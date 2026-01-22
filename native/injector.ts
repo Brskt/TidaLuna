@@ -133,6 +133,7 @@ const ProxiedBrowserWindow = new Proxy(electron.BrowserWindow, {
 		}
 
 		const window = new target(options);
+		globalThis.luna.tidalWindow = window;
 		globalThis.luna.sendToRender = window.webContents.send;
 
 		// if we are on linux and this is the main tidal window,

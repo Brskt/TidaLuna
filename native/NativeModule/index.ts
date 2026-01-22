@@ -13,12 +13,21 @@ declare global {
 	var luna: {
 		modules: Record<string, any>;
 		sendToRender: Electron.WebContents["send"];
+		tidalWindow?: Electron.BrowserWindow;
 	} & typeof expose;
 }
 export const luna = (globalThis.luna = {
 	modules: {},
 	sendToRender: (() => {}) as Electron.WebContents["send"],
+	tidalWindow: undefined,
 	...expose,
+});
+
+// Hot reload - load home page
+ipcHandle("__Luna.reload", async () => {
+	const win = globalThis.luna.tidalWindow;
+	if (!win) return;
+	win.loadURL("https://desktop.tidal.com/");
 });
 
 ipcHandle("__Luna.registerNative", async (_, fileName: string, code: string) => {

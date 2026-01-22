@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm, unlink, writeFile } from "fs/promises";
+import { mkdir, readdir, readFile, rm, unlink, writeFile } from "fs/promises";
 import JSZip from "jszip";
 import path from "path";
 
@@ -6,11 +6,17 @@ import { app } from "electron";
 
 import type { PackageJson } from "type-fest";
 
-export const pkg = async (): Promise<PackageJson> => require("./app/package.json");
+export const pkg = async (): Promise<PackageJson> => JSON.parse(await readFile(process.resourcesPath + "/app/package.json", "utf-8"));
 
 export const relaunch = async () => {
 	app.relaunch();
 	app.exit(0);
+};
+
+export const reload = async () => {
+	const win = globalThis.luna.tidalWindow;
+	if (!win) return;
+	win.loadURL("https://desktop.tidal.com/");
 };
 
 const appFolder = path.join(process.resourcesPath, "app");
@@ -60,7 +66,7 @@ export const update = async (version: string) => {
 
 	console.log("[UPDATER] == Extraction complete");
 
-	await relaunch();
+	await reload();
 };
 
 const clearAppFolder = async () => {
