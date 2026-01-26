@@ -1,5 +1,7 @@
-import { unloadableEmitter, type AnyFn } from "@inrixia/helpers";
+// Only run for Tidal windows
+if (!["desktop.tidal.com", "tidal.com", "listen.tidal.com"].includes(location.hostname)) throw null;
 
+import { unloadableEmitter, type AnyFn } from "@inrixia/helpers";
 import { contextBridge, ipcRenderer, webFrame } from "electron";
 
 const ipcRendererUnloadable = unloadableEmitter(ipcRenderer, null, "ipcRenderer");

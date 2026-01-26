@@ -110,8 +110,7 @@ const ProxiedBrowserWindow = new Proxy(electron.BrowserWindow, {
 		// Ensure smoothScrolling is always enabled
 		options.webPreferences.smoothScrolling = true;
 
-		// tidal-hifi does not set the title, rely on dev tools instead.
-		const isTidalWindow = options.title == "TIDAL" || options.webPreferences?.devTools;
+		const isTidalWindow = options.title === "TIDAL";
 
 		// explicitly set icon before load on linux
 		const platformIsLinux = process.platform === "linux";
@@ -121,8 +120,12 @@ const ProxiedBrowserWindow = new Proxy(electron.BrowserWindow, {
 		}
 
 		if (isTidalWindow) {
-			// Luna preload via session (runs FIRST)
-			electron.session.defaultSession.setPreloads([path.join(bundleDir, "preload.mjs")]);
+			// Register Luna preload for Tidal window only
+			electron.session.defaultSession.registerPreloadScript({
+				id: "luna-preload",
+				type: "frame",
+				filePath: path.join(bundleDir, "preload.mjs"),
+			});
 
 			// Detect and block tidal-hifi's preload (uses @electron/remote which doesn't work with sandbox)
 			const originalPreload = options.webPreferences?.preload;
