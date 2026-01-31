@@ -2,6 +2,7 @@
 import { Semaphore, Signal } from "@inrixia/helpers";
 import { unloadSet, type LunaUnloads } from "./helpers/unloadSet";
 import { ReactiveStore } from "./ReactiveStore";
+import { store as obyStore } from "oby";
 
 import { type LunaUnload } from "@luna/core";
 import * as ftch from "./helpers/fetch";
@@ -63,8 +64,23 @@ export class LunaPlugin {
 
 	// Storage backing for persisting plugin url/enabled/code etc... See LunaPluginStorage
 	public static readonly pluginStorage: ReactiveStore = ReactiveStore.getStore("@luna/plugins");
-	// Static store for all loaded plugins so we dont double load any
+	// Static store for all loaded plugins indexed by URL (allows multiple instances for display)
 	public static readonly plugins: Record<string, LunaPlugin> = {};
+
+	/**
+	 * Find a plugin by name, prioritizing installed versions
+	 */
+	public static getByName(name: string): LunaPlugin | undefined {
+		const all = this.getAllByName(name);
+		return all.find((p) => p.installed) ?? all[0];
+	}
+
+	/**
+	 * Find all plugin instances with a given name (e.g., DEV + GitHub versions)
+	 */
+	public static getAllByName(name: string): LunaPlugin[] {
+		return Object.values(this.plugins).filter((p) => p.name === name);
+	}
 
 	// Static list of Luna plugins that should be seperate from user plugins
 	public static readonly corePlugins: Set<string> = new Set(["@luna/lib", "@luna/lib.native", "@luna/ui", "@luna/dev", "@luna/linux"]);
@@ -82,8 +98,8 @@ export class LunaPlugin {
 			}
 		});
 		__ipcRenderer.on("__Luna.LunaPlugin.addDependant", (pluginName, dependantName) => {
-			const plugin = LunaPlugin.plugins[pluginName];
-			const dependantPlugin = LunaPlugin.plugins[dependantName];
+			const plugin = LunaPlugin.getByName(pluginName);
+			const dependantPlugin = LunaPlugin.getByName(dependantName);
 			const errTrace = coreTrace.msg.err.withContext(`__ipcRenderer.on("__Luna.LunaPlugin.addDependant")`);
 			if (plugin === undefined) return errTrace.throw(`Plugin ${pluginName} not found!`);
 			if (dependantPlugin === undefined) return errTrace.throw(`Dependancy ${dependantName} of ${pluginName} not found!`);
@@ -96,32 +112,60 @@ export class LunaPlugin {
 	 * Create a plugin instance from a store:LunaPluginStorage, if package is not populated it will be fetched using the url so we can get the name
 	 */
 	public static async fromStorage(storeInit: PartialLunaPluginStorage): Promise<LunaPlugin> {
+		// Ensure the url is sanitized incase users paste a link to the actual file
+		storeInit.url = storeInit.url.replace(/(\.mjs|\.json|\.mjs.map)$/, "");
+
+		// Return existing instance if same URL already loaded
+		const existingPlugin = this.plugins[storeInit.url];
+		if (existingPlugin) {
+			// Check if another version is now installed - update state accordingly
+			const otherInstalled = this.getAllByName(existingPlugin.name).find((p) => p !== existingPlugin && p.installed);
+			if (otherInstalled) {
+				existingPlugin.store.installed = false;
+				existingPlugin.store.enabled = false;
+			}
+			return existingPlugin;
+		}
+
 		let name = storeInit.package?.name;
 		if (name === undefined) {
-			// Ensure the url is sanitized incase users paste a link to the actual file
-			storeInit.url = storeInit.url.replace(/(\.mjs|\.json|\.mjs.map)$/, "");
-
 			storeInit.package ??= await this.fetchPackage(storeInit.url);
 			name = storeInit.package.name;
 		}
 
-		if (name in this.plugins) return this.plugins[name];
-
 		// Disable liveReload on load so people dont accidentally leave it on
 		storeInit.liveReload = false;
 
-		const store = await LunaPlugin.pluginStorage.getReactive<LunaPluginStorage>(name);
-		Object.assign(store, storeInit);
+		const isDev = storeInit.url.startsWith("http://127.0.0.1");
+		const createNonPersistedStore = () => obyStore({ ...storeInit, installed: false, enabled: false }) as LunaPluginStorage;
 
-		const plugin = (this.plugins[name] ??= new this(name, store));
+		let store: LunaPluginStorage;
+		if (isDev) {
+			// DEV plugins always use non-persisted reactive store
+			store = createNonPersistedStore();
+		} else {
+			// Get persisted store to check if this URL matches
+			const persistedStore = await LunaPlugin.pluginStorage.getReactive<LunaPluginStorage>(name);
+			if (persistedStore.url === undefined || persistedStore.url === storeInit.url) {
+				// First time loading or this is the persisted version - use persisted store
+				store = persistedStore;
+				Object.assign(store, storeInit);
+			} else {
+				// Different URL than persisted - create non-persisted reactive store for display only
+				store = createNonPersistedStore();
+			}
+		}
+
+		const plugin = (this.plugins[storeInit.url] ??= new this(name, store));
 		return plugin.load();
 	}
 
 	public static async fromName(name: string): Promise<LunaPlugin | undefined> {
-		if (name in this.plugins) return this.plugins[name];
+		const existing = this.getByName(name);
+		if (existing) return existing;
 
 		const store = await LunaPlugin.pluginStorage.getReactive<LunaPluginStorage>(name);
-		if (store === undefined) return;
+		if (store === undefined || store.url === undefined) return;
 
 		return this.fromStorage(store);
 	}
@@ -142,7 +186,8 @@ export class LunaPlugin {
 		public readonly name: string,
 		public readonly store: LunaPluginStorage,
 	) {
-		this.trace = LunaPlugin.trace.withSource(`[${this.name}]`).trace;
+		const devSuffix = this.store.url.startsWith("http://127.0.0.1") ? " [DEV]" : "";
+		this.trace = LunaPlugin.trace.withSource(`[${this.name}]${devSuffix}`).trace;
 		// Enabled has to be setup first because liveReload below accesses it
 		this._enabled = new Signal(this.store.enabled, (next) => {
 			// Protect against disabling permanantly in the background if loading causes a error
@@ -207,6 +252,7 @@ export class LunaPlugin {
 		if (!(plugin instanceof LunaPlugin)) throw new Error("Cannot add dependancy to non plugin!");
 		this.dependants.add(plugin);
 	}
+	// #endregion
 
 	// #region _exports
 	public get exports(): ModuleExports | undefined {
@@ -247,6 +293,9 @@ export class LunaPlugin {
 	public get installed(): boolean {
 		return this.store.installed;
 	}
+	public get isDev(): boolean {
+		return this.url.startsWith("http://127.0.0.1");
+	}
 	// #endregion
 
 	// #region load/unload
@@ -255,6 +304,7 @@ export class LunaPlugin {
 	 * This will unload the plugin without disabling it!
 	 */
 	private async unload(): Promise<void> {
+		const wasLoaded = this.exports !== undefined;
 		try {
 			this.loading._ = true;
 			// Unload dependants before unloading this plugin
@@ -267,6 +317,7 @@ export class LunaPlugin {
 			this.exports = undefined;
 			this.loading._ = false;
 			delete modules[this.name];
+			if (wasLoaded) this.trace.log("Unloaded");
 		}
 	}
 	/**
@@ -307,22 +358,39 @@ export class LunaPlugin {
 	// #region install/uninstall
 	public async install() {
 		this.loading._ = true;
+
+		// Uninstall other versions of the same plugin (e.g., switching from GitHub to DEV)
+		const otherVersions = LunaPlugin.getAllByName(this.name).filter((p) => p !== this && p.installed);
+		for (const other of otherVersions) {
+			coreTrace.msg.log(`Switching plugin ${this.name} from ${other.url} to ${this.url}`);
+			await other.uninstall();
+		}
+
+		// Update persisted store with this plugin's URL so it loads on restart (except DEV plugins)
+		if (!this.isDev) {
+			const persistedStore = await LunaPlugin.pluginStorage.getReactive<LunaPluginStorage>(this.name);
+			persistedStore.url = this.url;
+			persistedStore.package = this.package;
+			persistedStore.installed = true;
+			persistedStore.enabled = true;
+		}
+
 		this.store.installed = true;
 		await this.enable();
-		coreTrace.msg.log(`Installed plugin ${this.name}`);
+		coreTrace.msg.log(`Installed plugin ${this.name}${this.isDev ? " [DEV]" : ""}`);
 	}
 	public async uninstall() {
 		await this.disable();
 		this.loading._ = true;
-		for (const name in LunaPlugin.plugins) {
-			// Just to be safe
-			LunaPlugin.plugins[name].dependants.delete(this);
+		// Remove this plugin from all dependants lists
+		for (const plugin of Object.values(LunaPlugin.plugins)) {
+			plugin.dependants.delete(this);
 		}
 		this.store.installed = false;
-		delete LunaPlugin.plugins[this.name];
+		delete LunaPlugin.plugins[this.url];
 		await LunaPlugin.pluginStorage.del(this.name);
 		this.loading._ = false;
-		coreTrace.msg.log(`Uninstalled plugin ${this.name}`);
+		coreTrace.msg.log(`Uninstalled plugin ${this.name}${this.isDev ? " [DEV]" : ""}`);
 	}
 	// #endregion
 
@@ -398,7 +466,7 @@ export class LunaPlugin {
 				unload.source = this.name + (unload.source ? `.${unload.source}` : "");
 			}
 
-			this.trace.log(`Loaded`);
+			this.trace.log("Loaded");
 			// Make sure we load any enabled dependants, this is mostly to facilitate live reloading dependency trees
 			for (const dependant of this.dependants) {
 				// Remove dependant, dependant.load() will add it back if its still a dependant
