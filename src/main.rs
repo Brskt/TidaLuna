@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod decrypt;
+#[cfg(target_os = "windows")]
+mod exclusive_wasapi;
 mod player;
 mod preload;
 mod state;

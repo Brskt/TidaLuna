@@ -6,6 +6,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+use crate::exclusive_wasapi::{self, ExclusiveCommand, ExclusiveEvent, ExclusiveHandle};
+
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct AudioDevice {
     #[serde(rename = "controllableVolume")]
@@ -146,10 +149,42 @@ impl Player {
             let mut current_data: Option<Vec<u8>> = None;
             let mut current_volume: f32 = 1.0;
 
+            #[cfg(target_os = "windows")]
+            let mut exclusive_handle: Option<ExclusiveHandle> = None;
+            #[cfg(target_os = "windows")]
+            let mut is_exclusive_mode = false;
+
             loop {
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         PlayerCommand::LoadData(data) => {
+                            #[cfg(target_os = "windows")]
+                            {
+                                if is_exclusive_mode {
+                                    if let Some(ref handle) = exclusive_handle {
+                                        match exclusive_wasapi::decode_flac_to_pcm(&data) {
+                                            Ok(pcm) => {
+                                                handle.send(ExclusiveCommand::Load {
+                                                    pcm_data: pcm.data,
+                                                    sample_rate: pcm.sample_rate,
+                                                    channels: pcm.channels,
+                                                    bits_per_sample: pcm.bits_per_sample,
+                                                    total_frames: pcm.total_frames,
+                                                    duration_secs: pcm.duration_secs,
+                                                });
+                                                current_data = Some(data);
+                                                has_track = true;
+                                                is_playing = true;
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[WASAPI] PCM decode failed: {e}");
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+
                             let duration = get_audio_duration(&data);
                             let byte_len = data.len() as u64;
 
@@ -195,6 +230,16 @@ impl Player {
                             }
                         }
                         PlayerCommand::Play => {
+                            #[cfg(target_os = "windows")]
+                            {
+                                if is_exclusive_mode {
+                                    if let Some(ref handle) = exclusive_handle {
+                                        handle.send(ExclusiveCommand::Play);
+                                    }
+                                    is_playing = true;
+                                    continue;
+                                }
+                            }
                             if let Some(ref p) = rodio_player {
                                 p.play();
                             }
@@ -202,6 +247,16 @@ impl Player {
                             callback(PlayerEvent::StateChange("active".to_string()));
                         }
                         PlayerCommand::Pause => {
+                            #[cfg(target_os = "windows")]
+                            {
+                                if is_exclusive_mode {
+                                    if let Some(ref handle) = exclusive_handle {
+                                        handle.send(ExclusiveCommand::Pause);
+                                    }
+                                    is_playing = false;
+                                    continue;
+                                }
+                            }
                             if let Some(ref p) = rodio_player {
                                 p.pause();
                             }
@@ -209,6 +264,18 @@ impl Player {
                             callback(PlayerEvent::StateChange("paused".to_string()));
                         }
                         PlayerCommand::Stop => {
+                            #[cfg(target_os = "windows")]
+                            {
+                                if is_exclusive_mode {
+                                    if let Some(ref handle) = exclusive_handle {
+                                        handle.send(ExclusiveCommand::Stop);
+                                    }
+                                    is_playing = false;
+                                    has_track = false;
+                                    current_data = None;
+                                    continue;
+                                }
+                            }
                             if let Some(ref p) = rodio_player {
                                 p.stop();
                             }
@@ -218,6 +285,15 @@ impl Player {
                             current_data = None;
                         }
                         PlayerCommand::Seek(time) => {
+                            #[cfg(target_os = "windows")]
+                            {
+                                if is_exclusive_mode {
+                                    if let Some(ref handle) = exclusive_handle {
+                                        handle.send(ExclusiveCommand::Seek(time));
+                                    }
+                                    continue;
+                                }
+                            }
                             if let Some(ref p) = rodio_player {
                                 if let Err(e) = p.try_seek(Duration::from_secs_f64(time)) {
                                     eprintln!("Seek failed: {}", e);
@@ -226,6 +302,13 @@ impl Player {
                         }
                         PlayerCommand::SetVolume(vol) => {
                             current_volume = (vol / 100.0) as f32;
+                            #[cfg(target_os = "windows")]
+                            {
+                                if is_exclusive_mode {
+                                    // Volume ignored in exclusive mode (100% forced)
+                                    continue;
+                                }
+                            }
                             if let Some(ref p) = rodio_player {
                                 p.set_volume(current_volume);
                             }
@@ -234,7 +317,63 @@ impl Player {
                             let devices = enumerate_audio_devices();
                             callback(PlayerEvent::AudioDevices(devices, req_id));
                         }
-                        PlayerCommand::SetAudioDevice { id, exclusive: _ } => {
+                        PlayerCommand::SetAudioDevice { id, exclusive } => {
+                            let _ = &exclusive; // used on Windows only
+                            #[cfg(target_os = "windows")]
+                            {
+                                if exclusive {
+                                    // Switch to exclusive WASAPI mode
+                                    // Stop rodio playback
+                                    if let Some(ref p) = rodio_player {
+                                        p.stop();
+                                    }
+                                    rodio_player = None;
+
+                                    // Shutdown previous exclusive handle if any
+                                    if let Some(old) = exclusive_handle.take() {
+                                        old.shutdown();
+                                    }
+
+                                    let handle = ExclusiveHandle::spawn(id.clone());
+                                    is_exclusive_mode = true;
+                                    exclusive_handle = Some(handle);
+
+                                    // Reload current track in exclusive mode
+                                    if let Some(ref data) = current_data {
+                                        if let Some(ref handle) = exclusive_handle {
+                                            match exclusive_wasapi::decode_flac_to_pcm(data) {
+                                                Ok(pcm) => {
+                                                    handle.send(ExclusiveCommand::Load {
+                                                        pcm_data: pcm.data,
+                                                        sample_rate: pcm.sample_rate,
+                                                        channels: pcm.channels,
+                                                        bits_per_sample: pcm.bits_per_sample,
+                                                        total_frames: pcm.total_frames,
+                                                        duration_secs: pcm.duration_secs,
+                                                    });
+                                                    has_track = true;
+                                                    is_playing = true;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("[WASAPI] PCM decode failed: {e}");
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    eprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
+                                    continue;
+                                } else if is_exclusive_mode {
+                                    // Switch back from exclusive to shared mode
+                                    if let Some(old) = exclusive_handle.take() {
+                                        old.shutdown();
+                                    }
+                                    is_exclusive_mode = false;
+                                    eprintln!("[AUDIO] Switched back to shared mode");
+                                    // Fall through to shared device setup below
+                                }
+                            }
+
                             let position = rodio_player.as_ref().map(|p| p.get_pos());
                             let was_playing = is_playing;
 
@@ -290,8 +429,54 @@ impl Player {
                     }
                 }
 
-                // Poll playback state
-                if has_track && is_playing {
+                // Poll exclusive WASAPI events
+                #[cfg(target_os = "windows")]
+                {
+                    if is_exclusive_mode {
+                        if let Some(ref handle) = exclusive_handle {
+                            for ev in handle.poll_events() {
+                                match ev {
+                                    ExclusiveEvent::TimeUpdate(t) => {
+                                        callback(PlayerEvent::TimeUpdate(t));
+                                    }
+                                    ExclusiveEvent::StateChange(s) => {
+                                        if s == "completed" {
+                                            has_track = false;
+                                            is_playing = false;
+                                        }
+                                        callback(PlayerEvent::StateChange(s));
+                                    }
+                                    ExclusiveEvent::Duration(d) => {
+                                        current_duration = d;
+                                        callback(PlayerEvent::Duration(d));
+                                    }
+                                    ExclusiveEvent::InitFailed(e) => {
+                                        eprintln!("[WASAPI] Init failed, falling back to shared mode: {e}");
+                                        is_exclusive_mode = false;
+                                        // Handle will be dropped
+                                    }
+                                    ExclusiveEvent::Stopped => {
+                                        has_track = false;
+                                        is_playing = false;
+                                    }
+                                }
+                            }
+                        }
+
+                        // If we got InitFailed, drop the handle
+                        if !is_exclusive_mode {
+                            exclusive_handle = None;
+                        }
+                    }
+                }
+
+                // Poll playback state (shared/rodio mode)
+                #[cfg(target_os = "windows")]
+                let should_poll_rodio = !is_exclusive_mode;
+                #[cfg(not(target_os = "windows"))]
+                let should_poll_rodio = true;
+
+                if should_poll_rodio && has_track && is_playing {
                     if let Some(ref p) = rodio_player {
                         let pos = p.get_pos();
                         let pos_secs = pos.as_secs_f64();
