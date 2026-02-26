@@ -56,9 +56,12 @@ fn main() -> wry::Result<()> {
     let proxy_player = proxy.clone();
     let proxy_autoload = proxy.clone();
     let player = Arc::new(
-        Player::new(move |event| {
-            let _ = proxy_player.send_event(UserEvent::Player(event));
-        }, rt_handle.clone())
+        Player::new(
+            move |event| {
+                let _ = proxy_player.send_event(UserEvent::Player(event));
+            },
+            rt_handle.clone(),
+        )
         .expect("Failed to initialize player"),
     );
     let player_clone = player.clone();

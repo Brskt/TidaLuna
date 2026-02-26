@@ -1,6 +1,6 @@
 use crate::preload;
 use crate::state::{CURRENT_TRACK, TrackInfo};
-use rodio::{DeviceSinkBuilder, Decoder, MixerDeviceSink};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink};
 use std::io::Cursor;
 use std::sync::mpsc;
 use std::thread;
@@ -419,10 +419,7 @@ impl Player {
                                     eprintln!("[AUDIO] Switched to device: {}", id);
                                 }
                                 Err(e) => {
-                                    eprintln!(
-                                        "[ERROR] Failed to switch to device '{}': {}",
-                                        id, e
-                                    );
+                                    eprintln!("[ERROR] Failed to switch to device '{}': {}", id, e);
                                 }
                             }
                         }
@@ -451,7 +448,9 @@ impl Player {
                                         callback(PlayerEvent::Duration(d));
                                     }
                                     ExclusiveEvent::InitFailed(e) => {
-                                        eprintln!("[WASAPI] Init failed, falling back to shared mode: {e}");
+                                        eprintln!(
+                                            "[WASAPI] Init failed, falling back to shared mode: {e}"
+                                        );
                                         is_exclusive_mode = false;
                                         // Handle will be dropped
                                     }
@@ -520,7 +519,10 @@ impl Player {
             };
 
             let data = if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
-                eprintln!("[PRELOAD] Using preloaded data ({} bytes)", preloaded.data.len());
+                eprintln!(
+                    "[PRELOAD] Using preloaded data ({} bytes)",
+                    preloaded.data.len()
+                );
                 preloaded.data
             } else {
                 eprintln!("[FETCH] Downloading and decrypting track...");

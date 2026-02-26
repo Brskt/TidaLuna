@@ -87,10 +87,7 @@ pub fn decode_flac_to_pcm(raw: &[u8]) -> Result<DecodedPcm, String> {
 
     let codec_params = &track.codec_params;
     let sample_rate = codec_params.sample_rate.ok_or("no sample rate")?;
-    let channels = codec_params
-        .channels
-        .ok_or("no channel info")?
-        .count() as u32;
+    let channels = codec_params.channels.ok_or("no channel info")?.count() as u32;
     let bits_per_sample = codec_params.bits_per_sample.ok_or("no bits_per_sample")?;
     let n_frames = codec_params.n_frames.unwrap_or(0);
 
@@ -239,32 +236,55 @@ impl Drop for ExclusiveHandle {
 // Format negotiation helpers
 // ---------------------------------------------------------------------------
 
-fn negotiate_format(
-    sample_rate: u32,
-    channels: u32,
-    source_bps: u32,
-) -> Vec<(WaveFormat, i64)> {
+fn negotiate_format(sample_rate: u32, channels: u32, source_bps: u32) -> Vec<(WaveFormat, i64)> {
     let sr = sample_rate as usize;
     let ch = channels as usize;
     let bps = source_bps as usize;
 
-    let channel_mask = wasapi::make_channelmasks(ch)
-        .first().copied();
+    let channel_mask = wasapi::make_channelmasks(ch).first().copied();
 
     let mut candidates = Vec::new();
 
     // Priority 1: 32-bit container with source valid bits (integer)
-    candidates.push(WaveFormat::new(32, bps.min(32), &SampleType::Int, sr, ch, channel_mask));
+    candidates.push(WaveFormat::new(
+        32,
+        bps.min(32),
+        &SampleType::Int,
+        sr,
+        ch,
+        channel_mask,
+    ));
     // Priority 2: 24-bit container with 24 valid bits
     if bps != 24 {
-        candidates.push(WaveFormat::new(24, 24, &SampleType::Int, sr, ch, channel_mask));
+        candidates.push(WaveFormat::new(
+            24,
+            24,
+            &SampleType::Int,
+            sr,
+            ch,
+            channel_mask,
+        ));
     }
     // Priority 3: 16-bit container with 16 valid bits
     if bps != 16 {
-        candidates.push(WaveFormat::new(16, 16, &SampleType::Int, sr, ch, channel_mask));
+        candidates.push(WaveFormat::new(
+            16,
+            16,
+            &SampleType::Int,
+            sr,
+            ch,
+            channel_mask,
+        ));
     }
     // Priority 4: 32-bit float
-    candidates.push(WaveFormat::new(32, 32, &SampleType::Float, sr, ch, channel_mask));
+    candidates.push(WaveFormat::new(
+        32,
+        32,
+        &SampleType::Float,
+        sr,
+        ch,
+        channel_mask,
+    ));
 
     let period = calculate_period_100ns(
         (sr as i64) / 100, // ~10ms buffer
@@ -274,9 +294,7 @@ fn negotiate_format(
     candidates.into_iter().map(|fmt| (fmt, period)).collect()
 }
 
-fn init_exclusive_client(
-    device_id: &str,
-) -> Result<(DeviceEnumerator, wasapi::Device), String> {
+fn init_exclusive_client(device_id: &str) -> Result<(DeviceEnumerator, wasapi::Device), String> {
     let enumerator = DeviceEnumerator::new().map_err(|e| format!("DeviceEnumerator: {e}"))?;
 
     let device = if device_id == "default" {
@@ -323,10 +341,19 @@ fn open_exclusive_stream(
 
                 eprintln!(
                     "[WASAPI] Exclusive stream opened: {}Hz {}ch {}bit, buffer={}frames",
-                    sample_rate, channels, wave_fmt.get_validbitspersample(), buffer_size
+                    sample_rate,
+                    channels,
+                    wave_fmt.get_validbitspersample(),
+                    buffer_size
                 );
 
-                return Ok((audio_client, render_client, h_event, wave_fmt.clone(), buffer_size));
+                return Ok((
+                    audio_client,
+                    render_client,
+                    h_event,
+                    wave_fmt.clone(),
+                    buffer_size,
+                ));
             }
             Err(e) => {
                 let err_str = format!("{e}");
@@ -334,10 +361,8 @@ fn open_exclusive_stream(
                 if err_str.contains("BUFFER_SIZE_NOT_ALIGNED") || err_str.contains("88890019") {
                     // Get aligned size and retry
                     if let Ok(aligned_size) = audio_client.get_buffer_size() {
-                        let aligned_period = calculate_period_100ns(
-                            aligned_size as i64,
-                            sample_rate as i64,
-                        );
+                        let aligned_period =
+                            calculate_period_100ns(aligned_size as i64, sample_rate as i64);
 
                         drop(audio_client);
                         let mut audio_client2 = device
@@ -364,10 +389,19 @@ fn open_exclusive_stream(
 
                             eprintln!(
                                 "[WASAPI] Exclusive stream opened (aligned): {}Hz {}ch {}bit, buffer={}frames",
-                                sample_rate, channels, wave_fmt.get_validbitspersample(), buffer_size
+                                sample_rate,
+                                channels,
+                                wave_fmt.get_validbitspersample(),
+                                buffer_size
                             );
 
-                            return Ok((audio_client2, render_client, h_event, wave_fmt.clone(), buffer_size));
+                            return Ok((
+                                audio_client2,
+                                render_client,
+                                h_event,
+                                wave_fmt.clone(),
+                                buffer_size,
+                            ));
                         }
                     }
                 }
@@ -436,40 +470,38 @@ fn convert_pcm_frame(
                 let f = (sample_i32 as f32) / max_val;
                 out.extend_from_slice(&f.to_le_bytes());
             }
-            SampleType::Int => {
-                match dst_store_bits {
-                    16 => {
-                        let val = match src_bps {
-                            16 => sample_i32 as i16,
-                            24 => (sample_i32 >> 8) as i16,
-                            32 => (sample_i32 >> 16) as i16,
-                            _ => 0,
-                        };
-                        out.extend_from_slice(&val.to_le_bytes());
-                    }
-                    24 => {
-                        let val = match src_bps {
-                            16 => sample_i32 << 8,
-                            24 => sample_i32,
-                            32 => sample_i32 >> 8,
-                            _ => 0,
-                        };
-                        out.push((val & 0xFF) as u8);
-                        out.push(((val >> 8) & 0xFF) as u8);
-                        out.push(((val >> 16) & 0xFF) as u8);
-                    }
-                    32 => {
-                        let val = match src_bps {
-                            16 => sample_i32 << 16,
-                            24 => sample_i32 << 8,
-                            32 => sample_i32,
-                            _ => 0,
-                        };
-                        out.extend_from_slice(&val.to_le_bytes());
-                    }
-                    _ => {}
+            SampleType::Int => match dst_store_bits {
+                16 => {
+                    let val = match src_bps {
+                        16 => sample_i32 as i16,
+                        24 => (sample_i32 >> 8) as i16,
+                        32 => (sample_i32 >> 16) as i16,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&val.to_le_bytes());
                 }
-            }
+                24 => {
+                    let val = match src_bps {
+                        16 => sample_i32 << 8,
+                        24 => sample_i32,
+                        32 => sample_i32 >> 8,
+                        _ => 0,
+                    };
+                    out.push((val & 0xFF) as u8);
+                    out.push(((val >> 8) & 0xFF) as u8);
+                    out.push(((val >> 16) & 0xFF) as u8);
+                }
+                32 => {
+                    let val = match src_bps {
+                        16 => sample_i32 << 16,
+                        24 => sample_i32 << 8,
+                        32 => sample_i32,
+                        _ => 0,
+                    };
+                    out.extend_from_slice(&val.to_le_bytes());
+                }
+                _ => {}
+            },
         }
     }
 
@@ -543,7 +575,8 @@ fn render_thread(
                             let _ = ac.stop_stream();
                         }
 
-                        match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample) {
+                        match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample)
+                        {
                             Ok((ac, rc, ev, wf, bs)) => {
                                 pcm_data = data;
                                 pcm_sample_rate = sample_rate;
@@ -567,7 +600,8 @@ fn render_thread(
                                     let _ = ac.start_stream();
                                 }
                                 state = RenderState::Playing;
-                                let _ = event_tx.send(ExclusiveEvent::StateChange("active".to_string()));
+                                let _ = event_tx
+                                    .send(ExclusiveEvent::StateChange("active".to_string()));
                             }
                             Err(e) => {
                                 eprintln!("[WASAPI] Failed to open stream: {e}");
@@ -592,7 +626,8 @@ fn render_thread(
                                 let _ = ac.stop_stream();
                             }
                             state = RenderState::Paused;
-                            let _ = event_tx.send(ExclusiveEvent::StateChange("paused".to_string()));
+                            let _ =
+                                event_tx.send(ExclusiveEvent::StateChange("paused".to_string()));
                         }
                         ExclusiveCommand::Stop => {
                             if let Some(ref ac) = audio_client {
@@ -611,7 +646,8 @@ fn render_thread(
                                 }
 
                                 let src_bytes_per_sample = (pcm_src_bps / 8) as usize;
-                                let src_bytes_per_frame = src_bytes_per_sample * pcm_channels as usize;
+                                let src_bytes_per_frame =
+                                    src_bytes_per_sample * pcm_channels as usize;
 
                                 let target_frame = (time * pcm_sample_rate as f64) as u64;
                                 write_cursor = (target_frame as usize) * src_bytes_per_frame;
@@ -638,7 +674,12 @@ fn render_thread(
                                 let _ = ac.stop_stream();
                             }
 
-                            match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample) {
+                            match open_exclusive_stream(
+                                &device,
+                                sample_rate,
+                                channels,
+                                bits_per_sample,
+                            ) {
                                 Ok((ac, rc, ev, wf, bs)) => {
                                     pcm_data = data;
                                     pcm_sample_rate = sample_rate;
@@ -657,7 +698,8 @@ fn render_thread(
 
                                     let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
                                     let _ = audio_client.as_ref().unwrap().start_stream();
-                                    let _ = event_tx.send(ExclusiveEvent::StateChange("active".to_string()));
+                                    let _ = event_tx
+                                        .send(ExclusiveEvent::StateChange("active".to_string()));
                                 }
                                 Err(e) => {
                                     eprintln!("[WASAPI] Failed to open stream on Load: {e}");
@@ -687,9 +729,7 @@ fn render_thread(
                 }
 
                 // Write PCM data to device
-                if let (Some(ac), Some(rc), Some(wf)) =
-                    (&audio_client, &render_client, &wave_fmt)
-                {
+                if let (Some(ac), Some(rc), Some(wf)) = (&audio_client, &render_client, &wave_fmt) {
                     let available = match ac.get_available_space_in_frames() {
                         Ok(n) => n as usize,
                         Err(_) => continue,
@@ -735,19 +775,20 @@ fn render_thread(
                     let dst_valid = wf.get_validbitspersample() as u32;
                     let dst_type = wf.get_subformat().unwrap_or(SampleType::Int);
 
-                    let write_data = if pcm_src_bps == dst_store && matches!(dst_type, SampleType::Int) {
-                        // No conversion needed
-                        src_chunk.to_vec()
-                    } else {
-                        convert_pcm_frame(
-                            src_chunk,
-                            pcm_src_bps,
-                            dst_store,
-                            dst_valid,
-                            &dst_type,
-                            pcm_channels,
-                        )
-                    };
+                    let write_data =
+                        if pcm_src_bps == dst_store && matches!(dst_type, SampleType::Int) {
+                            // No conversion needed
+                            src_chunk.to_vec()
+                        } else {
+                            convert_pcm_frame(
+                                src_chunk,
+                                pcm_src_bps,
+                                dst_store,
+                                dst_valid,
+                                &dst_type,
+                                pcm_channels,
+                            )
+                        };
 
                     if let Err(e) = rc.write_to_device(frames_to_write, &write_data, None) {
                         eprintln!("[WASAPI] write error: {e}");
@@ -810,7 +851,8 @@ fn render_thread(
                             let _ = ac.stop_stream();
                         }
 
-                        match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample) {
+                        match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample)
+                        {
                             Ok((ac, rc, ev, wf, bs)) => {
                                 pcm_data = data;
                                 pcm_sample_rate = sample_rate;
@@ -830,7 +872,8 @@ fn render_thread(
                                 let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
                                 let _ = audio_client.as_ref().unwrap().start_stream();
                                 state = RenderState::Playing;
-                                let _ = event_tx.send(ExclusiveEvent::StateChange("active".to_string()));
+                                let _ = event_tx
+                                    .send(ExclusiveEvent::StateChange("active".to_string()));
                             }
                             Err(e) => {
                                 eprintln!("[WASAPI] Failed to open stream on Load: {e}");
