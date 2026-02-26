@@ -1,0 +1,88 @@
+name: Build
+
+on:
+  push:
+    branches: [lunar]
+  pull_request:
+    branches: [lunar]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libmpv-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libglib2.0-dev \
+            libgdk-pixbuf-2.0-dev \
+            libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidal-rs-linux
+          path: target/release/tidal-rs
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install LLVM
+        run: choco install llvm -y
+
+      - name: Download MPV libs
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match "mpv-dev-x86_64.*\.7z$" } | Select-Object -First 1
+          if (-not $asset) {
+            Write-Error "Could not find mpv-dev-x86_64 asset"
+            exit 1
+          }
+          Write-Host "Downloading $($asset.name)..."
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "mpv-dev.7z"
+          7z x mpv-dev.7z -ompv-dev
+          mkdir libs -Force
+          Copy-Item mpv-dev/libmpv/*.dll libs/ -ErrorAction SilentlyContinue
+          Copy-Item mpv-dev/libmpv/*.dll.a libs/ -ErrorAction SilentlyContinue
+          Copy-Item mpv-dev/*.dll libs/ -ErrorAction SilentlyContinue
+          Copy-Item mpv-dev/*.dll.a libs/ -ErrorAction SilentlyContinue
+          Get-ChildItem libs/
+          Get-ChildItem mpv-dev/ -Recurse | Select-Object FullName
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidal-rs-windows
+          path: |
+            target/release/tidal-rs.exe
+            target/release/libmpv-2.dll
