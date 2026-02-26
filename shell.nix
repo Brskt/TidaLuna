@@ -9,7 +9,7 @@
   rust-analyzer,
 
   bun,
-  mpv, # TODO? : just need library, load all?
+  alsa-lib,
 
   pkgconf,
   pkg-config,
@@ -29,7 +29,7 @@ mkShell {
     rustfmt
     rust-analyzer
 
-    mpv
+    alsa-lib
     bun
     pkgconf
     pkg-config

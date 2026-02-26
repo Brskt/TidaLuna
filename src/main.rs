@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod decrypt;
 mod player;
-mod server;
+mod preload;
 mod state;
 
 use player::{Player, PlayerEvent};
@@ -33,12 +33,6 @@ enum UserEvent {
 }
 
 fn main() -> wry::Result<()> {
-    
-    unsafe { // Fix stupid Vmoh stupid ego.
-        std::env::set_var("LC_NUMERIC", "C");
-        libc::setlocale(libc::LC_ALL, c"".as_ptr());
-    }
-
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("tidal-rs")
@@ -57,16 +51,12 @@ fn main() -> wry::Result<()> {
 
     let rt_handle = rt.handle().clone();
 
-    rt_handle.spawn(async {
-        server::start_server().await;
-    });
-
     let proxy_player = proxy.clone();
     let proxy_autoload = proxy.clone();
     let player = Arc::new(
         Player::new(move |event| {
             let _ = proxy_player.send_event(UserEvent::Player(event));
-        })
+        }, rt_handle.clone())
         .expect("Failed to initialize player"),
     );
     let player_clone = player.clone();
@@ -166,7 +156,7 @@ fn main() -> wry::Result<()> {
                              if state == "completed" {
                                  let proxy_autoload = proxy_autoload.clone();
                                  rt_handle.spawn(async move {
-                                     if let Some(track) = server::next_preloaded_track().await {
+                                     if let Some(track) = preload::next_preloaded_track().await {
                                          let _ = proxy_autoload.send_event(UserEvent::AutoLoad(track));
                                      }
                                  });
@@ -230,13 +220,13 @@ fn main() -> wry::Result<()> {
                                     key: key.to_string(),
                                 };
                                 rt_handle.spawn(async move {
-                                    server::start_preload(track).await;
+                                        preload::start_preload(track).await;
                                 });
                             }
                         }
                         "player.preload.cancel" => {
                             rt_handle.spawn(async {
-                                server::cancel_preload().await;
+                                preload::cancel_preload().await;
                             });
                         }
                         "player.play" => { let _ = player_clone.play(); },

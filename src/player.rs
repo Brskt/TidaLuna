@@ -1,7 +1,10 @@
-use crate::state::{CURRENT_TRACK, SERVER_ADDR, TrackInfo};
-use libmpv2::{Format, Mpv, events::Event, events::PropertyData};
+use crate::preload;
+use crate::state::{CURRENT_TRACK, TrackInfo};
+use rodio::{DeviceSinkBuilder, Decoder, MixerDeviceSink};
+use std::io::Cursor;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct AudioDevice {
@@ -13,12 +16,6 @@ pub struct AudioDevice {
     pub r#type: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct MpvDeviceEntry {
-    name: String,
-    description: String,
-}
-
 #[derive(Debug)]
 pub enum PlayerEvent {
     TimeUpdate(f64),
@@ -28,7 +25,7 @@ pub enum PlayerEvent {
 }
 
 enum PlayerCommand {
-    Load(String),
+    LoadData(Vec<u8>),
     Play,
     Pause,
     Stop,
@@ -40,240 +37,285 @@ enum PlayerCommand {
 
 pub struct Player {
     cmd_tx: mpsc::Sender<PlayerCommand>,
+    rt_handle: tokio::runtime::Handle,
 }
 
-// --- Helper Function for Logging ---
-fn log_audio_state(mpv: &Mpv) {
-    // 1. Fetch Audio State & Driver
-    let exclusive: bool = mpv.get_property("audio-exclusive").unwrap_or(false);
-    let filters: String = mpv.get_property("af").unwrap_or_else(|_| "".into());
-    let driver: String = mpv.get_property("ao").unwrap_or_else(|_| "auto".into());
+fn get_audio_duration(data: &[u8]) -> Option<f64> {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
 
-    // 2. Fetch Source Params (Decoder Output)
-    let src_rate: i64 = mpv.get_property("audio-params/samplerate").unwrap_or(0);
-    let src_fmt: String = mpv
-        .get_property("audio-params/format")
-        .unwrap_or_else(|_| "?".into());
-    let src_ch: String = mpv
-        .get_property("audio-params/hr-channels")
-        .unwrap_or_else(|_| "?".into());
+    let cursor = Cursor::new(data.to_vec());
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("flac");
 
-    // 3. Fetch Output Params (Hardware/DAC Input)
-    let out_rate: i64 = mpv.get_property("audio-out-params/samplerate").unwrap_or(0);
-    let out_fmt: String = mpv
-        .get_property("audio-out-params/format")
-        .unwrap_or_else(|_| "?".into());
-    let out_ch: String = mpv
-        .get_property("audio-out-params/hr-channels")
-        .unwrap_or_else(|_| "?".into());
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &Default::default(), &Default::default())
+        .ok()?;
+    let track = probed.format.default_track()?;
+    let n_frames = track.codec_params.n_frames?;
+    let sample_rate = track.codec_params.sample_rate?;
 
-    // 4. Determine Bit Perfection
-    // True if Source matches Output exactly and no filters are active.
-    let is_bit_perfect =
-        src_rate == out_rate && src_fmt == out_fmt && src_ch == out_ch && filters.is_empty();
+    Some(n_frames as f64 / sample_rate as f64)
+}
 
-    // 5. Log Status
-    eprintln!(
-        "[AUDIO] Driver: {} (Exclusive: {}) | Perfect: {} \n\
-         \t -> Source: {}Hz / {} / {}\n\
-         \t -> Output: {}Hz / {} / {}\n\
-         \t -> Filters: {}",
-        driver,
-        if exclusive { "ON" } else { "OFF" },
-        if is_bit_perfect {
-            "YES"
-        } else {
-            "NO (Resampled/Converted)"
-        },
-        src_rate,
-        src_fmt,
-        src_ch,
-        out_rate,
-        out_fmt,
-        out_ch,
-        if filters.is_empty() { "None" } else { &filters }
-    );
+fn enumerate_audio_devices() -> Vec<AudioDevice> {
+    use rodio::DeviceTrait;
+
+    let host = rodio::cpal::default_host();
+    use rodio::cpal::traits::HostTrait;
+
+    let mut devices = vec![AudioDevice {
+        controllable_volume: true,
+        id: "default".to_string(),
+        name: "System Default".to_string(),
+        r#type: Some("systemDefault".to_string()),
+    }];
+
+    if let Ok(output_devices) = host.output_devices() {
+        for device in output_devices {
+            if let Ok(desc) = device.description() {
+                devices.push(AudioDevice {
+                    controllable_volume: true,
+                    id: desc.name().to_string(),
+                    name: desc.name().to_string(),
+                    r#type: None,
+                });
+            }
+        }
+    }
+
+    devices
+}
+
+fn find_output_device(device_id: &str) -> Option<rodio::Device> {
+    use rodio::DeviceTrait;
+    use rodio::cpal::traits::HostTrait;
+
+    let host = rodio::cpal::default_host();
+    if device_id == "default" {
+        return host.default_output_device();
+    }
+
+    host.output_devices().ok()?.find(|d| {
+        d.description()
+            .ok()
+            .map(|desc| desc.name() == device_id)
+            .unwrap_or(false)
+    })
+}
+
+fn open_device_sink(device_id: Option<&str>) -> anyhow::Result<MixerDeviceSink> {
+    if let Some(id) = device_id {
+        if id != "default" {
+            if let Some(device) = find_output_device(id) {
+                return DeviceSinkBuilder::from_device(device)
+                    .map_err(|e| anyhow::anyhow!("Failed to configure device '{}': {}", id, e))?
+                    .open_stream()
+                    .map_err(|e| anyhow::anyhow!("Failed to open device '{}': {}", id, e));
+            }
+            eprintln!("[WARN] Device '{}' not found, falling back to default", id);
+        }
+    }
+    DeviceSinkBuilder::open_default_sink()
+        .map_err(|e| anyhow::anyhow!("Failed to open default audio output: {}", e))
 }
 
 impl Player {
-    pub fn new<F>(callback: F) -> anyhow::Result<Self>
+    pub fn new<F>(callback: F, rt_handle: tokio::runtime::Handle) -> anyhow::Result<Self>
     where
         F: Fn(PlayerEvent) + Send + 'static,
     {
-// Set locale before MPV init
-unsafe {
-        // 1. Prevent "Non-C locale" error
-        let locale = std::ffi::CString::new("C").unwrap();
-        libc::setlocale(libc::LC_ALL, locale.as_ptr());
-
-        // 2. Keeping variables
-        std::env::set_var("LC_ALL", "C");
-        std::env::set_var("LC_NUMERIC", "C");
-    }
-let mut mpv = Mpv::with_initializer(|init| {
-    init.set_option("config", "no")?;
-    init.set_option("terminal", "no")?;
-    init.set_option("msg-level", "all=error")?;
-    Ok(())
-}).map_err(|e| anyhow::anyhow!("MPV Init Error: {:?}", e))?;
-
-        mpv.observe_property("time-pos", Format::Double, 0)
-            .map_err(|e| anyhow::anyhow!("MPV Observe Error: {:?}", e))?;
-        mpv.observe_property("duration", Format::Double, 0)
-            .map_err(|e| anyhow::anyhow!("MPV Observe Error: {:?}", e))?;
-        mpv.observe_property("pause", Format::Flag, 0)
-            .map_err(|e| anyhow::anyhow!("MPV Observe Error: {:?}", e))?;
-        mpv.observe_property("idle-active", Format::Flag, 0)
-            .map_err(|e| anyhow::anyhow!("MPV Observe Error: {:?}", e))?;
-
         let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
-        let mut duration = 0.0;
-        let mut pending_active = false;
-        thread::spawn(move || {
-            loop {
-                match mpv.wait_event(0.25) {
-                    Some(Ok(event)) => match event {
-                        Event::PropertyChange { name, change, .. } => match name {
-                            "time-pos" => {
-                                if let PropertyData::Double(time) = change {
-                                    if time > 0.0 {
-                                        callback(PlayerEvent::TimeUpdate(time));
-                                    }
-                                }
-                            }
-                            "duration" => {
-                                if let PropertyData::Double(dur) = change {
-                                    callback(PlayerEvent::Duration(dur));
-                                    duration = dur;
-                                    if pending_active {
-                                        callback(PlayerEvent::StateChange("active".to_string()));
-                                        pending_active = false;
-                                    }
-                                }
-                            }
-                            "pause" => {
-                                if let PropertyData::Flag(paused) = change {
-                                    let state = if paused { "paused" } else { "active" };
-                                    callback(PlayerEvent::StateChange(state.to_string()));
-                                }
-                            }
-                            _ => {}
-                        },
-                        Event::EndFile(_) => {
-                            callback(PlayerEvent::TimeUpdate(duration));
-                            callback(PlayerEvent::StateChange("completed".to_string()));
-                            duration = 0.0;
-                            pending_active = false;
-                        }
-                        Event::StartFile => {
-                            pending_active = true;
-                        }
-                        _ => {}
-                    },
-                    Some(Err(e)) => eprintln!("MPV Event Loop Error: {:?}", e),
-                    _ => {}
-                }
 
+        thread::spawn(move || {
+            let mut device_sink = match open_device_sink(None) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to initialize audio output: {}", e);
+                    return;
+                }
+            };
+            device_sink.log_on_drop(false);
+
+            let mut rodio_player: Option<rodio::Player> = None;
+            let mut current_duration = 0.0f64;
+            let mut is_playing = false;
+            let mut has_track = false;
+            let mut last_empty = true;
+            let mut current_data: Option<Vec<u8>> = None;
+            let mut current_volume: f32 = 1.0;
+
+            loop {
                 while let Ok(cmd) = cmd_rx.try_recv() {
-                    let res = match cmd {
-                        PlayerCommand::Load(url) => {
-                            let r = mpv.command("loadfile", &[&url]);
-                            // Log AFTER loading so we see the new format
-                            log_audio_state(&mpv);
-                            r // Return the Result
-                        }
-                        PlayerCommand::Play => {
-                            let r = mpv.set_property("pause", false);
-                            log_audio_state(&mpv);
-                            r
-                        }
-                        PlayerCommand::Pause => {
-                            let r = mpv.set_property("pause", true);
-                            log_audio_state(&mpv);
-                            r
-                        }
-                        PlayerCommand::Stop => mpv.command("stop", &[]),
-                        PlayerCommand::Seek(time) => mpv.set_property("time-pos", time),
-                        PlayerCommand::SetVolume(vol) => mpv.set_property("volume", vol),
-                        PlayerCommand::GetAudioDevices(req_id) => {
-                            let remove = vec!["openal"];
-                            let devices = match mpv.get_property::<String>("audio-device-list") {
-                                Ok(json) => {
-                                    match serde_json::from_str::<Vec<MpvDeviceEntry>>(&json) {
-                                        Ok(entries) => entries
-                                            .into_iter()
-                                            .filter(|d| !remove.iter().any(|id| id == &d.name))
-                                            .map(|d| {
-                                                if d.name == "auto" {
-                                                    AudioDevice {
-                                                        controllable_volume: true,
-                                                        id: "default".to_string(),
-                                                        name: "System Default".to_string(),
-                                                        r#type: Some("systemDefault".to_string()),
-                                                    }
-                                                } else {
-                                                    AudioDevice {
-                                                        controllable_volume: true,
-                                                        id: d.name.clone(),
-                                                        name: d.description,
-                                                        r#type: None,
-                                                    }
-                                                }
-                                            })
-                                            .collect(),
-                                        Err(e) => {
-                                            eprintln!("Failed to parse audio-device-list: {}", e);
-                                            Vec::new()
-                                        }
+                    match cmd {
+                        PlayerCommand::LoadData(data) => {
+                            let duration = get_audio_duration(&data);
+                            let byte_len = data.len() as u64;
+
+                            let cursor = Cursor::new(data.clone());
+                            match Decoder::builder()
+                                .with_data(cursor)
+                                .with_byte_len(byte_len)
+                                .with_seekable(true)
+                                .with_hint("flac")
+                                .build()
+                            {
+                                Ok(source) => {
+                                    // Stop previous playback
+                                    if let Some(ref p) = rodio_player {
+                                        p.stop();
                                     }
+
+                                    let player = rodio::Player::connect_new(device_sink.mixer());
+                                    player.set_volume(current_volume);
+                                    player.append(source);
+
+                                    current_duration = duration.unwrap_or(0.0);
+                                    is_playing = true;
+                                    has_track = true;
+                                    last_empty = false;
+                                    current_data = Some(data);
+                                    rodio_player = Some(player);
+
+                                    if current_duration > 0.0 {
+                                        callback(PlayerEvent::Duration(current_duration));
+                                    }
+                                    callback(PlayerEvent::StateChange("active".to_string()));
+
+                                    eprintln!(
+                                        "[AUDIO] Playing: duration={:.1}s, volume={:.0}%",
+                                        current_duration,
+                                        current_volume * 100.0
+                                    );
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to read audio-device-list: {:?}", e);
-                                    Vec::new()
+                                    eprintln!("Failed to decode audio: {}", e);
                                 }
-                            };
+                            }
+                        }
+                        PlayerCommand::Play => {
+                            if let Some(ref p) = rodio_player {
+                                p.play();
+                            }
+                            is_playing = true;
+                            callback(PlayerEvent::StateChange("active".to_string()));
+                        }
+                        PlayerCommand::Pause => {
+                            if let Some(ref p) = rodio_player {
+                                p.pause();
+                            }
+                            is_playing = false;
+                            callback(PlayerEvent::StateChange("paused".to_string()));
+                        }
+                        PlayerCommand::Stop => {
+                            if let Some(ref p) = rodio_player {
+                                p.stop();
+                            }
+                            is_playing = false;
+                            has_track = false;
+                            current_duration = 0.0;
+                            current_data = None;
+                        }
+                        PlayerCommand::Seek(time) => {
+                            if let Some(ref p) = rodio_player {
+                                if let Err(e) = p.try_seek(Duration::from_secs_f64(time)) {
+                                    eprintln!("Seek failed: {}", e);
+                                }
+                            }
+                        }
+                        PlayerCommand::SetVolume(vol) => {
+                            current_volume = (vol / 100.0) as f32;
+                            if let Some(ref p) = rodio_player {
+                                p.set_volume(current_volume);
+                            }
+                        }
+                        PlayerCommand::GetAudioDevices(req_id) => {
+                            let devices = enumerate_audio_devices();
                             callback(PlayerEvent::AudioDevices(devices, req_id));
-                            Ok(())
                         }
-                        PlayerCommand::SetAudioDevice { id, exclusive } => {
-                            // 1. Set Exclusive Mode (Best Effort)
-                            if let Err(e) = mpv.set_property("audio-exclusive", exclusive) {
-                                eprintln!("[WARN] Failed to set audio-exclusive: {}", e);
-                            }
+                        PlayerCommand::SetAudioDevice { id, exclusive: _ } => {
+                            let position = rodio_player.as_ref().map(|p| p.get_pos());
+                            let was_playing = is_playing;
 
-                            if exclusive {
-                                // Force volume to 100% to bypass software mixing
-                                let _ = mpv.set_property("volume", 100);
-                                let _ = mpv.set_property("audio-channels", "auto");
-                            }
+                            match open_device_sink(Some(&id)) {
+                                Ok(mut new_sink) => {
+                                    new_sink.log_on_drop(false);
 
-                            // 2. Set the Device
-                            // We pass &id to ensure we don't consume the variable before printing it below
-                            let result = mpv.set_property("audio-device", id.clone());
+                                    // Stop old player
+                                    if let Some(ref p) = rodio_player {
+                                        p.stop();
+                                    }
 
-                            // 3. Verify and Log to Stderr
-                            match &result {
-                                Ok(_) => {
-                                    log_audio_state(&mpv);
+                                    device_sink = new_sink;
+
+                                    // Reload current track on new device
+                                    if let Some(ref data) = current_data {
+                                        let byte_len = data.len() as u64;
+                                        let cursor = Cursor::new(data.clone());
+                                        if let Ok(source) = Decoder::builder()
+                                            .with_data(cursor)
+                                            .with_byte_len(byte_len)
+                                            .with_seekable(true)
+                                            .with_hint("flac")
+                                            .build()
+                                        {
+                                            let player =
+                                                rodio::Player::connect_new(device_sink.mixer());
+                                            player.set_volume(current_volume);
+                                            player.append(source);
+
+                                            if let Some(pos) = position {
+                                                let _ = player.try_seek(pos);
+                                            }
+
+                                            if !was_playing {
+                                                player.pause();
+                                            }
+
+                                            rodio_player = Some(player);
+                                        }
+                                    }
+
+                                    eprintln!("[AUDIO] Switched to device: {}", id);
                                 }
-                                Err(e) => eprintln!(
-                                    "[ERROR] Failed to switch audio device to '{}': {}",
-                                    id, e
-                                ),
+                                Err(e) => {
+                                    eprintln!(
+                                        "[ERROR] Failed to switch to device '{}': {}",
+                                        id, e
+                                    );
+                                }
                             }
-
-                            result
                         }
-                    };
-
-                    if let Err(e) = res {
-                        eprintln!("MPV Command Execution Error: {:?}", e);
                     }
                 }
+
+                // Poll playback state
+                if has_track && is_playing {
+                    if let Some(ref p) = rodio_player {
+                        let pos = p.get_pos();
+                        let pos_secs = pos.as_secs_f64();
+
+                        if pos_secs > 0.0 {
+                            callback(PlayerEvent::TimeUpdate(pos_secs));
+                        }
+
+                        if p.empty() && !last_empty {
+                            callback(PlayerEvent::TimeUpdate(current_duration));
+                            callback(PlayerEvent::StateChange("completed".to_string()));
+                            has_track = false;
+                            is_playing = false;
+                            current_duration = 0.0;
+                            last_empty = true;
+                        }
+                    }
+                }
+
+                thread::sleep(Duration::from_millis(250));
             }
         });
 
-        Ok(Self { cmd_tx })
+        Ok(Self { cmd_tx, rt_handle })
     }
 
     pub fn load(&self, url: String, _format: String, key: String) -> anyhow::Result<()> {
@@ -285,17 +327,32 @@ let mut mpv = Mpv::with_initializer(|init| {
             });
         }
 
-        let stream_url = {
-            let lock = SERVER_ADDR.lock().unwrap();
-            let addr = lock
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Streaming server not ready"))?;
-            format!("http://{}/stream", addr)
-        };
+        let cmd_tx = self.cmd_tx.clone();
+        self.rt_handle.spawn(async move {
+            let track = TrackInfo {
+                url: url.clone(),
+                key: key.clone(),
+            };
 
-        self.cmd_tx
-            .send(PlayerCommand::Load(stream_url))
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))?;
+            let data = if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
+                eprintln!("[PRELOAD] Using preloaded data ({} bytes)", preloaded.data.len());
+                preloaded.data
+            } else {
+                eprintln!("[FETCH] Downloading and decrypting track...");
+                match preload::fetch_and_decrypt(&url, &key).await {
+                    Ok(d) => {
+                        eprintln!("[FETCH] Done ({} bytes)", d.len());
+                        d
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to fetch track: {}", e);
+                        return;
+                    }
+                }
+            };
+
+            let _ = cmd_tx.send(PlayerCommand::LoadData(data));
+        });
 
         Ok(())
     }

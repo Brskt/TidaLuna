@@ -8,7 +8,8 @@
   glib,
   webkitgtk_4_1,
   gdk-pixbuf,
-  gtk3
+  gtk3,
+  alsa-lib
 }:
 let
   toml = (lib.importTOML ./Cargo.toml).package;
@@ -27,6 +28,7 @@ rustPlatform.buildRustPackage {
     gtk3
     webkitgtk_4_1
     gdk-pixbuf
+    alsa-lib
   ];
 
   src = lib.fileset.toSource {
