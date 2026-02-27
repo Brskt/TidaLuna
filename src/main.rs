@@ -5,6 +5,7 @@ mod exclusive_wasapi;
 mod player;
 mod preload;
 mod state;
+mod streaming_buffer;
 
 use player::{Player, PlayerEvent};
 use serde::Deserialize;

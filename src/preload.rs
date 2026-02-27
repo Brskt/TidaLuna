@@ -1,5 +1,6 @@
 use crate::decrypt::FlacDecryptor;
 use crate::state::{CURRENT_TRACK, PRELOAD_STATE, PreloadedTrack, TrackInfo};
+use crate::streaming_buffer::StreamingBufferWriter;
 use futures_util::StreamExt;
 
 pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> {
@@ -81,4 +82,50 @@ pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack
         }
     }
     None
+}
+
+pub fn start_streaming_download(
+    resp: reqwest::Response,
+    key: String,
+    writer: StreamingBufferWriter,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let decryptor = match FlacDecryptor::new(&key) {
+            Ok(d) => d,
+            Err(e) => {
+                writer.finish_with_error(format!("decrypt init failed: {e}"));
+                return;
+            }
+        };
+
+        let mut stream = resp.bytes_stream();
+        let mut offset = 0u64;
+
+        while let Some(item) = stream.next().await {
+            if writer.is_cancelled() {
+                eprintln!("[STREAM] Download cancelled");
+                return;
+            }
+
+            match item {
+                Ok(chunk) => match decryptor.decrypt_chunk(&chunk, offset) {
+                    Ok(decrypted) => {
+                        offset += chunk.len() as u64;
+                        writer.write(&decrypted);
+                    }
+                    Err(e) => {
+                        writer.finish_with_error(format!("decrypt error: {e}"));
+                        return;
+                    }
+                },
+                Err(e) => {
+                    writer.finish_with_error(format!("network error: {e}"));
+                    return;
+                }
+            }
+        }
+
+        writer.finish();
+        eprintln!("[STREAM] Download complete ({} bytes decrypted)", offset);
+    })
 }

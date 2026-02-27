@@ -1,6 +1,7 @@
 use crate::preload;
 use crate::state::{CURRENT_TRACK, TrackInfo};
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink};
+use crate::streaming_buffer::StreamingBuffer;
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use std::io::Cursor;
 use std::sync::mpsc;
 use std::thread;
@@ -29,6 +30,7 @@ pub enum PlayerEvent {
 
 enum PlayerCommand {
     LoadData(Vec<u8>),
+    LoadStreaming(StreamingBuffer),
     Play,
     Pause,
     Stop,
@@ -147,6 +149,7 @@ impl Player {
             let mut has_track = false;
             let mut last_empty = true;
             let mut current_data: Option<Vec<u8>> = None;
+            let mut current_streaming_buffer: Option<StreamingBuffer> = None;
             let mut current_volume: f32 = 1.0;
 
             #[cfg(target_os = "windows")]
@@ -158,6 +161,11 @@ impl Player {
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         PlayerCommand::LoadData(data) => {
+                            if let Some(ref old_buf) = current_streaming_buffer {
+                                old_buf.cancel();
+                            }
+                            current_streaming_buffer = None;
+
                             let decode_start = std::time::Instant::now();
 
                             #[cfg(target_os = "windows")]
@@ -238,6 +246,102 @@ impl Player {
                                 }
                             }
                         }
+                        PlayerCommand::LoadStreaming(buffer) => {
+                            if let Some(ref old_buf) = current_streaming_buffer {
+                                old_buf.cancel();
+                            }
+
+                            let decode_start = std::time::Instant::now();
+
+                            #[cfg(target_os = "windows")]
+                            {
+                                if is_exclusive_mode {
+                                    buffer.wait_for_complete();
+                                    if let Some(data) = buffer.to_vec() {
+                                        if let Some(ref handle) = exclusive_handle {
+                                            match exclusive_wasapi::decode_flac_to_pcm(&data) {
+                                                Ok(pcm) => {
+                                                    eprintln!(
+                                                        "[WASAPI] PCM decode (streamed): {:.0}ms",
+                                                        decode_start.elapsed().as_secs_f64()
+                                                            * 1000.0
+                                                    );
+                                                    handle.send(ExclusiveCommand::Load {
+                                                        pcm_data: pcm.data,
+                                                        sample_rate: pcm.sample_rate,
+                                                        channels: pcm.channels,
+                                                        bits_per_sample: pcm.bits_per_sample,
+                                                        total_frames: pcm.total_frames,
+                                                        duration_secs: pcm.duration_secs,
+                                                    });
+                                                    current_data = Some(data);
+                                                    current_streaming_buffer = None;
+                                                    has_track = true;
+                                                    is_playing = true;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "[WASAPI] PCM decode failed: {e}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            let total_len = buffer.total_len();
+                            let reader = buffer.new_reader();
+
+                            match Decoder::builder()
+                                .with_data(reader)
+                                .with_byte_len(total_len)
+                                .with_seekable(true)
+                                .with_hint("flac")
+                                .build()
+                            {
+                                Ok(source) => {
+                                    if let Some(ref p) = rodio_player {
+                                        p.stop();
+                                    }
+
+                                    let duration = source
+                                        .total_duration()
+                                        .map(|d| d.as_secs_f64())
+                                        .unwrap_or(0.0);
+
+                                    let player =
+                                        rodio::Player::connect_new(device_sink.mixer());
+                                    player.set_volume(current_volume);
+                                    player.append(source);
+
+                                    current_duration = duration;
+                                    is_playing = true;
+                                    has_track = true;
+                                    last_empty = false;
+                                    current_data = None;
+                                    current_streaming_buffer = Some(buffer);
+                                    rodio_player = Some(player);
+
+                                    if current_duration > 0.0 {
+                                        callback(PlayerEvent::Duration(current_duration));
+                                    }
+                                    callback(PlayerEvent::StateChange("active".to_string()));
+
+                                    eprintln!(
+                                        "[AUDIO] Playing (streaming): duration={:.1}s, init={:.0}ms",
+                                        current_duration,
+                                        decode_start.elapsed().as_secs_f64() * 1000.0
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to decode streaming audio: {}", e);
+                                    buffer.cancel();
+                                    current_streaming_buffer = None;
+                                }
+                            }
+                        }
                         PlayerCommand::Play => {
                             #[cfg(target_os = "windows")]
                             {
@@ -273,6 +377,11 @@ impl Player {
                             callback(PlayerEvent::StateChange("paused".to_string()));
                         }
                         PlayerCommand::Stop => {
+                            if let Some(ref old_buf) = current_streaming_buffer {
+                                old_buf.cancel();
+                            }
+                            current_streaming_buffer = None;
+
                             #[cfg(target_os = "windows")]
                             {
                                 if is_exclusive_mode {
@@ -398,7 +507,63 @@ impl Player {
                                     device_sink = new_sink;
 
                                     // Reload current track on new device
-                                    if let Some(ref data) = current_data {
+                                    if let Some(ref streaming_buf) = current_streaming_buffer {
+                                        if streaming_buf.is_complete() {
+                                            if let Some(data) = streaming_buf.to_vec() {
+                                                let byte_len = data.len() as u64;
+                                                let cursor = Cursor::new(data.clone());
+                                                if let Ok(source) = Decoder::builder()
+                                                    .with_data(cursor)
+                                                    .with_byte_len(byte_len)
+                                                    .with_seekable(true)
+                                                    .with_hint("flac")
+                                                    .build()
+                                                {
+                                                    let player = rodio::Player::connect_new(
+                                                        device_sink.mixer(),
+                                                    );
+                                                    player.set_volume(current_volume);
+                                                    player.append(source);
+
+                                                    if let Some(pos) = position {
+                                                        let _ = player.try_seek(pos);
+                                                    }
+                                                    if !was_playing {
+                                                        player.pause();
+                                                    }
+
+                                                    current_data = Some(data);
+                                                    current_streaming_buffer = None;
+                                                    rodio_player = Some(player);
+                                                }
+                                            }
+                                        } else {
+                                            let total_len = streaming_buf.total_len();
+                                            let reader = streaming_buf.new_reader();
+                                            if let Ok(source) = Decoder::builder()
+                                                .with_data(reader)
+                                                .with_byte_len(total_len)
+                                                .with_seekable(true)
+                                                .with_hint("flac")
+                                                .build()
+                                            {
+                                                let player = rodio::Player::connect_new(
+                                                    device_sink.mixer(),
+                                                );
+                                                player.set_volume(current_volume);
+                                                player.append(source);
+
+                                                if let Some(pos) = position {
+                                                    let _ = player.try_seek(pos);
+                                                }
+                                                if !was_playing {
+                                                    player.pause();
+                                                }
+
+                                                rodio_player = Some(player);
+                                            }
+                                        }
+                                    } else if let Some(ref data) = current_data {
                                         let byte_len = data.len() as u64;
                                         let cursor = Cursor::new(data.clone());
                                         if let Ok(source) = Decoder::builder()
@@ -528,37 +693,64 @@ impl Player {
                 key: key.clone(),
             };
 
-            let data = if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
+            // Use preloaded data if available (instant)
+            if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
                 eprintln!(
                     "[PRELOAD] Using preloaded data ({} bytes, checked in {:.0}ms)",
                     preloaded.data.len(),
                     load_start.elapsed().as_secs_f64() * 1000.0
                 );
-                preloaded.data
-            } else {
-                eprintln!("[FETCH] Downloading and decrypting track...");
-                let fetch_start = std::time::Instant::now();
-                match preload::fetch_and_decrypt(&url, &key).await {
-                    Ok(d) => {
-                        eprintln!(
-                            "[FETCH] Done ({} bytes in {:.0}ms)",
-                            d.len(),
-                            fetch_start.elapsed().as_secs_f64() * 1000.0
-                        );
-                        d
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to fetch track: {}", e);
+                let _ = cmd_tx.send(PlayerCommand::LoadData(preloaded.data));
+                return;
+            }
+
+            // Start streaming download
+            eprintln!("[STREAM] Starting streaming download...");
+            let client = reqwest::Client::new();
+            let resp = match client.get(&url).send().await {
+                Ok(r) => {
+                    if !r.status().is_success() {
+                        eprintln!("[STREAM] Upstream status: {}", r.status());
                         return;
                     }
+                    r
+                }
+                Err(e) => {
+                    eprintln!("[STREAM] Request failed: {}", e);
+                    return;
                 }
             };
 
+            let total_len = resp.content_length().unwrap_or(0);
+            if total_len == 0 {
+                // Fallback to full download if Content-Length missing
+                eprintln!("[STREAM] No Content-Length, falling back to full download");
+                match preload::fetch_and_decrypt(&url, &key).await {
+                    Ok(data) => {
+                        eprintln!(
+                            "[FETCH] Done ({} bytes in {:.0}ms)",
+                            data.len(),
+                            load_start.elapsed().as_secs_f64() * 1000.0
+                        );
+                        let _ = cmd_tx.send(PlayerCommand::LoadData(data));
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to fetch track: {}", e);
+                    }
+                }
+                return;
+            }
+
+            let (buffer, writer) = StreamingBuffer::new(total_len);
             eprintln!(
-                "[LOAD] Total fetch phase: {:.0}ms",
+                "[STREAM] Starting streaming playback (total: {} bytes, setup: {:.0}ms)",
+                total_len,
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
-            let _ = cmd_tx.send(PlayerCommand::LoadData(data));
+            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer));
+
+            // Download continues in background, writer feeds the buffer
+            preload::start_streaming_download(resp, key, writer);
         });
 
         Ok(())
