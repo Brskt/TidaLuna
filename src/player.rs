@@ -158,12 +158,18 @@ impl Player {
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         PlayerCommand::LoadData(data) => {
+                            let decode_start = std::time::Instant::now();
+
                             #[cfg(target_os = "windows")]
                             {
                                 if is_exclusive_mode {
                                     if let Some(ref handle) = exclusive_handle {
                                         match exclusive_wasapi::decode_flac_to_pcm(&data) {
                                             Ok(pcm) => {
+                                                eprintln!(
+                                                    "[WASAPI] PCM decode: {:.0}ms",
+                                                    decode_start.elapsed().as_secs_f64() * 1000.0
+                                                );
                                                 handle.send(ExclusiveCommand::Load {
                                                     pcm_data: pcm.data,
                                                     sample_rate: pcm.sample_rate,
@@ -186,6 +192,7 @@ impl Player {
                             }
 
                             let duration = get_audio_duration(&data);
+                            let duration_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
                             let byte_len = data.len() as u64;
 
                             let cursor = Cursor::new(data.clone());
@@ -219,9 +226,11 @@ impl Player {
                                     callback(PlayerEvent::StateChange("active".to_string()));
 
                                     eprintln!(
-                                        "[AUDIO] Playing: duration={:.1}s, volume={:.0}%",
+                                        "[AUDIO] Playing: duration={:.1}s, volume={:.0}%, decode={:.0}ms, total_init={:.0}ms",
                                         current_duration,
-                                        current_volume * 100.0
+                                        current_volume * 100.0,
+                                        duration_ms,
+                                        decode_start.elapsed().as_secs_f64() * 1000.0
                                     );
                                 }
                                 Err(e) => {
@@ -513,6 +522,7 @@ impl Player {
 
         let cmd_tx = self.cmd_tx.clone();
         self.rt_handle.spawn(async move {
+            let load_start = std::time::Instant::now();
             let track = TrackInfo {
                 url: url.clone(),
                 key: key.clone(),
@@ -520,15 +530,21 @@ impl Player {
 
             let data = if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
                 eprintln!(
-                    "[PRELOAD] Using preloaded data ({} bytes)",
-                    preloaded.data.len()
+                    "[PRELOAD] Using preloaded data ({} bytes, checked in {:.0}ms)",
+                    preloaded.data.len(),
+                    load_start.elapsed().as_secs_f64() * 1000.0
                 );
                 preloaded.data
             } else {
                 eprintln!("[FETCH] Downloading and decrypting track...");
+                let fetch_start = std::time::Instant::now();
                 match preload::fetch_and_decrypt(&url, &key).await {
                     Ok(d) => {
-                        eprintln!("[FETCH] Done ({} bytes)", d.len());
+                        eprintln!(
+                            "[FETCH] Done ({} bytes in {:.0}ms)",
+                            d.len(),
+                            fetch_start.elapsed().as_secs_f64() * 1000.0
+                        );
                         d
                     }
                     Err(e) => {
@@ -538,6 +554,10 @@ impl Player {
                 }
             };
 
+            eprintln!(
+                "[LOAD] Total fetch phase: {:.0}ms",
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
             let _ = cmd_tx.send(PlayerCommand::LoadData(data));
         });
 

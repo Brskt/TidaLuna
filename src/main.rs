@@ -15,7 +15,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
 };
-use wry::WebViewBuilder;
+use wry::{WebContext, WebViewBuilder};
 
 #[derive(Deserialize, Debug)]
 struct IpcMessage {
@@ -66,12 +66,31 @@ fn main() -> wry::Result<()> {
     );
     let player_clone = player.clone();
 
+    let data_dir = {
+        #[cfg(target_os = "windows")]
+        {
+            let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(base).join("tidal-rs")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(base)
+                .join(".local")
+                .join("share")
+                .join("tidal-rs")
+        }
+    };
+
+    let mut web_context = WebContext::new(Some(data_dir));
+
     let script = include_str!(concat!(env!("OUT_DIR"), "/bundle.js"));
 
-    let builder = WebViewBuilder::new()
+    let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url("https://desktop.tidal.com/")
+        .with_devtools(true)
         .with_initialization_script(script)
-        .with_user_agent("Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/9999.9999.9999 Chrome/126.0.6478.127 Electron/31.2.1 Safari/537.36")
+        .with_user_agent("Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36")
         .with_ipc_handler(move |req| {
             let s = req.body();
             if let Ok(msg) = serde_json::from_str::<IpcMessage>(s) {
