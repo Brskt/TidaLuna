@@ -8,8 +8,20 @@ pub struct TrackInfo {
     pub key: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TrackMetadata {
+    pub title: String,
+    pub artist: String,
+    pub quality: String,
+}
+
+pub static CURRENT_METADATA: Lazy<Arc<Mutex<Option<TrackMetadata>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(None)));
+
 pub static CURRENT_TRACK: Lazy<Arc<Mutex<Option<TrackInfo>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
+
+pub static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(reqwest::Client::new);
 
 #[derive(Debug)]
 pub struct PreloadedTrack {

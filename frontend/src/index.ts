@@ -93,7 +93,21 @@ const createPlaybackController = () => {
     return {
         registerDelegate: (d: any) => { delegate = d; },
         sendPlayerCommand: (cmd: any) => { },
-        setCurrentMediaItem: (item: any) => { },
+        setCurrentMediaItem: (item: any) => {
+            if (item && typeof item === "object") {
+                let artist = "";
+                if (item.artist) {
+                    artist = typeof item.artist === "string" ? item.artist : item.artist?.name || "";
+                } else if (Array.isArray(item.artists)) {
+                    artist = item.artists.map((a: any) => typeof a === "string" ? a : a?.name || "").join(", ");
+                }
+                sendIpc("player.metadata", {
+                    title: item.title || item.name || "",
+                    artist,
+                    quality: item.audioQuality || item.quality || "",
+                });
+            }
+        },
         setCurrentTime: (time: any) => { },
         setPlayQueueState: (state: any) => { },
         setPlayingStatus: (status: any) => { },

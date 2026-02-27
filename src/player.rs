@@ -1,5 +1,5 @@
 use crate::preload;
-use crate::state::{CURRENT_TRACK, TrackInfo};
+use crate::state::{CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT, TrackInfo};
 use crate::streaming_buffer::StreamingBuffer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use std::io::Cursor;
@@ -110,6 +110,63 @@ fn find_output_device(device_id: &str) -> Option<rodio::Device> {
     })
 }
 
+fn format_ms(ms: f64) -> String {
+    if ms < 1.0 {
+        format!("{:.0}µs", ms * 1000.0)
+    } else {
+        format!("{:.0}ms", ms)
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_duration_mmss(secs: f64) -> String {
+    let total = secs as u32;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
+fn print_track_banner(format: &str) {
+    let meta = CURRENT_METADATA.lock().unwrap().clone();
+    let (title, artist, quality) = match meta {
+        Some(m) => (
+            if m.title.is_empty() {
+                "Unknown".to_string()
+            } else {
+                m.title
+            },
+            if m.artist.is_empty() {
+                "Unknown".to_string()
+            } else {
+                m.artist
+            },
+            if m.quality.is_empty() {
+                format.to_uppercase()
+            } else {
+                m.quality
+            },
+        ),
+        None => (
+            "Unknown".to_string(),
+            "Unknown".to_string(),
+            format.to_uppercase(),
+        ),
+    };
+    eprintln!("══════════════════════════════════════════");
+    eprintln!("  {} — {}", title, artist);
+    eprintln!("  Quality: {} | Format: {}", quality, format);
+    eprintln!("══════════════════════════════════════════");
+}
+
 fn open_device_sink(device_id: Option<&str>) -> anyhow::Result<MixerDeviceSink> {
     if let Some(id) = device_id {
         if id != "default" {
@@ -199,10 +256,12 @@ impl Player {
                                 }
                             }
 
+                            let probe_start = std::time::Instant::now();
                             let duration = get_audio_duration(&data);
-                            let duration_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
-                            let byte_len = data.len() as u64;
+                            let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
 
+                            let byte_len = data.len() as u64;
+                            let decoder_start = std::time::Instant::now();
                             let cursor = Cursor::new(data.clone());
                             match Decoder::builder()
                                 .with_data(cursor)
@@ -212,17 +271,21 @@ impl Player {
                                 .build()
                             {
                                 Ok(source) => {
-                                    // Stop previous playback
-                                    if let Some(ref p) = rodio_player {
-                                        p.stop();
+                                    let decoder_ms = decoder_start.elapsed().as_secs_f64() * 1000.0;
+
+                                    // Drop previous player to disconnect from mixer
+                                    if let Some(old) = rodio_player.take() {
+                                        old.stop();
+                                        drop(old);
                                     }
 
                                     let player = rodio::Player::connect_new(device_sink.mixer());
                                     player.set_volume(current_volume);
                                     player.append(source);
+                                    player.pause();
 
                                     current_duration = duration.unwrap_or(0.0);
-                                    is_playing = true;
+                                    is_playing = false;
                                     has_track = true;
                                     last_empty = false;
                                     current_data = Some(data);
@@ -231,18 +294,17 @@ impl Player {
                                     if current_duration > 0.0 {
                                         callback(PlayerEvent::Duration(current_duration));
                                     }
-                                    callback(PlayerEvent::StateChange("active".to_string()));
 
                                     eprintln!(
-                                        "[AUDIO] Playing: duration={:.1}s, volume={:.0}%, decode={:.0}ms, total_init={:.0}ms",
-                                        current_duration,
-                                        current_volume * 100.0,
-                                        duration_ms,
-                                        decode_start.elapsed().as_secs_f64() * 1000.0
+                                        "[AUDIO]  Duration: {} | Probe: {} | Decoder: {} | Total: {}",
+                                        format_duration_mmss(current_duration),
+                                        format_ms(probe_ms),
+                                        format_ms(decoder_ms),
+                                        format_ms(decode_start.elapsed().as_secs_f64() * 1000.0)
                                     );
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to decode audio: {}", e);
+                                    eprintln!("[ERROR]  Decode failed: {}", e);
                                 }
                             }
                         }
@@ -280,9 +342,7 @@ impl Player {
                                                     is_playing = true;
                                                 }
                                                 Err(e) => {
-                                                    eprintln!(
-                                                        "[WASAPI] PCM decode failed: {e}"
-                                                    );
+                                                    eprintln!("[WASAPI] PCM decode failed: {e}");
                                                 }
                                             }
                                         }
@@ -294,6 +354,7 @@ impl Player {
                             let total_len = buffer.total_len();
                             let reader = buffer.new_reader();
 
+                            let decoder_start = std::time::Instant::now();
                             match Decoder::builder()
                                 .with_data(reader)
                                 .with_byte_len(total_len)
@@ -302,8 +363,12 @@ impl Player {
                                 .build()
                             {
                                 Ok(source) => {
-                                    if let Some(ref p) = rodio_player {
-                                        p.stop();
+                                    let decoder_ms = decoder_start.elapsed().as_secs_f64() * 1000.0;
+
+                                    // Drop previous player to disconnect from mixer
+                                    if let Some(old) = rodio_player.take() {
+                                        old.stop();
+                                        drop(old);
                                     }
 
                                     let duration = source
@@ -311,13 +376,13 @@ impl Player {
                                         .map(|d| d.as_secs_f64())
                                         .unwrap_or(0.0);
 
-                                    let player =
-                                        rodio::Player::connect_new(device_sink.mixer());
+                                    let player = rodio::Player::connect_new(device_sink.mixer());
                                     player.set_volume(current_volume);
                                     player.append(source);
+                                    player.pause();
 
                                     current_duration = duration;
-                                    is_playing = true;
+                                    is_playing = false;
                                     has_track = true;
                                     last_empty = false;
                                     current_data = None;
@@ -327,16 +392,16 @@ impl Player {
                                     if current_duration > 0.0 {
                                         callback(PlayerEvent::Duration(current_duration));
                                     }
-                                    callback(PlayerEvent::StateChange("active".to_string()));
 
                                     eprintln!(
-                                        "[AUDIO] Playing (streaming): duration={:.1}s, init={:.0}ms",
-                                        current_duration,
-                                        decode_start.elapsed().as_secs_f64() * 1000.0
+                                        "[AUDIO]  Duration: {} | Decoder: {} | Total: {} (streaming)",
+                                        format_duration_mmss(current_duration),
+                                        format_ms(decoder_ms),
+                                        format_ms(decode_start.elapsed().as_secs_f64() * 1000.0)
                                     );
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to decode streaming audio: {}", e);
+                                    eprintln!("[ERROR]  Streaming decode failed: {}", e);
                                     buffer.cancel();
                                     current_streaming_buffer = None;
                                 }
@@ -394,8 +459,9 @@ impl Player {
                                     continue;
                                 }
                             }
-                            if let Some(ref p) = rodio_player {
-                                p.stop();
+                            if let Some(old) = rodio_player.take() {
+                                old.stop();
+                                drop(old);
                             }
                             is_playing = false;
                             has_track = false;
@@ -547,9 +613,8 @@ impl Player {
                                                 .with_hint("flac")
                                                 .build()
                                             {
-                                                let player = rodio::Player::connect_new(
-                                                    device_sink.mixer(),
-                                                );
+                                                let player =
+                                                    rodio::Player::connect_new(device_sink.mixer());
                                                 player.set_volume(current_volume);
                                                 player.append(source);
 
@@ -676,7 +741,9 @@ impl Player {
         Ok(Self { cmd_tx, rt_handle })
     }
 
-    pub fn load(&self, url: String, _format: String, key: String) -> anyhow::Result<()> {
+    pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
+        print_track_banner(&format);
+
         {
             let mut lock = CURRENT_TRACK.lock().unwrap();
             *lock = Some(TrackInfo {
@@ -696,8 +763,8 @@ impl Player {
             // Use preloaded data if available (instant)
             if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
                 eprintln!(
-                    "[PRELOAD] Using preloaded data ({} bytes, checked in {:.0}ms)",
-                    preloaded.data.len(),
+                    "[PRELOAD] Using preloaded data ({}, {:.0}ms)",
+                    format_bytes(preloaded.data.len() as u64),
                     load_start.elapsed().as_secs_f64() * 1000.0
                 );
                 let _ = cmd_tx.send(PlayerCommand::LoadData(preloaded.data));
@@ -705,48 +772,51 @@ impl Player {
             }
 
             // Start streaming download
-            eprintln!("[STREAM] Starting streaming download...");
-            let client = reqwest::Client::new();
-            let resp = match client.get(&url).send().await {
+            let req_start = std::time::Instant::now();
+            let resp = match HTTP_CLIENT.get(&url).send().await {
                 Ok(r) => {
                     if !r.status().is_success() {
-                        eprintln!("[STREAM] Upstream status: {}", r.status());
+                        eprintln!("[ERROR]  Upstream status: {}", r.status());
                         return;
                     }
                     r
                 }
                 Err(e) => {
-                    eprintln!("[STREAM] Request failed: {}", e);
+                    eprintln!("[ERROR]  Request failed: {}", e);
                     return;
                 }
             };
+            let ttfb_ms = req_start.elapsed().as_secs_f64() * 1000.0;
 
             let total_len = resp.content_length().unwrap_or(0);
             if total_len == 0 {
-                // Fallback to full download if Content-Length missing
-                eprintln!("[STREAM] No Content-Length, falling back to full download");
+                eprintln!(
+                    "[FETCH]  No Content-Length, full download... (TTFB: {:.0}ms)",
+                    ttfb_ms
+                );
                 match preload::fetch_and_decrypt(&url, &key).await {
                     Ok(data) => {
                         eprintln!(
-                            "[FETCH] Done ({} bytes in {:.0}ms)",
-                            data.len(),
+                            "[FETCH]  Done ({} in {:.0}ms)",
+                            format_bytes(data.len() as u64),
                             load_start.elapsed().as_secs_f64() * 1000.0
                         );
                         let _ = cmd_tx.send(PlayerCommand::LoadData(data));
                     }
                     Err(e) => {
-                        eprintln!("Failed to fetch track: {}", e);
+                        eprintln!("[ERROR]  Fetch failed: {}", e);
                     }
                 }
                 return;
             }
 
-            let (buffer, writer) = StreamingBuffer::new(total_len);
             eprintln!(
-                "[STREAM] Starting streaming playback (total: {} bytes, setup: {:.0}ms)",
-                total_len,
-                load_start.elapsed().as_secs_f64() * 1000.0
+                "[NET]    TTFB: {} | Size: {}",
+                format_ms(ttfb_ms),
+                format_bytes(total_len)
             );
+
+            let (buffer, writer) = StreamingBuffer::new(total_len);
             let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer));
 
             // Download continues in background, writer feeds the buffer

@@ -1,11 +1,10 @@
 use crate::decrypt::FlacDecryptor;
-use crate::state::{CURRENT_TRACK, PRELOAD_STATE, PreloadedTrack, TrackInfo};
+use crate::state::{CURRENT_TRACK, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo};
 use crate::streaming_buffer::StreamingBufferWriter;
 use futures_util::StreamExt;
 
 pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> {
-    let client = reqwest::Client::new();
-    let resp = client.get(url).send().await?;
+    let resp = HTTP_CLIENT.get(url).send().await?;
 
     if !resp.status().is_success() {
         anyhow::bail!("Upstream status: {}", resp.status());
@@ -90,6 +89,7 @@ pub fn start_streaming_download(
     writer: StreamingBufferWriter,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let download_start = std::time::Instant::now();
         let decryptor = match FlacDecryptor::new(&key) {
             Ok(d) => d,
             Err(e) => {
@@ -98,8 +98,14 @@ pub fn start_streaming_download(
             }
         };
 
+        const BATCH_SIZE: usize = 256 * 1024; // 256 KB
+
         let mut stream = resp.bytes_stream();
         let mut offset = 0u64;
+        let mut decrypt_calls = 0u32;
+        let mut decrypt_total_ms = 0.0f64;
+        let mut pending = Vec::with_capacity(BATCH_SIZE);
+        let mut pending_offset = 0u64;
 
         while let Some(item) = stream.next().await {
             if writer.is_cancelled() {
@@ -108,16 +114,29 @@ pub fn start_streaming_download(
             }
 
             match item {
-                Ok(chunk) => match decryptor.decrypt_chunk(&chunk, offset) {
-                    Ok(decrypted) => {
-                        offset += chunk.len() as u64;
-                        writer.write(&decrypted);
+                Ok(chunk) => {
+                    if pending.is_empty() {
+                        pending_offset = offset;
                     }
-                    Err(e) => {
-                        writer.finish_with_error(format!("decrypt error: {e}"));
-                        return;
+                    offset += chunk.len() as u64;
+                    pending.extend_from_slice(&chunk);
+
+                    if pending.len() >= BATCH_SIZE {
+                        let decrypt_start = std::time::Instant::now();
+                        match decryptor.decrypt_chunk(&pending, pending_offset) {
+                            Ok(decrypted) => {
+                                decrypt_total_ms += decrypt_start.elapsed().as_secs_f64() * 1000.0;
+                                decrypt_calls += 1;
+                                writer.write(&decrypted);
+                                pending.clear();
+                            }
+                            Err(e) => {
+                                writer.finish_with_error(format!("decrypt error: {e}"));
+                                return;
+                            }
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     writer.finish_with_error(format!("network error: {e}"));
                     return;
@@ -125,7 +144,35 @@ pub fn start_streaming_download(
             }
         }
 
+        // Flush remaining data
+        if !pending.is_empty() {
+            let decrypt_start = std::time::Instant::now();
+            match decryptor.decrypt_chunk(&pending, pending_offset) {
+                Ok(decrypted) => {
+                    decrypt_total_ms += decrypt_start.elapsed().as_secs_f64() * 1000.0;
+                    decrypt_calls += 1;
+                    writer.write(&decrypted);
+                }
+                Err(e) => {
+                    writer.finish_with_error(format!("decrypt error: {e}"));
+                    return;
+                }
+            }
+        }
+
         writer.finish();
-        eprintln!("[STREAM] Download complete ({} bytes decrypted)", offset);
+        let total_ms = download_start.elapsed().as_secs_f64() * 1000.0;
+        let net_ms = total_ms - decrypt_total_ms;
+        let size = if offset >= 1_048_576 {
+            format!("{:.1} MB", offset as f64 / 1_048_576.0)
+        } else if offset >= 1024 {
+            format!("{:.1} KB", offset as f64 / 1024.0)
+        } else {
+            format!("{} B", offset)
+        };
+        eprintln!(
+            "[STREAM] Complete {} | {:.0}ms (net: {:.0}ms, decrypt: {:.0}ms) | {} decrypt calls",
+            size, total_ms, net_ms, decrypt_total_ms, decrypt_calls
+        );
     })
 }

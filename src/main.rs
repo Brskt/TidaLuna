@@ -1,4 +1,7 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), not(feature = "console")),
+    windows_subsystem = "windows"
+)]
 mod decrypt;
 #[cfg(target_os = "windows")]
 mod exclusive_wasapi;
@@ -253,6 +256,17 @@ fn main() -> wry::Result<()> {
                             rt_handle.spawn(async {
                                 preload::cancel_preload().await;
                             });
+                        }
+                        "player.metadata" => {
+                            if let Some(obj) = msg.args.get(0) {
+                                let meta = crate::state::TrackMetadata {
+                                    title: obj.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    artist: obj.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    quality: obj.get("quality").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                };
+                                let mut lock = crate::state::CURRENT_METADATA.lock().unwrap();
+                                *lock = Some(meta);
+                            }
                         }
                         "player.play" => { let _ = player_clone.play(); },
                         "player.pause" => { let _ = player_clone.pause(); },
