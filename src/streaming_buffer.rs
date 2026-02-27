@@ -1,21 +1,26 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Condvar, Mutex};
 
+const BUFFER_AHEAD_LIMIT: u64 = 5 * 1024 * 1024; // 5 MB
+
 struct Inner {
     data: Vec<u8>,
     total_len: u64,
     finished: bool,
     cancelled: bool,
     error: Option<String>,
+    read_pos: u64,
 }
 
 pub struct StreamingBuffer {
     inner: Arc<(Mutex<Inner>, Condvar)>,
+    writer_notify: Arc<tokio::sync::Notify>,
     read_pos: u64,
 }
 
 pub struct StreamingBufferWriter {
     inner: Arc<(Mutex<Inner>, Condvar)>,
+    writer_notify: Arc<tokio::sync::Notify>,
 }
 
 impl StreamingBuffer {
@@ -27,16 +32,22 @@ impl StreamingBuffer {
                 finished: false,
                 cancelled: false,
                 error: None,
+                read_pos: 0,
             }),
             Condvar::new(),
         ));
+        let writer_notify = Arc::new(tokio::sync::Notify::new());
 
         let buffer = StreamingBuffer {
             inner: inner.clone(),
+            writer_notify: writer_notify.clone(),
             read_pos: 0,
         };
 
-        let writer = StreamingBufferWriter { inner };
+        let writer = StreamingBufferWriter {
+            inner,
+            writer_notify,
+        };
 
         (buffer, writer)
     }
@@ -46,6 +57,7 @@ impl StreamingBuffer {
         let mut inner = lock.lock().unwrap();
         inner.cancelled = true;
         cvar.notify_all();
+        self.writer_notify.notify_one();
     }
 
     pub fn is_complete(&self) -> bool {
@@ -82,6 +94,7 @@ impl StreamingBuffer {
     pub fn new_reader(&self) -> Self {
         StreamingBuffer {
             inner: self.inner.clone(),
+            writer_notify: self.writer_notify.clone(),
             read_pos: 0,
         }
     }
@@ -111,6 +124,11 @@ impl Read for StreamingBuffer {
                 let n = end - start;
                 buf[..n].copy_from_slice(&inner.data[start..end]);
                 self.read_pos += n as u64;
+                if self.read_pos > inner.read_pos {
+                    inner.read_pos = self.read_pos;
+                }
+                drop(inner);
+                self.writer_notify.notify_one();
                 return Ok(n);
             }
 
@@ -126,7 +144,7 @@ impl Read for StreamingBuffer {
 impl Seek for StreamingBuffer {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let (lock, _) = &*self.inner;
-        let inner = lock.lock().unwrap();
+        let mut inner = lock.lock().unwrap();
 
         let new_pos = match pos {
             SeekFrom::Start(offset) => offset as i64,
@@ -152,8 +170,16 @@ impl Seek for StreamingBuffer {
             ));
         }
 
-        drop(inner);
         self.read_pos = new_pos;
+        let should_notify = new_pos > inner.read_pos;
+        if should_notify {
+            inner.read_pos = new_pos;
+        }
+        drop(inner);
+        if should_notify {
+            self.writer_notify.notify_one();
+        }
+
         Ok(new_pos)
     }
 }
@@ -185,5 +211,19 @@ impl StreamingBufferWriter {
         let (lock, _) = &*self.inner;
         let inner = lock.lock().unwrap();
         inner.cancelled
+    }
+
+    pub async fn wait_if_buffer_full(&self) {
+        loop {
+            {
+                let (lock, _) = &*self.inner;
+                let inner = lock.lock().unwrap();
+                let ahead = (inner.data.len() as u64).saturating_sub(inner.read_pos);
+                if ahead < BUFFER_AHEAD_LIMIT || inner.cancelled {
+                    return;
+                }
+            }
+            self.writer_notify.notified().await;
+        }
     }
 }

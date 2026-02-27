@@ -2,7 +2,7 @@ use crate::preload;
 use crate::state::{CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT, TrackInfo};
 use crate::streaming_buffer::StreamingBuffer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -45,12 +45,51 @@ pub struct Player {
     rt_handle: tokio::runtime::Handle,
 }
 
-fn get_audio_duration(data: &[u8]) -> Option<f64> {
+struct AudioInfo {
+    duration: f64,
+    sample_rate: u32,
+    bits_per_sample: u32,
+    channels: u16,
+}
+
+struct MediaSourceAdapter<R> {
+    inner: R,
+    byte_len: u64,
+}
+
+impl<R: Read + Seek + Send + Sync> symphonia::core::io::MediaSource for MediaSourceAdapter<R> {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.byte_len)
+    }
+}
+
+impl<R: Read> Read for MediaSourceAdapter<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R: Seek> Seek for MediaSourceAdapter<R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+fn get_audio_info<R: Read + Seek + Send + Sync + 'static>(
+    reader: R,
+    byte_len: u64,
+) -> Option<AudioInfo> {
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::probe::Hint;
 
-    let cursor = Cursor::new(data.to_vec());
-    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    let adapter = MediaSourceAdapter {
+        inner: reader,
+        byte_len,
+    };
+    let mss = MediaSourceStream::new(Box::new(adapter), Default::default());
     let mut hint = Hint::new();
     hint.with_extension("flac");
 
@@ -58,10 +97,28 @@ fn get_audio_duration(data: &[u8]) -> Option<f64> {
         .format(&hint, mss, &Default::default(), &Default::default())
         .ok()?;
     let track = probed.format.default_track()?;
-    let n_frames = track.codec_params.n_frames?;
-    let sample_rate = track.codec_params.sample_rate?;
+    let params = &track.codec_params;
 
-    Some(n_frames as f64 / sample_rate as f64)
+    let n_frames = params.n_frames?;
+    let sample_rate = params.sample_rate?;
+    let duration = n_frames as f64 / sample_rate as f64;
+    let bits_per_sample = params.bits_per_sample.unwrap_or(0);
+    let channels = params.channels.map(|c| c.count() as u16).unwrap_or(0);
+
+    Some(AudioInfo {
+        duration,
+        sample_rate,
+        bits_per_sample,
+        channels,
+    })
+}
+
+fn format_sample_rate(rate: u32) -> String {
+    if rate % 1000 == 0 {
+        format!("{} kHz", rate / 1000)
+    } else {
+        format!("{:.1} kHz", rate as f64 / 1000.0)
+    }
 }
 
 fn enumerate_audio_devices() -> Vec<AudioDevice> {
@@ -257,7 +314,8 @@ impl Player {
                             }
 
                             let probe_start = std::time::Instant::now();
-                            let duration = get_audio_duration(&data);
+                            let audio_info =
+                                get_audio_info(Cursor::new(data.to_vec()), data.len() as u64);
                             let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
 
                             let byte_len = data.len() as u64;
@@ -284,7 +342,8 @@ impl Player {
                                     player.append(source);
                                     player.pause();
 
-                                    current_duration = duration.unwrap_or(0.0);
+                                    current_duration =
+                                        audio_info.as_ref().map(|i| i.duration).unwrap_or(0.0);
                                     is_playing = false;
                                     has_track = true;
                                     last_empty = false;
@@ -295,6 +354,20 @@ impl Player {
                                         callback(PlayerEvent::Duration(current_duration));
                                     }
 
+                                    if let Some(ref info) = audio_info {
+                                        let bitrate = if info.duration > 0.0 {
+                                            (byte_len as f64 * 8.0 / info.duration / 1000.0) as u32
+                                        } else {
+                                            0
+                                        };
+                                        eprintln!(
+                                            "[CODEC]  {} / {}bit / {}ch | {} kbps",
+                                            format_sample_rate(info.sample_rate),
+                                            info.bits_per_sample,
+                                            info.channels,
+                                            bitrate
+                                        );
+                                    }
                                     eprintln!(
                                         "[AUDIO]  Duration: {} | Probe: {} | Decoder: {} | Total: {}",
                                         format_duration_mmss(current_duration),
@@ -352,8 +425,12 @@ impl Player {
                             }
 
                             let total_len = buffer.total_len();
-                            let reader = buffer.new_reader();
 
+                            let probe_start = std::time::Instant::now();
+                            let audio_info = get_audio_info(buffer.new_reader(), total_len);
+                            let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
+
+                            let reader = buffer.new_reader();
                             let decoder_start = std::time::Instant::now();
                             match Decoder::builder()
                                 .with_data(reader)
@@ -371,9 +448,12 @@ impl Player {
                                         drop(old);
                                     }
 
-                                    let duration = source
-                                        .total_duration()
-                                        .map(|d| d.as_secs_f64())
+                                    let duration = audio_info
+                                        .as_ref()
+                                        .map(|i| i.duration)
+                                        .or_else(|| {
+                                            source.total_duration().map(|d| d.as_secs_f64())
+                                        })
                                         .unwrap_or(0.0);
 
                                     let player = rodio::Player::connect_new(device_sink.mixer());
@@ -393,9 +473,24 @@ impl Player {
                                         callback(PlayerEvent::Duration(current_duration));
                                     }
 
+                                    if let Some(ref info) = audio_info {
+                                        let bitrate = if info.duration > 0.0 {
+                                            (total_len as f64 * 8.0 / info.duration / 1000.0) as u32
+                                        } else {
+                                            0
+                                        };
+                                        eprintln!(
+                                            "[CODEC]  {} / {}bit / {}ch | {} kbps",
+                                            format_sample_rate(info.sample_rate),
+                                            info.bits_per_sample,
+                                            info.channels,
+                                            bitrate
+                                        );
+                                    }
                                     eprintln!(
-                                        "[AUDIO]  Duration: {} | Decoder: {} | Total: {} (streaming)",
+                                        "[AUDIO]  Duration: {} | Probe: {} | Decoder: {} | Total: {} (streaming)",
                                         format_duration_mmss(current_duration),
+                                        format_ms(probe_ms),
                                         format_ms(decoder_ms),
                                         format_ms(decode_start.elapsed().as_secs_f64() * 1000.0)
                                     );

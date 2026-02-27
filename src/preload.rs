@@ -128,6 +128,7 @@ pub fn start_streaming_download(
                                 decrypt_total_ms += decrypt_start.elapsed().as_secs_f64() * 1000.0;
                                 decrypt_calls += 1;
                                 writer.write(&decrypted);
+                                writer.wait_if_buffer_full().await;
                                 pending.clear();
                             }
                             Err(e) => {
