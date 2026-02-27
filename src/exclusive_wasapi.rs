@@ -37,7 +37,7 @@ pub enum ExclusiveCommand {
 
 pub enum ExclusiveEvent {
     TimeUpdate(f64),
-    StateChange(String),
+    StateChange(&'static str),
     Duration(f64),
     InitFailed(String),
     Stopped,
@@ -600,8 +600,7 @@ fn render_thread(
                                     let _ = ac.start_stream();
                                 }
                                 state = RenderState::Playing;
-                                let _ = event_tx
-                                    .send(ExclusiveEvent::StateChange("active".to_string()));
+                                let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
                             }
                             Err(e) => {
                                 eprintln!("[WASAPI] Failed to open stream: {e}");
@@ -626,8 +625,7 @@ fn render_thread(
                                 let _ = ac.stop_stream();
                             }
                             state = RenderState::Paused;
-                            let _ =
-                                event_tx.send(ExclusiveEvent::StateChange("paused".to_string()));
+                            let _ = event_tx.send(ExclusiveEvent::StateChange("paused"));
                         }
                         ExclusiveCommand::Stop => {
                             if let Some(ref ac) = audio_client {
@@ -698,8 +696,7 @@ fn render_thread(
 
                                     let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
                                     let _ = audio_client.as_ref().unwrap().start_stream();
-                                    let _ = event_tx
-                                        .send(ExclusiveEvent::StateChange("active".to_string()));
+                                    let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
                                 }
                                 Err(e) => {
                                     eprintln!("[WASAPI] Failed to open stream on Load: {e}");
@@ -757,7 +754,7 @@ fn render_thread(
                         let _ = rc.write_to_device(available, &silence, None);
 
                         let _ = event_tx.send(ExclusiveEvent::TimeUpdate(pcm_duration));
-                        let _ = event_tx.send(ExclusiveEvent::StateChange("completed".to_string()));
+                        let _ = event_tx.send(ExclusiveEvent::StateChange("completed"));
 
                         if let Some(ref ac) = audio_client {
                             let _ = ac.stop_stream();
@@ -814,7 +811,7 @@ fn render_thread(
                             let _ = ac.start_stream();
                         }
                         state = RenderState::Playing;
-                        let _ = event_tx.send(ExclusiveEvent::StateChange("active".to_string()));
+                        let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
                     }
                     Ok(ExclusiveCommand::Stop) => {
                         if let Some(ref ac) = audio_client {
@@ -872,8 +869,7 @@ fn render_thread(
                                 let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
                                 let _ = audio_client.as_ref().unwrap().start_stream();
                                 state = RenderState::Playing;
-                                let _ = event_tx
-                                    .send(ExclusiveEvent::StateChange("active".to_string()));
+                                let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
                             }
                             Err(e) => {
                                 eprintln!("[WASAPI] Failed to open stream on Load: {e}");

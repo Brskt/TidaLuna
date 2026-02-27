@@ -123,11 +123,11 @@ pub fn start_streaming_download(
 
                     if pending.len() >= BATCH_SIZE {
                         let decrypt_start = std::time::Instant::now();
-                        match decryptor.decrypt_chunk(&pending, pending_offset) {
-                            Ok(decrypted) => {
+                        match decryptor.decrypt_in_place(&mut pending, pending_offset) {
+                            Ok(()) => {
                                 decrypt_total_ms += decrypt_start.elapsed().as_secs_f64() * 1000.0;
                                 decrypt_calls += 1;
-                                writer.write(&decrypted);
+                                writer.write(&pending);
                                 writer.wait_if_buffer_full().await;
                                 pending.clear();
                             }
@@ -148,11 +148,11 @@ pub fn start_streaming_download(
         // Flush remaining data
         if !pending.is_empty() {
             let decrypt_start = std::time::Instant::now();
-            match decryptor.decrypt_chunk(&pending, pending_offset) {
-                Ok(decrypted) => {
+            match decryptor.decrypt_in_place(&mut pending, pending_offset) {
+                Ok(()) => {
                     decrypt_total_ms += decrypt_start.elapsed().as_secs_f64() * 1000.0;
                     decrypt_calls += 1;
-                    writer.write(&decrypted);
+                    writer.write(&pending);
                 }
                 Err(e) => {
                     writer.finish_with_error(format!("decrypt error: {e}"));

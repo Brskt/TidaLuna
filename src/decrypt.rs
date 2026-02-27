@@ -9,14 +9,14 @@ use tracing::debug;
 const MASTER_KEY: &str = "UIlTTEMmmLfGowo/UC60x2H45W6MdGgTRfo/umg4754=";
 
 struct DecryptedKey {
-    key: Vec<u8>,
-    nonce: Vec<u8>,
+    key: [u8; 16],
+    nonce: [u8; 8],
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct FlacDecryptor {
-    key: Vec<u8>,
-    nonce: Vec<u8>,
+    key: [u8; 16],
+    nonce: [u8; 8],
 }
 
 impl FlacDecryptor {
@@ -58,8 +58,8 @@ impl FlacDecryptor {
             );
         }
 
-        let key = decrypted_key[..16].to_vec();
-        let nonce = decrypted_key[16..24].to_vec();
+        let key: [u8; 16] = decrypted_key[..16].try_into().unwrap();
+        let nonce: [u8; 8] = decrypted_key[16..24].try_into().unwrap();
 
         debug!(
             "Extracted AES-128 key ({} bytes) and nonce ({} bytes)",
@@ -129,5 +129,39 @@ impl FlacDecryptor {
         }
 
         Ok(decrypted)
+    }
+
+    /// Decrypt in-place: applies AES-128-CTR keystream directly on the mutable buffer.
+    /// Avoids allocating a new Vec — the caller's buffer IS the output.
+    pub fn decrypt_in_place(&self, data: &mut [u8], byte_offset: u64) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        debug!(
+            "Decrypting {} bytes at offset {} with AES-128-CTR (in-place)",
+            data.len(),
+            byte_offset
+        );
+
+        let iv = self.build_iv_for_offset(byte_offset);
+
+        type Aes128Ctr = Ctr128BE<Aes128>;
+        let mut cipher = Aes128Ctr::new_from_slices(&self.key, &iv)
+            .map_err(|e| anyhow::anyhow!("Failed to create CTR cipher: {}", e))?;
+
+        let block_offset = (byte_offset % 16) as usize;
+
+        if block_offset > 0 {
+            // Need to align: create a temp buffer with padding, decrypt, copy back
+            let mut temp = vec![0u8; block_offset + data.len()];
+            temp[block_offset..].copy_from_slice(data);
+            cipher.apply_keystream(&mut temp);
+            data.copy_from_slice(&temp[block_offset..]);
+        } else {
+            cipher.apply_keystream(data);
+        }
+
+        Ok(())
     }
 }

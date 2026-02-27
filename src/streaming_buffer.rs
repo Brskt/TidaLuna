@@ -81,11 +81,11 @@ impl StreamingBuffer {
         }
     }
 
-    pub fn to_vec(&self) -> Option<Vec<u8>> {
+    pub fn take_data(&self) -> Option<Vec<u8>> {
         let (lock, _) = &*self.inner;
-        let inner = lock.lock().unwrap();
-        if inner.finished && inner.error.is_none() {
-            Some(inner.data.clone())
+        let mut inner = lock.lock().unwrap();
+        if inner.finished && inner.error.is_none() && !inner.data.is_empty() {
+            Some(std::mem::take(&mut inner.data))
         } else {
             None
         }

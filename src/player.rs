@@ -2,7 +2,8 @@ use crate::preload;
 use crate::state::{CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT, TrackInfo};
 use crate::streaming_buffer::StreamingBuffer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -24,7 +25,7 @@ pub struct AudioDevice {
 pub enum PlayerEvent {
     TimeUpdate(f64),
     Duration(f64),
-    StateChange(String),
+    StateChange(&'static str),
     AudioDevices(Vec<AudioDevice>, Option<String>),
 }
 
@@ -75,6 +76,46 @@ impl<R: Read> Read for MediaSourceAdapter<R> {
 impl<R: Seek> Seek for MediaSourceAdapter<R> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
+    }
+}
+
+struct SharedCursor {
+    data: Arc<Vec<u8>>,
+    pos: u64,
+}
+
+impl SharedCursor {
+    fn new(data: Arc<Vec<u8>>) -> Self {
+        Self { data, pos: 0 }
+    }
+}
+
+impl Read for SharedCursor {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let available = &self.data[self.pos as usize..];
+        let n = buf.len().min(available.len());
+        buf[..n].copy_from_slice(&available[..n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for SharedCursor {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let len = self.data.len() as i64;
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p as i64,
+            SeekFrom::End(p) => len + p,
+            SeekFrom::Current(p) => self.pos as i64 + p,
+        };
+        if new_pos < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before start",
+            ));
+        }
+        self.pos = new_pos as u64;
+        Ok(self.pos)
     }
 }
 
@@ -193,30 +234,27 @@ fn format_duration_mmss(secs: f64) -> String {
 }
 
 fn print_track_banner(format: &str) {
-    let meta = CURRENT_METADATA.lock().unwrap().clone();
-    let (title, artist, quality) = match meta {
+    let lock = CURRENT_METADATA.lock().unwrap();
+    let format_upper = format.to_uppercase();
+    let (title, artist, quality) = match lock.as_ref() {
         Some(m) => (
             if m.title.is_empty() {
-                "Unknown".to_string()
+                "Unknown"
             } else {
-                m.title
+                m.title.as_str()
             },
             if m.artist.is_empty() {
-                "Unknown".to_string()
+                "Unknown"
             } else {
-                m.artist
+                m.artist.as_str()
             },
             if m.quality.is_empty() {
-                format.to_uppercase()
+                format_upper.as_str()
             } else {
-                m.quality
+                m.quality.as_str()
             },
         ),
-        None => (
-            "Unknown".to_string(),
-            "Unknown".to_string(),
-            format.to_uppercase(),
-        ),
+        None => ("Unknown", "Unknown", format_upper.as_str()),
     };
     eprintln!("══════════════════════════════════════════");
     eprintln!("  {} — {}", title, artist);
@@ -262,7 +300,7 @@ impl Player {
             let mut is_playing = false;
             let mut has_track = false;
             let mut last_empty = true;
-            let mut current_data: Option<Vec<u8>> = None;
+            let mut current_data: Option<Arc<Vec<u8>>> = None;
             let mut current_streaming_buffer: Option<StreamingBuffer> = None;
             let mut current_volume: f32 = 1.0;
 
@@ -280,6 +318,7 @@ impl Player {
                             }
                             current_streaming_buffer = None;
 
+                            let data = Arc::new(data);
                             let decode_start = std::time::Instant::now();
 
                             #[cfg(target_os = "windows")]
@@ -313,14 +352,15 @@ impl Player {
                                 }
                             }
 
+                            let byte_len = data.len() as u64;
+
                             let probe_start = std::time::Instant::now();
                             let audio_info =
-                                get_audio_info(Cursor::new(data.to_vec()), data.len() as u64);
+                                get_audio_info(SharedCursor::new(data.clone()), byte_len);
                             let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
 
-                            let byte_len = data.len() as u64;
                             let decoder_start = std::time::Instant::now();
-                            let cursor = Cursor::new(data.clone());
+                            let cursor = SharedCursor::new(data.clone());
                             match Decoder::builder()
                                 .with_data(cursor)
                                 .with_byte_len(byte_len)
@@ -392,7 +432,7 @@ impl Player {
                             {
                                 if is_exclusive_mode {
                                     buffer.wait_for_complete();
-                                    if let Some(data) = buffer.to_vec() {
+                                    if let Some(data) = buffer.take_data() {
                                         if let Some(ref handle) = exclusive_handle {
                                             match exclusive_wasapi::decode_flac_to_pcm(&data) {
                                                 Ok(pcm) => {
@@ -409,7 +449,7 @@ impl Player {
                                                         total_frames: pcm.total_frames,
                                                         duration_secs: pcm.duration_secs,
                                                     });
-                                                    current_data = Some(data);
+                                                    current_data = Some(Arc::new(data));
                                                     current_streaming_buffer = None;
                                                     has_track = true;
                                                     is_playing = true;
@@ -441,6 +481,10 @@ impl Player {
                             {
                                 Ok(source) => {
                                     let decoder_ms = decoder_start.elapsed().as_secs_f64() * 1000.0;
+
+                                    // Capture Source trait values before append consumes source
+                                    let source_sample_rate = source.sample_rate().get();
+                                    let source_channels = source.channels().get();
 
                                     // Drop previous player to disconnect from mixer
                                     if let Some(old) = rodio_player.take() {
@@ -486,6 +530,12 @@ impl Player {
                                             info.channels,
                                             bitrate
                                         );
+                                    } else {
+                                        eprintln!(
+                                            "[CODEC]  {} / {}ch (probe failed, from Source trait)",
+                                            format_sample_rate(source_sample_rate),
+                                            source_channels
+                                        );
                                     }
                                     eprintln!(
                                         "[AUDIO]  Duration: {} | Probe: {} | Decoder: {} | Total: {} (streaming)",
@@ -517,7 +567,7 @@ impl Player {
                                 p.play();
                             }
                             is_playing = true;
-                            callback(PlayerEvent::StateChange("active".to_string()));
+                            callback(PlayerEvent::StateChange("active"));
                         }
                         PlayerCommand::Pause => {
                             #[cfg(target_os = "windows")]
@@ -534,7 +584,7 @@ impl Player {
                                 p.pause();
                             }
                             is_playing = false;
-                            callback(PlayerEvent::StateChange("paused".to_string()));
+                            callback(PlayerEvent::StateChange("paused"));
                         }
                         PlayerCommand::Stop => {
                             if let Some(ref old_buf) = current_streaming_buffer {
@@ -670,9 +720,10 @@ impl Player {
                                     // Reload current track on new device
                                     if let Some(ref streaming_buf) = current_streaming_buffer {
                                         if streaming_buf.is_complete() {
-                                            if let Some(data) = streaming_buf.to_vec() {
+                                            if let Some(data) = streaming_buf.take_data() {
+                                                let data = Arc::new(data);
                                                 let byte_len = data.len() as u64;
-                                                let cursor = Cursor::new(data.clone());
+                                                let cursor = SharedCursor::new(data.clone());
                                                 if let Ok(source) = Decoder::builder()
                                                     .with_data(cursor)
                                                     .with_byte_len(byte_len)
@@ -725,7 +776,7 @@ impl Player {
                                         }
                                     } else if let Some(ref data) = current_data {
                                         let byte_len = data.len() as u64;
-                                        let cursor = Cursor::new(data.clone());
+                                        let cursor = SharedCursor::new(data.clone());
                                         if let Ok(source) = Decoder::builder()
                                             .with_data(cursor)
                                             .with_byte_len(byte_len)
@@ -820,7 +871,7 @@ impl Player {
 
                         if p.empty() && !last_empty {
                             callback(PlayerEvent::TimeUpdate(current_duration));
-                            callback(PlayerEvent::StateChange("completed".to_string()));
+                            callback(PlayerEvent::StateChange("completed"));
                             has_track = false;
                             is_playing = false;
                             current_duration = 0.0;

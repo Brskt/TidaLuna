@@ -177,7 +177,7 @@ fn main() -> wry::Result<()> {
                          PlayerEvent::StateChange(state) => {
                              let js = format!(
                                  "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediastate', '{}'); }}",
-                                 state.to_string()
+                                 state
                              );
                              let _ = webview.evaluate_script(&js);
 
