@@ -309,8 +309,13 @@ impl Player {
             #[cfg(target_os = "windows")]
             let mut is_exclusive_mode = false;
 
+            let mut pending_cmds: Vec<PlayerCommand> = Vec::new();
             loop {
+                // Drain any commands that arrived during processing
                 while let Ok(cmd) = cmd_rx.try_recv() {
+                    pending_cmds.push(cmd);
+                }
+                for cmd in pending_cmds.drain(..) {
                     match cmd {
                         PlayerCommand::LoadData(data) => {
                             crate::state::GOVERNOR.reset_buffer_progress();
@@ -649,10 +654,19 @@ impl Player {
                                     continue;
                                 }
                             }
-                            if let Some(ref p) = rodio_player
-                                && let Err(e) = p.try_seek(Duration::from_secs_f64(time))
-                            {
-                                eprintln!("Seek failed: {}", e);
+                            if let Some(ref p) = rodio_player {
+                                let seek_t0 = std::time::Instant::now();
+                                let result = p.try_seek(Duration::from_secs_f64(time));
+                                let elapsed = seek_t0.elapsed();
+                                let timing = if elapsed.as_millis() > 0 {
+                                    format!("{:.0}ms", elapsed.as_secs_f64() * 1000.0)
+                                } else {
+                                    format!("{}µs", elapsed.as_micros())
+                                };
+                                match result {
+                                    Ok(()) => eprintln!("[SEEK]   try_seek OK: {timing}"),
+                                    Err(e) => eprintln!("[SEEK]   try_seek FAILED ({timing}): {e}"),
+                                }
                             }
                         }
                         PlayerCommand::SetVolume(vol) => {
@@ -917,7 +931,14 @@ impl Player {
                     }
                 }
 
-                thread::sleep(Duration::from_millis(250));
+                // Wait for next command or poll timeout (replaces sleep for lower seek latency)
+                if let Ok(cmd) = cmd_rx.recv_timeout(Duration::from_millis(250)) {
+                    pending_cmds.push(cmd);
+                    // Drain any additional queued commands
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        pending_cmds.push(cmd);
+                    }
+                }
             }
         });
 

@@ -124,6 +124,10 @@ pub fn start_streaming_download(
         let mut decrypt_calls = 0u32;
         let mut decrypt_total_ms = 0.0f64;
         let mut warmup = false;
+        let mut warmup_bytes: u64 = 0;
+        let mut warmup_first_logged = false;
+        let mut warmup_end_offset: u64 = 0; // absolute file offset to reach
+        const WARMUP_PAST_TARGET: u64 = 512 * 1024; // data past target for decoder (symphonia probes ~350-500KB)
         let mut warmup_start: Option<std::time::Instant> = None;
 
         'outer: loop {
@@ -137,12 +141,18 @@ pub fn start_streaming_download(
                     None => break, // no restart pending, we're done
                 };
 
+                let restart_t0 = std::time::Instant::now();
+
                 // Debounce: wait 20ms then check if a newer seek target arrived
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 if let Some((newer, s)) = writer.take_restart_target() {
                     target = newer;
                     skip_padding = s;
                 }
+                eprintln!(
+                    "[NET]    restart: debounce done +{:.0}ms",
+                    restart_t0.elapsed().as_secs_f64() * 1000.0
+                );
 
                 if writer.is_cancelled() {
                     eprintln!("[STREAM] Download cancelled");
@@ -151,7 +161,12 @@ pub fn start_streaming_download(
 
                 if !skip_padding {
                     warmup = true;
+                    warmup_bytes = 0;
+                    warmup_first_logged = false;
+                    warmup_end_offset = target + WARMUP_PAST_TARGET;
                     warmup_start = Some(std::time::Instant::now());
+                } else {
+                    warmup = false;
                 }
 
                 // Pad before target so the decoder's probe-back (~300KB)
@@ -169,6 +184,7 @@ pub fn start_streaming_download(
                     if skip_padding { ", cache continue" } else { "" }
                 );
                 let range_header = format!("bytes={padded_start}-");
+                let send_t0 = std::time::Instant::now();
                 let range_resp = match HTTP_CLIENT
                     .get(&url)
                     .header("Range", &range_header)
@@ -181,6 +197,11 @@ pub fn start_streaming_download(
                         return;
                     }
                 };
+                eprintln!(
+                    "[NET]    restart: TTFB {:.0}ms (total +{:.0}ms)",
+                    send_t0.elapsed().as_secs_f64() * 1000.0,
+                    restart_t0.elapsed().as_secs_f64() * 1000.0
+                );
 
                 let status = range_resp.status();
                 if status == reqwest::StatusCode::PARTIAL_CONTENT {
@@ -218,29 +239,58 @@ pub fn start_streaming_download(
 
                 match item {
                     Ok(chunk) => {
-                        GOVERNOR
-                            .acquire(TrafficClass::Playback, chunk.len() as u32)
-                            .await;
+                        if !warmup {
+                            GOVERNOR
+                                .acquire(TrafficClass::Playback, chunk.len() as u32)
+                                .await;
+                        }
 
                         if warmup {
                             // Per-chunk streaming: decrypt and write immediately
+                            // until we've fed enough data for the decoder to start.
                             let chunk_offset = offset;
-                            offset += chunk.len() as u64;
+                            let chunk_len = chunk.len();
+                            offset += chunk_len as u64;
                             let mut buf = chunk.to_vec();
                             let ds = std::time::Instant::now();
                             match decryptor.decrypt_in_place(&mut buf, chunk_offset) {
                                 Ok(()) => {
-                                    decrypt_total_ms += ds.elapsed().as_secs_f64() * 1000.0;
+                                    let decrypt_elapsed = ds.elapsed();
+                                    let decrypt_ms = decrypt_elapsed.as_secs_f64() * 1000.0;
+                                    decrypt_total_ms += decrypt_ms;
                                     decrypt_calls += 1;
                                     writer.write(&buf);
-                                    if let Some(ws) = warmup_start.take() {
+                                    warmup_bytes += chunk_len as u64;
+                                    if !warmup_first_logged {
+                                        warmup_first_logged = true;
+                                        if let Some(ref ws) = warmup_start {
+                                            eprintln!(
+                                                "[STREAM] First write: {:.0}ms ({} B)",
+                                                ws.elapsed().as_secs_f64() * 1000.0,
+                                                chunk_len
+                                            );
+                                        }
+                                    }
+                                    // Log every 128KB milestone instead of every chunk
+                                    let prev_kb = (warmup_bytes - chunk_len as u64) / (128 * 1024);
+                                    let curr_kb = warmup_bytes / (128 * 1024);
+                                    if prev_kb != curr_kb {
                                         eprintln!(
-                                            "[STREAM] First write: {:.0}ms ({} B)",
-                                            ws.elapsed().as_secs_f64() * 1000.0,
-                                            buf.len()
+                                            "[NET]    warmup: {}KB buffered",
+                                            warmup_bytes / 1024,
                                         );
                                     }
-                                    warmup = false;
+                                    if offset >= warmup_end_offset {
+                                        if let Some(ref ws) = warmup_start {
+                                            eprintln!(
+                                                "[NET]    warmup done: {}KB in {:.0}ms (past target: {}KB)",
+                                                warmup_bytes / 1024,
+                                                ws.elapsed().as_secs_f64() * 1000.0,
+                                                WARMUP_PAST_TARGET / 1024
+                                            );
+                                        }
+                                        warmup = false;
+                                    }
                                 }
                                 Err(e) => {
                                     writer.finish_with_error(format!("decrypt error: {e}"));

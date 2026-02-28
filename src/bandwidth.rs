@@ -206,6 +206,7 @@ const BOOST_MULT: f64 = 30.0; // 30× real-time after seek
 const BOOST_BURST_MULT: f64 = 3.0; // prefill 3s of audio
 const BOOST_AHEAD_SECS: f64 = 3.0; // exit boost when 3s ahead
 const BOOST_TIMEOUT_MS: u64 = 2000; // exit after 2s max (safeguard)
+const MIN_BOOST_AHEAD: u64 = 512 * 1024; // floor: must cover seek padding (512 KB)
 const FALLBACK_BOOST_RATE: f64 = 10_000_000.0; // 10 MB/s
 const FALLBACK_BOOST_BURST: f64 = 524_288.0; // 512 KB
 const FALLBACK_BOOST_AHEAD: u64 = 512 * 1024; // 512 KB
@@ -429,7 +430,7 @@ fn boost_params(bitrate: u64) -> (f64, f64, u64) {
         (
             bitrate as f64 * BOOST_MULT,
             bitrate as f64 * BOOST_BURST_MULT,
-            (bitrate as f64 * BOOST_AHEAD_SECS) as u64,
+            ((bitrate as f64 * BOOST_AHEAD_SECS) as u64).max(MIN_BOOST_AHEAD),
         )
     } else {
         (

@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex};
 
 const BUFFER_AHEAD_LIMIT: u64 = 2 * 1024 * 1024; // 2 MB
-const RESTART_THRESHOLD: u64 = 512 * 1024; // 512 KB
+const RESTART_THRESHOLD: u64 = 1024 * 1024; // 1 MB — covers warmup window (pad + past target)
 
 struct StaleRange {
     base_offset: u64,
