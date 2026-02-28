@@ -236,18 +236,18 @@ fn main() -> wry::Result<()> {
                     match msg.channel.as_str() {
                         "player.load" => {
                              if let (Some(url), Some(format), Some(key)) = (
-                                 msg.args.get(0).and_then(|v| v.as_str()),
+                                 msg.args.first().and_then(|v| v.as_str()),
                                  msg.args.get(1).and_then(|v| v.as_str()),
                                  msg.args.get(2).and_then(|v| v.as_str())
-                             ) {
-                                 if let Err(e) = player_clone.load(url.to_string(), format.to_string(), key.to_string()) {
-                                     eprintln!("Failed to load track: {}", e);
-                                 }
+                             )
+                                 && let Err(e) = player_clone.load(url.to_string(), format.to_string(), key.to_string())
+                             {
+                                 eprintln!("Failed to load track: {}", e);
                              }
                         },
                         "player.preload" => {
                             if let (Some(url), Some(_format), Some(key)) = (
-                                msg.args.get(0).and_then(|v| v.as_str()),
+                                msg.args.first().and_then(|v| v.as_str()),
                                 msg.args.get(1).and_then(|v| v.as_str()),
                                 msg.args.get(2).and_then(|v| v.as_str())
                             ) {
@@ -266,7 +266,7 @@ fn main() -> wry::Result<()> {
                             });
                         }
                         "player.metadata" => {
-                            if let Some(obj) = msg.args.get(0) {
+                            if let Some(obj) = msg.args.first() {
                                 let meta = crate::state::TrackMetadata {
                                     title: obj.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                                     artist: obj.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -280,12 +280,12 @@ fn main() -> wry::Result<()> {
                         "player.pause" => { let _ = player_clone.pause(); },
                         "player.stop" => { let _ = player_clone.stop(); },
                         "player.seek" => {
-                            if let Some(time) = msg.args.get(0).and_then(|v| v.as_f64()) {
+                            if let Some(time) = msg.args.first().and_then(|v| v.as_f64()) {
                                 let _ = player_clone.seek(time);
                             }
                         },
                         "player.volume" => {
-                            if let Some(vol) = msg.args.get(0).and_then(|v| v.as_f64()) {
+                            if let Some(vol) = msg.args.first().and_then(|v| v.as_f64()) {
                                 let _ = player_clone.set_volume(vol);
                             }
                         },
@@ -293,7 +293,7 @@ fn main() -> wry::Result<()> {
                             let _ = player_clone.get_audio_devices(msg.id);
                         },
                         "player.devices.set" => {
-                            if let Some(id) = msg.args.get(0).and_then(|v| v.as_str()) {
+                            if let Some(id) = msg.args.first().and_then(|v| v.as_str()) {
                                  let exclusive = msg
                                      .args
                                      .get(1)
@@ -331,13 +331,13 @@ fn main() -> wry::Result<()> {
                             }
                         }
                         "web.loaded" => {
-                            if let Some(url) = pending_navigation.take() {
-                                if url.starts_with("tidal://") {
-                                    let command = url.replace("tidal://", "");
-                                    let _ = webview.load_url(
-                                        &("https://desktop.tidal.com/".to_string() + &command),
-                                    );
-                                }
+                            if let Some(url) = pending_navigation.take()
+                                && url.starts_with("tidal://")
+                            {
+                                let command = url.replace("tidal://", "");
+                                let _ = webview.load_url(
+                                    &("https://desktop.tidal.com/".to_string() + &command),
+                                );
                             }
                             update_window_state(&webview, &window);
                         }

@@ -155,7 +155,7 @@ fn get_audio_info<R: Read + Seek + Send + Sync + 'static>(
 }
 
 fn format_sample_rate(rate: u32) -> String {
-    if rate % 1000 == 0 {
+    if rate.is_multiple_of(1000) {
         format!("{} kHz", rate / 1000)
     } else {
         format!("{:.1} kHz", rate as f64 / 1000.0)
@@ -263,16 +263,16 @@ fn print_track_banner(format: &str) {
 }
 
 fn open_device_sink(device_id: Option<&str>) -> anyhow::Result<MixerDeviceSink> {
-    if let Some(id) = device_id {
-        if id != "default" {
-            if let Some(device) = find_output_device(id) {
-                return DeviceSinkBuilder::from_device(device)
-                    .map_err(|e| anyhow::anyhow!("Failed to configure device '{}': {}", id, e))?
-                    .open_stream()
-                    .map_err(|e| anyhow::anyhow!("Failed to open device '{}': {}", id, e));
-            }
-            eprintln!("[WARN] Device '{}' not found, falling back to default", id);
+    if let Some(id) = device_id
+        && id != "default"
+    {
+        if let Some(device) = find_output_device(id) {
+            return DeviceSinkBuilder::from_device(device)
+                .map_err(|e| anyhow::anyhow!("Failed to configure device '{}': {}", id, e))?
+                .open_stream()
+                .map_err(|e| anyhow::anyhow!("Failed to open device '{}': {}", id, e));
         }
+        eprintln!("[WARN] Device '{}' not found, falling back to default", id);
     }
     DeviceSinkBuilder::open_default_sink()
         .map_err(|e| anyhow::anyhow!("Failed to open default audio output: {}", e))
@@ -649,10 +649,10 @@ impl Player {
                                     continue;
                                 }
                             }
-                            if let Some(ref p) = rodio_player {
-                                if let Err(e) = p.try_seek(Duration::from_secs_f64(time)) {
-                                    eprintln!("Seek failed: {}", e);
-                                }
+                            if let Some(ref p) = rodio_player
+                                && let Err(e) = p.try_seek(Duration::from_secs_f64(time))
+                            {
+                                eprintln!("Seek failed: {}", e);
                             }
                         }
                         PlayerCommand::SetVolume(vol) => {
@@ -886,23 +886,25 @@ impl Player {
                 #[cfg(not(target_os = "windows"))]
                 let should_poll_rodio = true;
 
-                if should_poll_rodio && has_track && is_playing {
-                    if let Some(ref p) = rodio_player {
-                        let pos = p.get_pos();
-                        let pos_secs = pos.as_secs_f64();
+                if should_poll_rodio
+                    && has_track
+                    && is_playing
+                    && let Some(ref p) = rodio_player
+                {
+                    let pos = p.get_pos();
+                    let pos_secs = pos.as_secs_f64();
 
-                        if pos_secs > 0.0 {
-                            callback(PlayerEvent::TimeUpdate(pos_secs));
-                        }
+                    if pos_secs > 0.0 {
+                        callback(PlayerEvent::TimeUpdate(pos_secs));
+                    }
 
-                        if p.empty() && !last_empty {
-                            callback(PlayerEvent::TimeUpdate(current_duration));
-                            callback(PlayerEvent::StateChange("completed"));
-                            has_track = false;
-                            is_playing = false;
-                            current_duration = 0.0;
-                            last_empty = true;
-                        }
+                    if p.empty() && !last_empty {
+                        callback(PlayerEvent::TimeUpdate(current_duration));
+                        callback(PlayerEvent::StateChange("completed"));
+                        has_track = false;
+                        is_playing = false;
+                        current_duration = 0.0;
+                        last_empty = true;
                     }
                 }
 

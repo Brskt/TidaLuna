@@ -94,10 +94,10 @@ pub async fn next_preloaded_track() -> Option<TrackInfo> {
 
 pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack> {
     let mut lock = PRELOAD_STATE.lock().await;
-    if let Some(data) = lock.data.as_ref() {
-        if data.track == *track {
-            return lock.data.take();
-        }
+    if let Some(data) = lock.data.as_ref()
+        && data.track == *track
+    {
+        return lock.data.take();
     }
     None
 }

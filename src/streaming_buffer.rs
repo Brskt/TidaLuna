@@ -149,7 +149,7 @@ impl Read for StreamingBuffer {
             }
 
             if let Some(ref err) = inner.error {
-                return Err(io::Error::new(io::ErrorKind::Other, err.clone()));
+                return Err(io::Error::other(err.clone()));
             }
 
             let buf_start = inner.base_offset;

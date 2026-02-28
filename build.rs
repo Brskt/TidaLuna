@@ -14,7 +14,7 @@ fn main() {
 
     // Make sure we have the node_modules ready
     let status = Command::new("bun")
-        .args(&["install"])
+        .args(["install"])
         .current_dir(frontend_dir)
         .status()
         .expect("Failed to run bun install");
@@ -25,7 +25,7 @@ fn main() {
 
     // Run the build script defined in package.json
     let status = Command::new("bun")
-        .args(&["run", "build"])
+        .args(["run", "build"])
         .current_dir(frontend_dir)
         .status()
         .expect("Failed to run bun build");
