@@ -1,9 +1,13 @@
+use crate::bandwidth::TrafficClass;
 use crate::decrypt::FlacDecryptor;
-use crate::state::{CURRENT_TRACK, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo};
+use crate::state::{
+    CURRENT_TRACK, GOVERNOR, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo,
+};
 use crate::streaming_buffer::StreamingBufferWriter;
 use futures_util::StreamExt;
 
 pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> {
+    let start = std::time::Instant::now();
     let resp = HTTP_CLIENT.get(url).send().await?;
 
     if !resp.status().is_success() {
@@ -17,10 +21,24 @@ pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> 
 
     while let Some(item) = stream.next().await {
         let chunk = item?;
+
+        GOVERNOR
+            .acquire(TrafficClass::Preload, chunk.len() as u32)
+            .await;
+
         let decrypted = decryptor.decrypt_chunk(&chunk, offset)?;
         offset += chunk.len() as u64;
         buffer.extend_from_slice(&decrypted);
     }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let rate_mbps = (offset as f64 * 8.0) / (elapsed * 1_000_000.0);
+    eprintln!(
+        "[FETCH]  {:.1} MB in {:.1}s ({:.1} Mbps)",
+        offset as f64 / 1_048_576.0,
+        elapsed,
+        rate_mbps
+    );
 
     Ok(buffer)
 }
@@ -33,6 +51,7 @@ pub async fn start_preload(track: TrackInfo) {
             return;
         }
 
+        eprintln!("[PRELOAD] Starting preload for next track");
         match fetch_and_decrypt(&track.url, &track.key).await {
             Ok(data) => {
                 if !data.is_empty() {
@@ -115,6 +134,10 @@ pub fn start_streaming_download(
 
             match item {
                 Ok(chunk) => {
+                    GOVERNOR
+                        .acquire(TrafficClass::Playback, chunk.len() as u32)
+                        .await;
+
                     if pending.is_empty() {
                         pending_offset = offset;
                     }
@@ -125,7 +148,8 @@ pub fn start_streaming_download(
                         let decrypt_start = std::time::Instant::now();
                         match decryptor.decrypt_in_place(&mut pending, pending_offset) {
                             Ok(()) => {
-                                decrypt_total_ms += decrypt_start.elapsed().as_secs_f64() * 1000.0;
+                                decrypt_total_ms +=
+                                    decrypt_start.elapsed().as_secs_f64() * 1000.0;
                                 decrypt_calls += 1;
                                 writer.write(&pending);
                                 writer.wait_if_buffer_full().await;

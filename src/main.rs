@@ -2,6 +2,7 @@
     all(not(debug_assertions), not(feature = "console")),
     windows_subsystem = "windows"
 )]
+mod bandwidth;
 mod decrypt;
 #[cfg(target_os = "windows")]
 mod exclusive_wasapi;
@@ -56,6 +57,13 @@ fn main() -> wry::Result<()> {
         .unwrap();
 
     let rt_handle = rt.handle().clone();
+
+    // Force-initialize the bandwidth governor while a runtime context is active.
+    // Lazy::new calls spawn_governor() which requires tokio::spawn.
+    {
+        let _guard = rt.enter();
+        let _ = &*crate::state::GOVERNOR;
+    }
 
     let proxy_player = proxy.clone();
     let proxy_autoload = proxy.clone();

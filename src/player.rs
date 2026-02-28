@@ -313,6 +313,8 @@ impl Player {
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         PlayerCommand::LoadData(data) => {
+                            crate::state::GOVERNOR.reset_buffer_progress();
+
                             if let Some(ref old_buf) = current_streaming_buffer {
                                 old_buf.cancel();
                             }
@@ -523,6 +525,16 @@ impl Player {
                                         } else {
                                             0
                                         };
+                                        // Publish bitrate (bytes/sec) for governor hysteresis
+                                        let bitrate_bps = if info.duration > 0.0 {
+                                            (total_len as f64 / info.duration) as u64
+                                        } else {
+                                            0
+                                        };
+                                        crate::state::GOVERNOR.buffer_progress().bitrate_bps.store(
+                                            bitrate_bps,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                         eprintln!(
                                             "[CODEC]  {} / {}bit / {}ch | {} kbps",
                                             format_sample_rate(info.sample_rate),
@@ -560,6 +572,9 @@ impl Player {
                                         handle.send(ExclusiveCommand::Play);
                                     }
                                     is_playing = true;
+                                    crate::state::GOVERNOR
+                                        .buffer_progress()
+                                        .set_playback_active(true);
                                     continue;
                                 }
                             }
@@ -567,6 +582,9 @@ impl Player {
                                 p.play();
                             }
                             is_playing = true;
+                            crate::state::GOVERNOR
+                                .buffer_progress()
+                                .set_playback_active(true);
                             callback(PlayerEvent::StateChange("active"));
                         }
                         PlayerCommand::Pause => {
@@ -577,6 +595,9 @@ impl Player {
                                         handle.send(ExclusiveCommand::Pause);
                                     }
                                     is_playing = false;
+                                    crate::state::GOVERNOR
+                                        .buffer_progress()
+                                        .set_playback_active(false);
                                     continue;
                                 }
                             }
@@ -584,9 +605,14 @@ impl Player {
                                 p.pause();
                             }
                             is_playing = false;
+                            crate::state::GOVERNOR
+                                .buffer_progress()
+                                .set_playback_active(false);
                             callback(PlayerEvent::StateChange("paused"));
                         }
                         PlayerCommand::Stop => {
+                            crate::state::GOVERNOR.reset_buffer_progress();
+
                             if let Some(ref old_buf) = current_streaming_buffer {
                                 old_buf.cancel();
                             }
@@ -962,7 +988,9 @@ impl Player {
                 format_bytes(total_len)
             );
 
-            let (buffer, writer) = StreamingBuffer::new(total_len);
+            crate::state::GOVERNOR.reset_buffer_progress();
+            let bp = crate::state::GOVERNOR.buffer_progress().clone();
+            let (buffer, writer) = StreamingBuffer::new(total_len, Some(bp));
             let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer));
 
             // Download continues in background, writer feeds the buffer

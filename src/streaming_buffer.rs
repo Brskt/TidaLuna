@@ -1,4 +1,6 @@
+use crate::bandwidth::BufferProgress;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex};
 
 const BUFFER_AHEAD_LIMIT: u64 = 5 * 1024 * 1024; // 5 MB
@@ -16,15 +18,24 @@ pub struct StreamingBuffer {
     inner: Arc<(Mutex<Inner>, Condvar)>,
     writer_notify: Arc<tokio::sync::Notify>,
     read_pos: u64,
+    buffer_progress: Option<Arc<BufferProgress>>,
 }
 
 pub struct StreamingBufferWriter {
     inner: Arc<(Mutex<Inner>, Condvar)>,
     writer_notify: Arc<tokio::sync::Notify>,
+    buffer_progress: Option<Arc<BufferProgress>>,
 }
 
 impl StreamingBuffer {
-    pub fn new(total_len: u64) -> (Self, StreamingBufferWriter) {
+    pub fn new(
+        total_len: u64,
+        buffer_progress: Option<Arc<BufferProgress>>,
+    ) -> (Self, StreamingBufferWriter) {
+        if let Some(ref bp) = buffer_progress {
+            bp.total_len.store(total_len, Relaxed);
+        }
+
         let inner = Arc::new((
             Mutex::new(Inner {
                 data: Vec::with_capacity(total_len as usize),
@@ -42,11 +53,13 @@ impl StreamingBuffer {
             inner: inner.clone(),
             writer_notify: writer_notify.clone(),
             read_pos: 0,
+            buffer_progress: buffer_progress.clone(),
         };
 
         let writer = StreamingBufferWriter {
             inner,
             writer_notify,
+            buffer_progress,
         };
 
         (buffer, writer)
@@ -96,6 +109,7 @@ impl StreamingBuffer {
             inner: self.inner.clone(),
             writer_notify: self.writer_notify.clone(),
             read_pos: 0,
+            buffer_progress: self.buffer_progress.clone(),
         }
     }
 }
@@ -126,6 +140,9 @@ impl Read for StreamingBuffer {
                 self.read_pos += n as u64;
                 if self.read_pos > inner.read_pos {
                     inner.read_pos = self.read_pos;
+                    if let Some(ref bp) = self.buffer_progress {
+                        bp.read_pos.store(self.read_pos, Relaxed);
+                    }
                 }
                 drop(inner);
                 self.writer_notify.notify_one();
@@ -176,6 +193,10 @@ impl Seek for StreamingBuffer {
             inner.read_pos = new_pos;
         }
         drop(inner);
+
+        if let Some(ref bp) = self.buffer_progress {
+            bp.read_pos.store(new_pos, Relaxed);
+        }
         if should_notify {
             self.writer_notify.notify_one();
         }
@@ -189,6 +210,9 @@ impl StreamingBufferWriter {
         let (lock, cvar) = &*self.inner;
         let mut inner = lock.lock().unwrap();
         inner.data.extend_from_slice(data);
+        if let Some(ref bp) = self.buffer_progress {
+            bp.written.store(inner.data.len() as u64, Relaxed);
+        }
         cvar.notify_all();
     }
 

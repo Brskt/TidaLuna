@@ -41,3 +41,6 @@ pub static PRELOAD_STATE: Lazy<TokioMutex<PreloadState>> = Lazy::new(|| {
         data: None,
     })
 });
+
+pub static GOVERNOR: Lazy<crate::bandwidth::GovernorHandle> =
+    Lazy::new(crate::bandwidth::spawn_governor);
