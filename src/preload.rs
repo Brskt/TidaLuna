@@ -103,22 +103,32 @@ pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack
 }
 
 /// Compute `(seek_padding, warmup_past_target)` based on the track's bitrate.
-/// Both values represent ~5 seconds of audio in bytes, clamped to [512 KB, 2 MB].
-/// Returns (512 KB, 512 KB) when bitrate is unknown (0).
+///
+/// - `seek_padding`: 5 seconds of audio, clamped to [512 KB, 2 MB].
+///   Covers the decoder's probe-back (~300-400 KB observed).
+/// - `warmup_past_target`: 2 seconds of audio, clamped to [256 KB, 512 KB].
+///   Data downloaded after the seek target in ungoverned warmup mode.
+///   The governor boost (30×) takes over immediately after.
+///
+/// Returns (512 KB, 256 KB) when bitrate is unknown (0).
 ///
 /// `bitrate_bps` is in **bytes per second** (total_len / duration), matching
 /// the unit stored in `BufferProgress::bitrate_bps`.
 fn seek_params(bitrate_bps: u64) -> (u64, u64) {
-    const FLOOR: u64 = 512 * 1024;
-    const CEIL: u64 = 2 * 1024 * 1024;
-    const DURATION_SECS: u64 = 5;
+    const PAD_FLOOR: u64 = 512 * 1024;
+    const PAD_CEIL: u64 = 2 * 1024 * 1024;
+    const PAD_SECS: u64 = 5;
+
+    const PT_FLOOR: u64 = 256 * 1024;
+    const PT_CEIL: u64 = 512 * 1024;
+    const PT_SECS: u64 = 2;
 
     if bitrate_bps == 0 {
-        return (FLOOR, FLOOR);
+        return (PAD_FLOOR, PT_FLOOR);
     }
-    let bytes = bitrate_bps * DURATION_SECS;
-    let clamped = bytes.clamp(FLOOR, CEIL);
-    (clamped, clamped)
+    let padding = (bitrate_bps * PAD_SECS).clamp(PAD_FLOOR, PAD_CEIL);
+    let past_target = (bitrate_bps * PT_SECS).clamp(PT_FLOOR, PT_CEIL);
+    (padding, past_target)
 }
 
 pub fn start_streaming_download(
@@ -142,12 +152,14 @@ pub fn start_streaming_download(
         let mut current_resp = Some(resp);
         let mut decrypt_calls = 0u32;
         let mut decrypt_total_ms = 0.0f64;
+        let mut range_restarts: u32 = 0;
         let mut warmup = false;
         let mut warmup_bytes: u64 = 0;
         let mut warmup_first_logged = false;
         let mut warmup_end_offset: u64 = 0; // absolute file offset to reach
         let mut warmup_past_target: u64 = 0;
         let mut warmup_start: Option<std::time::Instant> = None;
+        let mut warmup_headers_at: Option<std::time::Instant> = None;
 
         'outer: loop {
             // Determine the stream source: initial response or Range request
@@ -186,7 +198,6 @@ pub fn start_streaming_download(
                     warmup_first_logged = false;
                     warmup_past_target = wpt;
                     warmup_end_offset = target + wpt;
-                    warmup_start = Some(std::time::Instant::now());
                 } else {
                     warmup = false;
                 }
@@ -206,16 +217,24 @@ pub fn start_streaming_download(
                 );
                 let range_header = format!("bytes={padded_start}-");
                 let send_t0 = std::time::Instant::now();
-                let range_resp = match HTTP_CLIENT
-                    .get(&url)
-                    .header("Range", &range_header)
-                    .send()
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        writer.finish_with_error(format!("range request failed: {e}"));
-                        return;
+                let send_fut = HTTP_CLIENT.get(&url).header("Range", &range_header).send();
+                let range_resp = tokio::select! {
+                    biased;
+                    _ = writer.wait_for_restart_or_cancel() => {
+                        eprintln!(
+                            "[NET]    restart: cancelled during send ({:.0}ms)",
+                            send_t0.elapsed().as_secs_f64() * 1000.0
+                        );
+                        continue 'outer;
+                    }
+                    result = send_fut => {
+                        match result {
+                            Ok(r) => r,
+                            Err(e) => {
+                                writer.finish_with_error(format!("range request failed: {e}"));
+                                return;
+                            }
+                        }
                     }
                 };
                 eprintln!(
@@ -223,11 +242,17 @@ pub fn start_streaming_download(
                     send_t0.elapsed().as_secs_f64() * 1000.0,
                     restart_t0.elapsed().as_secs_f64() * 1000.0
                 );
+                if warmup {
+                    let now = std::time::Instant::now();
+                    warmup_headers_at = Some(now);
+                    warmup_start = Some(now);
+                }
 
                 let status = range_resp.status();
                 if status == reqwest::StatusCode::PARTIAL_CONTENT {
                     // 206 — server honored the Range
                     writer.reset_for_range(padded_start);
+                    range_restarts += 1;
                     (range_resp, padded_start)
                 } else if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
                     // 416 — offset beyond file, finish
@@ -249,14 +274,21 @@ pub fn start_streaming_download(
             let mut pending = Vec::with_capacity(BATCH_SIZE);
             let mut pending_offset = stream_offset;
 
-            while let Some(item) = stream.next().await {
-                if writer.is_cancelled() {
-                    eprintln!("[STREAM] Download cancelled");
-                    return;
-                }
-                if writer.has_restart_pending() {
-                    continue 'outer;
-                }
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    _ = writer.wait_for_restart_or_cancel() => {
+                        if writer.is_cancelled() {
+                            eprintln!("[STREAM] Download cancelled");
+                            return;
+                        }
+                        continue 'outer;
+                    }
+                    item = stream.next() => match item {
+                        Some(item) => item,
+                        None => break,
+                    },
+                };
 
                 match item {
                     Ok(chunk) => {
@@ -284,11 +316,12 @@ pub fn start_streaming_download(
                                     warmup_bytes += chunk_len as u64;
                                     if !warmup_first_logged {
                                         warmup_first_logged = true;
-                                        if let Some(ref ws) = warmup_start {
+                                        if let Some(ha) = warmup_headers_at {
+                                            let headers_to_body_ms =
+                                                ds.duration_since(ha).as_secs_f64() * 1000.0;
                                             eprintln!(
-                                                "[STREAM] First write: {:.0}ms ({} B)",
-                                                ws.elapsed().as_secs_f64() * 1000.0,
-                                                chunk_len
+                                                "[NET]    restart: headers→body +{:.0}ms | decrypt +{:.0}ms ({} B)",
+                                                headers_to_body_ms, decrypt_ms, chunk_len
                                             );
                                         }
                                     }
@@ -374,8 +407,8 @@ pub fn start_streaming_download(
         let total_ms = download_start.elapsed().as_secs_f64() * 1000.0;
         let net_ms = total_ms - decrypt_total_ms;
         eprintln!(
-            "[STREAM] Complete | {:.0}ms (net: {:.0}ms, decrypt: {:.0}ms) | {} decrypt calls",
-            total_ms, net_ms, decrypt_total_ms, decrypt_calls
+            "[STREAM] Complete | {:.0}ms (net: {:.0}ms, decrypt: {:.0}ms) | {} decrypt calls | {} restarts",
+            total_ms, net_ms, decrypt_total_ms, decrypt_calls, range_restarts
         );
     })
 }

@@ -231,6 +231,7 @@ struct GovernorState {
     preload_queue: VecDeque<TokenRequest>,
     gate: PreloadGate,
     boost_start: Option<Instant>,
+    preload_cooldown_until: Option<Instant>,
     saved_rate: f64,
     saved_burst: f64,
     last_bitrate: u64,
@@ -251,6 +252,7 @@ impl GovernorState {
             preload_queue: VecDeque::new(),
             gate: PreloadGate::Active,
             boost_start: None,
+            preload_cooldown_until: None,
             saved_rate: rate,
             saved_burst: burst,
             last_bitrate: 0,
@@ -273,7 +275,14 @@ impl GovernorState {
             &mut self.playback_bucket,
             &mut self.play_bytes,
         );
-        if self.gate == PreloadGate::Active && self.boost_start.is_none() {
+        // Clear cooldown when no track is active (stop/load reset)
+        if bp.total_len.load(Relaxed) == 0 {
+            self.preload_cooldown_until = None;
+        }
+        let cooldown_active = self
+            .preload_cooldown_until
+            .is_some_and(|t| Instant::now() < t);
+        if self.gate == PreloadGate::Active && self.boost_start.is_none() && !cooldown_active {
             serve_queue(
                 &mut self.preload_queue,
                 &mut self.preload_bucket,
@@ -322,6 +331,8 @@ impl GovernorState {
             self.playback_bucket.burst = boost_burst;
             self.playback_bucket.tokens = boost_burst;
             self.boost_start = Some(Instant::now());
+            self.preload_cooldown_until =
+                Some(Instant::now() + std::time::Duration::from_millis(1500));
             eprintln!(
                 "[GOV]    Seek BOOST ON (rate: {:.0} KB/s, {:.0}× real-time)",
                 boost_rate / 1024.0,

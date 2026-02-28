@@ -4,7 +4,23 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex};
 
 const BUFFER_AHEAD_LIMIT: u64 = 2 * 1024 * 1024; // 2 MB
-const RESTART_THRESHOLD: u64 = 1024 * 1024; // 1 MB — covers warmup window (pad + past target)
+/// Adaptive restart threshold: 3 seconds of audio, clamped to [256 KB, 1 MB].
+/// Falls back to the fixed 1 MB when bitrate is unknown.
+fn restart_threshold(bitrate_bps: u64) -> u64 {
+    const FLOOR: u64 = 256 * 1024;
+    const CEIL: u64 = 1024 * 1024;
+    const DURATION_SECS: u64 = 3;
+
+    if bitrate_bps == 0 {
+        return CEIL; // conservative fallback
+    }
+    bitrate_bps.saturating_mul(DURATION_SECS).clamp(FLOOR, CEIL)
+}
+
+/// Early restart: force a Range restart for any forward gap above this floor.
+/// A restart with boost (~280ms) is almost always faster than waiting for
+/// linear download at 5× bitrate to fill gaps of this size.
+const EARLY_RESTART_FLOOR: u64 = 256 * 1024;
 
 struct StaleRange {
     base_offset: u64,
@@ -223,8 +239,15 @@ impl Seek for StreamingBuffer {
 
             // Decide whether to trigger a Range restart
             if !inner.finished && !inner.cancelled {
-                let would_restart = new_pos < inner.base_offset
-                    || (new_pos >= buf_end && (new_pos - buf_end) >= RESTART_THRESHOLD);
+                let bitrate = self
+                    .buffer_progress
+                    .as_ref()
+                    .map(|bp| bp.bitrate_bps.load(Relaxed))
+                    .unwrap_or(0);
+                let threshold = restart_threshold(bitrate);
+                let gap = new_pos.saturating_sub(buf_end);
+                let would_restart =
+                    new_pos < inner.base_offset || gap >= threshold || gap >= EARLY_RESTART_FLOOR;
 
                 let mut restored = false;
 
@@ -283,6 +306,16 @@ impl Seek for StreamingBuffer {
                         bp.written.store(new_pos, Relaxed);
                         bp.request_seek_boost();
                     }
+                }
+
+                if !would_restart && new_pos >= buf_end && !inner.finished {
+                    eprintln!(
+                        "[SEEK]   Forward within threshold: pos={} buf_end={} gap={}KB (threshold={}KB)",
+                        new_pos,
+                        buf_end,
+                        (new_pos - buf_end) / 1024,
+                        threshold / 1024
+                    );
                 }
             }
         }
@@ -386,6 +419,19 @@ impl StreamingBufferWriter {
                 let absolute_written = inner.base_offset + inner.data.len() as u64;
                 let ahead = absolute_written.saturating_sub(inner.read_pos);
                 if ahead < BUFFER_AHEAD_LIMIT {
+                    return;
+                }
+            }
+            self.writer_notify.notified().await;
+        }
+    }
+
+    pub async fn wait_for_restart_or_cancel(&self) {
+        loop {
+            {
+                let (lock, _) = &*self.inner;
+                let inner = lock.lock().unwrap();
+                if inner.restart_target.is_some() || inner.cancelled {
                     return;
                 }
             }
