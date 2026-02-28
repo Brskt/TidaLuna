@@ -104,6 +104,7 @@ pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack
 
 pub fn start_streaming_download(
     resp: reqwest::Response,
+    url: String,
     key: String,
     writer: StreamingBufferWriter,
 ) -> tokio::task::JoinHandle<()> {
@@ -117,87 +118,191 @@ pub fn start_streaming_download(
             }
         };
 
-        const BATCH_SIZE: usize = 256 * 1024; // 256 KB
+        const BATCH_SIZE: usize = 128 * 1024; // 128 KB
 
-        let mut stream = resp.bytes_stream();
-        let mut offset = 0u64;
+        let mut current_resp = Some(resp);
         let mut decrypt_calls = 0u32;
         let mut decrypt_total_ms = 0.0f64;
-        let mut pending = Vec::with_capacity(BATCH_SIZE);
-        let mut pending_offset = 0u64;
+        let mut warmup = false;
+        let mut warmup_start: Option<std::time::Instant> = None;
 
-        while let Some(item) = stream.next().await {
-            if writer.is_cancelled() {
-                eprintln!("[STREAM] Download cancelled");
-                return;
-            }
+        'outer: loop {
+            // Determine the stream source: initial response or Range request
+            let (stream_resp, stream_offset) = if let Some(r) = current_resp.take() {
+                (r, 0u64)
+            } else {
+                // A restart was requested — get the target
+                let target = match writer.take_restart_target() {
+                    Some(t) => t,
+                    None => break, // no restart pending, we're done
+                };
 
-            match item {
-                Ok(chunk) => {
-                    GOVERNOR
-                        .acquire(TrafficClass::Playback, chunk.len() as u32)
-                        .await;
+                // Debounce: wait 20ms then check if a newer seek target arrived
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let target = writer.take_restart_target().unwrap_or(target);
 
-                    if pending.is_empty() {
-                        pending_offset = offset;
+                if writer.is_cancelled() {
+                    eprintln!("[STREAM] Download cancelled");
+                    return;
+                }
+
+                warmup = true;
+                warmup_start = Some(std::time::Instant::now());
+
+                // Pad before target so the decoder's probe-back (~300KB)
+                // lands within the buffer instead of triggering a second restart.
+                const SEEK_PADDING: u64 = 512 * 1024;
+                let padded_start = target.saturating_sub(SEEK_PADDING);
+                eprintln!(
+                    "[STREAM] Range restart at byte {padded_start} (target={target}, pad={}KB)",
+                    (target - padded_start) / 1024,
+                );
+                let range_header = format!("bytes={padded_start}-");
+                let range_resp = match HTTP_CLIENT
+                    .get(&url)
+                    .header("Range", &range_header)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        writer.finish_with_error(format!("range request failed: {e}"));
+                        return;
                     }
-                    offset += chunk.len() as u64;
-                    pending.extend_from_slice(&chunk);
+                };
 
-                    if pending.len() >= BATCH_SIZE {
-                        let decrypt_start = std::time::Instant::now();
-                        match decryptor.decrypt_in_place(&mut pending, pending_offset) {
-                            Ok(()) => {
-                                decrypt_total_ms +=
-                                    decrypt_start.elapsed().as_secs_f64() * 1000.0;
-                                decrypt_calls += 1;
-                                writer.write(&pending);
-                                writer.wait_if_buffer_full().await;
-                                pending.clear();
+                let status = range_resp.status();
+                if status == reqwest::StatusCode::PARTIAL_CONTENT {
+                    // 206 — server honored the Range
+                    writer.reset_for_range(padded_start);
+                    (range_resp, padded_start)
+                } else if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                    // 416 — offset beyond file, finish
+                    writer.finish();
+                    break;
+                } else if status.is_success() {
+                    // 200 — server ignored Range, restart from beginning
+                    eprintln!("[STREAM] Server ignored Range header, restarting from byte 0");
+                    writer.reset_for_range(0);
+                    (range_resp, 0u64)
+                } else {
+                    writer.finish_with_error(format!("range request status: {status}"));
+                    return;
+                }
+            };
+
+            let mut stream = stream_resp.bytes_stream();
+            let mut offset = stream_offset;
+            let mut pending = Vec::with_capacity(BATCH_SIZE);
+            let mut pending_offset = stream_offset;
+
+            while let Some(item) = stream.next().await {
+                if writer.is_cancelled() {
+                    eprintln!("[STREAM] Download cancelled");
+                    return;
+                }
+                if writer.has_restart_pending() {
+                    continue 'outer;
+                }
+
+                match item {
+                    Ok(chunk) => {
+                        GOVERNOR
+                            .acquire(TrafficClass::Playback, chunk.len() as u32)
+                            .await;
+
+                        if warmup {
+                            // Per-chunk streaming: decrypt and write immediately
+                            let chunk_offset = offset;
+                            offset += chunk.len() as u64;
+                            let mut buf = chunk.to_vec();
+                            let ds = std::time::Instant::now();
+                            match decryptor.decrypt_in_place(&mut buf, chunk_offset) {
+                                Ok(()) => {
+                                    decrypt_total_ms += ds.elapsed().as_secs_f64() * 1000.0;
+                                    decrypt_calls += 1;
+                                    writer.write(&buf);
+                                    if let Some(ws) = warmup_start.take() {
+                                        eprintln!(
+                                            "[STREAM] First write: {:.0}ms ({} B)",
+                                            ws.elapsed().as_secs_f64() * 1000.0,
+                                            buf.len()
+                                        );
+                                    }
+                                    warmup = false;
+                                }
+                                Err(e) => {
+                                    writer.finish_with_error(format!("decrypt error: {e}"));
+                                    return;
+                                }
                             }
-                            Err(e) => {
-                                writer.finish_with_error(format!("decrypt error: {e}"));
-                                return;
+                        } else {
+                            // Normal batch mode
+                            if pending.is_empty() {
+                                pending_offset = offset;
+                            }
+                            offset += chunk.len() as u64;
+                            pending.extend_from_slice(&chunk);
+
+                            if pending.len() >= BATCH_SIZE {
+                                let ds = std::time::Instant::now();
+                                match decryptor.decrypt_in_place(&mut pending, pending_offset) {
+                                    Ok(()) => {
+                                        decrypt_total_ms += ds.elapsed().as_secs_f64() * 1000.0;
+                                        decrypt_calls += 1;
+                                        writer.write(&pending);
+                                        pending.clear();
+
+                                        writer.wait_if_buffer_full().await;
+                                        if writer.has_restart_pending() {
+                                            continue 'outer;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        writer.finish_with_error(format!("decrypt error: {e}"));
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    writer.finish_with_error(format!("network error: {e}"));
-                    return;
-                }
-            }
-        }
-
-        // Flush remaining data
-        if !pending.is_empty() {
-            let decrypt_start = std::time::Instant::now();
-            match decryptor.decrypt_in_place(&mut pending, pending_offset) {
-                Ok(()) => {
-                    decrypt_total_ms += decrypt_start.elapsed().as_secs_f64() * 1000.0;
-                    decrypt_calls += 1;
-                    writer.write(&pending);
-                }
-                Err(e) => {
-                    writer.finish_with_error(format!("decrypt error: {e}"));
-                    return;
+                    Err(e) => {
+                        writer.finish_with_error(format!("network error: {e}"));
+                        return;
+                    }
                 }
             }
+
+            // Flush remaining data
+            if !pending.is_empty() {
+                let ds = std::time::Instant::now();
+                match decryptor.decrypt_in_place(&mut pending, pending_offset) {
+                    Ok(()) => {
+                        decrypt_total_ms += ds.elapsed().as_secs_f64() * 1000.0;
+                        decrypt_calls += 1;
+                        writer.write(&pending);
+                    }
+                    Err(e) => {
+                        writer.finish_with_error(format!("decrypt error: {e}"));
+                        return;
+                    }
+                }
+            }
+
+            // Check for restart before finishing
+            if writer.has_restart_pending() {
+                continue 'outer;
+            }
+
+            writer.finish();
+            break;
         }
 
-        writer.finish();
         let total_ms = download_start.elapsed().as_secs_f64() * 1000.0;
         let net_ms = total_ms - decrypt_total_ms;
-        let size = if offset >= 1_048_576 {
-            format!("{:.1} MB", offset as f64 / 1_048_576.0)
-        } else if offset >= 1024 {
-            format!("{:.1} KB", offset as f64 / 1024.0)
-        } else {
-            format!("{} B", offset)
-        };
         eprintln!(
-            "[STREAM] Complete {} | {:.0}ms (net: {:.0}ms, decrypt: {:.0}ms) | {} decrypt calls",
-            size, total_ms, net_ms, decrypt_total_ms, decrypt_calls
+            "[STREAM] Complete | {:.0}ms (net: {:.0}ms, decrypt: {:.0}ms) | {} decrypt calls",
+            total_ms, net_ms, decrypt_total_ms, decrypt_calls
         );
     })
 }

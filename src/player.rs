@@ -994,7 +994,7 @@ impl Player {
             let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer));
 
             // Download continues in background, writer feeds the buffer
-            preload::start_streaming_download(resp, key, writer);
+            preload::start_streaming_download(resp, url, key, writer);
         });
 
         Ok(())

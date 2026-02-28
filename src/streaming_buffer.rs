@@ -3,15 +3,18 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex};
 
-const BUFFER_AHEAD_LIMIT: u64 = 5 * 1024 * 1024; // 5 MB
+const BUFFER_AHEAD_LIMIT: u64 = 2 * 1024 * 1024; // 2 MB
+const RESTART_THRESHOLD: u64 = 512 * 1024; // 512 KB
 
 struct Inner {
     data: Vec<u8>,
     total_len: u64,
+    base_offset: u64,
     finished: bool,
     cancelled: bool,
     error: Option<String>,
     read_pos: u64,
+    restart_target: Option<u64>,
 }
 
 pub struct StreamingBuffer {
@@ -40,10 +43,12 @@ impl StreamingBuffer {
             Mutex::new(Inner {
                 data: Vec::with_capacity(total_len as usize),
                 total_len,
+                base_offset: 0,
                 finished: false,
                 cancelled: false,
                 error: None,
                 read_pos: 0,
+                restart_target: None,
             }),
             Condvar::new(),
         ));
@@ -97,7 +102,11 @@ impl StreamingBuffer {
     pub fn take_data(&self) -> Option<Vec<u8>> {
         let (lock, _) = &*self.inner;
         let mut inner = lock.lock().unwrap();
-        if inner.finished && inner.error.is_none() && !inner.data.is_empty() {
+        if inner.finished
+            && inner.error.is_none()
+            && !inner.data.is_empty()
+            && inner.base_offset == 0
+        {
             Some(std::mem::take(&mut inner.data))
         } else {
             None
@@ -131,9 +140,10 @@ impl Read for StreamingBuffer {
                 return Err(io::Error::new(io::ErrorKind::Other, err.clone()));
             }
 
-            let available = inner.data.len() as u64;
-            if self.read_pos < available {
-                let start = self.read_pos as usize;
+            let buf_start = inner.base_offset;
+            let buf_end = inner.base_offset + inner.data.len() as u64;
+            if self.read_pos >= buf_start && self.read_pos < buf_end {
+                let start = (self.read_pos - inner.base_offset) as usize;
                 let end = std::cmp::min(start + buf.len(), inner.data.len());
                 let n = end - start;
                 buf[..n].copy_from_slice(&inner.data[start..end]);
@@ -160,12 +170,14 @@ impl Read for StreamingBuffer {
 
 impl Seek for StreamingBuffer {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let (lock, _) = &*self.inner;
-        let mut inner = lock.lock().unwrap();
+        let total_len = {
+            let (lock, _) = &*self.inner;
+            lock.lock().unwrap().total_len
+        };
 
         let new_pos = match pos {
             SeekFrom::Start(offset) => offset as i64,
-            SeekFrom::End(offset) => inner.total_len as i64 + offset,
+            SeekFrom::End(offset) => total_len as i64 + offset,
             SeekFrom::Current(offset) => self.read_pos as i64 + offset,
         };
 
@@ -177,29 +189,59 @@ impl Seek for StreamingBuffer {
         }
 
         let new_pos = new_pos as u64;
-        if new_pos > inner.total_len {
+        if new_pos > total_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "seek beyond total length: {} > {}",
-                    new_pos, inner.total_len
-                ),
+                format!("seek beyond total length: {} > {}", new_pos, total_len),
             ));
         }
 
         self.read_pos = new_pos;
-        let should_notify = new_pos > inner.read_pos;
-        if should_notify {
-            inner.read_pos = new_pos;
+
+        {
+            let (lock, _) = &*self.inner;
+            let mut inner = lock.lock().unwrap();
+
+            // Update inner read_pos so backpressure unblocks when seeking forward.
+            if new_pos > inner.read_pos {
+                inner.read_pos = new_pos;
+            }
+
+            let buf_end = inner.base_offset + inner.data.len() as u64;
+
+            // Decide whether to trigger a Range restart
+            if !inner.finished && !inner.cancelled {
+                let would_restart = new_pos < inner.base_offset
+                    || (new_pos >= buf_end && (new_pos - buf_end) >= RESTART_THRESHOLD);
+
+                if would_restart {
+                    eprintln!(
+                        "[SEEK]   Range restart: pos={} available=[{}..{}] gap={}KB",
+                        new_pos,
+                        inner.base_offset,
+                        buf_end,
+                        if new_pos >= buf_end {
+                            (new_pos - buf_end) / 1024
+                        } else {
+                            (inner.base_offset - new_pos) / 1024
+                        }
+                    );
+                    inner.data.clear();
+                    inner.base_offset = new_pos;
+                    inner.restart_target = Some(new_pos);
+                    if let Some(ref bp) = self.buffer_progress {
+                        bp.written.store(new_pos, Relaxed);
+                        bp.request_seek_boost();
+                    }
+                }
+            }
         }
-        drop(inner);
 
         if let Some(ref bp) = self.buffer_progress {
             bp.read_pos.store(new_pos, Relaxed);
         }
-        if should_notify {
-            self.writer_notify.notify_one();
-        }
+        // Wake writer in case it was blocked by backpressure or needs to handle restart
+        self.writer_notify.notify_one();
 
         Ok(new_pos)
     }
@@ -209,9 +251,13 @@ impl StreamingBufferWriter {
     pub fn write(&self, data: &[u8]) {
         let (lock, cvar) = &*self.inner;
         let mut inner = lock.lock().unwrap();
+        if inner.restart_target.is_some() {
+            return; // Restart pending — discard stale writes
+        }
         inner.data.extend_from_slice(data);
         if let Some(ref bp) = self.buffer_progress {
-            bp.written.store(inner.data.len() as u64, Relaxed);
+            bp.written
+                .store(inner.base_offset + inner.data.len() as u64, Relaxed);
         }
         cvar.notify_all();
     }
@@ -237,13 +283,43 @@ impl StreamingBufferWriter {
         inner.cancelled
     }
 
+    pub fn has_restart_pending(&self) -> bool {
+        let (lock, _) = &*self.inner;
+        let inner = lock.lock().unwrap();
+        inner.restart_target.is_some()
+    }
+
+    pub fn take_restart_target(&self) -> Option<u64> {
+        let (lock, _) = &*self.inner;
+        let mut inner = lock.lock().unwrap();
+        inner.restart_target.take()
+    }
+
+    pub fn reset_for_range(&self, new_offset: u64) {
+        let (lock, cvar) = &*self.inner;
+        let mut inner = lock.lock().unwrap();
+        inner.data.clear();
+        inner.base_offset = new_offset;
+        inner.finished = false;
+        inner.error = None;
+        if let Some(ref bp) = self.buffer_progress {
+            bp.written
+                .store(inner.base_offset + inner.data.len() as u64, Relaxed);
+        }
+        cvar.notify_all();
+    }
+
     pub async fn wait_if_buffer_full(&self) {
         loop {
             {
                 let (lock, _) = &*self.inner;
                 let inner = lock.lock().unwrap();
-                let ahead = (inner.data.len() as u64).saturating_sub(inner.read_pos);
-                if ahead < BUFFER_AHEAD_LIMIT || inner.cancelled {
+                if inner.restart_target.is_some() || inner.cancelled {
+                    return;
+                }
+                let absolute_written = inner.base_offset + inner.data.len() as u64;
+                let ahead = absolute_written.saturating_sub(inner.read_pos);
+                if ahead < BUFFER_AHEAD_LIMIT {
                     return;
                 }
             }
