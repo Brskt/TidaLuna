@@ -131,31 +131,42 @@ pub fn start_streaming_download(
             let (stream_resp, stream_offset) = if let Some(r) = current_resp.take() {
                 (r, 0u64)
             } else {
-                // A restart was requested — get the target
-                let target = match writer.take_restart_target() {
+                // A restart was requested — get the target and padding flag
+                let (mut target, mut skip_padding) = match writer.take_restart_target() {
                     Some(t) => t,
                     None => break, // no restart pending, we're done
                 };
 
                 // Debounce: wait 20ms then check if a newer seek target arrived
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                let target = writer.take_restart_target().unwrap_or(target);
+                if let Some((newer, s)) = writer.take_restart_target() {
+                    target = newer;
+                    skip_padding = s;
+                }
 
                 if writer.is_cancelled() {
                     eprintln!("[STREAM] Download cancelled");
                     return;
                 }
 
-                warmup = true;
-                warmup_start = Some(std::time::Instant::now());
+                if !skip_padding {
+                    warmup = true;
+                    warmup_start = Some(std::time::Instant::now());
+                }
 
                 // Pad before target so the decoder's probe-back (~300KB)
                 // lands within the buffer instead of triggering a second restart.
+                // Skip padding for stale cache continuations (data already present).
                 const SEEK_PADDING: u64 = 512 * 1024;
-                let padded_start = target.saturating_sub(SEEK_PADDING);
+                let padded_start = if skip_padding {
+                    target
+                } else {
+                    target.saturating_sub(SEEK_PADDING)
+                };
                 eprintln!(
-                    "[STREAM] Range restart at byte {padded_start} (target={target}, pad={}KB)",
+                    "[STREAM] Range restart at byte {padded_start} (target={target}, pad={}KB{})",
                     (target - padded_start) / 1024,
+                    if skip_padding { ", cache continue" } else { "" }
                 );
                 let range_header = format!("bytes={padded_start}-");
                 let range_resp = match HTTP_CLIENT

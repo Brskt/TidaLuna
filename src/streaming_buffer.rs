@@ -6,6 +6,11 @@ use std::sync::{Arc, Condvar, Mutex};
 const BUFFER_AHEAD_LIMIT: u64 = 2 * 1024 * 1024; // 2 MB
 const RESTART_THRESHOLD: u64 = 512 * 1024; // 512 KB
 
+struct StaleRange {
+    base_offset: u64,
+    data: Vec<u8>,
+}
+
 struct Inner {
     data: Vec<u8>,
     total_len: u64,
@@ -15,6 +20,11 @@ struct Inner {
     error: Option<String>,
     read_pos: u64,
     restart_target: Option<u64>,
+    /// Saved buffer from before the last Range restart.
+    /// Enables instant backward seeks into recently played data.
+    stale: Option<StaleRange>,
+    /// When true, the download loop skips padding (stale cache continuation).
+    restart_skip_padding: bool,
 }
 
 pub struct StreamingBuffer {
@@ -49,6 +59,8 @@ impl StreamingBuffer {
                 error: None,
                 read_pos: 0,
                 restart_target: None,
+                stale: None,
+                restart_skip_padding: false,
             }),
             Condvar::new(),
         ));
@@ -214,7 +226,38 @@ impl Seek for StreamingBuffer {
                 let would_restart = new_pos < inner.base_offset
                     || (new_pos >= buf_end && (new_pos - buf_end) >= RESTART_THRESHOLD);
 
-                if would_restart {
+                let mut restored = false;
+
+                // Check stale cache before issuing a network restart
+                if would_restart && let Some(ref stale) = inner.stale {
+                    let stale_end = stale.base_offset + stale.data.len() as u64;
+                    if new_pos >= stale.base_offset && new_pos < stale_end {
+                        // Swap current ↔ stale — instant restore, no network
+                        let old_stale = inner.stale.take().unwrap();
+                        if !inner.data.is_empty() {
+                            inner.stale = Some(StaleRange {
+                                base_offset: inner.base_offset,
+                                data: std::mem::take(&mut inner.data),
+                            });
+                        }
+                        inner.base_offset = old_stale.base_offset;
+                        inner.data = old_stale.data;
+                        let continue_from = inner.base_offset + inner.data.len() as u64;
+                        inner.restart_target = Some(continue_from);
+                        inner.restart_skip_padding = true;
+                        inner.finished = false;
+                        eprintln!(
+                            "[SEEK]   Cache hit: pos={} restored=[{}..{}]",
+                            new_pos, inner.base_offset, continue_from
+                        );
+                        if let Some(ref bp) = self.buffer_progress {
+                            bp.written.store(continue_from, Relaxed);
+                        }
+                        restored = true;
+                    }
+                }
+
+                if would_restart && !restored {
                     eprintln!(
                         "[SEEK]   Range restart: pos={} available=[{}..{}] gap={}KB",
                         new_pos,
@@ -226,9 +269,16 @@ impl Seek for StreamingBuffer {
                             (inner.base_offset - new_pos) / 1024
                         }
                     );
-                    inner.data.clear();
+                    // Save current data as stale before clearing
+                    if !inner.data.is_empty() {
+                        inner.stale = Some(StaleRange {
+                            base_offset: inner.base_offset,
+                            data: std::mem::take(&mut inner.data),
+                        });
+                    }
                     inner.base_offset = new_pos;
                     inner.restart_target = Some(new_pos);
+                    inner.restart_skip_padding = false;
                     if let Some(ref bp) = self.buffer_progress {
                         bp.written.store(new_pos, Relaxed);
                         bp.request_seek_boost();
@@ -289,17 +339,26 @@ impl StreamingBufferWriter {
         inner.restart_target.is_some()
     }
 
-    pub fn take_restart_target(&self) -> Option<u64> {
+    pub fn take_restart_target(&self) -> Option<(u64, bool)> {
         let (lock, _) = &*self.inner;
         let mut inner = lock.lock().unwrap();
-        inner.restart_target.take()
+        inner.restart_target.take().map(|t| {
+            let skip = inner.restart_skip_padding;
+            inner.restart_skip_padding = false;
+            (t, skip)
+        })
     }
 
     pub fn reset_for_range(&self, new_offset: u64) {
         let (lock, cvar) = &*self.inner;
         let mut inner = lock.lock().unwrap();
-        inner.data.clear();
-        inner.base_offset = new_offset;
+        let current_end = inner.base_offset + inner.data.len() as u64;
+        if new_offset != current_end {
+            // Different range — clear and restart
+            inner.data.clear();
+            inner.base_offset = new_offset;
+        }
+        // else: continuation from stale restore — keep existing data
         inner.finished = false;
         inner.error = None;
         if let Some(ref bp) = self.buffer_progress {
