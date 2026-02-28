@@ -368,6 +368,13 @@ impl StreamingBufferWriter {
         cvar.notify_all();
     }
 
+    pub fn bitrate_bps(&self) -> u64 {
+        self.buffer_progress
+            .as_ref()
+            .map(|bp| bp.bitrate_bps.load(Relaxed))
+            .unwrap_or(0)
+    }
+
     pub async fn wait_if_buffer_full(&self) {
         loop {
             {

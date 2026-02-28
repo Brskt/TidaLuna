@@ -102,6 +102,25 @@ pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack
     None
 }
 
+/// Compute `(seek_padding, warmup_past_target)` based on the track's bitrate.
+/// Both values represent ~5 seconds of audio in bytes, clamped to [512 KB, 2 MB].
+/// Returns (512 KB, 512 KB) when bitrate is unknown (0).
+///
+/// `bitrate_bps` is in **bytes per second** (total_len / duration), matching
+/// the unit stored in `BufferProgress::bitrate_bps`.
+fn seek_params(bitrate_bps: u64) -> (u64, u64) {
+    const FLOOR: u64 = 512 * 1024;
+    const CEIL: u64 = 2 * 1024 * 1024;
+    const DURATION_SECS: u64 = 5;
+
+    if bitrate_bps == 0 {
+        return (FLOOR, FLOOR);
+    }
+    let bytes = bitrate_bps * DURATION_SECS;
+    let clamped = bytes.clamp(FLOOR, CEIL);
+    (clamped, clamped)
+}
+
 pub fn start_streaming_download(
     resp: reqwest::Response,
     url: String,
@@ -127,7 +146,7 @@ pub fn start_streaming_download(
         let mut warmup_bytes: u64 = 0;
         let mut warmup_first_logged = false;
         let mut warmup_end_offset: u64 = 0; // absolute file offset to reach
-        const WARMUP_PAST_TARGET: u64 = 512 * 1024; // data past target for decoder (symphonia probes ~350-500KB)
+        let mut warmup_past_target: u64 = 0;
         let mut warmup_start: Option<std::time::Instant> = None;
 
         'outer: loop {
@@ -159,11 +178,14 @@ pub fn start_streaming_download(
                     return;
                 }
 
+                let (seek_padding, wpt) = seek_params(writer.bitrate_bps());
+
                 if !skip_padding {
                     warmup = true;
                     warmup_bytes = 0;
                     warmup_first_logged = false;
-                    warmup_end_offset = target + WARMUP_PAST_TARGET;
+                    warmup_past_target = wpt;
+                    warmup_end_offset = target + wpt;
                     warmup_start = Some(std::time::Instant::now());
                 } else {
                     warmup = false;
@@ -172,11 +194,10 @@ pub fn start_streaming_download(
                 // Pad before target so the decoder's probe-back (~300KB)
                 // lands within the buffer instead of triggering a second restart.
                 // Skip padding for stale cache continuations (data already present).
-                const SEEK_PADDING: u64 = 512 * 1024;
                 let padded_start = if skip_padding {
                     target
                 } else {
-                    target.saturating_sub(SEEK_PADDING)
+                    target.saturating_sub(seek_padding)
                 };
                 eprintln!(
                     "[STREAM] Range restart at byte {padded_start} (target={target}, pad={}KB{})",
@@ -271,22 +292,13 @@ pub fn start_streaming_download(
                                             );
                                         }
                                     }
-                                    // Log every 128KB milestone instead of every chunk
-                                    let prev_kb = (warmup_bytes - chunk_len as u64) / (128 * 1024);
-                                    let curr_kb = warmup_bytes / (128 * 1024);
-                                    if prev_kb != curr_kb {
-                                        eprintln!(
-                                            "[NET]    warmup: {}KB buffered",
-                                            warmup_bytes / 1024,
-                                        );
-                                    }
                                     if offset >= warmup_end_offset {
                                         if let Some(ref ws) = warmup_start {
                                             eprintln!(
                                                 "[NET]    warmup done: {}KB in {:.0}ms (past target: {}KB)",
                                                 warmup_bytes / 1024,
                                                 ws.elapsed().as_secs_f64() * 1000.0,
-                                                WARMUP_PAST_TARGET / 1024
+                                                warmup_past_target / 1024
                                             );
                                         }
                                         warmup = false;
