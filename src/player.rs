@@ -4,9 +4,12 @@ use crate::streaming_buffer::StreamingBuffer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(target_os = "windows")]
 use crate::exclusive_wasapi::{self, ExclusiveCommand, ExclusiveEvent, ExclusiveHandle};
@@ -30,8 +33,8 @@ pub enum PlayerEvent {
 }
 
 enum PlayerCommand {
-    LoadData(Vec<u8>),
-    LoadStreaming(StreamingBuffer),
+    LoadData(Vec<u8>, u32),
+    LoadStreaming(StreamingBuffer, u32),
     Play,
     Pause,
     Stop,
@@ -44,6 +47,7 @@ enum PlayerCommand {
 pub struct Player {
     cmd_tx: mpsc::Sender<PlayerCommand>,
     rt_handle: tokio::runtime::Handle,
+    load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 struct AudioInfo {
@@ -317,7 +321,11 @@ impl Player {
                 }
                 for cmd in pending_cmds.drain(..) {
                     match cmd {
-                        PlayerCommand::LoadData(data) => {
+                        PlayerCommand::LoadData(data, load_gen) => {
+                            if load_gen != LOAD_SEQ.load(Relaxed) {
+                                eprintln!("[LOAD #{load_gen}] stale LoadData, ignoring");
+                                continue;
+                            }
                             crate::state::GOVERNOR.reset_buffer_progress();
 
                             if let Some(ref old_buf) = current_streaming_buffer {
@@ -428,7 +436,12 @@ impl Player {
                                 }
                             }
                         }
-                        PlayerCommand::LoadStreaming(buffer) => {
+                        PlayerCommand::LoadStreaming(buffer, load_gen) => {
+                            if load_gen != LOAD_SEQ.load(Relaxed) {
+                                eprintln!("[LOAD #{load_gen}] stale LoadStreaming, cancelling");
+                                buffer.cancel();
+                                continue;
+                            }
                             if let Some(ref old_buf) = current_streaming_buffer {
                                 old_buf.cancel();
                             }
@@ -942,11 +955,22 @@ impl Player {
             }
         });
 
-        Ok(Self { cmd_tx, rt_handle })
+        Ok(Self {
+            cmd_tx,
+            rt_handle,
+            load_handle: std::sync::Mutex::new(None),
+        })
     }
 
     pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
+        let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
+        eprintln!("[LOAD #{load_gen}] start");
         print_track_banner(&format);
+
+        // Abort any in-flight load task
+        if let Some(prev) = self.load_handle.lock().unwrap().take() {
+            prev.abort();
+        }
 
         {
             let mut lock = CURRENT_TRACK.lock().unwrap();
@@ -957,7 +981,7 @@ impl Player {
         }
 
         let cmd_tx = self.cmd_tx.clone();
-        self.rt_handle.spawn(async move {
+        let handle = self.rt_handle.spawn(async move {
             let load_start = std::time::Instant::now();
             let track = TrackInfo {
                 url: url.clone(),
@@ -966,12 +990,21 @@ impl Player {
 
             // Use preloaded data if available (instant)
             if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
+                if LOAD_SEQ.load(Relaxed) != load_gen {
+                    eprintln!("[LOAD #{load_gen}] stale after preload check, dropping");
+                    return;
+                }
                 eprintln!(
                     "[PRELOAD] Using preloaded data ({}, {:.0}ms)",
                     format_bytes(preloaded.data.len() as u64),
                     load_start.elapsed().as_secs_f64() * 1000.0
                 );
-                let _ = cmd_tx.send(PlayerCommand::LoadData(preloaded.data));
+                let _ = cmd_tx.send(PlayerCommand::LoadData(preloaded.data, load_gen));
+                return;
+            }
+
+            if LOAD_SEQ.load(Relaxed) != load_gen {
+                eprintln!("[LOAD #{load_gen}] stale before HTTP, dropping");
                 return;
             }
 
@@ -992,6 +1025,11 @@ impl Player {
             };
             let ttfb_ms = req_start.elapsed().as_secs_f64() * 1000.0;
 
+            if LOAD_SEQ.load(Relaxed) != load_gen {
+                eprintln!("[LOAD #{load_gen}] stale after HTTP TTFB, dropping");
+                return;
+            }
+
             let total_len = resp.content_length().unwrap_or(0);
             if total_len == 0 {
                 eprintln!(
@@ -1000,12 +1038,16 @@ impl Player {
                 );
                 match preload::fetch_and_decrypt(&url, &key).await {
                     Ok(data) => {
+                        if LOAD_SEQ.load(Relaxed) != load_gen {
+                            eprintln!("[LOAD #{load_gen}] stale after full download, dropping");
+                            return;
+                        }
                         eprintln!(
                             "[FETCH]  Done ({} in {:.0}ms)",
                             format_bytes(data.len() as u64),
                             load_start.elapsed().as_secs_f64() * 1000.0
                         );
-                        let _ = cmd_tx.send(PlayerCommand::LoadData(data));
+                        let _ = cmd_tx.send(PlayerCommand::LoadData(data, load_gen));
                     }
                     Err(e) => {
                         eprintln!("[ERROR]  Fetch failed: {}", e);
@@ -1015,7 +1057,7 @@ impl Player {
             }
 
             eprintln!(
-                "[NET]    TTFB: {} | Size: {}",
+                "[NET]    TTFB: {} | Size: {} (load #{load_gen})",
                 format_ms(ttfb_ms),
                 format_bytes(total_len)
             );
@@ -1023,11 +1065,14 @@ impl Player {
             crate::state::GOVERNOR.reset_buffer_progress();
             let bp = crate::state::GOVERNOR.buffer_progress().clone();
             let (buffer, writer) = StreamingBuffer::new(total_len, Some(bp));
-            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer));
+            eprintln!("[LOAD #{load_gen}] sending LoadStreaming");
+            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer, load_gen));
 
             // Download continues in background, writer feeds the buffer
             preload::start_streaming_download(resp, url, key, writer);
         });
+
+        *self.load_handle.lock().unwrap() = Some(handle);
 
         Ok(())
     }
@@ -1045,6 +1090,14 @@ impl Player {
     }
 
     pub fn stop(&self) -> anyhow::Result<()> {
+        LOAD_SEQ.fetch_add(1, Relaxed);
+        eprintln!(
+            "[STOP]   (invalidated load seq: {})",
+            LOAD_SEQ.load(Relaxed)
+        );
+        if let Some(prev) = self.load_handle.lock().unwrap().take() {
+            prev.abort();
+        }
         self.cmd_tx
             .send(PlayerCommand::Stop)
             .map_err(|_| anyhow::anyhow!("Player thread is dead"))
