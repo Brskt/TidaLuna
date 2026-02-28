@@ -5,10 +5,6 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{self, MissedTickBehavior};
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrafficClass {
     Playback,
@@ -49,6 +45,10 @@ impl BufferProgress {
         self.seek_boost.store(true, Relaxed);
     }
 
+    fn take_seek_boost(&self) -> bool {
+        self.seek_boost.swap(false, Relaxed)
+    }
+
     /// Bytes buffered ahead of the decoder read position.
     pub fn ahead(&self) -> u64 {
         self.written
@@ -75,19 +75,13 @@ impl BufferProgress {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal protocol
-// ---------------------------------------------------------------------------
-
 struct TokenRequest {
     class: TrafficClass,
     bytes: u32,
-    reply: oneshot::Sender<u32>,
+    /// Tokens still owed for this request. Decremented in passes by serve_queue.
+    remaining: u32,
+    reply: oneshot::Sender<()>,
 }
-
-// ---------------------------------------------------------------------------
-// GovernorHandle — public API
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct GovernorHandle {
@@ -97,20 +91,20 @@ pub struct GovernorHandle {
 
 impl GovernorHandle {
     /// Request `bytes` worth of bandwidth for `class`.
-    /// Blocks (async) until at least some tokens are granted.
-    /// Returns the number of bytes actually granted.
-    /// If the governor task is dead, returns `bytes` (ungoverned fallback).
-    pub async fn acquire(&self, class: TrafficClass, bytes: u32) -> u32 {
+    /// Blocks (async) until tokens are granted.
+    /// If the governor task is dead, returns immediately (ungoverned fallback).
+    pub async fn acquire(&self, class: TrafficClass, bytes: u32) {
         let (tx, rx) = oneshot::channel();
         let req = TokenRequest {
             class,
             bytes,
+            remaining: bytes,
             reply: tx,
         };
         if self.request_tx.send(req).await.is_err() {
-            return bytes; // governor dead — fallback
+            return; // governor dead — fallback
         }
-        rx.await.unwrap_or(bytes)
+        let _ = rx.await;
     }
 
     pub fn buffer_progress(&self) -> &Arc<BufferProgress> {
@@ -121,10 +115,6 @@ impl GovernorHandle {
         self.buffer_progress.reset();
     }
 }
-
-// ---------------------------------------------------------------------------
-// TokenBucket
-// ---------------------------------------------------------------------------
 
 struct TokenBucket {
     tokens: f64,
@@ -150,8 +140,8 @@ impl TokenBucket {
         self.tokens = (self.tokens + self.rate * elapsed).min(self.burst);
     }
 
-    /// Only grants when the full requested amount is available.
-    /// Prevents partial grants that would let oversized chunks through at ~2x rate.
+    /// Grants when the full requested amount is available.
+    /// Callers must ensure requested <= burst to avoid deadlock.
     fn try_consume(&mut self, requested: u32) -> bool {
         if self.tokens >= requested as f64 {
             self.tokens -= requested as f64;
@@ -161,10 +151,6 @@ impl TokenBucket {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Hysteresis gate
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreloadGate {
@@ -203,10 +189,6 @@ impl PreloadGate {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Governor task
-// ---------------------------------------------------------------------------
-
 const TICK_MS: u64 = 15;
 const PRELOAD_RATE: f64 = 500_000.0; // 500 KB/s
 const PRELOAD_BURST: f64 = 32_000.0; // 32 KB
@@ -241,188 +223,259 @@ pub fn spawn_governor() -> GovernorHandle {
     }
 }
 
-async fn governor_loop(mut request_rx: mpsc::Receiver<TokenRequest>, bp: Arc<BufferProgress>) {
-    let mut playback_bucket = TokenBucket::new(FALLBACK_RATE, FALLBACK_BURST);
-    let mut preload_bucket = TokenBucket::new(PRELOAD_RATE, PRELOAD_BURST);
+struct GovernorState {
+    playback_bucket: TokenBucket,
+    preload_bucket: TokenBucket,
+    playback_queue: VecDeque<TokenRequest>,
+    preload_queue: VecDeque<TokenRequest>,
+    gate: PreloadGate,
+    boost_start: Option<Instant>,
+    saved_rate: f64,
+    saved_burst: f64,
+    last_bitrate: u64,
+    play_bytes: u64,
+    preload_bytes: u64,
+    pause_time: std::time::Duration,
+    pause_start: Option<Instant>,
+    tick_count: u32,
+}
 
-    let mut playback_queue: VecDeque<TokenRequest> = VecDeque::new();
-    let mut preload_queue: VecDeque<TokenRequest> = VecDeque::new();
+impl GovernorState {
+    fn new() -> Self {
+        let (rate, burst) = playback_params(0);
+        Self {
+            playback_bucket: TokenBucket::new(rate, burst),
+            preload_bucket: TokenBucket::new(PRELOAD_RATE, PRELOAD_BURST),
+            playback_queue: VecDeque::new(),
+            preload_queue: VecDeque::new(),
+            gate: PreloadGate::Active,
+            boost_start: None,
+            saved_rate: rate,
+            saved_burst: burst,
+            last_bitrate: 0,
+            play_bytes: 0,
+            preload_bytes: 0,
+            pause_time: std::time::Duration::ZERO,
+            pause_start: None,
+            tick_count: 0,
+        }
+    }
 
-    let mut gate = PreloadGate::Active;
+    fn tick(&mut self, bp: &BufferProgress) {
+        self.playback_bucket.refill();
+        self.preload_bucket.refill();
+        self.update_adaptive_rate(bp);
+        self.update_boost(bp);
+        self.update_gate(bp);
+        serve_queue(
+            &mut self.playback_queue,
+            &mut self.playback_bucket,
+            &mut self.play_bytes,
+        );
+        if self.gate == PreloadGate::Active && self.boost_start.is_none() {
+            serve_queue(
+                &mut self.preload_queue,
+                &mut self.preload_bucket,
+                &mut self.preload_bytes,
+            );
+        }
+        self.emit_metrics(bp);
+    }
 
-    // Seek boost state
-    let mut boost_start: Option<Instant> = None;
-    let mut saved_rate: f64 = FALLBACK_RATE;
-    let mut saved_burst: f64 = FALLBACK_BURST;
-    let mut last_bitrate: u64 = 0;
+    fn update_adaptive_rate(&mut self, bp: &BufferProgress) {
+        let bitrate = bp.bitrate_bps.load(Relaxed);
+        if bitrate == self.last_bitrate || self.boost_start.is_some() {
+            return;
+        }
+        let (new_rate, new_burst) = playback_params(bitrate);
+        self.playback_bucket.rate = new_rate;
+        self.playback_bucket.burst = new_burst;
+        self.saved_rate = new_rate;
+        self.saved_burst = new_burst;
+        if bitrate > 0 {
+            eprintln!(
+                "[GOV]    Adaptive rate: {:.0} KB/s (bitrate: {:.0} KB/s, {:.0}× real-time)",
+                new_rate / 1024.0,
+                bitrate as f64 / 1024.0,
+                PLAYBACK_MULT
+            );
+        } else {
+            eprintln!(
+                "[GOV]    Adaptive rate: reset to fallback ({:.0} KB/s)",
+                new_rate / 1024.0
+            );
+        }
+        self.last_bitrate = bitrate;
+    }
 
-    // Metrics accumulators
-    let mut play_bytes: u64 = 0;
-    let mut preload_bytes: u64 = 0;
-    let mut pause_time = std::time::Duration::ZERO;
-    let mut pause_start: Option<Instant> = None;
-    let mut tick_count: u32 = 0;
+    fn update_boost(&mut self, bp: &BufferProgress) {
+        let bitrate = bp.bitrate_bps.load(Relaxed);
+        let (boost_rate, boost_burst, boost_ahead_threshold) = boost_params(bitrate);
 
+        if bp.take_seek_boost() {
+            if self.boost_start.is_none() {
+                self.saved_rate = self.playback_bucket.rate;
+                self.saved_burst = self.playback_bucket.burst;
+            }
+            self.playback_bucket.rate = boost_rate;
+            self.playback_bucket.burst = boost_burst;
+            self.playback_bucket.tokens = boost_burst;
+            self.boost_start = Some(Instant::now());
+            eprintln!(
+                "[GOV]    Seek BOOST ON (rate: {:.0} KB/s, {:.0}× real-time)",
+                boost_rate / 1024.0,
+                if bitrate > 0 { BOOST_MULT } else { 0.0 }
+            );
+        } else if let Some(start) = self.boost_start {
+            let ahead = bp.ahead();
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+
+            if ahead >= boost_ahead_threshold {
+                self.exit_boost();
+                eprintln!(
+                    "[GOV]    Seek BOOST OFF (threshold: {} KB ahead, {elapsed_ms}ms)",
+                    ahead / 1024
+                );
+            } else if elapsed_ms >= BOOST_TIMEOUT_MS {
+                self.exit_boost();
+                eprintln!(
+                    "[GOV]    Seek BOOST OFF (timeout {elapsed_ms}ms, {} KB ahead)",
+                    ahead / 1024
+                );
+            }
+        }
+    }
+
+    fn exit_boost(&mut self) {
+        self.playback_bucket.rate = self.saved_rate;
+        self.playback_bucket.burst = self.saved_burst;
+        self.boost_start = None;
+    }
+
+    fn update_gate(&mut self, bp: &BufferProgress) {
+        let new_gate = self.gate.update(bp);
+        if new_gate != self.gate {
+            match new_gate {
+                PreloadGate::Paused => {
+                    eprintln!("[GOV]    Preload PAUSED (buffer low)");
+                    self.pause_start = Some(Instant::now());
+                }
+                PreloadGate::Active => {
+                    eprintln!("[GOV]    Preload RESUMED (buffer ok)");
+                    if let Some(start) = self.pause_start.take() {
+                        self.pause_time += start.elapsed();
+                    }
+                }
+            }
+            self.gate = new_gate;
+        }
+    }
+
+    fn emit_metrics(&mut self, bp: &BufferProgress) {
+        self.tick_count += 1;
+        if self.tick_count >= METRICS_INTERVAL_TICKS {
+            let period = (self.tick_count as f64 * TICK_MS as f64) / 1000.0;
+            let play_rate = self.play_bytes as f64 / period / 1024.0;
+            let preload_rate = self.preload_bytes as f64 / period / 1024.0;
+            let ahead_kb = bp.ahead() / 1024;
+            let secs_str = bp
+                .ahead_seconds()
+                .map_or("?s".into(), |s| format!("{s:.1}s"));
+            let current_pause = if self.gate == PreloadGate::Paused {
+                self.pause_start.map(|s| s.elapsed()).unwrap_or_default() + self.pause_time
+            } else {
+                self.pause_time
+            };
+            let boost_str = if self.boost_start.is_some() {
+                " [BOOST]"
+            } else {
+                ""
+            };
+            eprintln!(
+                "[GOV]    play: {:.0} KB/s | preload: {:.0} KB/s | buf: {} KB ({}) | gate: {:?} | pause: {:.1}s{}",
+                play_rate,
+                preload_rate,
+                ahead_kb,
+                secs_str,
+                self.gate,
+                current_pause.as_secs_f64(),
+                boost_str
+            );
+
+            self.play_bytes = 0;
+            self.preload_bytes = 0;
+            self.pause_time = std::time::Duration::ZERO;
+            if self.gate == PreloadGate::Paused {
+                self.pause_start = Some(Instant::now());
+            }
+            self.tick_count = 0;
+        }
+    }
+}
+
+fn playback_params(bitrate: u64) -> (f64, f64) {
+    if bitrate > 0 {
+        (
+            bitrate as f64 * PLAYBACK_MULT,
+            bitrate as f64 * PLAYBACK_BURST_MULT,
+        )
+    } else {
+        (FALLBACK_RATE, FALLBACK_BURST)
+    }
+}
+
+fn boost_params(bitrate: u64) -> (f64, f64, u64) {
+    if bitrate > 0 {
+        (
+            bitrate as f64 * BOOST_MULT,
+            bitrate as f64 * BOOST_BURST_MULT,
+            (bitrate as f64 * BOOST_AHEAD_SECS) as u64,
+        )
+    } else {
+        (
+            FALLBACK_BOOST_RATE,
+            FALLBACK_BOOST_BURST,
+            FALLBACK_BOOST_AHEAD,
+        )
+    }
+}
+
+async fn governor_loop(mut rx: mpsc::Receiver<TokenRequest>, bp: Arc<BufferProgress>) {
+    let mut state = GovernorState::new();
     let mut interval = time::interval(std::time::Duration::from_millis(TICK_MS));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             biased;
-
-            _ = interval.tick() => {
-                // 1. Refill buckets
-                playback_bucket.refill();
-                preload_bucket.refill();
-
-                // 2. Adapt playback rate to track bitrate
-                let bitrate = bp.bitrate_bps.load(Relaxed);
-                if bitrate != last_bitrate && bitrate > 0 && boost_start.is_none() {
-                    let new_rate = bitrate as f64 * PLAYBACK_MULT;
-                    let new_burst = bitrate as f64 * PLAYBACK_BURST_MULT;
-                    playback_bucket.rate = new_rate;
-                    playback_bucket.burst = new_burst;
-                    saved_rate = new_rate;
-                    saved_burst = new_burst;
-                    eprintln!(
-                        "[GOV]    Adaptive rate: {:.0} KB/s (bitrate: {:.0} KB/s, {:.0}× real-time)",
-                        new_rate / 1024.0,
-                        bitrate as f64 / 1024.0,
-                        PLAYBACK_MULT
-                    );
-                    last_bitrate = bitrate;
-                }
-
-                // 3. Seek boost management
-                let (boost_rate, boost_burst, boost_ahead_threshold) = if bitrate > 0 {
-                    (
-                        bitrate as f64 * BOOST_MULT,
-                        bitrate as f64 * BOOST_BURST_MULT,
-                        (bitrate as f64 * BOOST_AHEAD_SECS) as u64,
-                    )
-                } else {
-                    (FALLBACK_BOOST_RATE, FALLBACK_BOOST_BURST, FALLBACK_BOOST_AHEAD)
-                };
-
-                if bp.seek_boost.swap(false, Relaxed) {
-                    // Enter boost — save current rate/burst, apply boosted values
-                    if boost_start.is_none() {
-                        saved_rate = playback_bucket.rate;
-                        saved_burst = playback_bucket.burst;
-                    }
-                    playback_bucket.rate = boost_rate;
-                    playback_bucket.burst = boost_burst;
-                    playback_bucket.tokens = boost_burst; // prefill for immediate serving
-                    boost_start = Some(Instant::now());
-                    eprintln!("[GOV]    Seek BOOST ON (rate: {:.0} KB/s, {:.0}× real-time)",
-                        boost_rate / 1024.0, if bitrate > 0 { BOOST_MULT } else { 0.0 });
-                } else if let Some(start) = boost_start {
-                    let ahead = bp.ahead();
-                    let elapsed_ms = start.elapsed().as_millis() as u64;
-
-                    if ahead >= boost_ahead_threshold {
-                        // Buffer has enough ahead — exit boost
-                        playback_bucket.rate = saved_rate;
-                        playback_bucket.burst = saved_burst;
-                        boost_start = None;
-                        eprintln!("[GOV]    Seek BOOST OFF (threshold: {} KB ahead, {elapsed_ms}ms)",
-                            ahead / 1024);
-                    } else if elapsed_ms >= BOOST_TIMEOUT_MS {
-                        // Timeout safeguard — exit boost
-                        playback_bucket.rate = saved_rate;
-                        playback_bucket.burst = saved_burst;
-                        boost_start = None;
-                        eprintln!("[GOV]    Seek BOOST OFF (timeout {elapsed_ms}ms, {} KB ahead)",
-                            ahead / 1024);
-                    }
-                }
-
-                // 4. Update hysteresis gate
-                let new_gate = gate.update(&bp);
-                if new_gate != gate {
-                    match new_gate {
-                        PreloadGate::Paused => {
-                            eprintln!("[GOV]    Preload PAUSED (buffer low)");
-                            pause_start = Some(Instant::now());
-                        }
-                        PreloadGate::Active => {
-                            eprintln!("[GOV]    Preload RESUMED (buffer ok)");
-                            if let Some(start) = pause_start.take() {
-                                pause_time += start.elapsed();
-                            }
-                        }
-                    }
-                    gate = new_gate;
-                }
-
-                // 5. Serve playback queue (priority)
-                serve_queue(&mut playback_queue, &mut playback_bucket, &mut play_bytes);
-
-                // 6. Serve preload queue (only if gate active AND not boosting)
-                if gate == PreloadGate::Active && boost_start.is_none() {
-                    serve_queue(&mut preload_queue, &mut preload_bucket, &mut preload_bytes);
-                }
-
-                // 7. Periodic metrics
-                tick_count += 1;
-                if tick_count >= METRICS_INTERVAL_TICKS {
-                    let period = (tick_count as f64 * TICK_MS as f64) / 1000.0;
-                    let play_rate = play_bytes as f64 / period / 1024.0;
-                    let preload_rate = preload_bytes as f64 / period / 1024.0;
-                    let ahead_kb = bp.ahead() / 1024;
-                    let secs_str = match bp.ahead_seconds() {
-                        Some(s) => format!("{:.1}s", s),
-                        None => "?s".to_string(),
-                    };
-                    let current_pause = if gate == PreloadGate::Paused {
-                        pause_start.map(|s| s.elapsed()).unwrap_or_default() + pause_time
-                    } else {
-                        pause_time
-                    };
-                    let boost_str = if boost_start.is_some() { " [BOOST]" } else { "" };
-                    eprintln!(
-                        "[GOV]    play: {:.0} KB/s | preload: {:.0} KB/s | buf: {} KB ({}) | gate: {:?} | pause: {:.1}s{}",
-                        play_rate, preload_rate, ahead_kb, secs_str, gate, current_pause.as_secs_f64(), boost_str
-                    );
-
-                    // Reset accumulators
-                    play_bytes = 0;
-                    preload_bytes = 0;
-                    pause_time = std::time::Duration::ZERO;
-                    if gate == PreloadGate::Paused {
-                        pause_start = Some(Instant::now());
-                    }
-                    tick_count = 0;
-                }
-            }
-
-            req = request_rx.recv() => {
-                match req {
-                    Some(r) => {
-                        match r.class {
-                            TrafficClass::Playback => playback_queue.push_back(r),
-                            TrafficClass::Preload => preload_queue.push_back(r),
-                        }
-                    }
-                    None => {
-                        // All senders dropped — drain queues and exit
-                        drain_queue_ungoverned(&mut playback_queue);
-                        drain_queue_ungoverned(&mut preload_queue);
-                        return;
-                    }
+            _ = interval.tick() => state.tick(&bp),
+            req = rx.recv() => match req {
+                Some(r) => match r.class {
+                    TrafficClass::Playback => state.playback_queue.push_back(r),
+                    TrafficClass::Preload => state.preload_queue.push_back(r),
+                },
+                None => {
+                    drain_queue_ungoverned(&mut state.playback_queue);
+                    drain_queue_ungoverned(&mut state.preload_queue);
+                    return;
                 }
             }
         }
     }
 }
 
-/// Try to grant tokens to queued requests. Removes fulfilled requests.
+/// Try to grant tokens to queued requests.
+/// Oversized chunks (> burst) are consumed in multiple passes across ticks.
 fn serve_queue(queue: &mut VecDeque<TokenRequest>, bucket: &mut TokenBucket, bytes_acc: &mut u64) {
-    while let Some(front) = queue.front() {
-        if bucket.try_consume(front.bytes) {
-            let req = queue.pop_front().unwrap();
-            *bytes_acc += req.bytes as u64;
-            let _ = req.reply.send(req.bytes);
+    while let Some(front) = queue.front_mut() {
+        let bite = (front.remaining as f64).min(bucket.burst) as u32;
+        if bucket.try_consume(bite) {
+            front.remaining -= bite;
+            if front.remaining == 0 {
+                let req = queue.pop_front().unwrap();
+                *bytes_acc += req.bytes as u64;
+                let _ = req.reply.send(());
+            }
         } else {
             break; // Not enough tokens this tick
         }
@@ -432,6 +485,6 @@ fn serve_queue(queue: &mut VecDeque<TokenRequest>, bucket: &mut TokenBucket, byt
 /// Drain a queue by granting full requested amounts (ungoverned fallback).
 fn drain_queue_ungoverned(queue: &mut VecDeque<TokenRequest>) {
     while let Some(req) = queue.pop_front() {
-        let _ = req.reply.send(req.bytes);
+        let _ = req.reply.send(());
     }
 }

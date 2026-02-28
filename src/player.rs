@@ -851,6 +851,9 @@ impl Player {
                                         if s == "completed" {
                                             has_track = false;
                                             is_playing = false;
+                                            crate::state::GOVERNOR
+                                                .buffer_progress()
+                                                .set_playback_active(false);
                                         }
                                         callback(PlayerEvent::StateChange(s));
                                     }
@@ -868,6 +871,9 @@ impl Player {
                                     ExclusiveEvent::Stopped => {
                                         has_track = false;
                                         is_playing = false;
+                                        crate::state::GOVERNOR
+                                            .buffer_progress()
+                                            .set_playback_active(false);
                                     }
                                 }
                             }
@@ -903,6 +909,9 @@ impl Player {
                         callback(PlayerEvent::StateChange("completed"));
                         has_track = false;
                         is_playing = false;
+                        crate::state::GOVERNOR
+                            .buffer_progress()
+                            .set_playback_active(false);
                         current_duration = 0.0;
                         last_empty = true;
                     }
