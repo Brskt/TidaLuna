@@ -80,8 +80,11 @@ LOGS=1 cargo run --release
 Windows CMD:
 
 ```bat
-set LOGS=1 && cargo run --release --features console
+set "LOGS=1" && cargo run --release --features console
 ```
+
+Tip: in `cmd.exe`, prefer `set "VAR=value"` to avoid accidental trailing spaces
+before `&&` (e.g. `LOGS=1 `), which would disable verbose logs.
 
 Supported truthy values: `1`, `true`, `TRUE`, `yes`, `YES`, `on`, `ON`.
 
