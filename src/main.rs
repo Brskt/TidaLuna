@@ -16,9 +16,10 @@ use serde::Deserialize;
 use state::TrackInfo;
 use std::sync::Arc;
 use tao::{
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
-    window::WindowBuilder,
+    keyboard::Key,
+    window::{CursorIcon, ResizeDirection, WindowBuilder},
 };
 use wry::{WebContext, WebViewBuilder};
 
@@ -43,7 +44,7 @@ fn main() -> wry::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_title("tidal-rs")
-        .with_decorations(false)
+        .with_decorations(cfg!(target_os = "linux"))
         .build(&event_loop)
         .unwrap();
 
@@ -101,26 +102,41 @@ fn main() -> wry::Result<()> {
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url("https://desktop.tidal.com/")
         .with_devtools(true)
-        .with_initialization_script(
-            r#"var _cfgTarget = { enableDesktopFeatures: true };
-var _cfgProxy = new Proxy(_cfgTarget, {
-    get: function(t, p) { return p === 'enableDesktopFeatures' ? true : t[p]; },
-    set: function(t, p, v) { if (p !== 'enableDesktopFeatures') t[p] = v; return true; }
-});
-Object.defineProperty(window, 'TIDAL_CONFIG', {
-    get: function() { return _cfgProxy; },
-    set: function(v) {
-        var src = (v && typeof v === 'object') ? v : {};
+        .with_initialization_script(format!(
+            r#"window.__TIDAL_RS_PLATFORM__ = '{platform}';
+var _cfgTarget = {{ enableDesktopFeatures: true }};
+var _cfgProxy = new Proxy(_cfgTarget, {{
+    get: function(t, p) {{ return p === 'enableDesktopFeatures' ? true : t[p]; }},
+    set: function(t, p, v) {{ if (p !== 'enableDesktopFeatures') t[p] = v; return true; }}
+}});
+Object.defineProperty(window, 'TIDAL_CONFIG', {{
+    get: function() {{ return _cfgProxy; }},
+    set: function(v) {{
+        var src = (v && typeof v === 'object') ? v : {{}};
         var keys = Object.keys(src);
-        for (var i = 0; i < keys.length; i++) {
+        for (var i = 0; i < keys.length; i++) {{
             if (keys[i] !== 'enableDesktopFeatures') _cfgTarget[keys[i]] = src[keys[i]];
-        }
-    },
+        }}
+    }},
     configurable: true
-});"#,
-        )
+}});"#,
+            platform = if cfg!(target_os = "linux") {
+                "linux"
+            } else if cfg!(target_os = "macos") {
+                "darwin"
+            } else {
+                "win32"
+            }
+        ))
         .with_initialization_script(script)
-        .with_user_agent("Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36")
+        // TODO: temporary Linux UA to bypass Tidal's anti-bot blocking during login.
+        // The Windows Electron UA triggers a fingerprint mismatch on WebKitGTK.
+        .with_user_agent({
+            #[cfg(target_os = "linux")]
+            { "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) tidal-hifi/1.12.4-beta Chrome/144.0.7559.96 Electron/40.1.0 Safari/537.36" }
+            #[cfg(not(target_os = "linux"))]
+            { "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36" }
+        })
         .with_ipc_handler(move |req| {
             let s = req.body();
             if let Ok(msg) = serde_json::from_str::<IpcMessage>(s) {
@@ -184,6 +200,21 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {
                 event: WindowEvent::CloseRequested,
                 ..
             } => *control_flow = ControlFlow::Exit,
+            Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        event:
+                            tao::event::KeyEvent {
+                                logical_key: Key::F12,
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            } => {
+                webview.open_devtools();
+            }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_) | WindowEvent::Moved(_),
                 ..
@@ -324,6 +355,53 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {
                                  let _ = player_clone.set_audio_device(id.to_string(), exclusive);
                             }
                         },
+                        "window.devtools" => {
+                            webview.open_devtools();
+                        }
+                        "window.drag" => {
+                            let _ = window.drag_window();
+                        }
+                        "window.resize" => {
+                            if window.is_maximized() {
+                                // Ignore resize when maximized.
+                            } else if let Some(dir) = msg.args.first().and_then(|v| v.as_str()) {
+                                let direction = match dir {
+                                    "n" => Some(ResizeDirection::North),
+                                    "s" => Some(ResizeDirection::South),
+                                    "e" => Some(ResizeDirection::East),
+                                    "w" => Some(ResizeDirection::West),
+                                    "ne" => Some(ResizeDirection::NorthEast),
+                                    "nw" => Some(ResizeDirection::NorthWest),
+                                    "se" => Some(ResizeDirection::SouthEast),
+                                    "sw" => Some(ResizeDirection::SouthWest),
+                                    _ => None,
+                                };
+                                if let Some(d) = direction
+                                    && let Err(e) = window.drag_resize_window(d)
+                                {
+                                    eprintln!("[WINDOW] drag_resize_window failed: {e}");
+                                }
+                            }
+                        }
+                        "window.cursor" => {
+                            if let Some(dir) = msg.args.first().and_then(|v| v.as_str()) {
+                                let cursor = match dir {
+                                    "n" => CursorIcon::NResize,
+                                    "s" => CursorIcon::SResize,
+                                    "e" => CursorIcon::EResize,
+                                    "w" => CursorIcon::WResize,
+                                    "ne" => CursorIcon::NeResize,
+                                    "nw" => CursorIcon::NwResize,
+                                    "se" => CursorIcon::SeResize,
+                                    "sw" => CursorIcon::SwResize,
+                                    _ => CursorIcon::Default,
+                                };
+                                window.set_cursor_icon(cursor);
+                            }
+                        }
+                        "window.cursor.reset" => {
+                            window.set_cursor_icon(CursorIcon::Default);
+                        }
                         "window.close" => *control_flow = ControlFlow::Exit,
                         "window.maximize" => {
                             window.set_maximized(true);
