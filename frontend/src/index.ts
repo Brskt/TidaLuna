@@ -430,6 +430,7 @@ const init = async () => {
     // Window resize + drag: borderless window management (non-Linux only).
     if (frameless) {
     const RESIZE_BORDER = 6;
+    const RESIZE_HOT_ZONE = RESIZE_BORDER + 8;
     const INTERACTIVE = "a, button, input, select, textarea, [role='button'], img, svg";
     const FALLBACK_TITLEBAR_HEIGHT = 48;
 
@@ -451,6 +452,17 @@ const init = async () => {
         return null;
     };
 
+    const isNearResizeEdge = (x: number, y: number): boolean => {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        return (
+            x <= RESIZE_HOT_ZONE ||
+            x >= w - RESIZE_HOT_ZONE ||
+            y <= RESIZE_HOT_ZONE ||
+            y >= h - RESIZE_HOT_ZONE
+        );
+    };
+
     const getTitlebarHeight = (): number => {
         const candidates = document.querySelectorAll("header, [role='banner']");
         for (const el of candidates) {
@@ -464,15 +476,31 @@ const init = async () => {
 
     // Resize cursor: only send IPC when direction changes.
     let lastDir: string | null = null;
-    document.addEventListener("mousemove", (e) => {
+    let mouseFramePending = false;
+    let pendingMouseX = 0;
+    let pendingMouseY = 0;
+    let pendingMouseTarget: HTMLElement | null = null;
+    const resetResizeCursor = () => {
+        if (lastDir !== null) {
+            lastDir = null;
+            sendIpc("window.cursor.reset");
+        }
+    };
+    const processResizeMouse = () => {
+        mouseFramePending = false;
         if (window.nativeInterface?.window?.isMaximized?.()) {
-            if (lastDir !== null) {
-                lastDir = null;
-                sendIpc("window.cursor.reset");
-            }
+            resetResizeCursor();
             return;
         }
-        const dir = hitTest(e.clientX, e.clientY);
+        if (pendingMouseTarget && pendingMouseTarget.closest(INTERACTIVE)) {
+            resetResizeCursor();
+            return;
+        }
+        if (!isNearResizeEdge(pendingMouseX, pendingMouseY)) {
+            resetResizeCursor();
+            return;
+        }
+        const dir = hitTest(pendingMouseX, pendingMouseY);
         if (dir !== lastDir) {
             lastDir = dir;
             if (dir) {
@@ -481,13 +509,19 @@ const init = async () => {
                 sendIpc("window.cursor.reset");
             }
         }
+    };
+    document.addEventListener("mousemove", (e) => {
+        pendingMouseX = e.clientX;
+        pendingMouseY = e.clientY;
+        pendingMouseTarget = e.target as HTMLElement | null;
+        if (!mouseFramePending) {
+            mouseFramePending = true;
+            requestAnimationFrame(processResizeMouse);
+        }
     }, true);
 
     document.addEventListener("mouseleave", () => {
-        if (lastDir !== null) {
-            lastDir = null;
-            sendIpc("window.cursor.reset");
-        }
+        resetResizeCursor();
     }, true);
 
     // Mousedown: resize (border) > drag (titlebar) > passthrough.
@@ -497,11 +531,13 @@ const init = async () => {
 
         // Resize takes priority (skip if maximized).
         if (!maximized) {
-            const dir = hitTest(e.clientX, e.clientY);
-            if (dir) {
-                e.preventDefault();
-                sendIpc("window.resize", dir);
-                return;
+            if (isNearResizeEdge(e.clientX, e.clientY)) {
+                const dir = hitTest(e.clientX, e.clientY);
+                if (dir) {
+                    e.preventDefault();
+                    sendIpc("window.resize", dir);
+                    return;
+                }
             }
         }
 
