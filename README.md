@@ -1,72 +1,96 @@
 # TidaLuna
 
-## Windows ARM64 Support
-Client now runs **fully natively** on Windows ARM64 (Snapdragon X Elite/Plus). No emulation required.
+A desktop TIDAL client written in Rust (`tao` + `wry`) with a native audio engine (`rodio`, plus optional exclusive WASAPI mode on Windows).
 
-### Build Automation & Libraries
-To make things easier, I've included the necessary ARM64 binaries and automated the setup:
-* **Included Libs**: The `/libs` folder already contains `libmpv-2.dll` and `libmpv.dll.a` for ARM64.
-* **Auto-Copy**: The `build.rs` script automatically copies the DLL to your `target/debug` or `target/release` folder during compilation.
-* **Frontend**: The build script also handles `bun install` and `bun run build` for the frontend automatically.
+## Current status (important)
 
-### Prerequisites
-* **LLVM**: Required in your `PATH` for compilation.
-* **MPV Binaries (ARM64)**: Download `libmpv-2.dll` and `libmpv.dll.a` from [zhongfly/mpv-winbuild](https://github.com/zhongfly/mpv-winbuild/releases) and place them in the `/libs` folder before building.
+- The frontend is bundled with Bun during Rust builds (`build.rs`).
 
-### Troubleshooting & Findings
-* **The "Null" Init Error**: Fixed by adding a "Language Trick" in `player.rs`. It forces the 'C' locale to prevent MPV from crashing on non-English Windows systems (where commas are used as decimals).
+## Features
 
-## Linux Notes
-Install `libmpv-git` from the **AUR**. Then do `Cargo Run` and ye should be good!
+- FLAC streaming with adaptive buffering (Range restart, seek boost, playback/preload governor).
+- Next-track preloading (RAM cache capped at `32 MB`).
+- Audio device selection.
+- Optional exclusive WASAPI mode on Windows, using a progressive FLAC -> PCM pipeline.
+- Window management: Linux uses native decorations; Windows/macOS use frameless window controls (min/max/close) + drag/resize.
+- WebView devtools via `F12`.
 
-### MPV Locale Fix
-The fix is already applied in `main.rs` (and handled specifically for Windows in `player.rs`):
-```rust
-unsafe {
-    std::env::set_var("LC_NUMERIC", "C");
-    libc::setlocale(libc::LC_ALL, c"".as_ptr());
-}
-PlayerCommand::Load Fix
-## Linux Notes
+## Requirements
 
-Install `libmpv-git` from the **AUR**
+### All platforms
 
-Then do `Cargo Run` and ye should be good!
+- Stable Rust
+- Bun (required, automatically used by `build.rs`)
 
-### MPV Locale Fix
+### Linux (Ubuntu/Debian)
 
-MPV's library requires the `LC_NUMERIC` locale to be set to `"C"` for proper number parsing (timestamps, durations, etc). Different locales use different decimal separators (`.` vs `,`), and MPV expects the C-style dot format.
-
-If you see this error:
-```
-Non-C locale detected. This is not supported.
-Call 'setlocale(LC_NUMERIC, "C");' in your code.
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential \
+  pkg-config \
+  libasound2-dev \
+  libgtk-3-dev \
+  libwebkit2gtk-4.1-dev \
+  libglib2.0-dev \
+  libgdk-pixbuf-2.0-dev \
+  libssl-dev
 ```
 
-The fix is already applied in `main.rs`:
-```rust
-unsafe {
-    std::env::set_var("LC_NUMERIC", "C");
-    libc::setlocale(libc::LC_ALL, c"".as_ptr());
-}
+## Build and run
+
+```bash
+cargo run
 ```
 
-This sets the numeric locale to C and tells the system to reload locale settings before MPV initializes otherwise it has a hemerage.
+Release:
 
-Requires `libc` as a dependency. (I added this already <3)
-
-### PlayerCommand::Load Fix
-
-If you see this error:
-```
-error[E0559]: variant `PlayerCommand::Load` has no field named `url`
+```bash
+cargo run --release
 ```
 
-This happens when struct syntax is used for tuple variant. The fix me made in `player.rs`:
-```rust
-// Wrong (struct syntax)
-.send(PlayerCommand::Load { url: stream_url })
+On Windows, to keep the console in release mode:
 
-// Correct (tuple syntax)
-.send(PlayerCommand::Load(stream_url))
+```bash
+cargo run --release --features console
 ```
+
+## Code quality
+
+```bash
+cargo xtask fmt
+cargo xtask clippy
+```
+
+## Logging
+
+The project uses `LOGS` for verbose logs:
+
+- enabled by default in debug
+- in release, enable explicitly
+
+Examples:
+
+Linux/macOS:
+
+```bash
+LOGS=1 cargo run --release
+```
+
+Windows CMD:
+
+```bat
+set LOGS=1 && cargo run --release --features console
+```
+
+Supported truthy values: `1`, `true`, `TRUE`, `yes`, `YES`, `on`, `ON`.
+
+## Local data path
+
+- Windows: `%LOCALAPPDATA%\\tidal-rs`
+- Linux/macOS: `~/.local/share/tidal-rs`
+
+## Notes
+
+- User-Agent is platform-specific in `src/main.rs`.
+- Bootstrap forces `TIDAL_CONFIG.enableDesktopFeatures = true` inside the WebView so desktop mode stays enabled.
