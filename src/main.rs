@@ -6,6 +6,7 @@ mod bandwidth;
 mod decrypt;
 #[cfg(target_os = "windows")]
 mod exclusive_wasapi;
+mod logging;
 mod player;
 mod preload;
 mod state;
@@ -15,8 +16,9 @@ use player::{Player, PlayerEvent};
 use serde::Deserialize;
 use state::TrackInfo;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tao::{
-    event::{ElementState, Event, WindowEvent},
+    event::{ElementState, Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
     keyboard::Key,
     window::{CursorIcon, ResizeDirection, WindowBuilder},
@@ -142,7 +144,7 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
             if let Ok(msg) = serde_json::from_str::<IpcMessage>(s) {
                 let _ = proxy.send_event(UserEvent::IpcMessage(msg));
             } else {
-                println!("Received unknown IPC message: {}", s);
+                crate::vprintln!("Received unknown IPC message: {}", s);
             }
         })
         .with_navigation_handler(move |url| {
@@ -192,10 +194,49 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
         let _ = webview.evaluate_script(&js);
     };
 
+    let mut pending_time_update: Option<(f64, u32)> = None;
+    let mut pending_player_js: Vec<String> = Vec::new();
+    let mut player_flush_deadline: Option<Instant> = None;
+    let player_flush_interval = Duration::from_millis(24);
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
         match event {
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                let now = Instant::now();
+                if player_flush_deadline.is_some_and(|t| now >= t) {
+                    if let Some((time, seq)) = pending_time_update.take() {
+                        pending_player_js.push(format!(
+                            "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediacurrenttime', {}, {}); }}",
+                            time, seq
+                        ));
+                    }
+                    if !pending_player_js.is_empty() {
+                        let js_batch = pending_player_js.join(";");
+                        let _ = webview.evaluate_script(&js_batch);
+                        pending_player_js.clear();
+                    }
+                    player_flush_deadline = None;
+                }
+            }
+            Event::MainEventsCleared => {
+                let now = Instant::now();
+                if player_flush_deadline.is_some_and(|t| now >= t) {
+                    if let Some((time, seq)) = pending_time_update.take() {
+                        pending_player_js.push(format!(
+                            "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediacurrenttime', {}, {}); }}",
+                            time, seq
+                        ));
+                    }
+                    if !pending_player_js.is_empty() {
+                        let js_batch = pending_player_js.join(";");
+                        let _ = webview.evaluate_script(&js_batch);
+                        pending_player_js.clear();
+                    }
+                    player_flush_deadline = None;
+                }
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
@@ -225,18 +266,24 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                  UserEvent::Player(player_event) => {
                      match player_event {
                         PlayerEvent::TimeUpdate(time, seq) => {
-                            let js = format!(
-                                 "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediacurrenttime', {}, {}); }}",
-                                 time, seq
-                             );
-                             let _ = webview.evaluate_script(&js);
-                        },
+                            pending_time_update = Some((time, seq));
+                            let now = Instant::now();
+                            if time == 0.0 {
+                                // Reset events should be reflected right away.
+                                player_flush_deadline = Some(now);
+                            } else if player_flush_deadline.is_none() {
+                                player_flush_deadline = Some(now + player_flush_interval);
+                            }
+                            if let Some(deadline) = player_flush_deadline {
+                                *control_flow = ControlFlow::WaitUntil(deadline);
+                            }
+                        }
                          PlayerEvent::StateChange(state, seq) => {
                              let js = format!(
                                  "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediastate', '{}', {}); }}",
                                  state, seq
                              );
-                             let _ = webview.evaluate_script(&js);
+                             pending_player_js.push(js);
 
                              if state == "completed" {
                                  let proxy_autoload = proxy_autoload.clone();
@@ -246,25 +293,46 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                                      }
                                  });
                              }
+                             let now = Instant::now();
+                             if player_flush_deadline.is_none() {
+                                 player_flush_deadline = Some(now + player_flush_interval);
+                             }
+                             if let Some(deadline) = player_flush_deadline {
+                                 *control_flow = ControlFlow::WaitUntil(deadline);
+                             }
                          },
                          PlayerEvent::Duration(duration, seq) => {
                                 let js = format!(
                                     "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediaduration', {}, {}); }}",
                                     duration, seq
                                 );
-                                let _ = webview.evaluate_script(&js);
+                                pending_player_js.push(js);
+                                let now = Instant::now();
+                                if player_flush_deadline.is_none() {
+                                    player_flush_deadline = Some(now + player_flush_interval);
+                                }
+                                if let Some(deadline) = player_flush_deadline {
+                                    *control_flow = ControlFlow::WaitUntil(deadline);
+                                }
                             },
                         PlayerEvent::AudioDevices(devices, req_id) => {
                              if let Ok(json_devices) = serde_json::to_string(&devices) {
                                  if let Some(id) = req_id {
                                      let js = format!("window.__TIDAL_IPC_RESPONSE__('{}', null, {})", id, json_devices);
-                                     let _ = webview.evaluate_script(&js);
+                                     pending_player_js.push(js);
                                  } else {
                                       let js = format!(
                                           "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('devices', {}); }}",
                                           json_devices
                                       );
-                                      let _ = webview.evaluate_script(&js);
+                                      pending_player_js.push(js);
+                                 }
+                                 let now = Instant::now();
+                                 if player_flush_deadline.is_none() {
+                                     player_flush_deadline = Some(now + player_flush_interval);
+                                 }
+                                 if let Some(deadline) = player_flush_deadline {
+                                     *control_flow = ControlFlow::WaitUntil(deadline);
                                  }
                              }
                         }
@@ -276,7 +344,7 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                     }
                 }
                 UserEvent::Navigate(url) => {
-                    println!("Navigating to: {}", url);
+                    crate::vprintln!("Navigating to: {}", url);
                     if url.starts_with("tidal://") {
                         let path = url.strip_prefix("tidal://").unwrap();
                         let _ = webview.load_url(
@@ -285,7 +353,7 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                     }
                 }
                 UserEvent::IpcMessage(msg) => {
-                    println!("IPC Message: {:?}", msg);
+                    crate::vprintln!("IPC Message: {:?}", msg);
                     match msg.channel.as_str() {
                         "player.load" => {
                              if let (Some(url), Some(format), Some(key)) = (

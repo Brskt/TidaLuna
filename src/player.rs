@@ -55,39 +55,6 @@ pub struct Player {
     load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-struct AudioInfo {
-    duration: f64,
-    sample_rate: u32,
-    bits_per_sample: u32,
-    channels: u16,
-}
-
-struct MediaSourceAdapter<R> {
-    inner: R,
-    byte_len: u64,
-}
-
-impl<R: Read + Seek + Send + Sync> symphonia::core::io::MediaSource for MediaSourceAdapter<R> {
-    fn is_seekable(&self) -> bool {
-        true
-    }
-    fn byte_len(&self) -> Option<u64> {
-        Some(self.byte_len)
-    }
-}
-
-impl<R: Read> Read for MediaSourceAdapter<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read(buf)
-    }
-}
-
-impl<R: Seek> Seek for MediaSourceAdapter<R> {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.inner.seek(pos)
-    }
-}
-
 struct SharedCursor {
     data: Arc<Vec<u8>>,
     pos: u64,
@@ -126,41 +93,6 @@ impl Seek for SharedCursor {
         self.pos = new_pos as u64;
         Ok(self.pos)
     }
-}
-
-fn get_audio_info<R: Read + Seek + Send + Sync + 'static>(
-    reader: R,
-    byte_len: u64,
-) -> Option<AudioInfo> {
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::probe::Hint;
-
-    let adapter = MediaSourceAdapter {
-        inner: reader,
-        byte_len,
-    };
-    let mss = MediaSourceStream::new(Box::new(adapter), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension("flac");
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &Default::default(), &Default::default())
-        .ok()?;
-    let track = probed.format.default_track()?;
-    let params = &track.codec_params;
-
-    let n_frames = params.n_frames?;
-    let sample_rate = params.sample_rate?;
-    let duration = n_frames as f64 / sample_rate as f64;
-    let bits_per_sample = params.bits_per_sample.unwrap_or(0);
-    let channels = params.channels.map(|c| c.count() as u16).unwrap_or(0);
-
-    Some(AudioInfo {
-        duration,
-        sample_rate,
-        bits_per_sample,
-        channels,
-    })
 }
 
 fn format_sample_rate(rate: u32) -> String {
@@ -265,10 +197,10 @@ fn print_track_banner(format: &str) {
         ),
         None => ("Unknown", "Unknown", format_upper.as_str()),
     };
-    eprintln!("══════════════════════════════════════════");
-    eprintln!("  {} — {}", title, artist);
-    eprintln!("  Quality: {} | Format: {}", quality, format);
-    eprintln!("══════════════════════════════════════════");
+    crate::vprintln!("══════════════════════════════════════════");
+    crate::vprintln!("  {} — {}", title, artist);
+    crate::vprintln!("  Quality: {} | Format: {}", quality, format);
+    crate::vprintln!("══════════════════════════════════════════");
 }
 
 fn open_device_sink(device_id: Option<&str>) -> anyhow::Result<MixerDeviceSink> {
@@ -331,7 +263,7 @@ impl Player {
                     match cmd {
                         PlayerCommand::LoadData(data, load_gen, event_seq) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
-                                eprintln!("[LOAD #{load_gen}] stale LoadData, ignoring");
+                                crate::vprintln!("[LOAD #{load_gen}] stale LoadData, ignoring");
                                 continue;
                             }
                             current_seq = event_seq;
@@ -380,7 +312,7 @@ impl Player {
                                             }
                                         });
 
-                                        eprintln!(
+                                        crate::vprintln!(
                                             "[WASAPI] Progressive decode started ({:.0}ms setup)",
                                             decode_start.elapsed().as_secs_f64() * 1000.0
                                         );
@@ -395,11 +327,6 @@ impl Player {
 
                             let byte_len = data.len() as u64;
 
-                            let probe_start = std::time::Instant::now();
-                            let audio_info =
-                                get_audio_info(SharedCursor::new(data.clone()), byte_len);
-                            let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
-
                             let decoder_start = std::time::Instant::now();
                             let cursor = SharedCursor::new(data.clone());
                             match Decoder::builder()
@@ -411,6 +338,12 @@ impl Player {
                             {
                                 Ok(source) => {
                                     let decoder_ms = decoder_start.elapsed().as_secs_f64() * 1000.0;
+                                    let source_sample_rate = source.sample_rate().get();
+                                    let source_channels = source.channels().get();
+                                    let source_duration = source
+                                        .total_duration()
+                                        .map(|d| d.as_secs_f64())
+                                        .unwrap_or(0.0);
 
                                     // Drop previous player to disconnect from mixer
                                     if let Some(old) = rodio_player.take() {
@@ -423,8 +356,7 @@ impl Player {
                                     player.append(source);
                                     player.pause();
 
-                                    current_duration =
-                                        audio_info.as_ref().map(|i| i.duration).unwrap_or(0.0);
+                                    current_duration = source_duration;
                                     is_playing = false;
                                     has_track = true;
                                     last_empty = false;
@@ -439,24 +371,20 @@ impl Player {
                                     }
                                     callback(PlayerEvent::TimeUpdate(0.0, current_seq));
 
-                                    if let Some(ref info) = audio_info {
-                                        let bitrate = if info.duration > 0.0 {
-                                            (byte_len as f64 * 8.0 / info.duration / 1000.0) as u32
-                                        } else {
-                                            0
-                                        };
-                                        eprintln!(
-                                            "[CODEC]  {} / {}bit / {}ch | {} kbps",
-                                            format_sample_rate(info.sample_rate),
-                                            info.bits_per_sample,
-                                            info.channels,
-                                            bitrate
-                                        );
-                                    }
-                                    eprintln!(
-                                        "[AUDIO]  Duration: {} | Probe: {} | Decoder: {} | Total: {}",
+                                    let bitrate = if current_duration > 0.0 {
+                                        (byte_len as f64 * 8.0 / current_duration / 1000.0) as u32
+                                    } else {
+                                        0
+                                    };
+                                    crate::vprintln!(
+                                        "[CODEC]  {} / {}ch | {} kbps",
+                                        format_sample_rate(source_sample_rate),
+                                        source_channels,
+                                        bitrate
+                                    );
+                                    crate::vprintln!(
+                                        "[AUDIO]  Duration: {} | Probe: n/a | Decoder: {} | Total: {}",
                                         format_duration_mmss(current_duration),
-                                        format_ms(probe_ms),
                                         format_ms(decoder_ms),
                                         format_ms(decode_start.elapsed().as_secs_f64() * 1000.0)
                                     );
@@ -468,7 +396,9 @@ impl Player {
                         }
                         PlayerCommand::LoadStreaming(buffer, load_gen, event_seq) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
-                                eprintln!("[LOAD #{load_gen}] stale LoadStreaming, cancelling");
+                                crate::vprintln!(
+                                    "[LOAD #{load_gen}] stale LoadStreaming, cancelling"
+                                );
                                 buffer.cancel();
                                 continue;
                             }
@@ -513,7 +443,7 @@ impl Player {
                                             }
                                         });
 
-                                        eprintln!(
+                                        crate::vprintln!(
                                             "[WASAPI] Progressive streaming decode started ({:.0}ms setup)",
                                             decode_start.elapsed().as_secs_f64() * 1000.0
                                         );
@@ -530,10 +460,6 @@ impl Player {
 
                             let total_len = buffer.total_len();
 
-                            let probe_start = std::time::Instant::now();
-                            let audio_info = get_audio_info(buffer.new_reader(), total_len);
-                            let probe_ms = probe_start.elapsed().as_secs_f64() * 1000.0;
-
                             let reader = buffer.new_reader();
                             let decoder_start = std::time::Instant::now();
                             match Decoder::builder()
@@ -549,6 +475,10 @@ impl Player {
                                     // Capture Source trait values before append consumes source
                                     let source_sample_rate = source.sample_rate().get();
                                     let source_channels = source.channels().get();
+                                    let source_duration = source
+                                        .total_duration()
+                                        .map(|d| d.as_secs_f64())
+                                        .unwrap_or(0.0);
 
                                     // Drop previous player to disconnect from mixer
                                     if let Some(old) = rodio_player.take() {
@@ -556,20 +486,12 @@ impl Player {
                                         drop(old);
                                     }
 
-                                    let duration = audio_info
-                                        .as_ref()
-                                        .map(|i| i.duration)
-                                        .or_else(|| {
-                                            source.total_duration().map(|d| d.as_secs_f64())
-                                        })
-                                        .unwrap_or(0.0);
-
                                     let player = rodio::Player::connect_new(device_sink.mixer());
                                     player.set_volume(current_volume);
                                     player.append(source);
                                     player.pause();
 
-                                    current_duration = duration;
+                                    current_duration = source_duration;
                                     is_playing = false;
                                     has_track = true;
                                     last_empty = false;
@@ -585,40 +507,30 @@ impl Player {
                                     }
                                     callback(PlayerEvent::TimeUpdate(0.0, current_seq));
 
-                                    if let Some(ref info) = audio_info {
-                                        let bitrate = if info.duration > 0.0 {
-                                            (total_len as f64 * 8.0 / info.duration / 1000.0) as u32
-                                        } else {
-                                            0
-                                        };
-                                        // Publish bitrate (bytes/sec) for governor hysteresis
-                                        let bitrate_bps = if info.duration > 0.0 {
-                                            (total_len as f64 / info.duration) as u64
-                                        } else {
-                                            0
-                                        };
-                                        crate::state::GOVERNOR.buffer_progress().bitrate_bps.store(
-                                            bitrate_bps,
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        );
-                                        eprintln!(
-                                            "[CODEC]  {} / {}bit / {}ch | {} kbps",
-                                            format_sample_rate(info.sample_rate),
-                                            info.bits_per_sample,
-                                            info.channels,
-                                            bitrate
-                                        );
+                                    let bitrate = if current_duration > 0.0 {
+                                        (total_len as f64 * 8.0 / current_duration / 1000.0) as u32
                                     } else {
-                                        eprintln!(
-                                            "[CODEC]  {} / {}ch (probe failed, from Source trait)",
-                                            format_sample_rate(source_sample_rate),
-                                            source_channels
-                                        );
-                                    }
-                                    eprintln!(
-                                        "[AUDIO]  Duration: {} | Probe: {} | Decoder: {} | Total: {} (streaming)",
+                                        0
+                                    };
+                                    // Publish bitrate (bytes/sec) for governor hysteresis.
+                                    let bitrate_bps = if current_duration > 0.0 {
+                                        (total_len as f64 / current_duration) as u64
+                                    } else {
+                                        0
+                                    };
+                                    crate::state::GOVERNOR
+                                        .buffer_progress()
+                                        .bitrate_bps
+                                        .store(bitrate_bps, std::sync::atomic::Ordering::Relaxed);
+                                    crate::vprintln!(
+                                        "[CODEC]  {} / {}ch | {} kbps",
+                                        format_sample_rate(source_sample_rate),
+                                        source_channels,
+                                        bitrate
+                                    );
+                                    crate::vprintln!(
+                                        "[AUDIO]  Duration: {} | Probe: n/a | Decoder: {} | Total: {} (streaming)",
                                         format_duration_mmss(current_duration),
-                                        format_ms(probe_ms),
                                         format_ms(decoder_ms),
                                         format_ms(decode_start.elapsed().as_secs_f64() * 1000.0)
                                     );
@@ -737,7 +649,7 @@ impl Player {
                                     format!("{}µs", elapsed.as_micros())
                                 };
                                 match result {
-                                    Ok(()) => eprintln!("[SEEK]   try_seek OK: {timing}"),
+                                    Ok(()) => crate::vprintln!("[SEEK]   try_seek OK: {timing}"),
                                     Err(e) => eprintln!("[SEEK]   try_seek FAILED ({timing}): {e}"),
                                 }
                             }
@@ -844,7 +756,10 @@ impl Player {
                                         }
                                     }
 
-                                    eprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
+                                    crate::vprintln!(
+                                        "[AUDIO] Switched to exclusive WASAPI: {}",
+                                        id
+                                    );
                                     continue;
                                 } else if is_exclusive_mode {
                                     // Switch back from exclusive to shared mode
@@ -852,7 +767,7 @@ impl Player {
                                         old.shutdown();
                                     }
                                     is_exclusive_mode = false;
-                                    eprintln!("[AUDIO] Switched back to shared mode");
+                                    crate::vprintln!("[AUDIO] Switched back to shared mode");
                                     // Fall through to shared device setup below
                                 }
                             }
@@ -955,7 +870,7 @@ impl Player {
                                         }
                                     }
 
-                                    eprintln!("[AUDIO] Switched to device: {}", id);
+                                    crate::vprintln!("[AUDIO] Switched to device: {}", id);
                                 }
                                 Err(e) => {
                                     eprintln!("[ERROR] Failed to switch to device '{}': {}", id, e);
@@ -1069,7 +984,7 @@ impl Player {
     pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
-        eprintln!("[LOAD #{load_gen}] start");
+        crate::vprintln!("[LOAD #{load_gen}] start");
         print_track_banner(&format);
 
         // Abort any in-flight load task
@@ -1096,10 +1011,10 @@ impl Player {
             // Use preloaded data if available (instant)
             if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
                 if LOAD_SEQ.load(Relaxed) != load_gen {
-                    eprintln!("[LOAD #{load_gen}] stale after preload check, dropping");
+                    crate::vprintln!("[LOAD #{load_gen}] stale after preload check, dropping");
                     return;
                 }
-                eprintln!(
+                crate::vprintln!(
                     "[PRELOAD] Using preloaded data ({}, {:.0}ms)",
                     format_bytes(preloaded.data.len() as u64),
                     load_start.elapsed().as_secs_f64() * 1000.0
@@ -1109,7 +1024,7 @@ impl Player {
             }
 
             if LOAD_SEQ.load(Relaxed) != load_gen {
-                eprintln!("[LOAD #{load_gen}] stale before HTTP, dropping");
+                crate::vprintln!("[LOAD #{load_gen}] stale before HTTP, dropping");
                 return;
             }
 
@@ -1131,23 +1046,25 @@ impl Player {
             let ttfb_ms = req_start.elapsed().as_secs_f64() * 1000.0;
 
             if LOAD_SEQ.load(Relaxed) != load_gen {
-                eprintln!("[LOAD #{load_gen}] stale after HTTP TTFB, dropping");
+                crate::vprintln!("[LOAD #{load_gen}] stale after HTTP TTFB, dropping");
                 return;
             }
 
             let total_len = resp.content_length().unwrap_or(0);
             if total_len == 0 {
-                eprintln!(
+                crate::vprintln!(
                     "[FETCH]  No Content-Length, full download... (TTFB: {:.0}ms)",
                     ttfb_ms
                 );
                 match preload::fetch_and_decrypt(&url, &key).await {
                     Ok(data) => {
                         if LOAD_SEQ.load(Relaxed) != load_gen {
-                            eprintln!("[LOAD #{load_gen}] stale after full download, dropping");
+                            crate::vprintln!(
+                                "[LOAD #{load_gen}] stale after full download, dropping"
+                            );
                             return;
                         }
-                        eprintln!(
+                        crate::vprintln!(
                             "[FETCH]  Done ({} in {:.0}ms)",
                             format_bytes(data.len() as u64),
                             load_start.elapsed().as_secs_f64() * 1000.0
@@ -1161,7 +1078,7 @@ impl Player {
                 return;
             }
 
-            eprintln!(
+            crate::vprintln!(
                 "[NET]    TTFB: {} | Size: {} (load #{load_gen})",
                 format_ms(ttfb_ms),
                 format_bytes(total_len)
@@ -1170,7 +1087,7 @@ impl Player {
             crate::state::GOVERNOR.reset_buffer_progress();
             let bp = crate::state::GOVERNOR.buffer_progress().clone();
             let (buffer, writer) = StreamingBuffer::new(total_len, Some(bp));
-            eprintln!("[LOAD #{load_gen}] sending LoadStreaming");
+            crate::vprintln!("[LOAD #{load_gen}] sending LoadStreaming");
             let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer, load_gen, event_seq));
 
             // Download continues in background, writer feeds the buffer
@@ -1197,7 +1114,7 @@ impl Player {
     pub fn stop(&self) -> anyhow::Result<()> {
         LOAD_SEQ.fetch_add(1, Relaxed);
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
-        eprintln!(
+        crate::vprintln!(
             "[STOP]   (invalidated load seq: {})",
             LOAD_SEQ.load(Relaxed)
         );

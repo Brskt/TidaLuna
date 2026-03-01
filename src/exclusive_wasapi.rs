@@ -404,7 +404,7 @@ fn open_exclusive_stream(
                     .get_audiorenderclient()
                     .map_err(|e| format!("render_client: {e}"))?;
 
-                eprintln!(
+                crate::vprintln!(
                     "[WASAPI] Exclusive stream opened: {}Hz {}ch {}bit, buffer={}frames",
                     sample_rate,
                     channels,
@@ -452,7 +452,7 @@ fn open_exclusive_stream(
                                 .get_audiorenderclient()
                                 .map_err(|e| format!("render_client: {e}"))?;
 
-                            eprintln!(
+                            crate::vprintln!(
                                 "[WASAPI] Exclusive stream opened (aligned): {}Hz {}ch {}bit, buffer={}frames",
                                 sample_rate,
                                 channels,
@@ -470,7 +470,7 @@ fn open_exclusive_stream(
                         }
                     }
                 }
-                eprintln!("[WASAPI] Format rejected: {e}");
+                crate::vprintln!("[WASAPI] Format rejected: {e}");
                 continue;
             }
         }

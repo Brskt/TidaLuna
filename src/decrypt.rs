@@ -95,44 +95,8 @@ impl FlacDecryptor {
         iv
     }
 
-    pub fn decrypt_chunk(
-        &self,
-        encrypted_data: &[u8],
-        byte_offset: u64,
-    ) -> anyhow::Result<Vec<u8>> {
-        if encrypted_data.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        debug!(
-            "Decrypting {} bytes at offset {} with AES-128-CTR",
-            encrypted_data.len(),
-            byte_offset
-        );
-
-        let iv = self.build_iv_for_offset(byte_offset);
-
-        type Aes128Ctr = Ctr128BE<Aes128>;
-        let mut cipher = Aes128Ctr::new_from_slices(&self.key, &iv)
-            .map_err(|e| anyhow::anyhow!("Failed to create CTR cipher: {}", e))?;
-
-        let block_offset = (byte_offset % 16) as usize;
-        let mut decrypted = encrypted_data.to_vec();
-
-        if block_offset > 0 {
-            let mut temp = vec![0u8; block_offset + decrypted.len()];
-            temp[block_offset..].copy_from_slice(&decrypted);
-            cipher.apply_keystream(&mut temp);
-            decrypted.copy_from_slice(&temp[block_offset..]);
-        } else {
-            cipher.apply_keystream(&mut decrypted);
-        }
-
-        Ok(decrypted)
-    }
-
     /// Decrypt in-place: applies AES-128-CTR keystream directly on the mutable buffer.
-    /// Avoids allocating a new Vec — the caller's buffer IS the output.
+    /// Avoids heap allocations — the caller's buffer IS the output.
     pub fn decrypt_in_place(&self, data: &mut [u8], byte_offset: u64) -> anyhow::Result<()> {
         if data.is_empty() {
             return Ok(());
@@ -151,17 +115,24 @@ impl FlacDecryptor {
             .map_err(|e| anyhow::anyhow!("Failed to create CTR cipher: {}", e))?;
 
         let block_offset = (byte_offset % 16) as usize;
-
         if block_offset > 0 {
-            // Need to align: create a temp buffer with padding, decrypt, copy back
-            let mut temp = vec![0u8; block_offset + data.len()];
-            temp[block_offset..].copy_from_slice(data);
-            cipher.apply_keystream(&mut temp);
-            data.copy_from_slice(&temp[block_offset..]);
-        } else {
-            cipher.apply_keystream(data);
+            // Advance the stream within the current block without heap allocation.
+            let mut skip = [0u8; 16];
+            cipher.apply_keystream(&mut skip[..block_offset]);
         }
 
+        cipher.apply_keystream(data);
         Ok(())
+    }
+
+    /// Compatibility shim for callers that already pass a scratch buffer.
+    /// Scratch is no longer needed: unaligned offsets are handled allocation-free.
+    pub fn decrypt_in_place_with_scratch(
+        &self,
+        data: &mut [u8],
+        byte_offset: u64,
+        _scratch: &mut Vec<u8>,
+    ) -> anyhow::Result<()> {
+        self.decrypt_in_place(data, byte_offset)
     }
 }

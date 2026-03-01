@@ -12,7 +12,7 @@ pub enum TrafficClass {
 }
 
 /// Shared atomic counters updated by StreamingBuffer read/write operations.
-/// The governor reads these on every tick (15 ms) to compute hysteresis.
+/// The governor reads these on every tick (25 ms) to compute hysteresis.
 pub struct BufferProgress {
     pub written: AtomicU64,
     pub read_pos: AtomicU64,
@@ -189,7 +189,7 @@ impl PreloadGate {
     }
 }
 
-const TICK_MS: u64 = 15;
+const TICK_MS: u64 = 25;
 const PRELOAD_RATE: f64 = 500_000.0; // 500 KB/s
 const PRELOAD_BURST: f64 = 32_000.0; // 32 KB
 const METRICS_INTERVAL_TICKS: u32 = (5000 / TICK_MS) as u32; // ~5 seconds
@@ -303,14 +303,14 @@ impl GovernorState {
         self.saved_rate = new_rate;
         self.saved_burst = new_burst;
         if bitrate > 0 {
-            eprintln!(
+            crate::vprintln!(
                 "[GOV]    Adaptive rate: {:.0} KB/s (bitrate: {:.0} KB/s, {:.0}× real-time)",
                 new_rate / 1024.0,
                 bitrate as f64 / 1024.0,
                 PLAYBACK_MULT
             );
         } else {
-            eprintln!(
+            crate::vprintln!(
                 "[GOV]    Adaptive rate: reset to fallback ({:.0} KB/s)",
                 new_rate / 1024.0
             );
@@ -333,7 +333,7 @@ impl GovernorState {
             self.boost_start = Some(Instant::now());
             self.preload_cooldown_until =
                 Some(Instant::now() + std::time::Duration::from_millis(1500));
-            eprintln!(
+            crate::vprintln!(
                 "[GOV]    Seek BOOST ON (rate: {:.0} KB/s, {:.0}× real-time)",
                 boost_rate / 1024.0,
                 if bitrate > 0 { BOOST_MULT } else { 0.0 }
@@ -344,13 +344,13 @@ impl GovernorState {
 
             if ahead >= boost_ahead_threshold {
                 self.exit_boost();
-                eprintln!(
+                crate::vprintln!(
                     "[GOV]    Seek BOOST OFF (threshold: {} KB ahead, {elapsed_ms}ms)",
                     ahead / 1024
                 );
             } else if elapsed_ms >= BOOST_TIMEOUT_MS {
                 self.exit_boost();
-                eprintln!(
+                crate::vprintln!(
                     "[GOV]    Seek BOOST OFF (timeout {elapsed_ms}ms, {} KB ahead)",
                     ahead / 1024
                 );
@@ -369,11 +369,11 @@ impl GovernorState {
         if new_gate != self.gate {
             match new_gate {
                 PreloadGate::Paused => {
-                    eprintln!("[GOV]    Preload PAUSED (buffer low)");
+                    crate::vprintln!("[GOV]    Preload PAUSED (buffer low)");
                     self.pause_start = Some(Instant::now());
                 }
                 PreloadGate::Active => {
-                    eprintln!("[GOV]    Preload RESUMED (buffer ok)");
+                    crate::vprintln!("[GOV]    Preload RESUMED (buffer ok)");
                     if let Some(start) = self.pause_start.take() {
                         self.pause_time += start.elapsed();
                     }
@@ -404,7 +404,7 @@ impl GovernorState {
                 ""
             };
             if self.boost_start.is_some() || play_rate > 0.0 || preload_rate > 0.0 {
-                eprintln!(
+                crate::vprintln!(
                     "[GOV]    play: {:.0} KB/s | preload: {:.0} KB/s | buf: {} KB ({}) | gate: {:?} | pause: {:.1}s{}",
                     play_rate,
                     preload_rate,

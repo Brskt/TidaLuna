@@ -6,7 +6,23 @@ use crate::state::{
 use crate::streaming_buffer::StreamingBufferWriter;
 use futures_util::StreamExt;
 
-pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> {
+const PRELOAD_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MB
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    if (bytes as f64) >= MB {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else {
+        format!("{:.0} KB", bytes as f64 / KB)
+    }
+}
+
+async fn fetch_and_decrypt_inner(
+    url: &str,
+    key: &str,
+    max_bytes: Option<usize>,
+) -> anyhow::Result<Option<Vec<u8>>> {
     let start = std::time::Instant::now();
     let resp = HTTP_CLIENT.get(url).send().await?;
 
@@ -17,6 +33,8 @@ pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> 
     let decryptor = FlacDecryptor::new(key)?;
     let mut stream = resp.bytes_stream();
     let mut offset = 0u64;
+    let mut decrypt_buf = Vec::new();
+    let mut decrypt_scratch = Vec::new();
     let mut buffer = Vec::new();
 
     while let Some(item) = stream.next().await {
@@ -26,38 +44,71 @@ pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> 
             .acquire(TrafficClass::Preload, chunk.len() as u32)
             .await;
 
-        let decrypted = decryptor.decrypt_chunk(&chunk, offset)?;
+        decrypt_buf.clear();
+        decrypt_buf.extend_from_slice(&chunk);
+        decryptor.decrypt_in_place_with_scratch(&mut decrypt_buf, offset, &mut decrypt_scratch)?;
         offset += chunk.len() as u64;
-        buffer.extend_from_slice(&decrypted);
+
+        if let Some(limit) = max_bytes
+            && buffer.len().saturating_add(decrypt_buf.len()) > limit
+        {
+            let elapsed = start.elapsed().as_secs_f64();
+            crate::vprintln!(
+                "[PRELOAD] Skip RAM cache: size > {} (received {} in {:.1}s)",
+                format_bytes(limit as u64),
+                format_bytes(offset),
+                elapsed
+            );
+            return Ok(None);
+        }
+
+        buffer.extend_from_slice(&decrypt_buf);
     }
 
     let elapsed = start.elapsed().as_secs_f64();
     let rate_mbps = (offset as f64 * 8.0) / (elapsed * 1_000_000.0);
-    eprintln!(
+    crate::vprintln!(
         "[FETCH]  {:.1} MB in {:.1}s ({:.1} Mbps)",
         offset as f64 / 1_048_576.0,
         elapsed,
         rate_mbps
     );
 
-    Ok(buffer)
+    Ok(Some(buffer))
+}
+
+pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> {
+    match fetch_and_decrypt_inner(url, key, None).await? {
+        Some(buffer) => Ok(buffer),
+        None => anyhow::bail!("unexpected capped fetch in uncapped mode"),
+    }
 }
 
 pub async fn start_preload(track: TrackInfo) {
     cancel_preload().await;
+
+    {
+        let mut lock = PRELOAD_STATE.lock().await;
+        lock.next_track = Some(track.clone());
+    }
 
     let handle = tokio::spawn(async move {
         if track.key.is_empty() || track.url.is_empty() {
             return;
         }
 
-        eprintln!("[PRELOAD] Starting preload for next track");
-        match fetch_and_decrypt(&track.url, &track.key).await {
-            Ok(data) => {
+        crate::vprintln!("[PRELOAD] Starting preload for next track");
+        match fetch_and_decrypt_inner(&track.url, &track.key, Some(PRELOAD_MAX_BYTES)).await {
+            Ok(Some(data)) => {
                 if !data.is_empty() {
                     let mut lock = PRELOAD_STATE.lock().await;
-                    lock.data = Some(PreloadedTrack { track, data });
+                    if lock.next_track.as_ref() == Some(&track) {
+                        lock.data = Some(PreloadedTrack { track, data });
+                    }
                 }
+            }
+            Ok(None) => {
+                // Too large for RAM cache; keep only next_track so auto-load can still proceed.
             }
             Err(e) => {
                 eprintln!("Preload failed: {}", e);
@@ -75,6 +126,7 @@ pub async fn cancel_preload() {
         handle.abort();
     }
     lock.data = None;
+    lock.next_track = None;
 }
 
 pub async fn next_preloaded_track() -> Option<TrackInfo> {
@@ -84,7 +136,7 @@ pub async fn next_preloaded_track() -> Option<TrackInfo> {
     };
 
     let lock = PRELOAD_STATE.lock().await;
-    let candidate = lock.data.as_ref().map(|d| d.track.clone());
+    let candidate = lock.next_track.clone();
 
     match (current, candidate) {
         (Some(curr), Some(next)) if curr == next => None,
@@ -97,6 +149,7 @@ pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack
     if let Some(data) = lock.data.as_ref()
         && data.track == *track
     {
+        lock.next_track = None;
         return lock.data.take();
     }
     None
@@ -180,13 +233,13 @@ pub fn start_streaming_download(
                     target = newer;
                     skip_padding = s;
                 }
-                eprintln!(
+                crate::vprintln!(
                     "[NET]    restart: debounce done +{:.0}ms",
                     restart_t0.elapsed().as_secs_f64() * 1000.0
                 );
 
                 if writer.is_cancelled() {
-                    eprintln!("[STREAM] Download cancelled");
+                    crate::vprintln!("[STREAM] Download cancelled");
                     return;
                 }
 
@@ -210,7 +263,7 @@ pub fn start_streaming_download(
                 } else {
                     target.saturating_sub(seek_padding)
                 };
-                eprintln!(
+                crate::vprintln!(
                     "[STREAM] Range restart at byte {padded_start} (target={target}, pad={}KB{})",
                     (target - padded_start) / 1024,
                     if skip_padding { ", cache continue" } else { "" }
@@ -221,7 +274,7 @@ pub fn start_streaming_download(
                 let range_resp = tokio::select! {
                     biased;
                     _ = writer.wait_for_restart_or_cancel() => {
-                        eprintln!(
+                        crate::vprintln!(
                             "[NET]    restart: cancelled during send ({:.0}ms)",
                             send_t0.elapsed().as_secs_f64() * 1000.0
                         );
@@ -237,7 +290,7 @@ pub fn start_streaming_download(
                         }
                     }
                 };
-                eprintln!(
+                crate::vprintln!(
                     "[NET]    restart: TTFB {:.0}ms (total +{:.0}ms)",
                     send_t0.elapsed().as_secs_f64() * 1000.0,
                     restart_t0.elapsed().as_secs_f64() * 1000.0
@@ -260,7 +313,9 @@ pub fn start_streaming_download(
                     break;
                 } else if status.is_success() {
                     // 200 — server ignored Range, restart from beginning
-                    eprintln!("[STREAM] Server ignored Range header, restarting from byte 0");
+                    crate::vprintln!(
+                        "[STREAM] Server ignored Range header, restarting from byte 0"
+                    );
                     writer.reset_for_range(0);
                     (range_resp, 0u64)
                 } else {
@@ -272,6 +327,7 @@ pub fn start_streaming_download(
             let mut stream = stream_resp.bytes_stream();
             let mut offset = stream_offset;
             let mut pending = Vec::with_capacity(BATCH_SIZE);
+            let mut warmup_buf = Vec::with_capacity(BATCH_SIZE);
             let mut pending_offset = stream_offset;
 
             loop {
@@ -279,7 +335,7 @@ pub fn start_streaming_download(
                     biased;
                     _ = writer.wait_for_restart_or_cancel() => {
                         if writer.is_cancelled() {
-                            eprintln!("[STREAM] Download cancelled");
+                            crate::vprintln!("[STREAM] Download cancelled");
                             return;
                         }
                         continue 'outer;
@@ -304,30 +360,33 @@ pub fn start_streaming_download(
                             let chunk_offset = offset;
                             let chunk_len = chunk.len();
                             offset += chunk_len as u64;
-                            let mut buf = chunk.to_vec();
+                            warmup_buf.clear();
+                            warmup_buf.extend_from_slice(&chunk);
                             let ds = std::time::Instant::now();
-                            match decryptor.decrypt_in_place(&mut buf, chunk_offset) {
+                            match decryptor.decrypt_in_place(&mut warmup_buf, chunk_offset) {
                                 Ok(()) => {
                                     let decrypt_elapsed = ds.elapsed();
                                     let decrypt_ms = decrypt_elapsed.as_secs_f64() * 1000.0;
                                     decrypt_total_ms += decrypt_ms;
                                     decrypt_calls += 1;
-                                    writer.write(&buf);
+                                    writer.write(&warmup_buf);
                                     warmup_bytes += chunk_len as u64;
                                     if !warmup_first_logged {
                                         warmup_first_logged = true;
                                         if let Some(ha) = warmup_headers_at {
                                             let headers_to_body_ms =
                                                 ds.duration_since(ha).as_secs_f64() * 1000.0;
-                                            eprintln!(
+                                            crate::vprintln!(
                                                 "[NET]    restart: headers→body +{:.0}ms | decrypt +{:.0}ms ({} B)",
-                                                headers_to_body_ms, decrypt_ms, chunk_len
+                                                headers_to_body_ms,
+                                                decrypt_ms,
+                                                chunk_len
                                             );
                                         }
                                     }
                                     if offset >= warmup_end_offset {
                                         if let Some(ref ws) = warmup_start {
-                                            eprintln!(
+                                            crate::vprintln!(
                                                 "[NET]    warmup done: {}KB in {:.0}ms (past target: {}KB)",
                                                 warmup_bytes / 1024,
                                                 ws.elapsed().as_secs_f64() * 1000.0,
@@ -406,9 +465,13 @@ pub fn start_streaming_download(
 
         let total_ms = download_start.elapsed().as_secs_f64() * 1000.0;
         let net_ms = total_ms - decrypt_total_ms;
-        eprintln!(
+        crate::vprintln!(
             "[STREAM] Complete | {:.0}ms (net: {:.0}ms, decrypt: {:.0}ms) | {} decrypt calls | {} restarts",
-            total_ms, net_ms, decrypt_total_ms, decrypt_calls, range_restarts
+            total_ms,
+            net_ms,
+            decrypt_total_ms,
+            decrypt_calls,
+            range_restarts
         );
     })
 }

@@ -4,6 +4,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex};
 
 const BUFFER_AHEAD_LIMIT: u64 = 2 * 1024 * 1024; // 2 MB
+const INITIAL_BUFFER_CAP: usize = 2 * 1024 * 1024; // 2 MB
+const STALE_CACHE_MAX: usize = 4 * 1024 * 1024; // 4 MB
 /// Adaptive restart threshold: 3 seconds of audio, clamped to [256 KB, 1 MB].
 /// Falls back to the fixed 1 MB when bitrate is unknown.
 fn restart_threshold(bitrate_bps: u64) -> u64 {
@@ -25,6 +27,22 @@ const EARLY_RESTART_FLOOR: u64 = 256 * 1024;
 struct StaleRange {
     base_offset: u64,
     data: Vec<u8>,
+}
+
+fn make_stale_range(base_offset: u64, mut data: Vec<u8>) -> Option<StaleRange> {
+    if data.is_empty() {
+        return None;
+    }
+    let mut base = base_offset;
+    if data.len() > STALE_CACHE_MAX {
+        let drop_prefix = data.len() - STALE_CACHE_MAX;
+        data = data.split_off(drop_prefix);
+        base = base.saturating_add(drop_prefix as u64);
+    }
+    Some(StaleRange {
+        base_offset: base,
+        data,
+    })
 }
 
 struct Inner {
@@ -67,7 +85,8 @@ impl StreamingBuffer {
 
         let inner = Arc::new((
             Mutex::new(Inner {
-                data: Vec::with_capacity(total_len as usize),
+                // Avoid reserving the whole track upfront; grow progressively.
+                data: Vec::with_capacity((total_len.min(INITIAL_BUFFER_CAP as u64)) as usize),
                 total_len,
                 base_offset: 0,
                 finished: false,
@@ -248,21 +267,19 @@ impl Seek for StreamingBuffer {
                     if new_pos >= stale.base_offset && new_pos < stale_end {
                         // Swap current ↔ stale — instant restore, no network
                         let old_stale = inner.stale.take().unwrap();
-                        if !inner.data.is_empty() {
-                            inner.stale = Some(StaleRange {
-                                base_offset: inner.base_offset,
-                                data: std::mem::take(&mut inner.data),
-                            });
-                        }
+                        let current = std::mem::take(&mut inner.data);
+                        inner.stale = make_stale_range(inner.base_offset, current);
                         inner.base_offset = old_stale.base_offset;
                         inner.data = old_stale.data;
                         let continue_from = inner.base_offset + inner.data.len() as u64;
                         inner.restart_target = Some(continue_from);
                         inner.restart_skip_padding = true;
                         inner.finished = false;
-                        eprintln!(
+                        crate::vprintln!(
                             "[SEEK]   Cache hit: pos={} restored=[{}..{}]",
-                            new_pos, inner.base_offset, continue_from
+                            new_pos,
+                            inner.base_offset,
+                            continue_from
                         );
                         if let Some(ref bp) = self.buffer_progress {
                             bp.written.store(continue_from, Relaxed);
@@ -272,7 +289,7 @@ impl Seek for StreamingBuffer {
                 }
 
                 if would_restart && !restored {
-                    eprintln!(
+                    crate::vprintln!(
                         "[SEEK]   Range restart: pos={} available=[{}..{}] gap={}KB",
                         new_pos,
                         inner.base_offset,
@@ -284,12 +301,8 @@ impl Seek for StreamingBuffer {
                         }
                     );
                     // Save current data as stale before clearing
-                    if !inner.data.is_empty() {
-                        inner.stale = Some(StaleRange {
-                            base_offset: inner.base_offset,
-                            data: std::mem::take(&mut inner.data),
-                        });
-                    }
+                    let current = std::mem::take(&mut inner.data);
+                    inner.stale = make_stale_range(inner.base_offset, current);
                     inner.base_offset = new_pos;
                     inner.restart_target = Some(new_pos);
                     inner.restart_skip_padding = false;
@@ -300,7 +313,7 @@ impl Seek for StreamingBuffer {
                 }
 
                 if !would_restart && new_pos >= buf_end && !inner.finished {
-                    eprintln!(
+                    crate::vprintln!(
                         "[SEEK]   Forward within threshold: pos={} buf_end={} gap={}KB (threshold={}KB)",
                         new_pos,
                         buf_end,
