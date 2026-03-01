@@ -271,57 +271,59 @@ const createNativePlayerComponent = () => {
     };
 }
 
+// Synchronous initialization: expose nativeInterface immediately so Tidal
+// detects desktop mode before its own scripts run.
+const credentials: { credentialsStorageKey: string; codeChallenge: string; redirectUri: string; codeVerifier: string } = {
+    credentialsStorageKey: "tidal",
+    codeChallenge: sessionStorage.getItem("pkce_challenge") || "",
+    redirectUri: "tidal://auth/",
+    codeVerifier: sessionStorage.getItem("pkce_verifier") || "",
+};
+
+window.nativeInterface = {
+    application: createApplicationController(),
+    audioHack: createAudioHack(),
+    chromecast: undefined,
+    credentials,
+    features: { chromecast: false, tidalConnect: false },
+    navigation: createNavigationController(),
+    playback: createPlaybackController(),
+    remoteDesktop: undefined,
+    tidalConnect: undefined,
+    userSession: createUserSession(),
+    userSettings: createUserSettings(),
+    window: createWindowController({ isMaximized: false, isFullscreen: false }),
+};
+window.NativePlayerComponent = createNativePlayerComponent();
+console.log("Native Interface exposed (sync)");
+
+// Async hydration: generate PKCE if missing, fetch real window state.
 const init = async () => {
     const now = Date.now();
-    console.log("Initializing Native Interface...");
 
-    let codeVerifier = sessionStorage.getItem("pkce_verifier");
-    let codeChallenge = sessionStorage.getItem("pkce_challenge");
-
-    if (!codeVerifier || !codeChallenge) {
-        codeVerifier = generateCodeVerifier();
-        codeChallenge = await generateCodeChallenge(codeVerifier);
-        sessionStorage.setItem("pkce_verifier", codeVerifier);
-        sessionStorage.setItem("pkce_challenge", codeChallenge);
+    if (!credentials.codeVerifier || !credentials.codeChallenge) {
+        const verifier = generateCodeVerifier();
+        const challenge = await generateCodeChallenge(verifier);
+        credentials.codeVerifier = verifier;
+        credentials.codeChallenge = challenge;
+        sessionStorage.setItem("pkce_verifier", verifier);
+        sessionStorage.setItem("pkce_challenge", challenge);
         console.log("Generated new PKCE pair");
     } else {
         console.log("Restored PKCE pair from session storage");
     }
 
-    console.log("PKCE Verifier:", codeVerifier);
-    console.log("PKCE Challenge:", codeChallenge);
-
-
-    let windowState = { isMaximized: false, isFullscreen: false };
     try {
-        const state = await invokeIpc("window.state.get");
-        if (state) windowState = state as any;
+        const state = await invokeIpc("window.state.get") as any;
+        if (state) {
+            const cb = window.__TIDAL_CALLBACKS__?.window;
+            if (cb && typeof cb.updateState === "function") {
+                cb.updateState(state.isMaximized, state.isFullscreen);
+            }
+        }
     } catch (e) {
         console.error("Failed to get window state", e);
     }
-
-    const nativeInterface = {
-        application: createApplicationController(),
-        audioHack: createAudioHack(),
-        chromecast: undefined,
-        credentials: {
-            credentialsStorageKey: "tidal",
-            codeChallenge: codeChallenge,
-            redirectUri: "tidal://auth/",
-            codeVerifier: codeVerifier
-        },
-        features: { chromecast: false, tidalConnect: false },
-        navigation: createNavigationController(),
-        playback: createPlaybackController(),
-        remoteDesktop: undefined,
-        tidalConnect: undefined,
-        userSession: createUserSession(),
-        userSettings: createUserSettings(),
-        window: createWindowController(windowState),
-    };
-
-    window.nativeInterface = nativeInterface;
-    window.NativePlayerComponent = createNativePlayerComponent();
 
     console.log("Native Interface initialized in", Date.now() - now, "ms");
 };

@@ -101,6 +101,24 @@ fn main() -> wry::Result<()> {
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url("https://desktop.tidal.com/")
         .with_devtools(true)
+        .with_initialization_script(
+            r#"var _cfgTarget = { enableDesktopFeatures: true };
+var _cfgProxy = new Proxy(_cfgTarget, {
+    get: function(t, p) { return p === 'enableDesktopFeatures' ? true : t[p]; },
+    set: function(t, p, v) { if (p !== 'enableDesktopFeatures') t[p] = v; return true; }
+});
+Object.defineProperty(window, 'TIDAL_CONFIG', {
+    get: function() { return _cfgProxy; },
+    set: function(v) {
+        var src = (v && typeof v === 'object') ? v : {};
+        var keys = Object.keys(src);
+        for (var i = 0; i < keys.length; i++) {
+            if (keys[i] !== 'enableDesktopFeatures') _cfgTarget[keys[i]] = src[keys[i]];
+        }
+    },
+    configurable: true
+});"#,
+        )
         .with_initialization_script(script)
         .with_user_agent("Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36")
         .with_ipc_handler(move |req| {
@@ -228,8 +246,12 @@ fn main() -> wry::Result<()> {
                 }
                 UserEvent::Navigate(url) => {
                     println!("Navigating to: {}", url);
-                    pending_navigation = Some(url);
-                    let _ = webview.load_url("https://desktop.tidal.com/");
+                    if url.starts_with("tidal://") {
+                        let path = url.strip_prefix("tidal://").unwrap();
+                        let _ = webview.load_url(
+                            &format!("https://desktop.tidal.com/{}", path),
+                        );
+                    }
                 }
                 UserEvent::IpcMessage(msg) => {
                     println!("IPC Message: {:?}", msg);
@@ -334,9 +356,9 @@ fn main() -> wry::Result<()> {
                             if let Some(url) = pending_navigation.take()
                                 && url.starts_with("tidal://")
                             {
-                                let command = url.replace("tidal://", "");
+                                let path = url.strip_prefix("tidal://").unwrap();
                                 let _ = webview.load_url(
-                                    &("https://desktop.tidal.com/".to_string() + &command),
+                                    &format!("https://desktop.tidal.com/{}", path),
                                 );
                             }
                             update_window_state(&webview, &window);
