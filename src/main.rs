@@ -224,17 +224,17 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
             Event::UserEvent(user_event) => match user_event {
                  UserEvent::Player(player_event) => {
                      match player_event {
-                        PlayerEvent::TimeUpdate(time) => {
+                        PlayerEvent::TimeUpdate(time, seq) => {
                             let js = format!(
-                                 "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediacurrenttime', {}); }}",
-                                 time
+                                 "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediacurrenttime', {}, {}); }}",
+                                 time, seq
                              );
                              let _ = webview.evaluate_script(&js);
                         },
-                         PlayerEvent::StateChange(state) => {
+                         PlayerEvent::StateChange(state, seq) => {
                              let js = format!(
-                                 "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediastate', '{}'); }}",
-                                 state
+                                 "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediastate', '{}', {}); }}",
+                                 state, seq
                              );
                              let _ = webview.evaluate_script(&js);
 
@@ -247,10 +247,10 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                                  });
                              }
                          },
-                         PlayerEvent::Duration(duration) => {
+                         PlayerEvent::Duration(duration, seq) => {
                                 let js = format!(
-                                    "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediaduration', {}); }}",
-                                    duration
+                                    "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediaduration', {}, {}); }}",
+                                    duration, seq
                                 );
                                 let _ = webview.evaluate_script(&js);
                             },

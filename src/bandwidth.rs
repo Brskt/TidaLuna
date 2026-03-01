@@ -403,16 +403,18 @@ impl GovernorState {
             } else {
                 ""
             };
-            eprintln!(
-                "[GOV]    play: {:.0} KB/s | preload: {:.0} KB/s | buf: {} KB ({}) | gate: {:?} | pause: {:.1}s{}",
-                play_rate,
-                preload_rate,
-                ahead_kb,
-                secs_str,
-                self.gate,
-                current_pause.as_secs_f64(),
-                boost_str
-            );
+            if self.boost_start.is_some() || play_rate > 0.0 || preload_rate > 0.0 {
+                eprintln!(
+                    "[GOV]    play: {:.0} KB/s | preload: {:.0} KB/s | buf: {} KB ({}) | gate: {:?} | pause: {:.1}s{}",
+                    play_rate,
+                    preload_rate,
+                    ahead_kb,
+                    secs_str,
+                    self.gate,
+                    current_pause.as_secs_f64(),
+                    boost_str
+                );
+            }
 
             self.play_bytes = 0;
             self.preload_bytes = 0;

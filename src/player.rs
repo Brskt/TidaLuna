@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
+static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(target_os = "windows")]
 use crate::exclusive_wasapi::{self, ExclusiveCommand, ExclusiveEvent, ExclusiveHandle};
@@ -26,18 +27,18 @@ pub struct AudioDevice {
 
 #[derive(Debug)]
 pub enum PlayerEvent {
-    TimeUpdate(f64),
-    Duration(f64),
-    StateChange(&'static str),
+    TimeUpdate(f64, u32),
+    Duration(f64, u32),
+    StateChange(&'static str, u32),
     AudioDevices(Vec<AudioDevice>, Option<String>),
 }
 
 enum PlayerCommand {
-    LoadData(Vec<u8>, u32),
-    LoadStreaming(StreamingBuffer, u32),
+    LoadData(Vec<u8>, u32, u32),
+    LoadStreaming(StreamingBuffer, u32, u32),
     Play,
     Pause,
-    Stop,
+    Stop(u32),
     Seek(f64),
     SetVolume(f64),
     GetAudioDevices(Option<String>),
@@ -307,6 +308,7 @@ impl Player {
             let mut current_data: Option<Arc<Vec<u8>>> = None;
             let mut current_streaming_buffer: Option<StreamingBuffer> = None;
             let mut current_volume: f32 = 1.0;
+            let mut current_seq: u32 = 0;
 
             #[cfg(target_os = "windows")]
             let mut exclusive_handle: Option<ExclusiveHandle> = None;
@@ -321,11 +323,12 @@ impl Player {
                 }
                 for cmd in pending_cmds.drain(..) {
                     match cmd {
-                        PlayerCommand::LoadData(data, load_gen) => {
+                        PlayerCommand::LoadData(data, load_gen, event_seq) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
                                 eprintln!("[LOAD #{load_gen}] stale LoadData, ignoring");
                                 continue;
                             }
+                            current_seq = event_seq;
                             crate::state::GOVERNOR.reset_buffer_progress();
 
                             if let Some(ref old_buf) = current_streaming_buffer {
@@ -406,8 +409,12 @@ impl Player {
                                     rodio_player = Some(player);
 
                                     if current_duration > 0.0 {
-                                        callback(PlayerEvent::Duration(current_duration));
+                                        callback(PlayerEvent::Duration(
+                                            current_duration,
+                                            current_seq,
+                                        ));
                                     }
+                                    callback(PlayerEvent::TimeUpdate(0.0, current_seq));
 
                                     if let Some(ref info) = audio_info {
                                         let bitrate = if info.duration > 0.0 {
@@ -436,12 +443,13 @@ impl Player {
                                 }
                             }
                         }
-                        PlayerCommand::LoadStreaming(buffer, load_gen) => {
+                        PlayerCommand::LoadStreaming(buffer, load_gen, event_seq) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
                                 eprintln!("[LOAD #{load_gen}] stale LoadStreaming, cancelling");
                                 buffer.cancel();
                                 continue;
                             }
+                            current_seq = event_seq;
                             if let Some(ref old_buf) = current_streaming_buffer {
                                 old_buf.cancel();
                             }
@@ -534,8 +542,12 @@ impl Player {
                                     rodio_player = Some(player);
 
                                     if current_duration > 0.0 {
-                                        callback(PlayerEvent::Duration(current_duration));
+                                        callback(PlayerEvent::Duration(
+                                            current_duration,
+                                            current_seq,
+                                        ));
                                     }
+                                    callback(PlayerEvent::TimeUpdate(0.0, current_seq));
 
                                     if let Some(ref info) = audio_info {
                                         let bitrate = if info.duration > 0.0 {
@@ -603,7 +615,7 @@ impl Player {
                             crate::state::GOVERNOR
                                 .buffer_progress()
                                 .set_playback_active(true);
-                            callback(PlayerEvent::StateChange("active"));
+                            callback(PlayerEvent::StateChange("active", current_seq));
                         }
                         PlayerCommand::Pause => {
                             #[cfg(target_os = "windows")]
@@ -626,9 +638,10 @@ impl Player {
                             crate::state::GOVERNOR
                                 .buffer_progress()
                                 .set_playback_active(false);
-                            callback(PlayerEvent::StateChange("paused"));
+                            callback(PlayerEvent::StateChange("paused", current_seq));
                         }
-                        PlayerCommand::Stop => {
+                        PlayerCommand::Stop(event_seq) => {
+                            current_seq = event_seq;
                             crate::state::GOVERNOR.reset_buffer_progress();
 
                             if let Some(ref old_buf) = current_streaming_buffer {
@@ -642,9 +655,13 @@ impl Player {
                                     if let Some(ref handle) = exclusive_handle {
                                         handle.send(ExclusiveCommand::Stop);
                                     }
+                                    callback(PlayerEvent::TimeUpdate(0.0, current_seq));
+                                    callback(PlayerEvent::StateChange("paused", current_seq));
                                     is_playing = false;
                                     has_track = false;
+                                    current_duration = 0.0;
                                     current_data = None;
+
                                     continue;
                                 }
                             }
@@ -652,6 +669,8 @@ impl Player {
                                 old.stop();
                                 drop(old);
                             }
+                            callback(PlayerEvent::TimeUpdate(0.0, current_seq));
+                            callback(PlayerEvent::StateChange("paused", current_seq));
                             is_playing = false;
                             has_track = false;
                             current_duration = 0.0;
@@ -872,7 +891,7 @@ impl Player {
                             for ev in handle.poll_events() {
                                 match ev {
                                     ExclusiveEvent::TimeUpdate(t) => {
-                                        callback(PlayerEvent::TimeUpdate(t));
+                                        callback(PlayerEvent::TimeUpdate(t, current_seq));
                                     }
                                     ExclusiveEvent::StateChange(s) => {
                                         if s == "completed" {
@@ -882,11 +901,11 @@ impl Player {
                                                 .buffer_progress()
                                                 .set_playback_active(false);
                                         }
-                                        callback(PlayerEvent::StateChange(s));
+                                        callback(PlayerEvent::StateChange(s, current_seq));
                                     }
                                     ExclusiveEvent::Duration(d) => {
                                         current_duration = d;
-                                        callback(PlayerEvent::Duration(d));
+                                        callback(PlayerEvent::Duration(d, current_seq));
                                     }
                                     ExclusiveEvent::InitFailed(e) => {
                                         eprintln!(
@@ -928,12 +947,12 @@ impl Player {
                     let pos_secs = pos.as_secs_f64();
 
                     if pos_secs > 0.0 {
-                        callback(PlayerEvent::TimeUpdate(pos_secs));
+                        callback(PlayerEvent::TimeUpdate(pos_secs, current_seq));
                     }
 
                     if p.empty() && !last_empty {
-                        callback(PlayerEvent::TimeUpdate(current_duration));
-                        callback(PlayerEvent::StateChange("completed"));
+                        callback(PlayerEvent::TimeUpdate(current_duration, current_seq));
+                        callback(PlayerEvent::StateChange("completed", current_seq));
                         has_track = false;
                         is_playing = false;
                         crate::state::GOVERNOR
@@ -964,6 +983,7 @@ impl Player {
 
     pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
+        let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         eprintln!("[LOAD #{load_gen}] start");
         print_track_banner(&format);
 
@@ -999,7 +1019,7 @@ impl Player {
                     format_bytes(preloaded.data.len() as u64),
                     load_start.elapsed().as_secs_f64() * 1000.0
                 );
-                let _ = cmd_tx.send(PlayerCommand::LoadData(preloaded.data, load_gen));
+                let _ = cmd_tx.send(PlayerCommand::LoadData(preloaded.data, load_gen, event_seq));
                 return;
             }
 
@@ -1047,7 +1067,7 @@ impl Player {
                             format_bytes(data.len() as u64),
                             load_start.elapsed().as_secs_f64() * 1000.0
                         );
-                        let _ = cmd_tx.send(PlayerCommand::LoadData(data, load_gen));
+                        let _ = cmd_tx.send(PlayerCommand::LoadData(data, load_gen, event_seq));
                     }
                     Err(e) => {
                         eprintln!("[ERROR]  Fetch failed: {}", e);
@@ -1066,7 +1086,7 @@ impl Player {
             let bp = crate::state::GOVERNOR.buffer_progress().clone();
             let (buffer, writer) = StreamingBuffer::new(total_len, Some(bp));
             eprintln!("[LOAD #{load_gen}] sending LoadStreaming");
-            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer, load_gen));
+            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer, load_gen, event_seq));
 
             // Download continues in background, writer feeds the buffer
             preload::start_streaming_download(resp, url, key, writer);
@@ -1091,6 +1111,7 @@ impl Player {
 
     pub fn stop(&self) -> anyhow::Result<()> {
         LOAD_SEQ.fetch_add(1, Relaxed);
+        let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         eprintln!(
             "[STOP]   (invalidated load seq: {})",
             LOAD_SEQ.load(Relaxed)
@@ -1099,7 +1120,7 @@ impl Player {
             prev.abort();
         }
         self.cmd_tx
-            .send(PlayerCommand::Stop)
+            .send(PlayerCommand::Stop(event_seq))
             .map_err(|_| anyhow::anyhow!("Player thread is dead"))
     }
 

@@ -191,6 +191,8 @@ const generateCodeChallenge = async (verifier: string) => {
 };
 const createNativePlayerComponent = () => {
     let activeEmitter: any = null;
+    let activePlayer: any = null;
+    let activeGen = 0;
     const Player = () => {
         const eventEmitter = {
             listeners: {} as Record<string, Function[]>,
@@ -216,6 +218,8 @@ const createNativePlayerComponent = () => {
         activeEmitter = eventEmitter;
 
         const player = {
+            currentTime: 0,
+            duration: 0,
             addEventListener: (event: string, cb: any) => {
                 eventEmitter.addListener(event, cb);
             },
@@ -230,6 +234,8 @@ const createNativePlayerComponent = () => {
                 sendIpc("player.devices.get");
             },
             load: (url: string, streamFormat: string, encryptionKey: string = "") => {
+                player.currentTime = 0;
+                activeEmitter?.emit?.("mediacurrenttime", { target: 0 });
                 sendIpc("player.load", url, streamFormat, encryptionKey);
             },
             play: () => { sendIpc("player.play"); },
@@ -260,13 +266,23 @@ const createNativePlayerComponent = () => {
                 sendIpc("player.devices.set", 'auto');
             }
         };
+        activePlayer = player;
         return player;
     }
 
     return {
         Player,
-        trigger: (event: string, target: any) => {
+        trigger: (event: string, target: any, gen?: number) => {
+            if (gen !== undefined) {
+                if (gen < activeGen) return;
+                if (gen > activeGen) activeGen = gen;
+            }
             event != "mediacurrenttime" && console.debug("NativePlayer:", event, target);
+            if (event === "mediacurrenttime" && activePlayer) {
+                activePlayer.currentTime = target;
+            } else if (event === "mediaduration" && activePlayer) {
+                activePlayer.duration = target;
+            }
             activeEmitter?.emit?.(event, { target });
         }
     };
