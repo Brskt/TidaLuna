@@ -254,12 +254,34 @@ impl Player {
             let mut exclusive_stream_cancel: Option<Arc<AtomicBool>> = None;
 
             let mut pending_cmds: Vec<PlayerCommand> = Vec::new();
+            let mut coalesced_cmds: Vec<PlayerCommand> = Vec::new();
             loop {
                 // Drain any commands that arrived during processing
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     pending_cmds.push(cmd);
                 }
+
+                // Coalesce seek bursts: keep only the newest seek until a non-seek command.
+                coalesced_cmds.clear();
+                let mut pending_seek: Option<f64> = None;
                 for cmd in pending_cmds.drain(..) {
+                    match cmd {
+                        PlayerCommand::Seek(time) => {
+                            pending_seek = Some(time);
+                        }
+                        other => {
+                            if let Some(time) = pending_seek.take() {
+                                coalesced_cmds.push(PlayerCommand::Seek(time));
+                            }
+                            coalesced_cmds.push(other);
+                        }
+                    }
+                }
+                if let Some(time) = pending_seek.take() {
+                    coalesced_cmds.push(PlayerCommand::Seek(time));
+                }
+
+                for cmd in coalesced_cmds.drain(..) {
                     match cmd {
                         PlayerCommand::LoadData(data, load_gen, event_seq) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
@@ -630,18 +652,29 @@ impl Player {
                             current_data = None;
                         }
                         PlayerCommand::Seek(time) => {
+                            // Latest-seek-wins: drop stale seeks queued while we were busy.
+                            let mut latest_time = time;
+                            while let Ok(next_cmd) = cmd_rx.try_recv() {
+                                match next_cmd {
+                                    PlayerCommand::Seek(t) => {
+                                        latest_time = t;
+                                    }
+                                    other => pending_cmds.push(other),
+                                }
+                            }
+
                             #[cfg(target_os = "windows")]
                             {
                                 if is_exclusive_mode {
                                     if let Some(ref handle) = exclusive_handle {
-                                        handle.send(ExclusiveCommand::Seek(time));
+                                        handle.send(ExclusiveCommand::Seek(latest_time));
                                     }
                                     continue;
                                 }
                             }
                             if let Some(ref p) = rodio_player {
                                 let seek_t0 = std::time::Instant::now();
-                                let result = p.try_seek(Duration::from_secs_f64(time));
+                                let result = p.try_seek(Duration::from_secs_f64(latest_time));
                                 let elapsed = seek_t0.elapsed();
                                 let timing = if elapsed.as_millis() > 0 {
                                     format!("{:.0}ms", elapsed.as_secs_f64() * 1000.0)
