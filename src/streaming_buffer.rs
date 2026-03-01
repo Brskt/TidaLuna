@@ -118,15 +118,6 @@ impl StreamingBuffer {
         inner.total_len
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn wait_for_complete(&self) {
-        let (lock, cvar) = &*self.inner;
-        let mut inner = lock.lock().unwrap();
-        while !inner.finished && !inner.cancelled {
-            inner = cvar.wait(inner).unwrap();
-        }
-    }
-
     pub fn take_data(&self) -> Option<Vec<u8>> {
         let (lock, _) = &*self.inner;
         let mut inner = lock.lock().unwrap();

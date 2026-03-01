@@ -1,12 +1,13 @@
-use std::io::Cursor;
-use std::sync::mpsc;
+use std::io::{Read, Seek};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use symphonia::core::audio::RawSampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
@@ -20,13 +21,19 @@ use wasapi::{
 // ---------------------------------------------------------------------------
 
 pub enum ExclusiveCommand {
-    Load {
-        pcm_data: Vec<u8>,
+    StartStream {
+        stream_id: u32,
         sample_rate: u32,
         channels: u32,
         bits_per_sample: u32,
-        total_frames: u64,
         duration_secs: f64,
+    },
+    PushPcm {
+        stream_id: u32,
+        pcm_data: Vec<u8>,
+    },
+    EndStream {
+        stream_id: u32,
     },
     Play,
     Pause,
@@ -43,13 +50,31 @@ pub enum ExclusiveEvent {
     Stopped,
 }
 
-pub struct DecodedPcm {
-    pub data: Vec<u8>,
-    pub sample_rate: u32,
-    pub channels: u32,
-    pub bits_per_sample: u32,
-    pub total_frames: u64,
-    pub duration_secs: f64,
+struct SizedMediaSource<R> {
+    inner: R,
+    byte_len: u64,
+}
+
+impl<R: Read> Read for SizedMediaSource<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R: Seek> Seek for SizedMediaSource<R> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+impl<R: Read + Seek + Send + Sync> MediaSource for SizedMediaSource<R> {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.byte_len)
+    }
 }
 
 pub struct ExclusiveHandle {
@@ -62,9 +87,47 @@ pub struct ExclusiveHandle {
 // FLAC -> PCM decoding (symphonia)
 // ---------------------------------------------------------------------------
 
-pub fn decode_flac_to_pcm(raw: &[u8]) -> Result<DecodedPcm, String> {
-    let cursor = Cursor::new(raw.to_vec());
-    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+fn append_interleaved_i32_as_pcm(raw_bytes: &[u8], bits_per_sample: u32, out: &mut Vec<u8>) {
+    if bits_per_sample <= 16 {
+        // i32 samples -> take upper 16 bits (little-endian: bytes [2..4]).
+        let frame_count = raw_bytes.len() / 4;
+        out.reserve(frame_count * 2);
+        for i in 0..frame_count {
+            let offset = i * 4;
+            out.push(raw_bytes[offset + 2]);
+            out.push(raw_bytes[offset + 3]);
+        }
+    } else if bits_per_sample <= 24 {
+        // i32 samples -> take upper 24 bits (bytes [1..4]).
+        let frame_count = raw_bytes.len() / 4;
+        out.reserve(frame_count * 3);
+        for i in 0..frame_count {
+            let offset = i * 4;
+            out.push(raw_bytes[offset + 1]);
+            out.push(raw_bytes[offset + 2]);
+            out.push(raw_bytes[offset + 3]);
+        }
+    } else {
+        // 32-bit: pass through all 4 bytes.
+        out.extend_from_slice(raw_bytes);
+    }
+}
+
+pub fn stream_flac_reader_to_wasapi<R>(
+    reader: R,
+    byte_len: u64,
+    stream_id: u32,
+    cmd_tx: mpsc::Sender<ExclusiveCommand>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String>
+where
+    R: Read + Seek + Send + Sync + 'static,
+{
+    let source = Box::new(SizedMediaSource {
+        inner: reader,
+        byte_len,
+    });
+    let mss = MediaSourceStream::new(source, Default::default());
 
     let mut hint = Hint::new();
     hint.with_extension("flac");
@@ -79,7 +142,6 @@ pub fn decode_flac_to_pcm(raw: &[u8]) -> Result<DecodedPcm, String> {
         .map_err(|e| format!("probe failed: {e}"))?;
 
     let mut format_reader = probed.format;
-
     let track = format_reader
         .default_track()
         .ok_or("no default track")?
@@ -90,17 +152,39 @@ pub fn decode_flac_to_pcm(raw: &[u8]) -> Result<DecodedPcm, String> {
     let channels = codec_params.channels.ok_or("no channel info")?.count() as u32;
     let bits_per_sample = codec_params.bits_per_sample.ok_or("no bits_per_sample")?;
     let n_frames = codec_params.n_frames.unwrap_or(0);
+    let duration_secs = if sample_rate > 0 && n_frames > 0 {
+        n_frames as f64 / sample_rate as f64
+    } else {
+        0.0
+    };
+
+    let stored_bps = if bits_per_sample <= 16 {
+        16
+    } else if bits_per_sample <= 24 {
+        24
+    } else {
+        32
+    };
+
+    cmd_tx
+        .send(ExclusiveCommand::StartStream {
+            stream_id,
+            sample_rate,
+            channels,
+            bits_per_sample: stored_bps,
+            duration_secs,
+        })
+        .map_err(|_| "failed to send StartStream".to_string())?;
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("decoder creation failed: {e}"))?;
 
-    let bytes_per_sample = ((bits_per_sample + 7) / 8).max(2) as usize;
-    let estimated_size = n_frames as usize * channels as usize * bytes_per_sample;
-    let mut pcm_bytes: Vec<u8> = Vec::with_capacity(estimated_size);
-    let mut total_decoded_frames: u64 = 0;
-
     loop {
+        if cancel.load(Relaxed) {
+            return Ok(());
+        }
+
         let packet = match format_reader.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(ref e))
@@ -108,7 +192,18 @@ pub fn decode_flac_to_pcm(raw: &[u8]) -> Result<DecodedPcm, String> {
             {
                 break;
             }
-            Err(_) => break,
+            Err(symphonia::core::errors::Error::IoError(e)) => {
+                if cancel.load(Relaxed) {
+                    return Ok(());
+                }
+                return Err(format!("decode io error: {e}"));
+            }
+            Err(e) => {
+                if cancel.load(Relaxed) {
+                    return Ok(());
+                }
+                return Err(format!("decode packet error: {e}"));
+            }
         };
 
         if packet.track_id() != track.id {
@@ -122,62 +217,28 @@ pub fn decode_flac_to_pcm(raw: &[u8]) -> Result<DecodedPcm, String> {
 
         let spec = *decoded.spec();
         let num_frames = decoded.capacity();
-
-        // Use RawSampleBuffer to get interleaved bytes at the native bit depth.
-        // We always decode as i32 and then truncate to the target container size.
         let mut raw_buf = RawSampleBuffer::<i32>::new(num_frames as u64, spec);
         raw_buf.copy_interleaved_ref(decoded);
 
-        let raw_bytes = raw_buf.as_bytes();
+        let mut chunk = Vec::new();
+        append_interleaved_i32_as_pcm(raw_buf.as_bytes(), bits_per_sample, &mut chunk);
 
-        if bits_per_sample <= 16 {
-            // i32 samples → take the upper 16 bits (little-endian: bytes [2..4])
-            let frame_count = raw_bytes.len() / 4;
-            for i in 0..frame_count {
-                let offset = i * 4;
-                pcm_bytes.push(raw_bytes[offset + 2]);
-                pcm_bytes.push(raw_bytes[offset + 3]);
-            }
-        } else if bits_per_sample <= 24 {
-            // i32 samples → take upper 24 bits (bytes [1..4])
-            let frame_count = raw_bytes.len() / 4;
-            for i in 0..frame_count {
-                let offset = i * 4;
-                pcm_bytes.push(raw_bytes[offset + 1]);
-                pcm_bytes.push(raw_bytes[offset + 2]);
-                pcm_bytes.push(raw_bytes[offset + 3]);
-            }
-        } else {
-            // 32-bit: pass through all 4 bytes
-            pcm_bytes.extend_from_slice(raw_bytes);
+        if !chunk.is_empty()
+            && cmd_tx
+                .send(ExclusiveCommand::PushPcm {
+                    stream_id,
+                    pcm_data: chunk,
+                })
+                .is_err()
+        {
+            return Ok(());
         }
-
-        total_decoded_frames += num_frames as u64;
     }
 
-    let duration_secs = if sample_rate > 0 {
-        total_decoded_frames as f64 / sample_rate as f64
-    } else {
-        0.0
-    };
-
-    // The actual bits stored per sample in our output buffer
-    let stored_bps = if bits_per_sample <= 16 {
-        16
-    } else if bits_per_sample <= 24 {
-        24
-    } else {
-        32
-    };
-
-    Ok(DecodedPcm {
-        data: pcm_bytes,
-        sample_rate,
-        channels,
-        bits_per_sample: stored_bps,
-        total_frames: total_decoded_frames,
-        duration_secs,
-    })
+    if !cancel.load(Relaxed) {
+        let _ = cmd_tx.send(ExclusiveCommand::EndStream { stream_id });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +265,10 @@ impl ExclusiveHandle {
 
     pub fn send(&self, cmd: ExclusiveCommand) {
         let _ = self.cmd_tx.send(cmd);
+    }
+
+    pub fn command_sender(&self) -> mpsc::Sender<ExclusiveCommand> {
+        self.cmd_tx.clone()
     }
 
     /// Drain all pending events (non-blocking).
@@ -555,6 +620,8 @@ fn render_thread(
     let mut pcm_duration: f64 = 0.0;
     let mut write_cursor: usize = 0;
     let mut frames_played: u64 = 0;
+    let mut current_stream_id: Option<u32> = None;
+    let mut stream_ended = true;
     let mut last_time_report = Instant::now();
 
     loop {
@@ -562,15 +629,13 @@ fn render_thread(
             RenderState::Idle => {
                 // Blocking wait for commands
                 match cmd_rx.recv() {
-                    Ok(ExclusiveCommand::Load {
-                        pcm_data: data,
+                    Ok(ExclusiveCommand::StartStream {
+                        stream_id,
                         sample_rate,
                         channels,
                         bits_per_sample,
-                        total_frames: _,
                         duration_secs,
                     }) => {
-                        // Stop any existing stream
                         if let Some(ref ac) = audio_client {
                             let _ = ac.stop_stream();
                         }
@@ -578,13 +643,15 @@ fn render_thread(
                         match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample)
                         {
                             Ok((ac, rc, ev, wf, bs)) => {
-                                pcm_data = data;
+                                pcm_data.clear();
                                 pcm_sample_rate = sample_rate;
                                 pcm_channels = channels;
                                 pcm_src_bps = bits_per_sample;
                                 pcm_duration = duration_secs;
                                 write_cursor = 0;
                                 frames_played = 0;
+                                current_stream_id = Some(stream_id);
+                                stream_ended = false;
                                 _buffer_size = bs;
                                 last_time_report = Instant::now();
 
@@ -594,8 +661,6 @@ fn render_thread(
                                 wave_fmt = Some(wf);
 
                                 let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
-
-                                // Start playback
                                 if let Some(ref ac) = audio_client {
                                     let _ = ac.start_stream();
                                 }
@@ -634,11 +699,13 @@ fn render_thread(
                             pcm_data.clear();
                             write_cursor = 0;
                             frames_played = 0;
+                            current_stream_id = None;
+                            stream_ended = true;
                             state = RenderState::Idle;
                             let _ = event_tx.send(ExclusiveEvent::Stopped);
                         }
                         ExclusiveCommand::Seek(time) => {
-                            if let Some(ref wf) = wave_fmt {
+                            if wave_fmt.is_some() {
                                 if let Some(ref ac) = audio_client {
                                     let _ = ac.stop_stream();
                                 }
@@ -652,22 +719,24 @@ fn render_thread(
                                 if write_cursor > pcm_data.len() {
                                     write_cursor = pcm_data.len();
                                 }
-                                frames_played = target_frame;
+                                frames_played = if src_bytes_per_frame > 0 {
+                                    (write_cursor / src_bytes_per_frame) as u64
+                                } else {
+                                    0
+                                };
 
                                 if let Some(ref ac) = audio_client {
                                     let _ = ac.start_stream();
                                 }
                             }
                         }
-                        ExclusiveCommand::Load {
-                            pcm_data: data,
+                        ExclusiveCommand::StartStream {
+                            stream_id,
                             sample_rate,
                             channels,
                             bits_per_sample,
-                            total_frames: _,
                             duration_secs,
                         } => {
-                            // Stop current, open new stream
                             if let Some(ref ac) = audio_client {
                                 let _ = ac.stop_stream();
                             }
@@ -679,13 +748,15 @@ fn render_thread(
                                 bits_per_sample,
                             ) {
                                 Ok((ac, rc, ev, wf, bs)) => {
-                                    pcm_data = data;
+                                    pcm_data.clear();
                                     pcm_sample_rate = sample_rate;
                                     pcm_channels = channels;
                                     pcm_src_bps = bits_per_sample;
                                     pcm_duration = duration_secs;
                                     write_cursor = 0;
                                     frames_played = 0;
+                                    current_stream_id = Some(stream_id);
+                                    stream_ended = false;
                                     _buffer_size = bs;
                                     last_time_report = Instant::now();
 
@@ -699,10 +770,23 @@ fn render_thread(
                                     let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
                                 }
                                 Err(e) => {
-                                    eprintln!("[WASAPI] Failed to open stream on Load: {e}");
+                                    eprintln!("[WASAPI] Failed to open stream on StartStream: {e}");
                                     let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
                                     return;
                                 }
+                            }
+                        }
+                        ExclusiveCommand::PushPcm {
+                            stream_id,
+                            pcm_data: data,
+                        } => {
+                            if current_stream_id == Some(stream_id) {
+                                pcm_data.extend_from_slice(&data);
+                            }
+                        }
+                        ExclusiveCommand::EndStream { stream_id } => {
+                            if current_stream_id == Some(stream_id) {
+                                stream_ended = true;
                             }
                         }
                         ExclusiveCommand::Shutdown => {
@@ -749,16 +833,23 @@ fn render_thread(
                     };
 
                     if remaining_frames == 0 {
-                        // Track finished — write silence and signal completion
+                        // Keep feeding silence while waiting for streamed PCM.
                         let silence = vec![0u8; available * dst_bytes_per_frame];
                         let _ = rc.write_to_device(available, &silence, None);
 
+                        if !stream_ended {
+                            continue;
+                        }
+
+                        // Track finished — signal completion once stream is ended.
                         let _ = event_tx.send(ExclusiveEvent::TimeUpdate(pcm_duration));
                         let _ = event_tx.send(ExclusiveEvent::StateChange("completed"));
 
                         if let Some(ref ac) = audio_client {
                             let _ = ac.stop_stream();
                         }
+                        current_stream_id = None;
+                        stream_ended = true;
                         state = RenderState::Idle;
                         continue;
                     }
@@ -820,11 +911,13 @@ fn render_thread(
                         pcm_data.clear();
                         write_cursor = 0;
                         frames_played = 0;
+                        current_stream_id = None;
+                        stream_ended = true;
                         state = RenderState::Idle;
                         let _ = event_tx.send(ExclusiveEvent::Stopped);
                     }
                     Ok(ExclusiveCommand::Seek(time)) => {
-                        if let Some(ref _wf) = wave_fmt {
+                        if wave_fmt.is_some() {
                             let src_bytes_per_sample = (pcm_src_bps / 8) as usize;
                             let src_bytes_per_frame = src_bytes_per_sample * pcm_channels as usize;
 
@@ -833,15 +926,18 @@ fn render_thread(
                             if write_cursor > pcm_data.len() {
                                 write_cursor = pcm_data.len();
                             }
-                            frames_played = target_frame;
+                            frames_played = if src_bytes_per_frame > 0 {
+                                (write_cursor / src_bytes_per_frame) as u64
+                            } else {
+                                0
+                            };
                         }
                     }
-                    Ok(ExclusiveCommand::Load {
-                        pcm_data: data,
+                    Ok(ExclusiveCommand::StartStream {
+                        stream_id,
                         sample_rate,
                         channels,
                         bits_per_sample,
-                        total_frames: _,
                         duration_secs,
                     }) => {
                         if let Some(ref ac) = audio_client {
@@ -851,13 +947,15 @@ fn render_thread(
                         match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample)
                         {
                             Ok((ac, rc, ev, wf, bs)) => {
-                                pcm_data = data;
+                                pcm_data.clear();
                                 pcm_sample_rate = sample_rate;
                                 pcm_channels = channels;
                                 pcm_src_bps = bits_per_sample;
                                 pcm_duration = duration_secs;
                                 write_cursor = 0;
                                 frames_played = 0;
+                                current_stream_id = Some(stream_id);
+                                stream_ended = false;
                                 _buffer_size = bs;
                                 last_time_report = Instant::now();
 
@@ -872,10 +970,23 @@ fn render_thread(
                                 let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
                             }
                             Err(e) => {
-                                eprintln!("[WASAPI] Failed to open stream on Load: {e}");
+                                eprintln!("[WASAPI] Failed to open stream on StartStream: {e}");
                                 let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
                                 return;
                             }
+                        }
+                    }
+                    Ok(ExclusiveCommand::PushPcm {
+                        stream_id,
+                        pcm_data: data,
+                    }) => {
+                        if current_stream_id == Some(stream_id) {
+                            pcm_data.extend_from_slice(&data);
+                        }
+                    }
+                    Ok(ExclusiveCommand::EndStream { stream_id }) => {
+                        if current_stream_id == Some(stream_id) {
+                            stream_ended = true;
                         }
                     }
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => {

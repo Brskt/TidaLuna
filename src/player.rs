@@ -4,6 +4,8 @@ use crate::streaming_buffer::StreamingBuffer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::thread;
@@ -11,6 +13,8 @@ use std::time::Duration;
 
 static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_os = "windows")]
+static EXCLUSIVE_STREAM_SEQ: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(target_os = "windows")]
 use crate::exclusive_wasapi::{self, ExclusiveCommand, ExclusiveEvent, ExclusiveHandle};
@@ -314,6 +318,8 @@ impl Player {
             let mut exclusive_handle: Option<ExclusiveHandle> = None;
             #[cfg(target_os = "windows")]
             let mut is_exclusive_mode = false;
+            #[cfg(target_os = "windows")]
+            let mut exclusive_stream_cancel: Option<Arc<AtomicBool>> = None;
 
             let mut pending_cmds: Vec<PlayerCommand> = Vec::new();
             loop {
@@ -331,6 +337,11 @@ impl Player {
                             current_seq = event_seq;
                             crate::state::GOVERNOR.reset_buffer_progress();
 
+                            #[cfg(target_os = "windows")]
+                            if let Some(cancel) = exclusive_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+
                             if let Some(ref old_buf) = current_streaming_buffer {
                                 old_buf.cancel();
                             }
@@ -343,28 +354,40 @@ impl Player {
                             {
                                 if is_exclusive_mode {
                                     if let Some(ref handle) = exclusive_handle {
-                                        match exclusive_wasapi::decode_flac_to_pcm(&data) {
-                                            Ok(pcm) => {
+                                        handle.send(ExclusiveCommand::Stop);
+                                        let cancel = Arc::new(AtomicBool::new(false));
+                                        exclusive_stream_cancel = Some(cancel.clone());
+
+                                        let cmd_tx = handle.command_sender();
+                                        let reader = SharedCursor::new(data.clone());
+                                        let total_len = data.len() as u64;
+                                        let stream_id =
+                                            EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+                                        thread::spawn(move || {
+                                            if let Err(e) =
+                                                exclusive_wasapi::stream_flac_reader_to_wasapi(
+                                                    reader,
+                                                    total_len,
+                                                    stream_id,
+                                                    cmd_tx,
+                                                    cancel.clone(),
+                                                )
+                                                && !cancel.load(Relaxed)
+                                            {
                                                 eprintln!(
-                                                    "[WASAPI] PCM decode: {:.0}ms",
-                                                    decode_start.elapsed().as_secs_f64() * 1000.0
+                                                    "[WASAPI] Progressive decode failed: {e}"
                                                 );
-                                                handle.send(ExclusiveCommand::Load {
-                                                    pcm_data: pcm.data,
-                                                    sample_rate: pcm.sample_rate,
-                                                    channels: pcm.channels,
-                                                    bits_per_sample: pcm.bits_per_sample,
-                                                    total_frames: pcm.total_frames,
-                                                    duration_secs: pcm.duration_secs,
-                                                });
-                                                current_data = Some(data);
-                                                has_track = true;
-                                                is_playing = true;
                                             }
-                                            Err(e) => {
-                                                eprintln!("[WASAPI] PCM decode failed: {e}");
-                                            }
-                                        }
+                                        });
+
+                                        eprintln!(
+                                            "[WASAPI] Progressive decode started ({:.0}ms setup)",
+                                            decode_start.elapsed().as_secs_f64() * 1000.0
+                                        );
+                                        current_data = Some(data);
+                                        current_streaming_buffer = None;
+                                        has_track = true;
+                                        is_playing = true;
                                     }
                                     continue;
                                 }
@@ -450,6 +473,11 @@ impl Player {
                                 continue;
                             }
                             current_seq = event_seq;
+                            #[cfg(target_os = "windows")]
+                            if let Some(cancel) = exclusive_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+
                             if let Some(ref old_buf) = current_streaming_buffer {
                                 old_buf.cancel();
                             }
@@ -459,34 +487,42 @@ impl Player {
                             #[cfg(target_os = "windows")]
                             {
                                 if is_exclusive_mode {
-                                    buffer.wait_for_complete();
-                                    if let Some(data) = buffer.take_data() {
-                                        if let Some(ref handle) = exclusive_handle {
-                                            match exclusive_wasapi::decode_flac_to_pcm(&data) {
-                                                Ok(pcm) => {
-                                                    eprintln!(
-                                                        "[WASAPI] PCM decode (streamed): {:.0}ms",
-                                                        decode_start.elapsed().as_secs_f64()
-                                                            * 1000.0
-                                                    );
-                                                    handle.send(ExclusiveCommand::Load {
-                                                        pcm_data: pcm.data,
-                                                        sample_rate: pcm.sample_rate,
-                                                        channels: pcm.channels,
-                                                        bits_per_sample: pcm.bits_per_sample,
-                                                        total_frames: pcm.total_frames,
-                                                        duration_secs: pcm.duration_secs,
-                                                    });
-                                                    current_data = Some(Arc::new(data));
-                                                    current_streaming_buffer = None;
-                                                    has_track = true;
-                                                    is_playing = true;
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("[WASAPI] PCM decode failed: {e}");
-                                                }
+                                    if let Some(ref handle) = exclusive_handle {
+                                        handle.send(ExclusiveCommand::Stop);
+
+                                        let cancel = Arc::new(AtomicBool::new(false));
+                                        exclusive_stream_cancel = Some(cancel.clone());
+
+                                        let cmd_tx = handle.command_sender();
+                                        let stream_reader = buffer.new_reader();
+                                        let total_len = buffer.total_len();
+                                        let stream_id =
+                                            EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+                                        thread::spawn(move || {
+                                            if let Err(e) =
+                                                exclusive_wasapi::stream_flac_reader_to_wasapi(
+                                                    stream_reader,
+                                                    total_len,
+                                                    stream_id,
+                                                    cmd_tx,
+                                                    cancel.clone(),
+                                                )
+                                                && !cancel.load(Relaxed)
+                                            {
+                                                eprintln!("[WASAPI] Stream decode failed: {e}");
                                             }
-                                        }
+                                        });
+
+                                        eprintln!(
+                                            "[WASAPI] Progressive streaming decode started ({:.0}ms setup)",
+                                            decode_start.elapsed().as_secs_f64() * 1000.0
+                                        );
+                                        current_data = None;
+                                        current_streaming_buffer = Some(buffer);
+                                        has_track = true;
+                                        is_playing = true;
+                                    } else {
+                                        buffer.cancel();
                                     }
                                     continue;
                                 }
@@ -644,6 +680,11 @@ impl Player {
                             current_seq = event_seq;
                             crate::state::GOVERNOR.reset_buffer_progress();
 
+                            #[cfg(target_os = "windows")]
+                            if let Some(cancel) = exclusive_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+
                             if let Some(ref old_buf) = current_streaming_buffer {
                                 old_buf.cancel();
                             }
@@ -722,6 +763,9 @@ impl Player {
                             let _ = &exclusive; // used on Windows only
                             #[cfg(target_os = "windows")]
                             {
+                                if let Some(cancel) = exclusive_stream_cancel.take() {
+                                    cancel.store(true, Relaxed);
+                                }
                                 if exclusive {
                                     // Switch to exclusive WASAPI mode
                                     // Stop rodio playback
@@ -739,26 +783,64 @@ impl Player {
                                     is_exclusive_mode = true;
                                     exclusive_handle = Some(handle);
 
-                                    // Reload current track in exclusive mode
-                                    if let Some(ref data) = current_data {
-                                        if let Some(ref handle) = exclusive_handle {
-                                            match exclusive_wasapi::decode_flac_to_pcm(data) {
-                                                Ok(pcm) => {
-                                                    handle.send(ExclusiveCommand::Load {
-                                                        pcm_data: pcm.data,
-                                                        sample_rate: pcm.sample_rate,
-                                                        channels: pcm.channels,
-                                                        bits_per_sample: pcm.bits_per_sample,
-                                                        total_frames: pcm.total_frames,
-                                                        duration_secs: pcm.duration_secs,
-                                                    });
-                                                    has_track = true;
-                                                    is_playing = true;
+                                    // Reload current track in exclusive mode.
+                                    if let Some(ref handle) = exclusive_handle {
+                                        if let Some(ref streaming_buf) = current_streaming_buffer {
+                                            handle.send(ExclusiveCommand::Stop);
+                                            let cancel = Arc::new(AtomicBool::new(false));
+                                            exclusive_stream_cancel = Some(cancel.clone());
+
+                                            let cmd_tx = handle.command_sender();
+                                            let reader = streaming_buf.new_reader();
+                                            let total_len = streaming_buf.total_len();
+                                            let stream_id =
+                                                EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+                                            thread::spawn(move || {
+                                                if let Err(e) =
+                                                    exclusive_wasapi::stream_flac_reader_to_wasapi(
+                                                        reader,
+                                                        total_len,
+                                                        stream_id,
+                                                        cmd_tx,
+                                                        cancel.clone(),
+                                                    )
+                                                    && !cancel.load(Relaxed)
+                                                {
+                                                    eprintln!(
+                                                        "[WASAPI] Device switch stream decode failed: {e}"
+                                                    );
                                                 }
-                                                Err(e) => {
-                                                    eprintln!("[WASAPI] PCM decode failed: {e}");
+                                            });
+                                            has_track = true;
+                                            is_playing = true;
+                                        } else if let Some(ref data) = current_data {
+                                            handle.send(ExclusiveCommand::Stop);
+                                            let cancel = Arc::new(AtomicBool::new(false));
+                                            exclusive_stream_cancel = Some(cancel.clone());
+
+                                            let cmd_tx = handle.command_sender();
+                                            let reader = SharedCursor::new(data.clone());
+                                            let total_len = data.len() as u64;
+                                            let stream_id =
+                                                EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+                                            thread::spawn(move || {
+                                                if let Err(e) =
+                                                    exclusive_wasapi::stream_flac_reader_to_wasapi(
+                                                        reader,
+                                                        total_len,
+                                                        stream_id,
+                                                        cmd_tx,
+                                                        cancel.clone(),
+                                                    )
+                                                    && !cancel.load(Relaxed)
+                                                {
+                                                    eprintln!(
+                                                        "[WASAPI] Device switch stream decode failed: {e}"
+                                                    );
                                                 }
-                                            }
+                                            });
+                                            has_track = true;
+                                            is_playing = true;
                                         }
                                     }
 
@@ -911,6 +993,9 @@ impl Player {
                                         eprintln!(
                                             "[WASAPI] Init failed, falling back to shared mode: {e}"
                                         );
+                                        if let Some(cancel) = exclusive_stream_cancel.take() {
+                                            cancel.store(true, Relaxed);
+                                        }
                                         is_exclusive_mode = false;
                                         // Handle will be dropped
                                     }
