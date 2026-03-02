@@ -2,14 +2,17 @@ use crate::preload;
 use crate::state::{CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT, TrackInfo};
 use crate::streaming_buffer::StreamingBuffer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
+use std::collections::HashMap;
+use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -38,8 +41,8 @@ pub enum PlayerEvent {
 }
 
 enum PlayerCommand {
-    LoadData(Vec<u8>, u32, u32),
-    LoadStreaming(StreamingBuffer, u32, u32),
+    LoadData(Vec<u8>, u32, u32, String),
+    LoadStreaming(StreamingBuffer, u32, u32, String),
     Play,
     Pause,
     Stop(u32),
@@ -174,6 +177,113 @@ fn format_duration_mmss(secs: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
+const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(1200);
+const RESUME_MIN_SECONDS: f64 = 1.0;
+
+fn canonical_track_id(url: &str) -> String {
+    url.split('?').next().unwrap_or(url).to_string()
+}
+
+fn resume_store_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(base)
+            .join("tidal-rs")
+            .join("resume_positions.json")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(base)
+            .join(".local")
+            .join("share")
+            .join("tidal-rs")
+            .join("resume_positions.json")
+    }
+}
+
+struct ResumeStore {
+    path: PathBuf,
+    positions: HashMap<String, f64>,
+    dirty: bool,
+    last_flush: Instant,
+}
+
+impl ResumeStore {
+    fn load() -> Self {
+        let path = resume_store_path();
+        let positions = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<HashMap<String, f64>>(&bytes).ok())
+            .map(|map| {
+                map.into_iter()
+                    .filter(|(_, v)| v.is_finite() && *v > RESUME_MIN_SECONDS)
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+
+        Self {
+            path,
+            positions,
+            dirty: false,
+            last_flush: Instant::now(),
+        }
+    }
+
+    fn get(&self, track_id: &str) -> Option<f64> {
+        self.positions
+            .get(track_id)
+            .copied()
+            .filter(|v| v.is_finite() && *v > RESUME_MIN_SECONDS)
+    }
+
+    fn set(&mut self, track_id: &str, seconds: f64) {
+        if !seconds.is_finite() || seconds <= RESUME_MIN_SECONDS {
+            return;
+        }
+        let old = self.positions.get(track_id).copied().unwrap_or(0.0);
+        if (old - seconds).abs() >= 0.25 {
+            self.positions.insert(track_id.to_string(), seconds);
+            self.dirty = true;
+        }
+    }
+
+    fn clear(&mut self, track_id: &str) {
+        if self.positions.remove(track_id).is_some() {
+            self.dirty = true;
+        }
+    }
+
+    fn flush_if_due(&mut self, force: bool) {
+        if !self.dirty {
+            return;
+        }
+        if !force && self.last_flush.elapsed() < RESUME_FLUSH_INTERVAL {
+            return;
+        }
+
+        if let Some(parent) = self.path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            eprintln!("[RESUME] Failed to create state directory: {e}");
+            return;
+        }
+
+        match serde_json::to_vec(&self.positions) {
+            Ok(buf) => {
+                if let Err(e) = fs::write(&self.path, buf) {
+                    eprintln!("[RESUME] Failed to persist state: {e}");
+                } else {
+                    self.dirty = false;
+                    self.last_flush = Instant::now();
+                }
+            }
+            Err(e) => eprintln!("[RESUME] Failed to serialize state: {e}"),
+        }
+    }
+}
+
 fn print_track_banner(format: &str) {
     let lock = CURRENT_METADATA.lock().unwrap();
     let format_upper = format.to_uppercase();
@@ -245,6 +355,10 @@ impl Player {
             let mut current_streaming_buffer: Option<StreamingBuffer> = None;
             let mut current_volume: f32 = 1.0;
             let mut current_seq: u32 = 0;
+            let mut current_track_id: Option<String> = None;
+            // Seek requested before player/decoder is ready.
+            let mut deferred_seek: Option<f64> = None;
+            let mut resume_store = ResumeStore::load();
 
             #[cfg(target_os = "windows")]
             let mut exclusive_handle: Option<ExclusiveHandle> = None;
@@ -283,10 +397,14 @@ impl Player {
 
                 for cmd in coalesced_cmds.drain(..) {
                     match cmd {
-                        PlayerCommand::LoadData(data, load_gen, event_seq) => {
+                        PlayerCommand::LoadData(data, load_gen, event_seq, track_id) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
                                 crate::vprintln!("[LOAD #{load_gen}] stale LoadData, ignoring");
                                 continue;
+                            }
+                            current_track_id = Some(track_id.clone());
+                            if deferred_seek.is_none() {
+                                deferred_seek = resume_store.get(&track_id);
                             }
                             current_seq = event_seq;
                             crate::state::GOVERNOR.reset_buffer_progress();
@@ -385,13 +503,24 @@ impl Player {
                                     current_data = Some(data);
                                     rodio_player = Some(player);
 
+                                    let mut initial_time = 0.0f64;
+                                    if let Some(seek_time) = deferred_seek.take()
+                                        && let Some(ref p) = rodio_player
+                                    {
+                                        if p.try_seek(Duration::from_secs_f64(seek_time)).is_ok() {
+                                            initial_time = seek_time.max(0.0);
+                                        } else {
+                                            deferred_seek = Some(seek_time);
+                                        }
+                                    }
+
                                     if current_duration > 0.0 {
                                         callback(PlayerEvent::Duration(
                                             current_duration,
                                             current_seq,
                                         ));
                                     }
-                                    callback(PlayerEvent::TimeUpdate(0.0, current_seq));
+                                    callback(PlayerEvent::TimeUpdate(initial_time, current_seq));
 
                                     let bitrate = if current_duration > 0.0 {
                                         (byte_len as f64 * 8.0 / current_duration / 1000.0) as u32
@@ -416,13 +545,17 @@ impl Player {
                                 }
                             }
                         }
-                        PlayerCommand::LoadStreaming(buffer, load_gen, event_seq) => {
+                        PlayerCommand::LoadStreaming(buffer, load_gen, event_seq, track_id) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
                                 crate::vprintln!(
                                     "[LOAD #{load_gen}] stale LoadStreaming, cancelling"
                                 );
                                 buffer.cancel();
                                 continue;
+                            }
+                            current_track_id = Some(track_id.clone());
+                            if deferred_seek.is_none() {
+                                deferred_seek = resume_store.get(&track_id);
                             }
                             current_seq = event_seq;
                             #[cfg(target_os = "windows")]
@@ -521,13 +654,24 @@ impl Player {
                                     current_streaming_buffer = Some(buffer);
                                     rodio_player = Some(player);
 
+                                    let mut initial_time = 0.0f64;
+                                    if let Some(seek_time) = deferred_seek.take()
+                                        && let Some(ref p) = rodio_player
+                                    {
+                                        if p.try_seek(Duration::from_secs_f64(seek_time)).is_ok() {
+                                            initial_time = seek_time.max(0.0);
+                                        } else {
+                                            deferred_seek = Some(seek_time);
+                                        }
+                                    }
+
                                     if current_duration > 0.0 {
                                         callback(PlayerEvent::Duration(
                                             current_duration,
                                             current_seq,
                                         ));
                                     }
-                                    callback(PlayerEvent::TimeUpdate(0.0, current_seq));
+                                    callback(PlayerEvent::TimeUpdate(initial_time, current_seq));
 
                                     let bitrate = if current_duration > 0.0 {
                                         (total_len as f64 * 8.0 / current_duration / 1000.0) as u32
@@ -598,6 +742,7 @@ impl Player {
                                     crate::state::GOVERNOR
                                         .buffer_progress()
                                         .set_playback_active(false);
+                                    resume_store.flush_if_due(true);
                                     continue;
                                 }
                             }
@@ -609,6 +754,7 @@ impl Player {
                                 .buffer_progress()
                                 .set_playback_active(false);
                             callback(PlayerEvent::StateChange("paused", current_seq));
+                            resume_store.flush_if_due(true);
                         }
                         PlayerCommand::Stop(event_seq) => {
                             current_seq = event_seq;
@@ -636,6 +782,9 @@ impl Player {
                                     has_track = false;
                                     current_duration = 0.0;
                                     current_data = None;
+                                    current_track_id = None;
+                                    deferred_seek = None;
+                                    resume_store.flush_if_due(true);
 
                                     continue;
                                 }
@@ -650,6 +799,9 @@ impl Player {
                             has_track = false;
                             current_duration = 0.0;
                             current_data = None;
+                            current_track_id = None;
+                            deferred_seek = None;
+                            resume_store.flush_if_due(true);
                         }
                         PlayerCommand::Seek(time) => {
                             // Latest-seek-wins: drop stale seeks queued while we were busy.
@@ -662,12 +814,20 @@ impl Player {
                                     other => pending_cmds.push(other),
                                 }
                             }
+                            if let Some(track_id) = current_track_id.as_ref() {
+                                resume_store.set(track_id, latest_time);
+                                resume_store.flush_if_due(false);
+                            }
 
                             #[cfg(target_os = "windows")]
                             {
                                 if is_exclusive_mode {
-                                    if let Some(ref handle) = exclusive_handle {
-                                        handle.send(ExclusiveCommand::Seek(latest_time));
+                                    if has_track {
+                                        if let Some(ref handle) = exclusive_handle {
+                                            handle.send(ExclusiveCommand::Seek(latest_time));
+                                        }
+                                    } else {
+                                        deferred_seek = Some(latest_time);
                                     }
                                     continue;
                                 }
@@ -682,9 +842,18 @@ impl Player {
                                     format!("{}µs", elapsed.as_micros())
                                 };
                                 match result {
-                                    Ok(()) => crate::vprintln!("[SEEK]   try_seek OK: {timing}"),
-                                    Err(e) => eprintln!("[SEEK]   try_seek FAILED ({timing}): {e}"),
+                                    Ok(()) => {
+                                        deferred_seek = None;
+                                        crate::vprintln!("[SEEK]   try_seek OK: {timing}");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[SEEK]   try_seek FAILED ({timing}): {e}");
+                                        deferred_seek = Some(latest_time);
+                                    }
                                 }
+                            } else {
+                                deferred_seek = Some(latest_time);
+                                crate::vprintln!("[SEEK]   queued until player ready");
                             }
                         }
                         PlayerCommand::SetVolume(vol) => {
@@ -921,12 +1090,21 @@ impl Player {
                             for ev in handle.poll_events() {
                                 match ev {
                                     ExclusiveEvent::TimeUpdate(t) => {
+                                        if let Some(track_id) = current_track_id.as_ref() {
+                                            resume_store.set(track_id, t);
+                                            resume_store.flush_if_due(false);
+                                        }
                                         callback(PlayerEvent::TimeUpdate(t, current_seq));
                                     }
                                     ExclusiveEvent::StateChange(s) => {
                                         if s == "completed" {
+                                            if let Some(track_id) = current_track_id.as_ref() {
+                                                resume_store.clear(track_id);
+                                                resume_store.flush_if_due(true);
+                                            }
                                             has_track = false;
                                             is_playing = false;
+                                            current_track_id = None;
                                             crate::state::GOVERNOR
                                                 .buffer_progress()
                                                 .set_playback_active(false);
@@ -936,6 +1114,13 @@ impl Player {
                                     ExclusiveEvent::Duration(d) => {
                                         current_duration = d;
                                         callback(PlayerEvent::Duration(d, current_seq));
+                                        if let Some(seek_time) = deferred_seek.take() {
+                                            handle.send(ExclusiveCommand::Seek(seek_time));
+                                            callback(PlayerEvent::TimeUpdate(
+                                                seek_time,
+                                                current_seq,
+                                            ));
+                                        }
                                     }
                                     ExclusiveEvent::InitFailed(e) => {
                                         eprintln!(
@@ -950,9 +1135,11 @@ impl Player {
                                     ExclusiveEvent::Stopped => {
                                         has_track = false;
                                         is_playing = false;
+                                        current_track_id = None;
                                         crate::state::GOVERNOR
                                             .buffer_progress()
                                             .set_playback_active(false);
+                                        resume_store.flush_if_due(true);
                                     }
                                 }
                             }
@@ -980,14 +1167,23 @@ impl Player {
                     let pos_secs = pos.as_secs_f64();
 
                     if pos_secs > 0.0 {
+                        if let Some(track_id) = current_track_id.as_ref() {
+                            resume_store.set(track_id, pos_secs);
+                            resume_store.flush_if_due(false);
+                        }
                         callback(PlayerEvent::TimeUpdate(pos_secs, current_seq));
                     }
 
                     if p.empty() && !last_empty {
+                        if let Some(track_id) = current_track_id.as_ref() {
+                            resume_store.clear(track_id);
+                            resume_store.flush_if_due(true);
+                        }
                         callback(PlayerEvent::TimeUpdate(current_duration, current_seq));
                         callback(PlayerEvent::StateChange("completed", current_seq));
                         has_track = false;
                         is_playing = false;
+                        current_track_id = None;
                         crate::state::GOVERNOR
                             .buffer_progress()
                             .set_playback_active(false);
@@ -1040,6 +1236,7 @@ impl Player {
                 url: url.clone(),
                 key: key.clone(),
             };
+            let track_id = canonical_track_id(&url);
 
             // Use preloaded data if available (instant)
             if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
@@ -1052,7 +1249,12 @@ impl Player {
                     format_bytes(preloaded.data.len() as u64),
                     load_start.elapsed().as_secs_f64() * 1000.0
                 );
-                let _ = cmd_tx.send(PlayerCommand::LoadData(preloaded.data, load_gen, event_seq));
+                let _ = cmd_tx.send(PlayerCommand::LoadData(
+                    preloaded.data,
+                    load_gen,
+                    event_seq,
+                    track_id.clone(),
+                ));
                 return;
             }
 
@@ -1102,7 +1304,12 @@ impl Player {
                             format_bytes(data.len() as u64),
                             load_start.elapsed().as_secs_f64() * 1000.0
                         );
-                        let _ = cmd_tx.send(PlayerCommand::LoadData(data, load_gen, event_seq));
+                        let _ = cmd_tx.send(PlayerCommand::LoadData(
+                            data,
+                            load_gen,
+                            event_seq,
+                            track_id.clone(),
+                        ));
                     }
                     Err(e) => {
                         eprintln!("[ERROR]  Fetch failed: {}", e);
@@ -1121,7 +1328,12 @@ impl Player {
             let bp = crate::state::GOVERNOR.buffer_progress().clone();
             let (buffer, writer) = StreamingBuffer::new(total_len, Some(bp));
             crate::vprintln!("[LOAD #{load_gen}] sending LoadStreaming");
-            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(buffer, load_gen, event_seq));
+            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(
+                buffer,
+                load_gen,
+                event_seq,
+                track_id.clone(),
+            ));
 
             // Download continues in background, writer feeds the buffer
             preload::start_streaming_download(resp, url, key, writer);
