@@ -9,6 +9,7 @@ declare global {
         __TIDAL_CALLBACKS__: any;
         __TIDAL_IPC_RESPONSE__: any;
         __TIDAL_RS_PLATFORM__: string;
+        __TIDAL_RS_WINDOW_STATE__?: { isMaximized: boolean; isFullscreen: boolean };
     }
     var window: Window & typeof globalThis;
 }
@@ -24,24 +25,6 @@ const sendIpc = (channel: string, ...args: any[]) => {
     window.ipc.postMessage(JSON.stringify({ channel, args }));
 };
 
-const pendingRequests = new Map<string, { resolve: (value: any) => void, reject: (reason: any) => void }>();
-
-window.__TIDAL_IPC_RESPONSE__ = (id: string, error: any, result: any) => {
-    const req = pendingRequests.get(id);
-    if (req) {
-        if (error) req.reject(error);
-        else req.resolve(result);
-        pendingRequests.delete(id);
-    }
-};
-
-const invokeIpc = (channel: string, ...args: any[]) => {
-    return new Promise((resolve, reject) => {
-        const id = Math.random().toString(36).substring(2);
-        pendingRequests.set(id, { resolve, reject });
-        window.ipc.postMessage(JSON.stringify({ channel, args, id }));
-    });
-};
 const createApplicationController = () => {
     let delegate: any = null;
 
@@ -309,7 +292,9 @@ window.nativeInterface = {
     tidalConnect: undefined,
     userSession: createUserSession(),
     userSettings: createUserSettings(),
-    window: createWindowController({ isMaximized: false, isFullscreen: false }),
+    window: createWindowController(
+        window.__TIDAL_RS_WINDOW_STATE__ || { isMaximized: false, isFullscreen: false }
+    ),
 };
 window.NativePlayerComponent = createNativePlayerComponent();
 console.log("Native Interface exposed (sync)");
@@ -328,18 +313,6 @@ const init = async () => {
         console.log("Generated new PKCE pair");
     } else {
         console.log("Restored PKCE pair from session storage");
-    }
-
-    try {
-        const state = await invokeIpc("window.state.get") as any;
-        if (state) {
-            const cb = window.__TIDAL_CALLBACKS__?.window;
-            if (cb && typeof cb.updateState === "function") {
-                cb.updateState(state.isMaximized, state.isFullscreen);
-            }
-        }
-    } catch (e) {
-        console.error("Failed to get window state", e);
     }
 
     // Frameless window management: controls + drag/resize (non-Linux only).

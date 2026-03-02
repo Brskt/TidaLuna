@@ -184,12 +184,18 @@ fn main() -> wry::Result<()> {
     let mut web_context = WebContext::new(Some(data_dir));
 
     let script = include_str!(concat!(env!("OUT_DIR"), "/bundle.js"));
+    let initial_is_maximized = window.is_maximized();
+    let initial_is_fullscreen = window.fullscreen().is_some();
 
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url("https://desktop.tidal.com/")
         .with_devtools(true)
         .with_initialization_script(format!(
             r#"window.__TIDAL_RS_PLATFORM__ = '{platform}';
+window.__TIDAL_RS_WINDOW_STATE__ = {{
+    isMaximized: {initial_is_maximized},
+    isFullscreen: {initial_is_fullscreen}
+}};
 var _cfgTarget = {{ enableDesktopFeatures: true }};
 var _cfgProxy = new Proxy(_cfgTarget, {{
     get: function(t, p) {{ return p === 'enableDesktopFeatures' ? true : t[p]; }},
@@ -212,7 +218,9 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                 "darwin"
             } else {
                 "win32"
-            }
+            },
+            initial_is_maximized = initial_is_maximized,
+            initial_is_fullscreen = initial_is_fullscreen
         ))
         .with_initialization_script(script)
         // TODO: temporary Linux UA to bypass Tidal's anti-bot blocking during login.
@@ -575,21 +583,6 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                         "window.unmaximize" => {
                             window.set_maximized(false);
                             update_window_state(&webview, &window);
-                        }
-                        "window.state.get" => {
-                            if let Some(id) = msg.id {
-                                let is_maximized = window.is_maximized();
-                                let is_fullscreen = window.fullscreen().is_some();
-                                let value = serde_json::json!({
-                                    "isMaximized": is_maximized,
-                                    "isFullscreen": is_fullscreen
-                                });
-                                let js = format!(
-                                    "window.__TIDAL_IPC_RESPONSE__('{}', null, {})",
-                                    id, value
-                                );
-                                let _ = webview.evaluate_script(&js);
-                            }
                         }
                         "web.loaded" => {
                             if let Some(url) = pending_navigation.take()
