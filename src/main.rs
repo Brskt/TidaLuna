@@ -2,23 +2,24 @@
     all(not(debug_assertions), not(feature = "console")),
     windows_subsystem = "windows"
 )]
+mod auth;
 mod bandwidth;
+mod bridge;
 mod decrypt;
-#[cfg(target_os = "windows")]
-mod exclusive_wasapi;
 mod logging;
+mod metadata;
 mod player;
-mod player_ipc;
 mod preload;
 mod state;
-mod streaming_buffer;
+mod window;
 
-use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
+use auth::load_or_create_pkce_credentials;
+use bridge::{PlayerBridgeEvent, flush_player_bridge};
+use metadata::parse_track_metadata;
+use player::ipc::{PlayerIpc, parse_player_ipc};
 use player::{Player, PlayerEvent};
-use player_ipc::{PlayerIpc, parse_player_ipc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use state::TrackInfo;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::{
@@ -27,6 +28,7 @@ use tao::{
     keyboard::Key,
     window::{CursorIcon, ResizeDirection, WindowBuilder},
 };
+use window::{cursor_icon_for_resize_direction, is_near_resize_edge, resize_direction_for_point};
 use wry::{WebContext, WebViewBuilder};
 
 #[derive(Deserialize, Debug)]
@@ -44,269 +46,6 @@ enum UserEvent {
     IpcMessage(IpcMessage),
     Player(PlayerEvent),
     AutoLoad(TrackInfo),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PkceCredentials {
-    credentials_storage_key: String,
-    code_challenge: String,
-    redirect_uri: String,
-    code_verifier: String,
-}
-
-fn pkce_credentials_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("pkce_credentials.json")
-}
-
-fn generate_pkce_credentials() -> PkceCredentials {
-    let (code_challenge, code_verifier) = PkceCodeChallenge::new_random_sha256();
-
-    PkceCredentials {
-        credentials_storage_key: "tidal".to_string(),
-        code_challenge: code_challenge.as_str().to_string(),
-        redirect_uri: "tidal://auth/".to_string(),
-        code_verifier: code_verifier.secret().to_string(),
-    }
-}
-
-fn is_valid_pkce_verifier(verifier: &str) -> bool {
-    let len = verifier.len();
-    (43..=128).contains(&len)
-        && verifier
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
-}
-
-fn is_valid_pkce_credentials(c: &PkceCredentials) -> bool {
-    if c.credentials_storage_key.trim().is_empty()
-        || c.code_challenge.trim().is_empty()
-        || c.redirect_uri.trim().is_empty()
-        || c.code_verifier.trim().is_empty()
-        || !is_valid_pkce_verifier(&c.code_verifier)
-    {
-        return false;
-    }
-
-    let verifier = PkceCodeVerifier::new(c.code_verifier.clone());
-    let expected_challenge = PkceCodeChallenge::from_code_verifier_sha256(&verifier);
-    c.code_challenge == expected_challenge.as_str()
-}
-
-fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredentials {
-    let path = pkce_credentials_path(data_dir);
-
-    if let Ok(bytes) = std::fs::read(&path)
-        && let Ok(mut loaded) = serde_json::from_slice::<PkceCredentials>(&bytes)
-    {
-        if loaded.credentials_storage_key.trim().is_empty() {
-            loaded.credentials_storage_key = "tidal".to_string();
-        }
-        if loaded.redirect_uri.trim().is_empty() {
-            loaded.redirect_uri = "tidal://auth/".to_string();
-        }
-        if is_valid_pkce_credentials(&loaded) {
-            crate::vprintln!("[PKCE]   Loaded persisted credentials");
-            return loaded;
-        }
-        crate::vprintln!("[PKCE]   Invalid persisted credentials, regenerating");
-    }
-
-    let generated = generate_pkce_credentials();
-    if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        eprintln!(
-            "[PKCE]   Failed to create directory {}: {e}",
-            parent.display()
-        );
-        return generated;
-    }
-    match serde_json::to_vec_pretty(&generated) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                eprintln!("[PKCE]   Failed to persist credentials: {e}");
-            } else {
-                crate::vprintln!("[PKCE]   Persisted credentials");
-            }
-        }
-        Err(e) => eprintln!("[PKCE]   Failed to serialize credentials: {e}"),
-    }
-    generated
-}
-
-fn resize_direction_for_point(
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    border: f64,
-) -> Option<ResizeDirection> {
-    let top = y <= border;
-    let bottom = y >= height - border;
-    let left = x <= border;
-    let right = x >= width - border;
-
-    if top && left {
-        Some(ResizeDirection::NorthWest)
-    } else if top && right {
-        Some(ResizeDirection::NorthEast)
-    } else if bottom && left {
-        Some(ResizeDirection::SouthWest)
-    } else if bottom && right {
-        Some(ResizeDirection::SouthEast)
-    } else if top {
-        Some(ResizeDirection::North)
-    } else if bottom {
-        Some(ResizeDirection::South)
-    } else if left {
-        Some(ResizeDirection::West)
-    } else if right {
-        Some(ResizeDirection::East)
-    } else {
-        None
-    }
-}
-
-fn is_near_resize_edge(x: f64, y: f64, width: f64, height: f64, hot_zone: f64) -> bool {
-    x <= hot_zone || x >= width - hot_zone || y <= hot_zone || y >= height - hot_zone
-}
-
-fn cursor_icon_for_resize_direction(direction: ResizeDirection) -> CursorIcon {
-    match direction {
-        ResizeDirection::North => CursorIcon::NResize,
-        ResizeDirection::South => CursorIcon::SResize,
-        ResizeDirection::East => CursorIcon::EResize,
-        ResizeDirection::West => CursorIcon::WResize,
-        ResizeDirection::NorthEast => CursorIcon::NeResize,
-        ResizeDirection::NorthWest => CursorIcon::NwResize,
-        ResizeDirection::SouthEast => CursorIcon::SeResize,
-        ResizeDirection::SouthWest => CursorIcon::SwResize,
-    }
-}
-
-fn value_trimmed_string(value: &serde_json::Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn first_trimmed_string(obj: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| obj.get(*key).and_then(value_trimmed_string))
-}
-
-fn parse_media_item_artist(obj: &serde_json::Value) -> String {
-    if let Some(artist) = obj.get("artist") {
-        if let Some(name) = value_trimmed_string(artist) {
-            return name;
-        }
-        if let Some(name) = artist.get("name").and_then(value_trimmed_string) {
-            return name;
-        }
-    }
-
-    if let Some(artists) = obj.get("artists").and_then(|v| v.as_array()) {
-        let names: Vec<String> = artists
-            .iter()
-            .filter_map(|artist| {
-                value_trimmed_string(artist)
-                    .or_else(|| artist.get("name").and_then(value_trimmed_string))
-            })
-            .collect();
-        if !names.is_empty() {
-            return names.join(", ");
-        }
-    }
-
-    String::new()
-}
-
-fn parse_track_metadata(payload: &serde_json::Value) -> crate::state::TrackMetadata {
-    let title = first_trimmed_string(payload, &["title", "name"]).unwrap_or_default();
-    let quality = first_trimmed_string(payload, &["audioQuality", "quality"]).unwrap_or_default();
-    let artist = parse_media_item_artist(payload);
-
-    crate::state::TrackMetadata {
-        title,
-        artist,
-        quality,
-    }
-}
-
-#[derive(Serialize, Debug)]
-struct PlayerBridgeEvent {
-    t: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    seq: Option<u32>,
-    v: serde_json::Value,
-}
-
-impl PlayerBridgeEvent {
-    fn time(value: f64, seq: u32) -> Self {
-        Self {
-            t: "time",
-            seq: Some(seq),
-            v: serde_json::json!(value),
-        }
-    }
-
-    fn duration(value: f64, seq: u32) -> Self {
-        Self {
-            t: "duration",
-            seq: Some(seq),
-            v: serde_json::json!(value),
-        }
-    }
-
-    fn state(value: &'static str, seq: u32) -> Self {
-        Self {
-            t: "state",
-            seq: Some(seq),
-            v: serde_json::json!(value),
-        }
-    }
-
-    fn devices(value: serde_json::Value) -> Self {
-        Self {
-            t: "devices",
-            seq: None,
-            v: value,
-        }
-    }
-}
-
-fn flush_player_bridge(
-    webview: &wry::WebView,
-    pending_time_update: &mut Option<(f64, u32)>,
-    pending_player_events: &mut Vec<PlayerBridgeEvent>,
-    pending_misc_js: &mut Vec<String>,
-) {
-    if let Some((time, seq)) = pending_time_update.take() {
-        pending_player_events.push(PlayerBridgeEvent::time(time, seq));
-    }
-
-    if !pending_player_events.is_empty() {
-        match serde_json::to_string(&*pending_player_events) {
-            Ok(events_json) => {
-                let js = format!(
-                    "if (window.__TIDAL_RS_PLAYER_PUSH__) {{ window.__TIDAL_RS_PLAYER_PUSH__({}); }}",
-                    events_json
-                );
-                let _ = webview.evaluate_script(&js);
-            }
-            Err(e) => eprintln!("[BRIDGE] Failed to serialize player events: {e}"),
-        }
-        pending_player_events.clear();
-    }
-
-    if !pending_misc_js.is_empty() {
-        let js_batch = pending_misc_js.join(";");
-        let _ = webview.evaluate_script(&js_batch);
-        pending_misc_js.clear();
-    }
 }
 
 fn main() -> wry::Result<()> {

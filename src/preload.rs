@@ -1,9 +1,9 @@
 use crate::bandwidth::TrafficClass;
 use crate::decrypt::FlacDecryptor;
+use crate::player::streaming::StreamingBufferWriter;
 use crate::state::{
     CURRENT_TRACK, GOVERNOR, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo,
 };
-use crate::streaming_buffer::StreamingBufferWriter;
 use futures_util::StreamExt;
 
 const PRELOAD_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MB
