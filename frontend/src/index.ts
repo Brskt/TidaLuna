@@ -306,7 +306,7 @@ console.log("Native Interface exposed (sync)");
 const init = async () => {
     const now = Date.now();
 
-    // Frameless window management: controls + drag/resize (non-Linux only).
+    // Frameless window management (non-Linux only).
     // On Linux, native decorations handle this (with_decorations(true)).
     const frameless = window.__TIDAL_RS_PLATFORM__ !== "linux";
 
@@ -391,131 +391,39 @@ const init = async () => {
         }
     }
 
-    // Window resize + drag: borderless window management (non-Linux only).
+    // Window drag: borderless titlebar management (non-Linux only).
+    // Resize hit-test/cursor/drag-resize are handled natively in Rust.
     if (frameless) {
-    const RESIZE_BORDER = 6;
-    const RESIZE_HOT_ZONE = RESIZE_BORDER + 8;
-    const INTERACTIVE = "a, button, input, select, textarea, [role='button'], img, svg";
-    const FALLBACK_TITLEBAR_HEIGHT = 48;
+        const INTERACTIVE = "a, button, input, select, textarea, [role='button'], img, svg";
+        const FALLBACK_TITLEBAR_HEIGHT = 48;
 
-    const hitTest = (x: number, y: number): string | null => {
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        const top = y <= RESIZE_BORDER;
-        const bottom = y >= h - RESIZE_BORDER;
-        const left = x <= RESIZE_BORDER;
-        const right = x >= w - RESIZE_BORDER;
-        if (top && left) return "nw";
-        if (top && right) return "ne";
-        if (bottom && left) return "sw";
-        if (bottom && right) return "se";
-        if (top) return "n";
-        if (bottom) return "s";
-        if (left) return "w";
-        if (right) return "e";
-        return null;
-    };
-
-    const isNearResizeEdge = (x: number, y: number): boolean => {
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        return (
-            x <= RESIZE_HOT_ZONE ||
-            x >= w - RESIZE_HOT_ZONE ||
-            y <= RESIZE_HOT_ZONE ||
-            y >= h - RESIZE_HOT_ZONE
-        );
-    };
-
-    const getTitlebarHeight = (): number => {
-        const candidates = document.querySelectorAll("header, [role='banner']");
-        for (const el of candidates) {
-            const rect = el.getBoundingClientRect();
-            if (rect.top <= 0 && rect.height > 0 && rect.height < 120) {
-                return rect.bottom;
-            }
-        }
-        return FALLBACK_TITLEBAR_HEIGHT;
-    };
-
-    // Resize cursor: only send IPC when direction changes.
-    let lastDir: string | null = null;
-    let mouseFramePending = false;
-    let pendingMouseX = 0;
-    let pendingMouseY = 0;
-    let pendingMouseTarget: HTMLElement | null = null;
-    const resetResizeCursor = () => {
-        if (lastDir !== null) {
-            lastDir = null;
-            sendIpc("window.cursor.reset");
-        }
-    };
-    const processResizeMouse = () => {
-        mouseFramePending = false;
-        if (window.nativeInterface?.window?.isMaximized?.()) {
-            resetResizeCursor();
-            return;
-        }
-        if (pendingMouseTarget && pendingMouseTarget.closest(INTERACTIVE)) {
-            resetResizeCursor();
-            return;
-        }
-        if (!isNearResizeEdge(pendingMouseX, pendingMouseY)) {
-            resetResizeCursor();
-            return;
-        }
-        const dir = hitTest(pendingMouseX, pendingMouseY);
-        if (dir !== lastDir) {
-            lastDir = dir;
-            if (dir) {
-                sendIpc("window.cursor", dir);
-            } else {
-                sendIpc("window.cursor.reset");
-            }
-        }
-    };
-    document.addEventListener("mousemove", (e) => {
-        pendingMouseX = e.clientX;
-        pendingMouseY = e.clientY;
-        pendingMouseTarget = e.target as HTMLElement | null;
-        if (!mouseFramePending) {
-            mouseFramePending = true;
-            requestAnimationFrame(processResizeMouse);
-        }
-    }, true);
-
-    document.addEventListener("mouseleave", () => {
-        resetResizeCursor();
-    }, true);
-
-    // Mousedown: resize (border) > drag (titlebar) > passthrough.
-    document.addEventListener("mousedown", (e) => {
-        if (e.button !== 0) return;
-        const maximized = window.nativeInterface?.window?.isMaximized?.();
-
-        // Resize takes priority (skip if maximized).
-        if (!maximized) {
-            if (isNearResizeEdge(e.clientX, e.clientY)) {
-                const dir = hitTest(e.clientX, e.clientY);
-                if (dir) {
-                    e.preventDefault();
-                    sendIpc("window.resize", dir);
-                    return;
+        const getTitlebarHeight = (): number => {
+            const candidates = document.querySelectorAll("header, [role='banner']");
+            for (const el of candidates) {
+                const rect = el.getBoundingClientRect();
+                if (rect.top <= 0 && rect.height > 0 && rect.height < 120) {
+                    return rect.bottom;
                 }
             }
-        }
+            return FALLBACK_TITLEBAR_HEIGHT;
+        };
 
-        // Titlebar drag.
-        if (e.clientY > getTitlebarHeight()) return;
-        const target = e.target as HTMLElement | null;
-        if (!target || target.closest(INTERACTIVE)) return;
-        e.preventDefault();
-        if (e.detail === 2) {
-            sendIpc(maximized ? "window.unmaximize" : "window.maximize");
-        } else {
-            sendIpc("window.drag");
-        }
-    }, true);
+        // Mousedown: titlebar drag > passthrough.
+        document.addEventListener("mousedown", (e) => {
+            if (e.button !== 0) return;
+
+            // Titlebar drag.
+            if (e.clientY > getTitlebarHeight()) return;
+            const target = e.target as HTMLElement | null;
+            if (!target || target.closest(INTERACTIVE)) return;
+            e.preventDefault();
+            const maximized = window.nativeInterface?.window?.isMaximized?.();
+            if (e.detail === 2) {
+                sendIpc(maximized ? "window.unmaximize" : "window.maximize");
+            } else {
+                sendIpc("window.drag");
+            }
+        }, true);
     } // end frameless
 
     // F12 devtools fallback (in case the WebView captures the key before tao).

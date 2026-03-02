@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::{
-    event::{ElementState, Event, StartCause, WindowEvent},
+    event::{ElementState, Event, MouseButton, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
     keyboard::Key,
     window::{CursorIcon, ResizeDirection, WindowBuilder},
@@ -131,6 +131,56 @@ fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredentials {
         Err(e) => eprintln!("[PKCE]   Failed to serialize credentials: {e}"),
     }
     generated
+}
+
+fn resize_direction_for_point(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    border: f64,
+) -> Option<ResizeDirection> {
+    let top = y <= border;
+    let bottom = y >= height - border;
+    let left = x <= border;
+    let right = x >= width - border;
+
+    if top && left {
+        Some(ResizeDirection::NorthWest)
+    } else if top && right {
+        Some(ResizeDirection::NorthEast)
+    } else if bottom && left {
+        Some(ResizeDirection::SouthWest)
+    } else if bottom && right {
+        Some(ResizeDirection::SouthEast)
+    } else if top {
+        Some(ResizeDirection::North)
+    } else if bottom {
+        Some(ResizeDirection::South)
+    } else if left {
+        Some(ResizeDirection::West)
+    } else if right {
+        Some(ResizeDirection::East)
+    } else {
+        None
+    }
+}
+
+fn is_near_resize_edge(x: f64, y: f64, width: f64, height: f64, hot_zone: f64) -> bool {
+    x <= hot_zone || x >= width - hot_zone || y <= hot_zone || y >= height - hot_zone
+}
+
+fn cursor_icon_for_resize_direction(direction: ResizeDirection) -> CursorIcon {
+    match direction {
+        ResizeDirection::North => CursorIcon::NResize,
+        ResizeDirection::South => CursorIcon::SResize,
+        ResizeDirection::East => CursorIcon::EResize,
+        ResizeDirection::West => CursorIcon::WResize,
+        ResizeDirection::NorthEast => CursorIcon::NeResize,
+        ResizeDirection::NorthWest => CursorIcon::NwResize,
+        ResizeDirection::SouthEast => CursorIcon::SeResize,
+        ResizeDirection::SouthWest => CursorIcon::SwResize,
+    }
 }
 
 fn value_trimmed_string(value: &serde_json::Value) -> Option<String> {
@@ -514,6 +564,11 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
     let mut pending_misc_js: Vec<String> = Vec::new();
     let mut player_flush_deadline: Option<Instant> = None;
     let player_flush_interval = Duration::from_millis(24);
+    let frameless = !cfg!(target_os = "linux");
+    let resize_border_px = 6.0_f64;
+    let resize_hot_zone_px = resize_border_px + 8.0;
+    let mut last_cursor_pos: Option<(f64, f64)> = None;
+    let mut last_resize_direction: Option<ResizeDirection> = None;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -567,6 +622,74 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                 ..
             } => {
                 update_window_state(&webview, &window);
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                if frameless {
+                    let x = position.x;
+                    let y = position.y;
+                    last_cursor_pos = Some((x, y));
+
+                    if window.is_maximized() {
+                        if last_resize_direction.take().is_some() {
+                            window.set_cursor_icon(CursorIcon::Default);
+                        }
+                    } else {
+                        let size = window.inner_size();
+                        let width = size.width as f64;
+                        let height = size.height as f64;
+                        let direction =
+                            if is_near_resize_edge(x, y, width, height, resize_hot_zone_px) {
+                                resize_direction_for_point(x, y, width, height, resize_border_px)
+                            } else {
+                                None
+                            };
+
+                        if direction != last_resize_direction {
+                            last_resize_direction = direction;
+                            window.set_cursor_icon(
+                                direction
+                                    .map(cursor_icon_for_resize_direction)
+                                    .unwrap_or(CursorIcon::Default),
+                            );
+                        }
+                    }
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CursorLeft { .. },
+                ..
+            } => {
+                last_cursor_pos = None;
+                if frameless && last_resize_direction.take().is_some() {
+                    window.set_cursor_icon(CursorIcon::Default);
+                }
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                if frameless
+                    && !window.is_maximized()
+                    && let Some((x, y)) = last_cursor_pos
+                {
+                    let size = window.inner_size();
+                    let width = size.width as f64;
+                    let height = size.height as f64;
+                    if let Some(direction) =
+                        resize_direction_for_point(x, y, width, height, resize_border_px)
+                        && let Err(e) = window.drag_resize_window(direction)
+                    {
+                        eprintln!("[WINDOW] drag_resize_window failed: {e}");
+                    }
+                }
             }
             Event::UserEvent(user_event) => match user_event {
                 UserEvent::Player(player_event) => {
@@ -738,47 +861,6 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                         }
                         "window.drag" => {
                             let _ = window.drag_window();
-                        }
-                        "window.resize" => {
-                            if window.is_maximized() {
-                                // Ignore resize when maximized.
-                            } else if let Some(dir) = msg.args.first().and_then(|v| v.as_str()) {
-                                let direction = match dir {
-                                    "n" => Some(ResizeDirection::North),
-                                    "s" => Some(ResizeDirection::South),
-                                    "e" => Some(ResizeDirection::East),
-                                    "w" => Some(ResizeDirection::West),
-                                    "ne" => Some(ResizeDirection::NorthEast),
-                                    "nw" => Some(ResizeDirection::NorthWest),
-                                    "se" => Some(ResizeDirection::SouthEast),
-                                    "sw" => Some(ResizeDirection::SouthWest),
-                                    _ => None,
-                                };
-                                if let Some(d) = direction
-                                    && let Err(e) = window.drag_resize_window(d)
-                                {
-                                    eprintln!("[WINDOW] drag_resize_window failed: {e}");
-                                }
-                            }
-                        }
-                        "window.cursor" => {
-                            if let Some(dir) = msg.args.first().and_then(|v| v.as_str()) {
-                                let cursor = match dir {
-                                    "n" => CursorIcon::NResize,
-                                    "s" => CursorIcon::SResize,
-                                    "e" => CursorIcon::EResize,
-                                    "w" => CursorIcon::WResize,
-                                    "ne" => CursorIcon::NeResize,
-                                    "nw" => CursorIcon::NwResize,
-                                    "se" => CursorIcon::SeResize,
-                                    "sw" => CursorIcon::SwResize,
-                                    _ => CursorIcon::Default,
-                                };
-                                window.set_cursor_icon(cursor);
-                            }
-                        }
-                        "window.cursor.reset" => {
-                            window.set_cursor_icon(CursorIcon::Default);
                         }
                         "window.close" => *control_flow = ControlFlow::Exit,
                         "window.maximize" => {
