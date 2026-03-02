@@ -80,8 +80,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tidal-rs-linux-amd64
-          path: target/release/tidal-rs
+          name: tidalunar-linux-amd64
+          path: target/release/tidalunar
 
   build-linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -114,8 +114,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tidal-rs-linux-arm64
-          path: target/release/tidal-rs
+          name: tidalunar-linux-arm64
+          path: target/release/tidalunar
 
   build-windows-amd64:
     runs-on: windows-latest
@@ -135,8 +135,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tidal-rs-windows-amd64
-          path: target/release/tidal-rs.exe
+          name: tidalunar-windows-amd64
+          path: target/release/tidalunar.exe
 
   build-windows-arm64:
     runs-on: windows-11-arm
@@ -156,8 +156,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tidal-rs-windows-arm64
-          path: target/release/tidal-rs.exe
+          name: tidalunar-windows-arm64
+          path: target/release/tidalunar.exe
 
   build-macos-arm64:
     runs-on: macos-latest
@@ -177,5 +177,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tidal-rs-macos-arm64
-          path: target/release/tidal-rs
+          name: tidalunar-macos-arm64
+          path: target/release/tidalunar

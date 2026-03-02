@@ -16,7 +16,7 @@ let
 in
 # TODO: there is *yet* no build process, so this will always fail
 rustPlatform.buildRustPackage {
-  pname = "tidal-rs";
+  pname = "tidalunar";
   inherit (toml) version;
 
   nativeBuildInputs = [

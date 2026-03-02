@@ -11,7 +11,7 @@ fn resume_store_path() -> PathBuf {
     {
         let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(base)
-            .join("tidal-rs")
+            .join("tidalunar")
             .join("resume_positions.json")
     }
     #[cfg(not(target_os = "windows"))]
@@ -20,7 +20,7 @@ fn resume_store_path() -> PathBuf {
         PathBuf::from(base)
             .join(".local")
             .join("share")
-            .join("tidal-rs")
+            .join("tidalunar")
             .join("resume_positions.json")
     }
 }

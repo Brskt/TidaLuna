@@ -62,7 +62,7 @@ fn main() -> wry::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let icon = load_window_icon();
     let window = WindowBuilder::new()
-        .with_title("tidal-rs")
+        .with_title("TidaLunar")
         .with_window_icon(Some(icon))
         .with_decorations(cfg!(target_os = "linux"))
         .build(&event_loop)
@@ -103,7 +103,7 @@ fn main() -> wry::Result<()> {
         #[cfg(target_os = "windows")]
         {
             let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(base).join("tidal-rs")
+            std::path::PathBuf::from(base).join("tidalunar")
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -111,7 +111,7 @@ fn main() -> wry::Result<()> {
             std::path::PathBuf::from(base)
                 .join(".local")
                 .join("share")
-                .join("tidal-rs")
+                .join("tidalunar")
         }
     };
 
