@@ -10,6 +10,7 @@ declare global {
         __TIDAL_IPC_RESPONSE__: any;
         __TIDAL_RS_PLATFORM__: string;
         __TIDAL_RS_WINDOW_STATE__?: { isMaximized: boolean; isFullscreen: boolean };
+        __TIDAL_RS_PLAYER_PUSH__?: (events: any[]) => void;
     }
     var window: Window & typeof globalThis;
 }
@@ -297,6 +298,24 @@ window.nativeInterface = {
     ),
 };
 window.NativePlayerComponent = createNativePlayerComponent();
+window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
+    if (!Array.isArray(events)) return;
+    const bridge = window.NativePlayerComponent;
+    if (!bridge || typeof bridge.trigger !== "function") return;
+    for (const event of events) {
+        if (!event || typeof event !== "object") continue;
+        const type = event.t;
+        if (type === "time") {
+            bridge.trigger("mediacurrenttime", event.v, event.seq);
+        } else if (type === "duration") {
+            bridge.trigger("mediaduration", event.v, event.seq);
+        } else if (type === "state") {
+            bridge.trigger("mediastate", event.v, event.seq);
+        } else if (type === "devices") {
+            bridge.trigger("devices", event.v);
+        }
+    }
+};
 console.log("Native Interface exposed (sync)");
 
 // Async hydration: generate PKCE if missing, fetch real window state.

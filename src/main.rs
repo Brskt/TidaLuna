@@ -13,7 +13,7 @@ mod state;
 mod streaming_buffer;
 
 use player::{Player, PlayerEvent};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use state::TrackInfo;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,6 +40,79 @@ enum UserEvent {
     IpcMessage(IpcMessage),
     Player(PlayerEvent),
     AutoLoad(TrackInfo),
+}
+
+#[derive(Serialize, Debug)]
+struct PlayerBridgeEvent {
+    t: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u32>,
+    v: serde_json::Value,
+}
+
+impl PlayerBridgeEvent {
+    fn time(value: f64, seq: u32) -> Self {
+        Self {
+            t: "time",
+            seq: Some(seq),
+            v: serde_json::json!(value),
+        }
+    }
+
+    fn duration(value: f64, seq: u32) -> Self {
+        Self {
+            t: "duration",
+            seq: Some(seq),
+            v: serde_json::json!(value),
+        }
+    }
+
+    fn state(value: &'static str, seq: u32) -> Self {
+        Self {
+            t: "state",
+            seq: Some(seq),
+            v: serde_json::json!(value),
+        }
+    }
+
+    fn devices(value: serde_json::Value) -> Self {
+        Self {
+            t: "devices",
+            seq: None,
+            v: value,
+        }
+    }
+}
+
+fn flush_player_bridge(
+    webview: &wry::WebView,
+    pending_time_update: &mut Option<(f64, u32)>,
+    pending_player_events: &mut Vec<PlayerBridgeEvent>,
+    pending_misc_js: &mut Vec<String>,
+) {
+    if let Some((time, seq)) = pending_time_update.take() {
+        pending_player_events.push(PlayerBridgeEvent::time(time, seq));
+    }
+
+    if !pending_player_events.is_empty() {
+        match serde_json::to_string(&*pending_player_events) {
+            Ok(events_json) => {
+                let js = format!(
+                    "if (window.__TIDAL_RS_PLAYER_PUSH__) {{ window.__TIDAL_RS_PLAYER_PUSH__({}); }}",
+                    events_json
+                );
+                let _ = webview.evaluate_script(&js);
+            }
+            Err(e) => eprintln!("[BRIDGE] Failed to serialize player events: {e}"),
+        }
+        pending_player_events.clear();
+    }
+
+    if !pending_misc_js.is_empty() {
+        let js_batch = pending_misc_js.join(";");
+        let _ = webview.evaluate_script(&js_batch);
+        pending_misc_js.clear();
+    }
 }
 
 fn parse_player_recover_args(
@@ -287,7 +360,8 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
     };
 
     let mut pending_time_update: Option<(f64, u32)> = None;
-    let mut pending_player_js: Vec<String> = Vec::new();
+    let mut pending_player_events: Vec<PlayerBridgeEvent> = Vec::new();
+    let mut pending_misc_js: Vec<String> = Vec::new();
     let mut player_flush_deadline: Option<Instant> = None;
     let player_flush_interval = Duration::from_millis(24);
 
@@ -298,34 +372,24 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let now = Instant::now();
                 if player_flush_deadline.is_some_and(|t| now >= t) {
-                    if let Some((time, seq)) = pending_time_update.take() {
-                        pending_player_js.push(format!(
-                            "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediacurrenttime', {}, {}); }}",
-                            time, seq
-                        ));
-                    }
-                    if !pending_player_js.is_empty() {
-                        let js_batch = pending_player_js.join(";");
-                        let _ = webview.evaluate_script(&js_batch);
-                        pending_player_js.clear();
-                    }
+                    flush_player_bridge(
+                        &webview,
+                        &mut pending_time_update,
+                        &mut pending_player_events,
+                        &mut pending_misc_js,
+                    );
                     player_flush_deadline = None;
                 }
             }
             Event::MainEventsCleared => {
                 let now = Instant::now();
                 if player_flush_deadline.is_some_and(|t| now >= t) {
-                    if let Some((time, seq)) = pending_time_update.take() {
-                        pending_player_js.push(format!(
-                            "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediacurrenttime', {}, {}); }}",
-                            time, seq
-                        ));
-                    }
-                    if !pending_player_js.is_empty() {
-                        let js_batch = pending_player_js.join(";");
-                        let _ = webview.evaluate_script(&js_batch);
-                        pending_player_js.clear();
-                    }
+                    flush_player_bridge(
+                        &webview,
+                        &mut pending_time_update,
+                        &mut pending_player_events,
+                        &mut pending_misc_js,
+                    );
                     player_flush_deadline = None;
                 }
             }
@@ -355,8 +419,8 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                 update_window_state(&webview, &window);
             }
             Event::UserEvent(user_event) => match user_event {
-                 UserEvent::Player(player_event) => {
-                     match player_event {
+                UserEvent::Player(player_event) => {
+                    match player_event {
                         PlayerEvent::TimeUpdate(time, seq) => {
                             pending_time_update = Some((time, seq));
                             let now = Instant::now();
@@ -370,35 +434,49 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                                 *control_flow = ControlFlow::WaitUntil(deadline);
                             }
                         }
-                         PlayerEvent::StateChange(state, seq) => {
-                             let js = format!(
-                                 "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediastate', '{}', {}); }}",
-                                 state, seq
-                             );
-                             pending_player_js.push(js);
+                        PlayerEvent::StateChange(state, seq) => {
+                            pending_player_events.push(PlayerBridgeEvent::state(state, seq));
 
-                             if state == "completed" {
-                                 let proxy_autoload = proxy_autoload.clone();
-                                 rt_handle.spawn(async move {
-                                     if let Some(track) = preload::next_preloaded_track().await {
-                                         let _ = proxy_autoload.send_event(UserEvent::AutoLoad(track));
-                                     }
-                                 });
-                             }
-                             let now = Instant::now();
-                             if player_flush_deadline.is_none() {
-                                 player_flush_deadline = Some(now + player_flush_interval);
-                             }
-                             if let Some(deadline) = player_flush_deadline {
-                                 *control_flow = ControlFlow::WaitUntil(deadline);
-                             }
-                         },
-                         PlayerEvent::Duration(duration, seq) => {
-                                let js = format!(
-                                    "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('mediaduration', {}, {}); }}",
-                                    duration, seq
-                                );
-                                pending_player_js.push(js);
+                            if state == "completed" {
+                                let proxy_autoload = proxy_autoload.clone();
+                                rt_handle.spawn(async move {
+                                    if let Some(track) = preload::next_preloaded_track().await {
+                                        let _ =
+                                            proxy_autoload.send_event(UserEvent::AutoLoad(track));
+                                    }
+                                });
+                            }
+                            let now = Instant::now();
+                            if player_flush_deadline.is_none() {
+                                player_flush_deadline = Some(now + player_flush_interval);
+                            }
+                            if let Some(deadline) = player_flush_deadline {
+                                *control_flow = ControlFlow::WaitUntil(deadline);
+                            }
+                        }
+                        PlayerEvent::Duration(duration, seq) => {
+                            pending_player_events.push(PlayerBridgeEvent::duration(duration, seq));
+                            let now = Instant::now();
+                            if player_flush_deadline.is_none() {
+                                player_flush_deadline = Some(now + player_flush_interval);
+                            }
+                            if let Some(deadline) = player_flush_deadline {
+                                *control_flow = ControlFlow::WaitUntil(deadline);
+                            }
+                        }
+                        PlayerEvent::AudioDevices(devices, req_id) => {
+                            if let Ok(json_devices) = serde_json::to_string(&devices) {
+                                if let Some(id) = req_id {
+                                    let js = format!(
+                                        "window.__TIDAL_IPC_RESPONSE__('{}', null, {})",
+                                        id, json_devices
+                                    );
+                                    pending_misc_js.push(js);
+                                } else {
+                                    pending_player_events.push(PlayerBridgeEvent::devices(
+                                        serde_json::json!(devices),
+                                    ));
+                                }
                                 let now = Instant::now();
                                 if player_flush_deadline.is_none() {
                                     player_flush_deadline = Some(now + player_flush_interval);
@@ -406,29 +484,9 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                                 if let Some(deadline) = player_flush_deadline {
                                     *control_flow = ControlFlow::WaitUntil(deadline);
                                 }
-                            },
-                        PlayerEvent::AudioDevices(devices, req_id) => {
-                             if let Ok(json_devices) = serde_json::to_string(&devices) {
-                                 if let Some(id) = req_id {
-                                     let js = format!("window.__TIDAL_IPC_RESPONSE__('{}', null, {})", id, json_devices);
-                                     pending_player_js.push(js);
-                                 } else {
-                                      let js = format!(
-                                          "if (window.NativePlayerComponent && window.NativePlayerComponent.trigger) {{ window.NativePlayerComponent.trigger('devices', {}); }}",
-                                          json_devices
-                                      );
-                                      pending_player_js.push(js);
-                                 }
-                                 let now = Instant::now();
-                                 if player_flush_deadline.is_none() {
-                                     player_flush_deadline = Some(now + player_flush_interval);
-                                 }
-                                 if let Some(deadline) = player_flush_deadline {
-                                     *control_flow = ControlFlow::WaitUntil(deadline);
-                                 }
-                             }
+                            }
                         }
-                     }
+                    }
                 }
                 UserEvent::AutoLoad(track) => {
                     if let Err(e) = player_clone.load(track.url, "flac".to_string(), track.key) {
@@ -439,30 +497,29 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                     crate::vprintln!("Navigating to: {}", url);
                     if url.starts_with("tidal://") {
                         let path = url.strip_prefix("tidal://").unwrap();
-                        let _ = webview.load_url(
-                            &format!("https://desktop.tidal.com/{}", path),
-                        );
+                        let _ = webview.load_url(&format!("https://desktop.tidal.com/{}", path));
                     }
                 }
                 UserEvent::IpcMessage(msg) => {
                     crate::vprintln!("IPC Message: {:?}", msg);
                     match msg.channel.as_str() {
                         "player.load" => {
-                             if let (Some(url), Some(format), Some(key)) = (
-                                 msg.args.first().and_then(|v| v.as_str()),
-                                 msg.args.get(1).and_then(|v| v.as_str()),
-                                 msg.args.get(2).and_then(|v| v.as_str())
-                             )
-                                 && let Err(e) = player_clone.load(url.to_string(), format.to_string(), key.to_string())
-                             {
-                                 eprintln!("Failed to load track: {}", e);
-                             }
-                        },
+                            if let (Some(url), Some(format), Some(key)) = (
+                                msg.args.first().and_then(|v| v.as_str()),
+                                msg.args.get(1).and_then(|v| v.as_str()),
+                                msg.args.get(2).and_then(|v| v.as_str()),
+                            ) && let Err(e) = player_clone.load(
+                                url.to_string(),
+                                format.to_string(),
+                                key.to_string(),
+                            ) {
+                                eprintln!("Failed to load track: {}", e);
+                            }
+                        }
                         "player.recover" => {
                             if let Some((url, format, key, target_time)) =
                                 parse_player_recover_args(&msg.args)
-                                && let Err(e) =
-                                    player_clone.recover(url, format, key, target_time)
+                                && let Err(e) = player_clone.recover(url, format, key, target_time)
                             {
                                 eprintln!("Failed to recover track: {}", e);
                             }
@@ -471,14 +528,14 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                             if let (Some(url), Some(_format), Some(key)) = (
                                 msg.args.first().and_then(|v| v.as_str()),
                                 msg.args.get(1).and_then(|v| v.as_str()),
-                                msg.args.get(2).and_then(|v| v.as_str())
+                                msg.args.get(2).and_then(|v| v.as_str()),
                             ) {
                                 let track = crate::state::TrackInfo {
                                     url: url.to_string(),
                                     key: key.to_string(),
                                 };
                                 rt_handle.spawn(async move {
-                                        preload::start_preload(track).await;
+                                    preload::start_preload(track).await;
                                 });
                             }
                         }
@@ -490,40 +547,58 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                         "player.metadata" => {
                             if let Some(obj) = msg.args.first() {
                                 let meta = crate::state::TrackMetadata {
-                                    title: obj.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    artist: obj.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    quality: obj.get("quality").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    title: obj
+                                        .get("title")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    artist: obj
+                                        .get("artist")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    quality: obj
+                                        .get("quality")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                 };
                                 let mut lock = crate::state::CURRENT_METADATA.lock().unwrap();
                                 *lock = Some(meta);
                             }
                         }
-                        "player.play" => { let _ = player_clone.play(); },
-                        "player.pause" => { let _ = player_clone.pause(); },
-                        "player.stop" => { let _ = player_clone.stop(); },
+                        "player.play" => {
+                            let _ = player_clone.play();
+                        }
+                        "player.pause" => {
+                            let _ = player_clone.pause();
+                        }
+                        "player.stop" => {
+                            let _ = player_clone.stop();
+                        }
                         "player.seek" => {
                             if let Some(time) = msg.args.first().and_then(|v| v.as_f64()) {
                                 let _ = player_clone.seek(time);
                             }
-                        },
+                        }
                         "player.volume" => {
                             if let Some(vol) = msg.args.first().and_then(|v| v.as_f64()) {
                                 let _ = player_clone.set_volume(vol);
                             }
-                        },
+                        }
                         "player.devices.get" => {
                             let _ = player_clone.get_audio_devices(msg.id);
-                        },
+                        }
                         "player.devices.set" => {
                             if let Some(id) = msg.args.first().and_then(|v| v.as_str()) {
-                                 let exclusive = msg
-                                     .args
-                                     .get(1)
-                                     .and_then(|v| v.as_str())
-                                     .is_some_and(|mode| mode == "exclusive");
-                                 let _ = player_clone.set_audio_device(id.to_string(), exclusive);
+                                let exclusive = msg
+                                    .args
+                                    .get(1)
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(|mode| mode == "exclusive");
+                                let _ = player_clone.set_audio_device(id.to_string(), exclusive);
                             }
-                        },
+                        }
                         "window.devtools" => {
                             webview.open_devtools();
                         }
@@ -589,9 +664,8 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                                 && url.starts_with("tidal://")
                             {
                                 let path = url.strip_prefix("tidal://").unwrap();
-                                let _ = webview.load_url(
-                                    &format!("https://desktop.tidal.com/{}", path),
-                                );
+                                let _ = webview
+                                    .load_url(&format!("https://desktop.tidal.com/{}", path));
                             }
                             update_window_state(&webview, &window);
                         }
