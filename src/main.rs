@@ -8,12 +8,14 @@ mod decrypt;
 mod exclusive_wasapi;
 mod logging;
 mod player;
+mod player_ipc;
 mod preload;
 mod state;
 mod streaming_buffer;
 
 use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
 use player::{Player, PlayerEvent};
+use player_ipc::{PlayerIpc, parse_player_ipc};
 use serde::{Deserialize, Serialize};
 use state::TrackInfo;
 use std::path::{Path, PathBuf};
@@ -305,90 +307,6 @@ fn flush_player_bridge(
         let _ = webview.evaluate_script(&js_batch);
         pending_misc_js.clear();
     }
-}
-
-fn parse_player_recover_args(
-    args: &[serde_json::Value],
-) -> Option<(String, String, String, Option<f64>)> {
-    fn parse_num(v: &serde_json::Value) -> Option<f64> {
-        v.as_f64()
-            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
-    }
-
-    fn parse_secs(v: &serde_json::Value) -> Option<f64> {
-        parse_num(v)
-    }
-
-    fn parse_millis(v: &serde_json::Value) -> Option<f64> {
-        parse_num(v).map(|ms| ms / 1000.0)
-    }
-
-    let payload = args.iter().find(|v| v.is_object());
-
-    let url = payload
-        .and_then(|p| p.get("url"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            args.first()
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-        })?;
-
-    let mut stream_format = payload
-        .and_then(|p| {
-            p.get("streamFormat")
-                .and_then(|v| v.as_str())
-                .or_else(|| p.get("format").and_then(|v| v.as_str()))
-        })
-        .unwrap_or("flac")
-        .to_string();
-
-    let mut encryption_key = payload
-        .and_then(|p| {
-            p.get("encryptionKey")
-                .and_then(|v| v.as_str())
-                .or_else(|| p.get("key").and_then(|v| v.as_str()))
-        })
-        .unwrap_or("")
-        .to_string();
-
-    if payload.is_none() {
-        if let (Some(arg1), Some(arg2)) = (
-            args.get(1).and_then(|v| v.as_str()),
-            args.get(2).and_then(|v| v.as_str()),
-        ) {
-            stream_format = arg1.to_string();
-            encryption_key = arg2.to_string();
-        } else if let Some(arg1) = args.get(1).and_then(|v| v.as_str()) {
-            encryption_key = arg1.to_string();
-        }
-    }
-
-    if stream_format.is_empty() {
-        stream_format = "flac".to_string();
-    }
-
-    let payload_time = payload.and_then(|p| {
-        p.get("currentTime")
-            .and_then(parse_secs)
-            .or_else(|| p.get("time").and_then(parse_secs))
-            .or_else(|| p.get("position").and_then(parse_secs))
-            .or_else(|| p.get("seek").and_then(parse_secs))
-            .or_else(|| p.get("startPosition").and_then(parse_secs))
-            .or_else(|| p.get("resumeTime").and_then(parse_secs))
-            .or_else(|| p.get("positionMs").and_then(parse_millis))
-            .or_else(|| p.get("timeMs").and_then(parse_millis))
-    });
-
-    let numeric_arg = args.iter().find_map(parse_secs);
-    let target_time = payload_time
-        .or(numeric_arg)
-        .filter(|t| t.is_finite() && *t > 0.0);
-
-    Some((url, stream_format, encryption_key, target_time))
 }
 
 fn main() -> wry::Result<()> {
@@ -775,117 +693,105 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                 }
                 UserEvent::IpcMessage(msg) => {
                     crate::vprintln!("IPC Message: {:?}", msg);
-                    match msg.channel.as_str() {
-                        "player.load" => {
-                            if let (Some(url), Some(format), Some(key)) = (
-                                msg.args.first().and_then(|v| v.as_str()),
-                                msg.args.get(1).and_then(|v| v.as_str()),
-                                msg.args.get(2).and_then(|v| v.as_str()),
-                            ) && let Err(e) = player_clone.load(
-                                url.to_string(),
-                                format.to_string(),
-                                key.to_string(),
-                            ) {
-                                eprintln!("Failed to load track: {}", e);
+                    if msg.channel.starts_with("player.") {
+                        match parse_player_ipc(&msg.channel, &msg.args, msg.id.as_deref()) {
+                            Ok(player_ipc) => match player_ipc {
+                                PlayerIpc::Load { url, format, key } => {
+                                    if let Err(e) = player_clone.load(url, format, key) {
+                                        eprintln!("Failed to load track: {}", e);
+                                    }
+                                }
+                                PlayerIpc::Recover {
+                                    url,
+                                    format,
+                                    key,
+                                    target_time,
+                                } => {
+                                    if let Err(e) =
+                                        player_clone.recover(url, format, key, target_time)
+                                    {
+                                        eprintln!("Failed to recover track: {}", e);
+                                    }
+                                }
+                                PlayerIpc::Preload { url, key } => {
+                                    let track = crate::state::TrackInfo { url, key };
+                                    rt_handle.spawn(async move {
+                                        preload::start_preload(track).await;
+                                    });
+                                }
+                                PlayerIpc::PreloadCancel => {
+                                    rt_handle.spawn(async {
+                                        preload::cancel_preload().await;
+                                    });
+                                }
+                                PlayerIpc::Metadata { payload } => {
+                                    let meta = parse_track_metadata(&payload);
+                                    let mut lock = crate::state::CURRENT_METADATA.lock().unwrap();
+                                    *lock = Some(meta);
+                                }
+                                PlayerIpc::Play => {
+                                    let _ = player_clone.play();
+                                }
+                                PlayerIpc::Pause => {
+                                    let _ = player_clone.pause();
+                                }
+                                PlayerIpc::Stop => {
+                                    let _ = player_clone.stop();
+                                }
+                                PlayerIpc::Seek { time } => {
+                                    let _ = player_clone.seek(time);
+                                }
+                                PlayerIpc::Volume { volume } => {
+                                    let _ = player_clone.set_volume(volume);
+                                }
+                                PlayerIpc::DevicesGet { request_id } => {
+                                    let _ = player_clone.get_audio_devices(request_id);
+                                }
+                                PlayerIpc::DevicesSet { id, exclusive } => {
+                                    let _ = player_clone.set_audio_device(id, exclusive);
+                                }
+                            },
+                            Err(e) => {
+                                crate::vprintln!(
+                                    "[IPC]    Invalid player IPC ({}): {:?}",
+                                    msg.channel,
+                                    e
+                                );
                             }
                         }
-                        "player.recover" => {
-                            if let Some((url, format, key, target_time)) =
-                                parse_player_recover_args(&msg.args)
-                                && let Err(e) = player_clone.recover(url, format, key, target_time)
-                            {
-                                eprintln!("Failed to recover track: {}", e);
+                    } else {
+                        match msg.channel.as_str() {
+                            "window.devtools" => {
+                                webview.open_devtools();
                             }
-                        }
-                        "player.preload" => {
-                            if let (Some(url), Some(_format), Some(key)) = (
-                                msg.args.first().and_then(|v| v.as_str()),
-                                msg.args.get(1).and_then(|v| v.as_str()),
-                                msg.args.get(2).and_then(|v| v.as_str()),
-                            ) {
-                                let track = crate::state::TrackInfo {
-                                    url: url.to_string(),
-                                    key: key.to_string(),
-                                };
-                                rt_handle.spawn(async move {
-                                    preload::start_preload(track).await;
-                                });
+                            "window.drag" => {
+                                let _ = window.drag_window();
                             }
-                        }
-                        "player.preload.cancel" => {
-                            rt_handle.spawn(async {
-                                preload::cancel_preload().await;
-                            });
-                        }
-                        "player.metadata" => {
-                            if let Some(obj) = msg.args.first() {
-                                let meta = parse_track_metadata(obj);
-                                let mut lock = crate::state::CURRENT_METADATA.lock().unwrap();
-                                *lock = Some(meta);
+                            "window.close" => *control_flow = ControlFlow::Exit,
+                            "window.maximize" => {
+                                window.set_maximized(true);
+                                update_window_state(&webview, &window);
                             }
-                        }
-                        "player.play" => {
-                            let _ = player_clone.play();
-                        }
-                        "player.pause" => {
-                            let _ = player_clone.pause();
-                        }
-                        "player.stop" => {
-                            let _ = player_clone.stop();
-                        }
-                        "player.seek" => {
-                            if let Some(time) = msg.args.first().and_then(|v| v.as_f64()) {
-                                let _ = player_clone.seek(time);
+                            "window.minimize" => {
+                                window.set_minimized(true);
+                                update_window_state(&webview, &window);
                             }
-                        }
-                        "player.volume" => {
-                            if let Some(vol) = msg.args.first().and_then(|v| v.as_f64()) {
-                                let _ = player_clone.set_volume(vol);
+                            "window.unmaximize" => {
+                                window.set_maximized(false);
+                                update_window_state(&webview, &window);
                             }
-                        }
-                        "player.devices.get" => {
-                            let _ = player_clone.get_audio_devices(msg.id);
-                        }
-                        "player.devices.set" => {
-                            if let Some(id) = msg.args.first().and_then(|v| v.as_str()) {
-                                let exclusive = msg
-                                    .args
-                                    .get(1)
-                                    .and_then(|v| v.as_str())
-                                    .is_some_and(|mode| mode == "exclusive");
-                                let _ = player_clone.set_audio_device(id.to_string(), exclusive);
+                            "web.loaded" => {
+                                if let Some(url) = pending_navigation.take()
+                                    && url.starts_with("tidal://")
+                                {
+                                    let path = url.strip_prefix("tidal://").unwrap();
+                                    let _ = webview
+                                        .load_url(&format!("https://desktop.tidal.com/{}", path));
+                                }
+                                update_window_state(&webview, &window);
                             }
+                            _ => {}
                         }
-                        "window.devtools" => {
-                            webview.open_devtools();
-                        }
-                        "window.drag" => {
-                            let _ = window.drag_window();
-                        }
-                        "window.close" => *control_flow = ControlFlow::Exit,
-                        "window.maximize" => {
-                            window.set_maximized(true);
-                            update_window_state(&webview, &window);
-                        }
-                        "window.minimize" => {
-                            window.set_minimized(true);
-                            update_window_state(&webview, &window);
-                        }
-                        "window.unmaximize" => {
-                            window.set_maximized(false);
-                            update_window_state(&webview, &window);
-                        }
-                        "web.loaded" => {
-                            if let Some(url) = pending_navigation.take()
-                                && url.starts_with("tidal://")
-                            {
-                                let path = url.strip_prefix("tidal://").unwrap();
-                                let _ = webview
-                                    .load_url(&format!("https://desktop.tidal.com/{}", path));
-                            }
-                            update_window_state(&webview, &window);
-                        }
-                        _ => {}
                     }
                 }
             },
