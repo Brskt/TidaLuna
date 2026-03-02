@@ -11,6 +11,12 @@ declare global {
         __TIDAL_RS_PLATFORM__: string;
         __TIDAL_RS_WINDOW_STATE__?: { isMaximized: boolean; isFullscreen: boolean };
         __TIDAL_RS_PLAYER_PUSH__?: (events: any[]) => void;
+        __TIDAL_RS_CREDENTIALS__?: {
+            credentialsStorageKey: string;
+            codeChallenge: string;
+            redirectUri: string;
+            codeVerifier: string;
+        };
     }
     var window: Window & typeof globalThis;
 }
@@ -152,20 +158,6 @@ const createWindowController = (initialState: { isMaximized: boolean, isFullscre
         unmaximize: () => sendIpc("window.unmaximize"),
     }
 }
-
-const generateCodeVerifier = () => {
-    const array = new Uint8Array(32);
-    window.crypto.getRandomValues(array);
-    return btoa(String.fromCharCode.apply(null, Array.from(array))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-};
-
-const generateCodeChallenge = async (verifier: string) => {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(verifier);
-    const hash = await window.crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hash));
-    return btoa(String.fromCharCode.apply(null, hashArray)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-};
 const createNativePlayerComponent = () => {
     let activeEmitter: any = null;
     let activePlayer: any = null;
@@ -265,12 +257,13 @@ const createNativePlayerComponent = () => {
 
 // Synchronous initialization: expose nativeInterface immediately so Tidal
 // detects desktop mode before its own scripts run.
-const credentials: { credentialsStorageKey: string; codeChallenge: string; redirectUri: string; codeVerifier: string } = {
-    credentialsStorageKey: "tidal",
-    codeChallenge: sessionStorage.getItem("pkce_challenge") || "",
-    redirectUri: "tidal://auth/",
-    codeVerifier: sessionStorage.getItem("pkce_verifier") || "",
-};
+const credentials: { credentialsStorageKey: string; codeChallenge: string; redirectUri: string; codeVerifier: string } =
+    window.__TIDAL_RS_CREDENTIALS__ || {
+        credentialsStorageKey: "tidal",
+        codeChallenge: "",
+        redirectUri: "tidal://auth/",
+        codeVerifier: "",
+    };
 
 window.nativeInterface = {
     application: createApplicationController(),
@@ -309,21 +302,9 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
 };
 console.log("Native Interface exposed (sync)");
 
-// Async hydration: generate PKCE if missing, fetch real window state.
+// Async hydration.
 const init = async () => {
     const now = Date.now();
-
-    if (!credentials.codeVerifier || !credentials.codeChallenge) {
-        const verifier = generateCodeVerifier();
-        const challenge = await generateCodeChallenge(verifier);
-        credentials.codeVerifier = verifier;
-        credentials.codeChallenge = challenge;
-        sessionStorage.setItem("pkce_verifier", verifier);
-        sessionStorage.setItem("pkce_challenge", challenge);
-        console.log("Generated new PKCE pair");
-    } else {
-        console.log("Restored PKCE pair from session storage");
-    }
 
     // Frameless window management: controls + drag/resize (non-Linux only).
     // On Linux, native decorations handle this (with_decorations(true)).

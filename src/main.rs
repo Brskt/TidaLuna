@@ -12,9 +12,11 @@ mod preload;
 mod state;
 mod streaming_buffer;
 
+use oauth2::{PkceCodeChallenge, PkceCodeVerifier};
 use player::{Player, PlayerEvent};
 use serde::{Deserialize, Serialize};
 use state::TrackInfo;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::{
@@ -40,6 +42,95 @@ enum UserEvent {
     IpcMessage(IpcMessage),
     Player(PlayerEvent),
     AutoLoad(TrackInfo),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PkceCredentials {
+    credentials_storage_key: String,
+    code_challenge: String,
+    redirect_uri: String,
+    code_verifier: String,
+}
+
+fn pkce_credentials_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("pkce_credentials.json")
+}
+
+fn generate_pkce_credentials() -> PkceCredentials {
+    let (code_challenge, code_verifier) = PkceCodeChallenge::new_random_sha256();
+
+    PkceCredentials {
+        credentials_storage_key: "tidal".to_string(),
+        code_challenge: code_challenge.as_str().to_string(),
+        redirect_uri: "tidal://auth/".to_string(),
+        code_verifier: code_verifier.secret().to_string(),
+    }
+}
+
+fn is_valid_pkce_verifier(verifier: &str) -> bool {
+    let len = verifier.len();
+    (43..=128).contains(&len)
+        && verifier
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
+}
+
+fn is_valid_pkce_credentials(c: &PkceCredentials) -> bool {
+    if c.credentials_storage_key.trim().is_empty()
+        || c.code_challenge.trim().is_empty()
+        || c.redirect_uri.trim().is_empty()
+        || c.code_verifier.trim().is_empty()
+        || !is_valid_pkce_verifier(&c.code_verifier)
+    {
+        return false;
+    }
+
+    let verifier = PkceCodeVerifier::new(c.code_verifier.clone());
+    let expected_challenge = PkceCodeChallenge::from_code_verifier_sha256(&verifier);
+    c.code_challenge == expected_challenge.as_str()
+}
+
+fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredentials {
+    let path = pkce_credentials_path(data_dir);
+
+    if let Ok(bytes) = std::fs::read(&path)
+        && let Ok(mut loaded) = serde_json::from_slice::<PkceCredentials>(&bytes)
+    {
+        if loaded.credentials_storage_key.trim().is_empty() {
+            loaded.credentials_storage_key = "tidal".to_string();
+        }
+        if loaded.redirect_uri.trim().is_empty() {
+            loaded.redirect_uri = "tidal://auth/".to_string();
+        }
+        if is_valid_pkce_credentials(&loaded) {
+            crate::vprintln!("[PKCE]   Loaded persisted credentials");
+            return loaded;
+        }
+        crate::vprintln!("[PKCE]   Invalid persisted credentials, regenerating");
+    }
+
+    let generated = generate_pkce_credentials();
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "[PKCE]   Failed to create directory {}: {e}",
+            parent.display()
+        );
+        return generated;
+    }
+    match serde_json::to_vec_pretty(&generated) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("[PKCE]   Failed to persist credentials: {e}");
+            } else {
+                crate::vprintln!("[PKCE]   Persisted credentials");
+            }
+        }
+        Err(e) => eprintln!("[PKCE]   Failed to serialize credentials: {e}"),
+    }
+    generated
 }
 
 fn value_trimmed_string(value: &serde_json::Value) -> Option<String> {
@@ -305,6 +396,12 @@ fn main() -> wry::Result<()> {
         }
     };
 
+    let pkce_credentials = load_or_create_pkce_credentials(&data_dir);
+    let pkce_credentials_json = serde_json::to_string(&pkce_credentials).unwrap_or_else(|e| {
+        eprintln!("[PKCE]   Failed to encode credentials for JS: {e}");
+        "{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"tidal://auth/\",\"codeVerifier\":\"\"}".to_string()
+    });
+
     let mut web_context = WebContext::new(Some(data_dir));
 
     let script = include_str!(concat!(env!("OUT_DIR"), "/bundle.js"));
@@ -320,6 +417,7 @@ window.__TIDAL_RS_WINDOW_STATE__ = {{
     isMaximized: {initial_is_maximized},
     isFullscreen: {initial_is_fullscreen}
 }};
+window.__TIDAL_RS_CREDENTIALS__ = {pkce_credentials_json};
 var _cfgTarget = {{ enableDesktopFeatures: true }};
 var _cfgProxy = new Proxy(_cfgTarget, {{
     get: function(t, p) {{ return p === 'enableDesktopFeatures' ? true : t[p]; }},
@@ -344,7 +442,8 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                 "win32"
             },
             initial_is_maximized = initial_is_maximized,
-            initial_is_fullscreen = initial_is_fullscreen
+            initial_is_fullscreen = initial_is_fullscreen,
+            pkce_credentials_json = pkce_credentials_json
         ))
         .with_initialization_script(script)
         // TODO: temporary Linux UA to bypass Tidal's anti-bot blocking during login.
