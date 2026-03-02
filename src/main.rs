@@ -48,10 +48,22 @@ enum UserEvent {
     AutoLoad(TrackInfo),
 }
 
+fn load_window_icon() -> tao::window::Icon {
+    let ico_bytes = include_bytes!("../tidaluna.ico");
+    let reader = image::ImageReader::new(std::io::Cursor::new(ico_bytes))
+        .with_guessed_format()
+        .expect("Failed to read icon format");
+    let img = reader.decode().expect("Failed to decode icon").to_rgba8();
+    let (w, h) = img.dimensions();
+    tao::window::Icon::from_rgba(img.into_raw(), w, h).expect("Failed to create window icon")
+}
+
 fn main() -> wry::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let icon = load_window_icon();
     let window = WindowBuilder::new()
         .with_title("tidal-rs")
+        .with_window_icon(Some(icon))
         .with_decorations(cfg!(target_os = "linux"))
         .build(&event_loop)
         .unwrap();

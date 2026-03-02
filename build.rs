@@ -37,4 +37,14 @@ fn main() {
     // Move the final bundle to where Rust can find it
     let bundle_path = frontend_dir.join("dist").join("bundle.js");
     std::fs::copy(&bundle_path, &dest_path).expect("Failed to copy bundle.js to OUT_DIR");
+
+    // --- WINDOWS ICON EMBEDDING ---
+    // Embeds tidaluna.ico into the .exe so it shows in Explorer/taskbar.
+    #[cfg(target_os = "windows")]
+    {
+        println!("cargo:rerun-if-changed=tidaluna.ico");
+        let mut res = tauri_winres::WindowsResource::new();
+        res.set_icon("tidaluna.ico");
+        res.compile().expect("Failed to compile Windows resources");
+    }
 }
