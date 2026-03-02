@@ -80,17 +80,8 @@ const createPlaybackController = () => {
         sendPlayerCommand: (cmd: any) => { },
         setCurrentMediaItem: (item: any) => {
             if (item && typeof item === "object") {
-                let artist = "";
-                if (item.artist) {
-                    artist = typeof item.artist === "string" ? item.artist : item.artist?.name || "";
-                } else if (Array.isArray(item.artists)) {
-                    artist = item.artists.map((a: any) => typeof a === "string" ? a : a?.name || "").join(", ");
-                }
-                sendIpc("player.metadata", {
-                    title: item.title || item.name || "",
-                    artist,
-                    quality: item.audioQuality || item.quality || "",
-                });
+                // Send raw media item; metadata parsing/fallbacks are centralized in Rust.
+                sendIpc("player.metadata", item);
             }
         },
         // Tidal calls this in multiple internal flows (including resets/progress updates),
