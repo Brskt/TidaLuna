@@ -40,9 +40,16 @@ pub enum PlayerEvent {
     AudioDevices(Vec<AudioDevice>, Option<String>),
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ResumePolicy {
+    Disabled,
+    Auto,
+    Explicit(f64),
+}
+
 enum PlayerCommand {
-    LoadData(Vec<u8>, u32, u32, String),
-    LoadStreaming(StreamingBuffer, u32, u32, String),
+    LoadData(Vec<u8>, u32, u32, String, ResumePolicy),
+    LoadStreaming(StreamingBuffer, u32, u32, String, ResumePolicy),
     Play,
     Pause,
     Stop(u32),
@@ -356,9 +363,12 @@ impl Player {
             let mut current_volume: f32 = 1.0;
             let mut current_seq: u32 = 0;
             let mut current_track_id: Option<String> = None;
-            // Seek requested before player/decoder is ready.
-            let mut deferred_seek: Option<f64> = None;
+            // Resume position loaded from persistent store, applied lazily on Play.
+            let mut pending_resume_seek: Option<f64> = None;
             let mut resume_store = ResumeStore::load();
+            // Startup-only fallback: if frontend sends load (not recover) on app boot,
+            // allow one auto resume until first explicit Play.
+            let mut allow_startup_auto_resume = true;
 
             #[cfg(target_os = "windows")]
             let mut exclusive_handle: Option<ExclusiveHandle> = None;
@@ -397,15 +407,35 @@ impl Player {
 
                 for cmd in coalesced_cmds.drain(..) {
                     match cmd {
-                        PlayerCommand::LoadData(data, load_gen, event_seq, track_id) => {
+                        PlayerCommand::LoadData(
+                            data,
+                            load_gen,
+                            event_seq,
+                            track_id,
+                            resume_policy,
+                        ) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
                                 crate::vprintln!("[LOAD #{load_gen}] stale LoadData, ignoring");
                                 continue;
                             }
                             current_track_id = Some(track_id.clone());
-                            if deferred_seek.is_none() {
-                                deferred_seek = resume_store.get(&track_id);
-                            }
+                            pending_resume_seek = match resume_policy {
+                                ResumePolicy::Disabled => {
+                                    if allow_startup_auto_resume {
+                                        resume_store.get(&track_id)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                ResumePolicy::Auto => resume_store.get(&track_id),
+                                ResumePolicy::Explicit(t) => {
+                                    if t.is_finite() && t > RESUME_MIN_SECONDS {
+                                        Some(t)
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
                             current_seq = event_seq;
                             crate::state::GOVERNOR.reset_buffer_progress();
 
@@ -503,23 +533,13 @@ impl Player {
                                     current_data = Some(data);
                                     rodio_player = Some(player);
 
-                                    let mut initial_time = 0.0f64;
-                                    if let Some(seek_time) = deferred_seek.take()
-                                        && let Some(ref p) = rodio_player
-                                    {
-                                        if p.try_seek(Duration::from_secs_f64(seek_time)).is_ok() {
-                                            initial_time = seek_time.max(0.0);
-                                        } else {
-                                            deferred_seek = Some(seek_time);
-                                        }
-                                    }
-
                                     if current_duration > 0.0 {
                                         callback(PlayerEvent::Duration(
                                             current_duration,
                                             current_seq,
                                         ));
                                     }
+                                    let initial_time = pending_resume_seek.unwrap_or(0.0);
                                     callback(PlayerEvent::TimeUpdate(initial_time, current_seq));
 
                                     let bitrate = if current_duration > 0.0 {
@@ -545,7 +565,13 @@ impl Player {
                                 }
                             }
                         }
-                        PlayerCommand::LoadStreaming(buffer, load_gen, event_seq, track_id) => {
+                        PlayerCommand::LoadStreaming(
+                            buffer,
+                            load_gen,
+                            event_seq,
+                            track_id,
+                            resume_policy,
+                        ) => {
                             if load_gen != LOAD_SEQ.load(Relaxed) {
                                 crate::vprintln!(
                                     "[LOAD #{load_gen}] stale LoadStreaming, cancelling"
@@ -554,9 +580,23 @@ impl Player {
                                 continue;
                             }
                             current_track_id = Some(track_id.clone());
-                            if deferred_seek.is_none() {
-                                deferred_seek = resume_store.get(&track_id);
-                            }
+                            pending_resume_seek = match resume_policy {
+                                ResumePolicy::Disabled => {
+                                    if allow_startup_auto_resume {
+                                        resume_store.get(&track_id)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                ResumePolicy::Auto => resume_store.get(&track_id),
+                                ResumePolicy::Explicit(t) => {
+                                    if t.is_finite() && t > RESUME_MIN_SECONDS {
+                                        Some(t)
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
                             current_seq = event_seq;
                             #[cfg(target_os = "windows")]
                             if let Some(cancel) = exclusive_stream_cancel.take() {
@@ -654,23 +694,13 @@ impl Player {
                                     current_streaming_buffer = Some(buffer);
                                     rodio_player = Some(player);
 
-                                    let mut initial_time = 0.0f64;
-                                    if let Some(seek_time) = deferred_seek.take()
-                                        && let Some(ref p) = rodio_player
-                                    {
-                                        if p.try_seek(Duration::from_secs_f64(seek_time)).is_ok() {
-                                            initial_time = seek_time.max(0.0);
-                                        } else {
-                                            deferred_seek = Some(seek_time);
-                                        }
-                                    }
-
                                     if current_duration > 0.0 {
                                         callback(PlayerEvent::Duration(
                                             current_duration,
                                             current_seq,
                                         ));
                                     }
+                                    let initial_time = pending_resume_seek.unwrap_or(0.0);
                                     callback(PlayerEvent::TimeUpdate(initial_time, current_seq));
 
                                     let bitrate = if current_duration > 0.0 {
@@ -709,9 +739,16 @@ impl Player {
                             }
                         }
                         PlayerCommand::Play => {
+                            allow_startup_auto_resume = false;
                             #[cfg(target_os = "windows")]
                             {
                                 if is_exclusive_mode {
+                                    if let Some(seek_time) = pending_resume_seek.take()
+                                        && let Some(ref handle) = exclusive_handle
+                                    {
+                                        handle.send(ExclusiveCommand::Seek(seek_time));
+                                        callback(PlayerEvent::TimeUpdate(seek_time, current_seq));
+                                    }
                                     if let Some(ref handle) = exclusive_handle {
                                         handle.send(ExclusiveCommand::Play);
                                     }
@@ -723,7 +760,33 @@ impl Player {
                                 }
                             }
                             if let Some(ref p) = rodio_player {
+                                let mut resumed_on_play: Option<f64> = None;
+                                if let Some(seek_time) = pending_resume_seek.take() {
+                                    match p.try_seek(Duration::from_secs_f64(seek_time)) {
+                                        Ok(()) => {
+                                            if let Some(track_id) = current_track_id.as_ref() {
+                                                resume_store.set(track_id, seek_time);
+                                            }
+                                            resumed_on_play = Some(seek_time.max(0.0));
+                                            callback(PlayerEvent::TimeUpdate(
+                                                seek_time.max(0.0),
+                                                current_seq,
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            // Retry on next Play if decoder wasn't ready yet.
+                                            pending_resume_seek = Some(seek_time);
+                                            eprintln!("[SEEK]   resume seek failed on play: {e}");
+                                        }
+                                    }
+                                }
                                 p.play();
+                                let pos_secs = p.get_pos().as_secs_f64();
+                                // Right after a successful resume seek, some backends can briefly
+                                // still report 0; avoid overriding the UI resume position with 0.
+                                if resumed_on_play.is_none() || pos_secs > 0.0 {
+                                    callback(PlayerEvent::TimeUpdate(pos_secs, current_seq));
+                                }
                             }
                             is_playing = true;
                             crate::state::GOVERNOR
@@ -748,6 +811,8 @@ impl Player {
                             }
                             if let Some(ref p) = rodio_player {
                                 p.pause();
+                                let pos_secs = p.get_pos().as_secs_f64();
+                                callback(PlayerEvent::TimeUpdate(pos_secs, current_seq));
                             }
                             is_playing = false;
                             crate::state::GOVERNOR
@@ -783,7 +848,7 @@ impl Player {
                                     current_duration = 0.0;
                                     current_data = None;
                                     current_track_id = None;
-                                    deferred_seek = None;
+                                    pending_resume_seek = None;
                                     resume_store.flush_if_due(true);
 
                                     continue;
@@ -800,7 +865,7 @@ impl Player {
                             current_duration = 0.0;
                             current_data = None;
                             current_track_id = None;
-                            deferred_seek = None;
+                            pending_resume_seek = None;
                             resume_store.flush_if_due(true);
                         }
                         PlayerCommand::Seek(time) => {
@@ -818,6 +883,7 @@ impl Player {
                                 resume_store.set(track_id, latest_time);
                                 resume_store.flush_if_due(false);
                             }
+                            pending_resume_seek = None;
 
                             #[cfg(target_os = "windows")]
                             {
@@ -826,8 +892,12 @@ impl Player {
                                         if let Some(ref handle) = exclusive_handle {
                                             handle.send(ExclusiveCommand::Seek(latest_time));
                                         }
+                                        callback(PlayerEvent::TimeUpdate(
+                                            latest_time.max(0.0),
+                                            current_seq,
+                                        ));
                                     } else {
-                                        deferred_seek = Some(latest_time);
+                                        pending_resume_seek = Some(latest_time);
                                     }
                                     continue;
                                 }
@@ -843,16 +913,19 @@ impl Player {
                                 };
                                 match result {
                                     Ok(()) => {
-                                        deferred_seek = None;
                                         crate::vprintln!("[SEEK]   try_seek OK: {timing}");
+                                        callback(PlayerEvent::TimeUpdate(
+                                            latest_time.max(0.0),
+                                            current_seq,
+                                        ));
                                     }
                                     Err(e) => {
                                         eprintln!("[SEEK]   try_seek FAILED ({timing}): {e}");
-                                        deferred_seek = Some(latest_time);
+                                        pending_resume_seek = Some(latest_time);
                                     }
                                 }
                             } else {
-                                deferred_seek = Some(latest_time);
+                                pending_resume_seek = Some(latest_time);
                                 crate::vprintln!("[SEEK]   queued until player ready");
                             }
                         }
@@ -1114,7 +1187,7 @@ impl Player {
                                     ExclusiveEvent::Duration(d) => {
                                         current_duration = d;
                                         callback(PlayerEvent::Duration(d, current_seq));
-                                        if let Some(seek_time) = deferred_seek.take() {
+                                        if let Some(seek_time) = pending_resume_seek.take() {
                                             handle.send(ExclusiveCommand::Seek(seek_time));
                                             callback(PlayerEvent::TimeUpdate(
                                                 seek_time,
@@ -1210,7 +1283,13 @@ impl Player {
         })
     }
 
-    pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
+    fn load_with_policy(
+        &self,
+        url: String,
+        format: String,
+        key: String,
+        resume_policy: ResumePolicy,
+    ) -> anyhow::Result<()> {
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         crate::vprintln!("[LOAD #{load_gen}] start");
@@ -1254,6 +1333,7 @@ impl Player {
                     load_gen,
                     event_seq,
                     track_id.clone(),
+                    resume_policy,
                 ));
                 return;
             }
@@ -1309,6 +1389,7 @@ impl Player {
                             load_gen,
                             event_seq,
                             track_id.clone(),
+                            resume_policy,
                         ));
                     }
                     Err(e) => {
@@ -1333,6 +1414,7 @@ impl Player {
                 load_gen,
                 event_seq,
                 track_id.clone(),
+                resume_policy,
             ));
 
             // Download continues in background, writer feeds the buffer
@@ -1342,6 +1424,24 @@ impl Player {
         *self.load_handle.lock().unwrap() = Some(handle);
 
         Ok(())
+    }
+
+    pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
+        self.load_with_policy(url, format, key, ResumePolicy::Disabled)
+    }
+
+    pub fn recover(
+        &self,
+        url: String,
+        format: String,
+        key: String,
+        target_time: Option<f64>,
+    ) -> anyhow::Result<()> {
+        let policy = match target_time {
+            Some(t) if t.is_finite() && t > RESUME_MIN_SECONDS => ResumePolicy::Explicit(t),
+            _ => ResumePolicy::Auto,
+        };
+        self.load_with_policy(url, format, key, policy)
     }
 
     pub fn play(&self) -> anyhow::Result<()> {

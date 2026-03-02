@@ -159,7 +159,8 @@ pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack
 ///
 /// - `seek_padding`: 5 seconds of audio, clamped to [512 KB, 2 MB].
 ///   Covers the decoder's probe-back (~300-400 KB observed).
-/// - `warmup_past_target`: 2 seconds of audio, clamped to [256 KB, 512 KB].
+/// - `warmup_past_target`: >= 2 seconds of audio, clamped to [256 KB, 768 KB],
+///   and at least `seek_padding / 2`.
 ///   Data downloaded after the seek target in ungoverned warmup mode.
 ///   The governor boost (30×) takes over immediately after.
 ///
@@ -173,16 +174,22 @@ fn seek_params(bitrate_bps: u64) -> (u64, u64) {
     const PAD_SECS: u64 = 5;
 
     const PT_FLOOR: u64 = 256 * 1024;
-    const PT_CEIL: u64 = 512 * 1024;
+    const PT_CEIL: u64 = 768 * 1024;
     const PT_SECS: u64 = 2;
 
     if bitrate_bps == 0 {
         return (PAD_FLOOR, PT_FLOOR);
     }
     let padding = (bitrate_bps * PAD_SECS).clamp(PAD_FLOOR, PAD_CEIL);
-    let past_target = (bitrate_bps * PT_SECS).clamp(PT_FLOOR, PT_CEIL);
+    // Prevent second restart right after warmup on high bitrate tracks:
+    // the warmup should reach at least half of the seek padding.
+    let dynamic = (bitrate_bps * PT_SECS).clamp(PT_FLOOR, PT_CEIL);
+    let past_target = dynamic.max(padding / 2).min(PT_CEIL);
     (padding, past_target)
 }
+
+/// Extra backward margin for decoder probe-back jitter near seek target.
+const PROBE_BACK_GUARD: u64 = 64 * 1024; // 64 KB
 
 pub fn start_streaming_download(
     resp: reqwest::Response,
@@ -249,8 +256,10 @@ pub fn start_streaming_download(
                     warmup = true;
                     warmup_bytes = 0;
                     warmup_first_logged = false;
-                    warmup_past_target = wpt;
-                    warmup_end_offset = target + wpt;
+                    // Keep a small extra forward margin to absorb probe jitter
+                    // and avoid a second micro-restart right after warmup.
+                    warmup_past_target = wpt.saturating_add(PROBE_BACK_GUARD);
+                    warmup_end_offset = target.saturating_add(warmup_past_target);
                 } else {
                     warmup = false;
                 }
@@ -261,7 +270,7 @@ pub fn start_streaming_download(
                 let padded_start = if skip_padding {
                     target
                 } else {
-                    target.saturating_sub(seek_padding)
+                    target.saturating_sub(seek_padding.saturating_add(PROBE_BACK_GUARD))
                 };
                 crate::vprintln!(
                     "[STREAM] Range restart at byte {padded_start} (target={target}, pad={}KB{})",

@@ -2,10 +2,16 @@ use crate::bandwidth::BufferProgress;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 const BUFFER_AHEAD_LIMIT: u64 = 2 * 1024 * 1024; // 2 MB
 const INITIAL_BUFFER_CAP: usize = 2 * 1024 * 1024; // 2 MB
 const STALE_CACHE_MAX: usize = 4 * 1024 * 1024; // 4 MB
+const EARLY_RESTART_COOLDOWN: Duration = Duration::from_millis(350);
+// Suppress tiny follow-up restarts that happen right after a restart because
+// decoder probing advances slightly beyond the current buffered end.
+const RESTART_FLAP_GAP_MAX: u64 = 384 * 1024; // 384 KB
+const RESTART_FLAP_THRESHOLD_MARGIN: u64 = 64 * 1024; // 64 KB
 /// Adaptive restart threshold: 3 seconds of audio, clamped to [256 KB, 1 MB].
 /// Falls back to the fixed 1 MB when bitrate is unknown.
 fn restart_threshold(bitrate_bps: u64) -> u64 {
@@ -59,6 +65,8 @@ struct Inner {
     stale: Option<StaleRange>,
     /// When true, the download loop skips padding (stale cache continuation).
     restart_skip_padding: bool,
+    /// Timestamp of last network restart request to avoid micro restart flapping.
+    last_restart_at: Option<Instant>,
 }
 
 pub struct StreamingBuffer {
@@ -96,6 +104,7 @@ impl StreamingBuffer {
                 restart_target: None,
                 stale: None,
                 restart_skip_padding: false,
+                last_restart_at: None,
             }),
             Condvar::new(),
         ));
@@ -256,8 +265,20 @@ impl Seek for StreamingBuffer {
                     .unwrap_or(0);
                 let threshold = restart_threshold(bitrate);
                 let gap = new_pos.saturating_sub(buf_end);
+                let restart_backward = new_pos < inner.base_offset;
+                let restart_threshold = gap >= threshold;
+                let restart_early = gap >= EARLY_RESTART_FLOOR;
+                let recent_restart = inner
+                    .last_restart_at
+                    .is_some_and(|t| t.elapsed() < EARLY_RESTART_COOLDOWN);
+                let near_threshold = gap <= threshold.saturating_add(RESTART_FLAP_THRESHOLD_MARGIN);
+                let suppress_flap = !restart_backward
+                    && recent_restart
+                    && gap > 0
+                    && gap <= RESTART_FLAP_GAP_MAX
+                    && near_threshold;
                 let would_restart =
-                    new_pos < inner.base_offset || gap >= threshold || gap >= EARLY_RESTART_FLOOR;
+                    restart_backward || (!suppress_flap && (restart_threshold || restart_early));
 
                 let mut restored = false;
 
@@ -306,6 +327,7 @@ impl Seek for StreamingBuffer {
                     inner.base_offset = new_pos;
                     inner.restart_target = Some(new_pos);
                     inner.restart_skip_padding = false;
+                    inner.last_restart_at = Some(Instant::now());
                     if let Some(ref bp) = self.buffer_progress {
                         bp.written.store(new_pos, Relaxed);
                         bp.request_seek_boost();

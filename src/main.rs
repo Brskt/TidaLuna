@@ -42,6 +42,90 @@ enum UserEvent {
     AutoLoad(TrackInfo),
 }
 
+fn parse_player_recover_args(
+    args: &[serde_json::Value],
+) -> Option<(String, String, String, Option<f64>)> {
+    fn parse_num(v: &serde_json::Value) -> Option<f64> {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+    }
+
+    fn parse_secs(v: &serde_json::Value) -> Option<f64> {
+        parse_num(v)
+    }
+
+    fn parse_millis(v: &serde_json::Value) -> Option<f64> {
+        parse_num(v).map(|ms| ms / 1000.0)
+    }
+
+    let payload = args.iter().find(|v| v.is_object());
+
+    let url = payload
+        .and_then(|p| p.get("url"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            args.first()
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        })?;
+
+    let mut stream_format = payload
+        .and_then(|p| {
+            p.get("streamFormat")
+                .and_then(|v| v.as_str())
+                .or_else(|| p.get("format").and_then(|v| v.as_str()))
+        })
+        .unwrap_or("flac")
+        .to_string();
+
+    let mut encryption_key = payload
+        .and_then(|p| {
+            p.get("encryptionKey")
+                .and_then(|v| v.as_str())
+                .or_else(|| p.get("key").and_then(|v| v.as_str()))
+        })
+        .unwrap_or("")
+        .to_string();
+
+    if payload.is_none() {
+        if let (Some(arg1), Some(arg2)) = (
+            args.get(1).and_then(|v| v.as_str()),
+            args.get(2).and_then(|v| v.as_str()),
+        ) {
+            stream_format = arg1.to_string();
+            encryption_key = arg2.to_string();
+        } else if let Some(arg1) = args.get(1).and_then(|v| v.as_str()) {
+            encryption_key = arg1.to_string();
+        }
+    }
+
+    if stream_format.is_empty() {
+        stream_format = "flac".to_string();
+    }
+
+    let payload_time = payload.and_then(|p| {
+        p.get("currentTime")
+            .and_then(parse_secs)
+            .or_else(|| p.get("time").and_then(parse_secs))
+            .or_else(|| p.get("position").and_then(parse_secs))
+            .or_else(|| p.get("seek").and_then(parse_secs))
+            .or_else(|| p.get("startPosition").and_then(parse_secs))
+            .or_else(|| p.get("resumeTime").and_then(parse_secs))
+            .or_else(|| p.get("positionMs").and_then(parse_millis))
+            .or_else(|| p.get("timeMs").and_then(parse_millis))
+    });
+
+    let numeric_arg = args.iter().find_map(parse_secs);
+    let target_time = payload_time
+        .or(numeric_arg)
+        .filter(|t| t.is_finite() && *t > 0.0);
+
+    Some((url, stream_format, encryption_key, target_time))
+}
+
 fn main() -> wry::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let window = WindowBuilder::new()
@@ -366,6 +450,15 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
                                  eprintln!("Failed to load track: {}", e);
                              }
                         },
+                        "player.recover" => {
+                            if let Some((url, format, key, target_time)) =
+                                parse_player_recover_args(&msg.args)
+                                && let Err(e) =
+                                    player_clone.recover(url, format, key, target_time)
+                            {
+                                eprintln!("Failed to recover track: {}", e);
+                            }
+                        }
                         "player.preload" => {
                             if let (Some(url), Some(_format), Some(key)) = (
                                 msg.args.first().and_then(|v| v.as_str()),

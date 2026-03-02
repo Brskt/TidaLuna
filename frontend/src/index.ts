@@ -109,6 +109,8 @@ const createPlaybackController = () => {
                 });
             }
         },
+        // Tidal calls this in multiple internal flows (including resets/progress updates),
+        // so forwarding it directly to backend seek causes unwanted jumps (e.g. back to 0).
         setCurrentTime: (time: any) => { },
         setPlayQueueState: (state: any) => { },
         setPlayingStatus: (status: any) => { },
@@ -234,8 +236,6 @@ const createNativePlayerComponent = () => {
                 sendIpc("player.devices.get");
             },
             load: (url: string, streamFormat: string, encryptionKey: string = "") => {
-                player.currentTime = 0;
-                activeEmitter?.emit?.("mediacurrenttime", { target: 0 });
                 sendIpc("player.load", url, streamFormat, encryptionKey);
             },
             play: () => { sendIpc("player.play"); },
@@ -253,8 +253,8 @@ const createNativePlayerComponent = () => {
             cancelPreload: () => {
                 sendIpc("player.preload.cancel");
             },
-            recover: (url: string, encryptionKey: string = "") => {
-
+            recover: (...args: any[]) => {
+                sendIpc("player.recover", ...args);
             },
             releaseDevice: () => {
                 console.log("Releasing device");
