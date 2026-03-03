@@ -55,6 +55,10 @@ rodio = { version = "0.22.1", default-features = false, features = [
 ] }
 symphonia = { version = "0.5.5", features = ["flac", "aac", "isomp4"] }
 image = { version = "0.25.9", default-features = false, features = ["ico"] }
+muda = { version = "0.17.1", default-features = false, features = ["gtk"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22.0"

@@ -16,6 +16,7 @@ mod window;
 use auth::load_or_create_pkce_credentials;
 use bridge::{PlayerBridgeEvent, flush_player_bridge};
 use metadata::parse_track_metadata;
+use muda::MenuEvent;
 use player::ipc::{PlayerIpc, parse_player_ipc};
 use player::{Player, PlayerEvent};
 use serde::Deserialize;
@@ -46,6 +47,7 @@ enum UserEvent {
     IpcMessage(IpcMessage),
     Player(PlayerEvent),
     AutoLoad(TrackInfo),
+    Menu(MenuEvent),
 }
 
 fn load_window_icon() -> tao::window::Icon {
@@ -68,7 +70,32 @@ fn main() -> wry::Result<()> {
         .build(&event_loop)
         .unwrap();
 
+    // Application context menu (shown via the hamburger button in Tidal's titlebar).
+    let ctx_menu = muda::Menu::new();
+    let mi_reload = muda::MenuItem::new("Reload", true, None);
+    let mi_devtools = muda::MenuItem::new("Developer Tools", true, None);
+    let mi_quit = muda::MenuItem::new("Quit", true, None);
+    ctx_menu
+        .append_items(&[
+            &mi_reload,
+            &muda::PredefinedMenuItem::separator(),
+            &mi_devtools,
+            &muda::PredefinedMenuItem::separator(),
+            &mi_quit,
+        ])
+        .unwrap();
+    let id_reload = mi_reload.id().clone();
+    let id_devtools = mi_devtools.id().clone();
+    let id_quit = mi_quit.id().clone();
+
     let proxy = event_loop.create_proxy();
+
+    // Forward muda menu events into the tao event loop.
+    let proxy_menu = proxy.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let _ = proxy_menu.send_event(UserEvent::Menu(event));
+    }));
+
     let proxy_nav = proxy.clone();
     let proxy_new_window = proxy.clone();
 
@@ -547,6 +574,34 @@ document.title = "TidaLunar - A TIDAL client";
                                 window.set_maximized(false);
                                 update_window_state(&webview, &window);
                             }
+                            "menu.clicked" => {
+                                let x = msg.args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let y = msg.args.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let pos = Some(muda::dpi::Position::Logical(
+                                    muda::dpi::LogicalPosition::new(x, y),
+                                ));
+                                #[cfg(target_os = "windows")]
+                                {
+                                    use muda::ContextMenu as _;
+                                    use tao::platform::windows::WindowExtWindows;
+                                    unsafe {
+                                        ctx_menu.show_context_menu_for_hwnd(
+                                            window.hwnd() as isize,
+                                            pos,
+                                        );
+                                    }
+                                }
+                                #[cfg(target_os = "linux")]
+                                {
+                                    use gtk::prelude::*;
+                                    use muda::ContextMenu as _;
+                                    use tao::platform::unix::WindowExtUnix;
+                                    ctx_menu.show_context_menu_for_gtk_window(
+                                        window.gtk_window().upcast_ref::<gtk::Window>(),
+                                        pos,
+                                    );
+                                }
+                            }
                             "web.loaded" => {
                                 if let Some(url) = pending_navigation.take()
                                     && url.starts_with("tidal://")
@@ -559,6 +614,15 @@ document.title = "TidaLunar - A TIDAL client";
                             }
                             _ => {}
                         }
+                    }
+                }
+                UserEvent::Menu(event) => {
+                    if event.id == id_reload {
+                        let _ = webview.evaluate_script("location.reload()");
+                    } else if event.id == id_devtools {
+                        webview.open_devtools();
+                    } else if event.id == id_quit {
+                        *control_flow = ControlFlow::Exit;
                     }
                 }
             },
