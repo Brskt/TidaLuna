@@ -123,6 +123,21 @@ export const initWindowControls = () => {
         }, true);
     } // end frameless
 
+    // Branding: force document.title to "TidaLunar - A TIDAL client".
+    // Tidal's SPA overwrites the title on navigation, so we use a MutationObserver
+    // on the <title> element to re-apply it whenever it changes.
+    // The visible titlebar text and initial document.title are handled via CSS injection
+    // in the Rust initialization script (src/main.rs).
+    const TIDALUNAR_TITLE = "TidaLunar - A TIDAL client";
+    const titleEl = document.querySelector("title");
+    if (titleEl) {
+        new MutationObserver(() => {
+            if (document.title !== TIDALUNAR_TITLE) {
+                document.title = TIDALUNAR_TITLE;
+            }
+        }).observe(titleEl, { childList: true, characterData: true, subtree: true });
+    }
+
     // F12 devtools fallback (in case the WebView captures the key before tao).
     document.addEventListener("keydown", (e) => {
         if (e.key === "F12") {

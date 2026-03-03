@@ -62,7 +62,7 @@ fn main() -> wry::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let icon = load_window_icon();
     let window = WindowBuilder::new()
-        .with_title("TidaLunar")
+        .with_title("TidaLunar - A TIDAL client")
         .with_window_icon(Some(icon))
         .with_decorations(cfg!(target_os = "linux"))
         .build(&event_loop)
@@ -152,7 +152,23 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
         }}
     }},
     configurable: true
-}});"#,
+}});
+document.title = "TidaLunar - A TIDAL client";
+(function() {{
+    var css = '[class*="_bar_"] > [class*="_title_"] {{ font-size:0 !important; }} [class*="_bar_"] > [class*="_title_"]::after {{ content:"TidaLunar - A TIDAL client"; font-size:0.75rem; }}';
+    function inject() {{
+        if (document.getElementById('tidalunar-branding')) return;
+        var s = document.createElement('style');
+        s.id = 'tidalunar-branding';
+        s.textContent = css;
+        document.head.prepend(s);
+    }}
+    if (document.head) {{
+        inject();
+    }} else {{
+        document.addEventListener('DOMContentLoaded', inject);
+    }}
+}})();"#,
             platform = if cfg!(target_os = "linux") {
                 "linux"
             } else if cfg!(target_os = "macos") {
