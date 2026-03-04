@@ -6,6 +6,7 @@ mod auth;
 mod bandwidth;
 mod bridge;
 mod decrypt;
+mod flac_meta;
 mod logging;
 mod metadata;
 mod player;
@@ -111,6 +112,7 @@ fn main() -> wry::Result<()> {
     {
         let _guard = rt.enter();
         let _ = &*crate::state::GOVERNOR;
+        let _ = &*crate::state::AUDIO_CACHE;
     }
 
     let proxy_player = proxy.clone();

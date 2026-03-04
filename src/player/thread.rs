@@ -1,61 +1,50 @@
+use super::buffer::RamBuffer;
 use super::resume::{RESUME_MIN_SECONDS, ResumeStore};
-use super::streaming::StreamingBuffer;
 use super::{LOAD_SEQ, PlayerCommand, PlayerEvent, ResumePolicy, format_ms};
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
-use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
-#[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
+use std::time::Duration;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use rubato::Resampler;
 #[cfg(target_os = "windows")]
 use std::thread;
-use std::time::Duration;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 
 #[cfg(target_os = "windows")]
 use super::{EXCLUSIVE_STREAM_SEQ, wasapi};
 #[cfg(target_os = "windows")]
 use wasapi::{ExclusiveCommand, ExclusiveEvent, ExclusiveHandle};
 
-struct SharedCursor {
-    data: Arc<Vec<u8>>,
-    pos: u64,
+// ---------------------------------------------------------------------------
+// Decode thread communication
+// ---------------------------------------------------------------------------
+
+enum DecodeCommand {
+    Seek(f64),
+    Pause,
+    Resume,
+    Stop,
 }
 
-impl SharedCursor {
-    fn new(data: Arc<Vec<u8>>) -> Self {
-        Self { data, pos: 0 }
-    }
+enum DecodeEvent {
+    /// Track decoded to completion (EOF).
+    Finished,
+    /// Decode error (non-fatal, logged).
+    Error(String),
+    /// Seek completed — audio output can resume.
+    SeekComplete,
 }
 
-impl Read for SharedCursor {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let available = &self.data[self.pos as usize..];
-        let n = buf.len().min(available.len());
-        buf[..n].copy_from_slice(&available[..n]);
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Seek for SharedCursor {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let len = self.data.len() as i64;
-        let new_pos = match pos {
-            SeekFrom::Start(p) => p as i64,
-            SeekFrom::End(p) => len + p,
-            SeekFrom::Current(p) => self.pos as i64 + p,
-        };
-        if new_pos < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "seek before start",
-            ));
-        }
-        self.pos = new_pos as u64;
-        Ok(self.pos)
-    }
-}
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn format_sample_rate(rate: u32) -> String {
     if rate.is_multiple_of(1000) {
@@ -71,11 +60,7 @@ fn format_duration_mmss(secs: f64) -> String {
 }
 
 fn enumerate_audio_devices() -> Vec<super::AudioDevice> {
-    use rodio::DeviceTrait;
-
-    let host = rodio::cpal::default_host();
-    use rodio::cpal::traits::HostTrait;
-
+    let host = cpal::default_host();
     let mut devices = vec![super::AudioDevice {
         controllable_volume: true,
         id: "default".to_string(),
@@ -85,11 +70,11 @@ fn enumerate_audio_devices() -> Vec<super::AudioDevice> {
 
     if let Ok(output_devices) = host.output_devices() {
         for device in output_devices {
-            if let Ok(desc) = device.description() {
+            if let Ok(name) = device.name() {
                 devices.push(super::AudioDevice {
                     controllable_volume: true,
-                    id: desc.name().to_string(),
-                    name: desc.name().to_string(),
+                    id: name.clone(),
+                    name,
                     r#type: None,
                 });
             }
@@ -99,100 +84,745 @@ fn enumerate_audio_devices() -> Vec<super::AudioDevice> {
     devices
 }
 
-fn find_output_device(device_id: &str) -> Option<rodio::Device> {
-    use rodio::DeviceTrait;
-    use rodio::cpal::traits::HostTrait;
-
-    let host = rodio::cpal::default_host();
+fn find_output_device(device_id: &str) -> Option<cpal::Device> {
+    let host = cpal::default_host();
     if device_id == "default" {
         return host.default_output_device();
     }
 
-    host.output_devices().ok()?.find(|d| {
-        d.description()
-            .ok()
-            .map(|desc| desc.name() == device_id)
-            .unwrap_or(false)
-    })
+    host.output_devices()
+        .ok()?
+        .find(|d| d.name().ok().map(|name| name == device_id).unwrap_or(false))
 }
 
-fn open_device_sink(device_id: Option<&str>) -> anyhow::Result<MixerDeviceSink> {
-    if let Some(id) = device_id
-        && id != "default"
-    {
-        if let Some(device) = find_output_device(id) {
-            return DeviceSinkBuilder::from_device(device)
-                .map_err(|e| anyhow::anyhow!("Failed to configure device '{}': {}", id, e))?
-                .open_stream()
-                .map_err(|e| anyhow::anyhow!("Failed to open device '{}': {}", id, e));
-        }
-        eprintln!("[WARN] Device '{}' not found, falling back to default", id);
-    }
-    DeviceSinkBuilder::open_default_sink()
-        .map_err(|e| anyhow::anyhow!("Failed to open default audio output: {}", e))
+// ---------------------------------------------------------------------------
+// cpal stream opening (try source rate, fallback to device default)
+// ---------------------------------------------------------------------------
+
+struct OpenedStream {
+    stream: cpal::Stream,
+    producer: rtrb::Producer<f32>,
+    rate: u32,
+    channels: u16,
+    /// Incremented by the decode thread after a seek. The cpal callback compares
+    /// its local copy and drains stale samples when it detects a mismatch.
+    seek_gen: Arc<AtomicU32>,
+    /// When true, the cpal callback outputs silence and drains the ring buffer.
+    /// Set by handle_seek (instant mute), cleared by SeekComplete handler.
+    muted: Arc<AtomicBool>,
 }
+
+/// Build the cpal output callback. Shared between both attempts.
+fn build_cpal_callback(
+    consumer: Arc<std::sync::Mutex<rtrb::Consumer<f32>>>,
+    volume: Arc<AtomicU32>,
+    seek_gen: Arc<AtomicU32>,
+    muted: Arc<AtomicBool>,
+) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send + 'static {
+    let mut local_gen: u32 = 0;
+    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+        let mut c = consumer.lock().unwrap();
+
+        // Muted during seek — output silence, drain stale data
+        if muted.load(Relaxed) {
+            while c.pop().is_ok() {}
+            for s in data.iter_mut() {
+                *s = 0.0;
+            }
+            return;
+        }
+
+        // Seek gen changed — drain stale samples from before the seek
+        let cur_gen = seek_gen.load(Relaxed);
+        if cur_gen != local_gen {
+            while c.pop().is_ok() {}
+            local_gen = cur_gen;
+        }
+
+        let v = f32::from_bits(volume.load(Relaxed));
+        for sample in data.iter_mut() {
+            *sample = if let Ok(s) = c.pop() { s * v } else { 0.0 };
+        }
+    }
+}
+
+/// Try to open a cpal output stream at the source sample rate first (letting the
+/// OS handle any resampling). If the device rejects the source rate, fall back
+/// to the device's default output config — the caller will then set up a rubato
+/// resampling pipeline.
+fn open_output_stream(
+    device: &cpal::Device,
+    source_rate: u32,
+    source_channels: u16,
+    volume: &Arc<AtomicU32>,
+) -> Option<OpenedStream> {
+    let seek_gen = Arc::new(AtomicU32::new(0));
+    let muted = Arc::new(AtomicBool::new(false));
+
+    // Attempt 1: source rate (no software resampling needed)
+    {
+        let config = cpal::StreamConfig {
+            channels: source_channels,
+            sample_rate: cpal::SampleRate(source_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let ring_size = source_rate as usize * source_channels as usize * 2;
+        let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
+        let consumer = Arc::new(std::sync::Mutex::new(consumer));
+
+        let cb = build_cpal_callback(
+            consumer.clone(),
+            volume.clone(),
+            seek_gen.clone(),
+            muted.clone(),
+        );
+        if let Ok(stream) = device.build_output_stream(
+            &config,
+            cb,
+            |err| eprintln!("[CPAL]   Stream error: {err}"),
+            None,
+        ) {
+            crate::vprintln!(
+                "[CPAL]   Opened at source rate: {}Hz/{}ch",
+                source_rate,
+                source_channels
+            );
+            return Some(OpenedStream {
+                stream,
+                producer,
+                rate: source_rate,
+                channels: source_channels,
+                seek_gen,
+                muted,
+            });
+        }
+    }
+
+    // Attempt 2: device default (will need rubato resampling)
+    let default = device.default_output_config().ok()?;
+    let ar = default.sample_rate().0;
+    let ac = default.channels();
+    let cfg = default.config();
+
+    crate::vprintln!(
+        "[CPAL]   Source rate {}Hz unsupported, using device default: {}Hz/{}ch",
+        source_rate,
+        ar,
+        ac
+    );
+
+    let ring_size = ar as usize * ac as usize * 2;
+    let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
+    let consumer = Arc::new(std::sync::Mutex::new(consumer));
+
+    let cb = build_cpal_callback(
+        consumer.clone(),
+        volume.clone(),
+        seek_gen.clone(),
+        muted.clone(),
+    );
+    match device.build_output_stream(
+        &cfg,
+        cb,
+        |err| eprintln!("[CPAL]   Stream error: {err}"),
+        None,
+    ) {
+        Ok(stream) => Some(OpenedStream {
+            stream,
+            producer,
+            rate: ar,
+            channels: ac,
+            seek_gen,
+            muted,
+        }),
+        Err(e) => {
+            eprintln!("[ERROR]  Failed to open cpal stream: {e}");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audio resampling pipeline (rubato)
+// ---------------------------------------------------------------------------
+
+/// Handles sample-rate conversion and channel remapping between the source
+/// format (from symphonia) and the output device format (from cpal).
+struct AudioPipeline {
+    resampler: rubato::SincFixedIn<f32>,
+    source_channels: usize,
+    output_channels: usize,
+    chunk_size: usize,
+    accum: Vec<Vec<f32>>,
+    accum_frames: usize,
+}
+
+impl AudioPipeline {
+    fn new(
+        source_rate: u32,
+        output_rate: u32,
+        source_channels: usize,
+        output_channels: usize,
+    ) -> Self {
+        let ratio = output_rate as f64 / source_rate as f64;
+        let chunk_size = 1024;
+        let params = rubato::SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: rubato::SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: rubato::WindowFunction::BlackmanHarris2,
+        };
+
+        let resampler =
+            rubato::SincFixedIn::<f32>::new(ratio, 2.0, params, chunk_size, source_channels)
+                .expect("failed to create resampler");
+
+        Self {
+            resampler,
+            source_channels,
+            output_channels,
+            chunk_size,
+            accum: vec![Vec::with_capacity(chunk_size * 2); source_channels],
+            accum_frames: 0,
+        }
+    }
+
+    /// Feed interleaved source samples, returns interleaved output samples
+    /// in the output channel layout.
+    fn process(&mut self, interleaved: &[f32]) -> Vec<f32> {
+        let src_ch = self.source_channels;
+        let frames = interleaved.len() / src_ch;
+
+        // De-interleave into per-channel accumulation buffers
+        for f in 0..frames {
+            for ch in 0..src_ch {
+                self.accum[ch].push(interleaved[f * src_ch + ch]);
+            }
+        }
+        self.accum_frames += frames;
+
+        let mut output = Vec::new();
+
+        // Process full chunks through resampler
+        while self.accum_frames >= self.chunk_size {
+            let input: Vec<&[f32]> = self.accum.iter().map(|ch| &ch[..self.chunk_size]).collect();
+
+            match self.resampler.process(&input, None) {
+                Ok(resampled) => {
+                    let out_frames = resampled.first().map(|c| c.len()).unwrap_or(0);
+                    self.interleave_into(&resampled, out_frames, &mut output);
+                }
+                Err(e) => {
+                    eprintln!("[RESAMPLE] Error: {e}");
+                }
+            }
+
+            for ch in &mut self.accum {
+                ch.drain(..self.chunk_size);
+            }
+            self.accum_frames -= self.chunk_size;
+        }
+
+        output
+    }
+
+    /// Flush remaining accumulated samples (call at EOF).
+    fn flush(&mut self) -> Vec<f32> {
+        if self.accum_frames == 0 {
+            return Vec::new();
+        }
+
+        let input: Vec<&[f32]> = self.accum.iter().map(|ch| &ch[..]).collect();
+        let mut output = Vec::new();
+
+        match self.resampler.process_partial(Some(&input), None) {
+            Ok(resampled) => {
+                let out_frames = resampled.first().map(|c| c.len()).unwrap_or(0);
+                self.interleave_into(&resampled, out_frames, &mut output);
+            }
+            Err(e) => {
+                eprintln!("[RESAMPLE] Flush error: {e}");
+            }
+        }
+
+        for ch in &mut self.accum {
+            ch.clear();
+        }
+        self.accum_frames = 0;
+        output
+    }
+
+    fn reset(&mut self) {
+        for ch in &mut self.accum {
+            ch.clear();
+        }
+        self.accum_frames = 0;
+        self.resampler.reset();
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn interleave_into(&self, resampled: &[Vec<f32>], frames: usize, output: &mut Vec<f32>) {
+        let src_ch = self.source_channels;
+        let out_ch = self.output_channels;
+        output.reserve(frames * out_ch);
+
+        for f_idx in 0..frames {
+            for ch in 0..out_ch {
+                let sample = if ch < src_ch {
+                    resampled[ch][f_idx]
+                } else if src_ch == 1 {
+                    resampled[0][f_idx] // mono → multi: duplicate
+                } else {
+                    0.0 // extra channels: silence
+                };
+                output.push(sample);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decode thread
+// ---------------------------------------------------------------------------
+
+/// Spawn the decode thread. Returns command sender, event receiver, and join handle.
+#[allow(clippy::too_many_arguments)]
+fn spawn_decode_thread(
+    buffer: RamBuffer,
+    producer: rtrb::Producer<f32>,
+    decoded_samples: Arc<AtomicU64>,
+    cmd_rx: mpsc::Receiver<DecodeCommand>,
+    event_tx: mpsc::Sender<DecodeEvent>,
+    output_rate: u32,
+    output_channels: u16,
+    seek_gen: Arc<AtomicU32>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("decode".into())
+        .spawn(move || {
+            decode_loop(
+                buffer,
+                producer,
+                decoded_samples,
+                cmd_rx,
+                event_tx,
+                output_rate,
+                output_channels,
+                seek_gen,
+            );
+        })
+        .expect("failed to spawn decode thread")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_loop(
+    buffer: RamBuffer,
+    mut producer: rtrb::Producer<f32>,
+    decoded_samples: Arc<AtomicU64>,
+    cmd_rx: mpsc::Receiver<DecodeCommand>,
+    event_tx: mpsc::Sender<DecodeEvent>,
+    output_rate: u32,
+    output_channels: u16,
+    seek_gen: Arc<AtomicU32>,
+) {
+    let mss = MediaSourceStream::new(Box::new(buffer), Default::default());
+
+    let hint = Hint::new();
+    let format_opts = FormatOptions::default();
+    let metadata_opts = MetadataOptions::default();
+    let decoder_opts = DecoderOptions::default();
+
+    let probed =
+        match symphonia::default::get_probe().format(&hint, mss, &format_opts, &metadata_opts) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = event_tx.send(DecodeEvent::Error(format!("probe failed: {e}")));
+                return;
+            }
+        };
+
+    let mut format = probed.format;
+
+    // Find the first audio track
+    let track = match format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+    {
+        Some(t) => t.clone(),
+        None => {
+            let _ = event_tx.send(DecodeEvent::Error("no audio track found".into()));
+            return;
+        }
+    };
+
+    let track_id = track.id;
+    let source_rate = track.codec_params.sample_rate.unwrap_or(44100);
+    let source_channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
+
+    let mut decoder =
+        match symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = event_tx.send(DecodeEvent::Error(format!("codec init failed: {e}")));
+                return;
+            }
+        };
+
+    // Create resampling pipeline if source and output formats differ
+    let mut pipeline = if source_rate != output_rate || source_channels != output_channels as usize
+    {
+        crate::vprintln!(
+            "[DECODE] Resampling: {}Hz/{}ch → {}Hz/{}ch",
+            source_rate,
+            source_channels,
+            output_rate,
+            output_channels
+        );
+        Some(AudioPipeline::new(
+            source_rate,
+            output_rate,
+            source_channels,
+            output_channels as usize,
+        ))
+    } else {
+        None
+    };
+
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut paused = false;
+
+    loop {
+        // Check for commands (non-blocking)
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                DecodeCommand::Seek(time) => {
+                    let seek_start = std::time::Instant::now();
+                    let seek_to = SeekTo::Time {
+                        time: symphonia::core::units::Time {
+                            seconds: time as u64,
+                            frac: time.fract(),
+                        },
+                        track_id: Some(track_id),
+                    };
+                    match format.seek(SeekMode::Coarse, seek_to) {
+                        Ok(seeked) => {
+                            let seek_dur = seek_start.elapsed();
+                            decoder.reset();
+                            if let Some(ref mut p) = pipeline {
+                                p.reset();
+                            }
+                            // Signal cpal callback to drain stale samples
+                            seek_gen.fetch_add(1, Relaxed);
+                            // Convert source timestamp to output timebase
+                            let out_ts = seeked.actual_ts * output_rate as u64 / source_rate as u64;
+                            decoded_samples.store(out_ts * output_channels as u64, Relaxed);
+                            let _ = event_tx.send(DecodeEvent::SeekComplete);
+                            let seek_ms = seek_dur.as_secs_f64() * 1000.0;
+                            if seek_ms >= 1.0 {
+                                crate::vprintln!(
+                                    "[SEEK]   decode: {:.0}ms (ts: {})",
+                                    seek_ms,
+                                    seeked.actual_ts
+                                );
+                            } else {
+                                crate::vprintln!(
+                                    "[SEEK]   decode: {:.0}µs (ts: {})",
+                                    seek_dur.as_micros(),
+                                    seeked.actual_ts
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(DecodeEvent::SeekComplete);
+                            crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
+                        }
+                    }
+                }
+                DecodeCommand::Pause => {
+                    paused = true;
+                }
+                DecodeCommand::Resume => {
+                    paused = false;
+                }
+                DecodeCommand::Stop => {
+                    return;
+                }
+            }
+        }
+
+        if paused {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
+        // Decode next packet
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof
+                    || e.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                // EOF — flush resampler pipeline before signaling completion
+                if let Some(ref mut pipe) = pipeline {
+                    let flushed = pipe.flush();
+                    let mut off = 0;
+                    while off < flushed.len() {
+                        let avail = producer.slots();
+                        if avail == 0 {
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
+                        }
+                        let n = (flushed.len() - off).min(avail);
+                        if let Ok(mut chunk) = producer.write_chunk_uninit(n) {
+                            let (first, second) = chunk.as_mut_slices();
+                            for (i, slot) in first.iter_mut().enumerate() {
+                                slot.write(flushed[off + i]);
+                            }
+                            let fl = first.len();
+                            for (i, slot) in second.iter_mut().enumerate() {
+                                slot.write(flushed[off + fl + i]);
+                            }
+                            unsafe {
+                                chunk.commit_all();
+                            }
+                            off += n;
+                        }
+                    }
+                }
+                let _ = event_tx.send(DecodeEvent::Finished);
+                return;
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => {
+                decoder.reset();
+                continue;
+            }
+            Err(e) => {
+                let _ = event_tx.send(DecodeEvent::Error(format!("packet error: {e}")));
+                let _ = event_tx.send(DecodeEvent::Finished);
+                return;
+            }
+        };
+
+        // Skip packets from other tracks
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(symphonia::core::errors::Error::DecodeError(e)) => {
+                crate::vprintln!("[DECODE] decode error (skipping): {e}");
+                continue;
+            }
+            Err(e) => {
+                let _ = event_tx.send(DecodeEvent::Error(format!("decode fatal: {e}")));
+                let _ = event_tx.send(DecodeEvent::Finished);
+                return;
+            }
+        };
+
+        let spec = *decoded.spec();
+        let num_frames = decoded.frames();
+
+        // Initialize or resize sample buffer
+        let sbuf = sample_buf.get_or_insert_with(|| SampleBuffer::new(num_frames as u64, spec));
+
+        if sbuf.capacity() < num_frames {
+            *sbuf = SampleBuffer::new(num_frames as u64, spec);
+        }
+
+        sbuf.copy_interleaved_ref(decoded);
+
+        let source_samples = sbuf.samples();
+
+        // Process through resampling pipeline if needed
+        let resampled: Vec<f32>;
+        let samples_to_push: &[f32] = if let Some(ref mut pipe) = pipeline {
+            resampled = pipe.process(source_samples);
+            &resampled
+        } else {
+            source_samples
+        };
+
+        // Push samples to ring buffer, blocking if full
+        let mut offset = 0;
+        while offset < samples_to_push.len() {
+            // Check for stop command during push
+            if let Ok(cmd) = cmd_rx.try_recv() {
+                match cmd {
+                    DecodeCommand::Stop => return,
+                    DecodeCommand::Pause => {
+                        paused = true;
+                        break;
+                    }
+                    DecodeCommand::Seek(time) => {
+                        let seek_start = std::time::Instant::now();
+                        let seek_to = SeekTo::Time {
+                            time: symphonia::core::units::Time {
+                                seconds: time as u64,
+                                frac: time.fract(),
+                            },
+                            track_id: Some(track_id),
+                        };
+                        match format.seek(SeekMode::Coarse, seek_to) {
+                            Ok(seeked) => {
+                                let seek_dur = seek_start.elapsed();
+                                decoder.reset();
+                                if let Some(ref mut p) = pipeline {
+                                    p.reset();
+                                }
+                                seek_gen.fetch_add(1, Relaxed);
+                                let out_ts =
+                                    seeked.actual_ts * output_rate as u64 / source_rate as u64;
+                                decoded_samples.store(out_ts * output_channels as u64, Relaxed);
+                                let _ = event_tx.send(DecodeEvent::SeekComplete);
+                                let seek_ms = seek_dur.as_secs_f64() * 1000.0;
+                                if seek_ms >= 1.0 {
+                                    crate::vprintln!(
+                                        "[SEEK]   decode: {:.0}ms (ts: {})",
+                                        seek_ms,
+                                        seeked.actual_ts
+                                    );
+                                } else {
+                                    crate::vprintln!(
+                                        "[SEEK]   decode: {:.0}µs (ts: {})",
+                                        seek_dur.as_micros(),
+                                        seeked.actual_ts
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                let _ = event_tx.send(DecodeEvent::SeekComplete);
+                                crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
+                            }
+                        }
+                        break;
+                    }
+                    DecodeCommand::Resume => {
+                        paused = false;
+                    }
+                }
+            }
+
+            if paused {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+
+            let available = producer.slots();
+            if available == 0 {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+
+            let to_write = (samples_to_push.len() - offset).min(available);
+            if let Ok(mut chunk) = producer.write_chunk_uninit(to_write) {
+                let slice = &samples_to_push[offset..offset + to_write];
+                let (first, second) = chunk.as_mut_slices();
+                for (i, slot) in first.iter_mut().enumerate() {
+                    slot.write(slice[i]);
+                }
+                let first_len = first.len();
+                if first_len < to_write {
+                    for (i, slot) in second.iter_mut().enumerate() {
+                        slot.write(slice[first_len + i]);
+                    }
+                }
+                unsafe {
+                    chunk.commit_all();
+                }
+                offset += to_write;
+                decoded_samples.fetch_add(to_write as u64, Relaxed);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PlayerThread
+// ---------------------------------------------------------------------------
 
 pub(super) struct PlayerThread<F> {
     cmd_rx: mpsc::Receiver<PlayerCommand>,
     callback: F,
-    device_sink: MixerDeviceSink,
-    rodio_player: Option<rodio::Player>,
-    current_duration: f64,
+    // Audio output
+    cpal_stream: Option<cpal::Stream>,
+    volume: Arc<AtomicU32>, // f32 bits stored as u32
+    // Decode thread
+    decode_cmd_tx: Option<mpsc::Sender<DecodeCommand>>,
+    decode_event_rx: Option<mpsc::Receiver<DecodeEvent>>,
+    decode_handle: Option<std::thread::JoinHandle<()>>,
+    // Track state
+    current_buffer: Option<RamBuffer>,
+    current_track_id: Option<String>,
+    is_cached: bool,
     is_playing: bool,
     has_track: bool,
-    last_empty: bool,
-    current_data: Option<Arc<Vec<u8>>>,
-    current_streaming_buffer: Option<StreamingBuffer>,
-    current_volume: f32,
+    current_duration: f64,
     current_seq: u32,
-    current_track_id: Option<String>,
-    pending_resume_seek: Option<f64>,
+    // Position tracking
+    decoded_samples: Arc<AtomicU64>,
+    sample_rate: u32,
+    channels: u16,
+    // Resume
     resume_store: ResumeStore,
+    pending_resume_seek: Option<f64>,
     allow_startup_auto_resume: bool,
+    // Device
+    current_device_id: Option<String>,
+    // WASAPI exclusive
     #[cfg(target_os = "windows")]
     exclusive_handle: Option<ExclusiveHandle>,
     #[cfg(target_os = "windows")]
     is_exclusive_mode: bool,
     #[cfg(target_os = "windows")]
     exclusive_stream_cancel: Option<Arc<AtomicBool>>,
+    // Seek state — suppresses TimeUpdates while decode thread is seeking
+    seeking: bool,
+    /// When the current seek started (for total seek timing)
+    seek_wall_start: Option<std::time::Instant>,
+    /// Shared with cpal callback — instantly mutes output when true
+    cpal_muted: Option<Arc<AtomicBool>>,
+    // Command coalescing
     pending_cmds: Vec<PlayerCommand>,
     coalesced_cmds: Vec<PlayerCommand>,
 }
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub fn new(cmd_rx: mpsc::Receiver<PlayerCommand>, callback: F) -> Option<Self> {
-        let mut device_sink = match open_device_sink(None) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to initialize audio output: {}", e);
-                return None;
-            }
-        };
-        device_sink.log_on_drop(false);
-
         Some(Self {
             cmd_rx,
             callback,
-            device_sink,
-            rodio_player: None,
-            current_duration: 0.0,
+            cpal_stream: None,
+            volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            decode_cmd_tx: None,
+            decode_event_rx: None,
+            decode_handle: None,
+            current_buffer: None,
+            current_track_id: None,
+            is_cached: false,
             is_playing: false,
             has_track: false,
-            last_empty: true,
-            current_data: None,
-            current_streaming_buffer: None,
-            current_volume: 1.0,
+            current_duration: 0.0,
             current_seq: 0,
-            current_track_id: None,
-            pending_resume_seek: None,
+            decoded_samples: Arc::new(AtomicU64::new(0)),
+            sample_rate: 44100,
+            channels: 2,
             resume_store: ResumeStore::load(),
+            pending_resume_seek: None,
             allow_startup_auto_resume: true,
+            current_device_id: None,
             #[cfg(target_os = "windows")]
             exclusive_handle: None,
             #[cfg(target_os = "windows")]
             is_exclusive_mode: false,
             #[cfg(target_os = "windows")]
             exclusive_stream_cancel: None,
+            seeking: false,
+            seek_wall_start: None,
+            cpal_muted: None,
             pending_cmds: Vec::new(),
             coalesced_cmds: Vec::new(),
         })
@@ -205,7 +835,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.pending_cmds.push(cmd);
             }
 
-            // Coalesce seek bursts: keep only the newest seek until a non-seek command.
+            // Coalesce seek bursts
             self.coalesced_cmds.clear();
             let mut pending_seek: Option<f64> = None;
             for cmd in self.pending_cmds.drain(..) {
@@ -225,7 +855,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.coalesced_cmds.push(PlayerCommand::Seek(time));
             }
 
-            // Take ownership of coalesced_cmds for iteration without borrowing self
             let cmds: Vec<PlayerCommand> = self.coalesced_cmds.drain(..).collect();
             for cmd in cmds {
                 self.handle_command(cmd);
@@ -235,13 +864,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             #[cfg(target_os = "windows")]
             self.poll_exclusive_events();
 
-            // Poll playback state (shared/rodio mode)
+            // Poll playback state
             self.poll_playback();
 
-            // Wait for next command or poll timeout (replaces sleep for lower seek latency)
-            if let Ok(cmd) = self.cmd_rx.recv_timeout(Duration::from_millis(250)) {
+            // Wait for next command — short poll while seeking to catch SeekComplete fast
+            let timeout = if self.seeking {
+                Duration::from_millis(1)
+            } else {
+                Duration::from_millis(250)
+            };
+            if let Ok(cmd) = self.cmd_rx.recv_timeout(timeout) {
                 self.pending_cmds.push(cmd);
-                // Drain any additional queued commands
                 while let Ok(cmd) = self.cmd_rx.try_recv() {
                     self.pending_cmds.push(cmd);
                 }
@@ -251,11 +884,24 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     fn handle_command(&mut self, cmd: PlayerCommand) {
         match cmd {
-            PlayerCommand::LoadData(data, load_gen, event_seq, track_id, resume_policy) => {
-                self.handle_load_data(data, load_gen, event_seq, track_id, resume_policy);
-            }
-            PlayerCommand::LoadStreaming(buffer, load_gen, event_seq, track_id, resume_policy) => {
-                self.handle_load_streaming(buffer, load_gen, event_seq, track_id, resume_policy);
+            PlayerCommand::Load {
+                buffer,
+                load_gen,
+                seq,
+                track_id,
+                resume_policy,
+                load_start,
+                cached,
+            } => {
+                self.handle_load(
+                    buffer,
+                    load_gen,
+                    seq,
+                    track_id,
+                    resume_policy,
+                    load_start,
+                    cached,
+                );
             }
             PlayerCommand::Play => self.handle_play(),
             PlayerCommand::Pause => self.handle_pause(),
@@ -289,188 +935,83 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
-    fn handle_load_data(
-        &mut self,
-        data: Vec<u8>,
-        load_gen: u32,
-        event_seq: u32,
-        track_id: String,
-        resume_policy: ResumePolicy,
-    ) {
-        if load_gen != LOAD_SEQ.load(Relaxed) {
-            crate::vprintln!("[LOAD #{load_gen}] stale LoadData, ignoring");
-            return;
+    /// Stop the current decode thread and cpal stream.
+    fn stop_decode(&mut self) {
+        if let Some(tx) = self.decode_cmd_tx.take() {
+            let _ = tx.send(DecodeCommand::Stop);
         }
-        self.current_track_id = Some(track_id.clone());
-        self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
-        self.current_seq = event_seq;
-        crate::state::GOVERNOR.reset_buffer_progress();
-
-        #[cfg(target_os = "windows")]
-        if let Some(cancel) = self.exclusive_stream_cancel.take() {
-            cancel.store(true, Relaxed);
+        // Drop the cpal stream (stops the audio callback)
+        self.cpal_stream = None;
+        if let Some(handle) = self.decode_handle.take() {
+            let _ = handle.join();
         }
-
-        if let Some(ref old_buf) = self.current_streaming_buffer {
-            old_buf.cancel();
-        }
-        self.current_streaming_buffer = None;
-
-        let data = Arc::new(data);
-        let decode_start = std::time::Instant::now();
-
-        #[cfg(target_os = "windows")]
-        {
-            if self.is_exclusive_mode {
-                if let Some(ref handle) = self.exclusive_handle {
-                    handle.send(ExclusiveCommand::Stop);
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    self.exclusive_stream_cancel = Some(cancel.clone());
-
-                    let cmd_tx = handle.command_sender();
-                    let reader = SharedCursor::new(data.clone());
-                    let total_len = data.len() as u64;
-                    let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
-                    thread::spawn(move || {
-                        if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
-                            reader,
-                            total_len,
-                            stream_id,
-                            cmd_tx,
-                            cancel.clone(),
-                        ) && !cancel.load(Relaxed)
-                        {
-                            eprintln!("[WASAPI] Progressive decode failed: {e}");
-                        }
-                    });
-
-                    crate::vprintln!(
-                        "[WASAPI] Progressive decode started ({:.0}ms setup)",
-                        decode_start.elapsed().as_secs_f64() * 1000.0
-                    );
-                    self.current_data = Some(data);
-                    self.current_streaming_buffer = None;
-                    self.has_track = true;
-                    self.is_playing = true;
-                }
-                return;
-            }
-        }
-
-        let byte_len = data.len() as u64;
-
-        let decoder_start = std::time::Instant::now();
-        let cursor = SharedCursor::new(data.clone());
-        match Decoder::builder()
-            .with_data(cursor)
-            .with_byte_len(byte_len)
-            .with_seekable(true)
-            .with_hint("flac")
-            .build()
-        {
-            Ok(source) => {
-                let decoder_ms = decoder_start.elapsed().as_secs_f64() * 1000.0;
-                let source_sample_rate = source.sample_rate().get();
-                let source_channels = source.channels().get();
-                let source_duration = source
-                    .total_duration()
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-
-                // Drop previous player to disconnect from mixer
-                if let Some(old) = self.rodio_player.take() {
-                    old.stop();
-                    drop(old);
-                }
-
-                let player = rodio::Player::connect_new(self.device_sink.mixer());
-                player.set_volume(self.current_volume);
-                player.append(source);
-                player.pause();
-
-                self.current_duration = source_duration;
-                self.is_playing = false;
-                self.has_track = true;
-                self.last_empty = false;
-                self.current_data = Some(data);
-                self.rodio_player = Some(player);
-
-                if self.current_duration > 0.0 {
-                    (self.callback)(PlayerEvent::Duration(
-                        self.current_duration,
-                        self.current_seq,
-                    ));
-                }
-                let initial_time = self.pending_resume_seek.unwrap_or(0.0);
-                (self.callback)(PlayerEvent::TimeUpdate(initial_time, self.current_seq));
-
-                let bitrate = if self.current_duration > 0.0 {
-                    (byte_len as f64 * 8.0 / self.current_duration / 1000.0) as u32
-                } else {
-                    0
-                };
-                crate::vprintln!(
-                    "[CODEC]  {} / {}ch | {} kbps",
-                    format_sample_rate(source_sample_rate),
-                    source_channels,
-                    bitrate
-                );
-                crate::vprintln!(
-                    "[AUDIO]  Duration: {} | Probe: n/a | Decoder: {} | Total: {}",
-                    format_duration_mmss(self.current_duration),
-                    format_ms(decoder_ms),
-                    format_ms(decode_start.elapsed().as_secs_f64() * 1000.0)
-                );
-            }
-            Err(e) => {
-                eprintln!("[ERROR]  Decode failed: {}", e);
-            }
-        }
+        self.decode_event_rx = None;
     }
 
-    fn handle_load_streaming(
+    #[allow(clippy::too_many_arguments)]
+    fn handle_load(
         &mut self,
-        buffer: StreamingBuffer,
+        buffer: RamBuffer,
         load_gen: u32,
         event_seq: u32,
         track_id: String,
         resume_policy: ResumePolicy,
+        load_start: std::time::Instant,
+        cached: bool,
     ) {
         if load_gen != LOAD_SEQ.load(Relaxed) {
-            crate::vprintln!("[LOAD #{load_gen}] stale LoadStreaming, cancelling");
-            buffer.cancel();
+            crate::vprintln!("[LOAD #{load_gen}] stale Load, ignoring");
             return;
         }
+
+        // Clear previous track's resume position
+        if let Some(ref prev) = self.current_track_id
+            && *prev != track_id
+        {
+            self.resume_store.clear(prev);
+        }
+
         self.current_track_id = Some(track_id.clone());
         self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
         self.current_seq = event_seq;
+        self.is_cached = cached;
+
+        crate::vprintln!(
+            "[LOAD #{load_gen}] handle_load enter | cached={} | track={}",
+            cached,
+            track_id.chars().take(60).collect::<String>()
+        );
+        let handle_start = std::time::Instant::now();
+
+        // Cancel previous playback
         #[cfg(target_os = "windows")]
         if let Some(cancel) = self.exclusive_stream_cancel.take() {
             cancel.store(true, Relaxed);
         }
-
-        if let Some(ref old_buf) = self.current_streaming_buffer {
+        if let Some(ref old_buf) = self.current_buffer {
             old_buf.cancel();
         }
+        self.stop_decode();
 
+        let teardown_ms = handle_start.elapsed().as_secs_f64() * 1000.0;
         let decode_start = std::time::Instant::now();
 
+        // WASAPI exclusive path
         #[cfg(target_os = "windows")]
         {
             if self.is_exclusive_mode {
                 if let Some(ref handle) = self.exclusive_handle {
                     handle.send(ExclusiveCommand::Stop);
-
                     let cancel = Arc::new(AtomicBool::new(false));
                     self.exclusive_stream_cancel = Some(cancel.clone());
 
                     let cmd_tx = handle.command_sender();
-                    let stream_reader = buffer.new_reader();
+                    let reader = buffer.clone();
                     let total_len = buffer.total_len();
                     let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
                     thread::spawn(move || {
                         if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
-                            stream_reader,
+                            reader,
                             total_len,
                             stream_id,
                             cmd_tx,
@@ -482,108 +1023,188 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     });
 
                     crate::vprintln!(
-                        "[WASAPI] Progressive streaming decode started ({:.0}ms setup)",
+                        "[WASAPI] Progressive decode started ({:.0}ms setup)",
                         decode_start.elapsed().as_secs_f64() * 1000.0
                     );
-                    self.current_data = None;
-                    self.current_streaming_buffer = Some(buffer);
+                    self.current_buffer = Some(buffer);
                     self.has_track = true;
                     self.is_playing = true;
-                } else {
-                    buffer.cancel();
                 }
                 return;
             }
         }
 
+        // Shared mode: symphonia + cpal
         let total_len = buffer.total_len();
 
-        let reader = buffer.new_reader();
-        let decoder_start = std::time::Instant::now();
-        match Decoder::builder()
-            .with_data(reader)
-            .with_byte_len(total_len)
-            .with_seekable(true)
-            .with_hint("flac")
-            .build()
-        {
-            Ok(source) => {
-                let decoder_ms = decoder_start.elapsed().as_secs_f64() * 1000.0;
+        // Probe the format with symphonia
+        let probe_reader = buffer.clone();
+        let mss = MediaSourceStream::new(Box::new(probe_reader), Default::default());
+        let hint = Hint::new();
 
-                // Capture Source trait values before append consumes source
-                let source_sample_rate = source.sample_rate().get();
-                let source_channels = source.channels().get();
-                let source_duration = source
-                    .total_duration()
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-
-                // Drop previous player to disconnect from mixer
-                if let Some(old) = self.rodio_player.take() {
-                    old.stop();
-                    drop(old);
-                }
-
-                let player = rodio::Player::connect_new(self.device_sink.mixer());
-                player.set_volume(self.current_volume);
-                player.append(source);
-                player.pause();
-
-                self.current_duration = source_duration;
-                self.is_playing = false;
-                self.has_track = true;
-                self.last_empty = false;
-                self.current_data = None;
-                self.current_streaming_buffer = Some(buffer);
-                self.rodio_player = Some(player);
-
-                if self.current_duration > 0.0 {
-                    (self.callback)(PlayerEvent::Duration(
-                        self.current_duration,
-                        self.current_seq,
-                    ));
-                }
-                let initial_time = self.pending_resume_seek.unwrap_or(0.0);
-                (self.callback)(PlayerEvent::TimeUpdate(initial_time, self.current_seq));
-
-                let bitrate = if self.current_duration > 0.0 {
-                    (total_len as f64 * 8.0 / self.current_duration / 1000.0) as u32
-                } else {
-                    0
-                };
-                // Publish bitrate (bytes/sec) for governor hysteresis.
-                let bitrate_bps = if self.current_duration > 0.0 {
-                    (total_len as f64 / self.current_duration) as u64
-                } else {
-                    0
-                };
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .bitrate_bps
-                    .store(bitrate_bps, std::sync::atomic::Ordering::Relaxed);
-                crate::vprintln!(
-                    "[CODEC]  {} / {}ch | {} kbps",
-                    format_sample_rate(source_sample_rate),
-                    source_channels,
-                    bitrate
-                );
-                crate::vprintln!(
-                    "[AUDIO]  Duration: {} | Probe: n/a | Decoder: {} | Total: {} (streaming)",
-                    format_duration_mmss(self.current_duration),
-                    format_ms(decoder_ms),
-                    format_ms(decode_start.elapsed().as_secs_f64() * 1000.0)
-                );
-            }
+        let probed = match symphonia::default::get_probe().format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        ) {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!("[ERROR]  Streaming decode failed: {}", e);
-                buffer.cancel();
-                self.current_streaming_buffer = None;
+                eprintln!("[ERROR]  Probe failed: {e}");
+                return;
+            }
+        };
+
+        let probe_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
+        crate::vprintln!("[LOAD #{load_gen}] probe: {}", format_ms(probe_ms));
+
+        // Get audio track info
+        let track = match probed
+            .format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        {
+            Some(t) => t,
+            None => {
+                eprintln!("[ERROR]  No audio track found");
+                return;
+            }
+        };
+
+        let source_sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+        let source_channels = track
+            .codec_params
+            .channels
+            .map(|c| c.count() as u16)
+            .unwrap_or(2);
+        let source_duration = track
+            .codec_params
+            .n_frames
+            .map(|n| n as f64 / source_sample_rate as f64)
+            .unwrap_or(0.0);
+
+        drop(probed); // Release the probe reader
+
+        self.current_duration = source_duration;
+        self.decoded_samples.store(0, Relaxed);
+
+        // Open cpal stream (try source rate first, fall back to device default + rubato)
+        let device = if let Some(ref id) = self.current_device_id {
+            find_output_device(id)
+        } else {
+            None
+        };
+        let device = device.unwrap_or_else(|| {
+            cpal::default_host()
+                .default_output_device()
+                .expect("no audio output device")
+        });
+
+        let cpal_start = std::time::Instant::now();
+        let opened =
+            match open_output_stream(&device, source_sample_rate, source_channels, &self.volume) {
+                Some(o) => o,
+                None => return,
+            };
+        let cpal_ms = cpal_start.elapsed().as_secs_f64() * 1000.0;
+        crate::vprintln!("[LOAD #{load_gen}] cpal open: {}", format_ms(cpal_ms));
+
+        let actual_rate = opened.rate;
+        let actual_channels = opened.channels;
+        let stream = opened.stream;
+        let ring_producer = opened.producer;
+        let seek_gen = opened.seek_gen;
+        self.cpal_muted = Some(opened.muted);
+
+        // Track position at output rate/channels
+        self.sample_rate = actual_rate;
+        self.channels = actual_channels;
+
+        // Spawn decode thread
+        let (decode_cmd_tx, decode_cmd_rx) = mpsc::channel();
+        let (decode_event_tx, decode_event_rx) = mpsc::channel();
+        let decoded_samples = self.decoded_samples.clone();
+
+        let decode_buffer = buffer.clone();
+        let decode_handle = spawn_decode_thread(
+            decode_buffer,
+            ring_producer,
+            decoded_samples,
+            decode_cmd_rx,
+            decode_event_tx,
+            actual_rate,
+            actual_channels,
+            seek_gen,
+        );
+
+        self.cpal_stream = Some(stream);
+        self.decode_cmd_tx = Some(decode_cmd_tx);
+        self.decode_event_rx = Some(decode_event_rx);
+        self.decode_handle = Some(decode_handle);
+        self.current_buffer = Some(buffer);
+        self.has_track = true;
+        self.is_playing = false;
+
+        // Emit events
+        if self.current_duration > 0.0 {
+            (self.callback)(PlayerEvent::Duration(
+                self.current_duration,
+                self.current_seq,
+            ));
+        }
+        let initial_time = self.pending_resume_seek.unwrap_or(0.0);
+        (self.callback)(PlayerEvent::TimeUpdate(initial_time, self.current_seq));
+
+        let bitrate = if self.current_duration > 0.0 {
+            (total_len as f64 * 8.0 / self.current_duration / 1000.0) as u32
+        } else {
+            0
+        };
+        // Publish bitrate (bytes/sec) for governor
+        let bitrate_bps = if self.current_duration > 0.0 {
+            (total_len as f64 / self.current_duration) as u64
+        } else {
+            0
+        };
+        {
+            let bp = crate::state::GOVERNOR.buffer_progress();
+            bp.bitrate_bps.store(bitrate_bps, Relaxed);
+            bp.total_len.store(total_len, Relaxed);
+            if let Some(ref buf) = self.current_buffer {
+                bp.written.store(buf.written(), Relaxed);
+                bp.read_pos.store(buf.read_cursor(), Relaxed);
             }
         }
+
+        crate::vprintln!(
+            "[CODEC]  {} / {}ch | {} kbps | {}",
+            format_sample_rate(source_sample_rate),
+            source_channels,
+            bitrate,
+            format_duration_mmss(self.current_duration)
+        );
+        crate::vprintln!(
+            "[LOAD #{load_gen}] pipeline: teardown={} probe={} cpal={} total={}{}",
+            format_ms(teardown_ms),
+            format_ms(probe_ms),
+            format_ms(cpal_ms),
+            format_ms(handle_start.elapsed().as_secs_f64() * 1000.0),
+            if cached {
+                " (CACHE HIT)"
+            } else {
+                " (streaming)"
+            }
+        );
+        crate::vprintln!(
+            "[LOAD #{load_gen}] ready in {} (from load_with_policy entry)",
+            format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
+        );
     }
 
     fn handle_play(&mut self) {
         self.allow_startup_auto_resume = false;
+
         #[cfg(target_os = "windows")]
         {
             if self.is_exclusive_mode {
@@ -603,35 +1224,29 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 return;
             }
         }
-        if let Some(ref p) = self.rodio_player {
-            let mut resumed_on_play: Option<f64> = None;
-            if let Some(seek_time) = self.pending_resume_seek.take() {
-                match p.try_seek(Duration::from_secs_f64(seek_time)) {
-                    Ok(()) => {
-                        if let Some(track_id) = self.current_track_id.as_ref() {
-                            self.resume_store.set(track_id, seek_time);
-                        }
-                        resumed_on_play = Some(seek_time.max(0.0));
-                        (self.callback)(PlayerEvent::TimeUpdate(
-                            seek_time.max(0.0),
-                            self.current_seq,
-                        ));
-                    }
-                    Err(e) => {
-                        // Retry on next Play if decoder wasn't ready yet.
-                        self.pending_resume_seek = Some(seek_time);
-                        eprintln!("[SEEK]   resume seek failed on play: {e}");
-                    }
-                }
-            }
-            p.play();
-            let pos_secs = p.get_pos().as_secs_f64();
-            // Right after a successful resume seek, some backends can briefly
-            // still report 0; avoid overriding the UI resume position with 0.
-            if resumed_on_play.is_none() || pos_secs > 0.0 {
-                (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
+
+        // Handle resume seek
+        if let Some(seek_time) = self.pending_resume_seek.take()
+            && let Some(ref tx) = self.decode_cmd_tx
+        {
+            let _ = tx.send(DecodeCommand::Seek(seek_time));
+            (self.callback)(PlayerEvent::TimeUpdate(
+                seek_time.max(0.0),
+                self.current_seq,
+            ));
+            if let Some(track_id) = self.current_track_id.as_ref() {
+                self.resume_store.set(track_id, seek_time);
             }
         }
+
+        // Start cpal stream + resume decode
+        if let Some(ref stream) = self.cpal_stream {
+            let _ = stream.play();
+        }
+        if let Some(ref tx) = self.decode_cmd_tx {
+            let _ = tx.send(DecodeCommand::Resume);
+        }
+
         self.is_playing = true;
         crate::state::GOVERNOR
             .buffer_progress()
@@ -654,11 +1269,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 return;
             }
         }
-        if let Some(ref p) = self.rodio_player {
-            p.pause();
-            let pos_secs = p.get_pos().as_secs_f64();
-            (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
+
+        if let Some(ref stream) = self.cpal_stream {
+            let _ = stream.pause();
         }
+        if let Some(ref tx) = self.decode_cmd_tx {
+            let _ = tx.send(DecodeCommand::Pause);
+        }
+
+        // Emit current position
+        let pos_secs = self.current_position_secs();
+        (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
+
         self.is_playing = false;
         crate::state::GOVERNOR
             .buffer_progress()
@@ -676,10 +1298,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             cancel.store(true, Relaxed);
         }
 
-        if let Some(ref old_buf) = self.current_streaming_buffer {
+        if let Some(ref old_buf) = self.current_buffer {
             old_buf.cancel();
         }
-        self.current_streaming_buffer = None;
+        self.stop_decode();
+        self.current_buffer = None;
 
         #[cfg(target_os = "windows")]
         {
@@ -692,31 +1315,26 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.is_playing = false;
                 self.has_track = false;
                 self.current_duration = 0.0;
-                self.current_data = None;
                 self.current_track_id = None;
                 self.pending_resume_seek = None;
                 self.resume_store.flush_if_due(true);
-
                 return;
             }
         }
-        if let Some(old) = self.rodio_player.take() {
-            old.stop();
-            drop(old);
-        }
+
         (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
         (self.callback)(PlayerEvent::StateChange("paused", self.current_seq));
         self.is_playing = false;
         self.has_track = false;
         self.current_duration = 0.0;
-        self.current_data = None;
         self.current_track_id = None;
         self.pending_resume_seek = None;
+        self.is_cached = false;
         self.resume_store.flush_if_due(true);
     }
 
     fn handle_seek(&mut self, time: f64) {
-        // Latest-seek-wins: drop stale seeks queued while we were busy.
+        // Latest-seek-wins
         let mut latest_time = time;
         while let Ok(next_cmd) = self.cmd_rx.try_recv() {
             match next_cmd {
@@ -726,6 +1344,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 other => self.pending_cmds.push(other),
             }
         }
+
         if let Some(track_id) = self.current_track_id.as_ref() {
             self.resume_store.set(track_id, latest_time);
             self.resume_store.flush_if_due(false);
@@ -749,28 +1368,36 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 return;
             }
         }
-        if let Some(ref p) = self.rodio_player {
-            let seek_t0 = std::time::Instant::now();
-            let result = p.try_seek(Duration::from_secs_f64(latest_time));
-            let elapsed = seek_t0.elapsed();
-            let timing = if elapsed.as_millis() > 0 {
-                format!("{:.0}ms", elapsed.as_secs_f64() * 1000.0)
-            } else {
-                format!("{}µs", elapsed.as_micros())
-            };
-            match result {
-                Ok(()) => {
-                    crate::vprintln!("[SEEK]   try_seek OK: {timing}");
-                    (self.callback)(PlayerEvent::TimeUpdate(
-                        latest_time.max(0.0),
-                        self.current_seq,
-                    ));
-                }
-                Err(e) => {
-                    eprintln!("[SEEK]   try_seek FAILED ({timing}): {e}");
-                    self.pending_resume_seek = Some(latest_time);
-                }
+
+        if let Some(ref tx) = self.decode_cmd_tx {
+            // Mute output instantly + freeze TimeUpdates until SeekComplete
+            self.seeking = true;
+            self.seek_wall_start = Some(std::time::Instant::now());
+            // Pause preload to free HTTP/2 bandwidth for Range restarts
+            crate::state::GOVERNOR
+                .buffer_progress()
+                .request_seek_preload_pause();
+            if let Some(ref m) = self.cpal_muted {
+                m.store(true, Relaxed);
             }
+            // Send target time so the scrubber jumps to the target position.
+            // Don't send any StateChange — TIDAL still thinks we're "active",
+            // but since we stop sending TimeUpdates, the scrubber stays pinned.
+            (self.callback)(PlayerEvent::TimeUpdate(
+                latest_time.max(0.0),
+                self.current_seq,
+            ));
+
+            let _ = tx.send(DecodeCommand::Seek(latest_time));
+            crate::vprintln!(
+                "[SEEK]   sent: {:.2}s ({})",
+                latest_time,
+                if self.is_cached {
+                    "cached/RAM"
+                } else {
+                    "streaming"
+                }
+            );
         } else {
             self.pending_resume_seek = Some(latest_time);
             crate::vprintln!("[SEEK]   queued until player ready");
@@ -778,16 +1405,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     fn handle_set_volume(&mut self, vol: f64) {
-        self.current_volume = (vol / 100.0) as f32;
+        let vol_f32 = (vol / 100.0) as f32;
+        self.volume.store(f32::to_bits(vol_f32), Relaxed);
+
         #[cfg(target_os = "windows")]
         {
             if self.is_exclusive_mode {
-                // Volume ignored in exclusive mode (100% forced)
                 return;
             }
-        }
-        if let Some(ref p) = self.rodio_player {
-            p.set_volume(self.current_volume);
         }
     }
 
@@ -797,21 +1422,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     fn handle_set_audio_device(&mut self, id: String, exclusive: bool) {
-        let _ = &exclusive; // used on Windows only
+        let _ = &exclusive;
         #[cfg(target_os = "windows")]
         {
             if let Some(cancel) = self.exclusive_stream_cancel.take() {
                 cancel.store(true, Relaxed);
             }
             if exclusive {
-                // Switch to exclusive WASAPI mode
-                // Stop rodio playback
-                if let Some(ref p) = self.rodio_player {
-                    p.stop();
-                }
-                self.rodio_player = None;
+                // Switch to exclusive WASAPI
+                self.stop_decode();
+                self.cpal_stream = None;
 
-                // Shutdown previous exclusive handle if any
                 if let Some(old) = self.exclusive_handle.take() {
                     old.shutdown();
                 }
@@ -820,39 +1441,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.is_exclusive_mode = true;
                 self.exclusive_handle = Some(handle);
 
-                // Reload current track in exclusive mode.
+                // Reload current track in exclusive mode
                 if let Some(ref handle) = self.exclusive_handle {
-                    if let Some(ref streaming_buf) = self.current_streaming_buffer {
+                    if let Some(ref buf) = self.current_buffer {
                         handle.send(ExclusiveCommand::Stop);
                         let cancel = Arc::new(AtomicBool::new(false));
                         self.exclusive_stream_cancel = Some(cancel.clone());
 
                         let cmd_tx = handle.command_sender();
-                        let reader = streaming_buf.new_reader();
-                        let total_len = streaming_buf.total_len();
-                        let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
-                        thread::spawn(move || {
-                            if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
-                                reader,
-                                total_len,
-                                stream_id,
-                                cmd_tx,
-                                cancel.clone(),
-                            ) && !cancel.load(Relaxed)
-                            {
-                                eprintln!("[WASAPI] Device switch stream decode failed: {e}");
-                            }
-                        });
-                        self.has_track = true;
-                        self.is_playing = true;
-                    } else if let Some(ref data) = self.current_data {
-                        handle.send(ExclusiveCommand::Stop);
-                        let cancel = Arc::new(AtomicBool::new(false));
-                        self.exclusive_stream_cancel = Some(cancel.clone());
-
-                        let cmd_tx = handle.command_sender();
-                        let reader = SharedCursor::new(data.clone());
-                        let total_len = data.len() as u64;
+                        let reader = buf.clone();
+                        let total_len = buf.total_len();
                         let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
                         thread::spawn(move || {
                             if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
@@ -871,119 +1469,156 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                 }
 
+                self.current_device_id = Some(id.clone());
                 crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
                 return;
             } else if self.is_exclusive_mode {
-                // Switch back from exclusive to shared mode
                 if let Some(old) = self.exclusive_handle.take() {
                     old.shutdown();
                 }
                 self.is_exclusive_mode = false;
                 crate::vprintln!("[AUDIO] Switched back to shared mode");
-                // Fall through to shared device setup below
             }
         }
 
-        let position = self.rodio_player.as_ref().map(|p| p.get_pos());
-        let was_playing = self.is_playing;
+        self.current_device_id = Some(id.clone());
 
-        match open_device_sink(Some(&id)) {
-            Ok(mut new_sink) => {
-                new_sink.log_on_drop(false);
+        // Rebuild cpal stream on new device
+        if self.has_track {
+            let was_playing = self.is_playing;
+            let position = self.current_position_secs();
 
-                // Stop old player
-                if let Some(ref p) = self.rodio_player {
-                    p.stop();
-                }
+            // Stop current decode + stream
+            self.stop_decode();
+            self.cpal_stream = None;
 
-                self.device_sink = new_sink;
-
-                // Reload current track on new device
-                if let Some(ref streaming_buf) = self.current_streaming_buffer {
-                    if streaming_buf.is_complete() {
-                        if let Some(data) = streaming_buf.take_data() {
-                            let data = Arc::new(data);
-                            let byte_len = data.len() as u64;
-                            let cursor = SharedCursor::new(data.clone());
-                            if let Ok(source) = Decoder::builder()
-                                .with_data(cursor)
-                                .with_byte_len(byte_len)
-                                .with_seekable(true)
-                                .with_hint("flac")
-                                .build()
-                            {
-                                let player = rodio::Player::connect_new(self.device_sink.mixer());
-                                player.set_volume(self.current_volume);
-                                player.append(source);
-
-                                if let Some(pos) = position {
-                                    let _ = player.try_seek(pos);
-                                }
-                                if !was_playing {
-                                    player.pause();
-                                }
-
-                                self.current_data = Some(data);
-                                self.current_streaming_buffer = None;
-                                self.rodio_player = Some(player);
-                            }
-                        }
-                    } else {
-                        let total_len = streaming_buf.total_len();
-                        let reader = streaming_buf.new_reader();
-                        if let Ok(source) = Decoder::builder()
-                            .with_data(reader)
-                            .with_byte_len(total_len)
-                            .with_seekable(true)
-                            .with_hint("flac")
-                            .build()
-                        {
-                            let player = rodio::Player::connect_new(self.device_sink.mixer());
-                            player.set_volume(self.current_volume);
-                            player.append(source);
-
-                            if let Some(pos) = position {
-                                let _ = player.try_seek(pos);
-                            }
-                            if !was_playing {
-                                player.pause();
-                            }
-
-                            self.rodio_player = Some(player);
-                        }
-                    }
-                } else if let Some(ref data) = self.current_data {
-                    let byte_len = data.len() as u64;
-                    let cursor = SharedCursor::new(data.clone());
-                    if let Ok(source) = Decoder::builder()
-                        .with_data(cursor)
-                        .with_byte_len(byte_len)
-                        .with_seekable(true)
-                        .with_hint("flac")
-                        .build()
-                    {
-                        let player = rodio::Player::connect_new(self.device_sink.mixer());
-                        player.set_volume(self.current_volume);
-                        player.append(source);
-
-                        if let Some(pos) = position {
-                            let _ = player.try_seek(pos);
-                        }
-
-                        if !was_playing {
-                            player.pause();
-                        }
-
-                        self.rodio_player = Some(player);
-                    }
-                }
-
-                crate::vprintln!("[AUDIO] Switched to device: {}", id);
+            // Re-load on new device by re-doing handle_load logic
+            if let Some(ref buffer) = self.current_buffer {
+                let buffer_clone = buffer.clone();
+                // Reuse existing handle_load logic by sending a synthetic load
+                // Actually, let's just rebuild the pipeline directly
+                self.rebuild_pipeline_on_device(buffer_clone, was_playing, position);
             }
+        }
+
+        crate::vprintln!("[AUDIO] Switched to device: {}", id);
+    }
+
+    /// Rebuild the decode+cpal pipeline on the current device.
+    fn rebuild_pipeline_on_device(&mut self, buffer: RamBuffer, was_playing: bool, seek_to: f64) {
+        let _total_len = buffer.total_len();
+
+        // Probe
+        let probe_reader = buffer.clone();
+        let mss = MediaSourceStream::new(Box::new(probe_reader), Default::default());
+        let hint = Hint::new();
+
+        let probed = match symphonia::default::get_probe().format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        ) {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!("[ERROR] Failed to switch to device '{}': {}", id, e);
+                eprintln!("[ERROR]  Probe failed on device switch: {e}");
+                return;
+            }
+        };
+
+        let track = match probed
+            .format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        {
+            Some(t) => t,
+            None => {
+                eprintln!("[ERROR]  No audio track on device switch");
+                return;
+            }
+        };
+
+        let sr = track.codec_params.sample_rate.unwrap_or(44100);
+        let ch = track
+            .codec_params
+            .channels
+            .map(|c| c.count() as u16)
+            .unwrap_or(2);
+
+        drop(probed);
+
+        let device = if let Some(ref id) = self.current_device_id {
+            find_output_device(id)
+        } else {
+            None
+        };
+        let device = device.unwrap_or_else(|| {
+            cpal::default_host()
+                .default_output_device()
+                .expect("no audio output device")
+        });
+
+        let opened = match open_output_stream(&device, sr, ch, &self.volume) {
+            Some(o) => o,
+            None => return,
+        };
+
+        let actual_rate = opened.rate;
+        let actual_channels = opened.channels;
+        self.cpal_muted = Some(opened.muted);
+
+        self.sample_rate = actual_rate;
+        self.channels = actual_channels;
+        self.decoded_samples.store(0, Relaxed);
+
+        let (decode_cmd_tx, decode_cmd_rx) = mpsc::channel();
+        let (decode_event_tx, decode_event_rx) = mpsc::channel();
+        let decoded_samples = self.decoded_samples.clone();
+
+        let decode_buffer = buffer.clone();
+        let decode_handle = spawn_decode_thread(
+            decode_buffer,
+            opened.producer,
+            decoded_samples,
+            decode_cmd_rx,
+            decode_event_tx,
+            actual_rate,
+            actual_channels,
+            opened.seek_gen,
+        );
+
+        let stream = opened.stream;
+
+        self.cpal_stream = Some(stream);
+        self.decode_cmd_tx = Some(decode_cmd_tx);
+        self.decode_event_rx = Some(decode_event_rx);
+        self.decode_handle = Some(decode_handle);
+        self.current_buffer = Some(buffer);
+
+        // Seek to previous position
+        if seek_to > 0.0
+            && let Some(ref tx) = self.decode_cmd_tx
+        {
+            let _ = tx.send(DecodeCommand::Seek(seek_to));
+        }
+
+        if was_playing {
+            if let Some(ref stream) = self.cpal_stream {
+                let _ = stream.play();
+            }
+            if let Some(ref tx) = self.decode_cmd_tx {
+                let _ = tx.send(DecodeCommand::Resume);
             }
         }
+    }
+
+    /// Compute current playback position in seconds from decoded sample count.
+    fn current_position_secs(&self) -> f64 {
+        let samples = self.decoded_samples.load(Relaxed);
+        let channels = self.channels.max(1) as u64;
+        let frames = samples / channels;
+        frames as f64 / self.sample_rate.max(1) as f64
     }
 
     #[cfg(target_os = "windows")]
@@ -1031,7 +1666,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 cancel.store(true, Relaxed);
                             }
                             self.is_exclusive_mode = false;
-                            // Handle will be dropped
                         }
                         ExclusiveEvent::Stopped => {
                             self.has_track = false;
@@ -1046,7 +1680,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
             }
 
-            // If we got InitFailed, drop the handle
             if !self.is_exclusive_mode {
                 self.exclusive_handle = None;
             }
@@ -1055,44 +1688,122 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     fn poll_playback(&mut self) {
         #[cfg(target_os = "windows")]
-        let should_poll_rodio = !self.is_exclusive_mode;
+        let should_poll = !self.is_exclusive_mode;
         #[cfg(not(target_os = "windows"))]
-        let should_poll_rodio = true;
+        let should_poll = true;
 
-        if should_poll_rodio
-            && self.has_track
-            && self.is_playing
-            && let Some(ref p) = self.rodio_player
-        {
-            let pos = p.get_pos();
-            let pos_secs = pos.as_secs_f64();
+        if !should_poll || !self.has_track || !self.is_playing {
+            return;
+        }
 
+        // Check decode events
+        if let Some(ref rx) = self.decode_event_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    DecodeEvent::Finished => {
+                        crate::vprintln!(
+                            "[TRACK]  Finished ({})",
+                            if self.is_cached {
+                                "from cache"
+                            } else {
+                                "from stream"
+                            }
+                        );
+                        // Track completed
+                        if let Some(track_id) = self.current_track_id.as_ref() {
+                            self.resume_store.clear(track_id);
+                            self.resume_store.flush_if_due(true);
+                        }
+
+                        // Write to disk cache if complete and not already cached
+                        if !self.is_cached
+                            && let Some(ref buf) = self.current_buffer
+                            && buf.is_complete()
+                            && let Some(data) = buf.take_data()
+                        {
+                            let track_id = self.current_track_id.clone();
+                            std::thread::spawn(move || {
+                                if let Some(tid) = track_id {
+                                    let mut cache = crate::state::AUDIO_CACHE.lock().unwrap();
+                                    match cache.store(&tid, "flac", &data) {
+                                        Ok(()) => {
+                                            crate::vprintln!(
+                                                "[CACHE]  Stored: {} ({})",
+                                                tid,
+                                                super::format_bytes(data.len() as u64)
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[CACHE]  Store failed: {e}");
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        (self.callback)(PlayerEvent::TimeUpdate(
+                            self.current_duration,
+                            self.current_seq,
+                        ));
+                        (self.callback)(PlayerEvent::StateChange("completed", self.current_seq));
+                        self.has_track = false;
+                        self.is_playing = false;
+                        self.current_track_id = None;
+                        crate::state::GOVERNOR
+                            .buffer_progress()
+                            .set_playback_active(false);
+                        self.current_duration = 0.0;
+                        return;
+                    }
+                    DecodeEvent::SeekComplete => {
+                        // Always unmute (safe even if not muted)
+                        if let Some(ref m) = self.cpal_muted {
+                            m.store(false, Relaxed);
+                        }
+                        if self.seeking {
+                            // User seek completed — log wall time
+                            self.seeking = false;
+                            let wall_ms = self
+                                .seek_wall_start
+                                .take()
+                                .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+                                .unwrap_or(0.0);
+                            crate::vprintln!(
+                                "[SEEK]   complete: wall={} ({})",
+                                format_ms(wall_ms),
+                                if self.is_cached {
+                                    "cached"
+                                } else {
+                                    "streaming"
+                                }
+                            );
+                        }
+                        // Resume seeks (from handle_play) also emit SeekComplete
+                        // but don't set seeking=true — no wall timer logged.
+                    }
+                    DecodeEvent::Error(e) => {
+                        crate::vprintln!("[DECODE] Error: {e}");
+                    }
+                }
+            }
+        }
+
+        // Update governor buffer progress for rate-limiting
+        if let Some(ref buf) = self.current_buffer {
+            let bp = crate::state::GOVERNOR.buffer_progress();
+            bp.written.store(buf.written(), Relaxed);
+            bp.read_pos.store(buf.read_cursor(), Relaxed);
+        }
+
+        // Emit time update (suppressed while seeking to freeze the UI)
+        if !self.seeking {
+            let pos_secs = self.current_position_secs();
             if pos_secs > 0.0 {
                 if let Some(track_id) = self.current_track_id.as_ref() {
                     self.resume_store.set(track_id, pos_secs);
                     self.resume_store.flush_if_due(false);
                 }
                 (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
-            }
-
-            if p.empty() && !self.last_empty {
-                if let Some(track_id) = self.current_track_id.as_ref() {
-                    self.resume_store.clear(track_id);
-                    self.resume_store.flush_if_due(true);
-                }
-                (self.callback)(PlayerEvent::TimeUpdate(
-                    self.current_duration,
-                    self.current_seq,
-                ));
-                (self.callback)(PlayerEvent::StateChange("completed", self.current_seq));
-                self.has_track = false;
-                self.is_playing = false;
-                self.current_track_id = None;
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(false);
-                self.current_duration = 0.0;
-                self.last_empty = true;
             }
         }
     }

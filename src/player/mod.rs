@@ -1,15 +1,16 @@
+pub(crate) mod buffer;
+pub(crate) mod cache;
 pub(crate) mod ipc;
 mod resume;
-pub(crate) mod streaming;
 mod thread;
 #[cfg(target_os = "windows")]
 pub(crate) mod wasapi;
 
 use crate::preload;
-use crate::state::{CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT, TrackInfo};
+use crate::state::{AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT_PLAYBACK, TrackInfo};
+use buffer::RamBuffer;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
-use streaming::StreamingBuffer;
 
 static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -42,15 +43,25 @@ enum ResumePolicy {
 }
 
 enum PlayerCommand {
-    LoadData(Vec<u8>, u32, u32, String, ResumePolicy),
-    LoadStreaming(StreamingBuffer, u32, u32, String, ResumePolicy),
+    Load {
+        buffer: RamBuffer,
+        load_gen: u32,
+        seq: u32,
+        track_id: String,
+        resume_policy: ResumePolicy,
+        load_start: std::time::Instant,
+        cached: bool,
+    },
     Play,
     Pause,
     Stop(u32),
     Seek(f64),
     SetVolume(f64),
     GetAudioDevices(Option<String>),
-    SetAudioDevice { id: String, exclusive: bool },
+    SetAudioDevice {
+        id: String,
+        exclusive: bool,
+    },
 }
 
 pub struct Player {
@@ -77,6 +88,51 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn http_version_str(v: reqwest::Version) -> &'static str {
+    if v == reqwest::Version::HTTP_3 {
+        "3"
+    } else if v == reqwest::Version::HTTP_2 {
+        "2"
+    } else if v == reqwest::Version::HTTP_11 {
+        "1.1"
+    } else if v == reqwest::Version::HTTP_10 {
+        "1.0"
+    } else {
+        "?"
+    }
+}
+
+/// Extract the CDN cache status from the response headers (x-cache).
+pub(crate) fn cdn_cache_status(resp: &reqwest::Response) -> &str {
+    resp.headers()
+        .get("x-cache")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("?")
+}
+
+pub(crate) fn log_response_headers(resp: &reqwest::Response, prefix: &str) {
+    let h = resp.headers();
+    let ver = http_version_str(resp.version());
+    let ct = h
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    let mut info = format!("HTTP/{ver} | type={ct}");
+    for &(header, label) in &[
+        ("content-encoding", "enc"),
+        ("server", "server"),
+        ("x-cache", "CDN"),
+        ("x-cache-hits", "hits"),
+        ("age", "age"),
+        ("via", "via"),
+    ] {
+        if let Some(val) = h.get(header).and_then(|v| v.to_str().ok()) {
+            info.push_str(&format!(" | {label}={val}"));
+        }
+    }
+    crate::vprintln!("{prefix} {info}");
 }
 
 fn canonical_track_id(url: &str) -> String {
@@ -166,35 +222,80 @@ impl Player {
             };
             let track_id = canonical_track_id(&url);
 
-            // Use preloaded data if available (instant)
+            // 1. Check disk cache
+            {
+                let cache_t0 = std::time::Instant::now();
+                let cache = AUDIO_CACHE.lock().unwrap();
+                if let Some(data) = cache.load(&track_id) {
+                    let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
+                    if LOAD_SEQ.load(Relaxed) != load_gen {
+                        return;
+                    }
+                    crate::vprintln!(
+                        "[CACHE]  Hit: {} | {} | read: {} | total: {}",
+                        track_id.chars().take(40).collect::<String>(),
+                        format_bytes(data.len() as u64),
+                        format_ms(cache_ms),
+                        format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
+                    );
+                    let buffer = RamBuffer::from_complete(data);
+                    let _ = cmd_tx.send(PlayerCommand::Load {
+                        buffer,
+                        load_gen,
+                        seq: event_seq,
+                        track_id,
+                        resume_policy,
+                        load_start,
+                        cached: true,
+                    });
+                    return;
+                }
+                let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
+                crate::vprintln!(
+                    "[CACHE]  Miss ({}) | lookup: {}",
+                    track_id.chars().take(40).collect::<String>(),
+                    format_ms(cache_ms)
+                );
+            }
+
+            // 2. Check preloaded data
+            let preload_t0 = std::time::Instant::now();
             if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
+                let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
                 if LOAD_SEQ.load(Relaxed) != load_gen {
                     crate::vprintln!("[LOAD #{load_gen}] stale after preload check, dropping");
                     return;
                 }
                 crate::vprintln!(
-                    "[PRELOAD] Using preloaded data ({}, {:.0}ms)",
+                    "[PRELOAD] Hit: {} | check: {} | total: {}",
                     format_bytes(preloaded.data.len() as u64),
-                    load_start.elapsed().as_secs_f64() * 1000.0
+                    format_ms(preload_ms),
+                    format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
                 );
-                let _ = cmd_tx.send(PlayerCommand::LoadData(
-                    preloaded.data,
+                let buffer = RamBuffer::from_complete(preloaded.data);
+                let _ = cmd_tx.send(PlayerCommand::Load {
+                    buffer,
                     load_gen,
-                    event_seq,
-                    track_id.clone(),
+                    seq: event_seq,
+                    track_id,
                     resume_policy,
-                ));
+                    load_start,
+                    cached: false,
+                });
                 return;
             }
+
+            let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
+            crate::vprintln!("[PRELOAD] Miss | check: {}", format_ms(preload_ms));
 
             if LOAD_SEQ.load(Relaxed) != load_gen {
                 crate::vprintln!("[LOAD #{load_gen}] stale before HTTP, dropping");
                 return;
             }
 
-            // Start streaming download
+            // 3. Stream from network
             let req_start = std::time::Instant::now();
-            let resp = match HTTP_CLIENT.get(&url).send().await {
+            let resp = match HTTP_CLIENT_PLAYBACK.get(&url).send().await {
                 Ok(r) => {
                     if !r.status().is_success() {
                         eprintln!("[ERROR]  Upstream status: {}", r.status());
@@ -208,6 +309,14 @@ impl Player {
                 }
             };
             let ttfb_ms = req_start.elapsed().as_secs_f64() * 1000.0;
+            let cdn = cdn_cache_status(&resp);
+            crate::vprintln!(
+                "[NET]    TTFB: {} | CDN: {} | HTTP/{}",
+                format_ms(ttfb_ms),
+                cdn,
+                http_version_str(resp.version())
+            );
+            log_response_headers(&resp, "[NET]   ");
 
             if LOAD_SEQ.load(Relaxed) != load_gen {
                 crate::vprintln!("[LOAD #{load_gen}] stale after HTTP TTFB, dropping");
@@ -217,8 +326,8 @@ impl Player {
             let total_len = resp.content_length().unwrap_or(0);
             if total_len == 0 {
                 crate::vprintln!(
-                    "[FETCH]  No Content-Length, full download... (TTFB: {:.0}ms)",
-                    ttfb_ms
+                    "[FETCH]  No Content-Length, full download... (TTFB: {})",
+                    format_ms(ttfb_ms)
                 );
                 match preload::fetch_and_decrypt(&url, &key).await {
                     Ok(data) => {
@@ -233,13 +342,16 @@ impl Player {
                             format_bytes(data.len() as u64),
                             load_start.elapsed().as_secs_f64() * 1000.0
                         );
-                        let _ = cmd_tx.send(PlayerCommand::LoadData(
-                            data,
+                        let buffer = RamBuffer::from_complete(data);
+                        let _ = cmd_tx.send(PlayerCommand::Load {
+                            buffer,
                             load_gen,
-                            event_seq,
-                            track_id.clone(),
+                            seq: event_seq,
+                            track_id,
                             resume_policy,
-                        ));
+                            load_start,
+                            cached: false,
+                        });
                     }
                     Err(e) => {
                         eprintln!("[ERROR]  Fetch failed: {}", e);
@@ -249,25 +361,55 @@ impl Player {
             }
 
             crate::vprintln!(
-                "[NET]    TTFB: {} | Size: {} (load #{load_gen})",
-                format_ms(ttfb_ms),
+                "[NET]    Size: {} (load #{load_gen})",
                 format_bytes(total_len)
             );
 
-            crate::state::GOVERNOR.reset_buffer_progress();
-            let bp = crate::state::GOVERNOR.buffer_progress().clone();
-            let (buffer, writer) = StreamingBuffer::new(total_len, Some(bp));
-            crate::vprintln!("[LOAD #{load_gen}] sending LoadStreaming");
-            let _ = cmd_tx.send(PlayerCommand::LoadStreaming(
+            let (buffer, writer) = RamBuffer::new(total_len);
+
+            // Start download
+            preload::start_download(resp, url, key, writer);
+
+            // Pre-buffer 64KB before handing to decoder
+            const PRE_BUFFER_TARGET: u64 = 64 * 1024;
+            const PRE_BUFFER_TIMEOUT_MS: u64 = 2000;
+
+            let prebuf_start = std::time::Instant::now();
+            loop {
+                if LOAD_SEQ.load(Relaxed) != load_gen {
+                    crate::vprintln!("[LOAD #{load_gen}] stale during pre-buffer, dropping");
+                    buffer.cancel();
+                    return;
+                }
+                if buffer.written() >= PRE_BUFFER_TARGET {
+                    break;
+                }
+                if prebuf_start.elapsed().as_millis() as u64 >= PRE_BUFFER_TIMEOUT_MS {
+                    crate::vprintln!(
+                        "[LOAD #{load_gen}] pre-buffer timeout ({}KB/{}KB in {}ms)",
+                        buffer.written() / 1024,
+                        PRE_BUFFER_TARGET / 1024,
+                        PRE_BUFFER_TIMEOUT_MS
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+
+            crate::vprintln!(
+                "[LOAD #{load_gen}] pre-buffered {}KB in {:.0}ms, sending Load",
+                buffer.written() / 1024,
+                prebuf_start.elapsed().as_secs_f64() * 1000.0
+            );
+            let _ = cmd_tx.send(PlayerCommand::Load {
                 buffer,
                 load_gen,
-                event_seq,
-                track_id.clone(),
+                seq: event_seq,
+                track_id,
                 resume_policy,
-            ));
-
-            // Download continues in background, writer feeds the buffer
-            preload::start_streaming_download(resp, url, key, writer);
+                load_start,
+                cached: false,
+            });
         });
 
         *self.load_handle.lock().unwrap() = Some(handle);
