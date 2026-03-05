@@ -63,10 +63,12 @@ impl Settings {
     }
 
     fn set(&self, key: &str, value: &str) {
-        let _ = self.conn.execute(
+        if let Err(e) = self.conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
             params![key, value],
-        );
+        ) {
+            crate::vprintln!("[SETTINGS] Failed to write {key}: {e}");
+        }
     }
 
     pub fn load_window_state(&self) -> WindowState {
@@ -96,10 +98,20 @@ impl Settings {
     }
 
     pub fn save_window_state(&self, state: &WindowState) {
+        let tx = match self.conn.unchecked_transaction() {
+            Ok(tx) => tx,
+            Err(e) => {
+                crate::vprintln!("[SETTINGS] Failed to begin transaction: {e}");
+                return;
+            }
+        };
         self.set("window.x", &state.x.to_string());
         self.set("window.y", &state.y.to_string());
         self.set("window.width", &state.width.to_string());
         self.set("window.height", &state.height.to_string());
         self.set("window.maximized", &state.maximized.to_string());
+        if let Err(e) = tx.commit() {
+            crate::vprintln!("[SETTINGS] Failed to commit transaction: {e}");
+        }
     }
 }

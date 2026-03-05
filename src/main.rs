@@ -304,8 +304,6 @@ document.title = "TidaLunar - A TIDAL client";
     let mut window_state_deadline: Option<Instant> = None;
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-
         macro_rules! save_window_state {
             () => {
                 let pos = window.outer_position().unwrap_or_default();
@@ -376,9 +374,7 @@ document.title = "TidaLunar - A TIDAL client";
                 ..
             } => {
                 update_window_state(&webview, &window);
-                let deadline = Instant::now() + Duration::from_millis(500);
-                window_state_deadline = Some(deadline);
-                *control_flow = ControlFlow::WaitUntil(deadline);
+                window_state_deadline = Some(Instant::now() + Duration::from_millis(500));
             }
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. },
@@ -456,9 +452,6 @@ document.title = "TidaLunar - A TIDAL client";
                             if player_flush_deadline.is_none() {
                                 player_flush_deadline =
                                     Some(Instant::now() + player_flush_interval);
-                            }
-                            if let Some(deadline) = player_flush_deadline {
-                                *control_flow = ControlFlow::WaitUntil(deadline);
                             }
                         };
                     }
@@ -710,6 +703,18 @@ document.title = "TidaLunar - A TIDAL client";
                 }
             },
             _ => (),
+        }
+
+        // Centralized deadline: pick the earliest pending timer.
+        if *control_flow != ControlFlow::Exit {
+            let next = [window_state_deadline, player_flush_deadline]
+                .into_iter()
+                .flatten()
+                .min();
+            *control_flow = match next {
+                Some(t) => ControlFlow::WaitUntil(t),
+                None => ControlFlow::Wait,
+            };
         }
     });
 }
