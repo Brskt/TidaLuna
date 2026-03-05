@@ -11,6 +11,7 @@ mod logging;
 mod metadata;
 mod player;
 mod preload;
+mod settings;
 mod state;
 mod window;
 
@@ -64,12 +65,29 @@ fn load_window_icon() -> tao::window::Icon {
 fn main() -> wry::Result<()> {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let icon = load_window_icon();
-    let window = WindowBuilder::new()
+
+    let app_settings = settings::Settings::open(&state::cache_data_dir())
+        .expect("Failed to open settings database");
+    let saved_window = app_settings.load_window_state();
+
+    let mut wb = WindowBuilder::new()
         .with_title("TidaLunar - A TIDAL client")
         .with_window_icon(Some(icon))
         .with_decorations(cfg!(target_os = "linux"))
-        .build(&event_loop)
-        .unwrap();
+        .with_inner_size(tao::dpi::PhysicalSize::new(
+            saved_window.width,
+            saved_window.height,
+        ));
+    if saved_window.has_position() {
+        wb = wb.with_position(tao::dpi::PhysicalPosition::new(
+            saved_window.x,
+            saved_window.y,
+        ));
+    }
+    let window = wb.build(&event_loop).unwrap();
+    if saved_window.maximized {
+        window.set_maximized(true);
+    }
 
     // Application context menu (shown via the hamburger button in Tidal's titlebar).
     let ctx_menu = muda::Menu::new();
@@ -283,13 +301,32 @@ document.title = "TidaLunar - A TIDAL client";
     let resize_hot_zone_px = resize_border_px + 8.0;
     let mut last_cursor_pos: Option<(f64, f64)> = None;
     let mut last_resize_direction: Option<ResizeDirection> = None;
+    let mut window_state_deadline: Option<Instant> = None;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
+        macro_rules! save_window_state {
+            () => {
+                let pos = window.outer_position().unwrap_or_default();
+                let size = window.inner_size();
+                app_settings.save_window_state(&settings::WindowState {
+                    x: pos.x,
+                    y: pos.y,
+                    width: size.width,
+                    height: size.height,
+                    maximized: window.is_maximized(),
+                });
+            };
+        }
+
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 let now = Instant::now();
+                if window_state_deadline.is_some_and(|t| now >= t) {
+                    window_state_deadline = None;
+                    save_window_state!();
+                }
                 if player_flush_deadline.is_some_and(|t| now >= t) {
                     flush_player_bridge(
                         &webview,
@@ -315,7 +352,10 @@ document.title = "TidaLunar - A TIDAL client";
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit,
+            } => {
+                save_window_state!();
+                *control_flow = ControlFlow::Exit;
+            }
             Event::WindowEvent {
                 event:
                     WindowEvent::KeyboardInput {
@@ -336,6 +376,9 @@ document.title = "TidaLunar - A TIDAL client";
                 ..
             } => {
                 update_window_state(&webview, &window);
+                let deadline = Instant::now() + Duration::from_millis(500);
+                window_state_deadline = Some(deadline);
+                *control_flow = ControlFlow::WaitUntil(deadline);
             }
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. },
@@ -597,7 +640,10 @@ document.title = "TidaLunar - A TIDAL client";
                             "window.drag" => {
                                 let _ = window.drag_window();
                             }
-                            "window.close" => *control_flow = ControlFlow::Exit,
+                            "window.close" => {
+                                save_window_state!();
+                                *control_flow = ControlFlow::Exit;
+                            }
                             "window.maximize" => {
                                 window.set_maximized(true);
                                 update_window_state(&webview, &window);
@@ -658,6 +704,7 @@ document.title = "TidaLunar - A TIDAL client";
                     } else if event.id == id_devtools {
                         webview.open_devtools();
                     } else if event.id == id_quit {
+                        save_window_state!();
                         *control_flow = ControlFlow::Exit;
                     }
                 }
