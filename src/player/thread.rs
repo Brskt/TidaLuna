@@ -2,7 +2,7 @@ use super::buffer::RamBuffer;
 use super::resume::{RESUME_MIN_SECONDS, ResumeStore};
 use super::{LOAD_SEQ, PlayerCommand, PlayerEvent, ResumePolicy, format_ms};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -21,6 +21,10 @@ use symphonia::core::probe::Hint;
 use super::{EXCLUSIVE_STREAM_SEQ, wasapi};
 #[cfg(target_os = "windows")]
 use wasapi::{ExclusiveCommand, ExclusiveEvent, ExclusiveHandle};
+
+/// Maximum difference (seconds) between a pre-seeked position and a seek
+/// target for the pre-seek to be considered "close enough" to skip.
+const PRE_SEEK_TOLERANCE: f64 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Decode thread communication
@@ -57,6 +61,23 @@ fn format_sample_rate(rate: u32) -> String {
 fn format_duration_mmss(secs: f64) -> String {
     let total = secs as u32;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+fn codec_name(codec: symphonia::core::codecs::CodecType) -> &'static str {
+    use symphonia::core::codecs;
+    match codec {
+        codecs::CODEC_TYPE_FLAC => "flac",
+        codecs::CODEC_TYPE_AAC => "aac",
+        codecs::CODEC_TYPE_MP3 => "mp3",
+        codecs::CODEC_TYPE_VORBIS => "vorbis",
+        codecs::CODEC_TYPE_OPUS => "opus",
+        codecs::CODEC_TYPE_PCM_S16LE
+        | codecs::CODEC_TYPE_PCM_S24LE
+        | codecs::CODEC_TYPE_PCM_S32LE
+        | codecs::CODEC_TYPE_PCM_F32LE => "pcm",
+        codecs::CODEC_TYPE_ALAC => "alac",
+        _ => "unknown",
+    }
 }
 
 fn enumerate_audio_devices() -> Vec<super::AudioDevice> {
@@ -110,6 +131,8 @@ struct OpenedStream {
     /// When true, the cpal callback outputs silence and drains the ring buffer.
     /// Set by handle_seek (instant mute), cleared by SeekComplete handler.
     muted: Arc<AtomicBool>,
+    /// Set by the cpal error callback: 0 = none, 1 = device disconnected, 2 = unknown error.
+    stream_error: Arc<AtomicU8>,
 }
 
 /// Build the cpal output callback. Shared between both attempts.
@@ -158,6 +181,7 @@ fn open_output_stream(
 ) -> Option<OpenedStream> {
     let seek_gen = Arc::new(AtomicU32::new(0));
     let muted = Arc::new(AtomicBool::new(false));
+    let stream_error = Arc::new(AtomicU8::new(0));
 
     // Attempt 1: source rate (no software resampling needed)
     {
@@ -176,10 +200,18 @@ fn open_output_stream(
             seek_gen.clone(),
             muted.clone(),
         );
+        let err_flag = stream_error.clone();
         if let Ok(stream) = device.build_output_stream(
             &config,
             cb,
-            |err| eprintln!("[CPAL]   Stream error: {err}"),
+            move |err| {
+                eprintln!("[CPAL]   Stream error: {err}");
+                let code = match err {
+                    cpal::StreamError::DeviceNotAvailable => 1,
+                    _ => 2,
+                };
+                err_flag.store(code, Relaxed);
+            },
             None,
         ) {
             crate::vprintln!(
@@ -194,6 +226,7 @@ fn open_output_stream(
                 channels: source_channels,
                 seek_gen,
                 muted,
+                stream_error,
             });
         }
     }
@@ -221,10 +254,18 @@ fn open_output_stream(
         seek_gen.clone(),
         muted.clone(),
     );
+    let err_flag = stream_error.clone();
     match device.build_output_stream(
         &cfg,
         cb,
-        |err| eprintln!("[CPAL]   Stream error: {err}"),
+        move |err| {
+            eprintln!("[CPAL]   Stream error: {err}");
+            let code = match err {
+                cpal::StreamError::DeviceNotAvailable => 1,
+                _ => 2,
+            };
+            err_flag.store(code, Relaxed);
+        },
         None,
     ) {
         Ok(stream) => Some(OpenedStream {
@@ -234,6 +275,7 @@ fn open_output_stream(
             channels: ac,
             seek_gen,
             muted,
+            stream_error,
         }),
         Err(e) => {
             eprintln!("[ERROR]  Failed to open cpal stream: {e}");
@@ -491,7 +533,7 @@ fn decode_loop(
     };
 
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
-    let mut paused = false;
+    let mut paused = true;
 
     loop {
         // Check for commands (non-blocking)
@@ -769,6 +811,10 @@ pub(super) struct PlayerThread<F> {
     // Resume
     resume_store: ResumeStore,
     pending_resume_seek: Option<f64>,
+    /// Pre-seek position sent to the paused decode thread during handle_load.
+    /// When handle_seek resolves the deferred play, if positions match we skip
+    /// the redundant network seek.
+    pre_seek_pos: Option<f64>,
     allow_startup_auto_resume: bool,
     // Device
     current_device_id: Option<String>,
@@ -779,12 +825,24 @@ pub(super) struct PlayerThread<F> {
     is_exclusive_mode: bool,
     #[cfg(target_os = "windows")]
     exclusive_stream_cancel: Option<Arc<AtomicBool>>,
+    // Deferred play — wait for frontend seek before starting decode.
+    // The Option<f64> carries a fallback resume position (used on timeout).
+    deferred_play: Option<(std::time::Instant, Option<f64>)>,
     // Seek state — suppresses TimeUpdates while decode thread is seeking
     seeking: bool,
+    /// Target position during an active seek — emitted as TimeUpdate so the
+    /// frontend's seek bar stays pinned at the target instead of freezing.
+    seek_target: Option<f64>,
     /// When the current seek started (for total seek timing)
     seek_wall_start: Option<std::time::Instant>,
     /// Shared with cpal callback — instantly mutes output when true
     cpal_muted: Option<Arc<AtomicBool>>,
+    /// Shared with cpal error callback: 0 = none, 1 = disconnected, 2 = unknown
+    cpal_stream_error: Option<Arc<AtomicU8>>,
+    // Buffering state — emits idle/active when decode thread stalls on RamBuffer
+    buffer_stalled: bool,
+    // Version event fire-once flag
+    version_emitted: bool,
     // Command coalescing
     pending_cmds: Vec<PlayerCommand>,
     coalesced_cmds: Vec<PlayerCommand>,
@@ -812,6 +870,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             channels: 2,
             resume_store: ResumeStore::load(),
             pending_resume_seek: None,
+            pre_seek_pos: None,
             allow_startup_auto_resume: true,
             current_device_id: None,
             #[cfg(target_os = "windows")]
@@ -820,9 +879,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             is_exclusive_mode: false,
             #[cfg(target_os = "windows")]
             exclusive_stream_cancel: None,
+            deferred_play: None,
             seeking: false,
+            seek_target: None,
             seek_wall_start: None,
             cpal_muted: None,
+            cpal_stream_error: None,
+            buffer_stalled: false,
+            version_emitted: false,
             pending_cmds: Vec::new(),
             coalesced_cmds: Vec::new(),
         })
@@ -867,9 +931,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Poll playback state
             self.poll_playback();
 
-            // Wait for next command — short poll while seeking to catch SeekComplete fast
+            // Wait for next command — short poll while seeking or deferred play
             let timeout = if self.seeking {
                 Duration::from_millis(1)
+            } else if self.deferred_play.is_some() {
+                Duration::from_millis(50)
             } else {
                 Duration::from_millis(250)
             };
@@ -911,6 +977,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::GetAudioDevices(req_id) => self.handle_get_audio_devices(req_id),
             PlayerCommand::SetAudioDevice { id, exclusive } => {
                 self.handle_set_audio_device(id, exclusive);
+            }
+            PlayerCommand::EmitMediaError { error, code } => {
+                (self.callback)(PlayerEvent::MediaError { error, code });
+            }
+            PlayerCommand::EmitMaxConnections => {
+                (self.callback)(PlayerEvent::MaxConnectionsReached);
             }
         }
     }
@@ -975,6 +1047,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
         self.current_seq = event_seq;
         self.is_cached = cached;
+        self.buffer_stalled = false;
 
         crate::vprintln!(
             "[LOAD #{load_gen}] handle_load enter | cached={} | track={}",
@@ -1083,29 +1156,62 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             .n_frames
             .map(|n| n as f64 / source_sample_rate as f64)
             .unwrap_or(0.0);
+        let source_bit_depth = track.codec_params.bits_per_sample;
+        let source_codec = codec_name(track.codec_params.codec);
 
         drop(probed); // Release the probe reader
 
         self.current_duration = source_duration;
         self.decoded_samples.store(0, Relaxed);
 
+        // Emit version once (fire-once at first load)
+        if !self.version_emitted {
+            self.version_emitted = true;
+            (self.callback)(PlayerEvent::Version(env!("CARGO_PKG_VERSION")));
+        }
+
+        // Emit media format info to the frontend
+        (self.callback)(PlayerEvent::MediaFormat {
+            codec: source_codec,
+            sample_rate: source_sample_rate,
+            bit_depth: source_bit_depth,
+            channels: source_channels,
+        });
+
         // Open cpal stream (try source rate first, fall back to device default + rubato)
         let device = if let Some(ref id) = self.current_device_id {
-            find_output_device(id)
+            match find_output_device(id) {
+                Some(d) => d,
+                None => {
+                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
+                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                    match cpal::default_host().default_output_device() {
+                        Some(d) => d,
+                        None => {
+                            (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                            return;
+                        }
+                    }
+                }
+            }
         } else {
-            None
+            match cpal::default_host().default_output_device() {
+                Some(d) => d,
+                None => {
+                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                    return;
+                }
+            }
         };
-        let device = device.unwrap_or_else(|| {
-            cpal::default_host()
-                .default_output_device()
-                .expect("no audio output device")
-        });
 
         let cpal_start = std::time::Instant::now();
         let opened =
             match open_output_stream(&device, source_sample_rate, source_channels, &self.volume) {
                 Some(o) => o,
-                None => return,
+                None => {
+                    (self.callback)(PlayerEvent::DeviceError("deviceformatnotsupported"));
+                    return;
+                }
             };
         let cpal_ms = cpal_start.elapsed().as_secs_f64() * 1000.0;
         crate::vprintln!("[LOAD #{load_gen}] cpal open: {}", format_ms(cpal_ms));
@@ -1116,6 +1222,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let ring_producer = opened.producer;
         let seek_gen = opened.seek_gen;
         self.cpal_muted = Some(opened.muted);
+        self.cpal_stream_error = Some(opened.stream_error);
 
         // Track position at output rate/channels
         self.sample_rate = actual_rate;
@@ -1144,7 +1251,20 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_handle = Some(decode_handle);
         self.current_buffer = Some(buffer);
         self.has_track = true;
+        let was_playing = self.is_playing;
         self.is_playing = false;
+
+        // Pre-seek: send seek to the paused decode thread now so data starts
+        // downloading from near the resume position. When play arrives later,
+        // the data is already buffered — no network seek needed.
+        self.pre_seek_pos = None;
+        if let Some(pos) = self.pending_resume_seek
+            && let Some(ref tx) = self.decode_cmd_tx
+        {
+            let _ = tx.send(DecodeCommand::Seek(pos));
+            self.pre_seek_pos = Some(pos);
+            crate::vprintln!("[LOAD #{load_gen}] pre-seek to {:.1}s (decode paused)", pos);
+        }
 
         // Emit events
         if self.current_duration > 0.0 {
@@ -1153,8 +1273,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.current_seq,
             ));
         }
-        let initial_time = self.pending_resume_seek.unwrap_or(0.0);
-        (self.callback)(PlayerEvent::TimeUpdate(initial_time, self.current_seq));
+        // NOTE: Do NOT emit TimeUpdate(resume_position) here.
+        // Sending a non-zero time during load confuses the TIDAL webapp's
+        // state machine — it thinks playback is active and the play button
+        // becomes a no-op.  The resume position is sent to the frontend
+        // only when playback actually starts (deferred play resolution).
 
         let bitrate = if self.current_duration > 0.0 {
             (total_len as f64 * 8.0 / self.current_duration / 1000.0) as u32
@@ -1200,6 +1323,47 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             "[LOAD #{load_gen}] ready in {} (from load_with_policy entry)",
             format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
         );
+
+        // Signal that the track is loaded and ready to play.
+        // Skip during auto-resume: the webapp already considers itself "playing".
+        if !self.allow_startup_auto_resume || self.pending_resume_seek.is_none() {
+            (self.callback)(PlayerEvent::StateChange("ready", self.current_seq));
+        }
+
+        // Auto-start deferred play on app startup.
+        // The TIDAL webapp restores its "playing" state from persistence and
+        // sends player.load() expecting playback to resume — it does NOT send
+        // a separate player.play IPC.  We silently start the deferred play
+        // mechanism so the 500ms timeout triggers start_playback().
+        // Do NOT send StateChange("active") — the webapp already considers
+        // itself in "playing" state; an unsolicited state event would confuse
+        // its internal state machine and break seeking.
+        if self.allow_startup_auto_resume
+            && let Some(pos) = self.pending_resume_seek.take()
+        {
+            self.allow_startup_auto_resume = false;
+            self.deferred_play = Some((std::time::Instant::now(), Some(pos)));
+            self.is_playing = true;
+            crate::state::GOVERNOR
+                .buffer_progress()
+                .set_playback_active(true);
+            crate::vprintln!(
+                "[LOAD #{load_gen}] auto-resume: deferred play at {:.1}s (no StateChange sent)",
+                pos
+            );
+        } else if was_playing && !self.is_playing {
+            // A Play command arrived before this Load completed (SDK sends
+            // play() right after load()). The play was a no-op because the
+            // cpal stream wasn't set up yet. Now that the track is ready,
+            // start playback automatically.
+            crate::vprintln!("[LOAD #{load_gen}] play was pending, starting playback");
+            self.is_playing = true;
+            crate::state::GOVERNOR
+                .buffer_progress()
+                .set_playback_active(true);
+            (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
+            self.start_playback();
+        }
     }
 
     fn handle_play(&mut self) {
@@ -1225,33 +1389,51 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
         }
 
-        // Handle resume seek
-        if let Some(seek_time) = self.pending_resume_seek.take()
-            && let Some(ref tx) = self.decode_cmd_tx
-        {
-            let _ = tx.send(DecodeCommand::Seek(seek_time));
-            (self.callback)(PlayerEvent::TimeUpdate(
-                seek_time.max(0.0),
-                self.current_seq,
-            ));
-            if let Some(track_id) = self.current_track_id.as_ref() {
-                self.resume_store.set(track_id, seek_time);
-            }
-        }
+        self.is_playing = true;
+        crate::state::GOVERNOR
+            .buffer_progress()
+            .set_playback_active(true);
+        (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
 
-        // Start cpal stream + resume decode
+        // If there's a pending resume seek, defer playback to let the frontend
+        // send its own seek first. If the frontend sends seek within 500ms,
+        // we use its position; otherwise the fallback resume position is used.
+        let resume_pos = self.pending_resume_seek.take();
+        if resume_pos.is_some() {
+            self.deferred_play = Some((std::time::Instant::now(), resume_pos));
+            crate::vprintln!(
+                "[PLAY]   deferred (resume={:?}, waiting for seek or timeout)",
+                resume_pos.map(|t| format!("{:.1}s", t))
+            );
+        } else {
+            self.start_playback();
+            crate::vprintln!("[PLAY]   immediate start (no resume)");
+        }
+    }
+
+    /// Actually start cpal stream + decode. Called after resume seek or deferred play resolves.
+    fn start_playback(&mut self) {
         if let Some(ref stream) = self.cpal_stream {
             let _ = stream.play();
         }
         if let Some(ref tx) = self.decode_cmd_tx {
             let _ = tx.send(DecodeCommand::Resume);
         }
+        // Pre-seek has served its purpose once playback starts.
+        self.pre_seek_pos = None;
+    }
 
-        self.is_playing = true;
-        crate::state::GOVERNOR
-            .buffer_progress()
-            .set_playback_active(true);
-        (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
+    /// If `pre_seek_pos` matches `target` within [`PRE_SEEK_TOLERANCE`], emit
+    /// a `TimeUpdate` and return `true` (caller should skip the seek).
+    /// Always consumes `pre_seek_pos` regardless of match.
+    fn try_skip_pre_seek(&mut self, target: f64) -> bool {
+        if let Some(pre_pos) = self.pre_seek_pos.take()
+            && (pre_pos - target).abs() < PRE_SEEK_TOLERANCE
+        {
+            (self.callback)(PlayerEvent::TimeUpdate(target.max(0.0), self.current_seq));
+            return true;
+        }
+        false
     }
 
     fn handle_pause(&mut self) {
@@ -1311,25 +1493,32 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     handle.send(ExclusiveCommand::Stop);
                 }
                 (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-                (self.callback)(PlayerEvent::StateChange("paused", self.current_seq));
+                (self.callback)(PlayerEvent::StateChange("stopped", self.current_seq));
                 self.is_playing = false;
                 self.has_track = false;
                 self.current_duration = 0.0;
                 self.current_track_id = None;
                 self.pending_resume_seek = None;
+                self.pre_seek_pos = None;
+                self.deferred_play = None;
+                (self.callback)(PlayerEvent::StateChange("uninitialized", self.current_seq));
                 self.resume_store.flush_if_due(true);
                 return;
             }
         }
 
         (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-        (self.callback)(PlayerEvent::StateChange("paused", self.current_seq));
+        (self.callback)(PlayerEvent::StateChange("stopped", self.current_seq));
         self.is_playing = false;
         self.has_track = false;
         self.current_duration = 0.0;
         self.current_track_id = None;
         self.pending_resume_seek = None;
+        self.pre_seek_pos = None;
+        self.deferred_play = None;
         self.is_cached = false;
+        self.buffer_stalled = false;
+        (self.callback)(PlayerEvent::StateChange("uninitialized", self.current_seq));
         self.resume_store.flush_if_due(true);
     }
 
@@ -1369,9 +1558,28 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
         }
 
+        // Resolve deferred play — frontend's seek overrides the resume position.
+        if self.deferred_play.take().is_some() {
+            let skipped = self.try_skip_pre_seek(latest_time);
+            self.start_playback();
+            if skipped {
+                crate::vprintln!(
+                    "[PLAY]   deferred resolved by seek (pre-seek matches, skip seek)"
+                );
+                return;
+            }
+            crate::vprintln!("[PLAY]   deferred resolved by seek (frontend position wins)");
+        }
+
+        if self.try_skip_pre_seek(latest_time) {
+            crate::vprintln!("[SEEK]   skipped (pre-seeked matches {:.2}s)", latest_time);
+            return;
+        }
+
         if let Some(ref tx) = self.decode_cmd_tx {
-            // Mute output instantly + freeze TimeUpdates until SeekComplete
+            // Mute output instantly + pin TimeUpdates at target until SeekComplete
             self.seeking = true;
+            self.seek_target = Some(latest_time);
             self.seek_wall_start = Some(std::time::Instant::now());
             // Pause preload to free HTTP/2 bandwidth for Range restarts
             crate::state::GOVERNOR
@@ -1380,9 +1588,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             if let Some(ref m) = self.cpal_muted {
                 m.store(true, Relaxed);
             }
-            // Send target time so the scrubber jumps to the target position.
-            // Don't send any StateChange — TIDAL still thinks we're "active",
-            // but since we stop sending TimeUpdates, the scrubber stays pinned.
+            // Notify the SDK/webapp that we're seeking — mirrors the official
+            // native player which emits mediastate("seeking") during a seek.
+            (self.callback)(PlayerEvent::StateChange("seeking", self.current_seq));
             (self.callback)(PlayerEvent::TimeUpdate(
                 latest_time.max(0.0),
                 self.current_seq,
@@ -1549,24 +1757,42 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         drop(probed);
 
         let device = if let Some(ref id) = self.current_device_id {
-            find_output_device(id)
+            match find_output_device(id) {
+                Some(d) => d,
+                None => {
+                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
+                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                    match cpal::default_host().default_output_device() {
+                        Some(d) => d,
+                        None => {
+                            (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                            return;
+                        }
+                    }
+                }
+            }
         } else {
-            None
+            match cpal::default_host().default_output_device() {
+                Some(d) => d,
+                None => {
+                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                    return;
+                }
+            }
         };
-        let device = device.unwrap_or_else(|| {
-            cpal::default_host()
-                .default_output_device()
-                .expect("no audio output device")
-        });
 
         let opened = match open_output_stream(&device, sr, ch, &self.volume) {
             Some(o) => o,
-            None => return,
+            None => {
+                (self.callback)(PlayerEvent::DeviceError("deviceformatnotsupported"));
+                return;
+            }
         };
 
         let actual_rate = opened.rate;
         let actual_channels = opened.channels;
         self.cpal_muted = Some(opened.muted);
+        self.cpal_stream_error = Some(opened.stream_error);
 
         self.sample_rate = actual_rate;
         self.channels = actual_channels;
@@ -1604,12 +1830,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         if was_playing {
-            if let Some(ref stream) = self.cpal_stream {
-                let _ = stream.play();
-            }
-            if let Some(ref tx) = self.decode_cmd_tx {
-                let _ = tx.send(DecodeCommand::Resume);
-            }
+            self.start_playback();
         }
     }
 
@@ -1666,6 +1887,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 cancel.store(true, Relaxed);
                             }
                             self.is_exclusive_mode = false;
+                            (self.callback)(PlayerEvent::DeviceError(
+                                "deviceexclusivemodenotallowed",
+                            ));
+                        }
+                        ExclusiveEvent::DeviceLocked(e) => {
+                            eprintln!("[WASAPI] Device locked by another process: {e}");
+                            if let Some(cancel) = self.exclusive_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+                            self.is_exclusive_mode = false;
+                            (self.callback)(PlayerEvent::DeviceError("devicelocked"));
                         }
                         ExclusiveEvent::Stopped => {
                             self.has_track = false;
@@ -1692,8 +1924,81 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(not(target_os = "windows"))]
         let should_poll = true;
 
+        // Always update governor buffer progress when a track is loaded
+        // (even when paused), so the governor can throttle downloads correctly.
+        if should_poll
+            && self.has_track
+            && let Some(ref buf) = self.current_buffer
+        {
+            let bp = crate::state::GOVERNOR.buffer_progress();
+            bp.written.store(buf.written(), Relaxed);
+            bp.read_pos.store(buf.read_cursor(), Relaxed);
+        }
+
+        // Detect cpal stream errors (device disconnected, unknown, etc.)
+        if let Some(ref flag) = self.cpal_stream_error {
+            let code = flag.swap(0, Relaxed);
+            if code == 1 {
+                (self.callback)(PlayerEvent::DeviceError("devicedisconnected"));
+            } else if code == 2 {
+                (self.callback)(PlayerEvent::DeviceError("deviceunknownerror"));
+            }
+        }
+
         if !should_poll || !self.has_track || !self.is_playing {
             return;
+        }
+
+        // Detect decode thread stalling on RamBuffer (buffering).
+        // Only relevant for streaming tracks (not cached), and not during seeks
+        // (which already emit "seeking" state).
+        if !self.is_cached
+            && !self.seeking
+            && let Some(ref buf) = self.current_buffer
+        {
+            let stalled = buf.is_stalled();
+            if stalled && !self.buffer_stalled {
+                self.buffer_stalled = true;
+                (self.callback)(PlayerEvent::StateChange("idle", self.current_seq));
+            } else if !stalled && self.buffer_stalled {
+                self.buffer_stalled = false;
+                (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
+            }
+        }
+
+        // Resolve deferred play on timeout (no seek arrived from frontend)
+        if let Some((start, resume_pos)) = self.deferred_play {
+            if start.elapsed() >= std::time::Duration::from_millis(500) {
+                self.deferred_play = None;
+                // Use fallback resume position if frontend didn't send seek
+                if let Some(pos) = resume_pos {
+                    // Skip seek if pre-seek already positioned decode thread here.
+                    // pre_seek_pos is checked non-destructively — start_playback()
+                    // will clear it once playback actually begins.
+                    let need_seek = self
+                        .pre_seek_pos
+                        .map(|pre| (pre - pos).abs() >= PRE_SEEK_TOLERANCE)
+                        .unwrap_or(true);
+                    if need_seek && let Some(ref tx) = self.decode_cmd_tx {
+                        let _ = tx.send(DecodeCommand::Seek(pos));
+                    }
+                    (self.callback)(PlayerEvent::TimeUpdate(pos.max(0.0), self.current_seq));
+                    if let Some(track_id) = self.current_track_id.as_ref() {
+                        self.resume_store.set(track_id, pos);
+                    }
+                    crate::vprintln!(
+                        "[PLAY]   deferred resolved by timeout → resume at {:.1}s{}",
+                        pos,
+                        if !need_seek { " (pre-seeked)" } else { "" }
+                    );
+                } else {
+                    self.pre_seek_pos = None;
+                    crate::vprintln!("[PLAY]   deferred resolved by timeout → start from 0");
+                }
+                self.start_playback();
+            } else {
+                return; // Still waiting — don't poll decode events yet
+            }
         }
 
         // Check decode events
@@ -1763,6 +2068,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         if self.seeking {
                             // User seek completed — log wall time
                             self.seeking = false;
+                            self.seek_target = None;
                             let wall_ms = self
                                 .seek_wall_start
                                 .take()
@@ -1777,26 +2083,28 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                     "streaming"
                                 }
                             );
+                            // Signal that playback has resumed after the seek.
+                            (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
                         }
                         // Resume seeks (from handle_play) also emit SeekComplete
                         // but don't set seeking=true — no wall timer logged.
                     }
                     DecodeEvent::Error(e) => {
                         crate::vprintln!("[DECODE] Error: {e}");
+                        (self.callback)(PlayerEvent::MediaError {
+                            error: e,
+                            code: "unreadable_file",
+                        });
                     }
                 }
             }
         }
 
-        // Update governor buffer progress for rate-limiting
-        if let Some(ref buf) = self.current_buffer {
-            let bp = crate::state::GOVERNOR.buffer_progress();
-            bp.written.store(buf.written(), Relaxed);
-            bp.read_pos.store(buf.read_cursor(), Relaxed);
-        }
-
-        // Emit time update (suppressed while seeking to freeze the UI)
-        if !self.seeking {
+        // Emit time update — during seeking, pin the display at the target position
+        // so the frontend's seek bar doesn't freeze or revert.
+        if let Some(target) = self.seek_target {
+            (self.callback)(PlayerEvent::TimeUpdate(target, self.current_seq));
+        } else {
             let pos_secs = self.current_position_secs();
             if pos_secs > 0.0 {
                 if let Some(track_id) = self.current_track_id.as_ref() {

@@ -407,23 +407,29 @@ document.title = "TidaLunar - A TIDAL client";
             }
             Event::UserEvent(user_event) => match user_event {
                 UserEvent::Player(player_event) => {
-                    match player_event {
-                        PlayerEvent::TimeUpdate(time, seq) => {
-                            pending_time_update = Some((time, seq));
-                            let now = Instant::now();
-                            if time == 0.0 {
-                                // Reset events should be reflected right away.
-                                player_flush_deadline = Some(now);
-                            } else if player_flush_deadline.is_none() {
-                                player_flush_deadline = Some(now + player_flush_interval);
+                    // Schedule a bridge flush after pushing event(s).
+                    macro_rules! schedule_flush {
+                        () => {
+                            if player_flush_deadline.is_none() {
+                                player_flush_deadline =
+                                    Some(Instant::now() + player_flush_interval);
                             }
                             if let Some(deadline) = player_flush_deadline {
                                 *control_flow = ControlFlow::WaitUntil(deadline);
                             }
+                        };
+                    }
+
+                    match player_event {
+                        PlayerEvent::TimeUpdate(time, seq) => {
+                            pending_time_update = Some((time, seq));
+                            if time == 0.0 {
+                                player_flush_deadline = Some(Instant::now());
+                            }
+                            schedule_flush!();
                         }
                         PlayerEvent::StateChange(state, seq) => {
                             pending_player_events.push(PlayerBridgeEvent::state(state, seq));
-
                             if state == "completed" {
                                 let proxy_autoload = proxy_autoload.clone();
                                 rt_handle.spawn(async move {
@@ -433,23 +439,11 @@ document.title = "TidaLunar - A TIDAL client";
                                     }
                                 });
                             }
-                            let now = Instant::now();
-                            if player_flush_deadline.is_none() {
-                                player_flush_deadline = Some(now + player_flush_interval);
-                            }
-                            if let Some(deadline) = player_flush_deadline {
-                                *control_flow = ControlFlow::WaitUntil(deadline);
-                            }
+                            schedule_flush!();
                         }
                         PlayerEvent::Duration(duration, seq) => {
                             pending_player_events.push(PlayerBridgeEvent::duration(duration, seq));
-                            let now = Instant::now();
-                            if player_flush_deadline.is_none() {
-                                player_flush_deadline = Some(now + player_flush_interval);
-                            }
-                            if let Some(deadline) = player_flush_deadline {
-                                *control_flow = ControlFlow::WaitUntil(deadline);
-                            }
+                            schedule_flush!();
                         }
                         PlayerEvent::AudioDevices(devices, req_id) => {
                             if let Ok(json_devices) = serde_json::to_string(&devices) {
@@ -464,14 +458,39 @@ document.title = "TidaLunar - A TIDAL client";
                                         serde_json::json!(devices),
                                     ));
                                 }
-                                let now = Instant::now();
-                                if player_flush_deadline.is_none() {
-                                    player_flush_deadline = Some(now + player_flush_interval);
-                                }
-                                if let Some(deadline) = player_flush_deadline {
-                                    *control_flow = ControlFlow::WaitUntil(deadline);
-                                }
+                                schedule_flush!();
                             }
+                        }
+                        PlayerEvent::MediaFormat {
+                            codec,
+                            sample_rate,
+                            bit_depth,
+                            channels,
+                        } => {
+                            pending_player_events.push(PlayerBridgeEvent::media_format(
+                                codec,
+                                sample_rate,
+                                bit_depth,
+                                channels,
+                            ));
+                            schedule_flush!();
+                        }
+                        PlayerEvent::Version(v) => {
+                            pending_player_events.push(PlayerBridgeEvent::version(v));
+                            schedule_flush!();
+                        }
+                        PlayerEvent::DeviceError(event_name) => {
+                            pending_player_events.push(PlayerBridgeEvent::device_error(event_name));
+                            schedule_flush!();
+                        }
+                        PlayerEvent::MediaError { error, code } => {
+                            pending_player_events
+                                .push(PlayerBridgeEvent::media_error(&error, code));
+                            schedule_flush!();
+                        }
+                        PlayerEvent::MaxConnectionsReached => {
+                            pending_player_events.push(PlayerBridgeEvent::max_connections());
+                            schedule_flush!();
                         }
                     }
                 }
@@ -488,7 +507,9 @@ document.title = "TidaLunar - A TIDAL client";
                     }
                 }
                 UserEvent::IpcMessage(msg) => {
-                    crate::vprintln!("IPC Message: {:?}", msg);
+                    if msg.channel != "player.dbg" {
+                        crate::vprintln!("IPC Message: {:?}", msg);
+                    }
                     if msg.channel.starts_with("player.") {
                         match parse_player_ipc(&msg.channel, &msg.args, msg.id.as_deref()) {
                             Ok(player_ipc) => match player_ipc {
@@ -535,6 +556,17 @@ document.title = "TidaLunar - A TIDAL client";
                                     let _ = player_clone.stop();
                                 }
                                 PlayerIpc::Seek { time } => {
+                                    // Flush the seek target to the frontend NOW — before
+                                    // any queued TimeUpdate can overwrite pending_time_update.
+                                    let seq = crate::player::LOAD_SEQ
+                                        .load(std::sync::atomic::Ordering::Relaxed);
+                                    pending_time_update = Some((time, seq));
+                                    flush_player_bridge(
+                                        &webview,
+                                        &mut pending_time_update,
+                                        &mut pending_player_events,
+                                        &mut pending_misc_js,
+                                    );
                                     let _ = player_clone.seek(time);
                                 }
                                 PlayerIpc::Volume { volume } => {
@@ -548,11 +580,13 @@ document.title = "TidaLunar - A TIDAL client";
                                 }
                             },
                             Err(e) => {
-                                crate::vprintln!(
-                                    "[IPC]    Invalid player IPC ({}): {:?}",
-                                    msg.channel,
-                                    e
-                                );
+                                if msg.channel != "player.dbg" {
+                                    crate::vprintln!(
+                                        "[IPC]    Invalid player IPC ({}): {:?}",
+                                        msg.channel,
+                                        e
+                                    );
+                                }
                             }
                         }
                     } else {

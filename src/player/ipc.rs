@@ -169,6 +169,14 @@ pub(crate) fn parse_player_ipc(
         "player.play" => Ok(PlayerIpc::Play),
         "player.pause" => Ok(PlayerIpc::Pause),
         "player.stop" => Ok(PlayerIpc::Stop),
+        "player.dbg" => {
+            if let Some(msg) = args.first().and_then(|v| v.as_str()) {
+                crate::vprintln!("{msg}");
+            }
+            Err(PlayerIpcParseError::UnknownChannel(
+                "player.dbg".to_string(),
+            ))
+        }
         "player.seek" => args
             .first()
             .and_then(|v| v.as_f64())

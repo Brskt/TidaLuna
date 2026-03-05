@@ -36,6 +36,19 @@ window.nativeInterface = {
     ),
 };
 window.NativePlayerComponent = createNativePlayerComponent();
+// Bridge event types that map 1:1 (event.t === trigger name, no seq).
+const PASSTHROUGH_EVENTS = new Set([
+    "devices", "devicedisconnected", "deviceexclusivemodenotallowed",
+    "deviceformatnotsupported", "devicelocked", "devicenotfound",
+    "deviceunknownerror", "mediaformat", "version", "mediaerror",
+    "mediamaxconnectionsreached",
+]);
+// Short aliases used by the Rust bridge → SDK event names (carry seq).
+const SEQ_EVENTS: Record<string, string> = {
+    "time": "mediacurrenttime",
+    "duration": "mediaduration",
+    "state": "mediastate",
+};
 window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
     if (!Array.isArray(events)) return;
     const bridge = window.NativePlayerComponent;
@@ -43,14 +56,11 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
     for (const event of events) {
         if (!event || typeof event !== "object") continue;
         const type = event.t;
-        if (type === "time") {
-            bridge.trigger("mediacurrenttime", event.v, event.seq);
-        } else if (type === "duration") {
-            bridge.trigger("mediaduration", event.v, event.seq);
-        } else if (type === "state") {
-            bridge.trigger("mediastate", event.v, event.seq);
-        } else if (type === "devices") {
-            bridge.trigger("devices", event.v);
+        const mapped = SEQ_EVENTS[type];
+        if (mapped) {
+            bridge.trigger(mapped, event.v, event.seq);
+        } else if (PASSTHROUGH_EVENTS.has(type)) {
+            bridge.trigger(type, event.v);
         }
     }
 };

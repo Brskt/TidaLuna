@@ -12,7 +12,7 @@ use buffer::RamBuffer;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
 
-static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
+pub(crate) static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_os = "windows")]
 static EXCLUSIVE_STREAM_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -33,6 +33,19 @@ pub enum PlayerEvent {
     Duration(f64, u32),
     StateChange(&'static str, u32),
     AudioDevices(Vec<AudioDevice>, Option<String>),
+    DeviceError(&'static str),
+    MediaFormat {
+        codec: &'static str,
+        sample_rate: u32,
+        bit_depth: Option<u32>,
+        channels: u16,
+    },
+    Version(&'static str),
+    MediaError {
+        error: String,
+        code: &'static str,
+    },
+    MaxConnectionsReached,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +75,11 @@ enum PlayerCommand {
         id: String,
         exclusive: bool,
     },
+    EmitMediaError {
+        error: String,
+        code: &'static str,
+    },
+    EmitMaxConnections,
 }
 
 pub struct Player {
@@ -298,13 +316,26 @@ impl Player {
             let resp = match HTTP_CLIENT_PLAYBACK.get(&url).send().await {
                 Ok(r) => {
                     if !r.status().is_success() {
-                        eprintln!("[ERROR]  Upstream status: {}", r.status());
+                        let status = r.status();
+                        eprintln!("[ERROR]  Upstream status: {}", status);
+                        if status.as_u16() == 429 {
+                            let _ = cmd_tx.send(PlayerCommand::EmitMaxConnections);
+                        } else {
+                            let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                                error: format!("HTTP {}", status),
+                                code: "no_such_file",
+                            });
+                        }
                         return;
                     }
                     r
                 }
                 Err(e) => {
                     eprintln!("[ERROR]  Request failed: {}", e);
+                    let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                        error: format!("request failed: {e}"),
+                        code: "no_such_file",
+                    });
                     return;
                 }
             };
@@ -355,6 +386,10 @@ impl Player {
                     }
                     Err(e) => {
                         eprintln!("[ERROR]  Fetch failed: {}", e);
+                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                            error: format!("fetch failed: {e}"),
+                            code: "no_such_file",
+                        });
                     }
                 }
                 return;

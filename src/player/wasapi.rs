@@ -47,6 +47,7 @@ pub enum ExclusiveEvent {
     StateChange(&'static str),
     Duration(f64),
     InitFailed(String),
+    DeviceLocked(String),
     Stopped,
 }
 
@@ -479,6 +480,13 @@ fn open_exclusive_stream(
     Err("no compatible exclusive format found".to_string())
 }
 
+/// Check if a WASAPI error indicates the device is locked by another process.
+fn is_device_in_use_error(err_str: &str) -> bool {
+    err_str.contains("DEVICE_IN_USE")
+        || err_str.contains("8889000a")
+        || err_str.contains("8889000A")
+}
+
 // ---------------------------------------------------------------------------
 // PCM conversion helpers
 // ---------------------------------------------------------------------------
@@ -669,7 +677,11 @@ fn render_thread(
                             }
                             Err(e) => {
                                 eprintln!("[WASAPI] Failed to open stream: {e}");
-                                let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+                                if is_device_in_use_error(&e) {
+                                    let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
+                                } else {
+                                    let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+                                }
                                 return;
                             }
                         }
@@ -771,7 +783,11 @@ fn render_thread(
                                 }
                                 Err(e) => {
                                     eprintln!("[WASAPI] Failed to open stream on StartStream: {e}");
-                                    let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+                                    if is_device_in_use_error(&e) {
+                                        let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
+                                    } else {
+                                        let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+                                    }
                                     return;
                                 }
                             }
@@ -971,7 +987,11 @@ fn render_thread(
                             }
                             Err(e) => {
                                 eprintln!("[WASAPI] Failed to open stream on StartStream: {e}");
-                                let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+                                if is_device_in_use_error(&e) {
+                                    let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
+                                } else {
+                                    let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+                                }
                                 return;
                             }
                         }

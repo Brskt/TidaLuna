@@ -36,6 +36,8 @@ struct SharedState {
     read_cursor: AtomicU64,
     /// Wake the async download loop on restart/cancel.
     async_notify: tokio::sync::Notify,
+    /// True while the read side is blocked waiting for data.
+    stalled: AtomicBool,
 }
 
 /// A RAM buffer that supports streaming writes and blocking reads.
@@ -80,6 +82,7 @@ impl RamBuffer {
             cancelled_atomic: AtomicBool::new(false),
             read_cursor: AtomicU64::new(0),
             async_notify: tokio::sync::Notify::new(),
+            stalled: AtomicBool::new(false),
         });
 
         let buffer = RamBuffer {
@@ -110,6 +113,7 @@ impl RamBuffer {
             cancelled_atomic: AtomicBool::new(false),
             read_cursor: AtomicU64::new(0),
             async_notify: tokio::sync::Notify::new(),
+            stalled: AtomicBool::new(false),
         });
 
         RamBuffer { shared, cursor: 0 }
@@ -161,6 +165,11 @@ impl RamBuffer {
     pub fn read_cursor(&self) -> u64 {
         self.shared.read_cursor.load(Relaxed)
     }
+
+    /// True when the decode thread is blocked waiting for data.
+    pub fn is_stalled(&self) -> bool {
+        self.shared.stalled.load(Relaxed)
+    }
 }
 
 impl Read for RamBuffer {
@@ -190,6 +199,7 @@ impl Read for RamBuffer {
                 buf[..n].copy_from_slice(&inner.data[start..end]);
                 self.cursor += n as u64;
                 self.shared.read_cursor.store(self.cursor, Relaxed);
+                self.shared.stalled.store(false, Relaxed);
                 return Ok(n);
             }
 
@@ -246,6 +256,7 @@ impl Read for RamBuffer {
             }
 
             // Wait for data or state change (5s timeout to avoid deadlock)
+            self.shared.stalled.store(true, Relaxed);
             let (guard, _) = self
                 .shared
                 .cvar

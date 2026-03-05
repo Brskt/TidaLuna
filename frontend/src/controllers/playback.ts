@@ -11,9 +11,13 @@ export const createPlaybackController = () => {
                 sendIpc("player.metadata", item);
             }
         },
-        // Tidal calls this in multiple internal flows (including resets/progress updates),
-        // so forwarding it directly to backend seek causes unwanted jumps (e.g. back to 0).
-        setCurrentTime: (time: any) => { },
+        // Update the player's internal time for immediate UI feedback.
+        // No backend seek is triggered — player.seek() handles that separately.
+        setCurrentTime: (time: any) => {
+            if (typeof time === 'number' && isFinite(time) && time >= 0) {
+                (window.NativePlayerComponent as any)?._setTime?.(time);
+            }
+        },
         setPlayQueueState: (state: any) => { },
         setPlayingStatus: (status: any) => { },
         setRepeatMode: (mode: any) => { },
