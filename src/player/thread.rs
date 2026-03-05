@@ -1324,34 +1324,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
         );
 
-        // Signal that the track is loaded and ready to play.
-        // Skip during auto-resume: the webapp already considers itself "playing".
-        if !self.allow_startup_auto_resume || self.pending_resume_seek.is_none() {
-            (self.callback)(PlayerEvent::StateChange("ready", self.current_seq));
-        }
+        (self.callback)(PlayerEvent::StateChange("ready", self.current_seq));
 
-        // Auto-start deferred play on app startup.
-        // The TIDAL webapp restores its "playing" state from persistence and
-        // sends player.load() expecting playback to resume — it does NOT send
-        // a separate player.play IPC.  We silently start the deferred play
-        // mechanism so the 500ms timeout triggers start_playback().
-        // Do NOT send StateChange("active") — the webapp already considers
-        // itself in "playing" state; an unsolicited state event would confuse
-        // its internal state machine and break seeking.
-        if self.allow_startup_auto_resume
-            && let Some(pos) = self.pending_resume_seek.take()
-        {
-            self.allow_startup_auto_resume = false;
-            self.deferred_play = Some((std::time::Instant::now(), Some(pos)));
-            self.is_playing = true;
-            crate::state::GOVERNOR
-                .buffer_progress()
-                .set_playback_active(true);
-            crate::vprintln!(
-                "[LOAD #{load_gen}] auto-resume: deferred play at {:.1}s (no StateChange sent)",
-                pos
-            );
-        } else if was_playing && !self.is_playing {
+        if was_playing && !self.is_playing {
             // A Play command arrived before this Load completed (SDK sends
             // play() right after load()). The play was a no-op because the
             // cpal stream wasn't set up yet. Now that the track is ready,
