@@ -260,11 +260,6 @@ fn flush_bridge_now(state: &mut AppState) {
 
     if !state.pending_player_events.is_empty() {
         if let Ok(events_json) = serde_json::to_string(&state.pending_player_events) {
-            crate::vprintln!(
-                "[FLUSH]  PUSH {} event(s): {}",
-                state.pending_player_events.len(),
-                events_json
-            );
             let js = format!(
                 "if (window.__TIDAL_RS_PLAYER_PUSH__) {{ window.__TIDAL_RS_PLAYER_PUSH__({}); }}",
                 events_json
