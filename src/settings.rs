@@ -28,6 +28,7 @@ impl Default for WindowState {
 
 impl WindowState {
     /// Returns true if the position was explicitly saved (not the sentinel default).
+    #[allow(dead_code)] // used when window state restore is wired up
     pub fn has_position(&self) -> bool {
         self.x != i32::MIN && self.y != i32::MIN
     }
@@ -62,6 +63,7 @@ impl Settings {
             .ok()
     }
 
+    #[allow(dead_code)] // used by save_window_state
     fn set(&self, key: &str, value: &str) {
         if let Err(e) = self.conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
@@ -97,6 +99,7 @@ impl Settings {
         }
     }
 
+    #[allow(dead_code)] // used when window state save is wired up
     pub fn save_window_state(&self, state: &WindowState) {
         let tx = match self.conn.unchecked_transaction() {
             Ok(tx) => tx,

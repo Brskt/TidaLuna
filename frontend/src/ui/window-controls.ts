@@ -105,21 +105,17 @@ export const initWindowControls = () => {
             return FALLBACK_TITLEBAR_HEIGHT;
         };
 
-        // Mousedown: titlebar drag > passthrough.
-        document.addEventListener("mousedown", (e) => {
+        // Double-click titlebar: toggle maximize/restore.
+        // Single-click drag is handled natively by CEF via CSS -webkit-app-region: drag
+        // + DragHandler forwarding to Window::set_draggable_regions().
+        document.addEventListener("dblclick", (e) => {
             if (e.button !== 0) return;
-
-            // Titlebar drag.
             if (e.clientY > getTitlebarHeight()) return;
             const target = e.target as HTMLElement | null;
             if (!target || target.closest(INTERACTIVE)) return;
             e.preventDefault();
             const maximized = window.nativeInterface?.window?.isMaximized?.();
-            if (e.detail === 2) {
-                sendIpc(maximized ? "window.unmaximize" : "window.maximize");
-            } else {
-                sendIpc("window.drag");
-            }
+            sendIpc(maximized ? "window.unmaximize" : "window.maximize");
         }, true);
     } // end frameless
 

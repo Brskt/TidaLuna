@@ -183,6 +183,9 @@ fn open_output_stream(
     let muted = Arc::new(AtomicBool::new(false));
     let stream_error = Arc::new(AtomicU8::new(0));
 
+    let dev_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+    crate::vprintln!("[CPAL]   Device: {}", dev_name);
+
     // Attempt 1: source rate (no software resampling needed)
     {
         let config = cpal::StreamConfig {
@@ -468,6 +471,7 @@ fn decode_loop(
     output_channels: u16,
     seek_gen: Arc<AtomicU32>,
 ) {
+    crate::vprintln!("[DECODE] Thread started, probing format...");
     let mss = MediaSourceStream::new(Box::new(buffer), Default::default());
 
     let hint = Hint::new();
@@ -532,8 +536,19 @@ fn decode_loop(
         None
     };
 
+    crate::vprintln!(
+        "[DECODE] Probe OK: {} {}Hz/{}ch | output: {}Hz/{}ch",
+        codec_name(track.codec_params.codec),
+        source_rate,
+        source_channels,
+        output_rate,
+        output_channels
+    );
+
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut paused = true;
+    let mut first_packet_logged = false;
+    let mut first_push_logged = false;
 
     loop {
         // Check for commands (non-blocking)
@@ -586,9 +601,11 @@ fn decode_loop(
                     paused = true;
                 }
                 DecodeCommand::Resume => {
+                    crate::vprintln!("[DECODE] Resumed");
                     paused = false;
                 }
                 DecodeCommand::Stop => {
+                    crate::vprintln!("[DECODE] Stop received, exiting");
                     return;
                 }
             }
@@ -679,12 +696,43 @@ fn decode_loop(
 
         let source_samples = sbuf.samples();
 
+        if !first_packet_logged {
+            first_packet_logged = true;
+            crate::vprintln!(
+                "[DECODE] First packet: {} frames, {} source samples",
+                num_frames,
+                source_samples.len()
+            );
+        }
+
         // Process through resampling pipeline if needed
         let resampled: Vec<f32>;
         let samples_to_push: &[f32] = if let Some(ref mut pipe) = pipeline {
             resampled = pipe.process(source_samples);
+            if !first_push_logged && !resampled.is_empty() {
+                let (min, max) = resampled
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(mn, mx), &s| (mn.min(s), mx.max(s)));
+                crate::vprintln!(
+                    "[DECODE] First resampled: {} samples | min={:.6} max={:.6}",
+                    resampled.len(),
+                    min,
+                    max
+                );
+            }
             &resampled
         } else {
+            if !first_push_logged && !source_samples.is_empty() {
+                let (min, max) = source_samples
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(mn, mx), &s| (mn.min(s), mx.max(s)));
+                crate::vprintln!(
+                    "[DECODE] First output (passthrough): {} samples | min={:.6} max={:.6}",
+                    source_samples.len(),
+                    min,
+                    max
+                );
+            }
             source_samples
         };
 
@@ -777,6 +825,10 @@ fn decode_loop(
                 }
                 offset += to_write;
                 decoded_samples.fetch_add(to_write as u64, Relaxed);
+                if !first_push_logged {
+                    first_push_logged = true;
+                    crate::vprintln!("[DECODE] First push to ring buffer: {} samples", to_write);
+                }
             }
         }
     }
@@ -839,6 +891,7 @@ pub(super) struct PlayerThread<F> {
     cpal_muted: Option<Arc<AtomicBool>>,
     /// Shared with cpal error callback: 0 = none, 1 = disconnected, 2 = unknown
     cpal_stream_error: Option<Arc<AtomicU8>>,
+    /// Diagnostic: non-zero samples read by cpal callback
     // Buffering state — emits idle/active when decode thread stalls on RamBuffer
     buffer_stalled: bool,
     // Version event fire-once flag
@@ -1251,7 +1304,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_handle = Some(decode_handle);
         self.current_buffer = Some(buffer);
         self.has_track = true;
-        let was_playing = self.is_playing;
         self.is_playing = false;
 
         // Pre-seek: send seek to the paused decode thread now so data starts
@@ -1325,20 +1377,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         );
 
         (self.callback)(PlayerEvent::StateChange("ready", self.current_seq));
-
-        if was_playing && !self.is_playing {
-            // A Play command arrived before this Load completed (SDK sends
-            // play() right after load()). The play was a no-op because the
-            // cpal stream wasn't set up yet. Now that the track is ready,
-            // start playback automatically.
-            crate::vprintln!("[LOAD #{load_gen}] play was pending, starting playback");
-            self.is_playing = true;
-            crate::state::GOVERNOR
-                .buffer_progress()
-                .set_playback_active(true);
-            (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
-            self.start_playback();
-        }
     }
 
     fn handle_play(&mut self) {
@@ -1389,10 +1427,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// Actually start cpal stream + decode. Called after resume seek or deferred play resolves.
     fn start_playback(&mut self) {
         if let Some(ref stream) = self.cpal_stream {
-            let _ = stream.play();
+            match stream.play() {
+                Ok(()) => crate::vprintln!("[PLAY]   cpal stream.play() OK"),
+                Err(e) => eprintln!("[ERROR]  cpal stream.play() failed: {e}"),
+            }
+        } else {
+            eprintln!("[ERROR]  start_playback: no cpal stream!");
         }
         if let Some(ref tx) = self.decode_cmd_tx {
             let _ = tx.send(DecodeCommand::Resume);
+            crate::vprintln!("[PLAY]   DecodeCommand::Resume sent");
+        } else {
+            eprintln!("[ERROR]  start_playback: no decode_cmd_tx!");
         }
         // Pre-seek has served its purpose once playback starts.
         self.pre_seek_pos = None;
@@ -1476,7 +1522,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.pending_resume_seek = None;
                 self.pre_seek_pos = None;
                 self.deferred_play = None;
-                (self.callback)(PlayerEvent::StateChange("uninitialized", self.current_seq));
                 self.resume_store.flush_if_due(true);
                 return;
             }
@@ -1493,7 +1538,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.deferred_play = None;
         self.is_cached = false;
         self.buffer_stalled = false;
-        (self.callback)(PlayerEvent::StateChange("uninitialized", self.current_seq));
         self.resume_store.flush_if_due(true);
     }
 
@@ -1563,8 +1607,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             if let Some(ref m) = self.cpal_muted {
                 m.store(true, Relaxed);
             }
-            // Notify the SDK/webapp that we're seeking — mirrors the official
-            // native player which emits mediastate("seeking") during a seek.
+            // Notify the SDK/webapp that we're seeking — nativePlayer.ts maps
+            // "seeking" to STALLED internally.
             (self.callback)(PlayerEvent::StateChange("seeking", self.current_seq));
             (self.callback)(PlayerEvent::TimeUpdate(
                 latest_time.max(0.0),

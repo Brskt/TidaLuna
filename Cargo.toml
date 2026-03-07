@@ -22,7 +22,7 @@ strip = true
 
 
 [dependencies]
-tao = "0.34.5"
+cef = { version = "145.5.0", features = ["build-util"] }
 tokio = { version = "1.49.0", features = [
   "rt-multi-thread",
   "net",
@@ -30,7 +30,6 @@ tokio = { version = "1.49.0", features = [
   "time",
   "macros",
 ] }
-wry = { version = "0.54.2", features = ["devtools"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 anyhow = "1.0.102"
@@ -54,14 +53,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 rubato = "0.14"
 symphonia = { version = "0.5.5", features = ["flac", "aac", "isomp4"] }
-image = { version = "0.25.9", default-features = false, features = ["ico"] }
-muda = { version = "0.17.1", default-features = false, features = ["gtk"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22.0"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
-tauri-winres = "0.3"
+winres = "0.1"

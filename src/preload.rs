@@ -1,9 +1,7 @@
 use crate::bandwidth::TrafficClass;
 use crate::decrypt::FlacDecryptor;
 use crate::player::buffer::RamBufferWriter;
-use crate::state::{
-    CURRENT_TRACK, GOVERNOR, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo,
-};
+use crate::state::{GOVERNOR, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo};
 use futures_util::StreamExt;
 
 const PRELOAD_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MB
@@ -135,21 +133,6 @@ pub async fn cancel_preload() {
     }
     lock.data = None;
     lock.next_track = None;
-}
-
-pub async fn next_preloaded_track() -> Option<TrackInfo> {
-    let current = {
-        let lock = CURRENT_TRACK.lock().unwrap();
-        lock.clone()
-    };
-
-    let lock = PRELOAD_STATE.lock().await;
-    let candidate = lock.next_track.clone();
-
-    match (current, candidate) {
-        (Some(curr), Some(next)) if curr == next => None,
-        (_, next) => next,
-    }
 }
 
 pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack> {

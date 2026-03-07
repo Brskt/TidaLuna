@@ -7,6 +7,7 @@ import { createUserSession } from "./controllers/session";
 import { createUserSettings } from "./controllers/settings";
 import { createWindowController } from "./controllers/window";
 import { createNativePlayerComponent } from "./controllers/player";
+import { sendIpc } from "./ipc";
 import { initWindowControls } from "./ui/window-controls";
 
 // Synchronous initialization: expose nativeInterface immediately so Tidal
@@ -64,6 +65,18 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
         }
     }
 };
+// --- Audio constructor interception for debugging ---
+(() => {
+    // Intercept Audio constructor
+    const OrigAudio = window.Audio;
+    (window as any).Audio = function(src?: string) {
+        sendIpc("player.dbg", "new Audio()", src || "no-src");
+        const el = new OrigAudio(src);
+        return el;
+    };
+    (window as any).Audio.prototype = OrigAudio.prototype;
+})();
+
 console.log("Native Interface exposed (sync)");
 
 // Async hydration.

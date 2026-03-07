@@ -13,26 +13,22 @@ mod player;
 mod preload;
 mod settings;
 mod state;
-mod window;
 
 use auth::load_or_create_pkce_credentials;
-use bridge::{PlayerBridgeEvent, flush_player_bridge};
+use bridge::PlayerBridgeEvent;
+use cef::wrapper::message_router::{
+    BrowserSideHandler, BrowserSideRouter, MessageRouterBrowserSide,
+    MessageRouterBrowserSideHandlerCallbacks, MessageRouterConfig, MessageRouterRendererSide,
+    MessageRouterRendererSideHandlerCallbacks, RendererSideRouter,
+};
+use cef::*;
 use metadata::parse_track_metadata;
-use muda::MenuEvent;
 use player::ipc::{PlayerIpc, parse_player_ipc};
 use player::{Player, PlayerEvent};
 use serde::Deserialize;
 use state::TrackInfo;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tao::{
-    event::{ElementState, Event, MouseButton, StartCause, WindowEvent},
-    event_loop::{ControlFlow, EventLoopBuilder},
-    keyboard::Key,
-    window::{CursorIcon, ResizeDirection, WindowBuilder},
-};
-use window::{cursor_icon_for_resize_direction, is_near_resize_edge, resize_direction_for_point};
-use wry::{WebContext, WebViewBuilder};
+use std::cell::{Cell, RefCell};
+use std::sync::{Arc, Mutex};
 
 #[derive(Deserialize, Debug)]
 struct IpcMessage {
@@ -43,145 +39,886 @@ struct IpcMessage {
     id: Option<String>,
 }
 
-#[derive(Debug)]
-enum UserEvent {
-    Navigate(String),
-    IpcMessage(IpcMessage),
-    Player(PlayerEvent),
-    AutoLoad(TrackInfo),
-    Menu(MenuEvent),
+// ---------------------------------------------------------------------------
+// Shared application state – accessible from CEF callbacks and posted tasks
+// ---------------------------------------------------------------------------
+
+struct AppState {
+    player: Arc<Player>,
+    rt_handle: tokio::runtime::Handle,
+    pending_time_update: Option<(f64, u32)>,
+    pending_player_events: Vec<PlayerBridgeEvent>,
+    pending_misc_js: Vec<String>,
+    #[allow(dead_code)] // used when window state save is wired up
+    app_settings: settings::Settings,
+    // The main browser reference – set once on_after_created fires
+    browser: Option<Browser>,
+    /// Prevents scheduling duplicate delayed flush tasks.
+    flush_scheduled: bool,
 }
 
-fn load_window_icon() -> tao::window::Icon {
-    let ico_bytes = include_bytes!("../tidaluna.ico");
-    let reader = image::ImageReader::new(std::io::Cursor::new(ico_bytes))
-        .with_guessed_format()
-        .expect("Failed to read icon format");
-    let img = reader.decode().expect("Failed to decode icon").to_rgba8();
-    let (w, h) = img.dimensions();
-    tao::window::Icon::from_rgba(img.into_raw(), w, h).expect("Failed to create window icon")
+// SAFETY: AppState is only accessed on the CEF UI thread (single-threaded access)
+// except for `player` and `rt_handle` which are Send+Sync.
+// The Arc<Mutex<>> is needed for the borrow checker at callback boundaries,
+// but actual concurrent access does not occur.
+unsafe impl Send for AppState {}
+unsafe impl Sync for AppState {}
+
+static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
+
+fn with_state<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut AppState) -> R,
+{
+    APP_STATE.get().map(|s| {
+        let mut guard = s.lock().unwrap();
+        f(&mut guard)
+    })
 }
 
-fn main() -> wry::Result<()> {
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    let icon = load_window_icon();
+/// Execute a JavaScript snippet on a given CEF frame.
+fn exec_js_on_frame(frame: &Frame, js: &str) {
+    let code = CefString::from(js);
+    let url = CefString::from("");
+    frame.execute_java_script(Some(&code), Some(&url), 0);
+}
 
-    let app_settings = settings::Settings::open(&state::cache_data_dir())
-        .expect("Failed to open settings database");
-    let saved_window = app_settings.load_window_state();
-
-    let mut wb = WindowBuilder::new()
-        .with_title("TidaLunar - A TIDAL client")
-        .with_window_icon(Some(icon))
-        .with_decorations(cfg!(target_os = "linux"))
-        .with_inner_size(tao::dpi::PhysicalSize::new(
-            saved_window.width,
-            saved_window.height,
-        ));
-    if saved_window.has_position() {
-        wb = wb.with_position(tao::dpi::PhysicalPosition::new(
-            saved_window.x,
-            saved_window.y,
-        ));
-    }
-    let window = wb.build(&event_loop).unwrap();
-    if saved_window.maximized {
-        window.set_maximized(true);
-    }
-
-    // Application context menu (shown via the hamburger button in Tidal's titlebar).
-    let ctx_menu = muda::Menu::new();
-    let mi_reload = muda::MenuItem::new("Reload", true, None);
-    let mi_devtools = muda::MenuItem::new("Developer Tools", true, None);
-    let mi_quit = muda::MenuItem::new("Quit", true, None);
-    ctx_menu
-        .append_items(&[
-            &mi_reload,
-            &muda::PredefinedMenuItem::separator(),
-            &mi_devtools,
-            &muda::PredefinedMenuItem::separator(),
-            &mi_quit,
-        ])
-        .unwrap();
-    let id_reload = mi_reload.id().clone();
-    let id_devtools = mi_devtools.id().clone();
-    let id_quit = mi_quit.id().clone();
-
-    let proxy = event_loop.create_proxy();
-
-    // Forward muda menu events into the tao event loop.
-    let proxy_menu = proxy.clone();
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        let _ = proxy_menu.send_event(UserEvent::Menu(event));
-    }));
-
-    let proxy_nav = proxy.clone();
-    let proxy_new_window = proxy.clone();
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let rt_handle = rt.handle().clone();
-
-    // Force-initialize the bandwidth governor while a runtime context is active.
-    // Lazy::new calls spawn_governor() which requires tokio::spawn.
-    {
-        let _guard = rt.enter();
-        let _ = &*crate::state::GOVERNOR;
-        let _ = &*crate::state::AUDIO_CACHE;
-    }
-
-    let proxy_player = proxy.clone();
-    let proxy_autoload = proxy.clone();
-    let player = Arc::new(
-        Player::new(
-            move |event| {
-                let _ = proxy_player.send_event(UserEvent::Player(event));
-            },
-            rt_handle.clone(),
-        )
-        .expect("Failed to initialize player"),
-    );
-    let player_clone = player.clone();
-
-    let data_dir = {
-        #[cfg(target_os = "windows")]
+/// Execute JavaScript in the main browser frame.
+#[allow(dead_code)] // will be used for direct JS evaluation
+fn eval_js(js: &str) {
+    with_state(|state| {
+        if let Some(ref browser) = state.browser
+            && let Some(frame) = browser.main_frame()
         {
-            let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(base).join("tidalunar")
+            exec_js_on_frame(&frame, js);
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            std::path::PathBuf::from(base)
-                .join(".local")
-                .join("share")
-                .join("tidalunar")
+    });
+}
+
+// ---------------------------------------------------------------------------
+// IPC handler – processes messages from the frontend
+// ---------------------------------------------------------------------------
+
+fn handle_ipc_message(request: &str) {
+    let msg: IpcMessage = match serde_json::from_str(request) {
+        Ok(m) => m,
+        Err(_) => {
+            crate::vprintln!("Received unknown IPC message: {}", request);
+            return;
         }
     };
 
-    let pkce_credentials = load_or_create_pkce_credentials(&data_dir);
-    let pkce_credentials_json = serde_json::to_string(&pkce_credentials).unwrap_or_else(|e| {
-        eprintln!("[PKCE]   Failed to encode credentials for JS: {e}");
-        "{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"tidal://auth/\",\"codeVerifier\":\"\"}".to_string()
+    if msg.channel == "player.dbg" {
+        crate::vprintln!("[JS-DBG] {:?}", msg.args);
+        return;
+    }
+
+    crate::vprintln!("IPC Message: {:?}", msg);
+
+    if msg.channel.starts_with("player.") {
+        handle_player_ipc(&msg);
+    } else {
+        handle_window_ipc(&msg);
+    }
+}
+
+fn handle_player_ipc(msg: &IpcMessage) {
+    with_state(|state| {
+        match parse_player_ipc(&msg.channel, &msg.args, msg.id.as_deref()) {
+            Ok(player_ipc) => match player_ipc {
+                PlayerIpc::Load { url, format, key } => {
+                    if let Err(e) = state.player.load(url, format, key) {
+                        eprintln!("Failed to load track: {}", e);
+                    }
+                }
+                PlayerIpc::Recover {
+                    url,
+                    format,
+                    key,
+                    target_time,
+                } => {
+                    if let Err(e) = state.player.recover(url, format, key, target_time) {
+                        eprintln!("Failed to recover track: {}", e);
+                    }
+                }
+                PlayerIpc::Preload { url, key } => {
+                    let track = TrackInfo { url, key };
+                    state.rt_handle.spawn(async move {
+                        preload::start_preload(track).await;
+                    });
+                }
+                PlayerIpc::PreloadCancel => {
+                    state.rt_handle.spawn(async {
+                        preload::cancel_preload().await;
+                    });
+                }
+                PlayerIpc::Metadata { payload } => {
+                    let meta = parse_track_metadata(&payload);
+                    let mut lock = crate::state::CURRENT_METADATA.lock().unwrap();
+                    *lock = Some(meta);
+                }
+                PlayerIpc::Play => {
+                    let _ = state.player.play();
+                }
+                PlayerIpc::Pause => {
+                    let _ = state.player.pause();
+                }
+                PlayerIpc::Stop => {
+                    let _ = state.player.stop();
+                }
+                PlayerIpc::Seek { time } => {
+                    let seq = crate::player::LOAD_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+                    state.pending_time_update = Some((time, seq));
+                    // Flush immediately for seek responsiveness
+                    flush_bridge_now(state);
+                    let _ = state.player.seek(time);
+                }
+                PlayerIpc::Volume { volume } => {
+                    let _ = state.player.set_volume(volume);
+                }
+                PlayerIpc::DevicesGet { request_id } => {
+                    let _ = state.player.get_audio_devices(request_id);
+                }
+                PlayerIpc::DevicesSet { id, exclusive } => {
+                    let _ = state.player.set_audio_device(id, exclusive);
+                }
+            },
+            Err(e) => {
+                crate::vprintln!("[IPC]    Invalid player IPC ({}): {:?}", msg.channel, e);
+            }
+        }
     });
+}
 
-    let mut web_context = WebContext::new(Some(data_dir));
+fn handle_window_ipc(msg: &IpcMessage) {
+    match msg.channel.as_str() {
+        "window.close" => {
+            with_state(|state| {
+                if let Some(window) = get_cef_window(state) {
+                    window.close();
+                } else {
+                    quit_message_loop();
+                }
+            });
+        }
+        "window.minimize" => {
+            with_state(|state| {
+                if let Some(window) = get_cef_window(state) {
+                    window.minimize();
+                }
+            });
+        }
+        // Both maximize and unmaximize toggle based on the actual window state
+        // from CEF, so the JS-side isMaximized() doesn't need to be in sync.
+        "window.maximize" | "window.unmaximize" => {
+            with_state(|state| {
+                if let Some(window) = get_cef_window(state) {
+                    if window.is_maximized() == 1 {
+                        window.restore();
+                        notify_window_state(state, false, false);
+                    } else {
+                        window.maximize();
+                        notify_window_state(state, true, false);
+                    }
+                }
+            });
+        }
+        "window.drag" => {
+            // Drag is handled by CSS -webkit-app-region: drag
+            // + DragHandler forwarding to Window::set_draggable_regions.
+        }
+        "web.loaded" => {}
+        _ => {}
+    }
+}
 
-    let script = include_str!(concat!(env!("OUT_DIR"), "/bundle.js"));
-    let initial_is_maximized = window.is_maximized();
-    let initial_is_fullscreen = window.fullscreen().is_some();
+/// Notify the frontend of window state changes so the maximize/restore
+/// button icon stays in sync.
+fn notify_window_state(state: &mut AppState, maximized: bool, fullscreen: bool) {
+    let js = format!(
+        "if (window.__TIDAL_CALLBACKS__ && window.__TIDAL_CALLBACKS__.window) \
+         {{ window.__TIDAL_CALLBACKS__.window.updateState({maximized}, {fullscreen}); }}"
+    );
+    state.pending_misc_js.push(js);
+    flush_bridge_now(state);
+}
 
-    let builder = WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_url("https://desktop.tidal.com/")
-        .with_devtools(true)
-        .with_initialization_script(format!(
-            r#"window.__TIDAL_RS_PLATFORM__ = '{platform}';
+/// Get the CEF Window from the current browser.
+fn get_cef_window(state: &AppState) -> Option<Window> {
+    let mut browser = state.browser.clone();
+    let bv = browser_view_get_for_browser(browser.as_mut())?;
+    bv.window()
+}
+
+/// Flush pending bridge events to the browser immediately.
+fn flush_bridge_now(state: &mut AppState) {
+    if let Some((time, seq)) = state.pending_time_update.take() {
+        state
+            .pending_player_events
+            .push(PlayerBridgeEvent::time(time, seq));
+    }
+
+    if !state.pending_player_events.is_empty() {
+        if let Ok(events_json) = serde_json::to_string(&state.pending_player_events) {
+            crate::vprintln!(
+                "[FLUSH]  PUSH {} event(s): {}",
+                state.pending_player_events.len(),
+                events_json
+            );
+            let js = format!(
+                "if (window.__TIDAL_RS_PLAYER_PUSH__) {{ window.__TIDAL_RS_PLAYER_PUSH__({}); }}",
+                events_json
+            );
+            if let Some(ref browser) = state.browser
+                && let Some(frame) = browser.main_frame()
+            {
+                exec_js_on_frame(&frame, &js);
+            }
+        }
+        state.pending_player_events.clear();
+    }
+
+    if !state.pending_misc_js.is_empty() {
+        let js_batch = state.pending_misc_js.join(";");
+        if let Some(ref browser) = state.browser
+            && let Some(frame) = browser.main_frame()
+        {
+            exec_js_on_frame(&frame, &js_batch);
+        }
+        state.pending_misc_js.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Player event handler – called from the player thread, posts to CEF UI thread
+// ---------------------------------------------------------------------------
+
+fn handle_player_event(event: PlayerEvent) {
+    with_state(|state| {
+        let mut should_flush = true;
+        match event {
+            PlayerEvent::TimeUpdate(time, seq) => {
+                state.pending_time_update = Some((time, seq));
+                if time != 0.0 {
+                    should_flush = false; // batch time updates
+                }
+            }
+            PlayerEvent::StateChange(st, seq) => {
+                crate::vprintln!("[BRIDGE] StateChange: \"{}\" seq={}", st, seq);
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::state(st, seq));
+            }
+            PlayerEvent::Duration(duration, seq) => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::duration(duration, seq));
+            }
+            PlayerEvent::AudioDevices(devices, req_id) => {
+                if let Ok(json_devices) = serde_json::to_string(&devices) {
+                    if let Some(id) = req_id {
+                        let js = format!(
+                            "window.__TIDAL_IPC_RESPONSE__('{}', null, {})",
+                            id, json_devices
+                        );
+                        state.pending_misc_js.push(js);
+                    } else {
+                        state
+                            .pending_player_events
+                            .push(PlayerBridgeEvent::devices(serde_json::json!(devices)));
+                    }
+                }
+            }
+            PlayerEvent::MediaFormat {
+                codec,
+                sample_rate,
+                bit_depth,
+                channels,
+            } => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::media_format(
+                        codec,
+                        sample_rate,
+                        bit_depth,
+                        channels,
+                    ));
+            }
+            PlayerEvent::Version(v) => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::version(v));
+            }
+            PlayerEvent::DeviceError(event_name) => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::device_error(event_name));
+            }
+            PlayerEvent::MediaError { error, code } => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::media_error(&error, code));
+            }
+            PlayerEvent::MaxConnectionsReached => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::max_connections());
+            }
+        }
+        if should_flush {
+            flush_bridge_now(state);
+        } else if !state.flush_scheduled {
+            // Schedule a delayed flush (24ms batching for time updates)
+            state.flush_scheduled = true;
+            schedule_flush_task();
+        }
+    });
+}
+
+fn schedule_flush_task() {
+    let mut task = FlushTask::new(0);
+    post_delayed_task(ThreadId::UI, Some(&mut task), 24);
+}
+
+wrap_task! {
+    struct FlushTask {
+        _p: u8,
+    }
+    impl Task {
+        fn execute(&self) {
+            with_state(|state| {
+                state.flush_scheduled = false;
+                flush_bridge_now(state);
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CEF handlers
+// ---------------------------------------------------------------------------
+
+// --- IPC Query Handler (JS → Rust via cefQuery) ---
+
+struct IpcQueryHandler;
+
+impl BrowserSideHandler for IpcQueryHandler {
+    fn on_query_str(
+        &self,
+        _browser: Option<Browser>,
+        _frame: Option<Frame>,
+        _query_id: i64,
+        request: &str,
+        _persistent: bool,
+        callback: Arc<Mutex<dyn cef::wrapper::message_router::BrowserSideCallback>>,
+    ) -> bool {
+        handle_ipc_message(request);
+        // Respond with success (fire-and-forget).
+        // Use "ok" instead of "" to avoid "Invalid UTF-16 string" warnings
+        // from empty CefString conversion in the response path.
+        callback.lock().unwrap().success_str("ok");
+        true
+    }
+}
+
+// --- Drag Handler (forward drag regions to Window for frameless drag) ---
+
+wrap_drag_handler! {
+    struct TidalDragHandler {
+        _p: u8,
+    }
+    impl DragHandler {
+        fn on_draggable_regions_changed(
+            &self,
+            browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            regions: Option<&[DraggableRegion]>,
+        ) {
+            if let Some(bv) = browser_view_get_for_browser(browser)
+                && let Some(window) = bv.window()
+            {
+                window.set_draggable_regions(regions);
+            }
+        }
+    }
+}
+
+// --- Client ---
+
+wrap_client! {
+    struct TidalClient {
+        life_span: LifeSpanHandler,
+        load: LoadHandler,
+        request: RequestHandler,
+        display: DisplayHandler,
+        drag: DragHandler,
+        router: Arc<BrowserSideRouter>,
+    }
+    impl Client {
+        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
+            Some(self.life_span.clone())
+        }
+        fn load_handler(&self) -> Option<LoadHandler> {
+            Some(self.load.clone())
+        }
+        fn request_handler(&self) -> Option<RequestHandler> {
+            Some(self.request.clone())
+        }
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(self.display.clone())
+        }
+        fn drag_handler(&self) -> Option<DragHandler> {
+            Some(self.drag.clone())
+        }
+        fn on_process_message_received(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            source_process: ProcessId,
+            message: Option<&mut ProcessMessage>,
+        ) -> i32 {
+            if self.router.on_process_message_received(
+                browser.cloned(),
+                frame.cloned(),
+                source_process,
+                message.cloned(),
+            ) {
+                1
+            } else {
+                0
+            }
+        }
+    }
+}
+
+// --- Life Span Handler ---
+
+wrap_life_span_handler! {
+    struct TidalLifeSpanHandler {
+        router: Arc<BrowserSideRouter>,
+    }
+    impl LifeSpanHandler {
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
+            if let Some(browser) = browser.cloned() {
+                with_state(|state| {
+                    state.browser = Some(browser);
+                });
+            }
+        }
+        fn do_close(&self, _browser: Option<&mut Browser>) -> i32 {
+            0 // allow close
+        }
+        fn on_before_close(&self, browser: Option<&mut Browser>) {
+            self.router.on_before_close(browser.cloned());
+            with_state(|state| {
+                state.browser = None;
+            });
+            quit_message_loop();
+        }
+    }
+}
+
+// --- Load Handler (inject initialization scripts) ---
+
+wrap_load_handler! {
+    struct TidalLoadHandler {
+        init_script: String,
+        bundle_script: String,
+        injected: Cell<bool>,
+    }
+    impl LoadHandler {
+        fn on_loading_state_change(
+            &self,
+            browser: Option<&mut Browser>,
+            is_loading: i32,
+            _can_go_back: i32,
+            _can_go_forward: i32,
+        ) {
+            // Inject scripts only on the first page load.  Re-injecting on
+            // SPA navigations would recreate NativePlayerComponent from
+            // scratch, destroying the SDK's emitter and all its listeners.
+            if is_loading == 0
+                && !self.injected.get()
+                && let Some(browser) = browser
+                && let Some(frame) = browser.main_frame()
+            {
+                self.injected.set(true);
+                exec_js_on_frame(&frame, &self.init_script);
+                exec_js_on_frame(&frame, &self.bundle_script);
+            }
+        }
+    }
+}
+
+// --- Request Handler ---
+
+wrap_request_handler! {
+    struct TidalRequestHandler {
+        router: Arc<BrowserSideRouter>,
+    }
+    impl RequestHandler {
+        fn on_before_browse(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            request: Option<&mut Request>,
+            _user_gesture: ::std::os::raw::c_int,
+            _is_redirect: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            // Intercept tidal:// custom scheme (OAuth redirect)
+            if let Some(req) = request {
+                let url_userfree = req.url();
+                let url_cef: CefString = CefString::from(&url_userfree);
+                let url = format!("{}", url_cef);
+                if url.starts_with("tidal://") {
+                    // Rewrite tidal://login/auth?code=... → https://desktop.tidal.com/login/auth?code=...
+                    let web_url = url.replacen("tidal://", "https://desktop.tidal.com/", 1);
+                    crate::vprintln!("[AUTH]   Intercepted tidal:// redirect → {}", web_url);
+                    if let Some(frame) = frame {
+                        let cef_url = CefString::from(web_url.as_str());
+                        frame.load_url(Some(&cef_url));
+                    }
+                    return 1; // block the tidal:// navigation
+                }
+            }
+            self.router
+                .on_before_browse(browser.cloned(), frame.cloned());
+            0 // allow navigation
+        }
+        fn on_render_process_terminated(
+            &self,
+            browser: Option<&mut Browser>,
+            _status: TerminationStatus,
+            _error_code: ::std::os::raw::c_int,
+            _error_string: Option<&CefString>,
+        ) {
+            self.router
+                .on_render_process_terminated(browser.cloned());
+        }
+    }
+}
+
+// --- Display Handler ---
+
+wrap_display_handler! {
+    struct TidalDisplayHandler {
+        _p: u8,
+    }
+    impl DisplayHandler {
+        fn on_title_change(&self, browser: Option<&mut Browser>, title: Option<&CefString>) {
+            let mut browser = browser.cloned();
+            if let Some(bv) = browser_view_get_for_browser(browser.as_mut())
+                && let Some(window) = bv.window()
+            {
+                window.set_title(title);
+            }
+        }
+        fn on_console_message(
+            &self,
+            _browser: Option<&mut Browser>,
+            _level: LogSeverity,
+            message: Option<&CefString>,
+            _source: Option<&CefString>,
+            _line: i32,
+        ) -> i32 {
+            if let Some(msg) = message {
+                crate::vprintln!("[JS] {msg}");
+            }
+            0
+        }
+    }
+}
+
+// --- Window Delegate ---
+
+wrap_window_delegate! {
+    struct TidalWindowDelegate {
+        browser_view: RefCell<Option<BrowserView>>,
+    }
+    impl ViewDelegate {
+        fn preferred_size(&self, _view: Option<&mut View>) -> Size {
+            let ws = with_state(|state| state.app_settings.load_window_state())
+                .unwrap_or_default();
+            Size {
+                width: ws.width as i32,
+                height: ws.height as i32,
+            }
+        }
+    }
+    impl PanelDelegate {}
+    impl WindowDelegate {
+        fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
+            1 // TIDAL draws its own title bar
+        }
+        fn can_resize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
+            1
+        }
+        fn can_maximize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
+            1
+        }
+        fn can_minimize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
+            1
+        }
+        fn on_window_created(&self, window: Option<&mut Window>) {
+            let bv = self.browser_view.borrow();
+            let (Some(window), Some(bv)) = (window, bv.as_ref()) else {
+                return;
+            };
+            let mut view = View::from(bv);
+            window.add_child_view(Some(&mut view));
+
+            // Set window icon from embedded PNG (taskbar + Alt+Tab on supported platforms)
+            if let Some(mut icon) = image_create() {
+                let png_data = include_bytes!("../tidaluna.png");
+                icon.add_png(1.0, Some(png_data));
+                window.set_window_icon(Some(&mut icon));
+                window.set_window_app_icon(Some(&mut icon));
+            }
+
+            window.show();
+        }
+        fn on_window_destroyed(&self, _window: Option<&mut Window>) {
+            *self.browser_view.borrow_mut() = None;
+        }
+        fn can_close(&self, _window: Option<&mut Window>) -> i32 {
+            let bv = self.browser_view.borrow();
+            let bv = bv.as_ref().expect("BrowserView is None");
+            if let Some(browser) = bv.browser() {
+                browser.host().unwrap().try_close_browser()
+            } else {
+                1
+            }
+        }
+    }
+}
+
+// --- Browser View Delegate ---
+
+wrap_browser_view_delegate! {
+    struct TidalBrowserViewDelegate {
+        _p: u8,
+    }
+    impl ViewDelegate {}
+    impl BrowserViewDelegate {}
+}
+
+// --- Render Process Handler (renderer side of message router) ---
+
+wrap_render_process_handler! {
+    struct TidalRenderProcessHandler {
+        router: Arc<RendererSideRouter>,
+    }
+    impl RenderProcessHandler {
+        fn on_context_created(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            context: Option<&mut V8Context>,
+        ) {
+            self.router
+                .on_context_created(browser.cloned(), frame.cloned(), context.cloned());
+        }
+        fn on_context_released(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            context: Option<&mut V8Context>,
+        ) {
+            self.router
+                .on_context_released(browser.cloned(), frame.cloned(), context.cloned());
+        }
+        fn on_process_message_received(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            source_process: ProcessId,
+            message: Option<&mut ProcessMessage>,
+        ) -> i32 {
+            if self.router.on_process_message_received(
+                browser.cloned(),
+                frame.cloned(),
+                Some(source_process),
+                message.cloned(),
+            ) {
+                1
+            } else {
+                0
+            }
+        }
+    }
+}
+
+// --- App ---
+
+wrap_app! {
+    struct TidalApp {
+        renderer_router: Arc<RendererSideRouter>,
+    }
+    impl App {
+        fn on_before_command_line_processing(
+            &self,
+            _process_type: Option<&CefString>,
+            command_line: Option<&mut CommandLine>,
+        ) {
+            // Only apply switches to the browser process — CEF propagates
+            // relevant ones to subprocesses automatically.
+            let proc_type = _process_type
+                .map(|s| format!("{}", s))
+                .unwrap_or_default();
+            if !proc_type.is_empty() {
+                return;
+            }
+
+            let Some(cmd) = command_line else { return };
+
+            // --- Switches: disable unnecessary subsystems ---
+            // TIDAL needs: DOM, CSS, JS, fetch/XHR, cookies, localStorage,
+            //              Canvas 2D, WebGL (cover art/transitions).
+            // Everything else is dead weight for a music streaming SPA.
+            let switches = [
+                "disable-background-networking",
+                "disable-sync",
+                "disable-default-apps",
+                "disable-component-update",
+                "disable-breakpad",
+                "disable-crash-reporter",
+                "disable-extensions",
+                "disable-translate",
+                "disable-notifications",
+                "disable-spell-checking",
+                "disable-client-side-phishing-detection",
+                "no-first-run",
+                "no-default-browser-check",
+                "disable-hang-monitor",
+                "disable-popup-blocking",
+                "disable-prompt-on-repost",
+                "disable-save-password-bubble",
+                "disable-webrtc",
+            ];
+            for s in &switches {
+                let name = CefString::from(*s);
+                cmd.append_switch(Some(&name));
+            }
+
+            // --- disable-features via append_switch (workaround for
+            //     append_switch_with_value crash on Windows) ---
+            let features = [
+                // Passwords & autofill — all credential/form-fill prompts
+                "PasswordManager",
+                "PasswordManagerOnboarding",
+                "AutofillServerCommunication",
+                "AutofillCreditCardEnabled",
+                "AutofillProfileEnabled",
+                "KeyboardAccessory",
+                // Translation
+                "Translate",
+                "TranslateUI",
+                // Payments — server-side only for TIDAL
+                "WebPayments",
+                "PaymentHandler",
+                "SecurePaymentConfirmation",
+                "DigitalGoodsAPI",
+                // Hardware access — no peripherals needed
+                "WebUSB",
+                "WebBluetooth",
+                "WebHID",
+                "WebNFC",
+                "WebMidi",
+                "Serial",
+                "Gamepad",
+                // Sensors — no device sensors needed
+                "GenericSensorExtraClasses",
+                "AmbientLightSensor",
+                // Background services — SPA, no offline/push needed
+                "BackgroundFetch",
+                "BackgroundSync",
+                "PushMessaging",
+                "IdleDetection",
+                // Media capture — no camera/mic/screen capture
+                "GetDisplayMedia",
+                "MediaSession",
+                // Speech — no voice input/output
+                "SpeechSynthesis",
+                "SpeechRecognition",
+                // WebRTC — no video/voice calls
+                "WebRtcHideLocalIpsWithMdns",
+                // XR
+                "WebXR",
+                // Privacy Sandbox / ads tracking
+                "Topics",
+                "Fledge",
+                "FledgeInterestGroupAPI",
+                "AttributionReporting",
+                "PrivateAggregation",
+                "SharedStorageAPI",
+                "PrivacySandboxAdsAPIsOverride",
+                // Federated identity — TIDAL uses own OAuth
+                "FedCm",
+                "FedCmAutoSigninAPI",
+                "WebOTP",
+                // Telemetry / client hints
+                "ClientHints",
+                "UserAgentClientHint",
+                "MetricsReportingPolicy",
+                "ReportingAPI",
+                "DeprecationReporting",
+                // Safe browsing — not a general browser
+                "SafeBrowsing",
+                // Misc APIs TIDAL doesn't use
+                "InterestFeedContentSuggestions",
+                "FileSystemAccess",
+                "ComponentUpdate",
+                "DirectSockets",
+                "EyeDropper",
+                "WindowPlacement",
+                "ContactsPicker",
+                "ContentIndex",
+                "InstalledApp",
+                "PictureInPictureV2",
+            ];
+            let switch = format!("disable-features={}", features.join(","));
+            let switch_cef = CefString::from(switch.as_str());
+            cmd.append_switch(Some(&switch_cef));
+
+            crate::vprintln!("[CEF]    Command line switches applied");
+        }
+        fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
+            Some(TidalBrowserProcessHandler::new(RefCell::new(None)))
+        }
+        fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+            Some(TidalRenderProcessHandler::new(self.renderer_router.clone()))
+        }
+    }
+}
+
+wrap_browser_process_handler! {
+    struct TidalBrowserProcessHandler {
+        client: RefCell<Option<Client>>,
+    }
+    impl BrowserProcessHandler {
+        fn on_context_initialized(&self) {
+            // --- Build initialization script ---
+            let data_dir = state::cache_data_dir();
+            let pkce_credentials = load_or_create_pkce_credentials(&data_dir);
+            let pkce_credentials_json =
+                serde_json::to_string(&pkce_credentials).unwrap_or_else(|e| {
+                    eprintln!("[PKCE]   Failed to encode credentials for JS: {e}");
+                    "{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"tidal://auth/\",\"codeVerifier\":\"\"}".to_string()
+                });
+
+            let platform = if cfg!(target_os = "linux") {
+                "linux"
+            } else if cfg!(target_os = "macos") {
+                "darwin"
+            } else {
+                "win32"
+            };
+
+            let init_script = format!(
+                r#"window.__TIDAL_RS_PLATFORM__ = '{platform}';
 window.__TIDAL_RS_WINDOW_STATE__ = {{
-    isMaximized: {initial_is_maximized},
-    isFullscreen: {initial_is_fullscreen}
+    isMaximized: false,
+    isFullscreen: false
 }};
 window.__TIDAL_RS_CREDENTIALS__ = {pkce_credentials_json};
 var _cfgTarget = {{ enableDesktopFeatures: true }};
@@ -202,7 +939,7 @@ Object.defineProperty(window, 'TIDAL_CONFIG', {{
 }});
 document.title = "TidaLunar - A TIDAL client";
 (function() {{
-    var css = '[class*="_bar_"] > [class*="_title_"] {{ font-size:0 !important; }} [class*="_bar_"] > [class*="_title_"]::after {{ content:"TidaLunar - A TIDAL client"; font-size:0.75rem; }}';
+    var css = '[class*="_bar_"] > [class*="_title_"] {{ font-size:0 !important; }} [class*="_bar_"] > [class*="_title_"]::after {{ content:"TidaLunar - A TIDAL client"; font-size:0.75rem; }} header, [role="banner"], nav[class*="bar"] {{ -webkit-app-region: drag; }} header a, header button, header input, header [role="button"], header img, header svg, [role="banner"] a, [role="banner"] button, [role="banner"] input, [role="banner"] [role="button"], nav[class*="bar"] a, nav[class*="bar"] button, nav[class*="bar"] input, nav[class*="bar"] [role="button"] {{ -webkit-app-region: no-drag; }}';
     function inject() {{
         if (document.getElementById('tidalunar-branding')) return;
         var s = document.createElement('style');
@@ -216,505 +953,187 @@ document.title = "TidaLunar - A TIDAL client";
         document.addEventListener('DOMContentLoaded', inject);
     }}
 }})();"#,
-            platform = if cfg!(target_os = "linux") {
-                "linux"
-            } else if cfg!(target_os = "macos") {
-                "darwin"
-            } else {
-                "win32"
-            },
-            initial_is_maximized = initial_is_maximized,
-            initial_is_fullscreen = initial_is_fullscreen,
-            pkce_credentials_json = pkce_credentials_json
-        ))
-        .with_initialization_script(script)
-        // TODO: temporary Linux UA to bypass Tidal's anti-bot blocking during login.
-        // The Windows Electron UA triggers a fingerprint mismatch on WebKitGTK.
-        .with_user_agent({
-            #[cfg(target_os = "linux")]
-            { "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) tidal-hifi/1.12.4-beta Chrome/144.0.7559.96 Electron/40.1.0 Safari/537.36" }
-            #[cfg(not(target_os = "linux"))]
-            { "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36" }
-        })
-        .with_ipc_handler(move |req| {
-            let s = req.body();
-            if let Ok(msg) = serde_json::from_str::<IpcMessage>(s) {
-                let _ = proxy.send_event(UserEvent::IpcMessage(msg));
-            } else {
-                crate::vprintln!("Received unknown IPC message: {}", s);
-            }
-        })
-        .with_navigation_handler(move |url| {
-            if url.starts_with("tidal://") {
-                let _ = proxy_nav.send_event(UserEvent::Navigate(url));
-                return false;
-            }
-            true
-        })
-        .with_new_window_req_handler(move |url, _features| {
-            if url.starts_with("tidal://") {
-                let _ = proxy_new_window.send_event(UserEvent::Navigate(url));
-                return wry::NewWindowResponse::Deny;
-            }
-            wry::NewWindowResponse::Allow
-        });
+                platform = platform,
+                pkce_credentials_json = pkce_credentials_json
+            );
 
-    #[cfg(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "android"
-    ))]
-    let webview = builder.build(&window)?;
+            let bundle_script = include_str!(concat!(env!("OUT_DIR"), "/bundle.js")).to_string();
 
-    #[cfg(not(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "android"
-    )))]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        let vbox = window.default_vbox().unwrap();
-        builder.build_gtk(vbox)?
+            // --- Create browser-side message router ---
+            let config = MessageRouterConfig::default();
+            let browser_router = BrowserSideRouter::new(config);
+            browser_router.add_handler(Arc::new(IpcQueryHandler), false);
+
+            // --- Build CEF client with handlers ---
+            let life_span = TidalLifeSpanHandler::new(browser_router.clone());
+            let load = TidalLoadHandler::new(init_script, bundle_script, Cell::new(false));
+            let request = TidalRequestHandler::new(browser_router.clone());
+            let display = TidalDisplayHandler::new(0);
+            let drag = TidalDragHandler::new(0);
+
+            {
+                let mut client = self.client.borrow_mut();
+                *client = Some(TidalClient::new(
+                    life_span,
+                    load,
+                    request,
+                    display,
+                    drag,
+                    browser_router,
+                ));
+            }
+
+            // --- Create browser view and window ---
+            let settings = BrowserSettings {
+                background_color: 0xFF111111, // match TIDAL dark theme
+                ..Default::default()
+            };
+            let url = CefString::from("https://desktop.tidal.com/");
+
+            let mut client_ref = self.default_client();
+            let mut bv_delegate = TidalBrowserViewDelegate::new(0);
+            let browser_view = browser_view_create(
+                client_ref.as_mut(),
+                Some(&url),
+                Some(&settings),
+                None,
+                None,
+                Some(&mut bv_delegate),
+            );
+
+            let mut window_delegate = TidalWindowDelegate::new(RefCell::new(browser_view));
+            window_create_top_level(Some(&mut window_delegate));
+            crate::vprintln!("[CEF]    Initialized");
+        }
+
+        fn default_client(&self) -> Option<Client> {
+            self.client.borrow().clone()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
+
+    let args = cef::args::Args::new();
+    let Some(cmd_line) = args.as_cmd_line() else {
+        return Err("Failed to parse command line arguments".into());
     };
 
-    let mut pending_navigation = std::env::args().find(|arg| arg.starts_with("tidal://"));
-    let update_window_state = |webview: &wry::WebView, window: &tao::window::Window| {
-        let is_maximized = window.is_maximized();
-        let is_fullscreen = window.fullscreen().is_some();
-        let js = format!(
-            "if (window.__TIDAL_CALLBACKS__ && window.__TIDAL_CALLBACKS__.window && window.__TIDAL_CALLBACKS__.window.updateState) {{ window.__TIDAL_CALLBACKS__.window.updateState({}, {}); }}",
-            is_maximized, is_fullscreen
-        );
-        let _ = webview.evaluate_script(&js);
-    };
+    let switch = CefString::from("type");
+    let is_browser = cmd_line.has_switch(Some(&switch)) != 1;
 
-    let mut pending_time_update: Option<(f64, u32)> = None;
-    let mut pending_player_events: Vec<PlayerBridgeEvent> = Vec::new();
-    let mut pending_misc_js: Vec<String> = Vec::new();
-    let mut player_flush_deadline: Option<Instant> = None;
-    let player_flush_interval = Duration::from_millis(24);
-    let frameless = !cfg!(target_os = "linux");
-    let resize_border_px = 6.0_f64;
-    let resize_hot_zone_px = resize_border_px + 8.0;
-    let mut last_cursor_pos: Option<(f64, f64)> = None;
-    let mut last_resize_direction: Option<ResizeDirection> = None;
-    let mut window_state_deadline: Option<Instant> = None;
+    // Create renderer-side router (needed by both browser and renderer processes)
+    let renderer_config = MessageRouterConfig::default();
+    let renderer_router = RendererSideRouter::new(renderer_config);
 
-    event_loop.run(move |event, _, control_flow| {
-        macro_rules! save_window_state {
-            () => {
-                let pos = window.outer_position().unwrap_or_default();
-                let size = window.inner_size();
-                app_settings.save_window_state(&settings::WindowState {
-                    x: pos.x,
-                    y: pos.y,
-                    width: size.width,
-                    height: size.height,
-                    maximized: window.is_maximized(),
-                });
-            };
-        }
+    // Handle subprocess execution (renderer, GPU, etc.)
+    // Pass the App so renderer subprocesses get our RenderProcessHandler
+    let mut app = TidalApp::new(renderer_router);
+    let ret = execute_process(
+        Some(args.as_main_args()),
+        Some(&mut app),
+        std::ptr::null_mut(),
+    );
+    if !is_browser {
+        std::process::exit(ret);
+    }
 
-        match event {
-            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-                let now = Instant::now();
-                if window_state_deadline.is_some_and(|t| now >= t) {
-                    window_state_deadline = None;
-                    save_window_state!();
-                }
-                if player_flush_deadline.is_some_and(|t| now >= t) {
-                    flush_player_bridge(
-                        &webview,
-                        &mut pending_time_update,
-                        &mut pending_player_events,
-                        &mut pending_misc_js,
-                    );
-                    player_flush_deadline = None;
-                }
-            }
-            Event::MainEventsCleared => {
-                let now = Instant::now();
-                if player_flush_deadline.is_some_and(|t| now >= t) {
-                    flush_player_bridge(
-                        &webview,
-                        &mut pending_time_update,
-                        &mut pending_player_events,
-                        &mut pending_misc_js,
-                    );
-                    player_flush_deadline = None;
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                save_window_state!();
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::KeyboardInput {
-                        event:
-                            tao::event::KeyEvent {
-                                logical_key: Key::F12,
-                                state: ElementState::Pressed,
-                                ..
-                            },
-                        ..
-                    },
-                ..
-            } => {
-                webview.open_devtools();
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(_) | WindowEvent::Moved(_),
-                ..
-            } => {
-                update_window_state(&webview, &window);
-                window_state_deadline = Some(Instant::now() + Duration::from_millis(500));
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CursorMoved { position, .. },
-                ..
-            } => {
-                if frameless {
-                    let x = position.x;
-                    let y = position.y;
-                    last_cursor_pos = Some((x, y));
+    // --- Initialize tokio runtime ---
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let rt_handle = rt.handle().clone();
 
-                    if window.is_maximized() {
-                        if last_resize_direction.take().is_some() {
-                            window.set_cursor_icon(CursorIcon::Default);
-                        }
-                    } else {
-                        let size = window.inner_size();
-                        let width = size.width as f64;
-                        let height = size.height as f64;
-                        let direction =
-                            if is_near_resize_edge(x, y, width, height, resize_hot_zone_px) {
-                                resize_direction_for_point(x, y, width, height, resize_border_px)
-                            } else {
-                                None
-                            };
+    // Force-initialize statics that require tokio
+    {
+        let _guard = rt.enter();
+        let _ = &*crate::state::GOVERNOR;
+        let _ = &*crate::state::AUDIO_CACHE;
+    }
 
-                        if direction != last_resize_direction {
-                            last_resize_direction = direction;
-                            window.set_cursor_icon(
-                                direction
-                                    .map(cursor_icon_for_resize_direction)
-                                    .unwrap_or(CursorIcon::Default),
-                            );
-                        }
-                    }
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CursorLeft { .. },
-                ..
-            } => {
-                last_cursor_pos = None;
-                if frameless && last_resize_direction.take().is_some() {
-                    window.set_cursor_icon(CursorIcon::Default);
-                }
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::MouseInput {
-                        state: ElementState::Pressed,
-                        button: MouseButton::Left,
-                        ..
-                    },
-                ..
-            } => {
-                if frameless
-                    && !window.is_maximized()
-                    && let Some((x, y)) = last_cursor_pos
-                {
-                    let size = window.inner_size();
-                    let width = size.width as f64;
-                    let height = size.height as f64;
-                    if let Some(direction) =
-                        resize_direction_for_point(x, y, width, height, resize_border_px)
-                        && let Err(e) = window.drag_resize_window(direction)
-                    {
-                        eprintln!("[WINDOW] drag_resize_window failed: {e}");
-                    }
-                }
-            }
-            Event::UserEvent(user_event) => match user_event {
-                UserEvent::Player(player_event) => {
-                    // Schedule a bridge flush after pushing event(s).
-                    macro_rules! schedule_flush {
-                        () => {
-                            if player_flush_deadline.is_none() {
-                                player_flush_deadline =
-                                    Some(Instant::now() + player_flush_interval);
-                            }
-                        };
-                    }
-
-                    match player_event {
-                        PlayerEvent::TimeUpdate(time, seq) => {
-                            pending_time_update = Some((time, seq));
-                            if time == 0.0 {
-                                player_flush_deadline = Some(Instant::now());
-                            }
-                            schedule_flush!();
-                        }
-                        PlayerEvent::StateChange(state, seq) => {
-                            pending_player_events.push(PlayerBridgeEvent::state(state, seq));
-                            if state == "completed" {
-                                let proxy_autoload = proxy_autoload.clone();
-                                rt_handle.spawn(async move {
-                                    if let Some(track) = preload::next_preloaded_track().await {
-                                        let _ =
-                                            proxy_autoload.send_event(UserEvent::AutoLoad(track));
-                                    }
-                                });
-                            }
-                            schedule_flush!();
-                        }
-                        PlayerEvent::Duration(duration, seq) => {
-                            pending_player_events.push(PlayerBridgeEvent::duration(duration, seq));
-                            schedule_flush!();
-                        }
-                        PlayerEvent::AudioDevices(devices, req_id) => {
-                            if let Ok(json_devices) = serde_json::to_string(&devices) {
-                                if let Some(id) = req_id {
-                                    let js = format!(
-                                        "window.__TIDAL_IPC_RESPONSE__('{}', null, {})",
-                                        id, json_devices
-                                    );
-                                    pending_misc_js.push(js);
-                                } else {
-                                    pending_player_events.push(PlayerBridgeEvent::devices(
-                                        serde_json::json!(devices),
-                                    ));
-                                }
-                                schedule_flush!();
-                            }
-                        }
-                        PlayerEvent::MediaFormat {
-                            codec,
-                            sample_rate,
-                            bit_depth,
-                            channels,
-                        } => {
-                            pending_player_events.push(PlayerBridgeEvent::media_format(
-                                codec,
-                                sample_rate,
-                                bit_depth,
-                                channels,
-                            ));
-                            schedule_flush!();
-                        }
-                        PlayerEvent::Version(v) => {
-                            pending_player_events.push(PlayerBridgeEvent::version(v));
-                            schedule_flush!();
-                        }
-                        PlayerEvent::DeviceError(event_name) => {
-                            pending_player_events.push(PlayerBridgeEvent::device_error(event_name));
-                            schedule_flush!();
-                        }
-                        PlayerEvent::MediaError { error, code } => {
-                            pending_player_events
-                                .push(PlayerBridgeEvent::media_error(&error, code));
-                            schedule_flush!();
-                        }
-                        PlayerEvent::MaxConnectionsReached => {
-                            pending_player_events.push(PlayerBridgeEvent::max_connections());
-                            schedule_flush!();
-                        }
-                    }
-                }
-                UserEvent::AutoLoad(track) => {
-                    if let Err(e) = player_clone.load(track.url, "flac".to_string(), track.key) {
-                        eprintln!("Failed to auto-load preloaded track: {}", e);
-                    }
-                }
-                UserEvent::Navigate(url) => {
-                    crate::vprintln!("Navigating to: {}", url);
-                    if url.starts_with("tidal://") {
-                        let path = url.strip_prefix("tidal://").unwrap();
-                        let _ = webview.load_url(&format!("https://desktop.tidal.com/{}", path));
-                    }
-                }
-                UserEvent::IpcMessage(msg) => {
-                    if msg.channel != "player.dbg" {
-                        crate::vprintln!("IPC Message: {:?}", msg);
-                    }
-                    if msg.channel.starts_with("player.") {
-                        match parse_player_ipc(&msg.channel, &msg.args, msg.id.as_deref()) {
-                            Ok(player_ipc) => match player_ipc {
-                                PlayerIpc::Load { url, format, key } => {
-                                    if let Err(e) = player_clone.load(url, format, key) {
-                                        eprintln!("Failed to load track: {}", e);
-                                    }
-                                }
-                                PlayerIpc::Recover {
-                                    url,
-                                    format,
-                                    key,
-                                    target_time,
-                                } => {
-                                    if let Err(e) =
-                                        player_clone.recover(url, format, key, target_time)
-                                    {
-                                        eprintln!("Failed to recover track: {}", e);
-                                    }
-                                }
-                                PlayerIpc::Preload { url, key } => {
-                                    let track = crate::state::TrackInfo { url, key };
-                                    rt_handle.spawn(async move {
-                                        preload::start_preload(track).await;
-                                    });
-                                }
-                                PlayerIpc::PreloadCancel => {
-                                    rt_handle.spawn(async {
-                                        preload::cancel_preload().await;
-                                    });
-                                }
-                                PlayerIpc::Metadata { payload } => {
-                                    let meta = parse_track_metadata(&payload);
-                                    let mut lock = crate::state::CURRENT_METADATA.lock().unwrap();
-                                    *lock = Some(meta);
-                                }
-                                PlayerIpc::Play => {
-                                    let _ = player_clone.play();
-                                }
-                                PlayerIpc::Pause => {
-                                    let _ = player_clone.pause();
-                                }
-                                PlayerIpc::Stop => {
-                                    let _ = player_clone.stop();
-                                }
-                                PlayerIpc::Seek { time } => {
-                                    // Flush the seek target to the frontend NOW — before
-                                    // any queued TimeUpdate can overwrite pending_time_update.
-                                    let seq = crate::player::LOAD_SEQ
-                                        .load(std::sync::atomic::Ordering::Relaxed);
-                                    pending_time_update = Some((time, seq));
-                                    flush_player_bridge(
-                                        &webview,
-                                        &mut pending_time_update,
-                                        &mut pending_player_events,
-                                        &mut pending_misc_js,
-                                    );
-                                    let _ = player_clone.seek(time);
-                                }
-                                PlayerIpc::Volume { volume } => {
-                                    let _ = player_clone.set_volume(volume);
-                                }
-                                PlayerIpc::DevicesGet { request_id } => {
-                                    let _ = player_clone.get_audio_devices(request_id);
-                                }
-                                PlayerIpc::DevicesSet { id, exclusive } => {
-                                    let _ = player_clone.set_audio_device(id, exclusive);
-                                }
-                            },
-                            Err(e) => {
-                                if msg.channel != "player.dbg" {
-                                    crate::vprintln!(
-                                        "[IPC]    Invalid player IPC ({}): {:?}",
-                                        msg.channel,
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        match msg.channel.as_str() {
-                            "window.devtools" => {
-                                webview.open_devtools();
-                            }
-                            "window.drag" => {
-                                let _ = window.drag_window();
-                            }
-                            "window.close" => {
-                                save_window_state!();
-                                *control_flow = ControlFlow::Exit;
-                            }
-                            "window.maximize" => {
-                                window.set_maximized(true);
-                                update_window_state(&webview, &window);
-                            }
-                            "window.minimize" => {
-                                window.set_minimized(true);
-                                update_window_state(&webview, &window);
-                            }
-                            "window.unmaximize" => {
-                                window.set_maximized(false);
-                                update_window_state(&webview, &window);
-                            }
-                            "menu.clicked" => {
-                                let x = msg.args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let y = msg.args.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let pos = Some(muda::dpi::Position::Logical(
-                                    muda::dpi::LogicalPosition::new(x, y),
-                                ));
-                                #[cfg(target_os = "windows")]
-                                {
-                                    use muda::ContextMenu as _;
-                                    use tao::platform::windows::WindowExtWindows;
-                                    unsafe {
-                                        ctx_menu.show_context_menu_for_hwnd(
-                                            window.hwnd() as isize,
-                                            pos,
-                                        );
-                                    }
-                                }
-                                #[cfg(target_os = "linux")]
-                                {
-                                    use gtk::prelude::*;
-                                    use muda::ContextMenu as _;
-                                    use tao::platform::unix::WindowExtUnix;
-                                    ctx_menu.show_context_menu_for_gtk_window(
-                                        window.gtk_window().upcast_ref::<gtk::Window>(),
-                                        pos,
-                                    );
-                                }
-                            }
-                            "web.loaded" => {
-                                if let Some(url) = pending_navigation.take()
-                                    && url.starts_with("tidal://")
-                                {
-                                    let path = url.strip_prefix("tidal://").unwrap();
-                                    let _ = webview
-                                        .load_url(&format!("https://desktop.tidal.com/{}", path));
-                                }
-                                update_window_state(&webview, &window);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                UserEvent::Menu(event) => {
-                    if event.id == id_reload {
-                        let _ = webview.evaluate_script("location.reload()");
-                    } else if event.id == id_devtools {
-                        webview.open_devtools();
-                    } else if event.id == id_quit {
-                        save_window_state!();
-                        *control_flow = ControlFlow::Exit;
-                    }
-                }
+    // --- Initialize player ---
+    let player = Arc::new(
+        Player::new(
+            move |event| {
+                // Post player event processing to CEF UI thread
+                let mut task = PlayerEventTask::new(event);
+                post_task(ThreadId::UI, Some(&mut task));
             },
-            _ => (),
-        }
+            rt_handle.clone(),
+        )
+        .expect("Failed to initialize player"),
+    );
 
-        // Centralized deadline: pick the earliest pending timer.
-        if *control_flow != ControlFlow::Exit {
-            let next = [window_state_deadline, player_flush_deadline]
-                .into_iter()
-                .flatten()
-                .min();
-            *control_flow = match next {
-                Some(t) => ControlFlow::WaitUntil(t),
-                None => ControlFlow::Wait,
-            };
-        }
+    // --- Initialize app settings ---
+    let app_settings = settings::Settings::open(&state::cache_data_dir())
+        .expect("Failed to open settings database");
+
+    // --- Set up shared state ---
+    let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
+        player,
+        rt_handle,
+        pending_time_update: None,
+        pending_player_events: Vec::new(),
+        pending_misc_js: Vec::new(),
+        app_settings,
+        browser: None,
+        flush_scheduled: false,
+    })));
+
+    // --- Initialize CEF ---
+    let root_cache = state::cache_data_dir().join("cef");
+    let profile_cache = root_cache.join("Default");
+    std::fs::create_dir_all(&profile_cache).ok();
+
+    let root_cache_cef = CefString::from(root_cache.to_string_lossy().as_ref());
+    let profile_cache_cef = CefString::from(profile_cache.to_string_lossy().as_ref());
+
+    let user_agent = CefString::from(if cfg!(target_os = "linux") {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) tidal-hifi/1.12.4-beta Chrome/144.0.7559.96 Electron/40.1.0 Safari/537.36"
+    } else {
+        "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36"
     });
+
+    let settings = Settings {
+        no_sandbox: 1,
+        root_cache_path: root_cache_cef,
+        cache_path: profile_cache_cef,
+        user_agent,
+        background_color: 0xFF111111, // TIDAL dark theme — no white/Chromium flash
+        ..Default::default()
+    };
+
+    assert_eq!(
+        initialize(
+            Some(args.as_main_args()),
+            Some(&settings),
+            Some(&mut app),
+            std::ptr::null_mut(),
+        ),
+        1,
+        "CEF initialization failed"
+    );
+
+    run_message_loop();
+    shutdown();
+    Ok(())
+}
+
+// --- Task to process player events on the UI thread ---
+
+wrap_task! {
+    struct PlayerEventTask {
+        event: PlayerEvent,
+    }
+    impl Task {
+        fn execute(&self) {
+            handle_player_event(self.event.clone());
+        }
+    }
 }

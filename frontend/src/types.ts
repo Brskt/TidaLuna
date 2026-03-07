@@ -1,9 +1,7 @@
 // this is basically electron's preload script
 declare global {
     interface Window {
-        ipc: {
-            postMessage: (message: string) => void;
-        };
+        cefQuery: (params: { request: string; onSuccess?: (response: string) => void; onFailure?: (errorCode: number, errorMessage: string) => void }) => void;
         nativeInterface: any;
         NativePlayerComponent: any;
         __TIDAL_CALLBACKS__: any;

@@ -27,7 +27,7 @@ pub struct AudioDevice {
     pub r#type: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PlayerEvent {
     TimeUpdate(f64, u32),
     Duration(f64, u32),
