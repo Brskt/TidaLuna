@@ -443,6 +443,60 @@ wrap_drag_handler! {
     }
 }
 
+// --- Download Handler (block all downloads) ---
+
+wrap_download_handler! {
+    struct TidalDownloadHandler {
+        _p: u8,
+    }
+    impl DownloadHandler {
+        fn can_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _url: Option<&CefString>,
+            _request_method: Option<&CefString>,
+        ) -> ::std::os::raw::c_int {
+            0 // deny all file downloads
+        }
+    }
+}
+
+// --- Permission Handler (deny all permissions) ---
+
+wrap_permission_handler! {
+    struct TidalPermissionHandler {
+        _p: u8,
+    }
+    impl PermissionHandler {
+        fn on_request_media_access_permission(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _requesting_origin: Option<&CefString>,
+            _requested_permissions: u32,
+            callback: Option<&mut MediaAccessCallback>,
+        ) -> ::std::os::raw::c_int {
+            if let Some(cb) = callback {
+                cb.cancel();
+            }
+            1 // handled — denied
+        }
+        fn on_show_permission_prompt(
+            &self,
+            _browser: Option<&mut Browser>,
+            _prompt_id: u64,
+            _requesting_origin: Option<&CefString>,
+            _requested_permissions: u32,
+            callback: Option<&mut PermissionPromptCallback>,
+        ) -> ::std::os::raw::c_int {
+            if let Some(cb) = callback {
+                cb.cont(PermissionRequestResult::DENY);
+            }
+            1 // handled — denied
+        }
+    }
+}
+
 // --- Client ---
 
 wrap_client! {
@@ -452,6 +506,8 @@ wrap_client! {
         request: RequestHandler,
         display: DisplayHandler,
         drag: DragHandler,
+        download: DownloadHandler,
+        permission: PermissionHandler,
         router: Arc<BrowserSideRouter>,
     }
     impl Client {
@@ -469,6 +525,12 @@ wrap_client! {
         }
         fn drag_handler(&self) -> Option<DragHandler> {
             Some(self.drag.clone())
+        }
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(self.download.clone())
+        }
+        fn permission_handler(&self) -> Option<PermissionHandler> {
+            Some(self.permission.clone())
         }
         fn on_process_message_received(
             &self,
@@ -584,6 +646,16 @@ wrap_request_handler! {
             self.router
                 .on_before_browse(browser.cloned(), frame.cloned());
             0 // allow navigation
+        }
+        fn on_certificate_error(
+            &self,
+            _browser: Option<&mut Browser>,
+            _cert_error: Errorcode,
+            _request_url: Option<&CefString>,
+            _ssl_info: Option<&mut Sslinfo>,
+            _callback: Option<&mut Callback>,
+        ) -> ::std::os::raw::c_int {
+            0 // reject — never bypass certificate errors
         }
         fn on_render_process_terminated(
             &self,
@@ -794,6 +866,7 @@ wrap_app! {
                 "disable-prompt-on-repost",
                 "disable-save-password-bubble",
                 "disable-webrtc",
+                "site-per-process",
             ];
             for s in &switches {
                 let name = CefString::from(*s);
@@ -970,6 +1043,8 @@ document.title = "TidaLunar - A TIDAL client";
             let request = TidalRequestHandler::new(browser_router.clone());
             let display = TidalDisplayHandler::new(0);
             let drag = TidalDragHandler::new(0);
+            let download = TidalDownloadHandler::new(0);
+            let permission = TidalPermissionHandler::new(0);
 
             {
                 let mut client = self.client.borrow_mut();
@@ -979,6 +1054,8 @@ document.title = "TidaLunar - A TIDAL client";
                     request,
                     display,
                     drag,
+                    download,
+                    permission,
                     browser_router,
                 ));
             }
@@ -1101,7 +1178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let settings = Settings {
-        no_sandbox: 1,
+        no_sandbox: 0,
         root_cache_path: root_cache_cef,
         cache_path: profile_cache_cef,
         user_agent,
