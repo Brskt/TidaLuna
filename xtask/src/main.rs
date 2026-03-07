@@ -93,21 +93,24 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     }
     fs::create_dir_all(&bundle_dir).map_err(|e| format!("failed to create dist/: {e}"))?;
 
-    // 5. Copy exe
-    let exe_src = target_dir.join(EXE_NAME);
-    let exe_dst = bundle_dir.join(EXE_NAME);
-    fs::copy(&exe_src, &exe_dst).map_err(|e| format!("failed to copy exe: {e}"))?;
-    println!("  Copied {EXE_NAME}");
+    // 5. Platform-specific bundling
+    if cfg!(target_os = "macos") {
+        bundle_macos(EXE_NAME, &target_dir, &cef_dir, &bundle_dir)?;
+    } else {
+        // Linux/Windows: flat directory with exe + CEF files
+        let exe_src = target_dir.join(EXE_NAME);
+        let exe_dst = bundle_dir.join(EXE_NAME);
+        fs::copy(&exe_src, &exe_dst).map_err(|e| format!("failed to copy exe: {e}"))?;
+        println!("  Copied {EXE_NAME}");
 
-    // 6. Copy all CEF files (DLLs, .pak, .dat, .bin, .json — skip .exe, .lib, dirs)
-    copy_cef_files(&cef_dir, &bundle_dir)?;
+        copy_cef_files(&cef_dir, &bundle_dir)?;
 
-    // 7. Copy locales/
-    let locales_src = cef_dir.join("locales");
-    let locales_dst = bundle_dir.join("locales");
-    if locales_src.is_dir() {
-        copy_dir_flat(&locales_src, &locales_dst)?;
-        println!("  Copied locales/");
+        let locales_src = cef_dir.join("locales");
+        let locales_dst = bundle_dir.join("locales");
+        if locales_src.is_dir() {
+            copy_dir_flat(&locales_src, &locales_dst)?;
+            println!("  Copied locales/");
+        }
     }
 
     println!("Bundle created in: {}", bundle_dir.display());
@@ -130,10 +133,13 @@ fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
                 for sub in fs::read_dir(&out_dir).into_iter().flatten().flatten() {
                     let sub_name = sub.file_name().to_string_lossy().to_string();
                     if sub_name.starts_with("cef_") && sub.path().is_dir() {
-                        // Verify it contains libcef
-                        let has_libcef = sub.path().join("libcef.dll").exists()
-                            || sub.path().join("libcef.so").exists();
-                        if has_libcef {
+                        let has_cef = sub.path().join("libcef.dll").exists()
+                            || sub.path().join("libcef.so").exists()
+                            || sub
+                                .path()
+                                .join("Chromium Embedded Framework.framework")
+                                .is_dir();
+                        if has_cef {
                             return Ok(sub.path());
                         }
                     }
@@ -143,6 +149,162 @@ fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
     }
     Err("CEF directory not found — run `cargo build --release` first".to_string())
 }
+
+// ---------------------------------------------------------------------------
+// macOS .app bundle
+// ---------------------------------------------------------------------------
+
+/// Create a macOS .app bundle with CEF framework and helper apps.
+///
+/// Structure:
+///   dist/tidalunar.app/
+///     Contents/
+///       MacOS/tidalunar
+///       Frameworks/
+///         Chromium Embedded Framework.framework/
+///         tidalunar Helper.app/
+///         tidalunar Helper (GPU).app/
+///         tidalunar Helper (Renderer).app/
+///         tidalunar Helper (Plugin).app/
+///         tidalunar Helper (Alerts).app/
+///       Resources/
+///       Info.plist
+fn bundle_macos(
+    exe_name: &str,
+    target_dir: &Path,
+    cef_dir: &Path,
+    bundle_dir: &Path,
+) -> Result<(), String> {
+    let app_dir = bundle_dir.join(format!("{exe_name}.app"));
+    let contents = app_dir.join("Contents");
+    let macos_dir = contents.join("MacOS");
+    let frameworks_dir = contents.join("Frameworks");
+    let resources_dir = contents.join("Resources");
+
+    for dir in [&macos_dir, &frameworks_dir, &resources_dir] {
+        fs::create_dir_all(dir).map_err(|e| format!("create dir: {e}"))?;
+    }
+
+    // Copy main binary
+    let exe_src = target_dir.join(exe_name);
+    fs::copy(&exe_src, macos_dir.join(exe_name)).map_err(|e| format!("copy main binary: {e}"))?;
+    println!("  Copied {exe_name}");
+
+    // Copy CEF framework (recursive, preserving symlinks)
+    let framework = "Chromium Embedded Framework.framework";
+    let fw_src = cef_dir.join(framework);
+    let fw_dst = frameworks_dir.join(framework);
+    copy_dir_recursive(&fw_src, &fw_dst)?;
+    println!("  Copied {framework}");
+
+    // Write main Info.plist
+    write_info_plist(&contents, exe_name, false)?;
+
+    // Create helper apps — CEF subprocess helpers reuse the main binary.
+    // CEF identifies the subprocess role via --type= argument.
+    let helpers = [
+        "Helper",
+        "Helper (GPU)",
+        "Helper (Renderer)",
+        "Helper (Plugin)",
+        "Helper (Alerts)",
+    ];
+    for suffix in helpers {
+        let helper_name = format!("{exe_name} {suffix}");
+        let helper_app = frameworks_dir.join(format!("{helper_name}.app"));
+        let helper_contents = helper_app.join("Contents");
+        let helper_macos = helper_contents.join("MacOS");
+
+        fs::create_dir_all(&helper_macos).map_err(|e| format!("create helper dir: {e}"))?;
+        fs::copy(&exe_src, helper_macos.join(&helper_name))
+            .map_err(|e| format!("copy helper binary: {e}"))?;
+        write_info_plist(&helper_contents, &helper_name, true)?;
+    }
+    println!("  Created {} helper apps", helpers.len());
+
+    Ok(())
+}
+
+fn write_info_plist(contents_dir: &Path, name: &str, is_helper: bool) -> Result<(), String> {
+    let identifier = name
+        .to_lowercase()
+        .replace(' ', "-")
+        .replace(['(', ')'], "");
+
+    let ui_element = if is_helper {
+        "\n    <key>LSUIElement</key>\n    <string>1</string>"
+    } else {
+        ""
+    };
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.tidalunar.{identifier}</string>
+    <key>CFBundleName</key>
+    <string>{name}</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>{ui_element}
+</dict>
+</plist>
+"#
+    );
+
+    fs::write(contents_dir.join("Info.plist"), plist).map_err(|e| format!("write Info.plist: {e}"))
+}
+
+/// Recursively copy a directory, preserving symlinks (needed for macOS framework structure).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("create dir {}: {e}", dst.display()))?;
+
+    for entry in fs::read_dir(src).map_err(|e| format!("read dir {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("file type {}: {e}", src_path.display()))?;
+
+        if ft.is_symlink() {
+            let target = fs::read_link(&src_path)
+                .map_err(|e| format!("read symlink {}: {e}", src_path.display()))?;
+            create_symlink(&target, &dst_path)?;
+        } else if ft.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("copy {}: {e}", src_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, link).map_err(|e| format!("symlink {}: {e}", link.display()))
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_target: &Path, _link: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Linux / Windows helpers (flat bundle)
+// ---------------------------------------------------------------------------
 
 /// Copy files from CEF dir to bundle (skip .exe, .lib, directories, build files)
 fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
@@ -162,10 +324,10 @@ fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
         }
 
         // Skip .exe and .lib files
-        if let Some(ext) = path.extension() {
-            if skip_extensions.contains(&ext.to_string_lossy().as_ref()) {
-                continue;
-            }
+        if let Some(ext) = path.extension()
+            && skip_extensions.contains(&ext.to_string_lossy().as_ref())
+        {
+            continue;
         }
 
         let dst = bundle_dir.join(&name);
