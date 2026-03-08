@@ -95,6 +95,20 @@ fn eval_js(js: &str) {
     });
 }
 
+fn toggle_devtools() {
+    with_state(|state| {
+        if let Some(ref browser) = state.browser
+            && let Some(host) = browser.host()
+        {
+            if host.has_dev_tools() == 1 {
+                host.close_dev_tools();
+            } else {
+                host.show_dev_tools(None, None, None, None);
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // IPC handler – processes messages from the frontend
 // ---------------------------------------------------------------------------
@@ -269,17 +283,7 @@ wrap_menu_model_delegate! {
                     eval_js("window.__TL_NAVIGATE__?.('/settings')");
                 }
                 MENU_DEVTOOLS => {
-                    with_state(|state| {
-                        if let Some(ref browser) = state.browser
-                            && let Some(host) = browser.host()
-                        {
-                            if host.has_dev_tools() == 1 {
-                                host.close_dev_tools();
-                            } else {
-                                host.show_dev_tools(None, None, None, None);
-                            }
-                        }
-                    });
+                    toggle_devtools();
                 }
                 MENU_ABOUT => {
                     eval_js(&about_dialog_js());
@@ -407,17 +411,7 @@ fn handle_window_ipc(msg: &IpcMessage) {
             });
         }
         "window.devtools" => {
-            with_state(|state| {
-                if let Some(ref browser) = state.browser
-                    && let Some(host) = browser.host()
-                {
-                    if host.has_dev_tools() == 1 {
-                        host.close_dev_tools();
-                    } else {
-                        host.show_dev_tools(None, None, None, None);
-                    }
-                }
-            });
+            toggle_devtools();
         }
         "menu.clicked" => {
             let x = msg.args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
