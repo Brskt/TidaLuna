@@ -551,8 +551,20 @@ fn decode_loop(
     let mut first_push_logged = false;
 
     loop {
-        // Check for commands (non-blocking)
-        while let Ok(cmd) = cmd_rx.try_recv() {
+        // Process commands — block when paused (zero CPU), poll when active.
+        loop {
+            let cmd = if paused {
+                match cmd_rx.recv() {
+                    Ok(cmd) => cmd,
+                    Err(_) => return,
+                }
+            } else {
+                match cmd_rx.try_recv() {
+                    Ok(cmd) => cmd,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                }
+            };
             match cmd {
                 DecodeCommand::Seek(time) => {
                     let seek_start = std::time::Instant::now();
@@ -609,11 +621,6 @@ fn decode_loop(
                     return;
                 }
             }
-        }
-
-        if paused {
-            std::thread::sleep(Duration::from_millis(10));
-            continue;
         }
 
         // Decode next packet
@@ -794,11 +801,6 @@ fn decode_loop(
                         paused = false;
                     }
                 }
-            }
-
-            if paused {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
             }
 
             let available = producer.slots();
