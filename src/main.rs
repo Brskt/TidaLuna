@@ -95,6 +95,30 @@ fn eval_js(js: &str) {
     });
 }
 
+/// Open a path or URL with the OS default handler.
+fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
+    let target = target.as_ref();
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args([
+                std::ffi::OsStr::new("/C"),
+                std::ffi::OsStr::new("start"),
+                std::ffi::OsStr::new(""),
+                target,
+            ])
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(target).spawn();
+    }
+}
+
 fn toggle_devtools() {
     with_state(|state| {
         if let Some(ref browser) = state.browser
@@ -299,25 +323,7 @@ wrap_menu_model_delegate! {
                     }
                 }
                 MENU_OPEN_DATA => {
-                    let dir = state::cache_data_dir();
-                    #[cfg(target_os = "windows")]
-                    {
-                        let _ = std::process::Command::new("explorer")
-                            .arg(dir)
-                            .spawn();
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg(dir)
-                            .spawn();
-                    }
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = std::process::Command::new("open")
-                            .arg(dir)
-                            .spawn();
-                    }
+                    open_in_os(state::cache_data_dir());
                 }
                 MENU_PLAY_PAUSE => {
                     eval_js("window.__TL_PLAY_PAUSE__?.()");
@@ -466,20 +472,7 @@ fn handle_window_ipc(msg: &IpcMessage) {
         }
         "window.open_url" => {
             if let Some(url) = msg.args.first().and_then(|v| v.as_str()) {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", url])
-                        .spawn();
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("open").arg(url).spawn();
-                }
+                open_in_os(url);
             }
         }
         "web.loaded" => {}
