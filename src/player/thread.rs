@@ -864,8 +864,8 @@ pub(super) struct PlayerThread<F> {
     resume_store: ResumeStore,
     pending_resume_seek: Option<f64>,
     /// Pre-seek position sent to the paused decode thread during handle_load.
-    /// When handle_seek resolves the deferred play, if positions match we skip
-    /// the redundant network seek.
+    /// If a subsequent seek targets the same position, we skip the redundant
+    /// network seek.
     pre_seek_pos: Option<f64>,
     allow_startup_auto_resume: bool,
     // Device
@@ -877,9 +877,6 @@ pub(super) struct PlayerThread<F> {
     is_exclusive_mode: bool,
     #[cfg(target_os = "windows")]
     exclusive_stream_cancel: Option<Arc<AtomicBool>>,
-    // Deferred play — wait for frontend seek before starting decode.
-    // The Option<f64> carries a fallback resume position (used on timeout).
-    deferred_play: Option<(std::time::Instant, Option<f64>)>,
     // Seek state — suppresses TimeUpdates while decode thread is seeking
     seeking: bool,
     /// Target position during an active seek — emitted as TimeUpdate so the
@@ -932,7 +929,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             is_exclusive_mode: false,
             #[cfg(target_os = "windows")]
             exclusive_stream_cancel: None,
-            deferred_play: None,
             seeking: false,
             seek_target: None,
             seek_wall_start: None,
@@ -984,11 +980,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Poll playback state
             self.poll_playback();
 
-            // Wait for next command — short poll while seeking or deferred play
+            // Wait for next command — short poll while seeking
             let timeout = if self.seeking {
                 Duration::from_millis(1)
-            } else if self.deferred_play.is_some() {
-                Duration::from_millis(50)
             } else {
                 Duration::from_millis(250)
             };
@@ -1408,20 +1402,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             .set_playback_active(true);
         (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
 
-        // If there's a pending resume seek, defer playback to let the frontend
-        // send its own seek first. If the frontend sends seek within 500ms,
-        // we use its position; otherwise the fallback resume position is used.
-        let resume_pos = self.pending_resume_seek.take();
-        if resume_pos.is_some() {
-            self.deferred_play = Some((std::time::Instant::now(), resume_pos));
-            crate::vprintln!(
-                "[PLAY]   deferred (resume={:?}, waiting for seek or timeout)",
-                resume_pos.map(|t| format!("{:.1}s", t))
-            );
+        // If there's a pending resume position, the decode thread was already
+        // pre-seeked to it during handle_load(). Emit TimeUpdate so the frontend
+        // knows the position, then start playback immediately (no timeout).
+        if let Some(pos) = self.pending_resume_seek.take() {
+            (self.callback)(PlayerEvent::TimeUpdate(pos.max(0.0), self.current_seq));
+            crate::vprintln!("[PLAY]   start at resume {:.1}s (pre-seeked)", pos);
         } else {
-            self.start_playback();
-            crate::vprintln!("[PLAY]   immediate start (no resume)");
+            crate::vprintln!("[PLAY]   start from beginning");
         }
+        self.start_playback();
     }
 
     /// Actually start cpal stream + decode. Called after resume seek or deferred play resolves.
@@ -1521,7 +1511,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.current_track_id = None;
                 self.pending_resume_seek = None;
                 self.pre_seek_pos = None;
-                self.deferred_play = None;
                 self.resume_store.flush_if_due(true);
                 return;
             }
@@ -1535,7 +1524,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.current_track_id = None;
         self.pending_resume_seek = None;
         self.pre_seek_pos = None;
-        self.deferred_play = None;
         self.is_cached = false;
         self.buffer_stalled = false;
         self.resume_store.flush_if_due(true);
@@ -1575,19 +1563,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
                 return;
             }
-        }
-
-        // Resolve deferred play — frontend's seek overrides the resume position.
-        if self.deferred_play.take().is_some() {
-            let skipped = self.try_skip_pre_seek(latest_time);
-            self.start_playback();
-            if skipped {
-                crate::vprintln!(
-                    "[PLAY]   deferred resolved by seek (pre-seek matches, skip seek)"
-                );
-                return;
-            }
-            crate::vprintln!("[PLAY]   deferred resolved by seek (frontend position wins)");
         }
 
         if self.try_skip_pre_seek(latest_time) {
@@ -1982,41 +1957,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             } else if !stalled && self.buffer_stalled {
                 self.buffer_stalled = false;
                 (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
-            }
-        }
-
-        // Resolve deferred play on timeout (no seek arrived from frontend)
-        if let Some((start, resume_pos)) = self.deferred_play {
-            if start.elapsed() >= std::time::Duration::from_millis(500) {
-                self.deferred_play = None;
-                // Use fallback resume position if frontend didn't send seek
-                if let Some(pos) = resume_pos {
-                    // Skip seek if pre-seek already positioned decode thread here.
-                    // pre_seek_pos is checked non-destructively — start_playback()
-                    // will clear it once playback actually begins.
-                    let need_seek = self
-                        .pre_seek_pos
-                        .map(|pre| (pre - pos).abs() >= PRE_SEEK_TOLERANCE)
-                        .unwrap_or(true);
-                    if need_seek && let Some(ref tx) = self.decode_cmd_tx {
-                        let _ = tx.send(DecodeCommand::Seek(pos));
-                    }
-                    (self.callback)(PlayerEvent::TimeUpdate(pos.max(0.0), self.current_seq));
-                    if let Some(track_id) = self.current_track_id.as_ref() {
-                        self.resume_store.set(track_id, pos);
-                    }
-                    crate::vprintln!(
-                        "[PLAY]   deferred resolved by timeout → resume at {:.1}s{}",
-                        pos,
-                        if !need_seek { " (pre-seeked)" } else { "" }
-                    );
-                } else {
-                    self.pre_seek_pos = None;
-                    crate::vprintln!("[PLAY]   deferred resolved by timeout → start from 0");
-                }
-                self.start_playback();
-            } else {
-                return; // Still waiting — don't poll decode events yet
             }
         }
 
