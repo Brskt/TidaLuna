@@ -135,6 +135,59 @@ struct OpenedStream {
     stream_error: Arc<AtomicU8>,
 }
 
+// ---------------------------------------------------------------------------
+// Audio format probing (symphonia)
+// ---------------------------------------------------------------------------
+
+struct ProbeInfo {
+    sample_rate: u32,
+    channels: u16,
+    duration: f64,
+    bit_depth: Option<u32>,
+    codec: &'static str,
+}
+
+/// Probe a RamBuffer with symphonia and return audio format info.
+fn probe_audio_format(buffer: &RamBuffer) -> Option<ProbeInfo> {
+    let reader = buffer.clone();
+    let mss = MediaSourceStream::new(Box::new(reader), Default::default());
+    let probed = match symphonia::default::get_probe().format(
+        &Hint::new(),
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[ERROR]  Probe failed: {e}");
+            return None;
+        }
+    };
+
+    let track = probed
+        .format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)?;
+
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+    Some(ProbeInfo {
+        sample_rate,
+        channels: track
+            .codec_params
+            .channels
+            .map(|c| c.count() as u16)
+            .unwrap_or(2),
+        duration: track
+            .codec_params
+            .n_frames
+            .map(|n| n as f64 / sample_rate as f64)
+            .unwrap_or(0.0),
+        bit_depth: track.codec_params.bits_per_sample,
+        codec: codec_name(track.codec_params.codec),
+    })
+}
+
 /// Build the cpal output callback. Shared between both attempts.
 fn build_cpal_callback(
     mut consumer: rtrb::Consumer<f32>,
@@ -1033,6 +1086,64 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_event_rx = None;
     }
 
+    /// Start playback via WASAPI exclusive mode. Returns `true` if the
+    /// exclusive path was taken (caller should return), `false` otherwise.
+    #[cfg(target_os = "windows")]
+    fn start_exclusive_playback(&mut self, buffer: RamBuffer) -> bool {
+        if !self.is_exclusive_mode {
+            return false;
+        }
+        if let Some(ref handle) = self.exclusive_handle {
+            handle.send(ExclusiveCommand::Stop);
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.exclusive_stream_cancel = Some(cancel.clone());
+
+            let cmd_tx = handle.command_sender();
+            let reader = buffer.clone();
+            let total_len = buffer.total_len();
+            let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+            thread::spawn(move || {
+                if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
+                    reader,
+                    total_len,
+                    stream_id,
+                    cmd_tx,
+                    cancel.clone(),
+                ) && !cancel.load(Relaxed)
+                {
+                    eprintln!("[WASAPI] Stream decode failed: {e}");
+                }
+            });
+
+            self.current_buffer = Some(buffer);
+            self.has_track = true;
+            self.is_playing = true;
+        }
+        true
+    }
+
+    /// Resolve the output device: try the user-selected device, fall back to
+    /// the system default. Returns `None` (with a DeviceError callback) if
+    /// no device is available.
+    fn resolve_output_device(&self) -> Option<cpal::Device> {
+        if let Some(ref id) = self.current_device_id {
+            match find_output_device(id) {
+                Some(d) => return Some(d),
+                None => {
+                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
+                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                }
+            }
+        }
+        match cpal::default_host().default_output_device() {
+            Some(d) => Some(d),
+            None => {
+                (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                None
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn handle_load(
         &mut self,
@@ -1084,95 +1195,29 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         // WASAPI exclusive path
         #[cfg(target_os = "windows")]
-        {
-            if self.is_exclusive_mode {
-                if let Some(ref handle) = self.exclusive_handle {
-                    handle.send(ExclusiveCommand::Stop);
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    self.exclusive_stream_cancel = Some(cancel.clone());
-
-                    let cmd_tx = handle.command_sender();
-                    let reader = buffer.clone();
-                    let total_len = buffer.total_len();
-                    let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
-                    thread::spawn(move || {
-                        if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
-                            reader,
-                            total_len,
-                            stream_id,
-                            cmd_tx,
-                            cancel.clone(),
-                        ) && !cancel.load(Relaxed)
-                        {
-                            eprintln!("[WASAPI] Stream decode failed: {e}");
-                        }
-                    });
-
-                    crate::vprintln!(
-                        "[WASAPI] Progressive decode started ({:.0}ms setup)",
-                        decode_start.elapsed().as_secs_f64() * 1000.0
-                    );
-                    self.current_buffer = Some(buffer);
-                    self.has_track = true;
-                    self.is_playing = true;
-                }
-                return;
-            }
+        if self.start_exclusive_playback(buffer.clone()) {
+            crate::vprintln!(
+                "[WASAPI] Progressive decode started ({:.0}ms setup)",
+                decode_start.elapsed().as_secs_f64() * 1000.0
+            );
+            return;
         }
 
         // Shared mode: symphonia + cpal
         let total_len = buffer.total_len();
 
-        // Probe the format with symphonia
-        let probe_reader = buffer.clone();
-        let mss = MediaSourceStream::new(Box::new(probe_reader), Default::default());
-        let hint = Hint::new();
-
-        let probed = match symphonia::default::get_probe().format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[ERROR]  Probe failed: {e}");
-                return;
-            }
+        let probe = match probe_audio_format(&buffer) {
+            Some(p) => p,
+            None => return,
         };
-
         let probe_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
         crate::vprintln!("[LOAD #{load_gen}] probe: {}", format_ms(probe_ms));
 
-        // Get audio track info
-        let track = match probed
-            .format
-            .tracks()
-            .iter()
-            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-        {
-            Some(t) => t,
-            None => {
-                eprintln!("[ERROR]  No audio track found");
-                return;
-            }
-        };
-
-        let source_sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-        let source_channels = track
-            .codec_params
-            .channels
-            .map(|c| c.count() as u16)
-            .unwrap_or(2);
-        let source_duration = track
-            .codec_params
-            .n_frames
-            .map(|n| n as f64 / source_sample_rate as f64)
-            .unwrap_or(0.0);
-        let source_bit_depth = track.codec_params.bits_per_sample;
-        let source_codec = codec_name(track.codec_params.codec);
-
-        drop(probed); // Release the probe reader
+        let source_sample_rate = probe.sample_rate;
+        let source_channels = probe.channels;
+        let source_duration = probe.duration;
+        let source_bit_depth = probe.bit_depth;
+        let source_codec = probe.codec;
 
         self.current_duration = source_duration;
         self.decoded_samples.store(0, Relaxed);
@@ -1192,29 +1237,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         });
 
         // Open cpal stream (try source rate first, fall back to device default + rubato)
-        let device = if let Some(ref id) = self.current_device_id {
-            match find_output_device(id) {
-                Some(d) => d,
-                None => {
-                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
-                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
-                    match cpal::default_host().default_output_device() {
-                        Some(d) => d,
-                        None => {
-                            (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            match cpal::default_host().default_output_device() {
-                Some(d) => d,
-                None => {
-                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
-                    return;
-                }
-            }
+        let device = match self.resolve_output_device() {
+            Some(d) => d,
+            None => return,
         };
 
         let cpal_start = std::time::Instant::now();
