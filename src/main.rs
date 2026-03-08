@@ -315,7 +315,7 @@ document.addEventListener('keydown',function h(e){{if(e.key==='Escape'){{o.remov
                     }
                 }
                 MENU_PLAY_PAUSE => {
-                    eval_js("var d=window.__TIDAL_PLAYBACK_DELEGATE__;if(d){window.__TL_PLAYING__?d.pause?.():d.resume?.();}");
+                    eval_js("window.__TL_PLAY_PAUSE__?.()");
                 }
                 MENU_NEXT => {
                     eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
