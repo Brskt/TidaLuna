@@ -170,6 +170,11 @@ impl RamBuffer {
     pub fn is_stalled(&self) -> bool {
         self.shared.stalled.load(Relaxed)
     }
+
+    /// Wait until the writer appends data, finishes, or an error occurs.
+    pub async fn notified(&self) {
+        self.shared.async_notify.notified().await;
+    }
 }
 
 impl Read for RamBuffer {
@@ -327,6 +332,7 @@ impl RamBufferWriter {
         let abs_written = inner.base_offset + inner.data.len() as u64;
         self.shared.written.store(abs_written, Relaxed);
         self.shared.cvar.notify_all();
+        self.shared.async_notify.notify_one();
         true
     }
 
@@ -336,6 +342,7 @@ impl RamBufferWriter {
         inner.finished = true;
         self.shared.finished_atomic.store(true, Relaxed);
         self.shared.cvar.notify_all();
+        self.shared.async_notify.notify_one();
     }
 
     /// Mark the download as finished with an error.
@@ -345,6 +352,7 @@ impl RamBufferWriter {
         inner.finished = true;
         self.shared.finished_atomic.store(true, Relaxed);
         self.shared.cvar.notify_all();
+        self.shared.async_notify.notify_one();
     }
 
     /// Check if the reader has cancelled the download.

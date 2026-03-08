@@ -398,6 +398,8 @@ impl Player {
             const PRE_BUFFER_TIMEOUT_MS: u64 = 2000;
 
             let prebuf_start = std::time::Instant::now();
+            let prebuf_deadline =
+                prebuf_start + std::time::Duration::from_millis(PRE_BUFFER_TIMEOUT_MS);
             loop {
                 if is_stale() {
                     crate::vprintln!("[LOAD #{load_gen}] stale during pre-buffer, dropping");
@@ -407,7 +409,9 @@ impl Player {
                 if buffer.written() >= PRE_BUFFER_TARGET {
                     break;
                 }
-                if prebuf_start.elapsed().as_millis() as u64 >= PRE_BUFFER_TIMEOUT_MS {
+                let remaining =
+                    prebuf_deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
                     crate::vprintln!(
                         "[LOAD #{load_gen}] pre-buffer timeout ({}KB/{}KB in {}ms)",
                         buffer.written() / 1024,
@@ -416,7 +420,8 @@ impl Player {
                     );
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                // Wait for the writer to append data (or timeout)
+                let _ = tokio::time::timeout(remaining, buffer.notified()).await;
             }
 
             crate::vprintln!(
