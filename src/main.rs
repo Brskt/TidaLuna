@@ -528,6 +528,11 @@ fn flush_bridge_now(state: &mut AppState) {
                 && let Some(frame) = browser.main_frame()
             {
                 exec_js_on_frame(&frame, &js);
+            } else {
+                crate::vprintln!(
+                    "[BRIDGE] flush DROPPED — {}",
+                    if state.browser.is_none() { "no browser" } else { "no frame" }
+                );
             }
         }
         state.pending_player_events.clear();
@@ -871,22 +876,28 @@ wrap_load_handler! {
 
                 // After login redirect (login/auth → /), force a full
                 // reload so the webapp starts fresh and calls Player().
-                // Without this, the webapp thinks the player is already
-                // initialized (from the /login/auth page) and skips it.
+                // Stop the player first to discard any state accumulated
+                // during the login pages.
                 if self.last_was_login.get() && !is_login {
                     self.last_was_login.set(false);
                     self.loaded_once.set(false);
+                    with_state(|state| {
+                        let _ = state.player.stop();
+                        // Discard any bridge events queued during login pages
+                        // so they don't leak into the fresh post-reload context.
+                        state.pending_player_events.clear();
+                        state.pending_time_update = None;
+                    });
                     crate::vprintln!("[LOAD]   Post-login redirect detected, reloading");
                     browser.reload();
                     return;
                 }
                 self.last_was_login.set(is_login);
 
-                // Stop any playing audio on navigation (logout, etc.)
-                // — the webapp state is gone so the player must reset.
-                // Skip the very first load (app startup, nothing playing)
-                // and login pages (no player needed).
-                if self.loaded_once.get() && !is_login {
+                // Stop playback only when navigating TO login (logout).
+                // SPA internal navigation (e.g. /tracks, /album/xxx) must
+                // NOT interrupt playback — TIDAL uses history.pushState().
+                if self.loaded_once.get() && is_login {
                     with_state(|state| {
                         let _ = state.player.stop();
                     });
