@@ -460,6 +460,63 @@ fn spawn_decode_thread(
         .expect("failed to spawn decode thread")
 }
 
+/// Execute a symphonia seek, reset decoder/resampler, update decoded_samples
+/// counter, signal SeekComplete, and log timing.
+#[allow(clippy::too_many_arguments)]
+fn do_decode_seek(
+    time: f64,
+    format: &mut dyn symphonia::core::formats::FormatReader,
+    decoder: &mut dyn symphonia::core::codecs::Decoder,
+    pipeline: &mut Option<AudioPipeline>,
+    track_id: u32,
+    source_rate: u32,
+    output_rate: u32,
+    output_channels: u16,
+    seek_gen: &AtomicU32,
+    decoded_samples: &AtomicU64,
+    event_tx: &mpsc::Sender<DecodeEvent>,
+) {
+    let seek_start = std::time::Instant::now();
+    let seek_to = SeekTo::Time {
+        time: symphonia::core::units::Time {
+            seconds: time as u64,
+            frac: time.fract(),
+        },
+        track_id: Some(track_id),
+    };
+    match format.seek(SeekMode::Coarse, seek_to) {
+        Ok(seeked) => {
+            let seek_dur = seek_start.elapsed();
+            decoder.reset();
+            if let Some(p) = pipeline {
+                p.reset();
+            }
+            seek_gen.fetch_add(1, Relaxed);
+            let out_ts = seeked.actual_ts * output_rate as u64 / source_rate as u64;
+            decoded_samples.store(out_ts * output_channels as u64, Relaxed);
+            let _ = event_tx.send(DecodeEvent::SeekComplete);
+            let seek_ms = seek_dur.as_secs_f64() * 1000.0;
+            if seek_ms >= 1.0 {
+                crate::vprintln!(
+                    "[SEEK]   decode: {:.0}ms (ts: {})",
+                    seek_ms,
+                    seeked.actual_ts
+                );
+            } else {
+                crate::vprintln!(
+                    "[SEEK]   decode: {:.0}µs (ts: {})",
+                    seek_dur.as_micros(),
+                    seeked.actual_ts
+                );
+            }
+        }
+        Err(e) => {
+            let _ = event_tx.send(DecodeEvent::SeekComplete);
+            crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decode_loop(
     buffer: RamBuffer,
@@ -567,47 +624,19 @@ fn decode_loop(
             };
             match cmd {
                 DecodeCommand::Seek(time) => {
-                    let seek_start = std::time::Instant::now();
-                    let seek_to = SeekTo::Time {
-                        time: symphonia::core::units::Time {
-                            seconds: time as u64,
-                            frac: time.fract(),
-                        },
-                        track_id: Some(track_id),
-                    };
-                    match format.seek(SeekMode::Coarse, seek_to) {
-                        Ok(seeked) => {
-                            let seek_dur = seek_start.elapsed();
-                            decoder.reset();
-                            if let Some(ref mut p) = pipeline {
-                                p.reset();
-                            }
-                            // Signal cpal callback to drain stale samples
-                            seek_gen.fetch_add(1, Relaxed);
-                            // Convert source timestamp to output timebase
-                            let out_ts = seeked.actual_ts * output_rate as u64 / source_rate as u64;
-                            decoded_samples.store(out_ts * output_channels as u64, Relaxed);
-                            let _ = event_tx.send(DecodeEvent::SeekComplete);
-                            let seek_ms = seek_dur.as_secs_f64() * 1000.0;
-                            if seek_ms >= 1.0 {
-                                crate::vprintln!(
-                                    "[SEEK]   decode: {:.0}ms (ts: {})",
-                                    seek_ms,
-                                    seeked.actual_ts
-                                );
-                            } else {
-                                crate::vprintln!(
-                                    "[SEEK]   decode: {:.0}µs (ts: {})",
-                                    seek_dur.as_micros(),
-                                    seeked.actual_ts
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            let _ = event_tx.send(DecodeEvent::SeekComplete);
-                            crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
-                        }
-                    }
+                    do_decode_seek(
+                        time,
+                        &mut *format,
+                        &mut *decoder,
+                        &mut pipeline,
+                        track_id,
+                        source_rate,
+                        output_rate,
+                        output_channels,
+                        &seek_gen,
+                        &decoded_samples,
+                        &event_tx,
+                    );
                 }
                 DecodeCommand::Pause => {
                     paused = true;
@@ -744,46 +773,19 @@ fn decode_loop(
                         break;
                     }
                     DecodeCommand::Seek(time) => {
-                        let seek_start = std::time::Instant::now();
-                        let seek_to = SeekTo::Time {
-                            time: symphonia::core::units::Time {
-                                seconds: time as u64,
-                                frac: time.fract(),
-                            },
-                            track_id: Some(track_id),
-                        };
-                        match format.seek(SeekMode::Coarse, seek_to) {
-                            Ok(seeked) => {
-                                let seek_dur = seek_start.elapsed();
-                                decoder.reset();
-                                if let Some(ref mut p) = pipeline {
-                                    p.reset();
-                                }
-                                seek_gen.fetch_add(1, Relaxed);
-                                let out_ts =
-                                    seeked.actual_ts * output_rate as u64 / source_rate as u64;
-                                decoded_samples.store(out_ts * output_channels as u64, Relaxed);
-                                let _ = event_tx.send(DecodeEvent::SeekComplete);
-                                let seek_ms = seek_dur.as_secs_f64() * 1000.0;
-                                if seek_ms >= 1.0 {
-                                    crate::vprintln!(
-                                        "[SEEK]   decode: {:.0}ms (ts: {})",
-                                        seek_ms,
-                                        seeked.actual_ts
-                                    );
-                                } else {
-                                    crate::vprintln!(
-                                        "[SEEK]   decode: {:.0}µs (ts: {})",
-                                        seek_dur.as_micros(),
-                                        seeked.actual_ts
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                let _ = event_tx.send(DecodeEvent::SeekComplete);
-                                crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
-                            }
-                        }
+                        do_decode_seek(
+                            time,
+                            &mut *format,
+                            &mut *decoder,
+                            &mut pipeline,
+                            track_id,
+                            source_rate,
+                            output_rate,
+                            output_channels,
+                            &seek_gen,
+                            &decoded_samples,
+                            &event_tx,
+                        );
                         break;
                     }
                     DecodeCommand::Resume => {
