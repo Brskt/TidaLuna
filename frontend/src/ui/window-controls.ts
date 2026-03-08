@@ -67,24 +67,16 @@ export const initWindowControls = () => {
         document.documentElement.appendChild(container);
 
         // Update maximize icon and aria-label when window state changes.
-        const cb = window.__TIDAL_CALLBACKS__?.window;
-        if (cb) {
-            cb._maxBtn = maximizeBtn;
-            cb._maxIcons = icons;
-            if (!cb._controlsWrapped && typeof cb.updateState === "function") {
-                const origUpdateState = cb.updateState;
-                cb._controlsWrapped = true;
-                cb.updateState = (maximized: boolean, fullscreen: boolean) => {
-                    origUpdateState(maximized, fullscreen);
-                    const btn = cb._maxBtn;
-                    const ic = cb._maxIcons;
-                    if (btn && ic) {
-                        btn.innerHTML = maximized ? ic.restore : ic.maximize;
-                        btn.setAttribute("aria-label", maximized ? "Restore" : "Maximize");
-                        btn.setAttribute("title", maximized ? "Restore" : "Maximize");
-                    }
-                };
-            }
+        const wc = window.nativeInterface?.window;
+        if (wc) {
+            const updateIcon = () => {
+                const maximized = wc.isMaximized();
+                maximizeBtn.innerHTML = maximized ? icons.restore : icons.maximize;
+                maximizeBtn.setAttribute("aria-label", maximized ? "Restore" : "Maximize");
+                maximizeBtn.setAttribute("title", maximized ? "Restore" : "Maximize");
+            };
+            wc.on("maximize", updateIcon);
+            wc.on("unmaximize", updateIcon);
         }
     }
 
