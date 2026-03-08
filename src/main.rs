@@ -109,7 +109,14 @@ fn handle_ipc_message(request: &str) {
     };
 
     if msg.channel == "player.dbg" {
-        crate::vprintln!("[JS-DBG] {:?}", msg.args);
+        let dominated_by_time = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == "setCurrentTime");
+        if !dominated_by_time {
+            crate::vprintln!("[JS-DBG] {:?}", msg.args);
+        }
         return;
     }
 
@@ -249,6 +256,19 @@ fn handle_window_ipc(msg: &IpcMessage) {
                         }
                     }
                     notify_window_state(state, !maximized, false);
+                }
+            });
+        }
+        "window.devtools" => {
+            with_state(|state| {
+                if let Some(ref browser) = state.browser
+                    && let Some(host) = browser.host()
+                {
+                    if host.has_dev_tools() == 1 {
+                        host.close_dev_tools();
+                    } else {
+                        host.show_dev_tools(None, None, None, None);
+                    }
                 }
             });
         }
@@ -610,7 +630,8 @@ wrap_load_handler! {
     struct TidalLoadHandler {
         init_script: String,
         bundle_script: String,
-        injected: Cell<bool>,
+        loaded_once: Cell<bool>,
+        last_was_login: Cell<bool>,
     }
     impl LoadHandler {
         fn on_loading_state_change(
@@ -620,17 +641,56 @@ wrap_load_handler! {
             _can_go_back: i32,
             _can_go_forward: i32,
         ) {
-            // Inject scripts only on the first page load.  Re-injecting on
-            // SPA navigations would recreate NativePlayerComponent from
-            // scratch, destroying the SDK's emitter and all its listeners.
+            // Inject scripts when the main frame finishes loading on
+            // desktop.tidal.com.  Skip sub-frames, about:blank,
+            // login.tidal.com, devtools, etc.
+            // The bundle is wrapped in a JS guard so that double-fires of
+            // on_loading_state_change for the same page are harmless.
             if is_loading == 0
-                && !self.injected.get()
                 && let Some(browser) = browser
                 && let Some(frame) = browser.main_frame()
             {
-                self.injected.set(true);
+                let url_userfree = frame.url();
+                let url = format!("{}", CefString::from(&url_userfree));
+                if !url.contains("desktop.tidal.com") {
+                    return;
+                }
+
+                let is_login = url.contains("/login");
+
+                // After login redirect (login/auth → /), force a full
+                // reload so the webapp starts fresh and calls Player().
+                // Without this, the webapp thinks the player is already
+                // initialized (from the /login/auth page) and skips it.
+                if self.last_was_login.get() && !is_login {
+                    self.last_was_login.set(false);
+                    self.loaded_once.set(false);
+                    crate::vprintln!("[LOAD]   Post-login redirect detected, reloading");
+                    browser.reload();
+                    return;
+                }
+                self.last_was_login.set(is_login);
+
+                // Stop any playing audio on navigation (logout, etc.)
+                // — the webapp state is gone so the player must reset.
+                // Skip the very first load (app startup, nothing playing)
+                // and login pages (no player needed).
+                if self.loaded_once.get() && !is_login {
+                    with_state(|state| {
+                        let _ = state.player.stop();
+                    });
+                }
+                self.loaded_once.set(true);
                 exec_js_on_frame(&frame, &self.init_script);
-                exec_js_on_frame(&frame, &self.bundle_script);
+                // Guard: skip bundle if already injected in this JS context
+                // (handles double-fire of on_loading_state_change).
+                exec_js_on_frame(
+                    &frame,
+                    &format!(
+                        "if(!window.__TL_INJECTED__){{window.__TL_INJECTED__=true;{}}}",
+                        self.bundle_script
+                    ),
+                );
             }
         }
     }
@@ -1154,6 +1214,25 @@ wrap_browser_process_handler! {
     }
     impl BrowserProcessHandler {
         fn on_context_initialized(&self) {
+            // Disable password manager and autofill via Chromium preferences.
+            // Command-line switches alone are insufficient in modern CEF.
+            if let Some(ctx) = cef::request_context_get_global_context() {
+                let prefs = [
+                    "credentials_enable_service",
+                    "profile.password_manager_enabled",
+                    "autofill.profile_enabled",
+                    "autofill.credit_card_enabled",
+                ];
+                for pref in prefs {
+                    if let Some(mut val) = cef::value_create() {
+                        val.set_bool(0);
+                        let name = CefString::from(pref);
+                        let mut err = CefString::from("");
+                        ctx.set_preference(Some(&name), Some(&mut val), Some(&mut err));
+                    }
+                }
+            }
+
             // --- Build initialization script ---
             let data_dir = state::cache_data_dir();
             let pkce_credentials = load_or_create_pkce_credentials(&data_dir);
@@ -1223,7 +1302,7 @@ document.title = "TidaLunar - A TIDAL client";
 
             // --- Build CEF client with handlers ---
             let life_span = TidalLifeSpanHandler::new(browser_router.clone());
-            let load = TidalLoadHandler::new(init_script, bundle_script, Cell::new(false));
+            let load = TidalLoadHandler::new(init_script, bundle_script, Cell::new(false), Cell::new(false));
             let request = TidalRequestHandler::new(browser_router.clone());
             let display = TidalDisplayHandler::new(0);
             let drag = TidalDragHandler::new(0);
