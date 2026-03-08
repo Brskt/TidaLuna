@@ -7,3 +7,11 @@ export const createNavigationController = () => {
 
     }
 }
+
+// Navigate the SPA to a given path by pushing history state and
+// dispatching a popstate event (React Router listens for these).
+export const navigateTo = (path: string) => {
+    window.history.pushState({}, "", path);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+};
+(window as any).__TL_NAVIGATE__ = navigateTo;

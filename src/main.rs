@@ -224,10 +224,7 @@ wrap_menu_model_delegate! {
         ) {
             match command_id {
                 MENU_SETTINGS => {
-                    eval_js(
-                        "window.history.pushState({}, '', '/settings');\
-                         window.dispatchEvent(new PopStateEvent('popstate'));",
-                    );
+                    eval_js("window.__TL_NAVIGATE__?.('/settings')");
                 }
                 MENU_DEVTOOLS => {
                     with_state(|state| {
