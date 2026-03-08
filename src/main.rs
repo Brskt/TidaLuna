@@ -1280,6 +1280,110 @@ wrap_render_process_handler! {
 
 // --- App ---
 
+/// Command-line switches passed to the browser process.
+/// CEF propagates relevant ones to subprocesses automatically.
+/// TIDAL needs: DOM, CSS, JS, fetch/XHR, cookies, localStorage,
+/// Canvas 2D, WebGL (cover art/transitions). Everything else is dead weight.
+const CEF_SWITCHES: &[&str] = &[
+    "disable-background-networking",
+    "disable-sync",
+    "disable-default-apps",
+    "disable-component-update",
+    "disable-breakpad",
+    "disable-crash-reporter",
+    "disable-extensions",
+    "disable-translate",
+    "disable-notifications",
+    "disable-spell-checking",
+    "disable-client-side-phishing-detection",
+    "no-first-run",
+    "no-default-browser-check",
+    "disable-hang-monitor",
+    "disable-popup-blocking",
+    "disable-prompt-on-repost",
+    "disable-save-password-bubble",
+    "disable-webrtc",
+    "site-per-process",
+];
+
+/// Chromium features to disable via `--disable-features=X,Y,Z`.
+/// Uses `append_switch` (not `append_switch_with_value`) to work around
+/// a crash on Windows (ACCESS_VIOLATION in add_child_view).
+const CEF_DISABLED_FEATURES: &[&str] = &[
+    // Passwords & autofill — all credential/form-fill prompts
+    "PasswordManager",
+    "PasswordManagerOnboarding",
+    "AutofillServerCommunication",
+    "AutofillCreditCardEnabled",
+    "AutofillProfileEnabled",
+    "KeyboardAccessory",
+    // Translation
+    "Translate",
+    "TranslateUI",
+    // Payments — server-side only for TIDAL
+    "WebPayments",
+    "PaymentHandler",
+    "SecurePaymentConfirmation",
+    "DigitalGoodsAPI",
+    // Hardware access — no peripherals needed
+    "WebUSB",
+    "WebBluetooth",
+    "WebHID",
+    "WebNFC",
+    "WebMidi",
+    "Serial",
+    "Gamepad",
+    // Sensors — no device sensors needed
+    "GenericSensorExtraClasses",
+    "AmbientLightSensor",
+    // Background services — SPA, no offline/push needed
+    "BackgroundFetch",
+    "BackgroundSync",
+    "PushMessaging",
+    "IdleDetection",
+    // Media capture — no camera/mic/screen capture
+    "GetDisplayMedia",
+    "MediaSession",
+    // Speech — no voice input/output
+    "SpeechSynthesis",
+    "SpeechRecognition",
+    // WebRTC — no video/voice calls
+    "WebRtcHideLocalIpsWithMdns",
+    // XR
+    "WebXR",
+    // Privacy Sandbox / ads tracking
+    "Topics",
+    "Fledge",
+    "FledgeInterestGroupAPI",
+    "AttributionReporting",
+    "PrivateAggregation",
+    "SharedStorageAPI",
+    "PrivacySandboxAdsAPIsOverride",
+    // Federated identity — TIDAL uses own OAuth
+    "FedCm",
+    "FedCmAutoSigninAPI",
+    "WebOTP",
+    // Telemetry / client hints
+    "ClientHints",
+    "UserAgentClientHint",
+    "MetricsReportingPolicy",
+    "ReportingAPI",
+    "DeprecationReporting",
+    // Safe browsing — not a general browser
+    "SafeBrowsing",
+    // Misc APIs TIDAL doesn't use
+    "InterestFeedContentSuggestions",
+    "FileSystemAccess",
+    "ComponentUpdate",
+    "DirectSockets",
+    "EyeDropper",
+    "WindowPlacement",
+    "ContactsPicker",
+    "ContentIndex",
+    "InstalledApp",
+    "PictureInPictureV2",
+];
+
 wrap_app! {
     struct TidalApp {
         renderer_router: Arc<RendererSideRouter>,
@@ -1301,113 +1405,12 @@ wrap_app! {
 
             let Some(cmd) = command_line else { return };
 
-            // --- Switches: disable unnecessary subsystems ---
-            // TIDAL needs: DOM, CSS, JS, fetch/XHR, cookies, localStorage,
-            //              Canvas 2D, WebGL (cover art/transitions).
-            // Everything else is dead weight for a music streaming SPA.
-            let switches = [
-                "disable-background-networking",
-                "disable-sync",
-                "disable-default-apps",
-                "disable-component-update",
-                "disable-breakpad",
-                "disable-crash-reporter",
-                "disable-extensions",
-                "disable-translate",
-                "disable-notifications",
-                "disable-spell-checking",
-                "disable-client-side-phishing-detection",
-                "no-first-run",
-                "no-default-browser-check",
-                "disable-hang-monitor",
-                "disable-popup-blocking",
-                "disable-prompt-on-repost",
-                "disable-save-password-bubble",
-                "disable-webrtc",
-                "site-per-process",
-            ];
-            for s in &switches {
+            for s in CEF_SWITCHES {
                 let name = CefString::from(*s);
                 cmd.append_switch(Some(&name));
             }
 
-            // --- disable-features via append_switch (workaround for
-            //     append_switch_with_value crash on Windows) ---
-            let features = [
-                // Passwords & autofill — all credential/form-fill prompts
-                "PasswordManager",
-                "PasswordManagerOnboarding",
-                "AutofillServerCommunication",
-                "AutofillCreditCardEnabled",
-                "AutofillProfileEnabled",
-                "KeyboardAccessory",
-                // Translation
-                "Translate",
-                "TranslateUI",
-                // Payments — server-side only for TIDAL
-                "WebPayments",
-                "PaymentHandler",
-                "SecurePaymentConfirmation",
-                "DigitalGoodsAPI",
-                // Hardware access — no peripherals needed
-                "WebUSB",
-                "WebBluetooth",
-                "WebHID",
-                "WebNFC",
-                "WebMidi",
-                "Serial",
-                "Gamepad",
-                // Sensors — no device sensors needed
-                "GenericSensorExtraClasses",
-                "AmbientLightSensor",
-                // Background services — SPA, no offline/push needed
-                "BackgroundFetch",
-                "BackgroundSync",
-                "PushMessaging",
-                "IdleDetection",
-                // Media capture — no camera/mic/screen capture
-                "GetDisplayMedia",
-                "MediaSession",
-                // Speech — no voice input/output
-                "SpeechSynthesis",
-                "SpeechRecognition",
-                // WebRTC — no video/voice calls
-                "WebRtcHideLocalIpsWithMdns",
-                // XR
-                "WebXR",
-                // Privacy Sandbox / ads tracking
-                "Topics",
-                "Fledge",
-                "FledgeInterestGroupAPI",
-                "AttributionReporting",
-                "PrivateAggregation",
-                "SharedStorageAPI",
-                "PrivacySandboxAdsAPIsOverride",
-                // Federated identity — TIDAL uses own OAuth
-                "FedCm",
-                "FedCmAutoSigninAPI",
-                "WebOTP",
-                // Telemetry / client hints
-                "ClientHints",
-                "UserAgentClientHint",
-                "MetricsReportingPolicy",
-                "ReportingAPI",
-                "DeprecationReporting",
-                // Safe browsing — not a general browser
-                "SafeBrowsing",
-                // Misc APIs TIDAL doesn't use
-                "InterestFeedContentSuggestions",
-                "FileSystemAccess",
-                "ComponentUpdate",
-                "DirectSockets",
-                "EyeDropper",
-                "WindowPlacement",
-                "ContactsPicker",
-                "ContentIndex",
-                "InstalledApp",
-                "PictureInPictureV2",
-            ];
-            let switch = format!("disable-features={}", features.join(","));
+            let switch = format!("disable-features={}", CEF_DISABLED_FEATURES.join(","));
             let switch_cef = CefString::from(switch.as_str());
             cmd.append_switch(Some(&switch_cef));
 
