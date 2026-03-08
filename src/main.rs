@@ -1657,6 +1657,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cache_path: profile_cache_cef,
         user_agent,
         background_color: 0xFF111111, // TIDAL dark theme — no white/Chromium flash
+        chrome_app_icon_id: 101,
         ..Default::default()
     };
 

@@ -43,7 +43,10 @@ fn main() {
     {
         let mut res = winres::WindowsResource::new();
         res.set_icon("tidaluna.ico");
+        res.set_icon_with_id("tidaluna.ico", "101");
         res.set_manifest_file("tidalunar.exe.manifest");
+        res.set("FileDescription", "TidaLunar");
+        res.set("ProductName", "TidaLunar");
         res.compile().expect("Failed to compile Windows resources");
     }
     println!("cargo:rerun-if-changed=tidalunar.exe.manifest");
