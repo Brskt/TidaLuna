@@ -235,6 +235,17 @@ impl Player {
         let handle = self.rt_handle.spawn(async move {
             let load_start = std::time::Instant::now();
             let is_stale = || LOAD_SEQ.load(Relaxed) != load_gen;
+            let send_load = |buffer: RamBuffer, cached: bool, track_id: String| {
+                let _ = cmd_tx.send(PlayerCommand::Load {
+                    buffer,
+                    load_gen,
+                    seq: event_seq,
+                    track_id,
+                    resume_policy,
+                    load_start,
+                    cached,
+                });
+            };
             let track = TrackInfo {
                 url: url.clone(),
                 key: key.clone(),
@@ -258,15 +269,7 @@ impl Player {
                         format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
                     );
                     let buffer = RamBuffer::from_complete(data);
-                    let _ = cmd_tx.send(PlayerCommand::Load {
-                        buffer,
-                        load_gen,
-                        seq: event_seq,
-                        track_id,
-                        resume_policy,
-                        load_start,
-                        cached: true,
-                    });
+                    send_load(buffer, true, track_id);
                     return;
                 }
                 let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
@@ -292,15 +295,7 @@ impl Player {
                     format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
                 );
                 let buffer = RamBuffer::from_complete(preloaded.data);
-                let _ = cmd_tx.send(PlayerCommand::Load {
-                    buffer,
-                    load_gen,
-                    seq: event_seq,
-                    track_id,
-                    resume_policy,
-                    load_start,
-                    cached: false,
-                });
+                send_load(buffer, false, track_id);
                 return;
             }
 
@@ -375,15 +370,7 @@ impl Player {
                             load_start.elapsed().as_secs_f64() * 1000.0
                         );
                         let buffer = RamBuffer::from_complete(data);
-                        let _ = cmd_tx.send(PlayerCommand::Load {
-                            buffer,
-                            load_gen,
-                            seq: event_seq,
-                            track_id,
-                            resume_policy,
-                            load_start,
-                            cached: false,
-                        });
+                        send_load(buffer, false, track_id);
                     }
                     Err(e) => {
                         eprintln!("[ERROR]  Fetch failed: {}", e);
@@ -437,15 +424,7 @@ impl Player {
                 buffer.written() / 1024,
                 prebuf_start.elapsed().as_secs_f64() * 1000.0
             );
-            let _ = cmd_tx.send(PlayerCommand::Load {
-                buffer,
-                load_gen,
-                seq: event_seq,
-                track_id,
-                resume_policy,
-                load_start,
-                cached: false,
-            });
+            send_load(buffer, false, track_id);
         });
 
         *self.load_handle.lock().unwrap() = Some(handle);
