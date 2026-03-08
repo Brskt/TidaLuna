@@ -698,12 +698,9 @@ fn decode_loop(
         let spec = *decoded.spec();
         let num_frames = decoded.frames();
 
-        // Initialize or resize sample buffer
-        let sbuf = sample_buf.get_or_insert_with(|| SampleBuffer::new(num_frames as u64, spec));
-
-        if sbuf.capacity() < num_frames {
-            *sbuf = SampleBuffer::new(num_frames as u64, spec);
-        }
+        // Initialize sample buffer with decoder's max capacity to avoid reallocations
+        let sbuf =
+            sample_buf.get_or_insert_with(|| SampleBuffer::new(decoded.capacity() as u64, spec));
 
         sbuf.copy_interleaved_ref(decoded);
 
