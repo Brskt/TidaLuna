@@ -234,6 +234,7 @@ impl Player {
         let cmd_tx = self.cmd_tx.clone();
         let handle = self.rt_handle.spawn(async move {
             let load_start = std::time::Instant::now();
+            let is_stale = || LOAD_SEQ.load(Relaxed) != load_gen;
             let track = TrackInfo {
                 url: url.clone(),
                 key: key.clone(),
@@ -246,7 +247,7 @@ impl Player {
                 let cache = AUDIO_CACHE.lock().unwrap();
                 if let Some(data) = cache.load(&track_id) {
                     let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
-                    if LOAD_SEQ.load(Relaxed) != load_gen {
+                    if is_stale() {
                         return;
                     }
                     crate::vprintln!(
@@ -280,7 +281,7 @@ impl Player {
             let preload_t0 = std::time::Instant::now();
             if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
                 let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
-                if LOAD_SEQ.load(Relaxed) != load_gen {
+                if is_stale() {
                     crate::vprintln!("[LOAD #{load_gen}] stale after preload check, dropping");
                     return;
                 }
@@ -306,7 +307,7 @@ impl Player {
             let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
             crate::vprintln!("[PRELOAD] Miss | check: {}", format_ms(preload_ms));
 
-            if LOAD_SEQ.load(Relaxed) != load_gen {
+            if is_stale() {
                 crate::vprintln!("[LOAD #{load_gen}] stale before HTTP, dropping");
                 return;
             }
@@ -349,7 +350,7 @@ impl Player {
             );
             log_response_headers(&resp, "[NET]   ");
 
-            if LOAD_SEQ.load(Relaxed) != load_gen {
+            if is_stale() {
                 crate::vprintln!("[LOAD #{load_gen}] stale after HTTP TTFB, dropping");
                 return;
             }
@@ -362,7 +363,7 @@ impl Player {
                 );
                 match preload::fetch_and_decrypt(&url, &key).await {
                     Ok(data) => {
-                        if LOAD_SEQ.load(Relaxed) != load_gen {
+                        if is_stale() {
                             crate::vprintln!(
                                 "[LOAD #{load_gen}] stale after full download, dropping"
                             );
@@ -411,7 +412,7 @@ impl Player {
 
             let prebuf_start = std::time::Instant::now();
             loop {
-                if LOAD_SEQ.load(Relaxed) != load_gen {
+                if is_stale() {
                     crate::vprintln!("[LOAD #{load_gen}] stale during pre-buffer, dropping");
                     buffer.cancel();
                     return;
