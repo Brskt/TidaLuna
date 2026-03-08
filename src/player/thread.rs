@@ -641,19 +641,8 @@ fn decode_loop(
                             continue;
                         }
                         let n = (flushed.len() - off).min(avail);
-                        if let Ok(mut chunk) = producer.write_chunk_uninit(n) {
-                            let (first, second) = chunk.as_mut_slices();
-                            for (i, slot) in first.iter_mut().enumerate() {
-                                slot.write(flushed[off + i]);
-                            }
-                            let fl = first.len();
-                            for (i, slot) in second.iter_mut().enumerate() {
-                                slot.write(flushed[off + fl + i]);
-                            }
-                            unsafe {
-                                chunk.commit_all();
-                            }
-                            off += n;
+                        if let Ok(chunk) = producer.write_chunk_uninit(n) {
+                            off += chunk.fill_from_iter(flushed[off..off + n].iter().copied());
                         }
                     }
                 }
@@ -810,22 +799,10 @@ fn decode_loop(
             }
 
             let to_write = (samples_to_push.len() - offset).min(available);
-            if let Ok(mut chunk) = producer.write_chunk_uninit(to_write) {
-                let slice = &samples_to_push[offset..offset + to_write];
-                let (first, second) = chunk.as_mut_slices();
-                for (i, slot) in first.iter_mut().enumerate() {
-                    slot.write(slice[i]);
-                }
-                let first_len = first.len();
-                if first_len < to_write {
-                    for (i, slot) in second.iter_mut().enumerate() {
-                        slot.write(slice[first_len + i]);
-                    }
-                }
-                unsafe {
-                    chunk.commit_all();
-                }
-                offset += to_write;
+            if let Ok(chunk) = producer.write_chunk_uninit(to_write) {
+                let written = chunk
+                    .fill_from_iter(samples_to_push[offset..offset + to_write].iter().copied());
+                offset += written;
                 decoded_samples.fetch_add(to_write as u64, Relaxed);
                 if !first_push_logged {
                     first_push_logged = true;
