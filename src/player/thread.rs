@@ -148,30 +148,27 @@ struct ProbeInfo {
 }
 
 /// Probe a RamBuffer with symphonia and return audio format info.
-fn probe_audio_format(buffer: &RamBuffer) -> Option<ProbeInfo> {
+fn probe_audio_format(buffer: &RamBuffer) -> Result<ProbeInfo, String> {
     let reader = buffer.clone();
     let mss = MediaSourceStream::new(Box::new(reader), Default::default());
-    let probed = match symphonia::default::get_probe().format(
-        &Hint::new(),
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[ERROR]  Probe failed: {e}");
-            return None;
-        }
-    };
+    let probed = symphonia::default::get_probe()
+        .format(
+            &Hint::new(),
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| format!("Probe failed: {e}"))?;
 
     let track = probed
         .format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)?;
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .ok_or_else(|| "No audio track found".to_string())?;
 
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    Some(ProbeInfo {
+    Ok(ProbeInfo {
         sample_rate,
         channels: track
             .codec_params
@@ -1207,8 +1204,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let total_len = buffer.total_len();
 
         let probe = match probe_audio_format(&buffer) {
-            Some(p) => p,
-            None => return,
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[ERROR]  {e}");
+                (self.callback)(PlayerEvent::MediaError {
+                    error: e,
+                    code: "mediaerror",
+                });
+                return;
+            }
         };
         let probe_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
         crate::vprintln!("[LOAD #{load_gen}] probe: {}", format_ms(probe_ms));
