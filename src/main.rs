@@ -528,7 +528,11 @@ fn flush_bridge_now(state: &mut AppState) {
             } else {
                 crate::vprintln!(
                     "[BRIDGE] flush DROPPED — {}",
-                    if state.browser.is_none() { "no browser" } else { "no frame" }
+                    if state.browser.is_none() {
+                        "no browser"
+                    } else {
+                        "no frame"
+                    }
                 );
             }
         }
