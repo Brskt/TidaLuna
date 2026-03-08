@@ -143,6 +143,31 @@ impl AudioCache {
         Ok(())
     }
 
+    /// Remove all cached audio files and clear the index.
+    pub fn clear(&mut self) -> anyhow::Result<()> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM audio_cache", [], |row| row.get(0))
+            .unwrap_or(0);
+        let total = self.total_size();
+
+        // Remove all audio files on disk
+        if self.audio_dir.exists() {
+            fs::remove_dir_all(&self.audio_dir).ok();
+            fs::create_dir_all(&self.audio_dir).ok();
+        }
+
+        // Clear the index
+        self.conn.execute("DELETE FROM audio_cache", [])?;
+
+        crate::vprintln!(
+            "[CACHE]  Cleared {} entries ({:.1} MB)",
+            count,
+            total as f64 / (1024.0 * 1024.0)
+        );
+        Ok(())
+    }
+
     /// Total size of all cached files according to the index.
     pub fn total_size(&self) -> u64 {
         self.conn

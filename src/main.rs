@@ -197,6 +197,152 @@ fn handle_player_ipc(msg: &IpcMessage) {
     });
 }
 
+// --- Hamburger menu ---
+
+const MENU_SETTINGS: i32 = 1;
+const MENU_DEVTOOLS: i32 = 2;
+const MENU_ABOUT: i32 = 3;
+const MENU_LOGOUT: i32 = 4;
+const MENU_EXIT: i32 = 5;
+const MENU_CLEAR_CACHE: i32 = 6;
+const MENU_OPEN_DATA: i32 = 7;
+const MENU_PLAY_PAUSE: i32 = 10;
+const MENU_NEXT: i32 = 11;
+const MENU_PREV: i32 = 12;
+const MENU_STOP: i32 = 13;
+
+wrap_menu_model_delegate! {
+    struct HamburgerMenuDelegate {
+        _p: u8,
+    }
+    impl MenuModelDelegate {
+        fn execute_command(
+            &self,
+            _menu_model: Option<&mut MenuModel>,
+            command_id: ::std::os::raw::c_int,
+            _event_flags: EventFlags,
+        ) {
+            match command_id {
+                MENU_SETTINGS => {
+                    eval_js(
+                        "window.history.pushState({}, '', '/settings');\
+                         window.dispatchEvent(new PopStateEvent('popstate'));",
+                    );
+                }
+                MENU_DEVTOOLS => {
+                    with_state(|state| {
+                        if let Some(ref browser) = state.browser
+                            && let Some(host) = browser.host()
+                        {
+                            if host.has_dev_tools() == 1 {
+                                host.close_dev_tools();
+                            } else {
+                                host.show_dev_tools(None, None, None, None);
+                            }
+                        }
+                    });
+                }
+                MENU_ABOUT => {
+                    use base64::Engine;
+                    let logo_b64 = base64::engine::general_purpose::STANDARD
+                        .encode(include_bytes!("../tidaluna.png"));
+                    let version = env!("CARGO_PKG_VERSION");
+                    let js = format!(
+                        r#"(function(){{
+if(document.getElementById('tl-about'))return;
+var o=document.createElement('div');o.id='tl-about';
+o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:99999;display:flex;align-items:center;justify-content:center;';
+o.innerHTML='<div style="background:#1a1a2e;border-radius:12px;padding:32px;max-width:380px;width:90%;color:#fff;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;position:relative;box-shadow:0 20px 60px rgba(0,0,0,0.5);">\
+<button id="tl-about-close" style="position:absolute;top:12px;right:16px;background:none;border:none;color:#666;font-size:22px;cursor:pointer;padding:4px 8px;line-height:1;">&times;</button>\
+<div style="text-align:center;margin-bottom:20px;">\
+<img src="data:image/png;base64,{logo}" style="width:64px;height:64px;margin-bottom:12px;border-radius:12px;">\
+<h1 style="margin:0;font-size:20px;font-weight:600;letter-spacing:0.5px;">TidaLunar</h1>\
+<p style="margin:4px 0 0;color:#888;font-size:13px;">v{ver} &middot; alpha</p>\
+</div>\
+<p style="text-align:center;color:#aaa;font-size:13px;margin:0 0 12px;">A native TIDAL client built with Rust</p>\
+<div style="text-align:center;margin-bottom:20px;font-size:13px;"><a href="https://github.com/Inrixia/TidaLuna" target="_blank" style="color:#5b8def;text-decoration:none;">GitHub</a> &middot; <a href="https://discord.gg/jK3uHrJGx4" target="_blank" style="color:#7289da;text-decoration:none;">Discord</a></div>\
+<hr style="border:none;border-top:1px solid #333;margin:0 0 16px;">\
+<p style="color:#666;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px;">Powered by</p>\
+<div style="columns:2;column-gap:16px;color:#999;font-size:12px;line-height:2;">\
+<a href="https://github.com/tauri-apps/cef-rs" target="_blank" style="display:block;color:#999;text-decoration:none;">CEF (Chromium)</a>\
+<a href="https://github.com/pdeljanov/Symphonia" target="_blank" style="display:block;color:#999;text-decoration:none;">symphonia</a>\
+<a href="https://github.com/RustAudio/cpal" target="_blank" style="display:block;color:#999;text-decoration:none;">cpal (Cross-Platform Audio)</a>\
+<a href="https://github.com/HEnquist/rubato" target="_blank" style="display:block;color:#999;text-decoration:none;">rubato</a>\
+</div>\
+<hr style="border:none;border-top:1px solid #333;margin:16px 0;">\
+<p style="text-align:center;color:#555;font-size:10px;margin:0;line-height:1.6;">This project is not affiliated with, endorsed by, or connected to TIDAL or its parent companies. TIDAL is a registered trademark of its respective owners.</p>\
+</div>';
+document.body.appendChild(o);
+o.querySelectorAll('a[href]').forEach(function(a){{a.addEventListener('click',function(e){{e.preventDefault();window.cefQuery({{request:JSON.stringify({{channel:'window.open_url',args:[a.href]}}),onSuccess:function(){{}},onFailure:function(){{}}}});}});}});
+o.addEventListener('click',function(e){{if(e.target===o)o.remove();}});
+document.getElementById('tl-about-close').addEventListener('click',function(){{o.remove();}});
+document.addEventListener('keydown',function h(e){{if(e.key==='Escape'){{o.remove();document.removeEventListener('keydown',h);}}}});
+}})()"#,
+                        logo = logo_b64,
+                        ver = version
+                    );
+                    eval_js(&js);
+                }
+                MENU_LOGOUT => {
+                    eval_js("window.location.href = '/logout';");
+                }
+                MENU_CLEAR_CACHE => {
+                    if let Ok(mut cache) = state::AUDIO_CACHE.lock()
+                        && let Err(e) = cache.clear()
+                    {
+                        crate::vprintln!("[CACHE]  Clear failed: {e}");
+                    }
+                }
+                MENU_OPEN_DATA => {
+                    let dir = state::cache_data_dir();
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(dir)
+                            .spawn();
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(dir)
+                            .spawn();
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = std::process::Command::new("open")
+                            .arg(dir)
+                            .spawn();
+                    }
+                }
+                MENU_PLAY_PAUSE => {
+                    eval_js("var d=window.__TIDAL_PLAYBACK_DELEGATE__;if(d){d.resume?d.resume():d.pause?.();}");
+                }
+                MENU_NEXT => {
+                    eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
+                }
+                MENU_PREV => {
+                    eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
+                }
+                MENU_STOP => {
+                    with_state(|state| {
+                        let _ = state.player.stop();
+                    });
+                }
+                MENU_EXIT => {
+                    with_state(|state| {
+                        if let Some(window) = get_cef_window(state) {
+                            window.close();
+                        } else {
+                            quit_message_loop();
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn handle_window_ipc(msg: &IpcMessage) {
     match msg.channel.as_str() {
         "window.close" => {
@@ -272,9 +418,74 @@ fn handle_window_ipc(msg: &IpcMessage) {
                 }
             });
         }
+        "menu.clicked" => {
+            let x = msg.args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let y = msg.args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+            with_state(|state| {
+                if let Some(window) = get_cef_window(state) {
+                    let mut delegate = HamburgerMenuDelegate::new(0);
+                    if let Some(mut menu) = menu_model_create(Some(&mut delegate)) {
+                        menu.add_item(MENU_PLAY_PAUSE, Some(&CefString::from("Play / Pause")));
+                        menu.add_item(MENU_NEXT, Some(&CefString::from("Next")));
+                        menu.add_item(MENU_PREV, Some(&CefString::from("Previous")));
+                        menu.add_item(MENU_STOP, Some(&CefString::from("Stop")));
+                        menu.add_separator();
+                        menu.add_item(MENU_SETTINGS, Some(&CefString::from("Settings")));
+
+                        let cache_label = if let Ok(cache) = state::AUDIO_CACHE.lock() {
+                            let mb = cache.total_size() as f64 / (1024.0 * 1024.0);
+                            format!("Clear Cache ({mb:.0} MB)")
+                        } else {
+                            "Clear Cache".to_string()
+                        };
+                        menu.add_item(
+                            MENU_CLEAR_CACHE,
+                            Some(&CefString::from(cache_label.as_str())),
+                        );
+                        menu.add_item(MENU_OPEN_DATA, Some(&CefString::from("Open Data Folder")));
+                        menu.add_item(MENU_DEVTOOLS, Some(&CefString::from("DevTools (F12)")));
+                        menu.add_separator();
+                        menu.add_item(MENU_ABOUT, Some(&CefString::from("About TidaLunar")));
+                        menu.add_separator();
+                        menu.add_item(MENU_LOGOUT, Some(&CefString::from("Log Out")));
+                        menu.add_item(MENU_EXIT, Some(&CefString::from("Exit")));
+
+                        let client = window.client_area_bounds_in_screen();
+                        let screen_point = Point {
+                            x: client.x + x,
+                            y: client.y + y,
+                        };
+                        window.show_menu(
+                            Some(&mut menu),
+                            Some(&screen_point),
+                            MenuAnchorPosition::TOPLEFT,
+                        );
+                    }
+                }
+            });
+        }
         "window.drag" => {
             // Drag is handled by CSS -webkit-app-region: drag
             // + DragHandler forwarding to Window::set_draggable_regions.
+        }
+        "window.open_url" => {
+            if let Some(url) = msg.args.first().and_then(|v| v.as_str()) {
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", url])
+                        .spawn();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open").arg(url).spawn();
+                }
+            }
         }
         "web.loaded" => {}
         _ => {}

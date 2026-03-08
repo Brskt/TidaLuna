@@ -5,6 +5,8 @@ export const createPlaybackController = () => {
     return {
         registerDelegate: (d: any) => {
             delegate = d;
+            // Expose delegate for native menu playback controls.
+            (window as any).__TIDAL_PLAYBACK_DELEGATE__ = d;
             sendIpc("player.dbg", "registerDelegate", Object.keys(d || {}).join(","));
         },
         sendPlayerCommand: (cmd: any) => {
