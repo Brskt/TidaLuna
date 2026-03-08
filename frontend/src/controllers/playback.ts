@@ -5,16 +5,8 @@ export const createPlaybackController = () => {
     return {
         registerDelegate: (d: any) => {
             delegate = d;
-            // Expose delegate and helpers for native menu playback controls.
+            // Expose delegate for native menu playback controls.
             (window as any).__TIDAL_PLAYBACK_DELEGATE__ = d;
-            (window as any).__TL_SKIP_PREVIOUS__ = () => {
-                const store = (window as any).__TL_REDUX_STORE__;
-                if (store?.dispatch) {
-                    store.dispatch({ type: "playQueue/MOVE_PREVIOUS" });
-                } else {
-                    d?.playPrevious?.();
-                }
-            };
             sendIpc("player.dbg", "registerDelegate", Object.keys(d || {}).join(","));
         },
         sendPlayerCommand: (cmd: any) => {

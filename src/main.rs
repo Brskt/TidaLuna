@@ -321,7 +321,7 @@ document.addEventListener('keydown',function h(e){{if(e.key==='Escape'){{o.remov
                     eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
                 }
                 MENU_PREV => {
-                    eval_js("window.__TL_SKIP_PREVIOUS__?.()");
+                    eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
                 }
                 MENU_STOP => {
                     with_state(|state| {
