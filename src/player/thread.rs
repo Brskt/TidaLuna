@@ -137,14 +137,14 @@ struct OpenedStream {
 
 /// Build the cpal output callback. Shared between both attempts.
 fn build_cpal_callback(
-    consumer: Arc<std::sync::Mutex<rtrb::Consumer<f32>>>,
+    mut consumer: rtrb::Consumer<f32>,
     volume: Arc<AtomicU32>,
     seek_gen: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
 ) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send + 'static {
     let mut local_gen: u32 = 0;
     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        let mut c = consumer.lock().unwrap();
+        let c = &mut consumer;
 
         // Muted during seek — output silence, drain stale data
         if muted.load(Relaxed) {
@@ -195,14 +195,8 @@ fn open_output_stream(
         };
         let ring_size = source_rate as usize * source_channels as usize * 2;
         let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
-        let consumer = Arc::new(std::sync::Mutex::new(consumer));
 
-        let cb = build_cpal_callback(
-            consumer.clone(),
-            volume.clone(),
-            seek_gen.clone(),
-            muted.clone(),
-        );
+        let cb = build_cpal_callback(consumer, volume.clone(), seek_gen.clone(), muted.clone());
         let err_flag = stream_error.clone();
         if let Ok(stream) = device.build_output_stream(
             &config,
@@ -249,14 +243,8 @@ fn open_output_stream(
 
     let ring_size = ar as usize * ac as usize * 2;
     let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
-    let consumer = Arc::new(std::sync::Mutex::new(consumer));
 
-    let cb = build_cpal_callback(
-        consumer.clone(),
-        volume.clone(),
-        seek_gen.clone(),
-        muted.clone(),
-    );
+    let cb = build_cpal_callback(consumer, volume.clone(), seek_gen.clone(), muted.clone());
     let err_flag = stream_error.clone();
     match device.build_output_stream(
         &cfg,
