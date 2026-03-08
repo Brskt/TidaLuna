@@ -204,6 +204,21 @@ fn handle_window_ipc(msg: &IpcMessage) {
         "window.minimize" => {
             with_state(|state| {
                 if let Some(window) = get_cef_window(state) {
+                    // On Windows, avoid CEF's window.minimize() which uses
+                    // synchronous SendMessage internally, causing reentrancy
+                    // deadlock in HWNDMessageHandler. PostMessageW queues the
+                    // message so it's processed as a fresh top-level dispatch.
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+                        let hwnd = window.window_handle().0 as windows_sys::Win32::Foundation::HWND;
+                        if !hwnd.is_null() {
+                            unsafe {
+                                PostMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE as usize, 0);
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
                     window.minimize();
                 }
             });
@@ -213,13 +228,27 @@ fn handle_window_ipc(msg: &IpcMessage) {
         "window.maximize" | "window.unmaximize" => {
             with_state(|state| {
                 if let Some(window) = get_cef_window(state) {
-                    if window.is_maximized() == 1 {
-                        window.restore();
-                        notify_window_state(state, false, false);
-                    } else {
-                        window.maximize();
-                        notify_window_state(state, true, false);
+                    let maximized = window.is_maximized() == 1;
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+                        let hwnd = window.window_handle().0 as windows_sys::Win32::Foundation::HWND;
+                        if !hwnd.is_null() {
+                            let cmd = if maximized { SC_RESTORE } else { SC_MAXIMIZE };
+                            unsafe {
+                                PostMessageW(hwnd, WM_SYSCOMMAND, cmd as usize, 0);
+                            }
+                        }
                     }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        if maximized {
+                            window.restore();
+                        } else {
+                            window.maximize();
+                        }
+                    }
+                    notify_window_state(state, !maximized, false);
                 }
             });
         }
@@ -696,6 +725,69 @@ wrap_display_handler! {
     }
 }
 
+/// Minimal Win32 subclass for CEF frameless window.
+///
+/// Handles `WM_NCCALCSIZE` to clamp maximized bounds to the monitor work
+/// area, and routes `SC_MINIMIZE`/`SC_MAXIMIZE`/`SC_RESTORE` through
+/// `DefWindowProcW` to avoid a reentrancy deadlock in Chromium's
+/// `HWNDMessageHandler`. Resize borders are handled by CEF's built-in
+/// `CaptionlessFrameView` (enabled via `is_frameless = 1`).
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn frameless_subclass_proc(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+    _uid: usize,
+    _ref_data: usize,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    unsafe {
+        match msg {
+            WM_NCCALCSIZE if wparam != 0 => {
+                // Let DefWindowProcW do internal bookkeeping (placement,
+                // WVR_VALIDRECTS) then set the client rect.
+                let params = &*(lparam as *const NCCALCSIZE_PARAMS);
+                let proposed = params.rgrc[0];
+                DefWindowProcW(hwnd, msg, wparam, lparam);
+                let params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
+
+                if IsZoomed(hwnd) != 0 {
+                    // When maximized, Windows expands the window beyond the
+                    // screen by the frame thickness. Clamp to the monitor's
+                    // work area so the window doesn't overflow.
+                    use windows_sys::Win32::Graphics::Gdi::*;
+                    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    let mut mi: MONITORINFO = core::mem::zeroed();
+                    mi.cbSize = core::mem::size_of::<MONITORINFO>() as u32;
+                    if GetMonitorInfoW(monitor, &mut mi) != 0 {
+                        params.rgrc[0] = mi.rcWork;
+                    } else {
+                        params.rgrc[0] = proposed;
+                    }
+                } else {
+                    params.rgrc[0] = proposed;
+                }
+                0
+            }
+            WM_SYSCOMMAND
+                if matches!(
+                    (wparam & 0xFFF0) as u32,
+                    SC_MINIMIZE | SC_MAXIMIZE | SC_RESTORE
+                ) =>
+            {
+                // Bypass CEF — Chromium's HWNDMessageHandler uses synchronous
+                // SendMessage for min/max/restore which deadlocks via
+                // reentrancy into its own LockUpdates/ScopedRedrawLock.
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
 // --- Window Delegate ---
 
 wrap_window_delegate! {
@@ -714,8 +806,39 @@ wrap_window_delegate! {
     }
     impl PanelDelegate {}
     impl WindowDelegate {
+        fn initial_bounds(&self, _window: Option<&mut Window>) -> cef::Rect {
+            let ws = with_state(|state| state.app_settings.load_window_state())
+                .unwrap_or_default();
+            // When maximized, return default (empty rect) so CEF centers the
+            // window at preferred_size when the user un-maximizes.  The saved
+            // bounds may be stale full-screen values from before the fix.
+            if ws.has_position() && !ws.maximized {
+                cef::Rect {
+                    x: ws.x,
+                    y: ws.y,
+                    width: ws.width as i32,
+                    height: ws.height as i32,
+                }
+            } else {
+                Default::default()
+            }
+        }
+        fn initial_show_state(&self, _window: Option<&mut Window>) -> cef::ShowState {
+            let ws = with_state(|state| state.app_settings.load_window_state())
+                .unwrap_or_default();
+            if ws.maximized {
+                cef::ShowState::MAXIMIZED
+            } else {
+                cef::ShowState::NORMAL
+            }
+        }
         fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
-            1 // TIDAL draws its own title bar
+            // Return 1 (frameless) so CEF uses CaptionlessFrameView
+            // which provides built-in resize border hit-testing (4px).
+            // On Windows, on_window_created patches the style to add
+            // WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX for
+            // proper taskbar minimize/restore behavior.
+            1
         }
         fn can_resize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
             1
@@ -742,10 +865,76 @@ wrap_window_delegate! {
                 window.set_window_app_icon(Some(&mut icon));
             }
 
+            // On Windows, CEF creates a WS_POPUP window for frameless mode.
+            // Patch the style to add thick frame + min/max buttons so the
+            // taskbar icon works (minimize/restore via click) and the system
+            // treats this as a proper resizable app window. Then install a
+            // minimal subclass for WM_NCCALCSIZE (maximize work-area clamp)
+            // and WM_SYSCOMMAND (deadlock bypass for min/max/restore).
+            #[cfg(target_os = "windows")]
+            {
+                use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+                use windows_sys::Win32::UI::WindowsAndMessaging::*;
+                let hwnd = window.window_handle().0 as *mut core::ffi::c_void;
+                if !hwnd.is_null() {
+                    unsafe {
+                        let style = GetWindowLongPtrW(hwnd as _, GWL_STYLE) as u32;
+                        let style = (style & !WS_POPUP)
+                            | WS_THICKFRAME
+                            | WS_MINIMIZEBOX
+                            | WS_MAXIMIZEBOX
+                            | WS_SYSMENU;
+                        SetWindowLongPtrW(hwnd as _, GWL_STYLE, style as isize);
+                        SetWindowSubclass(hwnd, Some(frameless_subclass_proc), 1, 0);
+                        SetWindowPos(
+                            hwnd,
+                            core::ptr::null_mut(),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+                        );
+                    }
+                }
+            }
+
             window.show();
         }
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
             *self.browser_view.borrow_mut() = None;
+        }
+        fn on_window_bounds_changed(
+            &self,
+            window: Option<&mut Window>,
+            new_bounds: Option<&cef::Rect>,
+        ) {
+            let (Some(window), Some(bounds)) = (window, new_bounds) else {
+                return;
+            };
+            // Don't save position while minimized (bounds are invalid).
+            if window.is_minimized() == 1 {
+                return;
+            }
+            let maximized = window.is_maximized() == 1;
+            with_state(|state| {
+                if maximized {
+                    // Only save the maximized flag — keep the normal-size
+                    // bounds in DB so restore returns to the right size.
+                    state.app_settings.save_maximized(true);
+                } else {
+                    state.app_settings.save_window_state(
+                        &crate::settings::WindowState {
+                            x: bounds.x,
+                            y: bounds.y,
+                            width: bounds.width as u32,
+                            height: bounds.height as u32,
+                            maximized: false,
+                        },
+                    );
+                }
+                notify_window_state(state, maximized, false);
+            });
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
             let bv = self.browser_view.borrow();
