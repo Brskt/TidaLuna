@@ -79,10 +79,40 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
 
 console.log("Native Interface exposed (sync)");
 
+// Find the TIDAL web app's Redux store via React fiber internals.
+const findReduxStore = () => {
+    for (const el of document.querySelectorAll("*")) {
+        const fiberKey = Object.keys(el).find(k => k.startsWith("__reactFiber"));
+        if (!fiberKey) continue;
+        let fiber = (el as any)[fiberKey];
+        while (fiber) {
+            if (fiber.memoizedProps?.store?.dispatch) {
+                return fiber.memoizedProps.store;
+            }
+            fiber = fiber.return;
+        }
+    }
+    return null;
+};
+
 // Async hydration.
 const init = async () => {
     const now = Date.now();
     initWindowControls();
+
+    // Capture Redux store once the app has rendered (max 30s).
+    let attempts = 0;
+    const poll = setInterval(() => {
+        const store = findReduxStore();
+        if (store) {
+            (window as any).__TL_REDUX_STORE__ = store;
+            clearInterval(poll);
+        } else if (++attempts >= 60) {
+            console.warn("Redux store not found after 30s, giving up");
+            clearInterval(poll);
+        }
+    }, 500);
+
     console.log("Native Interface initialized in", Date.now() - now, "ms");
 };
 

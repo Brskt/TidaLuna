@@ -315,13 +315,13 @@ document.addEventListener('keydown',function h(e){{if(e.key==='Escape'){{o.remov
                     }
                 }
                 MENU_PLAY_PAUSE => {
-                    eval_js("var d=window.__TIDAL_PLAYBACK_DELEGATE__;if(d){d.resume?d.resume():d.pause?.();}");
+                    eval_js("var d=window.__TIDAL_PLAYBACK_DELEGATE__;if(d){window.__TL_PLAYING__?d.pause?.():d.resume?.();}");
                 }
                 MENU_NEXT => {
                     eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
                 }
                 MENU_PREV => {
-                    eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
+                    eval_js("window.__TL_SKIP_PREVIOUS__?.()");
                 }
                 MENU_STOP => {
                     with_state(|state| {
