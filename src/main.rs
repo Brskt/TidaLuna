@@ -834,12 +834,18 @@ wrap_life_span_handler! {
 
 // --- Load Handler (inject initialization scripts) ---
 
+#[derive(Clone, Copy, PartialEq)]
+enum PageState {
+    Initial, // first load not completed yet
+    App,     // on a non-login page (desktop.tidal.com/*)
+    Login,   // on a login page (desktop.tidal.com/login/*)
+}
+
 wrap_load_handler! {
     struct TidalLoadHandler {
         init_script: String,
         bundle_script: String,
-        loaded_once: Cell<bool>,
-        last_was_login: Cell<bool>,
+        page_state: Cell<PageState>,
     }
     impl LoadHandler {
         fn on_loading_state_change(
@@ -865,14 +871,14 @@ wrap_load_handler! {
                 }
 
                 let is_login = url.contains("/login");
+                let prev = self.page_state.get();
 
                 // After login redirect (login/auth → /), force a full
                 // reload so the webapp starts fresh and calls Player().
                 // Stop the player first to discard any state accumulated
                 // during the login pages.
-                if self.last_was_login.get() && !is_login {
-                    self.last_was_login.set(false);
-                    self.loaded_once.set(false);
+                if prev == PageState::Login && !is_login {
+                    self.page_state.set(PageState::Initial);
                     with_state(|state| {
                         let _ = state.player.stop();
                         // Discard any bridge events queued during login pages
@@ -884,17 +890,20 @@ wrap_load_handler! {
                     browser.reload();
                     return;
                 }
-                self.last_was_login.set(is_login);
 
                 // Stop playback only when navigating TO login (logout).
                 // SPA internal navigation (e.g. /tracks, /album/xxx) must
                 // NOT interrupt playback — TIDAL uses history.pushState().
-                if self.loaded_once.get() && is_login {
+                if prev != PageState::Initial && is_login {
                     with_state(|state| {
                         let _ = state.player.stop();
                     });
                 }
-                self.loaded_once.set(true);
+                self.page_state.set(if is_login {
+                    PageState::Login
+                } else {
+                    PageState::App
+                });
                 exec_js_on_frame(&frame, &self.init_script);
                 // Guard: skip bundle if already injected in this JS context
                 // (handles double-fire of on_loading_state_change).
@@ -1519,7 +1528,7 @@ document.title = "TidaLunar - A TIDAL client";
 
             // --- Build CEF client with handlers ---
             let life_span = TidalLifeSpanHandler::new(browser_router.clone());
-            let load = TidalLoadHandler::new(init_script, bundle_script, Cell::new(false), Cell::new(false));
+            let load = TidalLoadHandler::new(init_script, bundle_script, Cell::new(PageState::Initial));
             let request = TidalRequestHandler::new(browser_router.clone());
             let display = TidalDisplayHandler::new(0);
             let drag = TidalDragHandler::new(0);
