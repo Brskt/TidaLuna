@@ -44,7 +44,7 @@ pub enum ExclusiveCommand {
 
 pub enum ExclusiveEvent {
     TimeUpdate(f64),
-    StateChange(&'static str),
+    StateChange(super::PlaybackState),
     Duration(f64),
     InitFailed(String),
     DeviceLocked(String),
@@ -591,6 +591,58 @@ enum RenderState {
     Paused,
 }
 
+/// Compute the write cursor and frames_played for a seek to `time` seconds.
+fn compute_seek_position(
+    time: f64,
+    sample_rate: u32,
+    channels: u32,
+    src_bps: u32,
+    pcm_len: usize,
+) -> (usize, u64) {
+    let src_bytes_per_sample = (src_bps / 8) as usize;
+    let src_bytes_per_frame = src_bytes_per_sample * channels as usize;
+    let target_frame = (time * sample_rate as f64) as u64;
+    let mut cursor = (target_frame as usize) * src_bytes_per_frame;
+    if cursor > pcm_len {
+        cursor = pcm_len;
+    }
+    let frames = if src_bytes_per_frame > 0 {
+        (cursor / src_bytes_per_frame) as u64
+    } else {
+        0
+    };
+    (cursor, frames)
+}
+
+/// Stop the current stream (if any), open a new exclusive stream, and dispatch
+/// error events on failure. Returns Ok with the new resources, or Err(()) when
+/// an error event has been sent and the render thread should exit.
+fn try_open_stream(
+    device: &wasapi::Device,
+    sample_rate: u32,
+    channels: u32,
+    bits_per_sample: u32,
+    audio_client: &Option<AudioClient>,
+    event_tx: &mpsc::Sender<ExclusiveEvent>,
+) -> Result<(AudioClient, AudioRenderClient, Handle, WaveFormat, u32), ()> {
+    if let Some(ref ac) = audio_client {
+        let _ = ac.stop_stream();
+    }
+
+    match open_exclusive_stream(device, sample_rate, channels, bits_per_sample) {
+        Ok(resources) => Ok(resources),
+        Err(e) => {
+            eprintln!("[WASAPI] Failed to open stream: {e}");
+            if is_device_in_use_error(&e) {
+                let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
+            } else {
+                let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
+            }
+            Err(())
+        }
+    }
+}
+
 fn render_thread(
     device_id: String,
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
@@ -644,47 +696,37 @@ fn render_thread(
                         bits_per_sample,
                         duration_secs,
                     }) => {
+                        let (ac, rc, ev, wf, bs) = match try_open_stream(
+                            &device, sample_rate, channels, bits_per_sample,
+                            &audio_client, &event_tx,
+                        ) {
+                            Ok(res) => res,
+                            Err(()) => return,
+                        };
+
+                        pcm_data.clear();
+                        pcm_sample_rate = sample_rate;
+                        pcm_channels = channels;
+                        pcm_src_bps = bits_per_sample;
+                        pcm_duration = duration_secs;
+                        write_cursor = 0;
+                        frames_played = 0;
+                        current_stream_id = Some(stream_id);
+                        stream_ended = false;
+                        _buffer_size = bs;
+                        last_time_report = Instant::now();
+
+                        audio_client = Some(ac);
+                        render_client = Some(rc);
+                        h_event = Some(ev);
+                        wave_fmt = Some(wf);
+
+                        let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
                         if let Some(ref ac) = audio_client {
-                            let _ = ac.stop_stream();
+                            let _ = ac.start_stream();
                         }
-
-                        match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample)
-                        {
-                            Ok((ac, rc, ev, wf, bs)) => {
-                                pcm_data.clear();
-                                pcm_sample_rate = sample_rate;
-                                pcm_channels = channels;
-                                pcm_src_bps = bits_per_sample;
-                                pcm_duration = duration_secs;
-                                write_cursor = 0;
-                                frames_played = 0;
-                                current_stream_id = Some(stream_id);
-                                stream_ended = false;
-                                _buffer_size = bs;
-                                last_time_report = Instant::now();
-
-                                audio_client = Some(ac);
-                                render_client = Some(rc);
-                                h_event = Some(ev);
-                                wave_fmt = Some(wf);
-
-                                let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
-                                if let Some(ref ac) = audio_client {
-                                    let _ = ac.start_stream();
-                                }
-                                state = RenderState::Playing;
-                                let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
-                            }
-                            Err(e) => {
-                                eprintln!("[WASAPI] Failed to open stream: {e}");
-                                if is_device_in_use_error(&e) {
-                                    let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
-                                } else {
-                                    let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
-                                }
-                                return;
-                            }
-                        }
+                        state = RenderState::Playing;
+                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                     }
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => {
                         break;
@@ -702,7 +744,7 @@ fn render_thread(
                                 let _ = ac.stop_stream();
                             }
                             state = RenderState::Paused;
-                            let _ = event_tx.send(ExclusiveEvent::StateChange("paused"));
+                            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
                         }
                         ExclusiveCommand::Stop => {
                             if let Some(ref ac) = audio_client {
@@ -721,22 +763,9 @@ fn render_thread(
                                 if let Some(ref ac) = audio_client {
                                     let _ = ac.stop_stream();
                                 }
-
-                                let src_bytes_per_sample = (pcm_src_bps / 8) as usize;
-                                let src_bytes_per_frame =
-                                    src_bytes_per_sample * pcm_channels as usize;
-
-                                let target_frame = (time * pcm_sample_rate as f64) as u64;
-                                write_cursor = (target_frame as usize) * src_bytes_per_frame;
-                                if write_cursor > pcm_data.len() {
-                                    write_cursor = pcm_data.len();
-                                }
-                                frames_played = if src_bytes_per_frame > 0 {
-                                    (write_cursor / src_bytes_per_frame) as u64
-                                } else {
-                                    0
-                                };
-
+                                (write_cursor, frames_played) = compute_seek_position(
+                                    time, pcm_sample_rate, pcm_channels, pcm_src_bps, pcm_data.len(),
+                                );
                                 if let Some(ref ac) = audio_client {
                                     let _ = ac.start_stream();
                                 }
@@ -749,48 +778,36 @@ fn render_thread(
                             bits_per_sample,
                             duration_secs,
                         } => {
-                            if let Some(ref ac) = audio_client {
-                                let _ = ac.stop_stream();
-                            }
-
-                            match open_exclusive_stream(
-                                &device,
-                                sample_rate,
-                                channels,
-                                bits_per_sample,
+                            let (ac, rc, ev, wf, bs) = match try_open_stream(
+                                &device, sample_rate, channels, bits_per_sample,
+                                &audio_client, &event_tx,
                             ) {
-                                Ok((ac, rc, ev, wf, bs)) => {
-                                    pcm_data.clear();
-                                    pcm_sample_rate = sample_rate;
-                                    pcm_channels = channels;
-                                    pcm_src_bps = bits_per_sample;
-                                    pcm_duration = duration_secs;
-                                    write_cursor = 0;
-                                    frames_played = 0;
-                                    current_stream_id = Some(stream_id);
-                                    stream_ended = false;
-                                    _buffer_size = bs;
-                                    last_time_report = Instant::now();
+                                Ok(res) => res,
+                                Err(()) => return,
+                            };
 
-                                    audio_client = Some(ac);
-                                    render_client = Some(rc);
-                                    h_event = Some(ev);
-                                    wave_fmt = Some(wf);
+                            pcm_data.clear();
+                            pcm_sample_rate = sample_rate;
+                            pcm_channels = channels;
+                            pcm_src_bps = bits_per_sample;
+                            pcm_duration = duration_secs;
+                            write_cursor = 0;
+                            frames_played = 0;
+                            current_stream_id = Some(stream_id);
+                            stream_ended = false;
+                            _buffer_size = bs;
+                            last_time_report = Instant::now();
 
-                                    let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
-                                    let _ = audio_client.as_ref().unwrap().start_stream();
-                                    let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
-                                }
-                                Err(e) => {
-                                    eprintln!("[WASAPI] Failed to open stream on StartStream: {e}");
-                                    if is_device_in_use_error(&e) {
-                                        let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
-                                    } else {
-                                        let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
-                                    }
-                                    return;
-                                }
+                            audio_client = Some(ac);
+                            render_client = Some(rc);
+                            h_event = Some(ev);
+                            wave_fmt = Some(wf);
+
+                            let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
+                            if let Some(ref ac) = audio_client {
+                                let _ = ac.start_stream();
                             }
+                            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                         }
                         ExclusiveCommand::PushPcm {
                             stream_id,
@@ -859,7 +876,7 @@ fn render_thread(
 
                         // Track finished — signal completion once stream is ended.
                         let _ = event_tx.send(ExclusiveEvent::TimeUpdate(pcm_duration));
-                        let _ = event_tx.send(ExclusiveEvent::StateChange("completed"));
+                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Completed));
 
                         if let Some(ref ac) = audio_client {
                             let _ = ac.stop_stream();
@@ -879,19 +896,18 @@ fn render_thread(
                     let dst_valid = wf.get_validbitspersample() as u32;
                     let dst_type = wf.get_subformat().unwrap_or(SampleType::Int);
 
-                    let write_data =
+                    let write_data: std::borrow::Cow<'_, [u8]> =
                         if pcm_src_bps == dst_store && matches!(dst_type, SampleType::Int) {
-                            // No conversion needed
-                            src_chunk.to_vec()
+                            std::borrow::Cow::Borrowed(src_chunk)
                         } else {
-                            convert_pcm_frame(
+                            std::borrow::Cow::Owned(convert_pcm_frame(
                                 src_chunk,
                                 pcm_src_bps,
                                 dst_store,
                                 dst_valid,
                                 &dst_type,
                                 pcm_channels,
-                            )
+                            ))
                         };
 
                     if let Err(e) = rc.write_to_device(frames_to_write, &write_data, None) {
@@ -918,7 +934,7 @@ fn render_thread(
                             let _ = ac.start_stream();
                         }
                         state = RenderState::Playing;
-                        let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
+                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                     }
                     Ok(ExclusiveCommand::Stop) => {
                         if let Some(ref ac) = audio_client {
@@ -934,19 +950,9 @@ fn render_thread(
                     }
                     Ok(ExclusiveCommand::Seek(time)) => {
                         if wave_fmt.is_some() {
-                            let src_bytes_per_sample = (pcm_src_bps / 8) as usize;
-                            let src_bytes_per_frame = src_bytes_per_sample * pcm_channels as usize;
-
-                            let target_frame = (time * pcm_sample_rate as f64) as u64;
-                            write_cursor = (target_frame as usize) * src_bytes_per_frame;
-                            if write_cursor > pcm_data.len() {
-                                write_cursor = pcm_data.len();
-                            }
-                            frames_played = if src_bytes_per_frame > 0 {
-                                (write_cursor / src_bytes_per_frame) as u64
-                            } else {
-                                0
-                            };
+                            (write_cursor, frames_played) = compute_seek_position(
+                                time, pcm_sample_rate, pcm_channels, pcm_src_bps, pcm_data.len(),
+                            );
                         }
                     }
                     Ok(ExclusiveCommand::StartStream {
@@ -956,45 +962,37 @@ fn render_thread(
                         bits_per_sample,
                         duration_secs,
                     }) => {
+                        let (ac, rc, ev, wf, bs) = match try_open_stream(
+                            &device, sample_rate, channels, bits_per_sample,
+                            &audio_client, &event_tx,
+                        ) {
+                            Ok(res) => res,
+                            Err(()) => return,
+                        };
+
+                        pcm_data.clear();
+                        pcm_sample_rate = sample_rate;
+                        pcm_channels = channels;
+                        pcm_src_bps = bits_per_sample;
+                        pcm_duration = duration_secs;
+                        write_cursor = 0;
+                        frames_played = 0;
+                        current_stream_id = Some(stream_id);
+                        stream_ended = false;
+                        _buffer_size = bs;
+                        last_time_report = Instant::now();
+
+                        audio_client = Some(ac);
+                        render_client = Some(rc);
+                        h_event = Some(ev);
+                        wave_fmt = Some(wf);
+
+                        let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
                         if let Some(ref ac) = audio_client {
-                            let _ = ac.stop_stream();
+                            let _ = ac.start_stream();
                         }
-
-                        match open_exclusive_stream(&device, sample_rate, channels, bits_per_sample)
-                        {
-                            Ok((ac, rc, ev, wf, bs)) => {
-                                pcm_data.clear();
-                                pcm_sample_rate = sample_rate;
-                                pcm_channels = channels;
-                                pcm_src_bps = bits_per_sample;
-                                pcm_duration = duration_secs;
-                                write_cursor = 0;
-                                frames_played = 0;
-                                current_stream_id = Some(stream_id);
-                                stream_ended = false;
-                                _buffer_size = bs;
-                                last_time_report = Instant::now();
-
-                                audio_client = Some(ac);
-                                render_client = Some(rc);
-                                h_event = Some(ev);
-                                wave_fmt = Some(wf);
-
-                                let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
-                                let _ = audio_client.as_ref().unwrap().start_stream();
-                                state = RenderState::Playing;
-                                let _ = event_tx.send(ExclusiveEvent::StateChange("active"));
-                            }
-                            Err(e) => {
-                                eprintln!("[WASAPI] Failed to open stream on StartStream: {e}");
-                                if is_device_in_use_error(&e) {
-                                    let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
-                                } else {
-                                    let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
-                                }
-                                return;
-                            }
-                        }
+                        state = RenderState::Playing;
+                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                     }
                     Ok(ExclusiveCommand::PushPcm {
                         stream_id,
