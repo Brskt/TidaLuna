@@ -24,7 +24,7 @@ use cef::wrapper::message_router::{
 use cef::*;
 use metadata::parse_track_metadata;
 use player::ipc::{PlayerIpc, parse_player_ipc};
-use player::{Player, PlayerEvent};
+use player::{PlaybackState, Player, PlayerEvent};
 use serde::Deserialize;
 use state::TrackInfo;
 use std::cell::{Cell, RefCell};
@@ -71,7 +71,7 @@ where
     F: FnOnce(&mut AppState) -> R,
 {
     APP_STATE.get().map(|s| {
-        let mut guard = s.lock().unwrap();
+        let mut guard = s.lock().expect("AppState lock poisoned");
         f(&mut guard)
     })
 }
@@ -199,7 +199,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                 }
                 PlayerIpc::Metadata { payload } => {
                     let meta = parse_track_metadata(&payload);
-                    let mut lock = crate::state::CURRENT_METADATA.lock().unwrap();
+                    let mut lock = crate::state::CURRENT_METADATA.lock().expect("CURRENT_METADATA lock poisoned");
                     *lock = Some(meta);
                 }
                 PlayerIpc::Play => {
@@ -279,17 +279,41 @@ document.addEventListener('keydown',function h(e){{if(e.key==='Escape'){{o.remov
     )
 }
 
-const MENU_SETTINGS: i32 = 1;
-const MENU_DEVTOOLS: i32 = 2;
-const MENU_ABOUT: i32 = 3;
-const MENU_LOGOUT: i32 = 4;
-const MENU_EXIT: i32 = 5;
-const MENU_CLEAR_CACHE: i32 = 6;
-const MENU_OPEN_DATA: i32 = 7;
-const MENU_PLAY_PAUSE: i32 = 10;
-const MENU_NEXT: i32 = 11;
-const MENU_PREV: i32 = 12;
-const MENU_STOP: i32 = 13;
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuCommand {
+    Settings = 1,
+    DevTools = 2,
+    About = 3,
+    Logout = 4,
+    Exit = 5,
+    ClearCache = 6,
+    OpenData = 7,
+    PlayPause = 10,
+    Next = 11,
+    Prev = 12,
+    Stop = 13,
+}
+
+impl TryFrom<i32> for MenuCommand {
+    type Error = i32;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Settings),
+            2 => Ok(Self::DevTools),
+            3 => Ok(Self::About),
+            4 => Ok(Self::Logout),
+            5 => Ok(Self::Exit),
+            6 => Ok(Self::ClearCache),
+            7 => Ok(Self::OpenData),
+            10 => Ok(Self::PlayPause),
+            11 => Ok(Self::Next),
+            12 => Ok(Self::Prev),
+            13 => Ok(Self::Stop),
+            other => Err(other),
+        }
+    }
+}
 
 wrap_menu_model_delegate! {
     struct HamburgerMenuDelegate {
@@ -302,44 +326,47 @@ wrap_menu_model_delegate! {
             command_id: ::std::os::raw::c_int,
             _event_flags: EventFlags,
         ) {
-            match command_id {
-                MENU_SETTINGS => {
+            let Ok(cmd) = MenuCommand::try_from(command_id) else {
+                return;
+            };
+            match cmd {
+                MenuCommand::Settings => {
                     eval_js("window.__TL_NAVIGATE__?.('/settings')");
                 }
-                MENU_DEVTOOLS => {
+                MenuCommand::DevTools => {
                     toggle_devtools();
                 }
-                MENU_ABOUT => {
+                MenuCommand::About => {
                     eval_js(&about_dialog_js());
                 }
-                MENU_LOGOUT => {
+                MenuCommand::Logout => {
                     eval_js("window.location.href = '/logout';");
                 }
-                MENU_CLEAR_CACHE => {
+                MenuCommand::ClearCache => {
                     if let Ok(mut cache) = state::AUDIO_CACHE.lock()
                         && let Err(e) = cache.clear()
                     {
                         crate::vprintln!("[CACHE]  Clear failed: {e}");
                     }
                 }
-                MENU_OPEN_DATA => {
+                MenuCommand::OpenData => {
                     open_in_os(state::cache_data_dir());
                 }
-                MENU_PLAY_PAUSE => {
+                MenuCommand::PlayPause => {
                     eval_js("window.__TL_PLAY_PAUSE__?.()");
                 }
-                MENU_NEXT => {
+                MenuCommand::Next => {
                     eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
                 }
-                MENU_PREV => {
+                MenuCommand::Prev => {
                     eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
                 }
-                MENU_STOP => {
+                MenuCommand::Stop => {
                     with_state(|state| {
                         let _ = state.player.stop();
                     });
                 }
-                MENU_EXIT => {
+                MenuCommand::Exit => {
                     with_state(|state| {
                         if let Some(window) = get_cef_window(state) {
                             window.close();
@@ -348,7 +375,6 @@ wrap_menu_model_delegate! {
                         }
                     });
                 }
-                _ => {}
             }
         }
     }
@@ -427,12 +453,12 @@ fn handle_window_ipc(msg: &IpcMessage) {
                 if let Some(window) = get_cef_window(state) {
                     let mut delegate = HamburgerMenuDelegate::new(0);
                     if let Some(mut menu) = menu_model_create(Some(&mut delegate)) {
-                        menu.add_item(MENU_PLAY_PAUSE, Some(&CefString::from("Play / Pause")));
-                        menu.add_item(MENU_NEXT, Some(&CefString::from("Next")));
-                        menu.add_item(MENU_PREV, Some(&CefString::from("Previous")));
-                        menu.add_item(MENU_STOP, Some(&CefString::from("Stop")));
+                        menu.add_item(MenuCommand::PlayPause as i32, Some(&CefString::from("Play / Pause")));
+                        menu.add_item(MenuCommand::Next as i32, Some(&CefString::from("Next")));
+                        menu.add_item(MenuCommand::Prev as i32, Some(&CefString::from("Previous")));
+                        menu.add_item(MenuCommand::Stop as i32, Some(&CefString::from("Stop")));
                         menu.add_separator();
-                        menu.add_item(MENU_SETTINGS, Some(&CefString::from("Settings")));
+                        menu.add_item(MenuCommand::Settings as i32, Some(&CefString::from("Settings")));
 
                         let cache_label = if let Ok(cache) = state::AUDIO_CACHE.lock() {
                             let mb = cache.total_size() as f64 / (1024.0 * 1024.0);
@@ -441,16 +467,16 @@ fn handle_window_ipc(msg: &IpcMessage) {
                             "Clear Cache".to_string()
                         };
                         menu.add_item(
-                            MENU_CLEAR_CACHE,
+                            MenuCommand::ClearCache as i32,
                             Some(&CefString::from(cache_label.as_str())),
                         );
-                        menu.add_item(MENU_OPEN_DATA, Some(&CefString::from("Open Data Folder")));
-                        menu.add_item(MENU_DEVTOOLS, Some(&CefString::from("DevTools (F12)")));
+                        menu.add_item(MenuCommand::OpenData as i32, Some(&CefString::from("Open Data Folder")));
+                        menu.add_item(MenuCommand::DevTools as i32, Some(&CefString::from("DevTools (F12)")));
                         menu.add_separator();
-                        menu.add_item(MENU_ABOUT, Some(&CefString::from("About TidaLunar")));
+                        menu.add_item(MenuCommand::About as i32, Some(&CefString::from("About TidaLunar")));
                         menu.add_separator();
-                        menu.add_item(MENU_LOGOUT, Some(&CefString::from("Log Out")));
-                        menu.add_item(MENU_EXIT, Some(&CefString::from("Exit")));
+                        menu.add_item(MenuCommand::Logout as i32, Some(&CefString::from("Log Out")));
+                        menu.add_item(MenuCommand::Exit as i32, Some(&CefString::from("Exit")));
 
                         let client = window.client_area_bounds_in_screen();
                         let screen_point = Point {
@@ -556,12 +582,12 @@ fn handle_player_event(event: PlayerEvent) {
                 }
             }
             PlayerEvent::StateChange(st, seq) => {
-                crate::vprintln!("[BRIDGE] StateChange: \"{}\" seq={}", st, seq);
+                crate::vprintln!("[BRIDGE] StateChange: \"{}\" seq={}", st.as_str(), seq);
 
                 // SDK contract: after "completed", auto-load the preloaded next track.
                 // The webapp does NOT send player.load for the next track — it expects
                 // the native player to transition internally.
-                if st == "completed" {
+                if st == PlaybackState::Completed {
                     let player = state.player.clone();
                     state.rt_handle.spawn(async move {
                         if let Some(next) = preload::take_next_track().await {
@@ -577,7 +603,7 @@ fn handle_player_event(event: PlayerEvent) {
 
                 state
                     .pending_player_events
-                    .push(PlayerBridgeEvent::state(st, seq));
+                    .push(PlayerBridgeEvent::state(st.as_str(), seq));
             }
             PlayerEvent::Duration(duration, seq) => {
                 state
@@ -619,10 +645,10 @@ fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::version(v));
             }
-            PlayerEvent::DeviceError(event_name) => {
+            PlayerEvent::DeviceError(kind) => {
                 state
                     .pending_player_events
-                    .push(PlayerBridgeEvent::device_error(event_name));
+                    .push(PlayerBridgeEvent::device_error(kind.as_str()));
             }
             PlayerEvent::MediaError { error, code } => {
                 state
@@ -686,7 +712,7 @@ impl BrowserSideHandler for IpcQueryHandler {
         // Respond with success (fire-and-forget).
         // Use "ok" instead of "" to avoid "Invalid UTF-16 string" warnings
         // from empty CefString conversion in the response path.
-        callback.lock().unwrap().success_str("ok");
+        callback.lock().expect("IPC callback lock poisoned").success_str("ok");
         true
     }
 }
