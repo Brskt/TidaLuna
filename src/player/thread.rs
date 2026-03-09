@@ -1875,21 +1875,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
-    /// Compute current playback position in seconds from decoded sample count.
-    fn current_position_secs(&self) -> f64 {
-        let samples = self.decoded_samples.load(Relaxed);
+    fn samples_to_secs(&self, samples: u64) -> f64 {
         let channels = self.channels.max(1) as u64;
         let frames = samples / channels;
         frames as f64 / self.sample_rate.max(1) as f64
     }
 
+    /// Compute current playback position in seconds from decoded sample count.
+    fn current_position_secs(&self) -> f64 {
+        self.samples_to_secs(self.decoded_samples.load(Relaxed))
+    }
+
     /// Compute actual playback position from samples consumed by cpal.
     /// More accurate than decoded_samples for time display and drain detection.
     fn played_position_secs(&self) -> f64 {
-        let samples = self.played_samples.load(Relaxed);
-        let channels = self.channels.max(1) as u64;
-        let frames = samples / channels;
-        frames as f64 / self.sample_rate.max(1) as f64
+        self.samples_to_secs(self.played_samples.load(Relaxed))
     }
 
     #[cfg(target_os = "windows")]
