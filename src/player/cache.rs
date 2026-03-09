@@ -101,7 +101,9 @@ impl AudioCache {
 
         if !exists {
             // Orphaned file — clean up
-            let _ = fs::remove_file(&path);
+            if let Err(e) = fs::remove_file(&path) {
+                crate::vprintln!("[CACHE]  Failed to remove orphan {}: {e}", track_id);
+            }
             return None;
         }
 
@@ -120,7 +122,9 @@ impl AudioCache {
     /// Evicts LRU entries if over capacity.
     pub fn store(&mut self, track_id: &str, format: &str, data: &[u8]) -> anyhow::Result<()> {
         let path = self.file_path(track_id);
-        let shard_dir = path.parent().unwrap();
+        let shard_dir = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("cache path has no parent: {}", path.display()))?;
         fs::create_dir_all(shard_dir)?;
 
         // Atomic write via tempfile in same directory (same filesystem for rename)
@@ -204,7 +208,9 @@ impl AudioCache {
             }
 
             let path = self.file_path(&evict_id);
-            let _ = fs::remove_file(&path);
+            if let Err(e) = fs::remove_file(&path) {
+                crate::vprintln!("[CACHE]  Failed to evict {}: {e}", evict_id);
+            }
             self.conn.execute(
                 "DELETE FROM audio_cache WHERE track_id = ?1",
                 params![evict_id],
