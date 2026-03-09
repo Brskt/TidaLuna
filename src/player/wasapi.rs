@@ -625,7 +625,7 @@ fn try_open_stream(
     audio_client: &Option<AudioClient>,
     event_tx: &mpsc::Sender<ExclusiveEvent>,
 ) -> Result<(AudioClient, AudioRenderClient, Handle, WaveFormat, u32), ()> {
-    if let Some(ref ac) = audio_client {
+    if let Some(ac) = audio_client {
         let _ = ac.stop_stream();
     }
 
