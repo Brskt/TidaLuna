@@ -35,7 +35,9 @@ impl WindowState {
 
 impl Settings {
     pub fn open(data_dir: &Path) -> rusqlite::Result<Self> {
-        std::fs::create_dir_all(data_dir).ok();
+        if let Err(e) = std::fs::create_dir_all(data_dir) {
+            crate::vprintln!("[SETTINGS] Failed to create data dir {}: {e}", data_dir.display());
+        }
         let db_path = data_dir.join("settings.db");
 
         let conn = Connection::open(&db_path)?;
