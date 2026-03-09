@@ -58,8 +58,12 @@ impl FlacDecryptor {
             );
         }
 
-        let key: [u8; 16] = decrypted_key[..16].try_into().expect("len >= 24 checked above");
-        let nonce: [u8; 8] = decrypted_key[16..24].try_into().expect("len >= 24 checked above");
+        let key: [u8; 16] = decrypted_key[..16]
+            .try_into()
+            .expect("len >= 24 checked above");
+        let nonce: [u8; 8] = decrypted_key[16..24]
+            .try_into()
+            .expect("len >= 24 checked above");
 
         debug!(
             "Extracted AES-128 key ({} bytes) and nonce ({} bytes)",

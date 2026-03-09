@@ -697,8 +697,12 @@ fn render_thread(
                         duration_secs,
                     }) => {
                         let (ac, rc, ev, wf, bs) = match try_open_stream(
-                            &device, sample_rate, channels, bits_per_sample,
-                            &audio_client, &event_tx,
+                            &device,
+                            sample_rate,
+                            channels,
+                            bits_per_sample,
+                            &audio_client,
+                            &event_tx,
                         ) {
                             Ok(res) => res,
                             Err(()) => return,
@@ -726,7 +730,8 @@ fn render_thread(
                             let _ = ac.start_stream();
                         }
                         state = RenderState::Playing;
-                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+                        let _ = event_tx
+                            .send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                     }
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => {
                         break;
@@ -744,7 +749,8 @@ fn render_thread(
                                 let _ = ac.stop_stream();
                             }
                             state = RenderState::Paused;
-                            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
+                            let _ = event_tx
+                                .send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
                         }
                         ExclusiveCommand::Stop => {
                             if let Some(ref ac) = audio_client {
@@ -764,7 +770,11 @@ fn render_thread(
                                     let _ = ac.stop_stream();
                                 }
                                 (write_cursor, frames_played) = compute_seek_position(
-                                    time, pcm_sample_rate, pcm_channels, pcm_src_bps, pcm_data.len(),
+                                    time,
+                                    pcm_sample_rate,
+                                    pcm_channels,
+                                    pcm_src_bps,
+                                    pcm_data.len(),
                                 );
                                 if let Some(ref ac) = audio_client {
                                     let _ = ac.start_stream();
@@ -779,8 +789,12 @@ fn render_thread(
                             duration_secs,
                         } => {
                             let (ac, rc, ev, wf, bs) = match try_open_stream(
-                                &device, sample_rate, channels, bits_per_sample,
-                                &audio_client, &event_tx,
+                                &device,
+                                sample_rate,
+                                channels,
+                                bits_per_sample,
+                                &audio_client,
+                                &event_tx,
                             ) {
                                 Ok(res) => res,
                                 Err(()) => return,
@@ -807,7 +821,8 @@ fn render_thread(
                             if let Some(ref ac) = audio_client {
                                 let _ = ac.start_stream();
                             }
-                            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+                            let _ = event_tx
+                                .send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                         }
                         ExclusiveCommand::PushPcm {
                             stream_id,
@@ -876,7 +891,8 @@ fn render_thread(
 
                         // Track finished — signal completion once stream is ended.
                         let _ = event_tx.send(ExclusiveEvent::TimeUpdate(pcm_duration));
-                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Completed));
+                        let _ = event_tx
+                            .send(ExclusiveEvent::StateChange(super::PlaybackState::Completed));
 
                         if let Some(ref ac) = audio_client {
                             let _ = ac.stop_stream();
@@ -934,7 +950,8 @@ fn render_thread(
                             let _ = ac.start_stream();
                         }
                         state = RenderState::Playing;
-                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+                        let _ = event_tx
+                            .send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                     }
                     Ok(ExclusiveCommand::Stop) => {
                         if let Some(ref ac) = audio_client {
@@ -951,7 +968,11 @@ fn render_thread(
                     Ok(ExclusiveCommand::Seek(time)) => {
                         if wave_fmt.is_some() {
                             (write_cursor, frames_played) = compute_seek_position(
-                                time, pcm_sample_rate, pcm_channels, pcm_src_bps, pcm_data.len(),
+                                time,
+                                pcm_sample_rate,
+                                pcm_channels,
+                                pcm_src_bps,
+                                pcm_data.len(),
                             );
                         }
                     }
@@ -963,8 +984,12 @@ fn render_thread(
                         duration_secs,
                     }) => {
                         let (ac, rc, ev, wf, bs) = match try_open_stream(
-                            &device, sample_rate, channels, bits_per_sample,
-                            &audio_client, &event_tx,
+                            &device,
+                            sample_rate,
+                            channels,
+                            bits_per_sample,
+                            &audio_client,
+                            &event_tx,
                         ) {
                             Ok(res) => res,
                             Err(()) => return,
@@ -992,7 +1017,8 @@ fn render_thread(
                             let _ = ac.start_stream();
                         }
                         state = RenderState::Playing;
-                        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+                        let _ = event_tx
+                            .send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                     }
                     Ok(ExclusiveCommand::PushPcm {
                         stream_id,

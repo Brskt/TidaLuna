@@ -1046,10 +1046,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     fn handle_command(&mut self, cmd: PlayerCommand) {
         match cmd {
-            PlayerCommand::Load {
-                request,
-                auto_play,
-            } => {
+            PlayerCommand::Load { request, auto_play } => {
                 self.handle_load(request);
                 if auto_play {
                     crate::vprintln!("[AUTO]   Auto-play after load");
@@ -1277,7 +1274,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             match open_output_stream(&device, source_sample_rate, source_channels, &self.volume) {
                 Some(o) => o,
                 None => {
-                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::FormatNotSupported));
+                    (self.callback)(PlayerEvent::DeviceError(
+                        DeviceErrorKind::FormatNotSupported,
+                    ));
                     return;
                 }
             };
@@ -1392,7 +1391,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
         );
 
-        (self.callback)(PlayerEvent::StateChange(PlaybackState::Ready, self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Ready,
+            self.current_seq,
+        ));
     }
 
     fn handle_play(&mut self) {
@@ -1427,7 +1429,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         crate::state::GOVERNOR
             .buffer_progress()
             .set_playback_active(true);
-        (self.callback)(PlayerEvent::StateChange(PlaybackState::Active, self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Active,
+            self.current_seq,
+        ));
 
         // If there's a pending resume position, the decode thread was already
         // pre-seeked to it during handle_load(). Emit TimeUpdate so the frontend
@@ -1505,7 +1510,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         crate::state::GOVERNOR
             .buffer_progress()
             .set_playback_active(false);
-        (self.callback)(PlayerEvent::StateChange(PlaybackState::Paused, self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Paused,
+            self.current_seq,
+        ));
         self.resume_store.flush_if_due(true);
     }
 
@@ -1531,7 +1539,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     handle.send(ExclusiveCommand::Stop);
                 }
                 (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-                (self.callback)(PlayerEvent::StateChange(PlaybackState::Stopped, self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(
+                    PlaybackState::Stopped,
+                    self.current_seq,
+                ));
                 self.is_playing = false;
                 self.has_track = false;
                 self.current_duration = 0.0;
@@ -1544,7 +1555,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-        (self.callback)(PlayerEvent::StateChange(PlaybackState::Stopped, self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Stopped,
+            self.current_seq,
+        ));
         self.is_playing = false;
         self.has_track = false;
         self.current_duration = 0.0;
@@ -1611,7 +1625,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             // Notify the SDK/webapp that we're seeking — nativePlayer.ts maps
             // "seeking" to STALLED internally.
-            (self.callback)(PlayerEvent::StateChange(PlaybackState::Seeking, self.current_seq));
+            (self.callback)(PlayerEvent::StateChange(
+                PlaybackState::Seeking,
+                self.current_seq,
+            ));
             (self.callback)(PlayerEvent::TimeUpdate(
                 latest_time.max(0.0),
                 self.current_seq,
@@ -1805,7 +1822,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let opened = match open_output_stream(&device, sr, ch, &self.volume) {
             Some(o) => o,
             None => {
-                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::FormatNotSupported));
+                (self.callback)(PlayerEvent::DeviceError(
+                    DeviceErrorKind::FormatNotSupported,
+                ));
                 return;
             }
         };
@@ -1991,10 +2010,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             let stalled = buf.is_stalled();
             if stalled && !self.buffer_stalled {
                 self.buffer_stalled = true;
-                (self.callback)(PlayerEvent::StateChange(PlaybackState::Idle, self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(
+                    PlaybackState::Idle,
+                    self.current_seq,
+                ));
             } else if !stalled && self.buffer_stalled {
                 self.buffer_stalled = false;
-                (self.callback)(PlayerEvent::StateChange(PlaybackState::Active, self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(
+                    PlaybackState::Active,
+                    self.current_seq,
+                ));
             }
         }
 
@@ -2085,7 +2110,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 }
                             );
                             // Signal that playback has resumed after the seek.
-                            (self.callback)(PlayerEvent::StateChange(PlaybackState::Active, self.current_seq));
+                            (self.callback)(PlayerEvent::StateChange(
+                                PlaybackState::Active,
+                                self.current_seq,
+                            ));
                         }
                         // Resume seeks (from handle_play) also emit SeekComplete
                         // but don't set seeking=true — no wall timer logged.
@@ -2120,7 +2148,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.current_duration,
                     self.current_seq,
                 ));
-                (self.callback)(PlayerEvent::StateChange(PlaybackState::Completed, self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(
+                    PlaybackState::Completed,
+                    self.current_seq,
+                ));
                 self.has_track = false;
                 self.is_playing = false;
                 self.current_track_id = None;

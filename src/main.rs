@@ -199,7 +199,9 @@ fn handle_player_ipc(msg: &IpcMessage) {
                 }
                 PlayerIpc::Metadata { payload } => {
                     let meta = parse_track_metadata(&payload);
-                    let mut lock = crate::state::CURRENT_METADATA.lock().expect("CURRENT_METADATA lock poisoned");
+                    let mut lock = crate::state::CURRENT_METADATA
+                        .lock()
+                        .expect("CURRENT_METADATA lock poisoned");
                     *lock = Some(meta);
                 }
                 PlayerIpc::Play => {
@@ -453,12 +455,18 @@ fn handle_window_ipc(msg: &IpcMessage) {
                 if let Some(window) = get_cef_window(state) {
                     let mut delegate = HamburgerMenuDelegate::new(0);
                     if let Some(mut menu) = menu_model_create(Some(&mut delegate)) {
-                        menu.add_item(MenuCommand::PlayPause as i32, Some(&CefString::from("Play / Pause")));
+                        menu.add_item(
+                            MenuCommand::PlayPause as i32,
+                            Some(&CefString::from("Play / Pause")),
+                        );
                         menu.add_item(MenuCommand::Next as i32, Some(&CefString::from("Next")));
                         menu.add_item(MenuCommand::Prev as i32, Some(&CefString::from("Previous")));
                         menu.add_item(MenuCommand::Stop as i32, Some(&CefString::from("Stop")));
                         menu.add_separator();
-                        menu.add_item(MenuCommand::Settings as i32, Some(&CefString::from("Settings")));
+                        menu.add_item(
+                            MenuCommand::Settings as i32,
+                            Some(&CefString::from("Settings")),
+                        );
 
                         let cache_label = if let Ok(cache) = state::AUDIO_CACHE.lock() {
                             let mb = cache.total_size() as f64 / (1024.0 * 1024.0);
@@ -470,12 +478,24 @@ fn handle_window_ipc(msg: &IpcMessage) {
                             MenuCommand::ClearCache as i32,
                             Some(&CefString::from(cache_label.as_str())),
                         );
-                        menu.add_item(MenuCommand::OpenData as i32, Some(&CefString::from("Open Data Folder")));
-                        menu.add_item(MenuCommand::DevTools as i32, Some(&CefString::from("DevTools (F12)")));
+                        menu.add_item(
+                            MenuCommand::OpenData as i32,
+                            Some(&CefString::from("Open Data Folder")),
+                        );
+                        menu.add_item(
+                            MenuCommand::DevTools as i32,
+                            Some(&CefString::from("DevTools (F12)")),
+                        );
                         menu.add_separator();
-                        menu.add_item(MenuCommand::About as i32, Some(&CefString::from("About TidaLunar")));
+                        menu.add_item(
+                            MenuCommand::About as i32,
+                            Some(&CefString::from("About TidaLunar")),
+                        );
                         menu.add_separator();
-                        menu.add_item(MenuCommand::Logout as i32, Some(&CefString::from("Log Out")));
+                        menu.add_item(
+                            MenuCommand::Logout as i32,
+                            Some(&CefString::from("Log Out")),
+                        );
                         menu.add_item(MenuCommand::Exit as i32, Some(&CefString::from("Exit")));
 
                         let client = window.client_area_bounds_in_screen();
@@ -712,7 +732,10 @@ impl BrowserSideHandler for IpcQueryHandler {
         // Respond with success (fire-and-forget).
         // Use "ok" instead of "" to avoid "Invalid UTF-16 string" warnings
         // from empty CefString conversion in the response path.
-        callback.lock().expect("IPC callback lock poisoned").success_str("ok");
+        callback
+            .lock()
+            .expect("IPC callback lock poisoned")
+            .success_str("ok");
         true
     }
 }
