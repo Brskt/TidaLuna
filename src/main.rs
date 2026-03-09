@@ -8,11 +8,14 @@ mod bridge;
 mod decrypt;
 mod flac_meta;
 mod logging;
+mod media_controls;
 mod metadata;
 mod player;
 mod preload;
 mod settings;
 mod state;
+#[cfg(target_os = "windows")]
+mod thumbbar;
 
 use auth::load_or_create_pkce_credentials;
 use bridge::PlayerBridgeEvent;
@@ -55,6 +58,10 @@ struct AppState {
     browser: Option<Browser>,
     /// Prevents scheduling duplicate delayed flush tasks.
     flush_scheduled: bool,
+    media_controls: Option<media_controls::OsMediaControls>,
+    media_duration: Option<f64>,
+    #[cfg(target_os = "windows")]
+    thumbbar: Option<thumbbar::ThumbBar>,
 }
 
 // SAFETY: AppState is only accessed on the CEF UI thread (single-threaded access)
@@ -66,7 +73,7 @@ unsafe impl Sync for AppState {}
 
 static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
 
-fn with_state<F, R>(f: F) -> Option<R>
+pub(crate) fn with_state<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut AppState) -> R,
 {
@@ -85,7 +92,7 @@ fn exec_js_on_frame(frame: &Frame, js: &str) {
 
 /// Execute JavaScript in the main browser frame.
 #[allow(dead_code)]
-fn eval_js(js: &str) {
+pub(crate) fn eval_js(js: &str) {
     with_state(|state| {
         if let Some(ref browser) = state.browser
             && let Some(frame) = browser.main_frame()
@@ -199,6 +206,9 @@ fn handle_player_ipc(msg: &IpcMessage) {
                 }
                 PlayerIpc::Metadata { payload } => {
                     let meta = parse_track_metadata(&payload);
+                    if let Some(ref mut mc) = state.media_controls {
+                        mc.set_metadata(&meta.title, &meta.artist, state.media_duration);
+                    }
                     let mut lock = crate::state::CURRENT_METADATA
                         .lock()
                         .expect("CURRENT_METADATA lock poisoned");
@@ -621,11 +631,34 @@ fn handle_player_event(event: PlayerEvent) {
                     });
                 }
 
+                if let Some(ref mut mc) = state.media_controls {
+                    mc.set_playback(st);
+                }
+
+                #[cfg(target_os = "windows")]
+                if let Some(ref tb) = state.thumbbar {
+                    tb.set_playing(matches!(
+                        st,
+                        PlaybackState::Active | PlaybackState::Seeking | PlaybackState::Idle
+                    ));
+                }
+
                 state
                     .pending_player_events
                     .push(PlayerBridgeEvent::state(st.as_str(), seq));
             }
             PlayerEvent::Duration(duration, seq) => {
+                state.media_duration = Some(duration);
+
+                // Update SMTC metadata with the now-known duration.
+                if let Some(ref mut mc) = state.media_controls
+                    && let Some(ref meta) = *crate::state::CURRENT_METADATA
+                        .lock()
+                        .expect("CURRENT_METADATA lock poisoned")
+                {
+                    mc.set_metadata(&meta.title, &meta.artist, Some(duration));
+                }
+
                 state
                     .pending_player_events
                     .push(PlayerBridgeEvent::duration(duration, seq));
@@ -1133,6 +1166,17 @@ unsafe extern "system" fn frameless_subclass_proc(
                 // reentrancy into its own LockUpdates/ScopedRedrawLock.
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            WM_COMMAND => {
+                // Thumbnail toolbar button clicks (ITaskbarList3)
+                let id = (wparam & 0xFFFF) as u32;
+                match id {
+                    0 => crate::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.()"),
+                    1 => crate::eval_js("window.__TL_PLAY_PAUSE__?.()"),
+                    2 => crate::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.()"),
+                    _ => return DefSubclassProc(hwnd, msg, wparam, lparam),
+                }
+                0
+            }
             _ => DefSubclassProc(hwnd, msg, wparam, lparam),
         }
     }
@@ -1249,7 +1293,33 @@ wrap_window_delegate! {
                 }
             }
 
+            {
+                #[cfg(target_os = "windows")]
+                let hwnd = Some(window.window_handle().0 as *mut std::ffi::c_void);
+                #[cfg(not(target_os = "windows"))]
+                let hwnd = None;
+
+                if let Some(mc) = media_controls::OsMediaControls::new(hwnd) {
+                    with_state(|state| {
+                        state.media_controls = Some(mc);
+                    });
+                }
+            }
+
             window.show();
+
+            // Thumbnail toolbar buttons (Previous / Play-Pause / Next) in the
+            // Windows taskbar.  Must be created after the window is shown so
+            // the shell has registered the HWND.
+            #[cfg(target_os = "windows")]
+            {
+                let hwnd = window.window_handle().0 as windows_sys::Win32::Foundation::HWND;
+                if let Some(tb) = thumbbar::ThumbBar::new(hwnd) {
+                    with_state(|state| {
+                        state.thumbbar = Some(tb);
+                    });
+                }
+            }
         }
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
             *self.browser_view.borrow_mut() = None;
@@ -1419,7 +1489,9 @@ const CEF_DISABLED_FEATURES: &[&str] = &[
     "IdleDetection",
     // Media capture — no camera/mic/screen capture
     "GetDisplayMedia",
-    "MediaSession",
+    // Media keys — souvlaki handles hardware media keys via SMTC;
+    // disable CEF's interception to avoid conflicts.
+    "HardwareMediaKeyHandling",
     // Speech — no voice input/output
     "SpeechSynthesis",
     "SpeechRecognition",
@@ -1650,6 +1722,47 @@ document.title = "TidaLunar - A TIDAL client";
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        let app_id: Vec<u16> = "com.tidalunar.app\0".encode_utf16().collect();
+        SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
+
+        // Register a display name for the AppUserModelID so that Windows
+        // shows "TidaLunar" instead of "Unknown app" in Quick Settings.
+        use windows_sys::Win32::System::Registry::{
+            HKEY_CURRENT_USER, KEY_WRITE, REG_SZ, RegCreateKeyExW, RegSetValueExW,
+        };
+        let subkey: Vec<u16> = "Software\\Classes\\AppUserModelId\\com.tidalunar.app\0"
+            .encode_utf16()
+            .collect();
+        let mut hkey = core::ptr::null_mut();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            core::ptr::null(),
+            0,
+            KEY_WRITE,
+            core::ptr::null(),
+            &mut hkey,
+            core::ptr::null_mut(),
+        ) == 0
+        {
+            let name: Vec<u16> = "DisplayName\0".encode_utf16().collect();
+            let value: Vec<u16> = "TidaLunar\0".encode_utf16().collect();
+            let _ = RegSetValueExW(
+                hkey,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr().cast(),
+                (value.len() * 2) as u32,
+            );
+            windows_sys::Win32::System::Registry::RegCloseKey(hkey);
+        }
+    }
+
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
     let args = cef::args::Args::new();
@@ -1717,6 +1830,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app_settings,
         browser: None,
         flush_scheduled: false,
+        media_controls: None,
+        media_duration: None,
+        #[cfg(target_os = "windows")]
+        thumbbar: None,
     })));
 
     // --- Initialize CEF ---
