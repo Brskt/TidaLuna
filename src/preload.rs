@@ -40,7 +40,6 @@ async fn fetch_and_decrypt_inner(
     let mut stream = resp.bytes_stream();
     let mut offset = 0u64;
     let mut decrypt_buf = Vec::new();
-    let mut decrypt_scratch = Vec::new();
     let mut buffer = Vec::new();
 
     while let Some(item) = stream.next().await {
@@ -52,7 +51,7 @@ async fn fetch_and_decrypt_inner(
 
         decrypt_buf.clear();
         decrypt_buf.extend_from_slice(&chunk);
-        decryptor.decrypt_in_place_with_scratch(&mut decrypt_buf, offset, &mut decrypt_scratch)?;
+        decryptor.decrypt_in_place(&mut decrypt_buf, offset)?;
         offset += chunk.len() as u64;
 
         if let Some(limit) = max_bytes

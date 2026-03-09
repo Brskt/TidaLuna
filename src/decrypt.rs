@@ -58,8 +58,8 @@ impl FlacDecryptor {
             );
         }
 
-        let key: [u8; 16] = decrypted_key[..16].try_into().unwrap();
-        let nonce: [u8; 8] = decrypted_key[16..24].try_into().unwrap();
+        let key: [u8; 16] = decrypted_key[..16].try_into().expect("len >= 24 checked above");
+        let nonce: [u8; 8] = decrypted_key[16..24].try_into().expect("len >= 24 checked above");
 
         debug!(
             "Extracted AES-128 key ({} bytes) and nonce ({} bytes)",
@@ -123,16 +123,5 @@ impl FlacDecryptor {
 
         cipher.apply_keystream(data);
         Ok(())
-    }
-
-    /// Compatibility shim for callers that already pass a scratch buffer.
-    /// Scratch is no longer needed: unaligned offsets are handled allocation-free.
-    pub fn decrypt_in_place_with_scratch(
-        &self,
-        data: &mut [u8],
-        byte_offset: u64,
-        _scratch: &mut Vec<u8>,
-    ) -> anyhow::Result<()> {
-        self.decrypt_in_place(data, byte_offset)
     }
 }
