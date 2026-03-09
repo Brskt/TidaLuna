@@ -186,8 +186,8 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         eprintln!("Failed to recover track: {}", e);
                     }
                 }
-                PlayerIpc::Preload { url, key } => {
-                    let track = TrackInfo { url, key };
+                PlayerIpc::Preload { url, format, key } => {
+                    let track = TrackInfo { url, format, key };
                     state.rt_handle.spawn(async move {
                         preload::start_preload(track).await;
                     });
@@ -557,6 +557,24 @@ fn handle_player_event(event: PlayerEvent) {
             }
             PlayerEvent::StateChange(st, seq) => {
                 crate::vprintln!("[BRIDGE] StateChange: \"{}\" seq={}", st, seq);
+
+                // SDK contract: after "completed", auto-load the preloaded next track.
+                // The webapp does NOT send player.load for the next track — it expects
+                // the native player to transition internally.
+                if st == "completed" {
+                    let player = state.player.clone();
+                    state.rt_handle.spawn(async move {
+                        if let Some(next) = preload::take_next_track().await {
+                            crate::vprintln!("[AUTO]   Loading preloaded next track");
+                            if let Err(e) = player.load_and_play(next.url, next.format, next.key) {
+                                eprintln!("[AUTO]   Failed to load next track: {e}");
+                            }
+                        } else {
+                            crate::vprintln!("[AUTO]   No preloaded next track");
+                        }
+                    });
+                }
+
                 state
                     .pending_player_events
                     .push(PlayerBridgeEvent::state(st, seq));

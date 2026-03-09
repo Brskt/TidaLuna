@@ -7,7 +7,9 @@ mod thread;
 pub(crate) mod wasapi;
 
 use crate::preload;
-use crate::state::{AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT_PLAYBACK, TrackInfo};
+use crate::state::{
+    AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, GOVERNOR, HTTP_CLIENT_PLAYBACK, TrackInfo,
+};
 use buffer::RamBuffer;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
@@ -64,6 +66,7 @@ enum PlayerCommand {
         resume_policy: ResumePolicy,
         load_start: std::time::Instant,
         cached: bool,
+        auto_play: bool,
     },
     Play,
     Pause,
@@ -212,6 +215,7 @@ impl Player {
         format: String,
         key: String,
         resume_policy: ResumePolicy,
+        auto_play: bool,
     ) -> anyhow::Result<()> {
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
@@ -223,10 +227,15 @@ impl Player {
             prev.abort();
         }
 
+        // Reset governor buffer progress so the new download isn't throttled
+        // by stale counters from the previous track.
+        GOVERNOR.reset_buffer_progress();
+
         {
             let mut lock = CURRENT_TRACK.lock().unwrap();
             *lock = Some(TrackInfo {
                 url: url.clone(),
+                format: format.clone(),
                 key: key.clone(),
             });
         }
@@ -244,10 +253,12 @@ impl Player {
                     resume_policy,
                     load_start,
                     cached,
+                    auto_play,
                 });
             };
             let track = TrackInfo {
                 url: url.clone(),
+                format: format.clone(),
                 key: key.clone(),
             };
             let track_id = canonical_track_id(&url);
@@ -438,7 +449,11 @@ impl Player {
     }
 
     pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
-        self.load_with_policy(url, format, key, ResumePolicy::Disabled)
+        self.load_with_policy(url, format, key, ResumePolicy::Disabled, false)
+    }
+
+    pub fn load_and_play(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
+        self.load_with_policy(url, format, key, ResumePolicy::Disabled, true)
     }
 
     pub fn recover(
@@ -452,7 +467,7 @@ impl Player {
             Some(t) if t.is_finite() && t > resume::RESUME_MIN_SECONDS => ResumePolicy::Explicit(t),
             _ => ResumePolicy::Auto,
         };
-        self.load_with_policy(url, format, key, policy)
+        self.load_with_policy(url, format, key, policy, false)
     }
 
     pub fn play(&self) -> anyhow::Result<()> {

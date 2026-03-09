@@ -135,6 +135,13 @@ pub async fn cancel_preload() {
     lock.next_track = None;
 }
 
+/// Return the next track info (set during preload) without consuming preloaded data.
+/// Used by the auto-load logic after "completed" to know which track to load next.
+pub async fn take_next_track() -> Option<TrackInfo> {
+    let mut lock = PRELOAD_STATE.lock().await;
+    lock.next_track.take()
+}
+
 pub async fn take_preloaded_if_match(track: &TrackInfo) -> Option<PreloadedTrack> {
     let mut lock = PRELOAD_STATE.lock().await;
     if let Some(data) = lock.data.as_ref()
@@ -350,9 +357,11 @@ pub fn start_download(
                 break;
             }
 
-            // Partial download (Range restart) reached EOF. The buffer only
-            // covers [base_offset..EOF]. Don't exit — a backward seek would
-            // need data before base_offset, requiring a new Range request.
+            // Partial download (Range restart) reached EOF. The buffer covers
+            // [base_offset..EOF]. Mark finished so the decode thread sees EOF
+            // and emits "completed". If a backward seek needs data before
+            // base_offset, buffer.rs clears `finished` and requests a restart.
+            writer.finish();
             crate::vprintln!(
                 "[STREAM] Partial EOF (base={}). Waiting for restart or cancel.",
                 stream_offset

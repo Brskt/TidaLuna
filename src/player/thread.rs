@@ -133,6 +133,8 @@ struct OpenedStream {
     muted: Arc<AtomicBool>,
     /// Set by the cpal error callback: 0 = none, 1 = device disconnected, 2 = unknown error.
     stream_error: Arc<AtomicU8>,
+    /// Samples actually played (popped from ring buffer) by the cpal callback.
+    played_samples: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +193,7 @@ fn build_cpal_callback(
     volume: Arc<AtomicU32>,
     seek_gen: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
+    played_samples: Arc<AtomicU64>,
 ) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send + 'static {
     let mut local_gen: u32 = 0;
     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -213,8 +216,17 @@ fn build_cpal_callback(
         }
 
         let v = f32::from_bits(volume.load(Relaxed));
+        let mut played: u64 = 0;
         for sample in data.iter_mut() {
-            *sample = if let Ok(s) = c.pop() { s * v } else { 0.0 };
+            if let Ok(s) = c.pop() {
+                *sample = s * v;
+                played += 1;
+            } else {
+                *sample = 0.0;
+            }
+        }
+        if played > 0 {
+            played_samples.fetch_add(played, Relaxed);
         }
     }
 }
@@ -232,6 +244,7 @@ fn open_output_stream(
     let seek_gen = Arc::new(AtomicU32::new(0));
     let muted = Arc::new(AtomicBool::new(false));
     let stream_error = Arc::new(AtomicU8::new(0));
+    let played_samples = Arc::new(AtomicU64::new(0));
 
     let dev_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
     crate::vprintln!("[CPAL]   Device: {}", dev_name);
@@ -246,7 +259,13 @@ fn open_output_stream(
         let ring_size = source_rate as usize * source_channels as usize * 2;
         let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
 
-        let cb = build_cpal_callback(consumer, volume.clone(), seek_gen.clone(), muted.clone());
+        let cb = build_cpal_callback(
+            consumer,
+            volume.clone(),
+            seek_gen.clone(),
+            muted.clone(),
+            played_samples.clone(),
+        );
         let err_flag = stream_error.clone();
         if let Ok(stream) = device.build_output_stream(
             &config,
@@ -274,6 +293,7 @@ fn open_output_stream(
                 seek_gen,
                 muted,
                 stream_error,
+                played_samples,
             });
         }
     }
@@ -294,7 +314,13 @@ fn open_output_stream(
     let ring_size = ar as usize * ac as usize * 2;
     let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
 
-    let cb = build_cpal_callback(consumer, volume.clone(), seek_gen.clone(), muted.clone());
+    let cb = build_cpal_callback(
+        consumer,
+        volume.clone(),
+        seek_gen.clone(),
+        muted.clone(),
+        played_samples.clone(),
+    );
     let err_flag = stream_error.clone();
     match device.build_output_stream(
         &cfg,
@@ -317,6 +343,7 @@ fn open_output_stream(
             seek_gen,
             muted,
             stream_error,
+            played_samples,
         }),
         Err(e) => {
             eprintln!("[ERROR]  Failed to open cpal stream: {e}");
@@ -904,9 +931,15 @@ pub(super) struct PlayerThread<F> {
     cpal_muted: Option<Arc<AtomicBool>>,
     /// Shared with cpal error callback: 0 = none, 1 = disconnected, 2 = unknown
     cpal_stream_error: Option<Arc<AtomicU8>>,
-    /// Diagnostic: non-zero samples read by cpal callback
+    /// Samples actually played by cpal (popped from ring buffer).
+    /// Used to calculate real playback position for drain delay on track end.
+    played_samples: Arc<AtomicU64>,
     // Buffering state — emits idle/active when decode thread stalls on RamBuffer
     buffer_stalled: bool,
+    /// Set when decode finishes; "completed" is deferred until cpal drains the ring buffer.
+    pending_complete: bool,
+    /// Last observed played_samples value — used to detect when cpal stops consuming.
+    last_played_snapshot: u64,
     // Version event fire-once flag
     version_emitted: bool,
     // Command coalescing
@@ -950,7 +983,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             seek_wall_start: None,
             cpal_muted: None,
             cpal_stream_error: None,
+            played_samples: Arc::new(AtomicU64::new(0)),
             buffer_stalled: false,
+            pending_complete: false,
+            last_played_snapshot: 0,
             version_emitted: false,
             pending_cmds: Vec::new(),
             coalesced_cmds: Vec::new(),
@@ -1021,6 +1057,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 resume_policy,
                 load_start,
                 cached,
+                auto_play,
             } => {
                 self.handle_load(
                     buffer,
@@ -1031,6 +1068,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     load_start,
                     cached,
                 );
+                if auto_play {
+                    crate::vprintln!("[AUTO]   Auto-play after load");
+                    self.handle_play();
+                }
             }
             PlayerCommand::Play => self.handle_play(),
             PlayerCommand::Pause => self.handle_pause(),
@@ -1169,6 +1210,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.current_seq = event_seq;
         self.is_cached = cached;
         self.buffer_stalled = false;
+        self.pending_complete = false;
+        self.last_played_snapshot = 0;
 
         crate::vprintln!(
             "[LOAD #{load_gen}] handle_load enter | cached={} | track={}",
@@ -1225,6 +1268,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         self.current_duration = source_duration;
         self.decoded_samples.store(0, Relaxed);
+        self.played_samples.store(0, Relaxed);
 
         // Emit version once (fire-once at first load)
         if !self.version_emitted {
@@ -1265,6 +1309,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let seek_gen = opened.seek_gen;
         self.cpal_muted = Some(opened.muted);
         self.cpal_stream_error = Some(opened.stream_error);
+        self.played_samples = opened.played_samples;
 
         // Track position at output rate/channels
         self.sample_rate = actual_rate;
@@ -1370,6 +1415,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     fn handle_play(&mut self) {
         self.allow_startup_auto_resume = false;
+
+        if !self.has_track {
+            crate::vprintln!("[PLAY]   ignored — no track loaded (has_track=false)");
+            return;
+        }
 
         #[cfg(target_os = "windows")]
         {
@@ -1782,10 +1832,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let actual_channels = opened.channels;
         self.cpal_muted = Some(opened.muted);
         self.cpal_stream_error = Some(opened.stream_error);
+        self.played_samples = opened.played_samples;
 
         self.sample_rate = actual_rate;
         self.channels = actual_channels;
         self.decoded_samples.store(0, Relaxed);
+        self.played_samples.store(0, Relaxed);
 
         let (decode_cmd_tx, decode_cmd_rx) = mpsc::channel();
         let (decode_event_tx, decode_event_rx) = mpsc::channel();
@@ -1826,6 +1878,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// Compute current playback position in seconds from decoded sample count.
     fn current_position_secs(&self) -> f64 {
         let samples = self.decoded_samples.load(Relaxed);
+        let channels = self.channels.max(1) as u64;
+        let frames = samples / channels;
+        frames as f64 / self.sample_rate.max(1) as f64
+    }
+
+    /// Compute actual playback position from samples consumed by cpal.
+    /// More accurate than decoded_samples for time display and drain detection.
+    fn played_position_secs(&self) -> f64 {
+        let samples = self.played_samples.load(Relaxed);
         let channels = self.channels.max(1) as u64;
         let frames = samples / channels;
         frames as f64 / self.sample_rate.max(1) as f64
@@ -1961,14 +2022,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 match event {
                     DecodeEvent::Finished => {
                         crate::vprintln!(
-                            "[TRACK]  Finished ({})",
+                            "[TRACK]  Decode finished ({})",
                             if self.is_cached {
                                 "from cache"
                             } else {
                                 "from stream"
                             }
                         );
-                        // Track completed
+                        // Clear resume position
                         if let Some(track_id) = self.current_track_id.as_ref() {
                             self.resume_store.clear(track_id);
                             self.resume_store.flush_if_due(true);
@@ -2000,21 +2061,25 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             });
                         }
 
-                        (self.callback)(PlayerEvent::TimeUpdate(
+                        // Defer "completed" until cpal drains the ring buffer.
+                        // The decode thread finishes well ahead of real-time playback.
+                        self.pending_complete = true;
+                        // Snapshot current played so the first poll doesn't false-trigger.
+                        self.last_played_snapshot =
+                            self.played_samples.load(Relaxed).wrapping_sub(1);
+                        crate::vprintln!(
+                            "[DRAIN]  Waiting for ring buffer drain (decoded={}, played={}, duration={:.2}s)",
+                            self.decoded_samples.load(Relaxed),
+                            self.played_samples.load(Relaxed),
                             self.current_duration,
-                            self.current_seq,
-                        ));
-                        (self.callback)(PlayerEvent::StateChange("completed", self.current_seq));
-                        self.has_track = false;
-                        self.is_playing = false;
-                        self.current_track_id = None;
-                        crate::state::GOVERNOR
-                            .buffer_progress()
-                            .set_playback_active(false);
-                        self.current_duration = 0.0;
-                        return;
+                        );
                     }
                     DecodeEvent::SeekComplete => {
+                        // Sync played_samples to decoded_samples after seek.
+                        // The cpal callback drained stale samples via seek_gen,
+                        // so played_samples must match the new decode position.
+                        self.played_samples
+                            .store(self.decoded_samples.load(Relaxed), Relaxed);
                         // Always unmute (safe even if not muted)
                         if let Some(ref m) = self.cpal_muted {
                             m.store(false, Relaxed);
@@ -2054,12 +2119,50 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
         }
 
+        // Check if the ring buffer has drained after decode finished.
+        // "completed" is deferred until cpal has actually played all decoded audio.
+        // We detect drain by observing when played_samples stops increasing between
+        // polls — that means cpal's callback found an empty ring buffer.
+        if self.pending_complete {
+            let played = self.played_samples.load(Relaxed);
+            if played > 0 && played == self.last_played_snapshot {
+                // cpal hasn't consumed any new samples since last poll → drained.
+                crate::vprintln!(
+                    "[DRAIN]  Ring buffer drained (played={}, decoded={})",
+                    played,
+                    self.decoded_samples.load(Relaxed),
+                );
+                self.pending_complete = false;
+                self.last_played_snapshot = 0;
+                (self.callback)(PlayerEvent::TimeUpdate(
+                    self.current_duration,
+                    self.current_seq,
+                ));
+                (self.callback)(PlayerEvent::StateChange("completed", self.current_seq));
+                self.has_track = false;
+                self.is_playing = false;
+                self.current_track_id = None;
+                crate::state::GOVERNOR
+                    .buffer_progress()
+                    .set_playback_active(false);
+                self.current_duration = 0.0;
+                return;
+            }
+            self.last_played_snapshot = played;
+        }
+
         // Emit time update — during seeking, pin the display at the target position
         // so the frontend's seek bar doesn't freeze or revert.
         if let Some(target) = self.seek_target {
             (self.callback)(PlayerEvent::TimeUpdate(target, self.current_seq));
         } else {
-            let pos_secs = self.current_position_secs();
+            let pos_secs = self.played_position_secs();
+            // Cap to track duration
+            let pos_secs = if self.current_duration > 0.0 {
+                pos_secs.min(self.current_duration)
+            } else {
+                pos_secs
+            };
             if pos_secs > 0.0 {
                 if let Some(track_id) = self.current_track_id.as_ref() {
                     self.resume_store.set(track_id, pos_secs);

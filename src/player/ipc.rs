@@ -15,6 +15,7 @@ pub(crate) enum PlayerIpc {
     },
     Preload {
         url: String,
+        format: String,
         key: String,
     },
     PreloadCancel,
@@ -154,8 +155,9 @@ pub(crate) fn parse_player_ipc(
             args.get(1).and_then(|v| v.as_str()),
             args.get(2).and_then(|v| v.as_str()),
         ) {
-            (Some(url), Some(_format), Some(key)) => Ok(PlayerIpc::Preload {
+            (Some(url), Some(format), Some(key)) => Ok(PlayerIpc::Preload {
                 url: url.to_string(),
+                format: format.to_string(),
                 key: key.to_string(),
             }),
             _ => Err(PlayerIpcParseError::InvalidArgs("player.preload")),

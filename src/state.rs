@@ -8,6 +8,7 @@ use tokio::sync::Mutex as TokioMutex;
 pub struct TrackInfo {
     pub url: String,
     pub key: String,
+    pub format: String,
 }
 
 #[derive(Clone, Debug, Default)]
