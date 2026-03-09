@@ -294,7 +294,6 @@ pub fn start_download(
                             _ = GOVERNOR.acquire(TrafficClass::Playback, chunk.len() as u32) => {}
                         }
 
-                        // Decrypt and write
                         decrypt_buf.clear();
                         decrypt_buf.extend_from_slice(&chunk);
                         match decryptor.decrypt_in_place(&mut decrypt_buf, offset) {
@@ -339,7 +338,6 @@ pub fn start_download(
                         return;
                     }
                     None => {
-                        // Stream ended
                         break;
                     }
                 }

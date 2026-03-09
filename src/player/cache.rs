@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Default maximum cache size: 2 GB.
 const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Eviction hysteresis: evict until total_size < max_bytes * 0.9.
@@ -27,7 +26,6 @@ fn track_hash(track_id: &str) -> String {
     format!("{:016x}", hash)
 }
 
-/// 2-char hex shard prefix from the hash.
 fn shard_prefix(hash: &str) -> &str {
     &hash[..2]
 }
@@ -50,7 +48,6 @@ impl AudioCache {
         let audio_dir = cache_dir.join("audio");
         let db_path = cache_dir.join("index.db");
 
-        // Ensure directories exist
         fs::create_dir_all(&audio_dir).ok();
 
         let conn = Connection::open(&db_path)?;
@@ -77,7 +74,6 @@ impl AudioCache {
         })
     }
 
-    /// Path to the cached audio file for a given track.
     fn file_path(&self, track_id: &str) -> PathBuf {
         let hash = track_hash(track_id);
         let shard = shard_prefix(&hash);
@@ -141,13 +137,11 @@ impl AudioCache {
             params![track_id, format, file_size, now],
         )?;
 
-        // Evict if over capacity
         self.evict_if_needed()?;
 
         Ok(())
     }
 
-    /// Remove all cached audio files and clear the index.
     pub fn clear(&mut self) -> anyhow::Result<()> {
         let count: i64 = self
             .conn
@@ -155,13 +149,11 @@ impl AudioCache {
             .unwrap_or(0);
         let total = self.total_size();
 
-        // Remove all audio files on disk
         if self.audio_dir.exists() {
             fs::remove_dir_all(&self.audio_dir).ok();
             fs::create_dir_all(&self.audio_dir).ok();
         }
 
-        // Clear the index
         self.conn.execute("DELETE FROM audio_cache", [])?;
 
         crate::vprintln!(
@@ -172,7 +164,6 @@ impl AudioCache {
         Ok(())
     }
 
-    /// Total size of all cached files according to the index.
     pub fn total_size(&self) -> u64 {
         self.conn
             .query_row(

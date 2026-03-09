@@ -49,7 +49,7 @@ struct AppState {
     pending_time_update: Option<(f64, u32)>,
     pending_player_events: Vec<PlayerBridgeEvent>,
     pending_misc_js: Vec<String>,
-    #[allow(dead_code)] // used when window state save is wired up
+    #[allow(dead_code)]
     app_settings: settings::Settings,
     // The main browser reference – set once on_after_created fires
     browser: Option<Browser>,
@@ -84,7 +84,7 @@ fn exec_js_on_frame(frame: &Frame, js: &str) {
 }
 
 /// Execute JavaScript in the main browser frame.
-#[allow(dead_code)] // will be used for direct JS evaluation
+#[allow(dead_code)]
 fn eval_js(js: &str) {
     with_state(|state| {
         if let Some(ref browser) = state.browser
@@ -775,7 +775,7 @@ wrap_download_handler! {
             _url: Option<&CefString>,
             _request_method: Option<&CefString>,
         ) -> ::std::os::raw::c_int {
-            0 // deny all file downloads
+            0
         }
     }
 }
@@ -798,7 +798,7 @@ wrap_permission_handler! {
             if let Some(cb) = callback {
                 cb.cancel();
             }
-            1 // handled — denied
+            1
         }
         fn on_show_permission_prompt(
             &self,
@@ -811,7 +811,7 @@ wrap_permission_handler! {
             if let Some(cb) = callback {
                 cb.cont(PermissionRequestResult::DENY);
             }
-            1 // handled — denied
+            1
         }
     }
 }
@@ -887,7 +887,7 @@ wrap_life_span_handler! {
             }
         }
         fn do_close(&self, _browser: Option<&mut Browser>) -> i32 {
-            0 // allow close
+            0
         }
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             self.router.on_before_close(browser.cloned());
@@ -1019,7 +1019,7 @@ wrap_request_handler! {
             }
             self.router
                 .on_before_browse(browser.cloned(), frame.cloned());
-            0 // allow navigation
+            0
         }
         fn on_certificate_error(
             &self,
@@ -1618,7 +1618,7 @@ document.title = "TidaLunar - A TIDAL client";
 
             // --- Create browser view and window ---
             let settings = BrowserSettings {
-                background_color: 0xFF111111, // match TIDAL dark theme
+                background_color: 0xFF111111,
                 ..Default::default()
             };
             let url = CefString::from("https://desktop.tidal.com/");

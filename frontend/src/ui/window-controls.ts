@@ -126,7 +126,7 @@ export const initWindowControls = () => {
         }).observe(titleEl, { childList: true, characterData: true, subtree: true });
     }
 
-    // F12 devtools fallback (in case the WebView captures the key before tao).
+    // F12 devtools fallback (in case CEF captures the key before the page).
     document.addEventListener("keydown", (e) => {
         if (e.key === "F12") {
             e.preventDefault();

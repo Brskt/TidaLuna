@@ -611,7 +611,6 @@ fn decode_loop(cfg: DecodeThreadConfig) {
 
     let mut format = probed.format;
 
-    // Find the first audio track
     let track = match format
         .tracks()
         .iter()
@@ -637,7 +636,6 @@ fn decode_loop(cfg: DecodeThreadConfig) {
             }
         };
 
-    // Create resampling pipeline if source and output formats differ
     let mut pipeline = if source_rate != output_rate || source_channels != output_channels as usize
     {
         crate::vprintln!(
@@ -720,7 +718,6 @@ fn decode_loop(cfg: DecodeThreadConfig) {
             }
         }
 
-        // Decode next packet
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(ref e))
@@ -757,7 +754,6 @@ fn decode_loop(cfg: DecodeThreadConfig) {
             }
         };
 
-        // Skip packets from other tracks
         if packet.track_id() != track_id {
             continue;
         }
@@ -795,7 +791,6 @@ fn decode_loop(cfg: DecodeThreadConfig) {
             );
         }
 
-        // Process through resampling pipeline if needed
         let resampled: Vec<f32>;
         let samples_to_push: &[f32] = if let Some(ref mut pipe) = pipeline {
             resampled = pipe.process(source_samples);
@@ -937,7 +932,6 @@ pub(super) struct PlayerThread<F> {
     pending_complete: bool,
     /// Last observed played_samples value — used to detect when cpal stops consuming.
     last_played_snapshot: u64,
-    // Version event fire-once flag
     version_emitted: bool,
     // Command coalescing
     pending_cmds: Vec<PlayerCommand>,
@@ -992,7 +986,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     pub fn run(&mut self) {
         loop {
-            // Drain any commands that arrived during processing
             while let Ok(cmd) = self.cmd_rx.try_recv() {
                 self.pending_cmds.push(cmd);
             }
@@ -1177,7 +1170,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return;
         }
 
-        // Clear previous track's resume position
         if let Some(ref prev) = self.current_track_id
             && *prev != track_id
         {
@@ -1255,7 +1247,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             (self.callback)(PlayerEvent::Version(env!("CARGO_PKG_VERSION")));
         }
 
-        // Emit media format info to the frontend
         (self.callback)(PlayerEvent::MediaFormat {
             codec: source_codec,
             sample_rate: source_sample_rate,
@@ -1292,11 +1283,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.cpal_stream_error = Some(opened.stream_error);
         self.played_samples = opened.played_samples;
 
-        // Track position at output rate/channels
         self.sample_rate = actual_rate;
         self.channels = actual_channels;
 
-        // Spawn decode thread
         let (decode_cmd_tx, decode_cmd_rx) = mpsc::channel();
         let (decode_event_tx, decode_event_rx) = mpsc::channel();
         let decoded_samples = self.decoded_samples.clone();
@@ -1333,7 +1322,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!("[LOAD #{load_gen}] pre-seek to {:.1}s (decode paused)", pos);
         }
 
-        // Emit events
         if self.current_duration > 0.0 {
             (self.callback)(PlayerEvent::Duration(
                 self.current_duration,
@@ -1462,7 +1450,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         } else {
             eprintln!("[ERROR]  start_playback: no decode_cmd_tx!");
         }
-        // Pre-seek has served its purpose once playback starts.
         self.pre_seek_pos = None;
     }
 
@@ -1502,7 +1489,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             let _ = tx.send(DecodeCommand::Pause);
         }
 
-        // Emit current position
         let pos_secs = self.current_position_secs();
         (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
 
@@ -1675,7 +1661,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 cancel.store(true, Relaxed);
             }
             if exclusive {
-                // Switch to exclusive WASAPI
                 self.stop_decode();
                 self.cpal_stream = None;
 
@@ -1687,7 +1672,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.is_exclusive_mode = true;
                 self.exclusive_handle = Some(handle);
 
-                // Reload current track in exclusive mode
                 if let Some(ref handle) = self.exclusive_handle {
                     if let Some(ref buf) = self.current_buffer {
                         handle.send(ExclusiveCommand::Stop);
@@ -1729,20 +1713,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         self.current_device_id = Some(id.clone());
 
-        // Rebuild cpal stream on new device
         if self.has_track {
             let was_playing = self.is_playing;
             let position = self.current_position_secs();
 
-            // Stop current decode + stream
             self.stop_decode();
             self.cpal_stream = None;
 
-            // Re-load on new device by re-doing handle_load logic
             if let Some(ref buffer) = self.current_buffer {
                 let buffer_clone = buffer.clone();
-                // Reuse existing handle_load logic by sending a synthetic load
-                // Actually, let's just rebuild the pipeline directly
                 self.rebuild_pipeline_on_device(buffer_clone, was_playing, position);
             }
         }
@@ -1754,7 +1733,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     fn rebuild_pipeline_on_device(&mut self, buffer: RamBuffer, was_playing: bool, seek_to: f64) {
         let _total_len = buffer.total_len();
 
-        // Probe
         let probe_reader = buffer.clone();
         let mss = MediaSourceStream::new(Box::new(probe_reader), Default::default());
         let hint = Hint::new();
@@ -1864,7 +1842,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_handle = Some(decode_handle);
         self.current_buffer = Some(buffer);
 
-        // Seek to previous position
         if seek_to > 0.0
             && let Some(ref tx) = self.decode_cmd_tx
         {
@@ -2023,7 +2000,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
         }
 
-        // Check decode events
         if let Some(ref rx) = self.decode_event_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -2036,7 +2012,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 "from stream"
                             }
                         );
-                        // Clear resume position
                         if let Some(track_id) = self.current_track_id.as_ref() {
                             self.resume_store.clear(track_id);
                             self.resume_store.flush_if_due(true);
@@ -2170,7 +2145,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             (self.callback)(PlayerEvent::TimeUpdate(target, self.current_seq));
         } else {
             let pos_secs = self.played_position_secs();
-            // Cap to track duration
             let pos_secs = if self.current_duration > 0.0 {
                 pos_secs.min(self.current_duration)
             } else {

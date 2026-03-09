@@ -66,7 +66,6 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
 };
 console.log("Native Interface exposed (sync)");
 
-// Async hydration.
 const init = async () => {
     const now = Date.now();
     initWindowControls();

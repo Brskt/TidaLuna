@@ -15,12 +15,12 @@ const SEEK_LOOKAHEAD: u64 = 32 * 1024; // 32 KB
 
 struct Inner {
     data: Vec<u8>,
-    base_offset: u64, // file offset where data[0] starts
-    total_len: u64,   // total file size
+    base_offset: u64,
+    total_len: u64,
     finished: bool,
     cancelled: bool,
     error: Option<String>,
-    restart_target: Option<u64>, // signal download thread to restart
+    restart_target: Option<u64>,
 }
 
 /// Shared state between readers, writers, and the async download loop.
@@ -63,7 +63,6 @@ pub struct RamBufferWriter {
 }
 
 impl RamBuffer {
-    /// Create a new empty buffer for streaming.
     pub fn new(total_len: u64) -> (Self, RamBufferWriter) {
         let shared = Arc::new(SharedState {
             inner: Mutex::new(Inner {
@@ -93,7 +92,6 @@ impl RamBuffer {
         (buffer, writer)
     }
 
-    /// Create a buffer with all data already present (cache hit or preload).
     pub fn from_complete(data: Vec<u8>) -> Self {
         let total_len = data.len() as u64;
         let shared = Arc::new(SharedState {
@@ -119,7 +117,6 @@ impl RamBuffer {
         RamBuffer { shared, cursor: 0 }
     }
 
-    /// Cancel the streaming download.
     pub fn cancel(&self) {
         let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.cancelled = true;
@@ -134,7 +131,6 @@ impl RamBuffer {
         inner.finished && inner.error.is_none() && inner.base_offset == 0
     }
 
-    /// Total file size.
     pub fn total_len(&self) -> u64 {
         let inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.total_len
@@ -155,7 +151,6 @@ impl RamBuffer {
         }
     }
 
-    /// Current amount of data written (absolute byte offset).
     pub fn written(&self) -> u64 {
         self.shared.written.load(Relaxed)
     }
@@ -196,7 +191,6 @@ impl Read for RamBuffer {
             let buf_start = inner.base_offset;
             let buf_end = inner.base_offset + inner.data.len() as u64;
 
-            // Data available in buffer
             if self.cursor >= buf_start && self.cursor < buf_end {
                 let start = (self.cursor - buf_start) as usize;
                 let end = std::cmp::min(start + buf.len(), inner.data.len());
@@ -336,7 +330,6 @@ impl RamBufferWriter {
         true
     }
 
-    /// Mark the download as finished (success).
     pub fn finish(&self) {
         let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.finished = true;
@@ -345,7 +338,6 @@ impl RamBufferWriter {
         self.shared.async_notify.notify_one();
     }
 
-    /// Mark the download as finished with an error.
     pub fn finish_with_error(&self, msg: String) {
         let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.error = Some(msg);
@@ -355,7 +347,6 @@ impl RamBufferWriter {
         self.shared.async_notify.notify_one();
     }
 
-    /// Check if the reader has cancelled the download.
     pub fn is_cancelled(&self) -> bool {
         self.shared.cancelled_atomic.load(Relaxed)
     }

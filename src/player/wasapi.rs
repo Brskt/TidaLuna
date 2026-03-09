@@ -672,7 +672,6 @@ fn render_thread(
     let mut wave_fmt: Option<WaveFormat> = None;
     let mut _buffer_size: u32 = 0;
 
-    // Current PCM data
     let mut pcm_data: Vec<u8> = Vec::new();
     let mut pcm_sample_rate: u32 = 0;
     let mut pcm_channels: u32 = 0;
@@ -857,7 +856,6 @@ fn render_thread(
                     let _ = ev.wait_for_event(50);
                 }
 
-                // Write PCM data to device
                 if let (Some(ac), Some(rc), Some(wf)) = (&audio_client, &render_client, &wave_fmt) {
                     let available = match ac.get_available_space_in_frames() {
                         Ok(n) => n as usize,
@@ -907,7 +905,6 @@ fn render_thread(
                     let src_chunk_size = frames_to_write * src_bytes_per_frame;
                     let src_chunk = &pcm_data[write_cursor..write_cursor + src_chunk_size];
 
-                    // Convert if needed
                     let dst_store = wf.get_bitspersample() as u32;
                     let dst_valid = wf.get_validbitspersample() as u32;
                     let dst_type = wf.get_subformat().unwrap_or(SampleType::Int);

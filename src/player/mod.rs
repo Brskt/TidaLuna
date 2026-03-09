@@ -275,7 +275,6 @@ impl Player {
         crate::vprintln!("[LOAD #{load_gen}] start");
         print_track_banner(&format);
 
-        // Abort any in-flight load task
         if let Some(prev) = self.load_handle.lock().unwrap().take() {
             prev.abort();
         }
@@ -318,7 +317,6 @@ impl Player {
             };
             let track_id = canonical_track_id(&url);
 
-            // 1. Check disk cache
             {
                 let cache_t0 = std::time::Instant::now();
                 let cache = AUDIO_CACHE.lock().unwrap();
@@ -346,7 +344,6 @@ impl Player {
                 );
             }
 
-            // 2. Check preloaded data
             let preload_t0 = std::time::Instant::now();
             if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
                 let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
@@ -373,7 +370,6 @@ impl Player {
                 return;
             }
 
-            // 3. Stream from network
             let req_start = std::time::Instant::now();
             let resp = match HTTP_CLIENT_PLAYBACK.get(&url).send().await {
                 Ok(r) => {
@@ -456,7 +452,6 @@ impl Player {
 
             let (buffer, writer) = RamBuffer::new(total_len);
 
-            // Start download
             preload::start_download(resp, url, key, writer);
 
             // Pre-buffer 64KB before handing to decoder
@@ -486,7 +481,6 @@ impl Player {
                     );
                     break;
                 }
-                // Wait for the writer to append data (or timeout)
                 let _ = tokio::time::timeout(remaining, buffer.notified()).await;
             }
 
