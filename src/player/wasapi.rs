@@ -20,7 +20,7 @@ use wasapi::{
 // Public types
 // ---------------------------------------------------------------------------
 
-pub enum ExclusiveCommand {
+pub(super) enum ExclusiveCommand {
     StartStream {
         stream_id: u32,
         sample_rate: u32,
@@ -42,7 +42,7 @@ pub enum ExclusiveCommand {
     Shutdown,
 }
 
-pub enum ExclusiveEvent {
+pub(super) enum ExclusiveEvent {
     TimeUpdate(f64),
     StateChange(super::PlaybackState),
     Duration(f64),
@@ -78,7 +78,7 @@ impl<R: Read + Seek + Send + Sync> MediaSource for SizedMediaSource<R> {
     }
 }
 
-pub struct ExclusiveHandle {
+pub(super) struct ExclusiveHandle {
     cmd_tx: mpsc::Sender<ExclusiveCommand>,
     event_rx: mpsc::Receiver<ExclusiveEvent>,
     thread: Option<JoinHandle<()>>,
@@ -114,7 +114,7 @@ fn append_interleaved_i32_as_pcm(raw_bytes: &[u8], bits_per_sample: u32, out: &m
     }
 }
 
-pub fn stream_flac_reader_to_wasapi<R>(
+pub(super) fn stream_flac_reader_to_wasapi<R>(
     reader: R,
     byte_len: u64,
     stream_id: u32,

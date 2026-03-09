@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use time::OffsetDateTime;
 
-pub static VERBOSE_LOGS: Lazy<bool> = Lazy::new(|| match std::env::var("LOGS") {
+static VERBOSE_LOGS: Lazy<bool> = Lazy::new(|| match std::env::var("LOGS") {
     Ok(v) => matches!(
         v.as_str(),
         "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
@@ -10,7 +10,7 @@ pub static VERBOSE_LOGS: Lazy<bool> = Lazy::new(|| match std::env::var("LOGS") {
 });
 
 #[inline]
-pub fn verbose_enabled() -> bool {
+fn verbose_enabled() -> bool {
     *VERBOSE_LOGS
 }
 

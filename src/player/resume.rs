@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(1200);
+const RESUME_FLUSH_INTERVAL: Duration = Duration::from_millis(1200);
 pub(crate) const RESUME_MIN_SECONDS: f64 = 1.0;
 
 fn resume_store_path() -> PathBuf {
