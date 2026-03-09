@@ -55,15 +55,15 @@ impl FlacSeekInfo {
                 for i in 0..entry_count {
                     let base = pos + i * 18;
                     let sample_number =
-                        u64::from_be_bytes(data[base..base + 8].try_into().unwrap());
+                        u64::from_be_bytes(data[base..base + 8].try_into().expect("18-byte entry bounds checked"));
                     // Placeholder entries have sample_number == 0xFFFFFFFFFFFFFFFF
                     if sample_number == u64::MAX {
                         continue;
                     }
                     let stream_offset =
-                        u64::from_be_bytes(data[base + 8..base + 16].try_into().unwrap());
+                        u64::from_be_bytes(data[base + 8..base + 16].try_into().expect("18-byte entry bounds checked"));
                     let frame_samples =
-                        u16::from_be_bytes(data[base + 16..base + 18].try_into().unwrap());
+                        u16::from_be_bytes(data[base + 16..base + 18].try_into().expect("18-byte entry bounds checked"));
                     seek_points.push(FlacSeekPoint {
                         sample_number,
                         stream_offset,
