@@ -121,7 +121,7 @@ impl RamBuffer {
 
     /// Cancel the streaming download.
     pub fn cancel(&self) {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.cancelled = true;
         self.shared.cancelled_atomic.store(true, Relaxed);
         self.shared.cvar.notify_all();
@@ -130,20 +130,20 @@ impl RamBuffer {
 
     /// Returns true if the entire file has been downloaded without error.
     pub fn is_complete(&self) -> bool {
-        let inner = self.shared.inner.lock().unwrap();
+        let inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.finished && inner.error.is_none() && inner.base_offset == 0
     }
 
     /// Total file size.
     pub fn total_len(&self) -> u64 {
-        let inner = self.shared.inner.lock().unwrap();
+        let inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.total_len
     }
 
     /// Take ownership of the complete data buffer (only if fully downloaded from offset 0).
     /// Returns None if incomplete or base_offset != 0.
     pub fn take_data(&self) -> Option<Vec<u8>> {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         if inner.finished
             && inner.error.is_none()
             && !inner.data.is_empty()
@@ -179,7 +179,7 @@ impl RamBuffer {
 
 impl Read for RamBuffer {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
 
         loop {
             if inner.cancelled {
@@ -255,7 +255,7 @@ impl Read for RamBuffer {
                         inner.restart_target = Some(restart_pos);
                         drop(inner);
                         self.shared.async_notify.notify_one();
-                        inner = self.shared.inner.lock().unwrap();
+                        inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
                     }
                 }
             }
@@ -266,7 +266,7 @@ impl Read for RamBuffer {
                 .shared
                 .cvar
                 .wait_timeout(inner, Duration::from_secs(5))
-                .unwrap();
+                .expect("RamBuffer condvar lock poisoned");
             inner = guard;
         }
     }
@@ -275,7 +275,7 @@ impl Read for RamBuffer {
 impl Seek for RamBuffer {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let total_len = {
-            let inner = self.shared.inner.lock().unwrap();
+            let inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
             inner.total_len
         };
 
@@ -312,7 +312,7 @@ impl MediaSource for RamBuffer {
     }
 
     fn byte_len(&self) -> Option<u64> {
-        let inner = self.shared.inner.lock().unwrap();
+        let inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         Some(inner.total_len)
     }
 }
@@ -323,7 +323,7 @@ impl RamBufferWriter {
     /// Write decrypted data to the buffer. Returns true if data was accepted,
     /// false if discarded due to a pending restart.
     pub fn write_counted(&self, data: &[u8]) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         // Discard writes if a restart is pending (stale data from old range)
         if inner.restart_target.is_some() {
             return false;
@@ -338,7 +338,7 @@ impl RamBufferWriter {
 
     /// Mark the download as finished (success).
     pub fn finish(&self) {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.finished = true;
         self.shared.finished_atomic.store(true, Relaxed);
         self.shared.cvar.notify_all();
@@ -347,7 +347,7 @@ impl RamBufferWriter {
 
     /// Mark the download as finished with an error.
     pub fn finish_with_error(&self, msg: String) {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.error = Some(msg);
         inner.finished = true;
         self.shared.finished_atomic.store(true, Relaxed);
@@ -363,13 +363,13 @@ impl RamBufferWriter {
     /// Take the pending restart target (if any). Returns the absolute byte offset
     /// where the download should resume.
     pub fn take_restart_target(&self) -> Option<u64> {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.restart_target.take()
     }
 
     /// Reset the buffer for a new Range request starting at `new_offset`.
     pub fn reset_for_range(&self, new_offset: u64) {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.data.clear();
         inner.base_offset = new_offset;
         inner.finished = false;
@@ -384,7 +384,7 @@ impl RamBufferWriter {
     pub async fn wait_for_restart_or_cancel(&self) {
         loop {
             {
-                let inner = self.shared.inner.lock().unwrap();
+                let inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
                 if inner.restart_target.is_some() || inner.cancelled {
                     return;
                 }
@@ -395,7 +395,7 @@ impl RamBufferWriter {
 
     /// Check if a restart is pending without consuming it.
     pub fn has_restart_pending(&self) -> bool {
-        let inner = self.shared.inner.lock().unwrap();
+        let inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.restart_target.is_some()
     }
 }
