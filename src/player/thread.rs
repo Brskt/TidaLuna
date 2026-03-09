@@ -1,6 +1,9 @@
 use super::buffer::RamBuffer;
 use super::resume::{RESUME_MIN_SECONDS, ResumeStore};
-use super::{LOAD_SEQ, PlayerCommand, PlayerEvent, ResumePolicy, format_ms};
+use super::{
+    DeviceErrorKind, LOAD_SEQ, LoadRequest, PlaybackState, PlayerCommand, PlayerEvent,
+    ResumePolicy, format_ms,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
@@ -497,8 +500,7 @@ impl AudioPipeline {
 // ---------------------------------------------------------------------------
 
 /// Spawn the decode thread. Returns command sender, event receiver, and join handle.
-#[allow(clippy::too_many_arguments)]
-fn spawn_decode_thread(
+struct DecodeThreadConfig {
     buffer: RamBuffer,
     producer: rtrb::Producer<f32>,
     decoded_samples: Arc<AtomicU64>,
@@ -507,39 +509,35 @@ fn spawn_decode_thread(
     output_rate: u32,
     output_channels: u16,
     seek_gen: Arc<AtomicU32>,
-) -> std::thread::JoinHandle<()> {
+}
+
+fn spawn_decode_thread(cfg: DecodeThreadConfig) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("decode".into())
         .spawn(move || {
-            decode_loop(
-                buffer,
-                producer,
-                decoded_samples,
-                cmd_rx,
-                event_tx,
-                output_rate,
-                output_channels,
-                seek_gen,
-            );
+            decode_loop(cfg);
         })
         .expect("failed to spawn decode thread")
 }
 
+struct DecodeContext<'a> {
+    track_id: u32,
+    source_rate: u32,
+    output_rate: u32,
+    output_channels: u16,
+    seek_gen: &'a AtomicU32,
+    decoded_samples: &'a AtomicU64,
+    event_tx: &'a mpsc::Sender<DecodeEvent>,
+}
+
 /// Execute a symphonia seek, reset decoder/resampler, update decoded_samples
 /// counter, signal SeekComplete, and log timing.
-#[allow(clippy::too_many_arguments)]
 fn do_decode_seek(
     time: f64,
     format: &mut dyn symphonia::core::formats::FormatReader,
     decoder: &mut dyn symphonia::core::codecs::Decoder,
     pipeline: &mut Option<AudioPipeline>,
-    track_id: u32,
-    source_rate: u32,
-    output_rate: u32,
-    output_channels: u16,
-    seek_gen: &AtomicU32,
-    decoded_samples: &AtomicU64,
-    event_tx: &mpsc::Sender<DecodeEvent>,
+    ctx: &DecodeContext,
 ) {
     let seek_start = std::time::Instant::now();
     let seek_to = SeekTo::Time {
@@ -547,7 +545,7 @@ fn do_decode_seek(
             seconds: time as u64,
             frac: time.fract(),
         },
-        track_id: Some(track_id),
+        track_id: Some(ctx.track_id),
     };
     match format.seek(SeekMode::Coarse, seek_to) {
         Ok(seeked) => {
@@ -556,10 +554,11 @@ fn do_decode_seek(
             if let Some(p) = pipeline {
                 p.reset();
             }
-            seek_gen.fetch_add(1, Relaxed);
-            let out_ts = seeked.actual_ts * output_rate as u64 / source_rate as u64;
-            decoded_samples.store(out_ts * output_channels as u64, Relaxed);
-            let _ = event_tx.send(DecodeEvent::SeekComplete);
+            ctx.seek_gen.fetch_add(1, Relaxed);
+            let out_ts = seeked.actual_ts * ctx.output_rate as u64 / ctx.source_rate as u64;
+            ctx.decoded_samples
+                .store(out_ts * ctx.output_channels as u64, Relaxed);
+            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete);
             let seek_ms = seek_dur.as_secs_f64() * 1000.0;
             if seek_ms >= 1.0 {
                 crate::vprintln!(
@@ -576,23 +575,23 @@ fn do_decode_seek(
             }
         }
         Err(e) => {
-            let _ = event_tx.send(DecodeEvent::SeekComplete);
+            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete);
             crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decode_loop(
-    buffer: RamBuffer,
-    mut producer: rtrb::Producer<f32>,
-    decoded_samples: Arc<AtomicU64>,
-    cmd_rx: mpsc::Receiver<DecodeCommand>,
-    event_tx: mpsc::Sender<DecodeEvent>,
-    output_rate: u32,
-    output_channels: u16,
-    seek_gen: Arc<AtomicU32>,
-) {
+fn decode_loop(cfg: DecodeThreadConfig) {
+    let DecodeThreadConfig {
+        buffer,
+        mut producer,
+        decoded_samples,
+        cmd_rx,
+        event_tx,
+        output_rate,
+        output_channels,
+        seek_gen,
+    } = cfg;
     crate::vprintln!("[DECODE] Thread started, probing format...");
     let mss = MediaSourceStream::new(Box::new(buffer), Default::default());
 
@@ -667,6 +666,16 @@ fn decode_loop(
         output_channels
     );
 
+    let decode_ctx = DecodeContext {
+        track_id,
+        source_rate,
+        output_rate,
+        output_channels,
+        seek_gen: &seek_gen,
+        decoded_samples: &decoded_samples,
+        event_tx: &event_tx,
+    };
+
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut paused = true;
     let mut first_packet_logged = false;
@@ -694,13 +703,7 @@ fn decode_loop(
                         &mut *format,
                         &mut *decoder,
                         &mut pipeline,
-                        track_id,
-                        source_rate,
-                        output_rate,
-                        output_channels,
-                        &seek_gen,
-                        &decoded_samples,
-                        &event_tx,
+                        &decode_ctx,
                     );
                 }
                 DecodeCommand::Pause => {
@@ -840,13 +843,7 @@ fn decode_loop(
                             &mut *format,
                             &mut *decoder,
                             &mut pipeline,
-                            track_id,
-                            source_rate,
-                            output_rate,
-                            output_channels,
-                            &seek_gen,
-                            &decoded_samples,
-                            &event_tx,
+                            &decode_ctx,
                         );
                         break;
                     }
@@ -1050,24 +1047,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     fn handle_command(&mut self, cmd: PlayerCommand) {
         match cmd {
             PlayerCommand::Load {
-                buffer,
-                load_gen,
-                seq,
-                track_id,
-                resume_policy,
-                load_start,
-                cached,
+                request,
                 auto_play,
             } => {
-                self.handle_load(
-                    buffer,
-                    load_gen,
-                    seq,
-                    track_id,
-                    resume_policy,
-                    load_start,
-                    cached,
-                );
+                self.handle_load(request);
                 if auto_play {
                     crate::vprintln!("[AUTO]   Auto-play after load");
                     self.handle_play();
@@ -1169,30 +1152,29 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 Some(d) => return Some(d),
                 None => {
                     crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
-                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                 }
             }
         }
         match cpal::default_host().default_output_device() {
             Some(d) => Some(d),
             None => {
-                (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                 None
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn handle_load(
-        &mut self,
-        buffer: RamBuffer,
-        load_gen: u32,
-        event_seq: u32,
-        track_id: String,
-        resume_policy: ResumePolicy,
-        load_start: std::time::Instant,
-        cached: bool,
-    ) {
+    fn handle_load(&mut self, req: LoadRequest) {
+        let LoadRequest {
+            buffer,
+            load_gen,
+            seq: event_seq,
+            track_id,
+            resume_policy,
+            load_start,
+            cached,
+        } = req;
         if load_gen != LOAD_SEQ.load(Relaxed) {
             crate::vprintln!("[LOAD #{load_gen}] stale Load, ignoring");
             return;
@@ -1295,7 +1277,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             match open_output_stream(&device, source_sample_rate, source_channels, &self.volume) {
                 Some(o) => o,
                 None => {
-                    (self.callback)(PlayerEvent::DeviceError("deviceformatnotsupported"));
+                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::FormatNotSupported));
                     return;
                 }
             };
@@ -1321,16 +1303,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let decoded_samples = self.decoded_samples.clone();
 
         let decode_buffer = buffer.clone();
-        let decode_handle = spawn_decode_thread(
-            decode_buffer,
-            ring_producer,
+        let decode_handle = spawn_decode_thread(DecodeThreadConfig {
+            buffer: decode_buffer,
+            producer: ring_producer,
             decoded_samples,
-            decode_cmd_rx,
-            decode_event_tx,
-            actual_rate,
-            actual_channels,
+            cmd_rx: decode_cmd_rx,
+            event_tx: decode_event_tx,
+            output_rate: actual_rate,
+            output_channels: actual_channels,
             seek_gen,
-        );
+        });
 
         self.cpal_stream = Some(stream);
         self.decode_cmd_tx = Some(decode_cmd_tx);
@@ -1410,7 +1392,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
         );
 
-        (self.callback)(PlayerEvent::StateChange("ready", self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(PlaybackState::Ready, self.current_seq));
     }
 
     fn handle_play(&mut self) {
@@ -1445,7 +1427,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         crate::state::GOVERNOR
             .buffer_progress()
             .set_playback_active(true);
-        (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(PlaybackState::Active, self.current_seq));
 
         // If there's a pending resume position, the decode thread was already
         // pre-seeked to it during handle_load(). Emit TimeUpdate so the frontend
@@ -1523,7 +1505,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         crate::state::GOVERNOR
             .buffer_progress()
             .set_playback_active(false);
-        (self.callback)(PlayerEvent::StateChange("paused", self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(PlaybackState::Paused, self.current_seq));
         self.resume_store.flush_if_due(true);
     }
 
@@ -1549,7 +1531,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     handle.send(ExclusiveCommand::Stop);
                 }
                 (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-                (self.callback)(PlayerEvent::StateChange("stopped", self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(PlaybackState::Stopped, self.current_seq));
                 self.is_playing = false;
                 self.has_track = false;
                 self.current_duration = 0.0;
@@ -1562,7 +1544,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-        (self.callback)(PlayerEvent::StateChange("stopped", self.current_seq));
+        (self.callback)(PlayerEvent::StateChange(PlaybackState::Stopped, self.current_seq));
         self.is_playing = false;
         self.has_track = false;
         self.current_duration = 0.0;
@@ -1629,7 +1611,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             // Notify the SDK/webapp that we're seeking — nativePlayer.ts maps
             // "seeking" to STALLED internally.
-            (self.callback)(PlayerEvent::StateChange("seeking", self.current_seq));
+            (self.callback)(PlayerEvent::StateChange(PlaybackState::Seeking, self.current_seq));
             (self.callback)(PlayerEvent::TimeUpdate(
                 latest_time.max(0.0),
                 self.current_seq,
@@ -1800,11 +1782,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 Some(d) => d,
                 None => {
                     crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
-                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                     match cpal::default_host().default_output_device() {
                         Some(d) => d,
                         None => {
-                            (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                             return;
                         }
                     }
@@ -1814,7 +1796,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             match cpal::default_host().default_output_device() {
                 Some(d) => d,
                 None => {
-                    (self.callback)(PlayerEvent::DeviceError("devicenotfound"));
+                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                     return;
                 }
             }
@@ -1823,7 +1805,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let opened = match open_output_stream(&device, sr, ch, &self.volume) {
             Some(o) => o,
             None => {
-                (self.callback)(PlayerEvent::DeviceError("deviceformatnotsupported"));
+                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::FormatNotSupported));
                 return;
             }
         };
@@ -1844,16 +1826,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let decoded_samples = self.decoded_samples.clone();
 
         let decode_buffer = buffer.clone();
-        let decode_handle = spawn_decode_thread(
-            decode_buffer,
-            opened.producer,
+        let decode_handle = spawn_decode_thread(DecodeThreadConfig {
+            buffer: decode_buffer,
+            producer: opened.producer,
             decoded_samples,
-            decode_cmd_rx,
-            decode_event_tx,
-            actual_rate,
-            actual_channels,
-            opened.seek_gen,
-        );
+            cmd_rx: decode_cmd_rx,
+            event_tx: decode_event_tx,
+            output_rate: actual_rate,
+            output_channels: actual_channels,
+            seek_gen: opened.seek_gen,
+        });
 
         let stream = opened.stream;
 
@@ -1906,7 +1888,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             (self.callback)(PlayerEvent::TimeUpdate(t, self.current_seq));
                         }
                         ExclusiveEvent::StateChange(s) => {
-                            if s == "completed" {
+                            if s == PlaybackState::Completed {
                                 if let Some(track_id) = self.current_track_id.as_ref() {
                                     self.resume_store.clear(track_id);
                                     self.resume_store.flush_if_due(true);
@@ -1938,7 +1920,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             }
                             self.is_exclusive_mode = false;
                             (self.callback)(PlayerEvent::DeviceError(
-                                "deviceexclusivemodenotallowed",
+                                DeviceErrorKind::ExclusiveModeNotAllowed,
                             ));
                         }
                         ExclusiveEvent::DeviceLocked(e) => {
@@ -1947,7 +1929,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 cancel.store(true, Relaxed);
                             }
                             self.is_exclusive_mode = false;
-                            (self.callback)(PlayerEvent::DeviceError("devicelocked"));
+                            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Locked));
                         }
                         ExclusiveEvent::Stopped => {
                             self.has_track = false;
@@ -1989,9 +1971,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if let Some(ref flag) = self.cpal_stream_error {
             let code = flag.swap(0, Relaxed);
             if code == 1 {
-                (self.callback)(PlayerEvent::DeviceError("devicedisconnected"));
+                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Disconnected));
             } else if code == 2 {
-                (self.callback)(PlayerEvent::DeviceError("deviceunknownerror"));
+                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
             }
         }
 
@@ -2009,10 +1991,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             let stalled = buf.is_stalled();
             if stalled && !self.buffer_stalled {
                 self.buffer_stalled = true;
-                (self.callback)(PlayerEvent::StateChange("idle", self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(PlaybackState::Idle, self.current_seq));
             } else if !stalled && self.buffer_stalled {
                 self.buffer_stalled = false;
-                (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(PlaybackState::Active, self.current_seq));
             }
         }
 
@@ -2103,7 +2085,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 }
                             );
                             // Signal that playback has resumed after the seek.
-                            (self.callback)(PlayerEvent::StateChange("active", self.current_seq));
+                            (self.callback)(PlayerEvent::StateChange(PlaybackState::Active, self.current_seq));
                         }
                         // Resume seeks (from handle_play) also emit SeekComplete
                         // but don't set seeking=true — no wall timer logged.
@@ -2138,7 +2120,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.current_duration,
                     self.current_seq,
                 ));
-                (self.callback)(PlayerEvent::StateChange("completed", self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(PlaybackState::Completed, self.current_seq));
                 self.has_track = false;
                 self.is_playing = false;
                 self.current_track_id = None;

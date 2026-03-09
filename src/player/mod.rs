@@ -29,13 +29,62 @@ pub struct AudioDevice {
     pub r#type: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackState {
+    Ready,
+    Active,
+    Paused,
+    Stopped,
+    Seeking,
+    Idle,
+    Completed,
+}
+
+impl PlaybackState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Stopped => "stopped",
+            Self::Seeking => "seeking",
+            Self::Idle => "idle",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // ExclusiveModeNotAllowed + Locked are Windows-only
+pub enum DeviceErrorKind {
+    NotFound,
+    FormatNotSupported,
+    ExclusiveModeNotAllowed,
+    Locked,
+    Disconnected,
+    Unknown,
+}
+
+impl DeviceErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "devicenotfound",
+            Self::FormatNotSupported => "deviceformatnotsupported",
+            Self::ExclusiveModeNotAllowed => "deviceexclusivemodenotallowed",
+            Self::Locked => "devicelocked",
+            Self::Disconnected => "devicedisconnected",
+            Self::Unknown => "deviceunknownerror",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     TimeUpdate(f64, u32),
     Duration(f64, u32),
-    StateChange(&'static str, u32),
+    StateChange(PlaybackState, u32),
     AudioDevices(Vec<AudioDevice>, Option<String>),
-    DeviceError(&'static str),
+    DeviceError(DeviceErrorKind),
     MediaFormat {
         codec: &'static str,
         sample_rate: u32,
@@ -50,22 +99,26 @@ pub enum PlayerEvent {
     MaxConnectionsReached,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum ResumePolicy {
     Disabled,
     Auto,
     Explicit(f64),
 }
 
+struct LoadRequest {
+    buffer: RamBuffer,
+    load_gen: u32,
+    seq: u32,
+    track_id: String,
+    resume_policy: ResumePolicy,
+    load_start: std::time::Instant,
+    cached: bool,
+}
+
 enum PlayerCommand {
     Load {
-        buffer: RamBuffer,
-        load_gen: u32,
-        seq: u32,
-        track_id: String,
-        resume_policy: ResumePolicy,
-        load_start: std::time::Instant,
-        cached: bool,
+        request: LoadRequest,
         auto_play: bool,
     },
     Play,
@@ -246,13 +299,15 @@ impl Player {
             let is_stale = || LOAD_SEQ.load(Relaxed) != load_gen;
             let send_load = |buffer: RamBuffer, cached: bool, track_id: String| {
                 let _ = cmd_tx.send(PlayerCommand::Load {
-                    buffer,
-                    load_gen,
-                    seq: event_seq,
-                    track_id,
-                    resume_policy,
-                    load_start,
-                    cached,
+                    request: LoadRequest {
+                        buffer,
+                        load_gen,
+                        seq: event_seq,
+                        track_id,
+                        resume_policy,
+                        load_start,
+                        cached,
+                    },
                     auto_play,
                 });
             };
