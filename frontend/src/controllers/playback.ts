@@ -1,4 +1,5 @@
 import { sendIpc } from "../ipc";
+import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 
 export const createPlaybackController = () => {
     let delegate: any = null;
@@ -10,6 +11,7 @@ export const createPlaybackController = () => {
             (window as any).__TL_PLAY_PAUSE__ = () => {
                 (window as any).__TL_PLAYING__ ? d?.pause?.() : d?.resume?.();
             };
+            setupActionHandlers();
             sendIpc("player.dbg", "registerDelegate", Object.keys(d || {}).join(","));
         },
         sendPlayerCommand: (cmd: any) => {
@@ -25,6 +27,7 @@ export const createPlaybackController = () => {
             if (item && typeof item === "object") {
                 // Send raw media item; metadata parsing/fallbacks are centralized in Rust.
                 sendIpc("player.metadata", item);
+                updateMetadata(item);
             }
         },
         setCurrentTime: (time: any) => {
@@ -39,6 +42,7 @@ export const createPlaybackController = () => {
         setPlayingStatus: (status: any) => {
             sendIpc("player.dbg", "setPlayingStatus", JSON.stringify(status));
             (window as any).__TL_PLAYING__ = !!status;
+            updatePlaybackState(!!status);
         },
         setRepeatMode: (mode: any) => { },
         setShuffle: (shuffle: any) => { },
