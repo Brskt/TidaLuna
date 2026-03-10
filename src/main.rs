@@ -1450,6 +1450,8 @@ const CEF_SWITCHES: &[&str] = &[
     "disable-save-password-bubble",
     "disable-webrtc",
     "site-per-process",
+    "disable-accelerated-video-decode",
+    "disable-accelerated-video-encode",
 ];
 
 /// Chromium features to disable via `--disable-features=X,Y,Z`.
@@ -1530,7 +1532,15 @@ const CEF_DISABLED_FEATURES: &[&str] = &[
     "ContentIndex",
     "InstalledApp",
     "PictureInPictureV2",
+    "BackForwardCache",
+    "SpareRendererForSitePerProcess",
+    "GlobalMediaControls",
+    "MediaRouter",
+    "OptimizationHints",
+    "CalculateNativeWinOcclusion",
 ];
+
+const CEF_ENABLED_FEATURES: &[&str] = &["PartitionAllocMemoryReclaimer"];
 
 wrap_app! {
     struct TidalApp {
@@ -1561,6 +1571,10 @@ wrap_app! {
             let switch = format!("disable-features={}", CEF_DISABLED_FEATURES.join(","));
             let switch_cef = CefString::from(switch.as_str());
             cmd.append_switch(Some(&switch_cef));
+
+            let enable = format!("enable-features={}", CEF_ENABLED_FEATURES.join(","));
+            let enable_cef = CefString::from(enable.as_str());
+            cmd.append_switch(Some(&enable_cef));
 
             crate::vprintln!("[CEF]    Command line switches applied");
         }
