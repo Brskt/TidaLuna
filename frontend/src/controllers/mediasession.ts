@@ -37,7 +37,7 @@ export function updatePlaybackState(playing: boolean) {
         ensureAudioContext();
         navigator.mediaSession.playbackState = "playing";
     } else {
-        ctx?.suspend().catch(() => {});
+        ctx?.suspend().catch((e) => console.warn("[luna:mediasession] AudioContext suspend failed:", e));
         navigator.mediaSession.playbackState = "paused";
     }
 }

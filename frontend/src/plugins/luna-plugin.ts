@@ -157,7 +157,7 @@ export class LunaPlugin {
         try {
             const pkg = typeof info.manifest === "string" ? JSON.parse(info.manifest) : info.manifest;
             if (pkg?.name) this.store.package = pkg;
-        } catch { /* keep existing package info */ }
+        } catch (e) { console.warn("[luna:plugin] Package info fetch failed:", e); }
         this.store.installed = true;
         this.store.enabled = true;
         this.enabled = true;
@@ -334,7 +334,8 @@ export class LunaPlugin {
         let pkg: PluginPackage;
         try {
             pkg = typeof info.manifest === "string" ? JSON.parse(info.manifest) : info.manifest;
-        } catch {
+        } catch (e) {
+            console.warn("[luna:plugin] Plugin info parse error:", e);
             pkg = { name: info.name };
         }
         if (!pkg.name) pkg.name = info.name;
@@ -408,7 +409,8 @@ export class LunaPlugin {
             try {
                 pkg = await invokeIpc("plugin.fetch_package", url);
                 if (typeof pkg === "string") pkg = JSON.parse(pkg);
-            } catch {
+            } catch (e) {
+                console.warn("[luna:plugin] Plugin update check error:", e);
                 // Fallback: derive name from URL
                 const lastSegment = url.split("/").filter(Boolean).pop() || "unknown";
                 pkg = { name: lastSegment };

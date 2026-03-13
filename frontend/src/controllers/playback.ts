@@ -117,7 +117,7 @@ export const createPlaybackController = () => {
                                 } else {
                                     store.dispatch({ type: "playbackControls/UPDATE_PLAYBACK_CONTEXT", payload: ctx });
                                 }
-                            } catch (_) { /* best-effort */ }
+                            } catch (e) { console.warn("[luna:playback] UPDATE_PLAYBACK_CONTEXT dispatch failed:", e); }
 
                             (window as any).__LUNAR_RESET_MEDIA_FORMAT__?.();
 

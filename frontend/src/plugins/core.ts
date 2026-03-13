@@ -119,7 +119,7 @@ export function getWebpackModuleCache(): Record<string, any> | undefined {
                     if (require?.c) cache = require.c;
                 },
             ]);
-        } catch {}
+        } catch (e) { console.warn("[luna:core] Plugin core error:", e); }
         if (cache) {
             w.__LUNAR_WEBPACK_CACHE__ = cache;
             return cache;

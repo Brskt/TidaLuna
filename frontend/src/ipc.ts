@@ -40,7 +40,8 @@ export const invokeIpc = (channel: string, ...args: any[]): Promise<any> => {
                 } else if (response.startsWith("S:")) {
                     try {
                         resolve(JSON.parse(response.slice(2)));
-                    } catch {
+                    } catch (e) {
+                        console.warn("[luna:ipc] Response parse error:", e);
                         resolve(response.slice(2));
                     }
                 } else {

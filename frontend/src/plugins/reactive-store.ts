@@ -31,7 +31,8 @@ export class ReactiveStore {
                 const value = JSON.parse(raw);
                 this.cache.set(key, value);
                 return value;
-            } catch {
+            } catch (e) {
+                console.warn("[luna:store] Reactive store error:", e);
                 return raw;
             }
         }
