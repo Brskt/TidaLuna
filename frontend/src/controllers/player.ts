@@ -94,10 +94,7 @@ export const createNativePlayerComponent = () => {
             load: (url: string, streamFormat: string, encryptionKey: string = "") => {
                 sendIpc("player.dbg", "SDK→load", streamFormat);
                 seekTarget = null;
-                // Soft-reset: null out stale format data but do NOT drain resolvers.
-                // The setTimeout in playback.ts already did a full reset (with drain)
-                // before firing interceptors; updateFormat's waiter is now pending.
-                // Draining here would kill that waiter before Rust sends mediaformat.
+                // Soft-reset format data (don't drain resolvers — playback.ts already did)
                 console.log("[DBG:player] load() soft-reset — __LUNAR_MEDIA_FORMAT__ = null (NO drain)");
                 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
                 sendIpc("player.load", url, streamFormat, encryptionKey);

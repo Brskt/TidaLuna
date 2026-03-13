@@ -1,9 +1,4 @@
-// --- @luna/lib runtime classes: MediaItem, PlayState, Quality, registerEmitter ---
-// Functional implementations backed by Redux intercept.
-
 import type { ReduxState } from "./redux-patch";
-
-// --- Event emitter infrastructure (matches @inrixia/helpers pattern) ---
 
 type LunaUnloads = Set<() => void>;
 type LunaUnload = () => void;
@@ -31,7 +26,6 @@ export function registerEmitter<T>(init: (emit: Emit<T>) => void | LunaUnload): 
     };
 }
 
-// --- Quality (matches upstream Quality class exactly) ---
 
 export class Quality {
     private static readonly idxLookup: Record<number, Quality> = {};
@@ -117,7 +111,6 @@ export class Quality {
     }
 }
 
-// --- MediaFormat type ---
 
 interface MediaFormat {
     sampleRate?: number;
@@ -126,7 +119,6 @@ interface MediaFormat {
     codec?: string;
 }
 
-// --- MediaItem ---
 
 export class MediaItem {
     readonly id: string;
@@ -139,7 +131,6 @@ export class MediaItem {
         this.contentType = contentType;
     }
 
-    // --- Instance accessors (best-effort from tidalItem) ---
 
     get trackNumber(): number { return this.tidalItem.trackNumber ?? 0; }
     get volumeNumber(): number { return this.tidalItem.volumeNumber ?? 0; }
@@ -281,7 +272,6 @@ export class MediaItem {
         return undefined;
     }
 
-    // --- Static properties ---
 
     static _redux: ReduxState;
     static onMediaTransition: AddReceiver<MediaItem>;
@@ -348,7 +338,6 @@ export class MediaItem {
     }
 }
 
-// --- PlayState ---
 
 export class PlayState {
     static _redux: ReduxState;
@@ -447,7 +436,6 @@ export class PlayState {
     }
 }
 
-// --- Initialization: wire event emitters to Redux intercepts ---
 
 export function initLibClasses(redux: ReduxState, unloads: LunaUnloads): void {
     MediaItem._redux = redux;

@@ -30,17 +30,13 @@ export const createPlaybackController = () => {
                 sendIpc("player.metadata", item);
                 updateMetadata(item);
 
-                // Notify luna interceptors of the media transition.
-                // We call interceptors directly instead of store.dispatch to avoid
-                // TIDAL's internal middleware/reducers which break the playback state machine.
-                // We also mutate playbackContext in the Redux state so that code reading
-                // PlayState.playbackContext (e.g. updateFormat) sees the correct track ID.
+                // Fire MEDIA_PRODUCT_TRANSITION interceptors directly (not via store.dispatch
+                // which triggers TIDAL's middleware and breaks the playback state machine).
                 const productId = String(item.productId ?? item.id ?? "");
                 if (productId && productId !== lastTransitionId) {
                     lastTransitionId = productId;
                     setTimeout(async () => {
                         try {
-                            // Stale check: a newer transition supersedes this one
                             if (lastTransitionId !== productId) return;
 
                             const { interceptors } = require("../luna-core/exposeTidalInternals.patchAction");
@@ -50,19 +46,13 @@ export const createPlaybackController = () => {
                             const controls = store.getState().playbackControls;
                             if (!controls) return;
 
-                            // Query the playbackInfo API to get the actual audio quality
-                            // the server delivers — mirrors TIDAL's native SDK which requests
-                            // at the user's configured streaming quality, then reports back
-                            // what was actually served in the response's audioQuality field.
+                            // Get actual audio quality from playbackInfo API (same as TIDAL's SDK)
                             let actualQuality: string | undefined;
                             try {
                                 const { getPlaybackInfo } = require("../luna-lib/helpers/getPlaybackInfo");
                                 const state = store.getState();
                                 const streamingQuality = state.settings?.quality?.streaming;
 
-                                // Try the user's streaming quality first. If the track doesn't
-                                // support it (returns null), fall back to the track's own
-                                // audioQuality from the content store.
                                 console.log("[DBG:pbi] streamingQuality=", streamingQuality, "productId=", productId);
                                 let pbi = await getPlaybackInfo(productId, streamingQuality);
                                 console.log("[DBG:pbi] first call result=", pbi ? "OK" : "null", "quality=", pbi?.audioQuality);
@@ -78,10 +68,7 @@ export const createPlaybackController = () => {
                                 if (lastTransitionId !== productId) return; // stale after async
                                 actualQuality = pbi?.audioQuality;
 
-                                // For non-FLAC formats (AAC/MP4), TIDAL's web SDK uses its own
-                                // browser player (boombox) which doesn't work in CEF. We decode
-                                // the BTS manifest to get the stream URL + encryption key, then
-                                // load it ourselves — symphonia handles AAC/ISOMP4 natively.
+                                // Self-load non-FLAC BTS streams (TIDAL's boombox doesn't work in CEF)
                                 console.log("[DBG:pbi] manifestMimeType=", pbi?.manifestMimeType, "manifest=", pbi?.manifest ? "present" : "null");
                                 if (pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
                                     const manifest = pbi.manifest;
@@ -102,13 +89,9 @@ export const createPlaybackController = () => {
                             const oldMp = controls.mediaProduct ?? {};
                             const mp = { ...oldMp, productId, productType: item.type ?? "track" };
 
-                            // Global override: updateFormat reads this instead of PlayState.playbackContext
                             (window as any).__LUNAR_CURRENT_PRODUCT_ID__ = productId;
 
-                            // Update playbackContext in Redux so that PlayState.playbackContext
-                            // returns the correct actualProductId. Redux Toolkit freezes state
-                            // objects, so direct mutation fails — dispatch through TIDAL's own
-                            // reducer which produces a new frozen state.
+                            // Dispatch UPDATE_PLAYBACK_CONTEXT — Redux state is frozen, direct mutation fails
                             try {
                                 const { buildActions } = require("../luna-core/exposeTidalInternals.patchAction");
                                 const buildAction = buildActions["playbackControls/UPDATE_PLAYBACK_CONTEXT"];
