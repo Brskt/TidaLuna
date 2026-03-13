@@ -3,12 +3,32 @@
   "module": "src/index.ts",
   "type": "module",
   "scripts": {
-    "build": "bun build ./src/index.ts --outfile=./dist/bundle.js --minify"
+    "build:ui": "node scripts/build-luna-ui.mjs",
+    "build": "node scripts/build-luna-ui.mjs && node scripts/build-bundle.mjs"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^7.3.9",
+    "@mui/material": "^7.3.9",
+    "@octokit/openapi-types": "^27.0.0",
+    "@types/bun": "latest",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/semver": "^7.7.1",
+    "esbuild": "^0.27.3",
+    "material-ui-confirm": "^4.0.0",
+    "semver": "^7.7.4"
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@inrixia/helpers": "^3.21.2",
+    "idb-keyval": "^6.2.2",
+    "oby": "^15.1.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "spitroast": "^2.1.6"
   }
 }

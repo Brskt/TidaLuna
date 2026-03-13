@@ -11,31 +11,45 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("bundle.js");
     let frontend_dir = Path::new("frontend");
+    let bundle_path = frontend_dir.join("dist").join("bundle.js");
 
     // Make sure we have the node_modules ready
-    let status = Command::new("bun")
-        .args(["install"])
-        .current_dir(frontend_dir)
-        .status()
-        .expect("Failed to run bun install");
+    // Skip bun install if node_modules already exists (avoids Bun segfault on Windows via 9P)
+    let node_modules = frontend_dir.join("node_modules");
+    if !node_modules.exists() {
+        let status = Command::new("bun")
+            .args(["install"])
+            .current_dir(frontend_dir)
+            .status()
+            .expect("Failed to run bun install");
 
-    if !status.success() {
-        panic!("bun install failed");
+        if !status.success() {
+            panic!("bun install failed");
+        }
     }
 
-    // Run the build script defined in package.json
-    let status = Command::new("bun")
-        .args(["run", "build"])
+    // Build @luna/ui plugin
+    let status = Command::new("node")
+        .args(["scripts/build-luna-ui.mjs"])
         .current_dir(frontend_dir)
         .status()
-        .expect("Failed to run bun build");
+        .expect("Failed to run build-luna-ui");
 
     if !status.success() {
-        panic!("bun build failed");
+        panic!("build-luna-ui failed");
     }
 
-    // Move the final bundle to where Rust can find it
-    let bundle_path = frontend_dir.join("dist").join("bundle.js");
+    // Build main bundle
+    let status = Command::new("node")
+        .args(["scripts/build-bundle.mjs"])
+        .current_dir(frontend_dir)
+        .status()
+        .expect("Failed to run build-bundle");
+
+    if !status.success() {
+        panic!("build-bundle failed");
+    }
+
     std::fs::copy(&bundle_path, &dest_path).expect("Failed to copy bundle.js to OUT_DIR");
 
     // --- WINDOWS ICON ---
