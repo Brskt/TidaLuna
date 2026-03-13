@@ -36,7 +36,7 @@ async fn fetch_and_decrypt_inner(
         anyhow::bail!("Upstream status: {}", resp.status());
     }
 
-    let decryptor = FlacDecryptor::new(key)?;
+    let decryptor = if key.is_empty() { None } else { Some(FlacDecryptor::new(key)?) };
     let mut stream = resp.bytes_stream();
     let mut offset = 0u64;
     let mut decrypt_buf = Vec::new();
@@ -51,7 +51,9 @@ async fn fetch_and_decrypt_inner(
 
         decrypt_buf.clear();
         decrypt_buf.extend_from_slice(&chunk);
-        decryptor.decrypt_in_place(&mut decrypt_buf, offset)?;
+        if let Some(ref dec) = decryptor {
+            dec.decrypt_in_place(&mut decrypt_buf, offset)?;
+        }
         offset += chunk.len() as u64;
 
         if let Some(limit) = max_bytes
@@ -98,7 +100,7 @@ pub async fn start_preload(track: TrackInfo) {
     }
 
     let handle = tokio::spawn(async move {
-        if track.key.is_empty() || track.url.is_empty() {
+        if track.url.is_empty() {
             return;
         }
 
@@ -162,11 +164,15 @@ pub fn start_download(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let download_start = std::time::Instant::now();
-        let decryptor = match FlacDecryptor::new(&key) {
-            Ok(d) => d,
-            Err(e) => {
-                writer.finish_with_error(format!("decrypt init failed: {e}"));
-                return;
+        let decryptor = if key.is_empty() {
+            None
+        } else {
+            match FlacDecryptor::new(&key) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    writer.finish_with_error(format!("decrypt init failed: {e}"));
+                    return;
+                }
             }
         };
 
@@ -296,7 +302,7 @@ pub fn start_download(
 
                         decrypt_buf.clear();
                         decrypt_buf.extend_from_slice(&chunk);
-                        match decryptor.decrypt_in_place(&mut decrypt_buf, offset) {
+                        match decryptor.as_ref().map(|d| d.decrypt_in_place(&mut decrypt_buf, offset)).unwrap_or(Ok(())) {
                             Ok(()) => {
                                 offset += chunk.len() as u64;
                                 let written = writer.write_counted(&decrypt_buf);
