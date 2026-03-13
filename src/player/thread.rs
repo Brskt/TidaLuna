@@ -1252,6 +1252,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             sample_rate: source_sample_rate,
             bit_depth: source_bit_depth,
             channels: source_channels,
+            bytes: total_len,
         });
 
         // Open cpal stream (try source rate first, fall back to device default + rubato)

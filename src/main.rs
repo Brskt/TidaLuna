@@ -2,6 +2,8 @@
     all(not(debug_assertions), not(feature = "console")),
     windows_subsystem = "windows"
 )]
+mod api;
+mod api_ipc;
 mod auth;
 mod bandwidth;
 mod bridge;
@@ -11,6 +13,7 @@ mod logging;
 mod media_controls;
 mod metadata;
 mod player;
+mod plugins;
 mod preload;
 mod settings;
 mod state;
@@ -31,15 +34,18 @@ use player::{PlaybackState, Player, PlayerEvent};
 use serde::Deserialize;
 use state::TrackInfo;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+pub(crate) type IpcCallback = Arc<Mutex<dyn cef::wrapper::message_router::BrowserSideCallback>>;
+
 #[derive(Deserialize, Debug)]
-struct IpcMessage {
-    channel: String,
+pub(crate) struct IpcMessage {
+    pub(crate) channel: String,
     #[serde(default)]
-    args: Vec<serde_json::Value>,
+    pub(crate) args: Vec<serde_json::Value>,
     #[serde(default)]
-    id: Option<String>,
+    pub(crate) id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +66,8 @@ struct AppState {
     flush_scheduled: bool,
     media_controls: Option<media_controls::OsMediaControls>,
     media_duration: Option<f64>,
+    plugin_store: plugins::PluginStore,
+    pending_ipc_callbacks: HashMap<String, IpcCallback>,
     #[cfg(target_os = "windows")]
     thumbbar: Option<thumbbar::ThumbBar>,
 }
@@ -247,6 +255,391 @@ fn handle_player_ipc(msg: &IpcMessage) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Plugin IPC handler — responds via cefQuery callback (not exec_js)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn ipc_callback_ok(cb: &IpcCallback, result: &str) {
+    cb.lock()
+        .expect("IPC callback lock poisoned")
+        .success_str(&format!("S:{result}"));
+}
+
+pub(crate) fn ipc_callback_err(cb: &IpcCallback, error: &str) {
+    cb.lock()
+        .expect("IPC callback lock poisoned")
+        .success_str(&format!("E:{error}"));
+}
+
+fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
+    // tidal.* — TIDAL API endpoints handled in Rust
+    if msg.channel.starts_with("tidal.") {
+        api_ipc::handle_tidal_ipc(msg, callback);
+        return;
+    }
+
+    // proxy.fetch — async HTTP fetch bypassing browser CORS
+    // Args: [url, optional_headers_json]
+    if msg.channel == "proxy.fetch" {
+        let url = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let headers_json = msg
+            .args
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let id = msg.id.unwrap_or_default();
+        with_state(|state| {
+            state.pending_ipc_callbacks.insert(id.clone(), callback);
+            let rt = state.rt_handle.clone();
+            rt.spawn(async move {
+                handle_proxy_fetch(id, url, headers_json).await;
+            });
+        });
+        return;
+    }
+
+    // proxy.head — async HTTP HEAD request, returns status + content-length
+    // Args: [url]
+    if msg.channel == "proxy.head" {
+        let url = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let id = msg.id.unwrap_or_default();
+        with_state(|state| {
+            state.pending_ipc_callbacks.insert(id.clone(), callback);
+            let rt = state.rt_handle.clone();
+            rt.spawn(async move {
+                handle_proxy_head(id, url).await;
+            });
+        });
+        return;
+    }
+
+    // plugin.fetch_package — async fetch of {url}.json manifest only (no install)
+    if msg.channel == "plugin.fetch_package" {
+        let url = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let id = msg.id.unwrap_or_default();
+        with_state(|state| {
+            state.pending_ipc_callbacks.insert(id.clone(), callback);
+            let rt = state.rt_handle.clone();
+            rt.spawn(async move {
+                let client = &*crate::state::HTTP_CLIENT;
+                let result = fetch_plugin_package(client, &url).await;
+                with_state(|state| {
+                    let Some(cb) = state.pending_ipc_callbacks.remove(&id) else {
+                        return;
+                    };
+                    match result {
+                        Ok(manifest) => ipc_callback_ok(&cb, &manifest),
+                        Err(e) => ipc_callback_err(&cb, &format!("{e:#}")),
+                    }
+                });
+            });
+        });
+        return;
+    }
+
+    // plugin.install is async (HTTP fetch) — store callback, respond later
+    if msg.channel == "plugin.install" {
+        let url = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let id = msg.id.unwrap_or_default();
+        with_state(|state| {
+            state.pending_ipc_callbacks.insert(id.clone(), callback);
+            let rt = state.rt_handle.clone();
+            rt.spawn(async move {
+                handle_plugin_install(id, url).await;
+            });
+        });
+        return;
+    }
+
+    with_state(|state| match msg.channel.as_str() {
+        "plugin.list" => {
+            let plugins = state.plugin_store.list();
+            let json = serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string());
+            ipc_callback_ok(&callback, &json);
+        }
+        "plugin.get_code" => {
+            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            match state.plugin_store.get_code(url) {
+                Some(code) => {
+                    let json = serde_json::to_string(&code).unwrap_or_else(|_| "null".to_string());
+                    ipc_callback_ok(&callback, &json);
+                }
+                None => ipc_callback_ok(&callback, "null"),
+            }
+        }
+        "plugin.uninstall" => {
+            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            match state.plugin_store.uninstall(url) {
+                Ok(()) => ipc_callback_ok(&callback, "true"),
+                Err(e) => ipc_callback_err(&callback, &e.to_string()),
+            }
+        }
+        "plugin.uninstall_all" => match state.plugin_store.uninstall_all() {
+            Ok(()) => ipc_callback_ok(&callback, "true"),
+            Err(e) => ipc_callback_err(&callback, &e.to_string()),
+        },
+        "plugin.enable" => {
+            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            match state.plugin_store.enable(url) {
+                Ok(()) => ipc_callback_ok(&callback, "true"),
+                Err(e) => ipc_callback_err(&callback, &e.to_string()),
+            }
+        }
+        "plugin.disable" => {
+            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            match state.plugin_store.disable(url) {
+                Ok(()) => ipc_callback_ok(&callback, "true"),
+                Err(e) => ipc_callback_err(&callback, &e.to_string()),
+            }
+        }
+        "plugin.storage.get" => {
+            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            match state.plugin_store.storage_get(ns, key) {
+                Some(val) => {
+                    let json = serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string());
+                    ipc_callback_ok(&callback, &json);
+                }
+                None => ipc_callback_ok(&callback, "null"),
+            }
+        }
+        "plugin.storage.set" => {
+            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            let value = msg.args.get(2).and_then(|v| v.as_str()).unwrap_or("");
+            match state.plugin_store.storage_set(ns, key, value) {
+                Ok(()) => ipc_callback_ok(&callback, "true"),
+                Err(e) => ipc_callback_err(&callback, &e.to_string()),
+            }
+        }
+        "plugin.storage.del" => {
+            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            match state.plugin_store.storage_del(ns, key) {
+                Ok(()) => ipc_callback_ok(&callback, "true"),
+                Err(e) => ipc_callback_err(&callback, &e.to_string()),
+            }
+        }
+        "plugin.storage.keys" => {
+            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let keys = state.plugin_store.storage_keys(ns);
+            let json = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
+            ipc_callback_ok(&callback, &json);
+        }
+        _ => {
+            ipc_callback_err(
+                &callback,
+                &format!("Unknown plugin channel: {}", msg.channel),
+            );
+        }
+    });
+}
+
+async fn handle_proxy_head(id: String, url: String) {
+    let client = &*crate::state::HTTP_CLIENT;
+    let result = client.head(&url).send().await;
+
+    with_state(|state| {
+        let Some(callback) = state.pending_ipc_callbacks.remove(&id) else {
+            return;
+        };
+        match result {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let content_length = resp.content_length().unwrap_or(0);
+                let json = serde_json::json!({
+                    "status": status,
+                    "contentLength": content_length,
+                });
+                ipc_callback_ok(&callback, &json.to_string());
+            }
+            Err(e) => {
+                ipc_callback_err(&callback, &format!("proxy.head failed: {e}"));
+            }
+        }
+    });
+}
+
+async fn handle_proxy_fetch(id: String, url: String, headers_json: String) {
+    let client = &*crate::state::HTTP_CLIENT;
+    let mut req = client.get(&url);
+
+    // Apply optional headers from JSON object (e.g. {"Authorization": "Bearer ..."})
+    if !headers_json.is_empty()
+        && let Ok(headers) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&headers_json)
+    {
+        for (key, value) in headers {
+            if let Some(val) = value.as_str() {
+                req = req.header(&key, val);
+            }
+        }
+    }
+
+    let result = req.send().await;
+
+    with_state(|state| {
+        let Some(callback) = state.pending_ipc_callbacks.remove(&id) else {
+            return;
+        };
+        match result {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                // Spawn a task to read the body since it's async
+                let rt = state.rt_handle.clone();
+                rt.spawn(async move {
+                    let body = resp.text().await.unwrap_or_default();
+                    let json = serde_json::json!({
+                        "status": status,
+                        "body": body,
+                    });
+                    ipc_callback_ok(&callback, &json.to_string());
+                });
+            }
+            Err(e) => {
+                ipc_callback_err(&callback, &format!("proxy.fetch failed: {e}"));
+            }
+        }
+    });
+}
+
+async fn handle_plugin_install(id: String, url: String) {
+    let client = &*crate::state::HTTP_CLIENT;
+    let result = fetch_plugin_data(client, &url).await;
+
+    with_state(|state| {
+        let Some(callback) = state.pending_ipc_callbacks.remove(&id) else {
+            return;
+        };
+        match result {
+            Ok((name, manifest, code, hash)) => {
+                match state
+                    .plugin_store
+                    .install(&url, &name, &manifest, &code, &hash)
+                {
+                    Ok(()) => {
+                        let info = plugins::PluginInfo {
+                            url: url.clone(),
+                            name,
+                            manifest,
+                            hash: Some(hash),
+                            enabled: true,
+                            installed: true,
+                        };
+                        let json =
+                            serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
+                        ipc_callback_ok(&callback, &json);
+                    }
+                    Err(e) => ipc_callback_err(&callback, &e.to_string()),
+                }
+            }
+            Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
+        }
+    });
+}
+
+/// Sanitize a plugin URL by stripping known extensions, matching upstream behavior.
+fn sanitize_plugin_url(url: &str) -> &str {
+    url.trim_end_matches(".mjs.map")
+        .trim_end_matches(".mjs")
+        .trim_end_matches(".json")
+}
+
+/// Fetch just the package manifest (`{base_url}.json`). Used by `plugin.fetch_package` IPC.
+async fn fetch_plugin_package(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
+    let base = sanitize_plugin_url(url);
+    let json_url = format!("{base}.json");
+    let manifest_str = client
+        .get(&json_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    // Validate it's actual JSON
+    let _: serde_json::Value = serde_json::from_str(&manifest_str)?;
+    Ok(manifest_str)
+}
+
+async fn fetch_plugin_data(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<(String, String, String, String)> {
+    use std::hash::{Hash, Hasher};
+
+    let base = sanitize_plugin_url(url);
+
+    // Try upstream pattern first: {base}.json for manifest, {base}.mjs for code
+    if let Ok(manifest_str) = fetch_plugin_package(client, base).await {
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_str)?;
+        let name = manifest["name"].as_str().unwrap_or("unknown").to_string();
+
+        let code_url = format!("{base}.mjs");
+        let code = client
+            .get(&code_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        code.hash(&mut hasher);
+        let hash = format!("{:x}", hasher.finish());
+
+        Ok((name, manifest_str, code, hash))
+    } else {
+        // Fallback: direct URL fetch (e.g. raw .mjs link or package.json link)
+        let fetch_url = if url.ends_with("package.json") {
+            url.to_string()
+        } else if !url.ends_with(".mjs") {
+            format!("{base}.mjs")
+        } else {
+            url.to_string()
+        };
+
+        let code = client
+            .get(&fetch_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+
+        let name = base
+            .rsplit_once('/')
+            .map(|(_, n)| n)
+            .unwrap_or("plugin")
+            .to_string();
+        let manifest = serde_json::json!({"name": &name, "main": &fetch_url}).to_string();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        code.hash(&mut hasher);
+        let hash = format!("{:x}", hasher.finish());
+
+        Ok((name, manifest, code, hash))
+    }
+}
+
 // --- Hamburger menu ---
 
 /// Build the JavaScript snippet that shows the About TidaLunar overlay.
@@ -301,6 +694,7 @@ enum MenuCommand {
     Exit = 5,
     ClearCache = 6,
     OpenData = 7,
+
     PlayPause = 10,
     Next = 11,
     Prev = 12,
@@ -318,6 +712,7 @@ impl TryFrom<i32> for MenuCommand {
             5 => Ok(Self::Exit),
             6 => Ok(Self::ClearCache),
             7 => Ok(Self::OpenData),
+
             10 => Ok(Self::PlayPause),
             11 => Ok(Self::Next),
             12 => Ok(Self::Prev),
@@ -342,6 +737,7 @@ wrap_menu_model_delegate! {
                 return;
             };
             match cmd {
+
                 MenuCommand::Settings => {
                     eval_js("window.__TL_NAVIGATE__?.('/settings')");
                 }
@@ -683,6 +1079,7 @@ fn handle_player_event(event: PlayerEvent) {
                 sample_rate,
                 bit_depth,
                 channels,
+                bytes,
             } => {
                 state
                     .pending_player_events
@@ -691,6 +1088,7 @@ fn handle_player_event(event: PlayerEvent) {
                         sample_rate,
                         bit_depth,
                         channels,
+                        bytes,
                     ));
             }
             PlayerEvent::Version(v) => {
@@ -761,10 +1159,20 @@ impl BrowserSideHandler for IpcQueryHandler {
         _persistent: bool,
         callback: Arc<Mutex<dyn cef::wrapper::message_router::BrowserSideCallback>>,
     ) -> bool {
+        // Try to parse the message to check for plugin invoke channels.
+        // Plugin channels with an id use the callback for the response;
+        // everything else is fire-and-forget (respond "ok" immediately).
+        if let Ok(msg) = serde_json::from_str::<IpcMessage>(request)
+            && (msg.channel.starts_with("plugin.")
+                || msg.channel.starts_with("proxy.")
+                || msg.channel.starts_with("tidal."))
+            && msg.id.is_some()
+        {
+            handle_plugin_ipc(msg, callback);
+            return true;
+        }
+
         handle_ipc_message(request);
-        // Respond with success (fire-and-forget).
-        // Use "ok" instead of "" to avoid "Invalid UTF-16 string" warnings
-        // from empty CefString conversion in the response path.
         callback
             .lock()
             .expect("IPC callback lock poisoned")
@@ -912,6 +1320,33 @@ wrap_life_span_handler! {
         router: Arc<BrowserSideRouter>,
     }
     impl LifeSpanHandler {
+        fn on_before_popup(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _popup_id: ::std::os::raw::c_int,
+            target_url: Option<&CefString>,
+            _target_frame_name: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            _user_gesture: ::std::os::raw::c_int,
+            _popup_features: Option<&PopupFeatures>,
+            _window_info: Option<&mut WindowInfo>,
+            _client: Option<&mut Option<Client>>,
+            _settings: Option<&mut BrowserSettings>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
+            _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
+        ) -> ::std::os::raw::c_int {
+            // Open external HTTP(S) links in the system browser, cancel all popups.
+            if let Some(url) = target_url {
+                let url_str = url.to_string();
+                if (url_str.starts_with("http://") || url_str.starts_with("https://"))
+                    && !url_str.contains("desktop.tidal.com")
+                {
+                    open_in_os(&url_str);
+                }
+            }
+            1 // Cancel popup — never open a CEF popup window
+        }
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             if let Some(browser) = browser.cloned() {
                 with_state(|state| {
@@ -1831,8 +2266,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // --- Initialize app settings ---
-    let app_settings = settings::Settings::open(&state::cache_data_dir())
-        .expect("Failed to open settings database");
+    let data_dir = state::cache_data_dir();
+    let app_settings =
+        settings::Settings::open(&data_dir).expect("Failed to open settings database");
+    let plugin_store =
+        plugins::PluginStore::open(&data_dir).expect("Failed to open plugin store database");
 
     // --- Set up shared state ---
     let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
@@ -1846,6 +2284,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flush_scheduled: false,
         media_controls: None,
         media_duration: None,
+        plugin_store,
+        pending_ipc_callbacks: HashMap::new(),
         #[cfg(target_os = "windows")]
         thumbbar: None,
     })));

@@ -90,6 +90,7 @@ pub enum PlayerEvent {
         sample_rate: u32,
         bit_depth: Option<u32>,
         channels: u16,
+        bytes: u64,
     },
     Version(&'static str),
     MediaError {

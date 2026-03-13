@@ -54,6 +54,7 @@ impl PlayerBridgeEvent {
         sample_rate: u32,
         bit_depth: Option<u32>,
         channels: u16,
+        bytes: u64,
     ) -> Self {
         Self {
             t: "mediaformat",
@@ -63,6 +64,7 @@ impl PlayerBridgeEvent {
                 "sampleRate": sample_rate,
                 "bitDepth": bit_depth,
                 "channels": channels,
+                "bytes": bytes,
             }),
         }
     }
