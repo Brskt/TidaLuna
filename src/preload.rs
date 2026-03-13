@@ -36,7 +36,11 @@ async fn fetch_and_decrypt_inner(
         anyhow::bail!("Upstream status: {}", resp.status());
     }
 
-    let decryptor = if key.is_empty() { None } else { Some(FlacDecryptor::new(key)?) };
+    let decryptor = if key.is_empty() {
+        None
+    } else {
+        Some(FlacDecryptor::new(key)?)
+    };
     let mut stream = resp.bytes_stream();
     let mut offset = 0u64;
     let mut decrypt_buf = Vec::new();
@@ -302,7 +306,11 @@ pub fn start_download(
 
                         decrypt_buf.clear();
                         decrypt_buf.extend_from_slice(&chunk);
-                        match decryptor.as_ref().map(|d| d.decrypt_in_place(&mut decrypt_buf, offset)).unwrap_or(Ok(())) {
+                        match decryptor
+                            .as_ref()
+                            .map(|d| d.decrypt_in_place(&mut decrypt_buf, offset))
+                            .unwrap_or(Ok(()))
+                        {
                             Ok(()) => {
                                 offset += chunk.len() as u64;
                                 let written = writer.write_counted(&decrypt_buf);
