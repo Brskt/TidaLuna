@@ -15,6 +15,10 @@ declare global {
             redirectUri: string;
             codeVerifier: string;
         };
+        __LUNAR_IPC_EMIT__?: (channel: string, ...args: any[]) => void;
+        luna?: any;
+        __ipcRenderer?: any;
+        __platform?: string;
     }
     var window: Window & typeof globalThis;
 }
