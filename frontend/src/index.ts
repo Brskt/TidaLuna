@@ -9,8 +9,10 @@ import { createUserSession } from "./controllers/session";
 import { createUserSettings } from "./controllers/settings";
 import { createWindowController } from "./controllers/window";
 import { createNativePlayerComponent } from "./controllers/player";
+import { updatePlaybackState } from "./controllers/mediasession";
+import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, isSelfLoad } from "./audio-proxy";
 import { initWindowControls } from "./ui/window-controls";
-import { invokeIpc } from "./ipc";
+import { invokeIpc, sendIpc } from "./ipc";
 
 // @luna/core and @luna/lib — safe to import after bootstrap
 import { initCore, modules, LunaPlugin } from "./luna-core";
@@ -84,6 +86,39 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
             (window as any).__LUNAR_MEDIA_FORMAT__ = event.v;
             for (const r of _mediaFormatResolvers) r(event.v);
             _mediaFormatResolvers = [];
+        }
+        if (type === "time") {
+            proxySetTime(event.v);
+        } else if (type === "duration") {
+            proxySetDuration(event.v);
+        } else if (type === "state") {
+            const playing = event.v === "active";
+            (window as any).__TL_PLAYING__ = playing;
+            updatePlaybackState(playing);
+            if (event.v === "completed") {
+                proxyReset();
+                if (isSelfLoad()) {
+                    // Self-loaded tracks bypass NativePlayer — manually advance queue.
+                    const { store } = require("./luna-lib/redux/store");
+                    const { playQueue: q } = store.getState();
+                    const nextId = q.elements[q.currentIndex + 1]?.mediaItemId;
+                    if (nextId) {
+                        setTimeout(() => {
+                            try {
+                                store.dispatch({ type: "playQueue/MOVE_NEXT" });
+                                window.nativeInterface.playback.setCurrentMediaItem({
+                                    productId: nextId,
+                                    type: "track",
+                                });
+                            } catch (e) {
+                                console.error("[luna] DASH auto-advance failed:", e);
+                            }
+                        }, 0);
+                    }
+                }
+            } else {
+                proxySetPlaying(playing);
+            }
         }
         const mapped = SEQ_EVENTS[type];
         if (mapped) {
@@ -162,6 +197,18 @@ const init = async () => {
         return;
     }
     console.log("[luna] Core initialized — Redux store discovered, modules populated");
+
+    // SDK middleware doesn't reach Rust player for DASH/AAC — intercept Redux actions.
+    {
+        const { interceptors } = require("./luna-core/exposeTidalInternals.patchAction");
+        const add = (action: string, cb: Function) => {
+            interceptors[action] ??= new Set();
+            interceptors[action].add(cb);
+        };
+        add("playbackControls/PLAY", () => sendIpc("player.play"));
+        add("playbackControls/SEEK", (time: number) => sendIpc("player.seek", time));
+        add("playbackControls/SET_VOLUME", (p: { volume: number }) => sendIpc("player.volume", p.volume));
+    }
 
     try {
         const { TidalApi } = await import("./luna-lib/classes/TidalApi");

@@ -538,11 +538,8 @@ export class MediaItem extends ContentBase {
 			format.codec = streamFormat.codec?.toLowerCase() ?? format.codec;
 			// Complement with DASH manifest data if available
 			if (playbackInfo.manifestMimeType === "application/dash+xml") {
-				const dashAudio = playbackInfo.manifest.tracks.audios[0];
-				if (dashAudio) {
-					format.bitrate = dashAudio.bitrate?.bps ?? format.bitrate;
-					format.bytes = dashAudio.size?.b ?? format.bytes;
-				}
+				format.bitrate = playbackInfo.manifest.bandwidth ?? format.bitrate;
+				format.sampleRate = playbackInfo.manifest.sampleRate ?? format.sampleRate;
 			}
 		} else {
 			format.bytes = (await getStreamBytes(playbackInfo)) ?? format.bytes;

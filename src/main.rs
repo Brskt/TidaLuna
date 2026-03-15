@@ -191,6 +191,15 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         eprintln!("Failed to load track: {}", e);
                     }
                 }
+                PlayerIpc::LoadDash {
+                    init_url,
+                    segment_urls,
+                    format,
+                } => {
+                    if let Err(e) = state.player.load_dash(init_url, segment_urls, format) {
+                        eprintln!("Failed to load DASH track: {}", e);
+                    }
+                }
                 PlayerIpc::Recover {
                     url,
                     format,

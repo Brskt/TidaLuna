@@ -38,7 +38,7 @@ export const getPlaybackInfo = async (mediaItemId: ItemId, audioQuality: AudioQu
 		const manifest: TidalManifest = decodedManifest;
 		return { ...rest, manifestMimeType: "application/vnd.tidal.bts" as const, manifest, mimeType: rest.mimeType ?? manifest.mimeType };
 	} else {
-		const manifest: DashManifest = decodedManifest ?? { tracks: { audios: [] } };
+		const manifest: DashManifest = decodedManifest ?? { initUrl: "", segmentUrls: [], codec: "" };
 		return { ...rest, manifestMimeType: "application/dash+xml" as const, manifest, mimeType: "audio/mp4" };
 	}
 };

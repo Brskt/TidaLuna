@@ -9,3 +9,9 @@ setupIpcBridge();
 
 // Initialize window.luna object (window.core.ts adds getters to it)
 (window as any).luna = {};
+
+// Force all audio through Rust player — prevents SDK boombox/shakaPlayer for DASH/AAC.
+delete (window as any).MediaSource;
+delete (window as any).ManagedMediaSource;
+
+import "./audio-proxy";

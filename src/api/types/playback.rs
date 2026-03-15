@@ -47,48 +47,17 @@ pub struct BtsManifest {
     pub key_id: Option<String>,
 }
 
-/// A single audio representation inside a DASH manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DashAudio {
-    #[serde(default)]
-    pub bitrate: Option<DashBitrate>,
-    #[serde(default)]
-    pub size: Option<DashSize>,
-}
-
-/// Bitrate info for a DASH audio representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DashBitrate {
-    #[serde(default)]
-    pub bps: Option<u64>,
-}
-
-/// Size info for a DASH audio representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DashSize {
-    #[serde(default)]
-    pub b: Option<u64>,
-}
-
-/// Decoded DASH manifest (simplified representation).
-///
-/// The full DASH MPD is XML, but for our purposes we only care about
-/// the audio track list extracted from it.
+/// Decoded DASH manifest with segment URLs extracted from MPD XML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashManifest {
-    pub tracks: DashTracks,
-}
-
-/// Track container in a DASH manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DashTracks {
+    pub init_url: String,
+    pub segment_urls: Vec<String>,
+    pub codec: String,
     #[serde(default)]
-    pub audios: Vec<DashAudio>,
+    pub sample_rate: Option<u32>,
+    #[serde(default)]
+    pub bandwidth: Option<u32>,
 }
 
 /// Processed playback info with a decoded manifest.

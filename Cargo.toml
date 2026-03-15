@@ -53,6 +53,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 rubato = "0.14"
 symphonia = { version = "0.5.5", features = ["flac", "aac", "isomp4"] }
+dash-mpd = { version = "0.17", default-features = false }
 souvlaki = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]

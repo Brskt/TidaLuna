@@ -13,6 +13,11 @@ pub(crate) enum PlayerIpc {
         key: String,
         target_time: Option<f64>,
     },
+    LoadDash {
+        init_url: String,
+        segment_urls: Vec<String>,
+        format: String,
+    },
     Preload {
         url: String,
         format: String,
@@ -142,6 +147,24 @@ pub(crate) fn parse_player_ipc(
             }),
             _ => Err(PlayerIpcParseError::InvalidArgs("player.load")),
         },
+        "player.load_dash" => {
+            let init_url = args.first().and_then(|v| v.as_str()).unwrap_or_default();
+            let segment_urls: Vec<String> = args
+                .get(1)
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            let format = args.get(2).and_then(|v| v.as_str()).unwrap_or("aac");
+            if init_url.is_empty() || segment_urls.is_empty() {
+                Err(PlayerIpcParseError::InvalidArgs("player.load_dash"))
+            } else {
+                Ok(PlayerIpc::LoadDash {
+                    init_url: init_url.to_string(),
+                    segment_urls,
+                    format: format.to_string(),
+                })
+            }
+        }
         "player.recover" => parse_player_recover_args(args)
             .map(|(url, format, key, target_time)| PlayerIpc::Recover {
                 url,

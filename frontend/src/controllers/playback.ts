@@ -1,4 +1,5 @@
 import { sendIpc } from "../ipc";
+import { setSelfLoad } from "../audio-proxy";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 
 export const createPlaybackController = () => {
@@ -70,6 +71,15 @@ export const createPlaybackController = () => {
 
                                 // Self-load non-FLAC BTS streams (TIDAL's boombox doesn't work in CEF)
                                 console.log("[DBG:pbi] manifestMimeType=", pbi?.manifestMimeType, "manifest=", pbi?.manifest ? "present" : "null");
+                                if (pbi?.manifestMimeType === "application/dash+xml" && pbi.manifest) {
+                                    const manifest = pbi.manifest as any;
+                                    if (manifest.initUrl && manifest.segmentUrls?.length > 0) {
+                                        const codec = manifest.codec?.split(".")?.[0] ?? "aac";
+                                        console.log("[DBG:pbi] DASH SELF-LOAD! codec=", codec, "segments=", manifest.segmentUrls.length);
+                                        setSelfLoad(true);
+                                        sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec);
+                                    }
+                                }
                                 if (pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
                                     const manifest = pbi.manifest;
                                     const streamUrl = manifest.urls?.[0];
@@ -79,6 +89,7 @@ export const createPlaybackController = () => {
                                         const codec = manifest.codecs?.split(".")?.[0] ?? "aac";
                                         const encKey = manifest.keyId ?? "";
                                         console.log("[DBG:pbi] SELF-LOAD! codec=", codec, "encKey=", encKey ? "present" : "empty");
+                                        setSelfLoad(true);
                                         sendIpc("player.load", streamUrl, codec, encKey);
                                     }
                                 }

@@ -19,9 +19,9 @@ export const parseStreamFormat = async (playbackInfo: PlaybackInfo): Promise<{ f
 	}
 
 	if (playbackInfo.manifestMimeType === "application/dash+xml") {
-		format.codec = "aac";
-		const audio = playbackInfo.manifest.tracks?.audios?.[0];
-		return { format, bytes: audio?.size?.b };
+		format.codec = playbackInfo.manifest.codec?.split(".")?.[0] || "aac";
+		format.sampleRate = playbackInfo.manifest.sampleRate || format.sampleRate;
+		return { format, bytes: undefined };
 	}
 
 	return { format, bytes: undefined };

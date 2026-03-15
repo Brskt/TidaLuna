@@ -506,6 +506,146 @@ impl Player {
         self.load_with_policy(url, format, key, ResumePolicy::Disabled, true)
     }
 
+    /// Load a DASH stream by fetching init + media segments and concatenating them.
+    pub fn load_dash(
+        &self,
+        init_url: String,
+        segment_urls: Vec<String>,
+        format: String,
+    ) -> anyhow::Result<()> {
+        let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
+        let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
+        crate::vprintln!(
+            "[DASH-LOAD #{load_gen}] start — {} segments",
+            segment_urls.len()
+        );
+        print_track_banner(&format);
+
+        if let Some(prev) = self.load_handle.lock().unwrap().take() {
+            prev.abort();
+        }
+        GOVERNOR.reset_buffer_progress();
+
+        let cmd_tx = self.cmd_tx.clone();
+        let handle = self.rt_handle.spawn(async move {
+            let load_start = std::time::Instant::now();
+            let is_stale = || LOAD_SEQ.load(Relaxed) != load_gen;
+
+            crate::vprintln!("[DASH-LOAD #{load_gen}] fetching init segment...");
+            let init_data = match HTTP_CLIENT_PLAYBACK.get(&init_url).send().await {
+                Ok(r) if r.status().is_success() => match r.bytes().await {
+                    Ok(b) => b.to_vec(),
+                    Err(e) => {
+                        eprintln!("[ERROR]  DASH init segment read failed: {e}");
+                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                            error: format!("DASH init segment: {e}"),
+                            code: "no_such_file",
+                        });
+                        return;
+                    }
+                },
+                Ok(r) => {
+                    eprintln!("[ERROR]  DASH init segment HTTP {}", r.status());
+                    let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                        error: format!("DASH init HTTP {}", r.status()),
+                        code: "no_such_file",
+                    });
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("[ERROR]  DASH init segment request failed: {e}");
+                    let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                        error: format!("DASH init request: {e}"),
+                        code: "no_such_file",
+                    });
+                    return;
+                }
+            };
+
+            if is_stale() {
+                crate::vprintln!("[DASH-LOAD #{load_gen}] stale after init, dropping");
+                return;
+            }
+
+            crate::vprintln!(
+                "[DASH-LOAD #{load_gen}] init: {} | {:.0}ms",
+                format_bytes(init_data.len() as u64),
+                load_start.elapsed().as_secs_f64() * 1000.0
+            );
+
+            let mut mp4_data = init_data;
+
+            for (i, seg_url) in segment_urls.iter().enumerate() {
+                if is_stale() {
+                    crate::vprintln!("[DASH-LOAD #{load_gen}] stale at segment {i}, dropping");
+                    return;
+                }
+
+                let seg_data = match HTTP_CLIENT_PLAYBACK.get(seg_url).send().await {
+                    Ok(r) if r.status().is_success() => match r.bytes().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[ERROR]  DASH segment {i} read failed: {e}");
+                            let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                                error: format!("DASH segment {i}: {e}"),
+                                code: "no_such_file",
+                            });
+                            return;
+                        }
+                    },
+                    Ok(r) => {
+                        eprintln!("[ERROR]  DASH segment {i} HTTP {}", r.status());
+                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                            error: format!("DASH segment {i} HTTP {}", r.status()),
+                            code: "no_such_file",
+                        });
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("[ERROR]  DASH segment {i} request failed: {e}");
+                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                            error: format!("DASH segment {i}: {e}"),
+                            code: "no_such_file",
+                        });
+                        return;
+                    }
+                };
+                mp4_data.extend_from_slice(&seg_data);
+            }
+
+            if is_stale() {
+                crate::vprintln!("[DASH-LOAD #{load_gen}] stale after all segments, dropping");
+                return;
+            }
+
+            let total_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+            crate::vprintln!(
+                "[DASH-LOAD #{load_gen}] done: {} segments, {} total in {:.0}ms",
+                segment_urls.len(),
+                format_bytes(mp4_data.len() as u64),
+                total_ms
+            );
+
+            let buffer = RamBuffer::from_complete(mp4_data);
+            let track_id = format!("dash-{load_gen}");
+            let _ = cmd_tx.send(PlayerCommand::Load {
+                request: LoadRequest {
+                    buffer,
+                    load_gen,
+                    seq: event_seq,
+                    track_id,
+                    resume_policy: ResumePolicy::Disabled,
+                    load_start,
+                    cached: false,
+                },
+                auto_play: true,
+            });
+        });
+
+        *self.load_handle.lock().unwrap() = Some(handle);
+        Ok(())
+    }
+
     pub fn recover(
         &self,
         url: String,
