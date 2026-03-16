@@ -1,5 +1,6 @@
 pub(crate) mod buffer;
 pub(crate) mod cache;
+pub(crate) mod dash;
 pub(crate) mod ipc;
 mod resume;
 mod thread;

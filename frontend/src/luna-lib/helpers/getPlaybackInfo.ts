@@ -1,6 +1,7 @@
 import type { DashManifest } from "./getPlaybackInfo.dasha.native";
 
 import type { PlaybackInfoResponse } from "../classes/TidalApi";
+import { TidalApi } from "../classes/TidalApi";
 
 import type { AudioQuality, ItemId } from "../redux";
 
@@ -28,17 +29,21 @@ interface DashPlaybackInfo extends PlaybackInfoBase {
 export type PlaybackInfo = DashPlaybackInfo | TidalPlaybackInfo;
 
 export const getPlaybackInfo = async (mediaItemId: ItemId, audioQuality: AudioQuality): Promise<PlaybackInfo | undefined> => {
-	// Rust decodes the base64 manifest and returns the processed PlaybackInfo
-	const result = await invokeIpc("tidal.playback_info", mediaItemId, audioQuality);
-	if (result === null || result === undefined) return undefined;
+	const playbackInfo = await TidalApi.playbackInfo(mediaItemId, audioQuality);
+	if (playbackInfo === undefined) return undefined;
 
-	// Map the Rust response (with decodedManifest) to the TS PlaybackInfo shape
-	const { decodedManifest, ...rest } = result;
-	if (decodedManifest?.type === "bts") {
-		const manifest: TidalManifest = decodedManifest;
-		return { ...rest, manifestMimeType: "application/vnd.tidal.bts" as const, manifest, mimeType: rest.mimeType ?? manifest.mimeType };
-	} else {
-		const manifest: DashManifest = decodedManifest ?? { initUrl: "", segmentUrls: [], codec: "" };
-		return { ...rest, manifestMimeType: "application/dash+xml" as const, manifest, mimeType: "audio/mp4" };
+	switch (playbackInfo.manifestMimeType) {
+		case "application/vnd.tidal.bts": {
+			const manifest: TidalManifest = JSON.parse(atob(playbackInfo.manifest));
+			return { ...playbackInfo, manifestMimeType: playbackInfo.manifestMimeType, manifest, mimeType: manifest.mimeType };
+		}
+		case "application/dash+xml": {
+			// DASH manifest parsing handled by Rust (no Node.js available)
+			const manifest: DashManifest = await invokeIpc("player.parse_dash", atob(playbackInfo.manifest));
+			return { ...playbackInfo, manifestMimeType: playbackInfo.manifestMimeType, manifest, mimeType: "audio/mp4" };
+		}
+		default: {
+			throw new Error(`Unsupported Stream Info manifest mime type: ${playbackInfo.manifestMimeType}`);
+		}
 	}
 };

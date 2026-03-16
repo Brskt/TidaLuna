@@ -210,14 +210,6 @@ const init = async () => {
         add("playbackControls/SET_VOLUME", (p: { volume: number }) => sendIpc("player.volume", p.volume));
     }
 
-    try {
-        const { TidalApi } = await import("./luna-lib/classes/TidalApi");
-        await TidalApi.pushCredentialsToRust();
-        console.log("[luna] Credentials pushed to Rust backend");
-    } catch (e) {
-        console.warn("[luna] Failed to push credentials to Rust:", e);
-    }
-
     modules["@luna/core"] = LunaCore;
     modules["@luna/lib"] = LunaLib;
     modules["@inrixia/helpers"] = InrixiaHelpers;

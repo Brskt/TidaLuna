@@ -2,8 +2,6 @@
     all(not(debug_assertions), not(feature = "console")),
     windows_subsystem = "windows"
 )]
-mod api;
-mod api_ipc;
 mod auth;
 mod bandwidth;
 mod bridge;
@@ -281,9 +279,20 @@ pub(crate) fn ipc_callback_err(cb: &IpcCallback, error: &str) {
 }
 
 fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
-    // tidal.* — TIDAL API endpoints handled in Rust
-    if msg.channel.starts_with("tidal.") {
-        api_ipc::handle_tidal_ipc(msg, callback);
+    // player.parse_dash — synchronous DASH MPD XML parsing
+    if msg.channel == "player.parse_dash" {
+        let xml = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match crate::player::dash::parse_dash_mpd(xml) {
+            Ok(manifest) => {
+                let json = serde_json::to_string(&manifest).unwrap_or_else(|_| "null".into());
+                ipc_callback_ok(&callback, &json);
+            }
+            Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
+        }
         return;
     }
 
@@ -1174,7 +1183,7 @@ impl BrowserSideHandler for IpcQueryHandler {
         if let Ok(msg) = serde_json::from_str::<IpcMessage>(request)
             && (msg.channel.starts_with("plugin.")
                 || msg.channel.starts_with("proxy.")
-                || msg.channel.starts_with("tidal."))
+                || msg.channel == "player.parse_dash")
             && msg.id.is_some()
         {
             handle_plugin_ipc(msg, callback);
