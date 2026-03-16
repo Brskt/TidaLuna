@@ -40,6 +40,7 @@ base64 = "0.22.1"
 tracing = "0.1.44"
 reqwest = { version = "0.12.28", default-features = false, features = [
   "stream",
+  "blocking",
   "rustls-tls-native-roots",
   "http2",
 ] }
@@ -55,6 +56,15 @@ rubato = "0.14"
 symphonia = { version = "0.5.5", features = ["flac", "aac", "isomp4"] }
 dash-mpd = { version = "0.17", default-features = false }
 souvlaki = "0.8"
+oxc = { version = "0.119", features = ["semantic", "transformer", "codegen"] }
+rquickjs = { version = "0.11", features = [
+  "loader",
+  "futures",
+  "macro",
+  "classes",
+  "properties",
+  "rust-alloc",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22.0"
