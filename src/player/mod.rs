@@ -11,6 +11,7 @@ use crate::state::{
     AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, GOVERNOR, HTTP_CLIENT_PLAYBACK, TrackInfo,
 };
 use buffer::RamBuffer;
+use futures_util::future::join_all;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
 
@@ -573,49 +574,51 @@ impl Player {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let mut mp4_data = init_data;
-
-            for (i, seg_url) in segment_urls.iter().enumerate() {
-                if is_stale() {
-                    crate::vprintln!("[DASH-LOAD #{load_gen}] stale at segment {i}, dropping");
-                    return;
-                }
-
-                let seg_data = match HTTP_CLIENT_PLAYBACK.get(seg_url).send().await {
-                    Ok(r) if r.status().is_success() => match r.bytes().await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            eprintln!("[ERROR]  DASH segment {i} read failed: {e}");
-                            let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
-                                error: format!("DASH segment {i}: {e}"),
-                                code: "no_such_file",
-                            });
-                            return;
+            let segment_futures: Vec<_> = segment_urls
+                .iter()
+                .enumerate()
+                .map(|(i, url)| {
+                    let url = url.clone();
+                    async move {
+                        let resp = HTTP_CLIENT_PLAYBACK.get(&url).send().await;
+                        match resp {
+                            Ok(r) if r.status().is_success() => match r.bytes().await {
+                                Ok(b) => Ok(b),
+                                Err(e) => Err(format!("DASH segment {i} read: {e}")),
+                            },
+                            Ok(r) => Err(format!("DASH segment {i} HTTP {}", r.status())),
+                            Err(e) => Err(format!("DASH segment {i} request: {e}")),
                         }
-                    },
-                    Ok(r) => {
-                        eprintln!("[ERROR]  DASH segment {i} HTTP {}", r.status());
-                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
-                            error: format!("DASH segment {i} HTTP {}", r.status()),
-                            code: "no_such_file",
-                        });
-                        return;
                     }
-                    Err(e) => {
-                        eprintln!("[ERROR]  DASH segment {i} request failed: {e}");
-                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
-                            error: format!("DASH segment {i}: {e}"),
-                            code: "no_such_file",
-                        });
-                        return;
-                    }
-                };
-                mp4_data.extend_from_slice(&seg_data);
-            }
+                })
+                .collect();
+
+            let results = join_all(segment_futures).await;
 
             if is_stale() {
-                crate::vprintln!("[DASH-LOAD #{load_gen}] stale after all segments, dropping");
+                crate::vprintln!("[DASH-LOAD #{load_gen}] stale after parallel fetch, dropping");
                 return;
+            }
+
+            let mut total_seg_bytes = 0usize;
+            for result in &results {
+                match result {
+                    Ok(data) => total_seg_bytes += data.len(),
+                    Err(msg) => {
+                        eprintln!("[ERROR]  {msg}");
+                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                            error: msg.clone(),
+                            code: "no_such_file",
+                        });
+                        return;
+                    }
+                }
+            }
+
+            let mut mp4_data = init_data;
+            mp4_data.reserve(total_seg_bytes);
+            for data in results.into_iter().flatten() {
+                mp4_data.extend_from_slice(&data);
             }
 
             let total_ms = load_start.elapsed().as_secs_f64() * 1000.0;
