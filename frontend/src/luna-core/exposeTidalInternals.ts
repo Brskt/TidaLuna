@@ -5,6 +5,7 @@
 
 import { buildActions, interceptors } from "./exposeTidalInternals.patchAction";
 import { getOrCreateLoadingContainer } from "./loadingContainer";
+import { sendIpc } from "../ipc";
 
 export const tidalModules: Record<string, object> = {};
 
@@ -178,6 +179,11 @@ function populateBuildActions(cache: Record<string, any> | undefined, store: any
 					}
 				}
 			}
+			// Forward to rquickjs plugins via Rust bridge
+			try {
+				const payload = action.payload !== undefined ? action.payload : action;
+				sendIpc("jsrt.redux_action", action.type, JSON.stringify(payload));
+			} catch { /* ignore serialization errors */ }
 		}
 		return originalDispatch(action);
 	};

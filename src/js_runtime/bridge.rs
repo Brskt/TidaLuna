@@ -1,7 +1,6 @@
-use rquickjs::{Ctx, Function, Result as JsResult};
+use std::cell::RefCell;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use rquickjs::{Ctx, Function, Result as JsResult};
 
 // ---------------------------------------------------------------------------
 // CEF Bridge — connects the rquickjs plugin runtime to CEF's DOM/Redux
@@ -23,8 +22,21 @@ use std::sync::{Arc, Mutex};
 //   - CEF forwards events to Rust
 //   - Rust dispatches to rquickjs listeners
 
-/// Shared state for pending CEF responses (bridge callbacks).
-pub type BridgeCallbacks = Arc<Mutex<HashMap<String, String>>>;
+// Thread-local queue for JS code that needs to be sent to CEF.
+// __cef_eval pushes here instead of calling eval_js() directly,
+// because eval_js() → with_state() would deadlock the Mutex
+// (we're already inside with_state from the IPC handler).
+// The caller drains this queue after ctx.with() returns.
+thread_local! {
+    static CEF_JS_QUEUE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Drain all queued JS code intended for CEF execution.
+/// Call this AFTER releasing the AppState Mutex, then pass each
+/// string to `eval_js()`.
+pub fn drain_cef_js() -> Vec<String> {
+    CEF_JS_QUEUE.with(|q| q.borrow_mut().drain(..).collect())
+}
 
 /// Install the CEF bridge globals in the rquickjs context.
 ///
@@ -92,12 +104,13 @@ pub fn install_bridge(ctx: &Ctx<'_>) -> JsResult<()> {
         })();
     "#)?;
 
-    // __cef_eval — sends JS code to CEF for execution
-    // This is a Rust function that calls eval_js()
+    // __cef_eval — queues JS code for later execution in CEF.
+    // Pushed to a thread-local queue (not eval_js directly) to avoid
+    // Mutex deadlock. The queue is drained after ctx.with() returns.
     ctx.globals().set(
         "__cef_eval",
         Function::new(ctx.clone(), |code: String| {
-            crate::eval_js(&code);
+            CEF_JS_QUEUE.with(|q| q.borrow_mut().push(code));
         })?.with_name("__cef_eval")?,
     )?;
 
@@ -219,5 +232,30 @@ mod tests {
             let user_id: i32 = ctx.eval("__cef_state.session.userId").unwrap();
             assert_eq!(user_id, 42);
         });
+    }
+
+    #[test]
+    fn test_cef_eval_queues_js() {
+        let (_rt, ctx) = js_runtime::init().expect("init");
+        ctx.with(|ctx| {
+            js_runtime::shims::install_shims(&ctx).unwrap();
+            super::install_bridge(&ctx).unwrap();
+
+            // Call __cef_eval from JS — should NOT call eval_js, just queue
+            let _: () = ctx.eval(r#"
+                __cef_eval("console.log('hello from CEF')");
+                __cef_eval("document.title = 'test'");
+            "#).unwrap();
+        });
+
+        // After ctx.with() returns, drain the queue
+        let queued = super::drain_cef_js();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0], "console.log('hello from CEF')");
+        assert_eq!(queued[1], "document.title = 'test'");
+
+        // Queue should be empty after drain
+        let queued2 = super::drain_cef_js();
+        assert!(queued2.is_empty());
     }
 }

@@ -2,10 +2,53 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 
 /// Install all globalThis shims into the given JS context.
 pub fn install_shims(ctx: &Ctx<'_>) -> JsResult<()> {
+    install_window(ctx)?;
     install_timers(ctx)?;
     install_base64(ctx)?;
     install_performance(ctx)?;
     install_text_codec(ctx)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Window shim: globalThis.window = globalThis + no-op event listeners
+// ---------------------------------------------------------------------------
+// Many JS libraries reference `window` — this prevents ReferenceError.
+// addEventListener/removeEventListener are no-ops since QuickJS has no DOM.
+
+fn install_window(ctx: &Ctx<'_>) -> JsResult<()> {
+    ctx.eval::<(), _>(r#"
+        globalThis.window = globalThis;
+        const stubEl = () => ({
+            style: {}, appendChild: () => stubEl(), removeChild: () => {},
+            innerHTML: "", innerText: "", id: "", className: "",
+            setAttribute: () => {}, getAttribute: () => null,
+            addEventListener: () => {}, removeEventListener: () => {},
+            querySelector: () => null, querySelectorAll: () => [],
+            children: [], childNodes: [], parentNode: null,
+            sheet: { insertRule: () => 0, deleteRule: () => {}, cssRules: [] },
+        });
+        const docStub = {
+            createElement: () => stubEl(),
+            createTextNode: () => stubEl(),
+            getElementById: () => null,
+            querySelector: () => null,
+            querySelectorAll: () => [],
+            body: stubEl(),
+            head: stubEl(),
+            documentElement: stubEl(),
+        };
+        globalThis.document = docStub;
+        globalThis.addEventListener = function() {};
+        globalThis.removeEventListener = function() {};
+        globalThis.navigator = { userAgent: "QuickJS/TidaLunar" };
+        globalThis.MutationObserver = class MutationObserver {
+            constructor(_cb) {}
+            observe() {}
+            disconnect() {}
+            takeRecords() { return []; }
+        };
+    "#)?;
     Ok(())
 }
 

@@ -174,10 +174,15 @@ fn handle_ipc_message(request: &str) {
         return;
     }
 
-    crate::vprintln!("IPC Message: {:?}", msg);
+    // Suppress logging for high-frequency channels
+    if msg.channel != "jsrt.tick" && msg.channel != "jsrt.state_sync" {
+        crate::vprintln!("IPC Message: {:?}", msg);
+    }
 
     if msg.channel.starts_with("player.") {
         handle_player_ipc(&msg);
+    } else if msg.channel.starts_with("jsrt.") {
+        handle_jsrt_fire_and_forget(&msg);
     } else {
         handle_window_ipc(&msg);
     }
@@ -281,6 +286,76 @@ pub(crate) fn ipc_callback_err(cb: &IpcCallback, error: &str) {
         .success_str(&format!("E:{error}"));
 }
 
+/// Handle fire-and-forget jsrt.* messages (no callback, no id).
+/// Used for high-frequency operations like state sync and Redux action forwarding.
+fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
+    match msg.channel.as_str() {
+        "jsrt.redux_action" => {
+            let action_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
+            with_state(|state| {
+                if let Some(ref rt) = state.plugin_runtime {
+                    rt.dispatch_redux_action(action_type, payload_json);
+                }
+            });
+            flush_cef_js_queue();
+        }
+        "jsrt.state_sync" => {
+            let state_json = msg.args.first().and_then(|v| v.as_str()).unwrap_or("{}");
+            with_state(|state| {
+                if let Some(ref rt) = state.plugin_runtime {
+                    rt.update_redux_state(state_json);
+                }
+            });
+        }
+        "jsrt.event" => {
+            let event_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
+            with_state(|state| {
+                if let Some(ref rt) = state.plugin_runtime {
+                    rt.dispatch_event(event_type, payload_json);
+                }
+            });
+            flush_cef_js_queue();
+        }
+        "jsrt.tick" => {
+            with_state(|state| {
+                if let Some(ref rt) = state.plugin_runtime {
+                    rt.tick();
+                }
+            });
+            flush_cef_js_queue();
+        }
+        "jsrt.load_plugins" => {
+            let loaded = with_state(|state| {
+                if let Some(ref mut rt) = state.plugin_runtime {
+                    rt.load_all_enabled(&state.plugin_store)
+                } else {
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default();
+            flush_cef_js_queue();
+            if !loaded.is_empty() {
+                crate::vprintln!("[JSRT] Loaded {} plugins: {:?}", loaded.len(), loaded);
+            }
+        }
+        _ => {
+            crate::vprintln!("[JSRT] Unknown fire-and-forget channel: {}", msg.channel);
+        }
+    }
+}
+
+/// Flush queued __cef_eval JS code into CEF.
+/// Must be called AFTER with_state() returns (Mutex released).
+fn flush_cef_js_queue() {
+    // drain_cef_js() is on a thread-local, no Mutex needed
+    let queued = crate::js_runtime::bridge::drain_cef_js();
+    for code in queued {
+        eval_js(&code);
+    }
+}
+
 fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
     // jsrt.eval — evaluate JS in the QuickJS plugin runtime (debug/test)
     if msg.channel == "jsrt.eval" {
@@ -298,6 +373,7 @@ fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
                 .unwrap_or_else(|| "null".to_string())
         })
         .unwrap_or_else(|| "null".to_string());
+        flush_cef_js_queue();
         ipc_callback_ok(&callback, &result);
         return;
     }
@@ -313,6 +389,7 @@ fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             }
         })
         .unwrap_or_else(|| "[]".to_string());
+        flush_cef_js_queue();
         ipc_callback_ok(&callback, &loaded);
         return;
     }
@@ -324,6 +401,47 @@ fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
                 rt.tick();
             }
         });
+        flush_cef_js_queue();
+        ipc_callback_ok(&callback, "true");
+        return;
+    }
+
+    // jsrt.redux_action — forward Redux action from CEF to rquickjs plugins
+    if msg.channel == "jsrt.redux_action" {
+        let action_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+        let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
+        with_state(|state| {
+            if let Some(ref rt) = state.plugin_runtime {
+                rt.dispatch_redux_action(action_type, payload_json);
+            }
+        });
+        flush_cef_js_queue();
+        ipc_callback_ok(&callback, "true");
+        return;
+    }
+
+    // jsrt.state_sync — update cached Redux state in rquickjs
+    if msg.channel == "jsrt.state_sync" {
+        let state_json = msg.args.first().and_then(|v| v.as_str()).unwrap_or("{}");
+        with_state(|state| {
+            if let Some(ref rt) = state.plugin_runtime {
+                rt.update_redux_state(state_json);
+            }
+        });
+        ipc_callback_ok(&callback, "true");
+        return;
+    }
+
+    // jsrt.event — forward a CEF event to rquickjs plugins
+    if msg.channel == "jsrt.event" {
+        let event_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+        let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
+        with_state(|state| {
+            if let Some(ref rt) = state.plugin_runtime {
+                rt.dispatch_event(event_type, payload_json);
+            }
+        });
+        flush_cef_js_queue();
         ipc_callback_ok(&callback, "true");
         return;
     }
@@ -2341,7 +2459,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugins::PluginStore::open(&data_dir).expect("Failed to open plugin store database");
 
     // --- Initialize QuickJS plugin runtime ---
-    let plugin_runtime = match js_runtime::plugin_runtime::PluginRuntime::new() {
+    let db_path = data_dir.join("plugins.db");
+    let plugin_runtime = match js_runtime::plugin_runtime::PluginRuntime::new(&db_path) {
         Ok(rt) => {
             crate::vprintln!("[JS_RUNTIME] QuickJS plugin runtime initialized");
             Some(rt)

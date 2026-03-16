@@ -39,6 +39,17 @@ fn main() {
         panic!("build-luna-ui failed");
     }
 
+    // Build @luna/* module bundles for rquickjs runtime
+    let status = Command::new("node")
+        .args(["scripts/build-luna-modules.mjs"])
+        .current_dir(frontend_dir)
+        .status()
+        .expect("Failed to run build-luna-modules");
+
+    if !status.success() {
+        panic!("build-luna-modules failed");
+    }
+
     // Build main bundle
     let status = Command::new("node")
         .args(["scripts/build-bundle.mjs"])

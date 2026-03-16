@@ -198,6 +198,46 @@ const init = async () => {
     }
     console.log("[luna] Core initialized — Redux store discovered, modules populated");
 
+    // Sync lightweight Redux state subset to rquickjs plugin runtime (throttled)
+    {
+        const { store } = require("./luna-lib/redux/store");
+        if (store && typeof store.subscribe === "function") {
+            let syncTimer: number | null = null;
+            const extractLightState = () => {
+                const s = store.getState();
+                return {
+                    playbackControls: s.playbackControls,
+                    playQueue: s.playQueue ? {
+                        currentIndex: s.playQueue.currentIndex,
+                        elements: s.playQueue.elements?.slice(
+                            Math.max(0, (s.playQueue.currentIndex ?? 0) - 2),
+                            (s.playQueue.currentIndex ?? 0) + 5,
+                        ),
+                        repeatMode: s.playQueue.repeatMode,
+                        shuffled: s.playQueue.shuffled,
+                    } : undefined,
+                    user: s.user,
+                    session: s.session,
+                };
+            };
+            const syncState = () => {
+                try {
+                    sendIpc("jsrt.state_sync", JSON.stringify(extractLightState()));
+                } catch { /* ignore serialization errors */ }
+                syncTimer = null;
+            };
+            // Throttle: sync at most every 1s
+            store.subscribe(() => {
+                if (syncTimer === null) {
+                    syncTimer = setTimeout(syncState, 1000) as unknown as number;
+                }
+            });
+            // Initial sync
+            syncState();
+            console.log("[luna] Redux state sync to rquickjs enabled (lightweight)");
+        }
+    }
+
     // SDK middleware doesn't reach Rust player for DASH/AAC — intercept Redux actions.
     {
         const { interceptors } = require("./luna-core/exposeTidalInternals.patchAction");
@@ -214,18 +254,6 @@ const init = async () => {
     modules["@luna/lib"] = LunaLib;
     modules["@inrixia/helpers"] = InrixiaHelpers;
 
-    // DBG: wrap onMediaTransition to trace plugin subscriptions
-    const _origOMT = LunaLib.MediaItem.onMediaTransition;
-    let _omtListenerCount = 0;
-    (LunaLib.MediaItem as any).onMediaTransition = (unloads: any, listener: any) => {
-        _omtListenerCount++;
-        console.log("[DBG:OMT-WRAP] listener registered! count=", _omtListenerCount);
-        return _origOMT(unloads, (...args: any[]) => {
-            console.log("[DBG:OMT-WRAP] listener CALLED, id=", (args[0] as any)?.id);
-            return listener(...args);
-        });
-    };
-
     try {
         const { LUNA_UI_CODE } = await import("./plugins/luna-ui-inline");
         const blob = new Blob([LUNA_UI_CODE], { type: "application/javascript" });
@@ -239,7 +267,11 @@ const init = async () => {
         console.error("[luna] Failed to load @luna/ui:", e);
     }
 
-    await LunaPlugin.loadStoredPlugins();
+    // Load user plugins in rquickjs runtime (not in CEF)
+    sendIpc("jsrt.load_plugins");
+    // Drive rquickjs timers and pending jobs periodically
+    setInterval(() => sendIpc("jsrt.tick"), 100);
+    console.log("[luna] Plugin execution delegated to rquickjs runtime");
 };
 
 setTimeout(init, 0);

@@ -3,6 +3,7 @@ pub mod fetch;
 pub mod loader;
 pub mod plugin_runtime;
 pub mod shims;
+pub mod storage;
 pub mod transpile;
 
 use rquickjs::{Context, Function, Runtime};
