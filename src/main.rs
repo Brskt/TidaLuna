@@ -7,6 +7,7 @@ mod bandwidth;
 mod bridge;
 mod decrypt;
 mod flac_meta;
+mod js_runtime;
 mod logging;
 mod media_controls;
 mod metadata;
@@ -66,6 +67,8 @@ struct AppState {
     media_duration: Option<f64>,
     plugin_store: plugins::PluginStore,
     pending_ipc_callbacks: HashMap<String, IpcCallback>,
+    /// QuickJS plugin runtime — executes TidaLuna plugins outside CEF
+    plugin_runtime: Option<js_runtime::plugin_runtime::PluginRuntime>,
     #[cfg(target_os = "windows")]
     thumbbar: Option<thumbbar::ThumbBar>,
 }
@@ -279,6 +282,52 @@ pub(crate) fn ipc_callback_err(cb: &IpcCallback, error: &str) {
 }
 
 fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
+    // jsrt.eval — evaluate JS in the QuickJS plugin runtime (debug/test)
+    if msg.channel == "jsrt.eval" {
+        let code = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let result = with_state(|state| {
+            state
+                .plugin_runtime
+                .as_ref()
+                .and_then(|rt| rt.eval(&code).ok())
+                .unwrap_or_else(|| "null".to_string())
+        })
+        .unwrap_or_else(|| "null".to_string());
+        ipc_callback_ok(&callback, &result);
+        return;
+    }
+
+    // jsrt.load_plugins — load all enabled plugins in the QuickJS runtime
+    if msg.channel == "jsrt.load_plugins" {
+        let loaded = with_state(|state| {
+            if let Some(ref mut rt) = state.plugin_runtime {
+                let urls = rt.load_all_enabled(&state.plugin_store);
+                serde_json::to_string(&urls).unwrap_or_else(|_| "[]".to_string())
+            } else {
+                "[]".to_string()
+            }
+        })
+        .unwrap_or_else(|| "[]".to_string());
+        ipc_callback_ok(&callback, &loaded);
+        return;
+    }
+
+    // jsrt.tick — drive timers and pending jobs in the QuickJS runtime
+    if msg.channel == "jsrt.tick" {
+        with_state(|state| {
+            if let Some(ref rt) = state.plugin_runtime {
+                rt.tick();
+            }
+        });
+        ipc_callback_ok(&callback, "true");
+        return;
+    }
+
     // player.parse_dash — synchronous DASH MPD XML parsing
     if msg.channel == "player.parse_dash" {
         let xml = msg
@@ -1183,6 +1232,7 @@ impl BrowserSideHandler for IpcQueryHandler {
         if let Ok(msg) = serde_json::from_str::<IpcMessage>(request)
             && (msg.channel.starts_with("plugin.")
                 || msg.channel.starts_with("proxy.")
+                || msg.channel.starts_with("jsrt.")
                 || msg.channel == "player.parse_dash")
             && msg.id.is_some()
         {
@@ -2290,6 +2340,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plugin_store =
         plugins::PluginStore::open(&data_dir).expect("Failed to open plugin store database");
 
+    // --- Initialize QuickJS plugin runtime ---
+    let plugin_runtime = match js_runtime::plugin_runtime::PluginRuntime::new() {
+        Ok(rt) => {
+            crate::vprintln!("[JS_RUNTIME] QuickJS plugin runtime initialized");
+            Some(rt)
+        }
+        Err(e) => {
+            eprintln!("[JS_RUNTIME] Failed to init QuickJS runtime: {e}");
+            None
+        }
+    };
+
     // --- Set up shared state ---
     let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
         player,
@@ -2304,6 +2366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         media_duration: None,
         plugin_store,
         pending_ipc_callbacks: HashMap::new(),
+        plugin_runtime,
         #[cfg(target_os = "windows")]
         thumbbar: None,
     })));
