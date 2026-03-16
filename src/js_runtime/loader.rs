@@ -97,10 +97,12 @@ impl LunaLoader {
 
     /// Register a built-in module with its source code.
     /// If the source is TypeScript, it will be transpiled to JS.
+    #[allow(dead_code)]
     pub fn with_module(mut self, name: &str, source: &str) -> Self {
         let js = if name.ends_with(".ts") || source.contains(": ") && !source.contains("\":") {
             // Heuristic: try transpiling as TS, fallback to raw if it fails
-            transpile::transpile_ts(source, &format!("{name}.ts")).unwrap_or_else(|_| source.to_string())
+            transpile::transpile_ts(source, &format!("{name}.ts"))
+                .unwrap_or_else(|_| source.to_string())
         } else {
             source.to_string()
         };
@@ -115,11 +117,13 @@ impl LunaLoader {
     }
 
     /// Register a module source at runtime (e.g., from PluginStore).
+    #[allow(dead_code)]
     pub fn add_module(&mut self, name: &str, source: String) {
         self.modules.insert(name.to_string(), source);
     }
 
     /// Check if a module is registered.
+    #[allow(dead_code)]
     pub fn has_module(&self, name: &str) -> bool {
         self.modules.contains_key(name)
     }
@@ -132,11 +136,10 @@ impl Loader for LunaLoader {
             .get(name)
             .ok_or_else(|| Error::new_loading(name))?;
 
-        Module::declare(ctx.clone(), name, source.as_str())
-            .map_err(|e| {
-                eprintln!("[LunaLoader] Failed to declare module '{name}': {e}");
-                e
-            })
+        Module::declare(ctx.clone(), name, source.as_str()).map_err(|e| {
+            eprintln!("[LunaLoader] Failed to declare module '{name}': {e}");
+            e
+        })
     }
 }
 
@@ -165,20 +168,26 @@ mod tests {
 
     #[test]
     fn test_resolve_relative() {
-        assert_eq!(resolve_relative("@luna/lib/classes/index", "./Album"), "@luna/lib/classes/Album");
-        assert_eq!(resolve_relative("@luna/lib/classes/Album", "../helpers/getCredentials"), "@luna/lib/helpers/getCredentials");
+        assert_eq!(
+            resolve_relative("@luna/lib/classes/index", "./Album"),
+            "@luna/lib/classes/Album"
+        );
+        assert_eq!(
+            resolve_relative("@luna/lib/classes/Album", "../helpers/getCredentials"),
+            "@luna/lib/helpers/getCredentials"
+        );
         assert_eq!(resolve_relative("main", "./utils"), "utils");
     }
 
     #[test]
     fn test_load_builtin_module() {
-        let loader = LunaLoader::new()
-            .with_js_module("@luna/core", "export const version = '1.0';");
+        let loader =
+            LunaLoader::new().with_js_module("@luna/core", "export const version = '1.0';");
 
         let (_rt, ctx) = setup_runtime_with_loader(loader);
 
         ctx.with(|ctx| {
-            let module = Module::evaluate(
+            Module::evaluate(
                 ctx.clone(),
                 "main",
                 "import { version } from '@luna/core'; globalThis.__version = version;",
@@ -194,8 +203,7 @@ mod tests {
 
     #[test]
     fn test_load_ts_module() {
-        let loader = LunaLoader::new()
-            .with_module("mylib", "export const x: number = 42;");
+        let loader = LunaLoader::new().with_module("mylib", "export const x: number = 42;");
 
         let (_rt, ctx) = setup_runtime_with_loader(loader);
 

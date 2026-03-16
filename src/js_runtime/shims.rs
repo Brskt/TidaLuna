@@ -11,13 +11,12 @@ pub fn install_shims(ctx: &Ctx<'_>) -> JsResult<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Window shim: globalThis.window = globalThis + no-op event listeners
+// Window/document/navigator stubs — prevents ReferenceError in library code
 // ---------------------------------------------------------------------------
-// Many JS libraries reference `window` — this prevents ReferenceError.
-// addEventListener/removeEventListener are no-ops since QuickJS has no DOM.
 
 fn install_window(ctx: &Ctx<'_>) -> JsResult<()> {
-    ctx.eval::<(), _>(r#"
+    ctx.eval::<(), _>(
+        r#"
         globalThis.window = globalThis;
         const stubEl = () => ({
             style: {}, appendChild: () => stubEl(), removeChild: () => {},
@@ -48,7 +47,8 @@ fn install_window(ctx: &Ctx<'_>) -> JsResult<()> {
             disconnect() {}
             takeRecords() { return []; }
         };
-    "#)?;
+    "#,
+    )?;
     Ok(())
 }
 
@@ -71,11 +71,13 @@ fn install_timers(ctx: &Ctx<'_>) -> JsResult<()> {
         "__now_ms",
         Function::new(ctx.clone(), || -> f64 {
             TIMER_EPOCH.with(|epoch| epoch.elapsed().as_secs_f64() * 1000.0)
-        })?.with_name("__now_ms")?,
+        })?
+        .with_name("__now_ms")?,
     )?;
 
     // Timer system in pure JS — avoids rquickjs lifetime issues
-    ctx.eval::<(), _>(r#"
+    ctx.eval::<(), _>(
+        r#"
         (function() {
             const timers = new Map();
             let nextId = 1;
@@ -109,7 +111,8 @@ fn install_timers(ctx: &Ctx<'_>) -> JsResult<()> {
                 }
             };
         })();
-    "#)?;
+    "#,
+    )?;
 
     Ok(())
 }
@@ -132,7 +135,8 @@ fn install_base64(ctx: &Ctx<'_>) -> JsResult<()> {
         Function::new(ctx.clone(), |input: String| -> rquickjs::Result<String> {
             use base64::Engine;
             Ok(base64::engine::general_purpose::STANDARD.encode(input.as_bytes()))
-        })?.with_name("btoa")?,
+        })?
+        .with_name("btoa")?,
     )?;
 
     globals.set(
@@ -141,10 +145,14 @@ fn install_base64(ctx: &Ctx<'_>) -> JsResult<()> {
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&input)
-                .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &format!("atob: {e}")))?;
-            String::from_utf8(bytes)
-                .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &format!("atob: {e}")))
-        })?.with_name("atob")?,
+                .map_err(|e| {
+                    rquickjs::Error::new_from_js_message("string", "string", &format!("atob: {e}"))
+                })?;
+            String::from_utf8(bytes).map_err(|e| {
+                rquickjs::Error::new_from_js_message("string", "string", &format!("atob: {e}"))
+            })
+        })?
+        .with_name("atob")?,
     )?;
 
     Ok(())
@@ -162,7 +170,8 @@ fn install_performance(ctx: &Ctx<'_>) -> JsResult<()> {
         "now",
         Function::new(ctx.clone(), move || -> f64 {
             start.elapsed().as_secs_f64() * 1000.0
-        })?.with_name("now")?,
+        })?
+        .with_name("now")?,
     )?;
 
     ctx.globals().set("performance", perf)?;
@@ -234,10 +243,14 @@ mod tests {
         ctx.with(|ctx| {
             super::install_shims(&ctx).unwrap();
 
-            let _: () = ctx.eval(r#"
+            let _: () = ctx
+                .eval(
+                    r#"
                 globalThis.__fired = false;
                 setTimeout(() => { globalThis.__fired = true; }, 0);
-            "#).unwrap();
+            "#,
+                )
+                .unwrap();
 
             super::drive_timers(&ctx).unwrap();
 
@@ -252,11 +265,15 @@ mod tests {
         ctx.with(|ctx| {
             super::install_shims(&ctx).unwrap();
 
-            let _: () = ctx.eval(r#"
+            let _: () = ctx
+                .eval(
+                    r#"
                 globalThis.__fired = false;
                 let id = setTimeout(() => { globalThis.__fired = true; }, 0);
                 clearTimeout(id);
-            "#).unwrap();
+            "#,
+                )
+                .unwrap();
 
             super::drive_timers(&ctx).unwrap();
 
@@ -296,12 +313,16 @@ mod tests {
         ctx.with(|ctx| {
             super::install_shims(&ctx).unwrap();
 
-            let result: String = ctx.eval(r#"
+            let result: String = ctx
+                .eval(
+                    r#"
                 const encoder = new TextEncoder();
                 const decoder = new TextDecoder();
                 const encoded = encoder.encode("hello");
                 decoder.decode(encoded);
-            "#).unwrap();
+            "#,
+                )
+                .unwrap();
             assert_eq!(result, "hello");
         });
     }

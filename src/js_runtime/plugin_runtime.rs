@@ -32,6 +32,7 @@ pub struct PluginRuntime {
     loaded_plugins: HashMap<String, LoadedPlugin>,
 }
 
+#[allow(dead_code)]
 struct LoadedPlugin {
     url: String,
     name: String,
@@ -83,14 +84,10 @@ impl PluginRuntime {
         })
     }
 
-    /// Register a built-in module (e.g., @luna/core, @luna/lib).
-    /// Must be called before loading plugins that depend on it.
-    ///
-    /// Note: Because rquickjs takes ownership of the loader in set_loader(),
-    /// we rebuild the loader each time.  For a small number of modules this
-    /// is fine.
+    /// Register a built-in module. rquickjs takes ownership of the loader,
+    /// so we declare directly in the context instead.
+    #[allow(dead_code)]
     pub fn register_module(&self, name: &str, source: &str) -> anyhow::Result<()> {
-        // Transpile if TypeScript
         let js = if name.ends_with(".ts") || name.ends_with(".mts") {
             transpile::transpile_ts(source, &format!("{name}.ts"))?
         } else {
@@ -106,14 +103,11 @@ impl PluginRuntime {
         })
     }
 
-    /// Load and execute a plugin by URL.
-    /// Fetches the code from the PluginStore, transpiles if needed, and executes.
     pub fn load_plugin(&mut self, store: &PluginStore, url: &str) -> anyhow::Result<()> {
         let code = store
             .get_code(url)
             .ok_or_else(|| anyhow::anyhow!("No code found for plugin '{url}'"))?;
 
-        // Transpile TS → JS if needed
         let js = if url.ends_with(".ts") || url.ends_with(".mts") {
             transpile::transpile_ts(&code, url)?
         } else {
@@ -131,9 +125,7 @@ impl PluginRuntime {
                 .map_err(|e| anyhow::anyhow!("Failed to evaluate plugin '{url}': {e}"))?;
 
             // Check for onUnload export
-            let has_unload: bool = evaluated
-                .get::<_, rquickjs::Function>("onUnload")
-                .is_ok();
+            let has_unload: bool = evaluated.get::<_, rquickjs::Function>("onUnload").is_ok();
 
             Ok(has_unload)
         })?;
@@ -159,6 +151,7 @@ impl PluginRuntime {
     }
 
     /// Unload a plugin — calls its `onUnload` export if present.
+    #[allow(dead_code)]
     pub fn unload_plugin(&mut self, url: &str) -> anyhow::Result<()> {
         let plugin = self.loaded_plugins.remove(url);
         if let Some(plugin) = &plugin {
@@ -184,7 +177,7 @@ impl PluginRuntime {
         Ok(())
     }
 
-    /// Drive timers — should be called periodically.
+    /// Drive timers and pending jobs.
     pub fn tick(&self) {
         self.ctx.with(|ctx| {
             let _ = shims::drive_timers(&ctx);
@@ -198,7 +191,6 @@ impl PluginRuntime {
         }
     }
 
-    /// Load all enabled plugins from the store.
     pub fn load_all_enabled(&mut self, store: &PluginStore) -> Vec<String> {
         let plugins = store.list();
         let mut loaded = Vec::new();
@@ -215,12 +207,11 @@ impl PluginRuntime {
         loaded
     }
 
-    /// Get list of currently loaded plugin URLs.
+    #[allow(dead_code)]
     pub fn loaded_plugins(&self) -> Vec<String> {
         self.loaded_plugins.keys().cloned().collect()
     }
 
-    /// Execute arbitrary JS in the plugin context (for debugging).
     pub fn eval(&self, code: &str) -> anyhow::Result<String> {
         self.ctx.with(|ctx| {
             let result: String = ctx
@@ -230,14 +221,11 @@ impl PluginRuntime {
         })
     }
 
-    /// Drain queued JS code from __cef_eval calls.
-    /// Call this AFTER releasing the AppState Mutex, then pass each
-    /// string to `eval_js()` to execute in CEF.
+    #[allow(dead_code)]
     pub fn drain_cef_js(&self) -> Vec<String> {
         bridge::drain_cef_js()
     }
 
-    /// Dispatch a Redux action intercept into the rquickjs context.
     pub fn dispatch_redux_action(&self, action_type: &str, payload_json: &str) {
         self.ctx.with(|ctx| {
             if let Err(e) = bridge::dispatch_redux_action(&ctx, action_type, payload_json) {
@@ -246,7 +234,6 @@ impl PluginRuntime {
         });
     }
 
-    /// Dispatch a CEF event into the rquickjs context.
     pub fn dispatch_event(&self, event_type: &str, payload_json: &str) {
         self.ctx.with(|ctx| {
             if let Err(e) = bridge::dispatch_event(&ctx, event_type, payload_json) {
@@ -255,7 +242,6 @@ impl PluginRuntime {
         });
     }
 
-    /// Update the cached Redux state in rquickjs.
     pub fn update_redux_state(&self, state_json: &str) {
         self.ctx.with(|ctx| {
             if let Err(e) = bridge::update_redux_state(&ctx, state_json) {
@@ -349,8 +335,7 @@ mod tests {
             let has_window: bool = ctx.eval("typeof window !== 'undefined'").unwrap();
             assert!(has_window, "window shim should be available");
 
-            let has_storage: bool =
-                ctx.eval("typeof __storage_get === 'function'").unwrap();
+            let has_storage: bool = ctx.eval("typeof __storage_get === 'function'").unwrap();
             assert!(has_storage, "__storage_get should be available");
         });
     }
@@ -390,12 +375,30 @@ mod tests {
 
         runtime.ctx.with(|ctx| {
             let exports: rquickjs::Object = ctx.eval("globalThis.__core_exports").unwrap();
-            assert!(exports.get::<_, bool>("hasTracer").unwrap(), "Tracer should be a function");
-            assert!(exports.get::<_, bool>("hasLunaPlugin").unwrap(), "LunaPlugin should be a function");
-            assert!(exports.get::<_, bool>("hasReactiveStore").unwrap(), "ReactiveStore should be a function");
-            assert!(exports.get::<_, bool>("hasUnloadSet").unwrap(), "unloadSet should be a function");
-            assert!(exports.get::<_, bool>("hasBuildActions").unwrap(), "buildActions should be an object");
-            assert!(exports.get::<_, bool>("hasInterceptors").unwrap(), "interceptors should be an object");
+            assert!(
+                exports.get::<_, bool>("hasTracer").unwrap(),
+                "Tracer should be a function"
+            );
+            assert!(
+                exports.get::<_, bool>("hasLunaPlugin").unwrap(),
+                "LunaPlugin should be a function"
+            );
+            assert!(
+                exports.get::<_, bool>("hasReactiveStore").unwrap(),
+                "ReactiveStore should be a function"
+            );
+            assert!(
+                exports.get::<_, bool>("hasUnloadSet").unwrap(),
+                "unloadSet should be a function"
+            );
+            assert!(
+                exports.get::<_, bool>("hasBuildActions").unwrap(),
+                "buildActions should be an object"
+            );
+            assert!(
+                exports.get::<_, bool>("hasInterceptors").unwrap(),
+                "interceptors should be an object"
+            );
         });
     }
 
@@ -436,18 +439,26 @@ mod tests {
 
         runtime.ctx.with(|ctx| {
             // Check for error first
-            let err: String = ctx.eval(r#"
+            let err: String = ctx
+                .eval(
+                    r#"
                 globalThis.__lib_error || ""
-            "#).unwrap_or_default();
+            "#,
+                )
+                .unwrap_or_default();
             if !err.is_empty() {
                 panic!("@luna/lib import error: {err}");
             }
 
-            let result: String = ctx.eval(r#"
+            let result: String = ctx
+                .eval(
+                    r#"
                 typeof globalThis.__lib_exports === "object"
                     ? JSON.stringify(globalThis.__lib_exports)
                     : "not set"
-            "#).unwrap_or_else(|_| "eval failed".into());
+            "#,
+                )
+                .unwrap_or_else(|_| "eval failed".into());
 
             if result == "not set" {
                 panic!("@luna/lib: exports not set (module never resolved)");
@@ -455,8 +466,14 @@ mod tests {
 
             eprintln!("[TEST] luna-lib exports: {result}");
             let exports: rquickjs::Object = ctx.eval("globalThis.__lib_exports").unwrap();
-            assert!(exports.get::<_, bool>("hasRedux").unwrap(), "redux should be an object");
-            assert!(exports.get::<_, bool>("hasIpcRenderer").unwrap(), "ipcRenderer should be an object");
+            assert!(
+                exports.get::<_, bool>("hasRedux").unwrap(),
+                "redux should be an object"
+            );
+            assert!(
+                exports.get::<_, bool>("hasIpcRenderer").unwrap(),
+                "ipcRenderer should be an object"
+            );
         });
     }
 
@@ -493,10 +510,22 @@ mod tests {
 
         runtime.ctx.with(|ctx| {
             let exports: rquickjs::Object = ctx.eval("globalThis.__dep_exports").unwrap();
-            assert!(exports.get::<_, bool>("hasSignal").unwrap(), "Signal should be a function");
-            assert!(exports.get::<_, bool>("hasMemoize").unwrap(), "memoize should be a function");
-            assert!(exports.get::<_, bool>("hasSemaphore").unwrap(), "Semaphore should be a function");
-            assert!(exports.get::<_, bool>("hasObyStore").unwrap(), "oby store should be a function");
+            assert!(
+                exports.get::<_, bool>("hasSignal").unwrap(),
+                "Signal should be a function"
+            );
+            assert!(
+                exports.get::<_, bool>("hasMemoize").unwrap(),
+                "memoize should be a function"
+            );
+            assert!(
+                exports.get::<_, bool>("hasSemaphore").unwrap(),
+                "Semaphore should be a function"
+            );
+            assert!(
+                exports.get::<_, bool>("hasObyStore").unwrap(),
+                "oby store should be a function"
+            );
         });
     }
 
@@ -604,11 +633,17 @@ mod tests {
 
             let core_keys: String = ctx.eval("globalThis.__plugin_core_keys").unwrap();
             assert!(core_keys.contains("Tracer"), "core should export Tracer");
-            assert!(core_keys.contains("LunaPlugin"), "core should export LunaPlugin");
+            assert!(
+                core_keys.contains("LunaPlugin"),
+                "core should export LunaPlugin"
+            );
 
             let lib_keys: String = ctx.eval("globalThis.__plugin_lib_keys").unwrap();
             assert!(lib_keys.contains("redux"), "lib should export redux");
-            assert!(lib_keys.contains("PlayState"), "lib should export PlayState");
+            assert!(
+                lib_keys.contains("PlayState"),
+                "lib should export PlayState"
+            );
         });
     }
 }

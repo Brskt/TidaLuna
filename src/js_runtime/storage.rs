@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use rquickjs::{Ctx, Function, Result as JsResult};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 // Thread-local SQLite connection for plugin storage.
 // Separate from the main PluginStore connection to avoid Mutex deadlocks
@@ -11,19 +11,16 @@ thread_local! {
     static STORAGE_CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
 }
 
-/// Open a second SQLite connection to the plugins database for JS runtime use.
-/// Must be called before install_storage().
 pub fn init_storage(db_path: &Path) -> anyhow::Result<()> {
-    let conn = Connection::open(db_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open storage DB: {e}"))?;
+    let conn =
+        Connection::open(db_path).map_err(|e| anyhow::anyhow!("Failed to open storage DB: {e}"))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     STORAGE_CONN.with(|c| *c.borrow_mut() = Some(conn));
     Ok(())
 }
 
-/// Install __storage_get, __storage_set, __storage_del, __storage_keys globals.
-/// These are called by the idb-keyval shim (frontend/src/quickjs-stubs/idb-keyval.mjs).
+/// Install `__storage_*` globals used by the idb-keyval shim.
 pub fn install_storage(ctx: &Ctx<'_>) -> JsResult<()> {
     let globals = ctx.globals();
 
@@ -112,44 +109,33 @@ pub fn install_storage(ctx: &Ctx<'_>) -> JsResult<()> {
 
     globals.set(
         "__storage_keys",
-        Function::new(
-            ctx.clone(),
-            |ns: String| -> rquickjs::Result<String> {
-                STORAGE_CONN.with(|c| {
-                    let borrow = c.borrow();
-                    let conn = borrow.as_ref().ok_or_else(|| {
-                        rquickjs::Error::new_from_js_message(
-                            "storage",
-                            "connection",
-                            "Storage not initialized",
-                        )
-                    })?;
-                    let mut stmt = conn
-                        .prepare("SELECT key FROM plugin_storage WHERE namespace = ?1")
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "storage",
-                                "keys",
-                                &e.to_string(),
-                            )
-                        })?;
-                    let keys: Vec<String> = stmt
-                        .query_map(params![ns], |row| row.get(0))
-                        .map_err(|e| {
-                            rquickjs::Error::new_from_js_message(
-                                "storage",
-                                "keys",
-                                &e.to_string(),
-                            )
-                        })?
-                        .filter_map(|r| r.ok())
-                        .collect();
-                    serde_json::to_string(&keys).map_err(|e| {
+        Function::new(ctx.clone(), |ns: String| -> rquickjs::Result<String> {
+            STORAGE_CONN.with(|c| {
+                let borrow = c.borrow();
+                let conn = borrow.as_ref().ok_or_else(|| {
+                    rquickjs::Error::new_from_js_message(
+                        "storage",
+                        "connection",
+                        "Storage not initialized",
+                    )
+                })?;
+                let mut stmt = conn
+                    .prepare("SELECT key FROM plugin_storage WHERE namespace = ?1")
+                    .map_err(|e| {
                         rquickjs::Error::new_from_js_message("storage", "keys", &e.to_string())
-                    })
+                    })?;
+                let keys: Vec<String> = stmt
+                    .query_map(params![ns], |row| row.get(0))
+                    .map_err(|e| {
+                        rquickjs::Error::new_from_js_message("storage", "keys", &e.to_string())
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                serde_json::to_string(&keys).map_err(|e| {
+                    rquickjs::Error::new_from_js_message("storage", "keys", &e.to_string())
                 })
-            },
-        )?
+            })
+        })?
         .with_name("__storage_keys")?,
     )?;
 
@@ -189,9 +175,7 @@ mod tests {
             let _: () = ctx
                 .eval(r#"__storage_set("test_ns", "key1", '{"hello":"world"}')"#)
                 .unwrap();
-            let result: String = ctx
-                .eval(r#"__storage_get("test_ns", "key1")"#)
-                .unwrap();
+            let result: String = ctx.eval(r#"__storage_get("test_ns", "key1")"#).unwrap();
             assert_eq!(result, r#"{"hello":"world"}"#);
         });
     }
@@ -215,15 +199,9 @@ mod tests {
         let (_rt, ctx) = js_runtime::init().unwrap();
         ctx.with(|ctx| {
             install_storage(&ctx).unwrap();
-            let _: () = ctx
-                .eval(r#"__storage_set("ns", "k", "v")"#)
-                .unwrap();
-            let _: () = ctx
-                .eval(r#"__storage_del("ns", "k")"#)
-                .unwrap();
-            let result: rquickjs::Value = ctx
-                .eval(r#"__storage_get("ns", "k")"#)
-                .unwrap();
+            let _: () = ctx.eval(r#"__storage_set("ns", "k", "v")"#).unwrap();
+            let _: () = ctx.eval(r#"__storage_del("ns", "k")"#).unwrap();
+            let result: rquickjs::Value = ctx.eval(r#"__storage_get("ns", "k")"#).unwrap();
             assert!(result.is_null() || result.is_undefined());
         });
     }
@@ -234,15 +212,9 @@ mod tests {
         let (_rt, ctx) = js_runtime::init().unwrap();
         ctx.with(|ctx| {
             install_storage(&ctx).unwrap();
-            let _: () = ctx
-                .eval(r#"__storage_set("ns", "a", "1")"#)
-                .unwrap();
-            let _: () = ctx
-                .eval(r#"__storage_set("ns", "b", "2")"#)
-                .unwrap();
-            let result: String = ctx
-                .eval(r#"__storage_keys("ns")"#)
-                .unwrap();
+            let _: () = ctx.eval(r#"__storage_set("ns", "a", "1")"#).unwrap();
+            let _: () = ctx.eval(r#"__storage_set("ns", "b", "2")"#).unwrap();
+            let result: String = ctx.eval(r#"__storage_keys("ns")"#).unwrap();
             let keys: Vec<String> = serde_json::from_str(&result).unwrap();
             assert!(keys.contains(&"a".to_string()));
             assert!(keys.contains(&"b".to_string()));

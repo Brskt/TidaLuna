@@ -448,11 +448,7 @@ fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
 
     // player.parse_dash — synchronous DASH MPD XML parsing
     if msg.channel == "player.parse_dash" {
-        let xml = msg
-            .args
-            .first()
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let xml = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
         match crate::player::dash::parse_dash_mpd(xml) {
             Ok(manifest) => {
                 let json = serde_json::to_string(&manifest).unwrap_or_else(|_| "null".into());

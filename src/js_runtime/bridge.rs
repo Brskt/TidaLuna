@@ -111,7 +111,8 @@ pub fn install_bridge(ctx: &Ctx<'_>) -> JsResult<()> {
         "__cef_eval",
         Function::new(ctx.clone(), |code: String| {
             CEF_JS_QUEUE.with(|q| q.borrow_mut().push(code));
-        })?.with_name("__cef_eval")?,
+        })?
+        .with_name("__cef_eval")?,
     )?;
 
     Ok(())
@@ -122,9 +123,7 @@ pub fn install_bridge(ctx: &Ctx<'_>) -> JsResult<()> {
 pub fn dispatch_event(ctx: &Ctx<'_>, event_type: &str, payload_json: &str) -> JsResult<()> {
     let escaped_type = event_type.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_payload = payload_json.replace('\\', "\\\\").replace('"', "\\\"");
-    let code = format!(
-        r#"__dispatch_cef_event("{escaped_type}", "{escaped_payload}")"#
-    );
+    let code = format!(r#"__dispatch_cef_event("{escaped_type}", "{escaped_payload}")"#);
     ctx.eval::<(), _>(code.as_str())
 }
 
@@ -132,9 +131,7 @@ pub fn dispatch_event(ctx: &Ctx<'_>, event_type: &str, payload_json: &str) -> Js
 pub fn dispatch_redux_action(ctx: &Ctx<'_>, action_type: &str, payload_json: &str) -> JsResult<()> {
     let escaped_type = action_type.replace('\\', "\\\\").replace('"', "\\\"");
     let escaped_payload = payload_json.replace('\\', "\\\\").replace('"', "\\\"");
-    let code = format!(
-        r#"__dispatch_redux_action("{escaped_type}", "{escaped_payload}")"#
-    );
+    let code = format!(r#"__dispatch_redux_action("{escaped_type}", "{escaped_payload}")"#);
     ctx.eval::<(), _>(code.as_str())
 }
 
@@ -157,18 +154,24 @@ mod tests {
             super::install_bridge(&ctx).unwrap();
 
             // Register a listener
-            let _: () = ctx.eval(r#"
+            let _: () = ctx
+                .eval(
+                    r#"
                 globalThis.__received = null;
                 __on_cef_event("test_event", function(data) {
                     globalThis.__received = data;
                 });
-            "#).unwrap();
+            "#,
+                )
+                .unwrap();
 
             // Dispatch from Rust
             super::dispatch_event(&ctx, "test_event", r#"{"hello":"world"}"#).unwrap();
 
             // Check it was received
-            let received: String = ctx.eval(r#"JSON.stringify(globalThis.__received)"#).unwrap();
+            let received: String = ctx
+                .eval(r#"JSON.stringify(globalThis.__received)"#)
+                .unwrap();
             assert_eq!(received, r#"{"hello":"world"}"#);
         });
     }
@@ -180,11 +183,15 @@ mod tests {
             js_runtime::shims::install_shims(&ctx).unwrap();
             super::install_bridge(&ctx).unwrap();
 
-            let _: () = ctx.eval(r#"
+            let _: () = ctx
+                .eval(
+                    r#"
                 globalThis.__count = 0;
                 const unsub = __on_cef_event("inc", function() { globalThis.__count++; });
                 unsub(); // Immediately unsubscribe
-            "#).unwrap();
+            "#,
+                )
+                .unwrap();
 
             super::dispatch_event(&ctx, "inc", "null").unwrap();
 
@@ -242,10 +249,14 @@ mod tests {
             super::install_bridge(&ctx).unwrap();
 
             // Call __cef_eval from JS — should NOT call eval_js, just queue
-            let _: () = ctx.eval(r#"
+            let _: () = ctx
+                .eval(
+                    r#"
                 __cef_eval("console.log('hello from CEF')");
                 __cef_eval("document.title = 'test'");
-            "#).unwrap();
+            "#,
+                )
+                .unwrap();
         });
 
         // After ctx.with() returns, drain the queue

@@ -1,32 +1,30 @@
 use rquickjs::{Ctx, Function, Result as JsResult};
 
-/// Install a `fetch()` global that proxies to Rust's reqwest client.
-///
-/// The fetch is synchronous (blocks the JS thread) since QuickJS is
-/// single-threaded anyway.  Returns a Response-like object with:
-///   .ok, .status, .statusText, .headers (object), .url
-///   .text() → string
-///   .json() → parsed object
+/// Synchronous `fetch()` global backed by `reqwest::blocking`.
 pub fn install_fetch(ctx: &Ctx<'_>) -> JsResult<()> {
-    // Rust-side HTTP request function: __fetch_raw(url, method, headers_json, body)
-    // Returns JSON: { status, statusText, ok, url, headers: {}, body: "" }
     ctx.globals().set(
         "__fetch_raw",
-        Function::new(ctx.clone(), |url: String, method: String, headers_json: String, body: Option<String>| -> rquickjs::Result<String> {
-            // Build and execute HTTP request synchronously using reqwest::blocking
-            let result = do_fetch(&url, &method, &headers_json, body.as_deref());
-            match result {
-                Ok(resp) => Ok(resp),
-                Err(e) => Err(rquickjs::Error::new_from_js_message(
-                    "fetch",
-                    "response",
-                    &format!("fetch failed: {e}"),
-                )),
-            }
-        })?.with_name("__fetch_raw")?,
+        Function::new(
+            ctx.clone(),
+            |url: String,
+             method: String,
+             headers_json: String,
+             body: Option<String>|
+             -> rquickjs::Result<String> {
+                let result = do_fetch(&url, &method, &headers_json, body.as_deref());
+                match result {
+                    Ok(resp) => Ok(resp),
+                    Err(e) => Err(rquickjs::Error::new_from_js_message(
+                        "fetch",
+                        "response",
+                        &format!("fetch failed: {e}"),
+                    )),
+                }
+            },
+        )?
+        .with_name("__fetch_raw")?,
     )?;
 
-    // JS-side fetch() that wraps __fetch_raw into a Response-like object
     ctx.eval::<(), _>(r#"
         globalThis.fetch = function(input, init) {
             const url = typeof input === "string" ? input : input.url;
@@ -109,9 +107,12 @@ pub fn install_fetch(ctx: &Ctx<'_>) -> JsResult<()> {
     Ok(())
 }
 
-/// Execute an HTTP request synchronously using reqwest blocking client.
-/// Returns a JSON string with the response data.
-fn do_fetch(url: &str, method: &str, headers_json: &str, body: Option<&str>) -> anyhow::Result<String> {
+fn do_fetch(
+    url: &str,
+    method: &str,
+    headers_json: &str,
+    body: Option<&str>,
+) -> anyhow::Result<String> {
     // Use a blocking client — QuickJS is single-threaded anyway
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -127,11 +128,13 @@ fn do_fetch(url: &str, method: &str, headers_json: &str, body: Option<&str>) -> 
     };
 
     // Parse and apply headers
-    if !headers_json.is_empty() && headers_json != "{}" {
-        if let Ok(headers) = serde_json::from_str::<std::collections::HashMap<String, String>>(headers_json) {
-            for (k, v) in &headers {
-                req = req.header(k.as_str(), v.as_str());
-            }
+    if !headers_json.is_empty()
+        && headers_json != "{}"
+        && let Ok(headers) =
+            serde_json::from_str::<std::collections::HashMap<String, String>>(headers_json)
+    {
+        for (k, v) in &headers {
+            req = req.header(k.as_str(), v.as_str());
         }
     }
 
@@ -151,7 +154,10 @@ fn do_fetch(url: &str, method: &str, headers_json: &str, body: Option<&str>) -> 
     let mut resp_headers = serde_json::Map::new();
     for (k, v) in resp.headers() {
         if let Ok(v) = v.to_str() {
-            resp_headers.insert(k.as_str().to_string(), serde_json::Value::String(v.to_string()));
+            resp_headers.insert(
+                k.as_str().to_string(),
+                serde_json::Value::String(v.to_string()),
+            );
         }
     }
 
@@ -194,10 +200,14 @@ mod tests {
 
             // Fetch a known URL — use httpbin or just verify structure
             // We test with a simple synchronous resolve since our fetch is sync
-            let is_promise: bool = ctx.eval(r#"
+            let is_promise: bool = ctx
+                .eval(
+                    r#"
                 const r = fetch("https://httpbin.org/get");
                 r instanceof Promise;
-            "#).unwrap();
+            "#,
+                )
+                .unwrap();
             assert!(is_promise);
         });
     }

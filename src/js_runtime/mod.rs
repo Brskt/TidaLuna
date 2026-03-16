@@ -9,21 +9,14 @@ pub mod transpile;
 use rquickjs::{Context, Function, Runtime};
 
 /// Initialize the QuickJS runtime and context.
-///
-/// Returns a `(Runtime, Context)` pair ready for module loading and
-/// plugin execution.  The context is created with all standard
-/// intrinsics (JSON, Promise, Date, RegExp, etc.).
 pub fn init() -> Result<(Runtime, Context), rquickjs::Error> {
     let rt = Runtime::new()?;
 
-    // Memory limit: 64 MB — generous for plugin logic, prevents runaways.
     rt.set_memory_limit(64 * 1024 * 1024);
-    // Max stack size: 1 MB
     rt.set_max_stack_size(1024 * 1024);
 
     let ctx = Context::full(&rt)?;
 
-    // Inject minimal console shim so JS code doesn't crash on console.log
     ctx.with(|ctx| {
         let globals = ctx.globals();
 
@@ -47,9 +40,13 @@ pub fn init() -> Result<(Runtime, Context), rquickjs::Error> {
         console.set("log", log)?;
         console.set("warn", warn)?;
         console.set("error", error)?;
-        console.set("info", Function::new(ctx.clone(), |msg: String| {
-            crate::vprintln!("[JS:INFO] {}", msg);
-        })?.with_name("info")?)?;
+        console.set(
+            "info",
+            Function::new(ctx.clone(), |msg: String| {
+                crate::vprintln!("[JS:INFO] {}", msg);
+            })?
+            .with_name("info")?,
+        )?;
 
         globals.set("console", console)?;
 
