@@ -19,7 +19,7 @@ export const startIpcLog = () => {
 		return originalCefQuery!({
 			request: params.request,
 			onSuccess: (response: string) => {
-				trace.log("Rust → JS", channel, response.length > 200 ? response.slice(0, 200) + "…" : response);
+				trace.log("Rust → JS", channel, response?.length > 200 ? response.slice(0, 200) + "…" : response);
 				params.onSuccess?.(response);
 			},
 			onFailure: (errorCode: number, errorMessage: string) => {
