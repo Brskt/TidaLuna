@@ -94,7 +94,8 @@ fn enumerate_audio_devices() -> Vec<super::AudioDevice> {
 
     if let Ok(output_devices) = host.output_devices() {
         for device in output_devices {
-            if let Ok(name) = device.name() {
+            if let Ok(desc) = device.description() {
+                let name = desc.name().to_string();
                 devices.push(super::AudioDevice {
                     controllable_volume: true,
                     id: name.clone(),
@@ -114,9 +115,12 @@ fn find_output_device(device_id: &str) -> Option<cpal::Device> {
         return host.default_output_device();
     }
 
-    host.output_devices()
-        .ok()?
-        .find(|d| d.name().ok().map(|name| name == device_id).unwrap_or(false))
+    host.output_devices().ok()?.find(|d| {
+        d.description()
+            .ok()
+            .map(|desc| desc.name() == device_id)
+            .unwrap_or(false)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -249,14 +253,17 @@ fn open_output_stream(
     let stream_error = Arc::new(AtomicU8::new(0));
     let played_samples = Arc::new(AtomicU64::new(0));
 
-    let dev_name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+    let dev_name = device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
     crate::vprintln!("[CPAL]   Device: {}", dev_name);
 
     // Attempt 1: source rate (no software resampling needed)
     {
         let config = cpal::StreamConfig {
             channels: source_channels,
-            sample_rate: cpal::SampleRate(source_rate),
+            sample_rate: source_rate,
             buffer_size: cpal::BufferSize::Default,
         };
         let ring_size = source_rate as usize * source_channels as usize * 2;
@@ -303,7 +310,7 @@ fn open_output_stream(
 
     // Attempt 2: device default (will need rubato resampling)
     let default = device.default_output_config().ok()?;
-    let ar = default.sample_rate().0;
+    let ar = default.sample_rate();
     let ac = default.channels();
     let cfg = default.config();
 
@@ -362,7 +369,7 @@ fn open_output_stream(
 /// Handles sample-rate conversion and channel remapping between the source
 /// format (from symphonia) and the output device format (from cpal).
 struct AudioPipeline {
-    resampler: rubato::SincFixedIn<f32>,
+    resampler: rubato::Async<f32>,
     source_channels: usize,
     output_channels: usize,
     chunk_size: usize,
@@ -387,9 +394,15 @@ impl AudioPipeline {
             window: rubato::WindowFunction::BlackmanHarris2,
         };
 
-        let resampler =
-            rubato::SincFixedIn::<f32>::new(ratio, 2.0, params, chunk_size, source_channels)
-                .expect("failed to create resampler");
+        let resampler = rubato::Async::<f32>::new_sinc(
+            ratio,
+            2.0,
+            &params,
+            chunk_size,
+            source_channels,
+            rubato::FixedAsync::Input,
+        )
+        .expect("failed to create resampler");
 
         Self {
             resampler,
@@ -404,6 +417,9 @@ impl AudioPipeline {
     /// Feed interleaved source samples, returns interleaved output samples
     /// in the output channel layout.
     fn process(&mut self, interleaved: &[f32]) -> Vec<f32> {
+        use audioadapter_buffers::direct::SequentialSliceOfVecs;
+        use rubato::Resampler;
+
         let src_ch = self.source_channels;
         let frames = interleaved.len() / src_ch;
 
@@ -419,12 +435,13 @@ impl AudioPipeline {
 
         // Process full chunks through resampler
         while self.accum_frames >= self.chunk_size {
-            let input: Vec<&[f32]> = self.accum.iter().map(|ch| &ch[..self.chunk_size]).collect();
+            let adapter = SequentialSliceOfVecs::new(&self.accum, src_ch, self.chunk_size)
+                .expect("invalid buffer dimensions");
 
-            match self.resampler.process(&input, None) {
+            match self.resampler.process(&adapter, 0, None) {
                 Ok(resampled) => {
-                    let out_frames = resampled.first().map(|c| c.len()).unwrap_or(0);
-                    self.interleave_into(&resampled, out_frames, &mut output);
+                    let data = resampled.take_data();
+                    self.remap_channels(&data, src_ch, &mut output);
                 }
                 Err(e) => {
                     eprintln!("[RESAMPLE] Error: {e}");
@@ -442,17 +459,44 @@ impl AudioPipeline {
 
     /// Flush remaining accumulated samples (call at EOF).
     fn flush(&mut self) -> Vec<f32> {
+        use audioadapter_buffers::direct::SequentialSliceOfVecs;
+        use rubato::{Indexing, Resampler};
+
         if self.accum_frames == 0 {
             return Vec::new();
         }
 
-        let input: Vec<&[f32]> = self.accum.iter().map(|ch| &ch[..]).collect();
-        let mut output = Vec::new();
+        let src_ch = self.source_channels;
+        let partial_frames = self.accum_frames;
 
-        match self.resampler.process_partial(Some(&input), None) {
-            Ok(resampled) => {
-                let out_frames = resampled.first().map(|c| c.len()).unwrap_or(0);
-                self.interleave_into(&resampled, out_frames, &mut output);
+        // Pad accum channels to chunk_size so the adapter doesn't reject the slice length
+        for ch in &mut self.accum {
+            ch.resize(self.chunk_size, 0.0);
+        }
+
+        let adapter = SequentialSliceOfVecs::new(&self.accum, src_ch, self.chunk_size)
+            .expect("invalid buffer dimensions");
+
+        let out_max = self.resampler.output_frames_max();
+        let mut out_buf =
+            audioadapter_buffers::owned::InterleavedOwned::<f32>::new(0.0, src_ch, out_max);
+
+        let indexing = Indexing {
+            input_offset: 0,
+            output_offset: 0,
+            partial_len: Some(partial_frames),
+            active_channels_mask: None,
+        };
+
+        let mut output = Vec::new();
+        match self
+            .resampler
+            .process_into_buffer(&adapter, &mut out_buf, Some(&indexing))
+        {
+            Ok((_consumed, written)) => {
+                let data = out_buf.take_data();
+                let used = &data[..written * src_ch];
+                self.remap_channels(used, src_ch, &mut output);
             }
             Err(e) => {
                 eprintln!("[RESAMPLE] Flush error: {e}");
@@ -474,18 +518,22 @@ impl AudioPipeline {
         self.resampler.reset();
     }
 
-    #[allow(clippy::needless_range_loop)]
-    fn interleave_into(&self, resampled: &[Vec<f32>], frames: usize, output: &mut Vec<f32>) {
-        let src_ch = self.source_channels;
+    fn remap_channels(&self, data: &[f32], src_ch: usize, output: &mut Vec<f32>) {
         let out_ch = self.output_channels;
+        let frames = data.len() / src_ch;
         output.reserve(frames * out_ch);
+
+        if src_ch == out_ch {
+            output.extend_from_slice(data);
+            return;
+        }
 
         for f_idx in 0..frames {
             for ch in 0..out_ch {
                 let sample = if ch < src_ch {
-                    resampled[ch][f_idx]
+                    data[f_idx * src_ch + ch]
                 } else if src_ch == 1 {
-                    resampled[0][f_idx] // mono → multi: duplicate
+                    data[f_idx * src_ch] // mono → multi: duplicate
                 } else {
                     0.0 // extra channels: silence
                 };
