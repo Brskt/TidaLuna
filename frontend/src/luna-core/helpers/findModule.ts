@@ -13,7 +13,10 @@ export const findModuleProperty = memoize(<T>(selector: (key: unknown, value: un
 
 export const findModuleByProperty = memoize(<T extends object>(selector: (key: unknown, value: unknown) => boolean): T | VoidLike => {
 	const foundProperty = recursiveSearch<T>(tidalModules, selector).next().value;
-	if (foundProperty === undefined) return coreTrace.warn("findModuleByProperty", `Unable to find module using selector:`, selector);
+	if (foundProperty === undefined) {
+		if (Object.keys(tidalModules).length > 0) coreTrace.warn("findModuleByProperty", `Unable to find module using selector:`, selector);
+		return;
+	}
 	let module: object = tidalModules;
 	// Remove the final path part
 	foundProperty.path.pop();
