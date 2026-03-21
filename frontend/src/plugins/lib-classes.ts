@@ -212,6 +212,7 @@ export class MediaItem {
     async fetchTidalMediaItem(): Promise<void> {}
 
     async fetchBestQuality(): Promise<Quality> {
+        if (this.contentType !== "track") return Quality.High;
         return this.bestQuality;
     }
 

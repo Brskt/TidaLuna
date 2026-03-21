@@ -66,8 +66,8 @@ export class MediaItem extends ContentBase {
 			const cache = await mediaItemCache;
 			return new MediaItem(itemId, mediaItem, contentType, cache);
 		});
-		// Fetch real quality for spatial tracks
-		if (item) await item.fetchBestQuality();
+		// Fetch real quality for spatial tracks (only for tracks, not videos)
+		if (item && contentType === "track") await item.fetchBestQuality();
 		return item;
 	}
 	public static fromIsrc: (isrc: string) => Promise<MediaItem | undefined> = memoize(async (isrc) => {
