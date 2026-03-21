@@ -3,18 +3,17 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    // --- FRONTEND BUILD (BUN) ---
-    // Only rebuild if frontend source or deps actually change
     println!("cargo:rerun-if-changed=frontend/src");
     println!("cargo:rerun-if-changed=frontend/package.json");
+    println!("cargo:rerun-if-changed=frontend/scripts");
+    println!("cargo:rerun-if-changed=frontend/plugins");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("bundle.js");
     let frontend_dir = Path::new("frontend");
     let bundle_path = frontend_dir.join("dist").join("bundle.js");
 
-    // Make sure we have the node_modules ready
-    // Skip bun install if node_modules already exists (avoids Bun segfault on Windows via 9P)
+    // Skip bun install if node_modules exists (avoids Bun segfault on Windows via 9P)
     let node_modules = frontend_dir.join("node_modules");
     if !node_modules.exists() {
         let status = Command::new("bun")
@@ -29,7 +28,7 @@ fn main() {
     }
 
     // Build @luna/ui plugin
-    let status = Command::new("node")
+    let status = Command::new("bun")
         .args(["scripts/build-luna-ui.mjs"])
         .current_dir(frontend_dir)
         .status()
@@ -39,19 +38,19 @@ fn main() {
         panic!("build-luna-ui failed");
     }
 
-    // Build @luna/* module bundles for rquickjs runtime
-    let status = Command::new("node")
-        .args(["scripts/build-luna-modules.mjs"])
+    // Build @luna/dev plugin
+    let status = Command::new("bun")
+        .args(["scripts/build-luna-dev.mjs"])
         .current_dir(frontend_dir)
         .status()
-        .expect("Failed to run build-luna-modules");
+        .expect("Failed to run build-luna-dev");
 
     if !status.success() {
-        panic!("build-luna-modules failed");
+        panic!("build-luna-dev failed");
     }
 
     // Build main bundle
-    let status = Command::new("node")
+    let status = Command::new("bun")
         .args(["scripts/build-bundle.mjs"])
         .current_dir(frontend_dir)
         .status()
@@ -63,7 +62,7 @@ fn main() {
 
     std::fs::copy(&bundle_path, &dest_path).expect("Failed to copy bundle.js to OUT_DIR");
 
-    // --- WINDOWS ICON ---
+    // Windows icon
     #[cfg(target_os = "windows")]
     {
         let mut res = winres::WindowsResource::new();

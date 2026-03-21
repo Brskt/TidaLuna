@@ -131,7 +131,14 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
 console.log("Native Interface exposed (sync)");
 
 // Bearer token capture: TIDAL encrypts tokens in AuthDB, so we intercept outgoing requests.
+// Token is forwarded to Rust so plugin fetch requests get the token injected server-side.
 (window as any).__LUNAR_CAPTURED_TOKEN__ = "";
+function captureToken(token: string) {
+    if (token && token !== (window as any).__LUNAR_CAPTURED_TOKEN__) {
+        (window as any).__LUNAR_CAPTURED_TOKEN__ = token;
+        sendIpc("jsrt.set_token", token);
+    }
+}
 
 const origXHROpen = XMLHttpRequest.prototype.open;
 const origXHRSetHeader = XMLHttpRequest.prototype.setRequestHeader;
@@ -141,7 +148,7 @@ XMLHttpRequest.prototype.open = function (this: XMLHttpRequest & { _lunaUrl?: st
 };
 XMLHttpRequest.prototype.setRequestHeader = function (this: XMLHttpRequest & { _lunaUrl?: string }, name: string, value: string) {
     if (name === "Authorization" && value.startsWith("Bearer ") && this._lunaUrl?.includes("tidal.com")) {
-        (window as any).__LUNAR_CAPTURED_TOKEN__ = value.slice(7);
+        captureToken(value.slice(7));
     }
     return origXHRSetHeader.call(this, name, value);
 };
@@ -171,7 +178,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
         const headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers as any);
         const auth = headers.get("Authorization");
         if (auth?.startsWith("Bearer ")) {
-            (window as any).__LUNAR_CAPTURED_TOKEN__ = auth.slice(7);
+            captureToken(auth.slice(7));
         }
     }
 
@@ -179,6 +186,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
         return await nativeFetch(input, init);
     } catch (e) {
         if (!(e instanceof TypeError)) throw e;
+        console.log(`[luna:proxy] CORS fallback: ${url.substring(0, 100)}`);
         const resp = await proxyFetch(url, init);
         if (resp.status >= 400) console.warn(`[luna:proxy] ${resp.status} ${url.substring(0, 80)}`);
         return resp;
@@ -197,46 +205,6 @@ const init = async () => {
         return;
     }
     console.log("[luna] Core initialized — Redux store discovered, modules populated");
-
-    // Sync lightweight Redux state subset to rquickjs plugin runtime (throttled)
-    {
-        const { store } = require("./luna-lib/redux/store");
-        if (store && typeof store.subscribe === "function") {
-            let syncTimer: number | null = null;
-            const extractLightState = () => {
-                const s = store.getState();
-                return {
-                    playbackControls: s.playbackControls,
-                    playQueue: s.playQueue ? {
-                        currentIndex: s.playQueue.currentIndex,
-                        elements: s.playQueue.elements?.slice(
-                            Math.max(0, (s.playQueue.currentIndex ?? 0) - 2),
-                            (s.playQueue.currentIndex ?? 0) + 5,
-                        ),
-                        repeatMode: s.playQueue.repeatMode,
-                        shuffled: s.playQueue.shuffled,
-                    } : undefined,
-                    user: s.user,
-                    session: s.session,
-                };
-            };
-            const syncState = () => {
-                try {
-                    sendIpc("jsrt.state_sync", JSON.stringify(extractLightState()));
-                } catch { /* ignore serialization errors */ }
-                syncTimer = null;
-            };
-            // Throttle: sync at most every 1s
-            store.subscribe(() => {
-                if (syncTimer === null) {
-                    syncTimer = setTimeout(syncState, 1000) as unknown as number;
-                }
-            });
-            // Initial sync
-            syncState();
-            console.log("[luna] Redux state sync to rquickjs enabled (lightweight)");
-        }
-    }
 
     // SDK middleware doesn't reach Rust player for DASH/AAC — intercept Redux actions.
     {
@@ -267,11 +235,25 @@ const init = async () => {
         console.error("[luna] Failed to load @luna/ui:", e);
     }
 
-    // Load user plugins in rquickjs runtime (not in CEF)
+    try {
+        const { LUNA_DEV_CODE } = await import("./plugins/luna-dev-inline");
+        const blob = new Blob([LUNA_DEV_CODE], { type: "application/javascript" });
+        const blobUrl = URL.createObjectURL(blob);
+        const devMod = await import(/* @vite-ignore */ blobUrl);
+        URL.revokeObjectURL(blobUrl);
+        modules["@luna/dev"] = devMod;
+        LunaPlugin.corePlugins.add("@luna/dev");
+        console.log("[luna] @luna/dev core plugin loaded");
+    } catch (e) {
+        console.error("[luna] Failed to load @luna/dev:", e);
+    }
+
+    // Load user plugins — Rust prepares + wraps them, injects into CEF
     sendIpc("jsrt.load_plugins");
-    // Drive rquickjs timers and pending jobs periodically
-    setInterval(() => sendIpc("jsrt.tick"), 100);
-    console.log("[luna] Plugin execution delegated to rquickjs runtime");
+    // Populate CEF plugin registry from Rust PluginStore (for @luna/ui display)
+    const { exposeLoaderApi } = require("./plugins/loader");
+    exposeLoaderApi();
+    console.log("[luna] Plugin execution delegated to Rust plugin manager");
 };
 
 setTimeout(init, 0);
