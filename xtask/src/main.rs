@@ -33,7 +33,8 @@ fn usage() {
     eprintln!("Commands:");
     eprintln!("  clippy    Run clippy with strict warnings");
     eprintln!("  fmt       Check formatting");
-    eprintln!("  bundle    Build release and create distributable bundle");
+    eprintln!("  bundle    Build and create distributable bundle (dev by default)");
+    eprintln!("            --release  Build in release mode (optimized, slower)");
     eprintln!("            --console  Enable console window (shows logs)");
 }
 
@@ -64,23 +65,31 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     };
 
     let console = flags.iter().any(|f| f == "--console");
+    let release = flags.iter().any(|f| f == "--release");
+    let profile = if release { "release" } else { "dev" };
 
-    // 1. Build release
+    // 1. Build
     println!(
-        "Building release{}...",
+        "Building {profile}{}...",
         if console { " (console)" } else { "" }
     );
-    if console {
-        run("cargo", &["build", "--release", "--features", "console"])?;
-    } else {
-        run("cargo", &["build", "--release"])?;
+    let mut args = vec!["build"];
+    if release {
+        args.push("--release");
     }
+    if console {
+        args.push("--features");
+        args.push("console");
+    }
+    run("cargo", &args)?;
 
     // 2. Locate project root and target dir
     let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or("cannot find project root")?;
-    let target_dir = project_root.join("target").join("release");
+    let target_dir = project_root
+        .join("target")
+        .join(if release { "release" } else { "debug" });
     let bundle_dir = project_root.join("dist");
 
     // 3. Find CEF directory from build output
@@ -113,6 +122,17 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         }
     }
 
+    // 6. Copy native-host.js for Bun native module runtime
+    let host_script = project_root.join("frontend/scripts/native-host.js");
+    if host_script.exists() {
+        fs::copy(&host_script, bundle_dir.join("native-host.js"))
+            .map_err(|e| format!("failed to copy native-host.js: {e}"))?;
+        println!("  Copied native-host.js");
+    }
+
+    // 7. Download Bun binary if not already in bundle
+    download_bun(&bundle_dir)?;
+
     println!("Bundle created in: {}", bundle_dir.display());
     Ok(())
 }
@@ -123,29 +143,43 @@ fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
     let entries = fs::read_dir(&build_dir)
         .map_err(|e| format!("cannot read {}: {e}", build_dir.display()))?;
 
+    // Only match the CEF library for the current target (avoids picking Linux dirs on Windows)
+    let cef_marker = if cfg!(target_os = "windows") {
+        "libcef.dll"
+    } else if cfg!(target_os = "macos") {
+        "Chromium Embedded Framework.framework"
+    } else {
+        "libcef.so"
+    };
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str.starts_with("cef-dll-sys-") {
             let out_dir = entry.path().join("out");
             if out_dir.is_dir() {
-                // Find the platform-specific CEF directory (e.g., cef_windows_x86_64)
                 for sub in fs::read_dir(&out_dir).into_iter().flatten().flatten() {
                     let sub_name = sub.file_name().to_string_lossy().to_string();
                     if sub_name.starts_with("cef_") && sub.path().is_dir() {
-                        let has_cef = sub.path().join("libcef.dll").exists()
-                            || sub.path().join("libcef.so").exists()
-                            || sub
-                                .path()
-                                .join("Chromium Embedded Framework.framework")
-                                .is_dir();
-                        if has_cef {
-                            return Ok(sub.path());
+                        let marker_path = sub.path().join(cef_marker);
+                        if marker_path.exists() || marker_path.is_dir() {
+                            candidates.push(sub.path());
                         }
                     }
                 }
             }
         }
+    }
+
+    candidates.sort_by(|a, b| {
+        let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+        mtime(b).cmp(&mtime(a))
+    });
+
+    if let Some(best) = candidates.into_iter().next() {
+        return Ok(best);
     }
     Err("CEF directory not found — run `cargo build --release` first".to_string())
 }
@@ -349,6 +383,103 @@ fn copy_dir_flat(src: &Path, dst: &Path) -> Result<(), String> {
                 .map_err(|e| format!("failed to copy {}: {e}", entry.path().display()))?;
         }
     }
+    Ok(())
+}
+
+/// Download Bun binary from GitHub releases into the bundle directory.
+/// Skips download if `bun` (or `bun.exe`) already exists in the bundle.
+fn download_bun(bundle_dir: &Path) -> Result<(), String> {
+    let bun_name = if cfg!(target_os = "windows") {
+        "bun.exe"
+    } else {
+        "bun"
+    };
+    let bun_dst = bundle_dir.join(bun_name);
+    if bun_dst.exists() {
+        println!("  Bun already present");
+        return Ok(());
+    }
+
+    let (archive_name, inner_dir) = if cfg!(target_os = "windows") {
+        ("bun-windows-x64.zip", "bun-windows-x64")
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            ("bun-darwin-aarch64.zip", "bun-darwin-aarch64")
+        } else {
+            ("bun-darwin-x64.zip", "bun-darwin-x64")
+        }
+    } else {
+        ("bun-linux-x64.zip", "bun-linux-x64")
+    };
+
+    let url = format!("https://github.com/oven-sh/bun/releases/latest/download/{archive_name}");
+    let zip_path = bundle_dir.join(archive_name);
+
+    println!("  Downloading Bun from {url}...");
+    let status = Command::new("curl")
+        .args(["-fSL", "-o"])
+        .arg(&zip_path)
+        .arg(&url)
+        .status()
+        .map_err(|e| format!("curl failed: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Failed to download Bun (curl exit: {:?})",
+            status.code()
+        ));
+    }
+
+    println!("  Extracting {bun_name}...");
+    if cfg!(target_os = "windows") {
+        // Use PowerShell to extract on Windows
+        let ps_cmd = format!(
+            "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+            zip_path.display(),
+            bundle_dir.display()
+        );
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_cmd])
+            .status()
+            .map_err(|e| format!("powershell extract failed: {e}"))?;
+        if !status.success() {
+            return Err("Failed to extract Bun zip".to_string());
+        }
+    } else {
+        let status = Command::new("unzip")
+            .args(["-o", "-q"])
+            .arg(&zip_path)
+            .arg("-d")
+            .arg(bundle_dir)
+            .status()
+            .map_err(|e| format!("unzip failed: {e}"))?;
+        if !status.success() {
+            return Err("Failed to extract Bun zip".to_string());
+        }
+    }
+
+    // Move bun binary from inner directory to bundle root
+    let inner_bun = bundle_dir.join(inner_dir).join(bun_name);
+    if inner_bun.exists() {
+        fs::rename(&inner_bun, &bun_dst).map_err(|e| format!("failed to move bun binary: {e}"))?;
+        // Clean up inner directory
+        let _ = fs::remove_dir_all(bundle_dir.join(inner_dir));
+    }
+
+    // Clean up zip
+    let _ = fs::remove_file(&zip_path);
+
+    if bun_dst.exists() {
+        // Make executable on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&bun_dst, fs::Permissions::from_mode(0o755));
+        }
+        println!("  Bun installed ({bun_name})");
+    } else {
+        println!("  Warning: Bun binary not found after extraction");
+    }
+
     Ok(())
 }
 
