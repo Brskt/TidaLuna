@@ -1,6 +1,5 @@
-use once_cell::sync::Lazy;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -18,11 +17,11 @@ pub struct TrackMetadata {
     pub quality: String,
 }
 
-pub static CURRENT_METADATA: Lazy<Arc<Mutex<Option<TrackMetadata>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(None)));
+pub static CURRENT_METADATA: LazyLock<Arc<Mutex<Option<TrackMetadata>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
-pub static CURRENT_TRACK: Lazy<Arc<Mutex<Option<TrackInfo>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(None)));
+pub static CURRENT_TRACK: LazyLock<Arc<Mutex<Option<TrackInfo>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 fn build_http_client() -> reqwest::Client {
     // Keep streaming requests unconstrained (no global request timeout),
@@ -49,12 +48,12 @@ fn build_http_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
-pub static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(build_http_client);
+pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
 /// Dedicated HTTP client for playback (initial GET + Range restarts).
 /// Separate from HTTP_CLIENT so playback gets its own TCP connection,
 /// avoiding HTTP/2 bandwidth contention with preload downloads.
-pub static HTTP_CLIENT_PLAYBACK: Lazy<reqwest::Client> = Lazy::new(build_http_client);
+pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
 #[derive(Debug)]
 pub struct PreloadedTrack {
@@ -69,7 +68,7 @@ pub struct PreloadState {
     pub next_track: Option<TrackInfo>,
 }
 
-pub static PRELOAD_STATE: Lazy<TokioMutex<PreloadState>> = Lazy::new(|| {
+pub static PRELOAD_STATE: LazyLock<TokioMutex<PreloadState>> = LazyLock::new(|| {
     TokioMutex::new(PreloadState {
         task: None,
         data: None,
@@ -77,8 +76,8 @@ pub static PRELOAD_STATE: Lazy<TokioMutex<PreloadState>> = Lazy::new(|| {
     })
 });
 
-pub static GOVERNOR: Lazy<crate::bandwidth::GovernorHandle> =
-    Lazy::new(crate::bandwidth::spawn_governor);
+pub static GOVERNOR: LazyLock<crate::audio::bandwidth::GovernorHandle> =
+    LazyLock::new(crate::audio::bandwidth::spawn_governor);
 
 pub fn cache_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -96,7 +95,7 @@ pub fn cache_data_dir() -> PathBuf {
     }
 }
 
-pub static AUDIO_CACHE: Lazy<Mutex<crate::player::cache::AudioCache>> = Lazy::new(|| {
+pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = LazyLock::new(|| {
     let dir = cache_data_dir();
     match crate::player::cache::AudioCache::open(&dir) {
         Ok(cache) => {

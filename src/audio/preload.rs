@@ -1,18 +1,12 @@
-use crate::bandwidth::TrafficClass;
-use crate::decrypt::FlacDecryptor;
+use crate::audio::bandwidth::TrafficClass;
+use crate::audio::decrypt::FlacDecryptor;
 use crate::player::buffer::RamBufferWriter;
 use crate::state::{GOVERNOR, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo};
 use futures_util::StreamExt;
 
 const PRELOAD_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
-fn format_ms(ms: f64) -> String {
-    if ms < 1.0 {
-        format!("{:.0}µs", ms * 1000.0)
-    } else {
-        format!("{:.0}ms", ms)
-    }
-}
+use crate::util::fmt::format_ms;
 
 fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;

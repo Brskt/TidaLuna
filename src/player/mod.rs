@@ -7,7 +7,7 @@ mod thread;
 #[cfg(target_os = "windows")]
 pub(crate) mod wasapi;
 
-use crate::preload;
+use crate::audio::preload;
 use crate::state::{
     AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, GOVERNOR, HTTP_CLIENT_PLAYBACK, TrackInfo,
 };
@@ -147,13 +147,7 @@ pub struct Player {
     load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-fn format_ms(ms: f64) -> String {
-    if ms < 1.0 {
-        format!("{:.0}µs", ms * 1000.0)
-    } else {
-        format!("{:.0}ms", ms)
-    }
-}
+use crate::util::fmt::format_ms;
 
 fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {

@@ -13,6 +13,7 @@ pub enum TrafficClass {
 
 /// Shared atomic counters updated by StreamingBuffer read/write operations.
 /// The governor reads these on every tick (25 ms) to compute hysteresis.
+#[derive(Default)]
 pub struct BufferProgress {
     pub written: AtomicU64,
     pub read_pos: AtomicU64,
@@ -33,16 +34,7 @@ pub struct BufferProgress {
 
 impl BufferProgress {
     pub fn new() -> Self {
-        Self {
-            written: AtomicU64::new(0),
-            read_pos: AtomicU64::new(0),
-            total_len: AtomicU64::new(0),
-            bitrate_bps: AtomicU64::new(0),
-            playback_active: AtomicBool::new(false),
-            seek_boost: AtomicBool::new(false),
-            init_warmup_done: AtomicBool::new(false),
-            seek_preload_pause: AtomicBool::new(false),
-        }
+        Self::default()
     }
 
     pub fn set_playback_active(&self, active: bool) {

@@ -12,6 +12,7 @@ use super::wrapper;
 ///   2. Transpiled TS→JS if needed (OXC)
 ///   3. Wrapped in security closure (wrapper.rs)
 ///   4. Returned as a JS string for injection into CEF
+#[derive(Default)]
 pub struct PluginManager {
     /// Track which plugins are currently loaded (for unload).
     loaded: std::collections::HashSet<String>,
@@ -19,9 +20,7 @@ pub struct PluginManager {
 
 impl PluginManager {
     pub fn new() -> Self {
-        Self {
-            loaded: std::collections::HashSet::new(),
-        }
+        Self::default()
     }
 
     /// Prepare a plugin for CEF injection.
@@ -29,12 +28,9 @@ impl PluginManager {
     /// Returns the wrapped JS code ready to be passed to `eval_js()`,
     /// or an error if transpilation fails.
     pub fn prepare_plugin(&mut self, plugin_id: &str, code: &str) -> anyhow::Result<String> {
-        // Transpile if it looks like TypeScript
-        let js = if needs_transpile(code) {
-            transpile::transpile_ts(code, &format!("{plugin_id}.mts"))?
-        } else {
-            code.to_string()
-        };
+        // Always transpile: OXC handles plain JS as a no-op and this avoids
+        // unreliable heuristics for detecting TypeScript.
+        let js = transpile::transpile_ts(code, &format!("{plugin_id}.mts"))?;
 
         // Strip ES module syntax (export/import) so code runs in IIFE context.
         // Quartz-bundled plugins have exports at the end and imports already resolved.
@@ -103,18 +99,6 @@ impl PluginManager {
     }
 }
 
-/// Heuristic: does the source code look like TypeScript?
-fn needs_transpile(code: &str) -> bool {
-    // Check for common TypeScript indicators
-    code.contains(": string")
-        || code.contains(": number")
-        || code.contains(": boolean")
-        || code.contains(": void")
-        || code.contains("interface ")
-        || code.contains("<T>")
-        || code.contains("as ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,13 +161,5 @@ mod tests {
         mgr.prepare_plugin("my-plugin", "").unwrap();
         mgr.unload_plugin("my-plugin");
         assert!(!mgr.is_loaded("my-plugin"));
-    }
-
-    #[test]
-    fn test_needs_transpile() {
-        assert!(needs_transpile("const x: number = 1;"));
-        assert!(needs_transpile("interface Foo { bar: string }"));
-        assert!(!needs_transpile("const x = 1;"));
-        assert!(!needs_transpile("console.log('hello');"));
     }
 }

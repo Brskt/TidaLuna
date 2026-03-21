@@ -66,7 +66,9 @@ impl OsMediaControls {
             PlaybackState::Paused | PlaybackState::Ready => {
                 (MediaPlayback::Paused { progress: None }, "Paused")
             }
-            _ => (MediaPlayback::Stopped, "Stopped"),
+            PlaybackState::Stopped | PlaybackState::Completed => {
+                (MediaPlayback::Stopped, "Stopped")
+            }
         };
         crate::vprintln!("[MEDIA]  set_playback: {} → SMTC {}", state.as_str(), label);
         match self.controls.set_playback(playback) {
@@ -102,27 +104,27 @@ fn handle_media_event(event: MediaControlEvent) {
     match event {
         MediaControlEvent::Play => {
             crate::vprintln!("[MEDIA]  Play");
-            crate::eval_js("window.__TL_PLAY_PAUSE__?.()");
+            crate::app_state::eval_js("window.__TL_PLAY_PAUSE__?.()");
         }
         MediaControlEvent::Pause => {
             crate::vprintln!("[MEDIA]  Pause");
-            crate::eval_js("window.__TL_PLAY_PAUSE__?.()");
+            crate::app_state::eval_js("window.__TL_PLAY_PAUSE__?.()");
         }
         MediaControlEvent::Toggle => {
             crate::vprintln!("[MEDIA]  Toggle");
-            crate::eval_js("window.__TL_PLAY_PAUSE__?.()");
+            crate::app_state::eval_js("window.__TL_PLAY_PAUSE__?.()");
         }
         MediaControlEvent::Next => {
             crate::vprintln!("[MEDIA]  Next");
-            crate::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
+            crate::app_state::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
         }
         MediaControlEvent::Previous => {
             crate::vprintln!("[MEDIA]  Previous");
-            crate::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
+            crate::app_state::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
         }
         MediaControlEvent::Stop => {
             crate::vprintln!("[MEDIA]  Stop");
-            crate::with_state(|state| {
+            crate::app_state::with_state(|state| {
                 let _ = state.player.stop();
             });
         }
