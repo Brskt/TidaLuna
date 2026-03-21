@@ -27,37 +27,24 @@ fn main() {
         }
     }
 
-    // Build @luna/ui plugin
-    let status = Command::new("bun")
-        .args(["scripts/build-luna-ui.mjs"])
-        .current_dir(frontend_dir)
-        .status()
-        .expect("Failed to run build-luna-ui");
-
-    if !status.success() {
-        panic!("build-luna-ui failed");
+    fn run_bun(frontend_dir: &Path, script: &str) {
+        let status = Command::new("bun")
+            .args(["scripts/".to_owned() + script])
+            .current_dir(frontend_dir)
+            .status()
+            .unwrap_or_else(|e| panic!("Failed to run {script}: {e}"));
+        if !status.success() {
+            panic!("{script} failed");
+        }
     }
 
-    // Build @luna/dev plugin
-    let status = Command::new("bun")
-        .args(["scripts/build-luna-dev.mjs"])
-        .current_dir(frontend_dir)
-        .status()
-        .expect("Failed to run build-luna-dev");
-
-    if !status.success() {
-        panic!("build-luna-dev failed");
-    }
-
-    // Build main bundle
-    let status = Command::new("bun")
-        .args(["scripts/build-bundle.mjs"])
-        .current_dir(frontend_dir)
-        .status()
-        .expect("Failed to run build-bundle");
-
-    if !status.success() {
-        panic!("build-bundle failed");
+    // On Windows via 9P, Bun segfaults. Pre-build from WSL then skip here.
+    if cfg!(target_os = "windows") && bundle_path.exists() {
+        eprintln!("Windows: skipping bun scripts (using pre-built outputs)");
+    } else {
+        run_bun(frontend_dir, "build-luna-ui.mjs");
+        run_bun(frontend_dir, "build-luna-dev.mjs");
+        run_bun(frontend_dir, "build-bundle.mjs");
     }
 
     std::fs::copy(&bundle_path, &dest_path).expect("Failed to copy bundle.js to OUT_DIR");
