@@ -1,14 +1,11 @@
 /**
- * Build @luna/core and @luna/lib as standalone ESM bundles for the rquickjs runtime.
+ * Build standalone ESM bundles for modules that are used at runtime.
  *
- * Each bundle resolves all internal (relative) imports but externalizes
- * dependencies that are provided separately in the QuickJS module loader:
- *   - react, react-dom/client, react/jsx-runtime  (stubs)
- *   - oby, @inrixia/helpers                       (bundled from node_modules)
- *   - idb-keyval                                   (shim → SQLite)
+ * These bundles are NOT for QuickJS anymore — they're used by the CEF frontend
+ * as part of the main app bundle. The QuickJS overrides have been removed.
  *
  * Output:
- *   frontend/dist/luna-core.mjs   — @luna/core
+ *   frontend/dist/luna-core.mjs   — @luna/core (no overrides, real browser code)
  *   frontend/dist/luna-lib.mjs    — @luna/lib
  *   frontend/dist/oby.mjs         — oby (reactive store)
  *   frontend/dist/inrixia-helpers.mjs — @inrixia/helpers
@@ -20,37 +17,7 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
 
-// --- QuickJS override plugin ---
-// Replaces browser-only luna-core modules with QuickJS-compatible stubs.
-// Only affects the @luna/core bundle — the CEF bundle (build-bundle.mjs) is unchanged.
-const overridesDir = resolve(root, "src/quickjs-overrides");
-const quickjsOverrides = {
-    name: "quickjs-overrides",
-    setup(build) {
-        // Map original absolute paths → override file paths
-        const lunaCoreDir = resolve(root, "src/luna-core");
-        const overrides = new Map([
-            [resolve(lunaCoreDir, "exposeTidalInternals.ts"), resolve(overridesDir, "exposeTidalInternals.ts")],
-            [resolve(lunaCoreDir, "loadingContainer.ts"), resolve(overridesDir, "loadingContainer.ts")],
-            [resolve(lunaCoreDir, "window.core.ts"), resolve(overridesDir, "window.core.ts")],
-            [resolve(lunaCoreDir, "modules.ts"), resolve(overridesDir, "modules.ts")],
-        ]);
-        // Intercept file loading: when esbuild loads an original file, serve the override instead
-        const filter = /\/(exposeTidalInternals|loadingContainer|window\.core|modules)\.ts$/;
-        build.onLoad({ filter }, async (args) => {
-            const override = overrides.get(args.path);
-            if (!override) return;
-            const { readFile } = await import("fs/promises");
-            return { contents: await readFile(override, "utf-8"), loader: "ts" };
-        });
-        // Resolve @luna/core self-references to index.ts
-        build.onResolve({ filter: /^@luna\/core$/ }, () => ({
-            path: resolve(lunaCoreDir, "index.ts"),
-        }));
-    },
-};
-
-// Dependencies provided separately in the rquickjs module loader
+// Dependencies provided separately
 const CORE_EXTERNALS = [
     "@inrixia/helpers",
     "react",
@@ -65,6 +32,17 @@ const LIB_EXTERNALS = [
     "@inrixia/helpers",
 ];
 
+// Resolve @luna/core self-references
+const coreSelfResolve = {
+    name: "core-self-resolve",
+    setup(build) {
+        const lunaCoreDir = resolve(root, "src/luna-core");
+        build.onResolve({ filter: /^@luna\/core$/ }, () => ({
+            path: resolve(lunaCoreDir, "index.ts"),
+        }));
+    },
+};
+
 // --- @luna/core ---
 await build({
     entryPoints: [resolve(root, "src/luna-core/index.ts")],
@@ -75,7 +53,7 @@ await build({
     target: "esnext",
     treeShaking: true,
     external: CORE_EXTERNALS,
-    plugins: [quickjsOverrides],
+    plugins: [coreSelfResolve],
     logLevel: "info",
 });
 console.log("  luna-core.mjs built");

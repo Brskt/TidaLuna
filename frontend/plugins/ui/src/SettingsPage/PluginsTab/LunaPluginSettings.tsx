@@ -20,6 +20,18 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 	const [loadError, setLoadError] = React.useState(plugin.loadError._);
 	const [installed, setInstalled] = React.useState(plugin.installed);
 	const [hideSettings, setHideSettings] = React.useState(plugin.store.hideSettings);
+	// useState(() => fn) to store a function without React calling it as a lazy initializer
+	const [SettingsComponent, setSettingsComponent] = React.useState<any>(() => plugin.exports?.Settings);
+
+	// Re-check exports when plugins-updated fires (exports are set asynchronously)
+	React.useEffect(() => {
+		const handler = () => {
+			const next = plugin.exports?.Settings;
+			if (next !== SettingsComponent) setSettingsComponent(() => next);
+		};
+		window.addEventListener("luna:plugins-updated", handler);
+		return () => window.removeEventListener("luna:plugins-updated", handler);
+	}, [plugin, SettingsComponent]);
 
 	const [pkg, setPackage] = React.useState<PluginPackage>(obyStore.unwrap(plugin.store.package));
 
@@ -62,7 +74,7 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 	// Dont allow disabling core plugins
 	const isCore = LunaPlugin.corePlugins.has(name);
 
-	const Settings = plugin.exports?.Settings;
+	const Settings = SettingsComponent;
 	const hasSettings = Settings !== undefined && Settings !== null;
 
 	return (

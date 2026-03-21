@@ -1,17 +1,16 @@
 /**
  * LunaPlugin — port of TidaLuna's LunaPlugin class for TidaLunar.
  *
- * Differences from upstream:
- * - No oby — uses Signal for reactive state
- * - No IndexedDB — persistence via SQLite/IPC (Rust backend)
- * - Fetch happens Rust-side via plugin.install IPC
- * - No @inrixia/helpers — Signal and Semaphore are local
+ * This is a thin CEF-side proxy. It:
+ * - Stores display state (name, url, enabled, installed, package)
+ * - Routes lifecycle actions to Rust (DB) and Rust (runtime)
+ * - Provides reactive signals for @luna/ui components
+ * - Does NOT execute plugin code in CEF (execution is in Rust)
  */
 
 import { Signal } from "./signal";
-import { Semaphore } from "./semaphore";
-import { invokeIpc } from "../ipc";
-import { modules, Tracer } from "./core";
+import { invokeIpc, sendIpc } from "../ipc";
+import { modules } from "./core";
 import { store as obyStore } from "oby";
 
 // --- Types matching TidaLuna's API ---
@@ -44,11 +43,29 @@ export type LunaPluginStore = {
 };
 
 type ModuleExports = {
-    unloads?: Set<() => void>;
-    onUnload?: () => void;
     Settings?: any;
-    errSignal?: Signal<string | undefined>;
 };
+
+// --- Upstream registry reference ---
+// Set by loader.ts after import. Allows lifecycle methods to sync
+// both registries without a circular import on @luna/core.
+let _upstreamPlugins: Record<string, any> | null = null;
+
+/** Called by loader.ts to wire the upstream LunaPlugin.plugins reference. */
+export function setUpstreamPlugins(plugins: Record<string, any>) {
+    _upstreamPlugins = plugins;
+}
+
+/** Sync a plugin into the upstream registry and notify @luna/ui. */
+function syncUpstream(url: string, plugin: LunaPlugin | null) {
+    if (!_upstreamPlugins) return;
+    if (plugin) {
+        _upstreamPlugins[url] = plugin;
+    } else {
+        delete _upstreamPlugins[url];
+    }
+    window.dispatchEvent(new Event("luna:plugins-updated"));
+}
 
 // --- LunaPlugin class ---
 
@@ -70,8 +87,6 @@ export class LunaPlugin {
     loadError = new Signal<string | undefined>(undefined);
 
     // Private
-    private blobUrl = "";
-    private loadSemaphore = new Semaphore(1);
     private reloadTimeout: ReturnType<typeof setTimeout> | null = null;
     private enabledListeners = new Set<(enabled: boolean) => void>();
     private liveReloadListeners = new Set<(liveReload: boolean) => void>();
@@ -144,52 +159,101 @@ export class LunaPlugin {
     }
 
     // --- Lifecycle ---
+    // All actions follow: update local state → persist to Rust DB → route to Rust → notify UI
 
     async load(): Promise<void> {
-        if (this.enabled && this.installed) {
-            await this.loadExports();
-        }
+        // No-op: plugins are loaded into Rust at boot via jsrt.load_plugins.
+        // This exists for API compatibility (upstream fromStorage calls it).
     }
 
     async install(): Promise<void> {
-        const info = await invokeIpc("plugin.install", this.url);
-        // Update store with data from Rust
+        this.loading._ = true;
+        console.log(`[luna:plugin] install() called for ${this.url}`);
         try {
-            const pkg = typeof info.manifest === "string" ? JSON.parse(info.manifest) : info.manifest;
-            if (pkg?.name) this.store.package = pkg;
-        } catch (e) { console.warn("[luna:plugin] Package info fetch failed:", e); }
-        this.store.installed = true;
-        this.store.enabled = true;
-        this.enabled = true;
-        this.name = this.store.package.name;
-        await this.loadExports();
+            const info = await invokeIpc("plugin.install", this.url);
+            console.log(`[luna:plugin] plugin.install IPC returned for ${this.url}`, info?.name);
+            try {
+                const pkg = typeof info.manifest === "string" ? JSON.parse(info.manifest) : info.manifest;
+                if (pkg?.name) this.store.package = pkg;
+            } catch (e) { console.warn("[luna:plugin] Package info fetch failed:", e); }
+            this.store.installed = true;
+            this.store.enabled = true;
+            this.enabled = true;
+            this.name = this.store.package.name;
+            console.log(`[luna:plugin] Sending jsrt.enable_plugin for ${this.url}`);
+            sendIpc("jsrt.enable_plugin", this.url);
+            LunaPlugin.plugins[this.url] = this;
+            syncUpstream(this.url, this);
+            this.extractSettings().then(() => {
+                console.log(`[luna:plugin] extractSettings() done for ${this.name}, hasSettings=${!!this.exports?.Settings}`);
+                syncUpstream(this.url, this);
+            });
+        } finally {
+            this.loading._ = false;
+        }
     }
 
     async enable(): Promise<void> {
-        this.enabled = true;
-        await invokeIpc("plugin.enable", this.url);
-        await this.loadExports();
+        this.loading._ = true;
+        console.log(`[luna:plugin] enable() called for ${this.url}`);
+        try {
+            this.enabled = true;
+            await invokeIpc("plugin.enable", this.url);
+            console.log(`[luna:plugin] Sending jsrt.enable_plugin for ${this.url}`);
+            sendIpc("jsrt.enable_plugin", this.url);
+            syncUpstream(this.url, this);
+            this.extractSettings().then(() => {
+                console.log(`[luna:plugin] extractSettings() done for ${this.name}, hasSettings=${!!this.exports?.Settings}`);
+                syncUpstream(this.url, this);
+            });
+        } finally {
+            this.loading._ = false;
+        }
     }
 
     async disable(): Promise<void> {
-        await this.unload();
-        this.enabled = false;
-        await invokeIpc("plugin.disable", this.url);
+        this.loading._ = true;
+        console.log(`[luna:plugin] disable() called for ${this.url}`);
+        try {
+            this.stopReloadLoop();
+            console.log(`[luna:plugin] Sending jsrt.disable_plugin for ${this.url}`);
+            sendIpc("jsrt.disable_plugin", this.url);
+            this.enabled = false;
+            this.exports = undefined;
+            // Clear cached exports so re-enable picks up the fresh instance
+            if ((window as any).__pluginExports) {
+                delete (window as any).__pluginExports[this.url];
+            }
+            await invokeIpc("plugin.disable", this.url);
+            syncUpstream(this.url, this);
+        } finally {
+            this.loading._ = false;
+        }
     }
 
     async reload(): Promise<void> {
-        await this.unload();
-        await this.loadExports(true);
+        this.loading._ = true;
+        try {
+            sendIpc("jsrt.disable_plugin", this.url);
+            sendIpc("jsrt.enable_plugin", this.url);
+        } finally {
+            this.loading._ = false;
+        }
     }
 
     async uninstall(): Promise<void> {
         await this.disable();
-        this.store.installed = false;
-        delete LunaPlugin.plugins[this.url];
-        await invokeIpc("plugin.uninstall", this.url);
-        // Cascade to dependants
-        for (const dep of this.dependants) {
-            await dep.uninstall();
+        this.loading._ = true;
+        try {
+            this.store.installed = false;
+            delete LunaPlugin.plugins[this.url];
+            syncUpstream(this.url, null);
+            await invokeIpc("plugin.uninstall", this.url);
+            for (const dep of this.dependants) {
+                await dep.uninstall();
+            }
+        } finally {
+            this.loading._ = false;
         }
     }
 
@@ -197,97 +261,63 @@ export class LunaPlugin {
         this.dependants.add(plugin);
     }
 
-    // --- Private: module loading ---
-
-    private async loadExports(reload = false): Promise<void> {
-        await this.loadSemaphore.acquire();
+    // --- Settings extraction ---
+    // Load plugin code in CEF (as blob URL) to extract the Settings React component.
+    // Plugin .mjs files resolve deps via luna.core.modules (Quartz pattern) — no transform needed.
+    // Side effects are reversed via the plugin's unloads Set after extraction.
+    // Timeout prevents hanging on top-level awaits (ReactiveStore, observePromise, etc.).
+    async extractSettings(): Promise<void> {
         try {
-            this.loading._ = true;
-            this.loadError._ = undefined;
-
-            const code = await invokeIpc("plugin.get_code", this.url);
-            if (!code) {
-                this.loadError._ = "No code available";
-                return;
+            // Try reading exports from the running plugin instance first.
+            // The security wrapper registers exports on window.__pluginExports
+            // so the Settings component shares state with the actual plugin.
+            // The plugin runs in an async IIFE — exports may not be registered yet.
+            // Wait briefly for the plugin to finish executing before falling back.
+            for (let attempt = 0; attempt < 10; attempt++) {
+                const pluginExports = (window as any).__pluginExports?.[this.url];
+                if (pluginExports?.Settings) {
+                    this.exports = { Settings: pluginExports.Settings };
+                    console.log(`[luna:plugin] Settings found for ${this.name} (from running instance)`);
+                    return;
+                }
+                await new Promise(r => setTimeout(r, 200));
             }
+
+            // Fallback: load plugin via blob URL import (re-executes the plugin).
+            // This is used when the plugin hasn't finished loading yet or has no exports.
+            const code = await invokeIpc("plugin.get_code", this.url);
+            if (!code) return;
+            if (!/\bSettings\b/.test(code)) return;
+
+            console.log(`[luna:plugin] Extracting Settings for ${this.name} (blob import fallback)...`);
 
             const blob = new Blob([code], { type: "application/javascript" });
             const blobUrl = URL.createObjectURL(blob);
-            this.blobUrl = blobUrl;
-
             try {
-                const mod = await import(/* @vite-ignore */ blobUrl);
-                this.exports = {};
-
-                if (mod.unloads instanceof Set) {
-                    this.exports.unloads = mod.unloads;
-                }
-                if (typeof mod.onUnload === "function") {
-                    this.exports.onUnload = mod.onUnload;
-                }
+                const timeout = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error("Settings extraction timed out")), 10000)
+                );
+                const mod = await Promise.race([import(/* @vite-ignore */ blobUrl), timeout]);
                 if (mod.Settings) {
-                    this.exports.Settings = mod.Settings;
+                    this.exports = { Settings: mod.Settings };
+                    console.log(`[luna:plugin] Settings extracted for ${this.name}`);
                 }
-                if (mod.errSignal) {
-                    this.exports.errSignal = mod.errSignal;
-                }
-
-                // Register in module registry so window.require(name) works
-                modules[this.name] = mod;
-
-                const { trace } = Tracer(this.name);
-                trace(reload ? "Reloaded" : "Loaded");
-            } catch (e: any) {
-                this.loadError._ = e?.message || "Failed to load";
-                console.error(`[luna:plugin] Failed to load ${this.name}:`, e);
-                if (this.blobUrl) {
-                    URL.revokeObjectURL(this.blobUrl);
-                    this.blobUrl = "";
-                }
-            }
-        } finally {
-            this.loading._ = false;
-            this.loadSemaphore.release();
-        }
-    }
-
-    // --- Private: cleanup ---
-
-    private async unload(): Promise<void> {
-        this.stopReloadLoop();
-
-        if (this.exports) {
-            // Run cleanup functions in reverse order
-            if (this.exports.unloads) {
-                const cleanups = Array.from(this.exports.unloads);
-                for (let i = cleanups.length - 1; i >= 0; i--) {
-                    try {
-                        cleanups[i]();
-                    } catch (e) {
-                        console.error(`[luna:plugin] Cleanup error in ${this.name}:`, e);
+                // Clean up side effects — plugin logic runs via Rust wrapper, not this import
+                if (mod.unloads instanceof Set) {
+                    const fns = Array.from(mod.unloads);
+                    for (let i = fns.length - 1; i >= 0; i--) {
+                        try { (fns[i] as () => void)(); } catch {}
                     }
                 }
-            }
-            if (this.exports.onUnload) {
-                try {
-                    this.exports.onUnload();
-                } catch (e) {
-                    console.error(`[luna:plugin] onUnload error in ${this.name}:`, e);
+                if (typeof mod.onUnload === "function") {
+                    try { mod.onUnload(); } catch {}
                 }
+                delete modules[this.name];
+            } finally {
+                URL.revokeObjectURL(blobUrl);
             }
-            this.exports = undefined;
-        }
-
-        delete modules[this.name];
-
-        if (this.blobUrl) {
-            URL.revokeObjectURL(this.blobUrl);
-            this.blobUrl = "";
-        }
-
-        // Cascade: unload dependant plugins
-        for (const dep of this.dependants) {
-            await dep.unload();
+        } catch (e) {
+            console.error(`[luna:plugin] Settings extraction failed for ${this.name}:`, e);
         }
     }
 
@@ -300,13 +330,11 @@ export class LunaPlugin {
             if (!this.liveReload || !this.enabled) return;
             this.fetching._ = true;
             try {
-                // Re-install to refresh cached code (Rust fetches + updates SQLite)
                 const info = await invokeIpc("plugin.install", this.url);
                 const newHash = info?.hash;
                 if (newHash && newHash !== this.store.package.hash) {
                     this.store.package.hash = newHash;
-                    await this.unload();
-                    await this.loadExports(true);
+                    await this.reload();
                 }
             } catch (e) {
                 console.error(`[luna:plugin] Live reload error for ${this.name}:`, e);
@@ -355,11 +383,8 @@ export class LunaPlugin {
     }
 
     static async install(url: string): Promise<LunaPlugin> {
-        // Sanitize URL like upstream
         const cleanUrl = url.replace(/(\.(mjs|json|mjs\.map))$/, "");
 
-        // If already loaded at this URL, disable first (unloads runtime + marks disabled)
-        // Rust install will set enabled=1 again via INSERT OR REPLACE
         const existing = LunaPlugin.plugins[cleanUrl];
         if (existing) {
             await existing.disable();
@@ -368,8 +393,10 @@ export class LunaPlugin {
         const info = await invokeIpc("plugin.install", cleanUrl);
         const plugin = LunaPlugin.fromPluginInfo(info);
         if (plugin.enabled) {
-            await plugin.loadExports();
+            sendIpc("jsrt.enable_plugin", cleanUrl);
         }
+        syncUpstream(cleanUrl, plugin);
+        plugin.extractSettings().then(() => syncUpstream(cleanUrl, plugin));
         return plugin;
     }
 
@@ -377,8 +404,7 @@ export class LunaPlugin {
         const plugins = await invokeIpc("plugin.list");
         if (!Array.isArray(plugins)) return;
         for (const info of plugins) {
-            const plugin = LunaPlugin.fromPluginInfo(info);
-            await plugin.load();
+            LunaPlugin.fromPluginInfo(info);
         }
     }
 
@@ -398,7 +424,6 @@ export class LunaPlugin {
      * name/author/description. Does NOT install or enable the plugin.
      */
     static async fromStorage(opts: { url: string; package?: PluginPackage }): Promise<LunaPlugin> {
-        // Sanitize URL: strip extensions like upstream
         const url = opts.url.replace(/(\.(mjs|json|mjs\.map))$/, "");
 
         const existing = LunaPlugin.plugins[url];
@@ -411,7 +436,6 @@ export class LunaPlugin {
                 if (typeof pkg === "string") pkg = JSON.parse(pkg);
             } catch (e) {
                 console.warn("[luna:plugin] Plugin update check error:", e);
-                // Fallback: derive name from URL
                 const lastSegment = url.split("/").filter(Boolean).pop() || "unknown";
                 pkg = { name: lastSegment };
             }

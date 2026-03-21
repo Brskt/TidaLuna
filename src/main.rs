@@ -7,10 +7,10 @@ mod bandwidth;
 mod bridge;
 mod decrypt;
 mod flac_meta;
-mod js_runtime;
 mod logging;
 mod media_controls;
 mod metadata;
+mod native_runtime;
 mod player;
 mod plugins;
 mod preload;
@@ -47,6 +47,28 @@ pub(crate) struct IpcMessage {
     pub(crate) id: Option<String>,
 }
 
+impl std::fmt::Display for IpcMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IpcMessage {{ channel: {:?}, args: [", self.channel)?;
+        for (i, arg) in self.args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            let s = arg.to_string();
+            if s.len() > 200 {
+                write!(f, "{}...({} chars)", &s[..200], s.len())?;
+            } else {
+                write!(f, "{s}")?;
+            }
+        }
+        write!(f, "]")?;
+        if let Some(id) = &self.id {
+            write!(f, ", id: {id:?}")?;
+        }
+        write!(f, " }}")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared application state – accessible from CEF callbacks and posted tasks
 // ---------------------------------------------------------------------------
@@ -66,9 +88,12 @@ struct AppState {
     media_controls: Option<media_controls::OsMediaControls>,
     media_duration: Option<f64>,
     plugin_store: plugins::PluginStore,
+    plugin_manager: plugins::PluginManager,
+    /// OAuth token captured from CEF — injected into plugin fetch requests.
+    captured_token: String,
     pending_ipc_callbacks: HashMap<String, IpcCallback>,
-    /// QuickJS plugin runtime — executes TidaLuna plugins outside CEF
-    plugin_runtime: Option<js_runtime::plugin_runtime::PluginRuntime>,
+    /// Bun child process for native plugin modules (lazy-initialized).
+    native_runtime: Option<native_runtime::NativeRuntime>,
     #[cfg(target_os = "windows")]
     thumbbar: Option<thumbbar::ThumbBar>,
 }
@@ -174,10 +199,7 @@ fn handle_ipc_message(request: &str) {
         return;
     }
 
-    // Suppress logging for high-frequency channels
-    if msg.channel != "jsrt.tick" && msg.channel != "jsrt.state_sync" {
-        crate::vprintln!("IPC Message: {:?}", msg);
-    }
+    crate::vprintln!("IPC Message: {}", msg);
 
     if msg.channel.starts_with("player.") {
         handle_player_ipc(&msg);
@@ -287,162 +309,134 @@ pub(crate) fn ipc_callback_err(cb: &IpcCallback, error: &str) {
 }
 
 /// Handle fire-and-forget jsrt.* messages (no callback, no id).
-/// Used for high-frequency operations like state sync and Redux action forwarding.
 fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
     match msg.channel.as_str() {
-        "jsrt.redux_action" => {
-            let action_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
+        "jsrt.set_token" => {
+            let token = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
             with_state(|state| {
-                if let Some(ref rt) = state.plugin_runtime {
-                    rt.dispatch_redux_action(action_type, payload_json);
-                }
+                state.captured_token = token.to_string();
             });
-            flush_cef_js_queue();
+            crate::vprintln!("[PLUGIN] Token captured ({} chars)", token.len());
         }
-        "jsrt.state_sync" => {
-            let state_json = msg.args.first().and_then(|v| v.as_str()).unwrap_or("{}");
-            with_state(|state| {
-                if let Some(ref rt) = state.plugin_runtime {
-                    rt.update_redux_state(state_json);
-                }
-            });
-        }
-        "jsrt.event" => {
-            let event_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
-            with_state(|state| {
-                if let Some(ref rt) = state.plugin_runtime {
-                    rt.dispatch_event(event_type, payload_json);
-                }
-            });
-            flush_cef_js_queue();
-        }
-        "jsrt.tick" => {
-            with_state(|state| {
-                if let Some(ref rt) = state.plugin_runtime {
-                    rt.tick();
-                }
-            });
-            flush_cef_js_queue();
-        }
-        "jsrt.load_plugins" => {
-            let loaded = with_state(|state| {
-                if let Some(ref mut rt) = state.plugin_runtime {
-                    rt.load_all_enabled(&state.plugin_store)
-                } else {
-                    Vec::new()
+        "jsrt.enable_plugin" => {
+            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() {
+                return;
+            }
+            let prepared = with_state(|state| {
+                let code = state.plugin_store.get_code(url)?;
+                match state.plugin_manager.prepare_plugin(url, &code) {
+                    Ok(js) => Some(js),
+                    Err(e) => {
+                        crate::vprintln!("[PLUGIN] Failed to prepare '{}': {}", url, e);
+                        None
+                    }
                 }
             })
-            .unwrap_or_default();
-            flush_cef_js_queue();
-            if !loaded.is_empty() {
-                crate::vprintln!("[JSRT] Loaded {} plugins: {:?}", loaded.len(), loaded);
+            .flatten();
+            if let Some(js) = prepared {
+                eval_js(&js);
             }
         }
+        "jsrt.disable_plugin" => {
+            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() {
+                return;
+            }
+            crate::vprintln!("[PLUGIN] disable_plugin requested for '{}'", url);
+            let cleanup_js = with_state(|state| {
+                crate::vprintln!(
+                    "[PLUGIN] is_loaded('{}') = {}",
+                    url,
+                    state.plugin_manager.is_loaded(url)
+                );
+                state.plugin_manager.unload_plugin(url)
+            })
+            .flatten();
+            if let Some(ref js) = cleanup_js {
+                crate::vprintln!(
+                    "[PLUGIN] Unloading '{}' ({} bytes cleanup JS)",
+                    url,
+                    js.len()
+                );
+                eval_js(js);
+            } else {
+                crate::vprintln!("[PLUGIN] No cleanup needed for '{}' (not loaded)", url);
+            }
+        }
+        "jsrt.load_plugins" => {
+            let prepared = with_state(|state| {
+                state
+                    .plugin_manager
+                    .prepare_all_enabled(&state.plugin_store)
+            })
+            .unwrap_or_default();
+            crate::vprintln!("[PLUGIN] Loading {} plugins into CEF", prepared.len());
+            for (url, js) in &prepared {
+                crate::vprintln!("[PLUGIN] Injecting '{}' ({} bytes)", url, js.len());
+                eval_js(js);
+            }
+        }
+        // Channels no longer needed (were for QuickJS) — silently ignore
+        "jsrt.tick"
+        | "jsrt.state_sync"
+        | "jsrt.redux_action"
+        | "jsrt.event"
+        | "jsrt.set_product_id"
+        | "jsrt.dom_query_result"
+        | "jsrt.dom_query_result_all"
+        | "jsrt.dom_raw_query_result"
+        | "jsrt.dom_observe"
+        | "jsrt.dom_event"
+        | "jsrt.dom_mutation"
+        | "jsrt.dom_ready" => {}
         _ => {
             crate::vprintln!("[JSRT] Unknown fire-and-forget channel: {}", msg.channel);
         }
     }
 }
-
-/// Flush queued __cef_eval JS code into CEF.
-/// Must be called AFTER with_state() returns (Mutex released).
-fn flush_cef_js_queue() {
-    // drain_cef_js() is on a thread-local, no Mutex needed
-    let queued = crate::js_runtime::bridge::drain_cef_js();
-    for code in queued {
-        eval_js(&code);
-    }
-}
-
 fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
-    // jsrt.eval — evaluate JS in the QuickJS plugin runtime (debug/test)
-    if msg.channel == "jsrt.eval" {
-        let code = msg
+    // plugin.fetch — async HTTP fetch for plugins (token injection, audit)
+    if msg.channel == "plugin.fetch" {
+        let plugin_id = msg
             .args
             .first()
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let result = with_state(|state| {
-            state
-                .plugin_runtime
-                .as_ref()
-                .and_then(|rt| rt.eval(&code).ok())
-                .unwrap_or_else(|| "null".to_string())
-        })
-        .unwrap_or_else(|| "null".to_string());
-        flush_cef_js_queue();
-        ipc_callback_ok(&callback, &result);
-        return;
-    }
-
-    // jsrt.load_plugins — load all enabled plugins in the QuickJS runtime
-    if msg.channel == "jsrt.load_plugins" {
-        let loaded = with_state(|state| {
-            if let Some(ref mut rt) = state.plugin_runtime {
-                let urls = rt.load_all_enabled(&state.plugin_store);
-                serde_json::to_string(&urls).unwrap_or_else(|_| "[]".to_string())
-            } else {
-                "[]".to_string()
-            }
-        })
-        .unwrap_or_else(|| "[]".to_string());
-        flush_cef_js_queue();
-        ipc_callback_ok(&callback, &loaded);
-        return;
-    }
-
-    // jsrt.tick — drive timers and pending jobs in the QuickJS runtime
-    if msg.channel == "jsrt.tick" {
+        let url = msg
+            .args
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let opts_json = msg
+            .args
+            .get(2)
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}")
+            .to_string();
+        let id = msg.id.unwrap_or_default();
+        // Parse opts and get token while holding the lock
+        let opts: plugins::fetch::FetchOpts = serde_json::from_str(&opts_json)
+            .unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
+        let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
         with_state(|state| {
-            if let Some(ref rt) = state.plugin_runtime {
-                rt.tick();
-            }
+            state.pending_ipc_callbacks.insert(id.clone(), callback);
+            let rt = state.rt_handle.clone();
+            rt.spawn(async move {
+                let result = plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
+                with_state(|state| {
+                    let Some(cb) = state.pending_ipc_callbacks.remove(&id) else {
+                        return;
+                    };
+                    match result {
+                        Ok(json) => ipc_callback_ok(&cb, &json),
+                        Err(e) => ipc_callback_err(&cb, &e),
+                    }
+                });
+            });
         });
-        flush_cef_js_queue();
-        ipc_callback_ok(&callback, "true");
-        return;
-    }
-
-    // jsrt.redux_action — forward Redux action from CEF to rquickjs plugins
-    if msg.channel == "jsrt.redux_action" {
-        let action_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-        let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
-        with_state(|state| {
-            if let Some(ref rt) = state.plugin_runtime {
-                rt.dispatch_redux_action(action_type, payload_json);
-            }
-        });
-        flush_cef_js_queue();
-        ipc_callback_ok(&callback, "true");
-        return;
-    }
-
-    // jsrt.state_sync — update cached Redux state in rquickjs
-    if msg.channel == "jsrt.state_sync" {
-        let state_json = msg.args.first().and_then(|v| v.as_str()).unwrap_or("{}");
-        with_state(|state| {
-            if let Some(ref rt) = state.plugin_runtime {
-                rt.update_redux_state(state_json);
-            }
-        });
-        ipc_callback_ok(&callback, "true");
-        return;
-    }
-
-    // jsrt.event — forward a CEF event to rquickjs plugins
-    if msg.channel == "jsrt.event" {
-        let event_type = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-        let payload_json = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("{}");
-        with_state(|state| {
-            if let Some(ref rt) = state.plugin_runtime {
-                rt.dispatch_event(event_type, payload_json);
-            }
-        });
-        flush_cef_js_queue();
-        ipc_callback_ok(&callback, "true");
         return;
     }
 
@@ -500,6 +494,166 @@ fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             let rt = state.rt_handle.clone();
             rt.spawn(async move {
                 handle_proxy_head(id, url).await;
+            });
+        });
+        return;
+    }
+
+    // __Luna.registerNative — register a native module in the Bun child process
+    if msg.channel == "__Luna.registerNative" {
+        let name = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let code = msg
+            .args
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() || code.is_empty() {
+            ipc_callback_err(&callback, "registerNative: missing name or code");
+            return;
+        }
+
+        crate::vprintln!(
+            "[NATIVE] Registering module '{}' ({} bytes)",
+            name,
+            code.len()
+        );
+
+        with_state(|state| {
+            // Lazy-init Bun process
+            if state.native_runtime.is_none() {
+                match native_runtime::NativeRuntime::spawn(&state.rt_handle) {
+                    Ok(rt) => {
+                        state.native_runtime = Some(rt);
+                        crate::vprintln!("[NATIVE] Bun process started");
+                    }
+                    Err(e) => {
+                        crate::vprintln!("[NATIVE] Failed to start Bun: {e}");
+                        ipc_callback_err(
+                            &callback,
+                            &format!("Failed to start native runtime: {e}"),
+                        );
+                        return;
+                    }
+                }
+            }
+
+            // Extract channels from runtime before spawning async task
+            let pending = state.native_runtime.as_ref().unwrap().pending_clone();
+            let stdin_tx = state.native_runtime.as_ref().unwrap().stdin_tx_clone();
+            let bun_id = state.native_runtime.as_ref().unwrap().next_id_str();
+            let rt = state.rt_handle.clone();
+
+            rt.spawn(async move {
+                let cmd = serde_json::json!({
+                    "id": bun_id,
+                    "type": "register",
+                    "name": name,
+                    "code": code,
+                });
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                {
+                    if let Ok(mut map) = pending.lock() {
+                        map.insert(bun_id.clone(), tx);
+                    }
+                }
+                let line = serde_json::to_string(&cmd).unwrap_or_default();
+                let _ = stdin_tx.send(line);
+
+                let result = rx.await;
+
+                match result {
+                    Ok(Ok(response)) => {
+                        let exports = response
+                            .get("exports")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let channel = format!("__LunaNative.{name}");
+                        crate::vprintln!(
+                            "[NATIVE] Registered '{}': {} exports ({})",
+                            name,
+                            exports.len(),
+                            exports.join(", ")
+                        );
+                        ipc_callback_ok(&callback, &format!("\"{channel}\""));
+                    }
+                    Ok(Err(e)) => {
+                        crate::vprintln!("[NATIVE] Register failed for '{}': {}", name, e);
+                        ipc_callback_err(&callback, &e);
+                    }
+                    Err(_) => {
+                        ipc_callback_err(&callback, "Bun response channel dropped");
+                    }
+                }
+            });
+        });
+        return;
+    }
+
+    // __LunaNative.* — call a function on a registered native module
+    if msg.channel.starts_with("__LunaNative.") {
+        let module_name = msg
+            .channel
+            .strip_prefix("__LunaNative.")
+            .unwrap_or("")
+            .to_string();
+        let export_name = msg
+            .args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let call_args: Vec<serde_json::Value> = msg.args.iter().skip(1).cloned().collect();
+
+        with_state(|state| {
+            let Some(ref runtime) = state.native_runtime else {
+                ipc_callback_err(&callback, "Native runtime not initialized");
+                return;
+            };
+
+            let pending = runtime.pending_clone();
+            let stdin_tx = runtime.stdin_tx_clone();
+            let bun_id = runtime.next_id_str();
+            let rt = state.rt_handle.clone();
+
+            rt.spawn(async move {
+                let cmd = serde_json::json!({
+                    "id": bun_id,
+                    "type": "call",
+                    "name": module_name,
+                    "fn": export_name,
+                    "args": call_args,
+                });
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                {
+                    if let Ok(mut map) = pending.lock() {
+                        map.insert(bun_id.clone(), tx);
+                    }
+                }
+                let line = serde_json::to_string(&cmd).unwrap_or_default();
+                let _ = stdin_tx.send(line);
+
+                match rx.await {
+                    Ok(Ok(response)) => {
+                        let val = response
+                            .get("result")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        ipc_callback_ok(&callback, &val.to_string());
+                    }
+                    Ok(Err(e)) => ipc_callback_err(&callback, &e),
+                    Err(_) => ipc_callback_err(&callback, "Bun response channel dropped"),
+                }
             });
         });
         return;
@@ -1271,6 +1425,21 @@ fn handle_player_event(event: PlayerEvent) {
                         channels,
                         bytes,
                     ));
+                // Also forward to QuickJS so plugins can read __LUNAR_MEDIA_FORMAT__.
+                // Store as pending and dispatch during next tick (which drives promises).
+                {
+                    let format_json = serde_json::json!({
+                        "codec": codec,
+                        "sampleRate": sample_rate,
+                        "bitDepth": bit_depth,
+                        "channels": channels,
+                        "bytes": bytes,
+                    });
+                    state.pending_misc_js.push(format!(
+                        "(function(){{var f={};globalThis.__LUNAR_MEDIA_FORMAT__=f;var r=globalThis.__LUNAR_MEDIA_FORMAT_RESOLVERS__;globalThis.__LUNAR_MEDIA_FORMAT_RESOLVERS__=[];for(var i=0;i<r.length;i++)r[i](f)}})()",
+                        format_json
+                    ));
+                }
             }
             PlayerEvent::Version(v) => {
                 state
@@ -1347,6 +1516,8 @@ impl BrowserSideHandler for IpcQueryHandler {
             && (msg.channel.starts_with("plugin.")
                 || msg.channel.starts_with("proxy.")
                 || msg.channel.starts_with("jsrt.")
+                || msg.channel.starts_with("__Luna.")
+                || msg.channel.starts_with("__LunaNative.")
                 || msg.channel == "player.parse_dash")
             && msg.id.is_some()
         {
@@ -1718,7 +1889,15 @@ wrap_display_handler! {
             _line: i32,
         ) -> i32 {
             if let Some(msg) = message {
-                crate::vprintln!("[JS] {msg}");
+                let s = msg.to_string();
+                // Route __IPC__ prefixed messages as IPC (used by __cef_eval code
+                // because window.cefQuery from execute_java_script doesn't reach
+                // the BrowserSideHandler)
+                if let Some(json) = s.strip_prefix("__IPC__:") {
+                    handle_ipc_message(json);
+                    return 0;
+                }
+                crate::vprintln!("[JS] {s}");
             }
             0
         }
@@ -2059,6 +2238,10 @@ const CEF_SWITCHES: &[&str] = &[
     "disable-notifications",
     "disable-spell-checking",
     "disable-client-side-phishing-detection",
+    // Disable CORS — plugins and plugin stores need cross-origin access to GitHub.
+    // Upstream TidaLuna does the same via Electron's webSecurity: false.
+    // Plugin code is already sandboxed by our security wrapper (fetch proxied, etc.).
+    "disable-web-security",
     "no-first-run",
     "no-default-browser-check",
     "disable-hang-monitor",
@@ -2454,19 +2637,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plugin_store =
         plugins::PluginStore::open(&data_dir).expect("Failed to open plugin store database");
 
-    // --- Initialize QuickJS plugin runtime ---
-    let db_path = data_dir.join("plugins.db");
-    let plugin_runtime = match js_runtime::plugin_runtime::PluginRuntime::new(&db_path) {
-        Ok(rt) => {
-            crate::vprintln!("[JS_RUNTIME] QuickJS plugin runtime initialized");
-            Some(rt)
-        }
-        Err(e) => {
-            eprintln!("[JS_RUNTIME] Failed to init QuickJS runtime: {e}");
-            None
-        }
-    };
-
     // --- Set up shared state ---
     let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
         player,
@@ -2480,8 +2650,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         media_controls: None,
         media_duration: None,
         plugin_store,
+        plugin_manager: plugins::PluginManager::new(),
+        captured_token: String::new(),
         pending_ipc_callbacks: HashMap::new(),
-        plugin_runtime,
+        native_runtime: None,
         #[cfg(target_os = "windows")]
         thumbbar: None,
     })));

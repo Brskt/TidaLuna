@@ -7,7 +7,7 @@ export class StyleTag {
 		unloads: LunaUnloads,
 		private _css?: string,
 	) {
-		this.styleTag = (id ? document.getElementById(id) : this.createElement()) ?? this.createElement();
+		this.styleTag = this.createElement();
 		this.css = _css;
 		unloads.add(this.remove.bind(this));
 	}
