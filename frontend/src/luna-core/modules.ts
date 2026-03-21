@@ -19,12 +19,15 @@ window.require.main = undefined;
 
 // TidaLunar: reduxStore is assigned by initModules() after webpack/Redux discovery.
 export let reduxStore: Store;
+let _resolveStoreReady: () => void;
+export const storeReady: Promise<void> = new Promise((r) => { _resolveStoreReady = r; });
 
 /**
  * Must be called after initTidalInternals() has populated tidalModules.
  */
 export function initModules(store: Store): void {
 	reduxStore = store;
+	_resolveStoreReady();
 
 	// Expose react — try TIDAL's webpack cache first, fall back to bundled packages
 	modules["react"] = findModuleByProperty((key, value) => key === "createElement" && typeof value === "function");

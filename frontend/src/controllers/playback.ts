@@ -40,6 +40,9 @@ export const createPlaybackController = () => {
                         try {
                             if (lastTransitionId !== productId) return;
 
+                            await require("../luna-core/modules").storeReady;
+                            if (lastTransitionId !== productId) return;
+
                             const { interceptors } = require("../luna-core/exposeTidalInternals.patchAction");
                             const { store } = require("../luna-lib/redux/store");
                             const actionType = "playbackControls/MEDIA_PRODUCT_TRANSITION";
