@@ -54,11 +54,20 @@ const PASSTHROUGH_EVENTS = new Set([
     "deviceunknownerror", "mediaformat", "version", "mediaerror",
     "mediamaxconnectionsreached",
 ]);
+let _lastTimeDispatch = 0;
+let _forceTimeDispatch = false;
+
 // Short aliases used by the Rust bridge → SDK event names (carry seq).
 const SEQ_EVENTS: Record<string, string> = {
     "time": "mediacurrenttime",
     "duration": "mediaduration",
     "state": "mediastate",
+};
+const BRIDGE_TO_REDUX_STATE: Record<string, string> = {
+    "active": "PLAYING",
+    "paused": "NOT_PLAYING",
+    "completed": "IDLE",
+    "idle": "IDLE",
 };
 // Mediaformat bridge: latest format data from Rust player (playbackInfo fallback)
 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
@@ -89,6 +98,17 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
         }
         if (type === "time") {
             proxySetTime(event.v);
+            const now = Date.now();
+            if (_forceTimeDispatch || now - _lastTimeDispatch >= 250) {
+                _forceTimeDispatch = false;
+                _lastTimeDispatch = now;
+                try {
+                    const { buildActions } = require("./luna-core/exposeTidalInternals.patchAction");
+                    const { store } = require("./luna-lib/redux/store");
+                    const timeUpdate = buildActions["playbackControls/TIME_UPDATE"];
+                    if (timeUpdate) store.dispatch(timeUpdate(event.v));
+                } catch (_) {}
+            }
         } else if (type === "duration") {
             proxySetDuration(event.v);
         } else if (type === "state") {
@@ -118,6 +138,15 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
                 }
             } else {
                 proxySetPlaying(playing);
+            }
+            const reduxState = BRIDGE_TO_REDUX_STATE[event.v as string];
+            if (reduxState) {
+                try {
+                    const { buildActions } = require("./luna-core/exposeTidalInternals.patchAction");
+                    const { store } = require("./luna-lib/redux/store");
+                    const setPlaybackState = buildActions["playbackControls/SET_PLAYBACK_STATE"];
+                    if (setPlaybackState) store.dispatch(setPlaybackState(reduxState));
+                } catch (_) {}
             }
         }
         const mapped = SEQ_EVENTS[type];
@@ -214,7 +243,10 @@ const init = async () => {
             interceptors[action].add(cb);
         };
         add("playbackControls/PLAY", () => sendIpc("player.play"));
-        add("playbackControls/SEEK", (time: number) => sendIpc("player.seek", time));
+        add("playbackControls/SEEK", (time: number) => {
+            sendIpc("player.seek", time);
+            _forceTimeDispatch = true;
+        });
         add("playbackControls/SET_VOLUME", (p: { volume: number }) => sendIpc("player.volume", p.volume));
     }
 
