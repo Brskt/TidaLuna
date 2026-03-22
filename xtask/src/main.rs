@@ -133,6 +133,10 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     // 7. Download Bun binary if not already in bundle
     download_bun(&bundle_dir)?;
 
+    if release {
+        strip_binaries(&bundle_dir)?;
+    }
+
     println!("Bundle created in: {}", bundle_dir.display());
     Ok(())
 }
@@ -481,6 +485,89 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
+    if cfg!(target_os = "windows") {
+        return Ok(());
+    }
+
+    let strip_args: &[&str] = if cfg!(target_os = "macos") {
+        &["-x"]
+    } else {
+        &["--strip-debug", "--strip-unneeded"]
+    };
+
+    let should_strip = |name: &str| -> bool {
+        name.ends_with(".so")
+            || name.contains(".so.")
+            || name.ends_with(".dylib")
+            || name == "bun"
+    };
+
+    let mut stripped = 0u32;
+    for entry in fs::read_dir(bundle_dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_file() && should_strip(&name) {
+            let size_before = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+            let mut args: Vec<&str> = strip_args.to_vec();
+            let path_str = path.to_string_lossy().to_string();
+            args.push(&path_str);
+
+            let status = Command::new("strip")
+                .args(&args)
+                .status()
+                .map_err(|e| format!("strip failed for {name}: {e}"))?;
+
+            if status.success() {
+                let size_after = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let saved_mb = (size_before.saturating_sub(size_after)) as f64 / 1_048_576.0;
+                println!("  Stripped {name} ({saved_mb:.1} MB saved)");
+                stripped += 1;
+            } else {
+                println!("  Warning: strip failed for {name}");
+            }
+        }
+    }
+
+    if cfg!(target_os = "macos") {
+        strip_macos_app(bundle_dir, strip_args)?;
+    }
+
+    if stripped > 0 {
+        println!("  Stripped {stripped} binaries");
+    }
+    Ok(())
+}
+
+fn strip_macos_app(bundle_dir: &Path, strip_args: &[&str]) -> Result<(), String> {
+    fn walk_strip(dir: &Path, strip_args: &[&str]) -> Result<(), String> {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_strip(&path, strip_args)?;
+            } else if path.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".dylib") || name == "Chromium Embedded Framework" {
+                    let mut args: Vec<&str> = strip_args.to_vec();
+                    let path_str = path.to_string_lossy().to_string();
+                    args.push(&path_str);
+                    let status = Command::new("strip")
+                        .args(&args)
+                        .status()
+                        .map_err(|e| format!("strip failed for {name}: {e}"))?;
+                    if status.success() {
+                        println!("  Stripped {name}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    walk_strip(bundle_dir, strip_args)
 }
 
 fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
