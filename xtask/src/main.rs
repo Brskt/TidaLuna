@@ -499,10 +499,7 @@ fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
     };
 
     let should_strip = |name: &str| -> bool {
-        name.ends_with(".so")
-            || name.contains(".so.")
-            || name.ends_with(".dylib")
-            || name == "bun"
+        name.ends_with(".so") || name.contains(".so.") || name.ends_with(".dylib") || name == "bun"
     };
 
     let mut stripped = 0u32;
