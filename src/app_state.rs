@@ -81,7 +81,6 @@ pub(crate) fn exec_js_on_frame(frame: &Frame, js: &str) {
     frame.execute_java_script(Some(&code), Some(&url), 0);
 }
 
-#[allow(dead_code)]
 pub(crate) fn eval_js(js: &str) {
     let browser = with_state(|state| state.browser.clone());
     if let Some(Some(browser)) = browser

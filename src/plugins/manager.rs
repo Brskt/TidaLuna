@@ -49,7 +49,6 @@ impl PluginManager {
     }
 
     /// Check if a plugin is currently loaded.
-    #[allow(dead_code)]
     pub fn is_loaded(&self, plugin_id: &str) -> bool {
         self.loaded.contains(plugin_id)
     }
