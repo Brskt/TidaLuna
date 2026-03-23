@@ -104,23 +104,23 @@ fn handle_media_event(event: MediaControlEvent) {
     match event {
         MediaControlEvent::Play => {
             crate::vprintln!("[MEDIA]  Play");
-            crate::app_state::eval_js("window.__TL_PLAY_PAUSE__?.()");
+            crate::app_state::eval_js(super::js_actions::PLAY_PAUSE);
         }
         MediaControlEvent::Pause => {
             crate::vprintln!("[MEDIA]  Pause");
-            crate::app_state::eval_js("window.__TL_PLAY_PAUSE__?.()");
+            crate::app_state::eval_js(super::js_actions::PLAY_PAUSE);
         }
         MediaControlEvent::Toggle => {
             crate::vprintln!("[MEDIA]  Toggle");
-            crate::app_state::eval_js("window.__TL_PLAY_PAUSE__?.()");
+            crate::app_state::eval_js(super::js_actions::PLAY_PAUSE);
         }
         MediaControlEvent::Next => {
             crate::vprintln!("[MEDIA]  Next");
-            crate::app_state::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
+            crate::app_state::eval_js(super::js_actions::PLAY_NEXT);
         }
         MediaControlEvent::Previous => {
             crate::vprintln!("[MEDIA]  Previous");
-            crate::app_state::eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
+            crate::app_state::eval_js(super::js_actions::PLAY_PREV);
         }
         MediaControlEvent::Stop => {
             crate::vprintln!("[MEDIA]  Stop");

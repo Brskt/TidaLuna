@@ -120,13 +120,13 @@ wrap_menu_model_delegate! {
                     open_in_os(crate::state::cache_data_dir());
                 }
                 MenuCommand::PlayPause => {
-                    eval_js("window.__TL_PLAY_PAUSE__?.()");
+                    eval_js(crate::platform::js_actions::PLAY_PAUSE);
                 }
                 MenuCommand::Next => {
-                    eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();");
+                    eval_js(crate::platform::js_actions::PLAY_NEXT);
                 }
                 MenuCommand::Prev => {
-                    eval_js("window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();");
+                    eval_js(crate::platform::js_actions::PLAY_PREV);
                 }
                 MenuCommand::Stop => {
                     with_state(|state| {

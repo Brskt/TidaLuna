@@ -52,13 +52,9 @@ unsafe extern "system" fn frameless_subclass_proc(
             WM_COMMAND => {
                 let id = (wparam & 0xFFFF) as u32;
                 match id {
-                    0 => crate::app_state::eval_js(
-                        "window.__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.()",
-                    ),
-                    1 => crate::app_state::eval_js("window.__TL_PLAY_PAUSE__?.()"),
-                    2 => crate::app_state::eval_js(
-                        "window.__TIDAL_PLAYBACK_DELEGATE__?.playNext?.()",
-                    ),
+                    0 => crate::app_state::eval_js(crate::platform::js_actions::PLAY_PREV),
+                    1 => crate::app_state::eval_js(crate::platform::js_actions::PLAY_PAUSE),
+                    2 => crate::app_state::eval_js(crate::platform::js_actions::PLAY_NEXT),
                     _ => return DefSubclassProc(hwnd, msg, wparam, lparam),
                 }
                 0
