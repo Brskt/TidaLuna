@@ -173,7 +173,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             let track_id = self.current_track_id.clone();
                             std::thread::spawn(move || {
                                 if let Some(tid) = track_id {
-                                    let mut cache = crate::state::AUDIO_CACHE.lock().unwrap();
+                                    let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
+                                        eprintln!("[CACHE]  Lock poisoned, skipping store");
+                                        return;
+                                    };
                                     match cache.store(&tid, "flac", &data) {
                                         Ok(()) => {
                                             crate::vprintln!(

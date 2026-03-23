@@ -250,7 +250,10 @@ fn canonical_track_id(url: &str) -> String {
 }
 
 fn print_track_banner(format: &str) {
-    let lock = CURRENT_METADATA.lock().unwrap();
+    let Ok(lock) = CURRENT_METADATA.lock() else {
+        crate::vprintln!("[PLAYER] CURRENT_METADATA lock poisoned, skipping banner");
+        return;
+    };
     let format_upper = format.to_uppercase();
     let (title, artist, quality) = match lock.as_ref() {
         Some(m) => (
@@ -280,7 +283,10 @@ fn print_track_banner(format: &str) {
 
 fn try_cache_hit(ctx: &LoadContext, track_id: &str) -> LoadStep {
     let cache_t0 = std::time::Instant::now();
-    let cache = AUDIO_CACHE.lock().unwrap();
+    let Ok(cache) = AUDIO_CACHE.lock() else {
+        crate::vprintln!("[CACHE]  Lock poisoned, skipping cache lookup");
+        return LoadStep::Miss;
+    };
     if let Some(data) = cache.load(track_id) {
         let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
         if ctx.is_stale() {
