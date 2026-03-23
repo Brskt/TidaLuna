@@ -29,7 +29,7 @@ pub struct NativeRuntime {
 }
 
 impl NativeRuntime {
-    /// Spawn a Bun child process running `native-host.js`.
+    /// Spawn a Bun child process running `native-host.cjs`.
     ///
     /// Looks for the Bun binary and host script next to the current executable,
     /// falling back to `bun` in PATH for development.
@@ -48,8 +48,8 @@ impl NativeRuntime {
             })?;
 
         // Find host script
-        let host_script = find_file(&exe_dir, "native-host.js")
-            .ok_or_else(|| anyhow::anyhow!("native-host.js not found next to executable."))?;
+        let host_script = find_file(&exe_dir, "native-host.cjs")
+            .ok_or_else(|| anyhow::anyhow!("native-host.cjs not found next to executable."))?;
 
         crate::vprintln!(
             "[BUN]    Spawning: {} run {}",

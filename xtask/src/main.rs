@@ -35,7 +35,6 @@ fn usage() {
     eprintln!("  fmt       Check formatting");
     eprintln!("  bundle    Build and create distributable bundle (dev by default)");
     eprintln!("            --release  Build in release mode (optimized, slower)");
-    eprintln!("            --console  Enable console window (shows logs)");
 }
 
 fn clippy() -> Result<(), String> {
@@ -64,22 +63,14 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         "tidalunar"
     };
 
-    let console = flags.iter().any(|f| f == "--console");
     let release = flags.iter().any(|f| f == "--release");
     let profile = if release { "release" } else { "dev" };
 
     // 1. Build
-    println!(
-        "Building {profile}{}...",
-        if console { " (console)" } else { "" }
-    );
+    println!("Building {profile}...");
     let mut args = vec!["build"];
     if release {
         args.push("--release");
-    }
-    if console {
-        args.push("--features");
-        args.push("console");
     }
     run("cargo", &args)?;
 
@@ -122,12 +113,12 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         }
     }
 
-    // 6. Copy native-host.js for Bun native module runtime
-    let host_script = project_root.join("frontend/scripts/native-host.js");
+    // 6. Copy native-host.cjs for Bun native module runtime
+    let host_script = project_root.join("frontend/scripts/native-host.cjs");
     if host_script.exists() {
-        fs::copy(&host_script, bundle_dir.join("native-host.js"))
-            .map_err(|e| format!("failed to copy native-host.js: {e}"))?;
-        println!("  Copied native-host.js");
+        fs::copy(&host_script, bundle_dir.join("native-host.cjs"))
+            .map_err(|e| format!("failed to copy native-host.cjs: {e}"))?;
+        println!("  Copied native-host.cjs");
     }
 
     // 7. Download Bun binary if not already in bundle
