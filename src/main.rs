@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let renderer_config = MessageRouterConfig::default();
     let renderer_router = RendererSideRouter::new(renderer_config);
 
-    let mut app = ui::handlers::TidalApp::new(renderer_router);
+    let mut app = ui::TidalApp::new(renderer_router);
     let ret = execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
