@@ -42,15 +42,6 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn get(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = ?1",
-        params![key],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
 fn set(conn: &Connection, key: &str, value: &str) {
     if let Err(e) = conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
@@ -61,24 +52,37 @@ fn set(conn: &Connection, key: &str, value: &str) {
 }
 
 pub(crate) fn load_window_state(conn: &mut Connection) -> WindowState {
-    let def = WindowState::default();
-    WindowState {
-        x: get(conn, "window.x")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(def.x),
-        y: get(conn, "window.y")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(def.y),
-        width: get(conn, "window.width")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(def.width),
-        height: get(conn, "window.height")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(def.height),
-        maximized: get(conn, "window.maximized")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(def.maximized),
+    let mut ws = WindowState::default();
+    let mut stmt = match conn.prepare(
+        "SELECT key, value FROM settings WHERE key IN ('window.x', 'window.y', 'window.width', 'window.height', 'window.maximized')",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::vprintln!("[SETTINGS] Failed to load window state: {e}");
+            return ws;
+        }
+    };
+    let rows = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::vprintln!("[SETTINGS] Failed to load window state: {e}");
+            return ws;
+        }
+    };
+    for row in rows.flatten() {
+        let (key, value) = row;
+        match key.as_str() {
+            "window.x" => { if let Ok(v) = value.parse() { ws.x = v; } }
+            "window.y" => { if let Ok(v) = value.parse() { ws.y = v; } }
+            "window.width" => { if let Ok(v) = value.parse() { ws.width = v; } }
+            "window.height" => { if let Ok(v) = value.parse() { ws.height = v; } }
+            "window.maximized" => { if let Ok(v) = value.parse() { ws.maximized = v; } }
+            _ => {}
+        }
     }
+    ws
 }
 
 pub(crate) fn save_window_state(conn: &mut Connection, state: &WindowState) {

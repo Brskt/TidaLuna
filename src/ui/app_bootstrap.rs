@@ -5,7 +5,7 @@ use cef::wrapper::message_router::{
     MessageRouterRendererSideHandlerCallbacks, RendererSideRouter,
 };
 use cef::*;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
 // --- Render Process Handler ---
@@ -319,7 +319,7 @@ document.title = "TidaLunar - A TIDAL client";
                 Some(&mut bv_delegate),
             );
 
-            let mut window_delegate = TidalWindowDelegate::new(RefCell::new(browser_view));
+            let mut window_delegate = TidalWindowDelegate::new(RefCell::new(browser_view), OnceCell::new());
             window_create_top_level(Some(&mut window_delegate));
             crate::vprintln!("[CEF]    Initialized");
         }

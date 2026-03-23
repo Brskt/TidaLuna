@@ -2,7 +2,7 @@ use crate::app_state::with_state;
 use crate::ipc::window::notify_window_state;
 use crate::ui::flush::run_flush_batch;
 use cef::*;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 
 // --- Win32 frameless subclass ---
 
@@ -70,13 +70,18 @@ unsafe extern "system" fn frameless_subclass_proc(
 
 // --- Window Delegate ---
 
+fn load_init_window_state() -> crate::settings::WindowState {
+    crate::state::db().call(|_, sc| crate::settings::load_window_state(sc))
+}
+
 wrap_window_delegate! {
     pub(super) struct TidalWindowDelegate {
         browser_view: RefCell<Option<BrowserView>>,
+        init_window_state: OnceCell<crate::settings::WindowState>,
     }
     impl ViewDelegate {
         fn preferred_size(&self, _view: Option<&mut View>) -> Size {
-            let ws = crate::state::db().call(|_, sc| crate::settings::load_window_state(sc));
+            let ws = self.init_window_state.get_or_init(load_init_window_state);
             Size {
                 width: ws.width as i32,
                 height: ws.height as i32,
@@ -86,7 +91,7 @@ wrap_window_delegate! {
     impl PanelDelegate {}
     impl WindowDelegate {
         fn initial_bounds(&self, _window: Option<&mut Window>) -> cef::Rect {
-            let ws = crate::state::db().call(|_, sc| crate::settings::load_window_state(sc));
+            let ws = self.init_window_state.get_or_init(load_init_window_state);
             if ws.has_position() && !ws.maximized {
                 cef::Rect {
                     x: ws.x,
@@ -99,7 +104,7 @@ wrap_window_delegate! {
             }
         }
         fn initial_show_state(&self, _window: Option<&mut Window>) -> cef::ShowState {
-            let ws = crate::state::db().call(|_, sc| crate::settings::load_window_state(sc));
+            let ws = self.init_window_state.get_or_init(load_init_window_state);
             if ws.maximized {
                 cef::ShowState::MAXIMIZED
             } else {
