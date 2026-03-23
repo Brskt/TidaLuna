@@ -389,7 +389,11 @@ wrap_display_handler! {
                     handle_ipc_message(json);
                     return 0;
                 }
-                crate::vprintln!("[JS] {s}");
+                if s.starts_with("[DBG:") || s.starts_with("[withFormat") {
+                    crate::vprintln3!("[JS] {s}");
+                } else {
+                    crate::vprintln!("[JS] {s}");
+                }
             }
             0
         }

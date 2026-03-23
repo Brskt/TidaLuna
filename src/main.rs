@@ -1,7 +1,4 @@
-#![cfg_attr(
-    all(not(debug_assertions), not(feature = "console")),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app_state;
 mod audio;
 mod bridge;
@@ -27,6 +24,13 @@ use std::sync::{Arc, Mutex};
 use ui::flush::PlayerEventTask;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    if logging::log_level() >= 1 {
+        unsafe {
+            windows_sys::Win32::System::Console::AllocConsole();
+        }
+    }
+
     #[cfg(target_os = "windows")]
     unsafe {
         use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;

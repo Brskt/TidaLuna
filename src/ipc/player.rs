@@ -21,7 +21,7 @@ pub(crate) fn handle_ipc_message(request: &str) {
             .and_then(|v| v.as_str())
             .is_some_and(|s| s == "setCurrentTime");
         if !dominated_by_time {
-            crate::vprintln!("[JS-DBG] {:?}", msg.args);
+            crate::vprintln2!("[JS-DBG] {:?}", msg.args);
         }
         return;
     }

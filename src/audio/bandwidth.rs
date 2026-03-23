@@ -296,7 +296,7 @@ impl GovernorState {
         if bp.take_seek_preload_pause() {
             self.preload_cooldown_until =
                 Some(Instant::now() + std::time::Duration::from_millis(1500));
-            crate::vprintln!("[GOV]    Preload paused for seek (1.5s cooldown)");
+            crate::vprintln2!("[GOV]    Preload paused for seek (1.5s cooldown)");
         }
         self.update_gate(bp);
         if !self.playback_throttled {
@@ -334,14 +334,14 @@ impl GovernorState {
         self.saved_rate = new_rate;
         self.saved_burst = new_burst;
         if bitrate > 0 {
-            crate::vprintln!(
+            crate::vprintln2!(
                 "[GOV]    Adaptive rate: {:.0} KB/s (bitrate: {:.0} KB/s, {:.0}× real-time)",
                 new_rate / 1024.0,
                 bitrate as f64 / 1024.0,
                 PLAYBACK_MULT
             );
         } else {
-            crate::vprintln!(
+            crate::vprintln2!(
                 "[GOV]    Adaptive rate: reset to fallback ({:.0} KB/s)",
                 new_rate / 1024.0
             );
@@ -364,7 +364,7 @@ impl GovernorState {
             self.boost_start = Some(Instant::now());
             self.preload_cooldown_until =
                 Some(Instant::now() + std::time::Duration::from_millis(1500));
-            crate::vprintln!(
+            crate::vprintln2!(
                 "[GOV]    Seek BOOST ON (rate: {:.0} KB/s, {:.0}× real-time)",
                 boost_rate / 1024.0,
                 if bitrate > 0 { BOOST_MULT } else { 0.0 }
@@ -375,13 +375,13 @@ impl GovernorState {
 
             if ahead >= boost_ahead_threshold {
                 self.exit_boost();
-                crate::vprintln!(
+                crate::vprintln2!(
                     "[GOV]    Seek BOOST OFF (threshold: {} KB ahead, {elapsed_ms}ms)",
                     ahead / 1024
                 );
             } else if elapsed_ms >= BOOST_TIMEOUT_MS {
                 self.exit_boost();
-                crate::vprintln!(
+                crate::vprintln2!(
                     "[GOV]    Seek BOOST OFF (timeout {elapsed_ms}ms, {} KB ahead)",
                     ahead / 1024
                 );
@@ -440,7 +440,7 @@ impl GovernorState {
                 } else {
                     0.0
                 };
-                crate::vprintln!(
+                crate::vprintln2!(
                     "[GOV]    Starvation BOOST ON (buffer: {} KB, {:.1}s ahead)",
                     ahead / 1024,
                     ahead_secs
@@ -475,10 +475,10 @@ impl GovernorState {
             Some(secs) => {
                 if !self.playback_throttled && secs >= PLAYBACK_HIGH_WATER_SECS {
                     self.playback_throttled = true;
-                    crate::vprintln!("[GOV]    Playback throttled (buffer: {secs:.1}s ahead)");
+                    crate::vprintln2!("[GOV]    Playback throttled (buffer: {secs:.1}s ahead)");
                 } else if self.playback_throttled && secs < PLAYBACK_LOW_WATER_SECS {
                     self.playback_throttled = false;
-                    crate::vprintln!("[GOV]    Playback resumed (buffer: {secs:.1}s ahead)");
+                    crate::vprintln2!("[GOV]    Playback resumed (buffer: {secs:.1}s ahead)");
                 }
             }
             None => {
@@ -504,11 +504,11 @@ impl GovernorState {
         if new_gate != self.gate {
             match new_gate {
                 PreloadGate::Paused => {
-                    crate::vprintln!("[GOV]    Preload PAUSED (buffer low)");
+                    crate::vprintln2!("[GOV]    Preload PAUSED (buffer low)");
                     self.pause_start = Some(Instant::now());
                 }
                 PreloadGate::Active => {
-                    crate::vprintln!("[GOV]    Preload RESUMED (buffer ok)");
+                    crate::vprintln2!("[GOV]    Preload RESUMED (buffer ok)");
                     if let Some(start) = self.pause_start.take() {
                         self.pause_time += start.elapsed();
                     }
@@ -539,7 +539,7 @@ impl GovernorState {
                 ""
             };
             if self.boost_start.is_some() || play_rate > 0.0 || preload_rate > 0.0 {
-                crate::vprintln!(
+                crate::vprintln3!(
                     "[GOV]    play: {:.0} KB/s | preload: {:.0} KB/s | buf: {} KB ({}) | preload: {:?} | pause: {:.1}s{}",
                     play_rate,
                     preload_rate,

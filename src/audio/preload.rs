@@ -198,7 +198,7 @@ pub fn start_download(
                 }
 
                 let range_header = format!("bytes={target}-");
-                crate::vprintln!("[STREAM] Range restart at byte {target}");
+                crate::vprintln2!("[STREAM] Range restart at byte {target}");
 
                 let send_fut = crate::state::HTTP_CLIENT_PLAYBACK
                     .get(&url)
@@ -210,7 +210,7 @@ pub fn start_download(
                         if writer.is_cancelled() {
                             return;
                         }
-                        crate::vprintln!("[STREAM] Restart aborted (new restart pending) after {}", format_ms(restart_t0.elapsed().as_secs_f64() * 1000.0));
+                        crate::vprintln3!("[STREAM] Restart aborted (new restart pending) after {}", format_ms(restart_t0.elapsed().as_secs_f64() * 1000.0));
                         continue 'outer;
                     }
                     result = send_fut => {
@@ -226,7 +226,7 @@ pub fn start_download(
 
                 let cdn = crate::player::cdn_cache_status(&range_resp);
                 let ttfb = format_ms(restart_t0.elapsed().as_secs_f64() * 1000.0);
-                crate::vprintln!(
+                crate::vprintln2!(
                     "[STREAM] TTFB: {} | CDN: {} | Range: bytes={}-",
                     ttfb,
                     cdn,
@@ -245,7 +245,7 @@ pub fn start_download(
                     break;
                 } else if status.is_success() {
                     // Server ignored Range, restart from beginning
-                    crate::vprintln!(
+                    crate::vprintln2!(
                         "[STREAM] Server ignored Range header, restarting from byte 0"
                     );
                     writer.reset_for_range(0);
@@ -271,7 +271,7 @@ pub fn start_download(
                         if writer.is_cancelled() {
                             return;
                         }
-                        crate::vprintln!(
+                        crate::vprintln3!(
                             "[STREAM] Interrupted: new restart after {}KB in {} ({} chunks)",
                             bytes_since_restart / 1024,
                             format_ms(stream_start.elapsed().as_secs_f64() * 1000.0),
@@ -313,20 +313,20 @@ pub fn start_download(
 
                                 // Log first chunk + progress every 512KB
                                 if chunk_count == 1 {
-                                    crate::vprintln!(
+                                    crate::vprintln3!(
                                         "[STREAM] First chunk: {}B at {}",
                                         chunk.len(),
                                         format_ms(stream_start.elapsed().as_secs_f64() * 1000.0),
                                     );
                                 }
                                 if !written {
-                                    crate::vprintln!(
+                                    crate::vprintln3!(
                                         "[STREAM] Write DISCARDED (restart pending) at {}KB",
                                         bytes_since_restart / 1024
                                     );
                                 }
                                 if bytes_since_restart - last_progress_bytes >= 512 * 1024 {
-                                    crate::vprintln!(
+                                    crate::vprintln3!(
                                         "[STREAM] Progress: {}KB in {} ({} chunks)",
                                         bytes_since_restart / 1024,
                                         format_ms(stream_start.elapsed().as_secs_f64() * 1000.0),
@@ -367,7 +367,7 @@ pub fn start_download(
             // and emits "completed". If a backward seek needs data before
             // base_offset, buffer.rs clears `finished` and requests a restart.
             writer.finish();
-            crate::vprintln!(
+            crate::vprintln2!(
                 "[STREAM] Partial EOF (base={}). Waiting for restart or cancel.",
                 stream_offset
             );

@@ -44,22 +44,16 @@ sudo apt-get install -y \
 
 ## Build
 
-Dev build with console (recommended for development):
+Dev build:
 
 ```bash
-cargo xtask bundle --console
+cargo xtask bundle
 ```
 
 Release build (optimized, strips debug symbols from CEF binaries):
 
 ```bash
 cargo xtask bundle --release
-```
-
-Release with console:
-
-```bash
-cargo xtask bundle --release --console
 ```
 
 The bundle is created in `dist/` with the executable, CEF files, and Bun runtime.
@@ -73,10 +67,12 @@ cargo xtask clippy
 
 ## Logging
 
-Verbose logs are controlled by `LOGS`:
+Logs are controlled by `LOGS` (level 1 enabled by default in debug builds):
 
-- Enabled by default in debug builds.
-- In release, enable explicitly.
+- `LOGS=0` — No logs
+- `LOGS=1` — General logs (IPC, player, plugins, media controls)
+- `LOGS=2` — + Streaming details (governor state changes, range restarts, TTFB)
+- `LOGS=3` — + Streaming verbose (chunk progress, governor periodic stats)
 
 Linux/macOS:
 
@@ -89,8 +85,6 @@ Windows CMD:
 ```bat
 set "LOGS=1" && dist\tidalunar.exe
 ```
-
-Supported truthy values: `1`, `true`, `TRUE`, `yes`, `YES`, `on`, `ON`.
 
 ## Local data path
 
