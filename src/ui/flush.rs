@@ -169,15 +169,17 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             PlayerEvent::Duration(duration, seq) => {
                 state.media_duration = Some(duration);
 
-                if let Some(ref meta) = *crate::state::CURRENT_METADATA
-                    .lock()
-                    .expect("CURRENT_METADATA lock poisoned")
-                {
-                    mc_action = MediaControlAction::SetMetadata {
-                        title: meta.title.clone(),
-                        artist: meta.artist.clone(),
-                        duration: Some(duration),
-                    };
+                match crate::state::CURRENT_METADATA.lock() {
+                    Ok(lock) => {
+                        if let Some(ref meta) = *lock {
+                            mc_action = MediaControlAction::SetMetadata {
+                                title: meta.title.clone(),
+                                artist: meta.artist.clone(),
+                                duration: Some(duration),
+                            };
+                        }
+                    }
+                    Err(e) => crate::vprintln!("[BRIDGE] CURRENT_METADATA lock poisoned: {e}"),
                 }
 
                 state

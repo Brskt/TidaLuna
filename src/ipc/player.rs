@@ -113,10 +113,12 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         let duration = state.media_duration;
                         let mc = state.media_controls.take();
                         let mc_metadata = Some((meta.title.clone(), meta.artist.clone(), duration));
-                        let mut lock = crate::state::CURRENT_METADATA
-                            .lock()
-                            .expect("CURRENT_METADATA lock poisoned");
-                        *lock = Some(meta);
+                        match crate::state::CURRENT_METADATA.lock() {
+                            Ok(mut lock) => *lock = Some(meta),
+                            Err(e) => {
+                                crate::vprintln!("[PLAYER] CURRENT_METADATA lock poisoned: {e}")
+                            }
+                        }
                         PlayerIpcEffects {
                             batch: None,
                             mc,
