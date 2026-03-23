@@ -1,26 +1,26 @@
 # TidaLuna
 
-A desktop TIDAL client written in Rust (`tao` + `wry`) with a native audio engine (`rodio`, plus optional exclusive WASAPI mode on Windows).
-
-## Current status (important)
-
-- The frontend is bundled with Bun during Rust builds (`build.rs`).
+A desktop TIDAL client written in Rust with CEF (Chromium Embedded Framework) and a native audio engine (symphonia, cpal, rubato).
 
 ## Features
 
-- FLAC streaming with adaptive buffering (Range restart, seek boost, playback/preload governor).
-- Next-track preloading (RAM cache capped at `32 MB`).
+- FLAC and AAC/DASH streaming with adaptive buffering and next-track preloading.
+- Audio cache (SQLite index, 2 GB LRU with sharded files).
 - Audio device selection.
-- Optional exclusive WASAPI mode on Windows, using a progressive FLAC -> PCM pipeline.
-- Window management: Linux uses native decorations; Windows/macOS use frameless window controls (min/max/close) + drag/resize.
-- WebView devtools via `F12`.
+- Resampling via rubato when device sample rate differs from source.
+- Optional exclusive WASAPI mode on Windows (progressive FLAC/AAC to PCM pipeline).
+- Media controls integration (MPRIS on Linux, thumbnail toolbar on Windows).
+- Plugin system: hybrid Rust + CEF execution with per-plugin sandboxing.
+- Native plugin modules via Bun child process.
 
 ## Requirements
 
 ### All platforms
 
 - Stable Rust
-- Bun (required, automatically used by `build.rs`)
+- Bun
+- CMake
+- Ninja
 
 ### Linux (Ubuntu/Debian)
 
@@ -30,30 +30,39 @@ sudo apt-get install -y \
   build-essential \
   pkg-config \
   libasound2-dev \
+  libdbus-1-dev \
   libgtk-3-dev \
-  libwebkit2gtk-4.1-dev \
   libglib2.0-dev \
   libgdk-pixbuf-2.0-dev \
-  libssl-dev
+  cmake \
+  ninja-build
 ```
 
-## Build and run
+### Windows
+
+- Ninja (`choco install ninja`)
+
+## Build
+
+Dev build with console (recommended for development):
 
 ```bash
-cargo run
+cargo xtask bundle --console
 ```
 
-Release:
+Release build (optimized, strips debug symbols from CEF binaries):
 
 ```bash
-cargo run --release
+cargo xtask bundle --release
 ```
 
-On Windows, to keep the console in release mode:
+Release with console:
 
 ```bash
-cargo run --release --features console
+cargo xtask bundle --release --console
 ```
+
+The bundle is created in `dist/` with the executable, CEF files, and Bun runtime.
 
 ## Code quality
 
@@ -64,36 +73,27 @@ cargo xtask clippy
 
 ## Logging
 
-The project uses `LOGS` for verbose logs:
+Verbose logs are controlled by `LOGS`:
 
-- enabled by default in debug
-- in release, enable explicitly
-
-Examples:
+- Enabled by default in debug builds.
+- In release, enable explicitly.
 
 Linux/macOS:
 
 ```bash
-LOGS=1 cargo run --release
+LOGS=1 ./dist/tidalunar
 ```
 
 Windows CMD:
 
 ```bat
-set "LOGS=1" && cargo run --release --features console
+set "LOGS=1" && dist\tidalunar.exe
 ```
-
-Tip: in `cmd.exe`, prefer `set "VAR=value"` to avoid accidental trailing spaces
-before `&&` (e.g. `LOGS=1 `), which would disable verbose logs.
 
 Supported truthy values: `1`, `true`, `TRUE`, `yes`, `YES`, `on`, `ON`.
 
 ## Local data path
 
-- Windows: `%LOCALAPPDATA%\\tidal-rs`
-- Linux/macOS: `~/.local/share/tidal-rs`
-
-## Notes
-
-- User-Agent is platform-specific in `src/main.rs`.
-- Bootstrap forces `TIDAL_CONFIG.enableDesktopFeatures = true` inside the WebView so desktop mode stays enabled.
+- Linux: `~/.local/share/tidalunar`
+- Windows: `%LOCALAPPDATA%\tidalunar`
+- macOS: `~/Library/Application Support/tidalunar`
