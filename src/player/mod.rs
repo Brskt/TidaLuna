@@ -119,6 +119,45 @@ struct LoadRequest {
     cached: bool,
 }
 
+enum LoadStep {
+    Handled,
+    Miss,
+}
+
+struct LoadContext {
+    load_gen: u32,
+    event_seq: u32,
+    load_start: std::time::Instant,
+    resume_policy: ResumePolicy,
+    auto_play: bool,
+    cmd_tx: mpsc::Sender<PlayerCommand>,
+}
+
+impl LoadContext {
+    fn is_stale(&self) -> bool {
+        LOAD_SEQ.load(Relaxed) != self.load_gen
+    }
+
+    fn publish_load(&self, buffer: RamBuffer, cached: bool, track_id: String) {
+        let _ = self.cmd_tx.send(PlayerCommand::Load {
+            request: LoadRequest {
+                buffer,
+                load_gen: self.load_gen,
+                seq: self.event_seq,
+                track_id,
+                resume_policy: self.resume_policy,
+                load_start: self.load_start,
+                cached,
+            },
+            auto_play: self.auto_play,
+        });
+    }
+
+    fn emit_media_error(&self, error: String, code: &'static str) {
+        let _ = self.cmd_tx.send(PlayerCommand::EmitMediaError { error, code });
+    }
+}
+
 enum PlayerCommand {
     Load {
         request: LoadRequest,
@@ -239,6 +278,182 @@ fn print_track_banner(format: &str) {
     crate::vprintln!("══════════════════════════════════════════");
 }
 
+fn try_cache_hit(ctx: &LoadContext, track_id: &str) -> LoadStep {
+    let cache_t0 = std::time::Instant::now();
+    let cache = AUDIO_CACHE.lock().unwrap();
+    if let Some(data) = cache.load(track_id) {
+        let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
+        if ctx.is_stale() {
+            return LoadStep::Handled;
+        }
+        crate::vprintln!(
+            "[CACHE]  Hit: {} | {} | read: {} | total: {}",
+            track_id.chars().take(40).collect::<String>(),
+            format_bytes(data.len() as u64),
+            format_ms(cache_ms),
+            format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)
+        );
+        let buffer = RamBuffer::from_complete(data);
+        ctx.publish_load(buffer, true, track_id.to_string());
+        return LoadStep::Handled;
+    }
+    let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
+    crate::vprintln!(
+        "[CACHE]  Miss ({}) | lookup: {}",
+        track_id.chars().take(40).collect::<String>(),
+        format_ms(cache_ms)
+    );
+    LoadStep::Miss
+}
+
+async fn try_preload_hit(ctx: &LoadContext, track: &TrackInfo, track_id: &str) -> LoadStep {
+    let preload_t0 = std::time::Instant::now();
+    if let Some(preloaded) = preload::take_preloaded_if_match(track).await {
+        let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
+        if ctx.is_stale() {
+            crate::vprintln!(
+                "[LOAD #{}] stale after preload check, dropping",
+                ctx.load_gen
+            );
+            return LoadStep::Handled;
+        }
+        crate::vprintln!(
+            "[PRELOAD] Hit: {} | check: {} | total: {}",
+            format_bytes(preloaded.data.len() as u64),
+            format_ms(preload_ms),
+            format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)
+        );
+        let buffer = RamBuffer::from_complete(preloaded.data);
+        ctx.publish_load(buffer, false, track_id.to_string());
+        return LoadStep::Handled;
+    }
+
+    let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
+    crate::vprintln!("[PRELOAD] Miss | check: {}", format_ms(preload_ms));
+    LoadStep::Miss
+}
+
+async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &str) {
+    let load_gen = ctx.load_gen;
+
+    if ctx.is_stale() {
+        crate::vprintln!("[LOAD #{load_gen}] stale before HTTP, dropping");
+        return;
+    }
+
+    let req_start = std::time::Instant::now();
+    let resp = match HTTP_CLIENT_PLAYBACK.get(url).send().await {
+        Ok(r) => {
+            if !r.status().is_success() {
+                let status = r.status();
+                eprintln!("[ERROR]  Upstream status: {}", status);
+                if status.as_u16() == 429 {
+                    let _ = ctx.cmd_tx.send(PlayerCommand::EmitMaxConnections);
+                } else {
+                    ctx.emit_media_error(format!("HTTP {}", status), "no_such_file");
+                }
+                return;
+            }
+            r
+        }
+        Err(e) => {
+            eprintln!("[ERROR]  Request failed: {}", e);
+            ctx.emit_media_error(format!("request failed: {e}"), "no_such_file");
+            return;
+        }
+    };
+    let ttfb_ms = req_start.elapsed().as_secs_f64() * 1000.0;
+    let cdn = cdn_cache_status(&resp);
+    crate::vprintln!(
+        "[NET]    TTFB: {} | CDN: {} | HTTP/{}",
+        format_ms(ttfb_ms),
+        cdn,
+        http_version_str(resp.version())
+    );
+    log_response_headers(&resp, "[NET]   ");
+
+    if ctx.is_stale() {
+        crate::vprintln!("[LOAD #{load_gen}] stale after HTTP TTFB, dropping");
+        return;
+    }
+
+    let total_len = resp.content_length().unwrap_or(0);
+    if total_len == 0 {
+        crate::vprintln!(
+            "[FETCH]  No Content-Length, full download... (TTFB: {})",
+            format_ms(ttfb_ms)
+        );
+        match preload::fetch_and_decrypt(url, key).await {
+            Ok(data) => {
+                if ctx.is_stale() {
+                    crate::vprintln!(
+                        "[LOAD #{load_gen}] stale after full download, dropping"
+                    );
+                    return;
+                }
+                crate::vprintln!(
+                    "[FETCH]  Done ({} in {:.0}ms)",
+                    format_bytes(data.len() as u64),
+                    ctx.load_start.elapsed().as_secs_f64() * 1000.0
+                );
+                let buffer = RamBuffer::from_complete(data);
+                ctx.publish_load(buffer, false, track_id.to_string());
+            }
+            Err(e) => {
+                eprintln!("[ERROR]  Fetch failed: {}", e);
+                ctx.emit_media_error(format!("fetch failed: {e}"), "no_such_file");
+            }
+        }
+        return;
+    }
+
+    crate::vprintln!(
+        "[NET]    Size: {} (load #{load_gen})",
+        format_bytes(total_len)
+    );
+
+    let (buffer, writer) = RamBuffer::new(total_len);
+
+    preload::start_download(resp, url.to_string(), key.to_string(), writer);
+
+    // Pre-buffer 64KB before handing to decoder
+    const PRE_BUFFER_TARGET: u64 = 64 * 1024;
+    const PRE_BUFFER_TIMEOUT_MS: u64 = 2000;
+
+    let prebuf_start = std::time::Instant::now();
+    let prebuf_deadline =
+        prebuf_start + std::time::Duration::from_millis(PRE_BUFFER_TIMEOUT_MS);
+    loop {
+        if ctx.is_stale() {
+            crate::vprintln!("[LOAD #{load_gen}] stale during pre-buffer, dropping");
+            buffer.cancel();
+            return;
+        }
+        if buffer.written() >= PRE_BUFFER_TARGET {
+            break;
+        }
+        let remaining =
+            prebuf_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            crate::vprintln!(
+                "[LOAD #{load_gen}] pre-buffer timeout ({}KB/{}KB in {}ms)",
+                buffer.written() / 1024,
+                PRE_BUFFER_TARGET / 1024,
+                PRE_BUFFER_TIMEOUT_MS
+            );
+            break;
+        }
+        let _ = tokio::time::timeout(remaining, buffer.notified()).await;
+    }
+
+    crate::vprintln!(
+        "[LOAD #{load_gen}] pre-buffered {}KB in {:.0}ms, sending Load",
+        buffer.written() / 1024,
+        prebuf_start.elapsed().as_secs_f64() * 1000.0
+    );
+    ctx.publish_load(buffer, false, track_id.to_string());
+}
+
 impl Player {
     pub fn new<F>(callback: F, rt_handle: tokio::runtime::Handle) -> anyhow::Result<Self>
     where
@@ -289,24 +504,16 @@ impl Player {
             });
         }
 
-        let cmd_tx = self.cmd_tx.clone();
+        let ctx = LoadContext {
+            load_gen,
+            event_seq,
+            load_start: std::time::Instant::now(),
+            resume_policy,
+            auto_play,
+            cmd_tx: self.cmd_tx.clone(),
+        };
+
         let handle = self.rt_handle.spawn(async move {
-            let load_start = std::time::Instant::now();
-            let is_stale = || LOAD_SEQ.load(Relaxed) != load_gen;
-            let send_load = |buffer: RamBuffer, cached: bool, track_id: String| {
-                let _ = cmd_tx.send(PlayerCommand::Load {
-                    request: LoadRequest {
-                        buffer,
-                        load_gen,
-                        seq: event_seq,
-                        track_id,
-                        resume_policy,
-                        load_start,
-                        cached,
-                    },
-                    auto_play,
-                });
-            };
             let track = TrackInfo {
                 url: url.clone(),
                 format: format.clone(),
@@ -314,179 +521,13 @@ impl Player {
             };
             let track_id = canonical_track_id(&url);
 
-            {
-                let cache_t0 = std::time::Instant::now();
-                let cache = AUDIO_CACHE.lock().unwrap();
-                if let Some(data) = cache.load(&track_id) {
-                    let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
-                    if is_stale() {
-                        return;
-                    }
-                    crate::vprintln!(
-                        "[CACHE]  Hit: {} | {} | read: {} | total: {}",
-                        track_id.chars().take(40).collect::<String>(),
-                        format_bytes(data.len() as u64),
-                        format_ms(cache_ms),
-                        format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
-                    );
-                    let buffer = RamBuffer::from_complete(data);
-                    send_load(buffer, true, track_id);
-                    return;
-                }
-                let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
-                crate::vprintln!(
-                    "[CACHE]  Miss ({}) | lookup: {}",
-                    track_id.chars().take(40).collect::<String>(),
-                    format_ms(cache_ms)
-                );
-            }
-
-            let preload_t0 = std::time::Instant::now();
-            if let Some(preloaded) = preload::take_preloaded_if_match(&track).await {
-                let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
-                if is_stale() {
-                    crate::vprintln!("[LOAD #{load_gen}] stale after preload check, dropping");
-                    return;
-                }
-                crate::vprintln!(
-                    "[PRELOAD] Hit: {} | check: {} | total: {}",
-                    format_bytes(preloaded.data.len() as u64),
-                    format_ms(preload_ms),
-                    format_ms(load_start.elapsed().as_secs_f64() * 1000.0)
-                );
-                let buffer = RamBuffer::from_complete(preloaded.data);
-                send_load(buffer, false, track_id);
+            if let LoadStep::Handled = try_cache_hit(&ctx, &track_id) {
                 return;
             }
-
-            let preload_ms = preload_t0.elapsed().as_secs_f64() * 1000.0;
-            crate::vprintln!("[PRELOAD] Miss | check: {}", format_ms(preload_ms));
-
-            if is_stale() {
-                crate::vprintln!("[LOAD #{load_gen}] stale before HTTP, dropping");
+            if let LoadStep::Handled = try_preload_hit(&ctx, &track, &track_id).await {
                 return;
             }
-
-            let req_start = std::time::Instant::now();
-            let resp = match HTTP_CLIENT_PLAYBACK.get(&url).send().await {
-                Ok(r) => {
-                    if !r.status().is_success() {
-                        let status = r.status();
-                        eprintln!("[ERROR]  Upstream status: {}", status);
-                        if status.as_u16() == 429 {
-                            let _ = cmd_tx.send(PlayerCommand::EmitMaxConnections);
-                        } else {
-                            let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
-                                error: format!("HTTP {}", status),
-                                code: "no_such_file",
-                            });
-                        }
-                        return;
-                    }
-                    r
-                }
-                Err(e) => {
-                    eprintln!("[ERROR]  Request failed: {}", e);
-                    let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
-                        error: format!("request failed: {e}"),
-                        code: "no_such_file",
-                    });
-                    return;
-                }
-            };
-            let ttfb_ms = req_start.elapsed().as_secs_f64() * 1000.0;
-            let cdn = cdn_cache_status(&resp);
-            crate::vprintln!(
-                "[NET]    TTFB: {} | CDN: {} | HTTP/{}",
-                format_ms(ttfb_ms),
-                cdn,
-                http_version_str(resp.version())
-            );
-            log_response_headers(&resp, "[NET]   ");
-
-            if is_stale() {
-                crate::vprintln!("[LOAD #{load_gen}] stale after HTTP TTFB, dropping");
-                return;
-            }
-
-            let total_len = resp.content_length().unwrap_or(0);
-            if total_len == 0 {
-                crate::vprintln!(
-                    "[FETCH]  No Content-Length, full download... (TTFB: {})",
-                    format_ms(ttfb_ms)
-                );
-                match preload::fetch_and_decrypt(&url, &key).await {
-                    Ok(data) => {
-                        if is_stale() {
-                            crate::vprintln!(
-                                "[LOAD #{load_gen}] stale after full download, dropping"
-                            );
-                            return;
-                        }
-                        crate::vprintln!(
-                            "[FETCH]  Done ({} in {:.0}ms)",
-                            format_bytes(data.len() as u64),
-                            load_start.elapsed().as_secs_f64() * 1000.0
-                        );
-                        let buffer = RamBuffer::from_complete(data);
-                        send_load(buffer, false, track_id);
-                    }
-                    Err(e) => {
-                        eprintln!("[ERROR]  Fetch failed: {}", e);
-                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
-                            error: format!("fetch failed: {e}"),
-                            code: "no_such_file",
-                        });
-                    }
-                }
-                return;
-            }
-
-            crate::vprintln!(
-                "[NET]    Size: {} (load #{load_gen})",
-                format_bytes(total_len)
-            );
-
-            let (buffer, writer) = RamBuffer::new(total_len);
-
-            preload::start_download(resp, url, key, writer);
-
-            // Pre-buffer 64KB before handing to decoder
-            const PRE_BUFFER_TARGET: u64 = 64 * 1024;
-            const PRE_BUFFER_TIMEOUT_MS: u64 = 2000;
-
-            let prebuf_start = std::time::Instant::now();
-            let prebuf_deadline =
-                prebuf_start + std::time::Duration::from_millis(PRE_BUFFER_TIMEOUT_MS);
-            loop {
-                if is_stale() {
-                    crate::vprintln!("[LOAD #{load_gen}] stale during pre-buffer, dropping");
-                    buffer.cancel();
-                    return;
-                }
-                if buffer.written() >= PRE_BUFFER_TARGET {
-                    break;
-                }
-                let remaining =
-                    prebuf_deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    crate::vprintln!(
-                        "[LOAD #{load_gen}] pre-buffer timeout ({}KB/{}KB in {}ms)",
-                        buffer.written() / 1024,
-                        PRE_BUFFER_TARGET / 1024,
-                        PRE_BUFFER_TIMEOUT_MS
-                    );
-                    break;
-                }
-                let _ = tokio::time::timeout(remaining, buffer.notified()).await;
-            }
-
-            crate::vprintln!(
-                "[LOAD #{load_gen}] pre-buffered {}KB in {:.0}ms, sending Load",
-                buffer.written() / 1024,
-                prebuf_start.elapsed().as_secs_f64() * 1000.0
-            );
-            send_load(buffer, false, track_id);
+            start_stream_load(&ctx, &url, &key, &track_id).await;
         });
 
         *self.load_handle.lock().unwrap() = Some(handle);
