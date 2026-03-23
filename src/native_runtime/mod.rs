@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 
-pub(crate) type PendingMap =
+type PendingMap =
     Arc<Mutex<HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>>;
 
 pub struct NativeRuntime {
@@ -153,96 +153,42 @@ impl NativeRuntime {
         })
     }
 
-    /// Register a native module. Returns the list of exported names.
-    #[allow(dead_code)]
-    pub async fn register(&self, name: &str, code: &str) -> Result<Vec<String>, String> {
-        let cmd = serde_json::json!({
-            "id": self.next_id(),
-            "type": "register",
-            "name": name,
-            "code": code,
-        });
-
-        let response = self.send_and_wait(cmd).await?;
-
-        let exports = response
-            .get("exports")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(exports)
-    }
-
-    /// Call a function on a registered native module. Returns the JSON result.
-    #[allow(dead_code)]
-    pub async fn call(
+    /// Send a command to the Bun process and return a receiver for the response.
+    ///
+    /// This is synchronous — safe to call under a lock. The caller `.await`s the
+    /// receiver outside the lock to get the result.
+    ///
+    /// The command JSON must NOT contain an `"id"` field — one is assigned
+    /// automatically and injected into the command before sending.
+    pub fn send_command(
         &self,
-        module_name: &str,
-        fn_name: &str,
-        args: &[serde_json::Value],
-    ) -> Result<serde_json::Value, String> {
-        let cmd = serde_json::json!({
-            "id": self.next_id(),
-            "type": "call",
-            "name": module_name,
-            "fn": fn_name,
-            "args": args,
-        });
+        mut cmd: serde_json::Value,
+    ) -> Result<oneshot::Receiver<Result<serde_json::Value, String>>, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
+        cmd["id"] = serde_json::Value::String(id.clone());
 
-        let response = self.send_and_wait(cmd).await?;
-
-        Ok(response
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    }
-
-    /// Clone the stdin sender (for use across await boundaries without holding state).
-    pub fn stdin_tx_clone(&self) -> mpsc::UnboundedSender<String> {
-        self.stdin_tx.clone()
-    }
-
-    /// Clone the pending map (for use across await boundaries).
-    pub fn pending_clone(&self) -> PendingMap {
-        self.pending.clone()
-    }
-
-    /// Get the next request ID as a string.
-    pub fn next_id_str(&self) -> String {
-        self.next_id.fetch_add(1, Ordering::Relaxed).to_string()
-    }
-
-    #[allow(dead_code)]
-    fn next_id(&self) -> String {
-        self.next_id.fetch_add(1, Ordering::Relaxed).to_string()
-    }
-
-    #[allow(dead_code)]
-    async fn send_and_wait(&self, cmd: serde_json::Value) -> Result<serde_json::Value, String> {
-        let id = cmd
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0")
-            .to_string();
         let (tx, rx) = oneshot::channel();
-
-        {
-            let mut map = self.pending.lock().map_err(|e| format!("lock: {e}"))?;
-            map.insert(id, tx);
+        match self.pending.lock() {
+            Ok(mut map) => {
+                map.insert(id.clone(), tx);
+            }
+            Err(e) => return Err(format!("pending lock poisoned: {e}")),
         }
 
-        let line = serde_json::to_string(&cmd).map_err(|e| format!("serialize: {e}"))?;
-        self.stdin_tx
-            .send(line)
-            .map_err(|_| "Bun stdin channel closed".to_string())?;
+        let line = serde_json::to_string(&cmd).unwrap_or_default();
+        if self.stdin_tx.send(line).is_err() {
+            match self.pending.lock() {
+                Ok(mut map) => {
+                    map.remove(&id);
+                }
+                Err(e) => {
+                    crate::vprintln!("[NATIVE] pending lock poisoned during cleanup: {e}");
+                }
+            }
+            return Err("Bun stdin channel closed".to_string());
+        }
 
-        rx.await
-            .map_err(|_| "Bun response channel dropped".to_string())?
+        Ok(rx)
     }
 }
 

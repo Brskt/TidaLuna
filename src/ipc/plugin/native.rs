@@ -1,34 +1,6 @@
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 
-fn send_bun_command(
-    pending: &crate::native_runtime::PendingMap,
-    stdin_tx: &tokio::sync::mpsc::UnboundedSender<String>,
-    id: &str,
-    cmd: serde_json::Value,
-) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    match pending.lock() {
-        Ok(mut map) => {
-            map.insert(id.to_string(), tx);
-        }
-        Err(e) => return Err(format!("pending lock poisoned: {e}")),
-    }
-    let line = serde_json::to_string(&cmd).unwrap_or_default();
-    if stdin_tx.send(line).is_err() {
-        match pending.lock() {
-            Ok(mut map) => {
-                map.remove(id);
-            }
-            Err(e) => {
-                crate::vprintln!("[NATIVE] pending lock poisoned during cleanup: {e}");
-            }
-        }
-        return Err("Bun stdin channel closed".to_string());
-    }
-    Ok(rx)
-}
-
 pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
     let name = msg
         .args
@@ -67,14 +39,22 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
             }
         }
 
-        let pending = state.native_runtime.as_ref().unwrap().pending_clone();
-        let stdin_tx = state.native_runtime.as_ref().unwrap().stdin_tx_clone();
-        let bun_id = state.native_runtime.as_ref().unwrap().next_id_str();
+        let cmd = serde_json::json!({
+            "type": "register",
+            "name": name,
+            "code": code,
+        });
+        let rx = state
+            .native_runtime
+            .as_ref()
+            .unwrap()
+            .send_command(cmd)
+            ?;
         let rt = state.rt_handle.clone();
-        Ok((pending, stdin_tx, bun_id, rt))
+        Ok((rx, rt))
     });
 
-    let Some(Ok((pending, stdin_tx, bun_id, rt))) = spawn_data else {
+    let Some(Ok((rx, rt))) = spawn_data else {
         if let Some(Err(e)) = spawn_data {
             ipc_callback_err(&callback, &e);
         }
@@ -82,20 +62,6 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
     };
 
     rt.spawn(async move {
-        let cmd = serde_json::json!({
-            "id": bun_id,
-            "type": "register",
-            "name": name,
-            "code": code,
-        });
-        let rx = match send_bun_command(&pending, &stdin_tx, &bun_id, cmd) {
-            Ok(rx) => rx,
-            Err(e) => {
-                ipc_callback_err(&callback, &e);
-                return;
-            }
-        };
-
         match rx.await {
             Ok(Ok(response)) => {
                 let exports = response
@@ -146,14 +112,18 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
             return Err("Native runtime not initialized".to_string());
         };
 
-        let pending = runtime.pending_clone();
-        let stdin_tx = runtime.stdin_tx_clone();
-        let bun_id = runtime.next_id_str();
+        let cmd = serde_json::json!({
+            "type": "call",
+            "name": module_name,
+            "fn": export_name,
+            "args": call_args,
+        });
+        let rx = runtime.send_command(cmd)?;
         let rt = state.rt_handle.clone();
-        Ok((pending, stdin_tx, bun_id, rt))
+        Ok((rx, rt))
     });
 
-    let Some(Ok((pending, stdin_tx, bun_id, rt))) = call_data else {
+    let Some(Ok((rx, rt))) = call_data else {
         if let Some(Err(e)) = call_data {
             ipc_callback_err(&callback, &e);
         }
@@ -161,21 +131,6 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
     };
 
     rt.spawn(async move {
-        let cmd = serde_json::json!({
-            "id": bun_id,
-            "type": "call",
-            "name": module_name,
-            "fn": export_name,
-            "args": call_args,
-        });
-        let rx = match send_bun_command(&pending, &stdin_tx, &bun_id, cmd) {
-            Ok(rx) => rx,
-            Err(e) => {
-                ipc_callback_err(&callback, &e);
-                return;
-            }
-        };
-
         match rx.await {
             Ok(Ok(response)) => {
                 let val = response
