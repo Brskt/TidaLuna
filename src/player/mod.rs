@@ -186,9 +186,9 @@ pub struct Player {
     load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-use crate::util::fmt::format_ms;
+pub(crate) use crate::util::fmt::format_ms;
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
     } else if bytes >= 1_048_576 {
