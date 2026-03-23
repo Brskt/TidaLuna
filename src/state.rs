@@ -95,6 +95,12 @@ pub fn cache_data_dir() -> PathBuf {
     }
 }
 
+pub(crate) static DB: std::sync::OnceLock<crate::db::DbActor> = std::sync::OnceLock::new();
+
+pub(crate) fn db() -> &'static crate::db::DbActor {
+    DB.get().expect("DB actor not initialized")
+}
+
 pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = LazyLock::new(|| {
     let dir = cache_data_dir();
     match crate::player::cache::AudioCache::open(&dir) {

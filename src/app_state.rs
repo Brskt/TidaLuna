@@ -42,13 +42,10 @@ pub(crate) struct AppState {
     pub(crate) pending_time_update: Option<(f64, u32)>,
     pub(crate) pending_player_events: Vec<crate::bridge::PlayerBridgeEvent>,
     pub(crate) pending_misc_js: Vec<String>,
-    #[allow(dead_code)]
-    pub(crate) app_settings: crate::settings::Settings,
     pub(crate) browser: Option<Browser>,
     pub(crate) flush_scheduled: bool,
     pub(crate) media_controls: Option<crate::platform::media_controls::OsMediaControls>,
     pub(crate) media_duration: Option<f64>,
-    pub(crate) plugin_store: crate::plugins::PluginStore,
     pub(crate) plugin_manager: crate::plugins::PluginManager,
     pub(crate) captured_token: String,
     pub(crate) pending_ipc_callbacks: HashMap<String, IpcCallback>,
@@ -59,8 +56,11 @@ pub(crate) struct AppState {
     pub(crate) thumbbar: Option<crate::platform::thumbbar::ThumbBar>,
 }
 
-// SAFETY: AppState contains non-Send types (Browser, rusqlite::Connection, etc.)
-// but all access is serialized through Arc<Mutex<>>. The Mutex ensures exclusive access.
+// SAFETY: AppState contains non-Send CEF/OS handles and thread-sensitive fields
+// (Browser, OsMediaControls, ThumbBar). The code maintains the invariant that
+// these fields are only accessed from the CEF UI thread. The Mutex serializes
+// access to shared data, but soundness of Send relies on the human-enforced
+// guarantee that thread-sensitive fields are never touched from non-UI threads.
 unsafe impl Send for AppState {}
 
 pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();

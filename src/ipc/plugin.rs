@@ -58,7 +58,10 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             if url.is_empty() {
                 return;
             }
-            let code = with_state(|state| state.plugin_store.get_code(url)).flatten();
+            let url_owned = url.to_owned();
+            let code = crate::state::db().call(move |pc, _| {
+                crate::plugins::store::get_code(pc, &url_owned)
+            });
             if let Some(code) = code {
                 match crate::plugins::PluginManager::transpile_and_wrap(url, &code) {
                     Ok(js) => {
@@ -98,10 +101,9 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
         }
         "jsrt.load_plugins" => {
-            let plugin_code = with_state(|state| {
-                crate::plugins::PluginManager::collect_enabled_code(&state.plugin_store)
-            })
-            .unwrap_or_default();
+            let plugin_code = crate::state::db().call(|pc, _| {
+                crate::plugins::store::collect_enabled_code(pc)
+            });
             let mut prepared = Vec::new();
             for (url, name, code) in &plugin_code {
                 match crate::plugins::PluginManager::transpile_and_wrap(url, code) {
@@ -455,14 +457,18 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
         return;
     }
 
-    let result: Option<Result<String, String>> = with_state(|state| match msg.channel.as_str() {
+    let db = crate::state::db();
+    let channel = msg.channel.clone();
+    let args = msg.args.clone();
+
+    let result: Result<String, String> = db.call(move |pc, _| match channel.as_str() {
         "plugin.list" => {
-            let plugins = state.plugin_store.list();
+            let plugins = crate::plugins::store::list(pc);
             Ok(serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string()))
         }
         "plugin.get_code" => {
-            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            match state.plugin_store.get_code(url) {
+            let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            match crate::plugins::store::get_code(pc, url) {
                 Some(code) => {
                     Ok(serde_json::to_string(&code).unwrap_or_else(|_| "null".to_string()))
                 }
@@ -470,73 +476,60 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             }
         }
         "plugin.uninstall" => {
-            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            state
-                .plugin_store
-                .uninstall(url)
+            let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            crate::plugins::store::uninstall(pc, url)
                 .map(|()| "true".to_string())
                 .map_err(|e| e.to_string())
         }
-        "plugin.uninstall_all" => state
-            .plugin_store
-            .uninstall_all()
+        "plugin.uninstall_all" => crate::plugins::store::uninstall_all(pc)
             .map(|()| "true".to_string())
             .map_err(|e| e.to_string()),
         "plugin.enable" => {
-            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            state
-                .plugin_store
-                .enable(url)
+            let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            crate::plugins::store::enable(pc, url)
                 .map(|()| "true".to_string())
                 .map_err(|e| e.to_string())
         }
         "plugin.disable" => {
-            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            state
-                .plugin_store
-                .disable(url)
+            let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            crate::plugins::store::disable(pc, url)
                 .map(|()| "true".to_string())
                 .map_err(|e| e.to_string())
         }
         "plugin.storage.get" => {
-            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            match state.plugin_store.storage_get(ns, key) {
+            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            match crate::plugins::store::storage_get(pc, ns, key) {
                 Some(val) => Ok(serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string())),
                 None => Ok("null".to_string()),
             }
         }
         "plugin.storage.set" => {
-            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let value = msg.args.get(2).and_then(|v| v.as_str()).unwrap_or("");
-            state
-                .plugin_store
-                .storage_set(ns, key, value)
+            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            let value = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
+            crate::plugins::store::storage_set(pc, ns, key, value)
                 .map(|()| "true".to_string())
                 .map_err(|e| e.to_string())
         }
         "plugin.storage.del" => {
-            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            state
-                .plugin_store
-                .storage_del(ns, key)
+            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            crate::plugins::store::storage_del(pc, ns, key)
                 .map(|()| "true".to_string())
                 .map_err(|e| e.to_string())
         }
         "plugin.storage.keys" => {
-            let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let keys = state.plugin_store.storage_keys(ns);
+            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let keys = crate::plugins::store::storage_keys(pc, ns);
             Ok(serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()))
         }
-        _ => Err(format!("Unknown plugin channel: {}", msg.channel)),
+        _ => Err(format!("Unknown plugin channel: {}", channel)),
     });
 
     match result {
-        Some(Ok(json)) => ipc_callback_ok(&callback, &json),
-        Some(Err(e)) => ipc_callback_err(&callback, &e),
-        None => ipc_callback_err(&callback, "AppState not available"),
+        Ok(json) => ipc_callback_ok(&callback, &json),
+        Err(e) => ipc_callback_err(&callback, &e),
     }
 }
 
@@ -610,26 +603,30 @@ async fn handle_plugin_install(id: String, url: String) {
     };
     match result {
         Ok((name, manifest, code, hash)) => {
-            let install_result = with_state(|state| {
-                state
-                    .plugin_store
-                    .install(&url, &name, &manifest, &code, &hash)
-                    .map(|()| crate::plugins::PluginInfo {
-                        url: url.clone(),
-                        name,
-                        manifest,
-                        hash: Some(hash),
-                        enabled: true,
-                        installed: true,
+            let install_result = tokio::task::spawn_blocking({
+                let url = url.clone();
+                move || {
+                    crate::state::db().call(move |pc, _| {
+                        crate::plugins::store::install(pc, &url, &name, &manifest, &code, &hash)
+                            .map(|()| crate::plugins::PluginInfo {
+                                url,
+                                name,
+                                manifest,
+                                hash: Some(hash),
+                                enabled: true,
+                                installed: true,
+                            })
                     })
-            });
+                }
+            })
+            .await;
             match install_result {
-                Some(Ok(info)) => {
+                Ok(Ok(info)) => {
                     let json = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
                     ipc_callback_ok(&callback, &json);
                 }
-                Some(Err(e)) => ipc_callback_err(&callback, &e.to_string()),
-                None => ipc_callback_err(&callback, "AppState not available"),
+                Ok(Err(e)) => ipc_callback_err(&callback, &e.to_string()),
+                Err(e) => ipc_callback_err(&callback, &format!("spawn_blocking failed: {e}")),
             }
         }
         Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),

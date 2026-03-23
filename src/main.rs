@@ -2,6 +2,7 @@
 mod app_state;
 mod audio;
 mod bridge;
+mod db;
 mod ipc;
 mod logging;
 mod native_runtime;
@@ -117,10 +118,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let data_dir = state::cache_data_dir();
-    let app_settings =
-        settings::Settings::open(&data_dir).expect("Failed to open settings database");
-    let plugin_store =
-        plugins::PluginStore::open(&data_dir).expect("Failed to open plugin store database");
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        crate::vprintln!("[DB] Failed to create data dir {}: {e}", data_dir.display());
+    }
+    let db_actor = db::DbActor::open(&data_dir).expect("Failed to open databases");
+    let _ = state::DB.set(db_actor);
 
     let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
         player,
@@ -128,12 +130,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending_time_update: None,
         pending_player_events: Vec::new(),
         pending_misc_js: Vec::new(),
-        app_settings,
         browser: None,
         flush_scheduled: false,
         media_controls: None,
         media_duration: None,
-        plugin_store,
         plugin_manager: plugins::PluginManager::new(),
         captured_token: String::new(),
         pending_ipc_callbacks: HashMap::new(),

@@ -1,4 +1,3 @@
-use super::store::PluginStore;
 use super::transpile;
 use super::wrapper;
 
@@ -33,23 +32,6 @@ impl PluginManager {
     /// Mark a plugin as loaded.
     pub fn mark_loaded(&mut self, plugin_id: &str) {
         self.loaded.insert(plugin_id.to_string());
-    }
-
-    /// Collect enabled plugins' code from the store (read-only, no transpilation).
-    pub fn collect_enabled_code(store: &PluginStore) -> Vec<(String, String, String)> {
-        let plugins = store.list();
-        let mut result = Vec::new();
-        for info in &plugins {
-            if !info.enabled {
-                continue;
-            }
-            let Some(code) = store.get_code(&info.url) else {
-                crate::vprintln!("[PLUGIN] No code found for '{}'", info.url);
-                continue;
-            };
-            result.push((info.url.clone(), info.name.clone(), code));
-        }
-        result
     }
 
     /// Generate JS to unload a plugin (calls the plugin's cleanup callbacks).

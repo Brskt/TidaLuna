@@ -472,8 +472,7 @@ wrap_window_delegate! {
     }
     impl ViewDelegate {
         fn preferred_size(&self, _view: Option<&mut View>) -> Size {
-            let ws = with_state(|state| state.app_settings.load_window_state())
-                .unwrap_or_default();
+            let ws = crate::state::db().call(|_, sc| crate::settings::load_window_state(sc));
             Size {
                 width: ws.width as i32,
                 height: ws.height as i32,
@@ -483,8 +482,7 @@ wrap_window_delegate! {
     impl PanelDelegate {}
     impl WindowDelegate {
         fn initial_bounds(&self, _window: Option<&mut Window>) -> cef::Rect {
-            let ws = with_state(|state| state.app_settings.load_window_state())
-                .unwrap_or_default();
+            let ws = crate::state::db().call(|_, sc| crate::settings::load_window_state(sc));
             if ws.has_position() && !ws.maximized {
                 cef::Rect {
                     x: ws.x,
@@ -497,8 +495,7 @@ wrap_window_delegate! {
             }
         }
         fn initial_show_state(&self, _window: Option<&mut Window>) -> cef::ShowState {
-            let ws = with_state(|state| state.app_settings.load_window_state())
-                .unwrap_or_default();
+            let ws = crate::state::db().call(|_, sc| crate::settings::load_window_state(sc));
             if ws.maximized {
                 cef::ShowState::MAXIMIZED
             } else {
@@ -619,15 +616,16 @@ wrap_window_delegate! {
             }
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
-            with_state(|state| {
-                if let Some(ws) = state.pending_window_save.take() {
+            let pending_ws = with_state(|state| state.pending_window_save.take()).flatten();
+            if let Some(ws) = pending_ws {
+                crate::state::db().call(move |_, sc| {
                     if ws.maximized {
-                        state.app_settings.save_maximized(true);
+                        crate::settings::save_maximized(sc, true);
                     } else {
-                        state.app_settings.save_window_state(&ws);
+                        crate::settings::save_window_state(sc, &ws);
                     }
-                }
-            });
+                });
+            }
             let bv = self.browser_view.borrow();
             let bv = bv.as_ref().expect("BrowserView is None");
             if let Some(browser) = bv.browser() {
@@ -982,16 +980,20 @@ wrap_task! {
     }
     impl Task {
         fn execute(&self) {
-            with_state(|state| {
+            let pending_ws = with_state(|state| {
                 state.window_save_scheduled = false;
-                if let Some(ws) = state.pending_window_save.take() {
+                state.pending_window_save.take()
+            })
+            .flatten();
+            if let Some(ws) = pending_ws {
+                crate::state::db().call(move |_, sc| {
                     if ws.maximized {
-                        state.app_settings.save_maximized(true);
+                        crate::settings::save_maximized(sc, true);
                     } else {
-                        state.app_settings.save_window_state(&ws);
+                        crate::settings::save_window_state(sc, &ws);
                     }
-                }
-            });
+                });
+            }
         }
     }
 }
