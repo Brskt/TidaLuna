@@ -154,7 +154,9 @@ impl LoadContext {
     }
 
     fn emit_media_error(&self, error: String, code: &'static str) {
-        let _ = self.cmd_tx.send(PlayerCommand::EmitMediaError { error, code });
+        let _ = self
+            .cmd_tx
+            .send(PlayerCommand::EmitMediaError { error, code });
     }
 }
 
@@ -392,9 +394,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         match preload::fetch_and_decrypt(url, key).await {
             Ok(data) => {
                 if ctx.is_stale() {
-                    crate::vprintln!(
-                        "[LOAD #{load_gen}] stale after full download, dropping"
-                    );
+                    crate::vprintln!("[LOAD #{load_gen}] stale after full download, dropping");
                     return;
                 }
                 crate::vprintln!(
@@ -427,8 +427,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
     const PRE_BUFFER_TIMEOUT_MS: u64 = 2000;
 
     let prebuf_start = std::time::Instant::now();
-    let prebuf_deadline =
-        prebuf_start + std::time::Duration::from_millis(PRE_BUFFER_TIMEOUT_MS);
+    let prebuf_deadline = prebuf_start + std::time::Duration::from_millis(PRE_BUFFER_TIMEOUT_MS);
     loop {
         if ctx.is_stale() {
             crate::vprintln!("[LOAD #{load_gen}] stale during pre-buffer, dropping");
@@ -438,8 +437,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         if buffer.written() >= PRE_BUFFER_TARGET {
             break;
         }
-        let remaining =
-            prebuf_deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = prebuf_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             crate::vprintln!(
                 "[LOAD #{load_gen}] pre-buffer timeout ({}KB/{}KB in {}ms)",

@@ -1,7 +1,7 @@
+mod jsrt;
 mod native;
 mod plugin_ipc;
 mod proxy;
-mod jsrt;
 
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
 
@@ -32,8 +32,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             let xml = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
             match crate::player::dash::parse_dash_mpd(xml) {
                 Ok(manifest) => {
-                    let json =
-                        serde_json::to_string(&manifest).unwrap_or_else(|_| "null".into());
+                    let json = serde_json::to_string(&manifest).unwrap_or_else(|_| "null".into());
                     ipc_callback_ok(&callback, &json);
                 }
                 Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),

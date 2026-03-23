@@ -15,9 +15,8 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
                 return;
             }
             let url_owned = url.to_owned();
-            let code = crate::state::db().call_plugins(move |pc| {
-                crate::plugins::store::get_code(pc, &url_owned)
-            });
+            let code = crate::state::db()
+                .call_plugins(move |pc| crate::plugins::store::get_code(pc, &url_owned));
             if let Some(code) = code {
                 match crate::plugins::PluginManager::transpile_and_wrap(url, &code) {
                     Ok(js) => {
@@ -57,9 +56,8 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
         }
         "jsrt.load_plugins" => {
-            let plugins = crate::state::db().call_plugins(|pc| {
-                crate::plugins::store::collect_enabled_code(pc)
-            });
+            let plugins = crate::state::db()
+                .call_plugins(crate::plugins::store::collect_enabled_code);
             let mut prepared = Vec::new();
             for p in &plugins {
                 match crate::plugins::PluginManager::transpile_and_wrap(&p.url, &p.code) {

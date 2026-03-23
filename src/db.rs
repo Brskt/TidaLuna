@@ -25,8 +25,7 @@ impl DbActor {
     /// Returns once both connections are open and schema is initialized.
     pub fn open(data_dir: &Path) -> rusqlite::Result<Self> {
         let (tx, rx) = mpsc::sync_channel::<BoxedFn>(64);
-        let (init_tx, init_rx) =
-            mpsc::sync_channel::<Result<ThreadId, rusqlite::Error>>(0);
+        let (init_tx, init_rx) = mpsc::sync_channel::<Result<ThreadId, rusqlite::Error>>(0);
         let data_dir = data_dir.to_owned();
 
         std::thread::Builder::new()
@@ -58,10 +57,11 @@ impl DbActor {
             })
             .expect("failed to spawn db-actor thread");
 
-        let actor_thread_id = init_rx
-            .recv()
-            .expect("db-actor init channel closed")?;
-        Ok(Self { tx, actor_thread_id })
+        let actor_thread_id = init_rx.recv().expect("db-actor init channel closed")?;
+        Ok(Self {
+            tx,
+            actor_thread_id,
+        })
     }
 
     /// Execute a closure on the database actor thread with both connections.

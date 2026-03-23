@@ -21,15 +21,14 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
         .unwrap_or("{}")
         .to_string();
     let id = msg.id.clone().unwrap_or_default();
-    let opts: crate::plugins::fetch::FetchOpts = serde_json::from_str(&opts_json)
-        .unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
+    let opts: crate::plugins::fetch::FetchOpts =
+        serde_json::from_str(&opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
     let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
         let rt = state.rt_handle.clone();
         rt.spawn(async move {
-            let result =
-                crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
+            let result = crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
             let Some(cb) = take_ipc_callback(&id) else {
                 return;
             };

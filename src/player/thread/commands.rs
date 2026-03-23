@@ -3,16 +3,18 @@ use super::output::{
     format_duration_mmss, format_sample_rate, open_output_stream, probe_audio_format,
 };
 use super::{DecodeCommand, PlayerThread};
+use crate::player::resume::RESUME_MIN_SECONDS;
 use crate::player::{
     DeviceErrorKind, LOAD_SEQ, LoadRequest, PlaybackState, PlayerCommand, PlayerEvent,
     ResumePolicy, format_ms,
 };
-use crate::player::resume::RESUME_MIN_SECONDS;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
 
 use cpal::traits::{HostTrait, StreamTrait};
 
+#[cfg(target_os = "windows")]
+use crate::player::{EXCLUSIVE_STREAM_SEQ, wasapi};
 #[cfg(target_os = "windows")]
 use std::sync::Arc;
 #[cfg(target_os = "windows")]
@@ -20,9 +22,7 @@ use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
 use std::thread;
 #[cfg(target_os = "windows")]
-use crate::player::{EXCLUSIVE_STREAM_SEQ, wasapi};
-#[cfg(target_os = "windows")]
-use wasapi::{ExclusiveCommand, ExclusiveHandle};
+use wasapi::ExclusiveCommand;
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn resolve_resume_policy(
@@ -102,10 +102,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             match super::output::find_output_device(id) {
                 Some(d) => return Some(d),
                 None => {
-                    crate::vprintln!(
-                        "[AUDIO] Device '{}' not found, falling back to default",
-                        id
-                    );
+                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
                     (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                 }
             }

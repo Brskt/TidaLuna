@@ -14,13 +14,13 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 #[cfg(target_os = "windows")]
+use crate::player::{EXCLUSIVE_STREAM_SEQ, wasapi};
+#[cfg(target_os = "windows")]
 use std::sync::Arc;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
 use std::thread;
-#[cfg(target_os = "windows")]
-use crate::player::{EXCLUSIVE_STREAM_SEQ, wasapi};
 #[cfg(target_os = "windows")]
 use wasapi::{ExclusiveCommand, ExclusiveHandle};
 
@@ -152,10 +152,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             match find_output_device(id) {
                 Some(d) => d,
                 None => {
-                    crate::vprintln!(
-                        "[AUDIO] Device '{}' not found, falling back to default",
-                        id
-                    );
+                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
                     (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                     match cpal::default_host().default_output_device() {
                         Some(d) => d,

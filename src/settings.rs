@@ -74,11 +74,31 @@ pub(crate) fn load_window_state(conn: &mut Connection) -> WindowState {
     for row in rows.flatten() {
         let (key, value) = row;
         match key.as_str() {
-            "window.x" => { if let Ok(v) = value.parse() { ws.x = v; } }
-            "window.y" => { if let Ok(v) = value.parse() { ws.y = v; } }
-            "window.width" => { if let Ok(v) = value.parse() { ws.width = v; } }
-            "window.height" => { if let Ok(v) = value.parse() { ws.height = v; } }
-            "window.maximized" => { if let Ok(v) = value.parse() { ws.maximized = v; } }
+            "window.x" => {
+                if let Ok(v) = value.parse() {
+                    ws.x = v;
+                }
+            }
+            "window.y" => {
+                if let Ok(v) = value.parse() {
+                    ws.y = v;
+                }
+            }
+            "window.width" => {
+                if let Ok(v) = value.parse() {
+                    ws.width = v;
+                }
+            }
+            "window.height" => {
+                if let Ok(v) = value.parse() {
+                    ws.height = v;
+                }
+            }
+            "window.maximized" => {
+                if let Ok(v) = value.parse() {
+                    ws.maximized = v;
+                }
+            }
             _ => {}
         }
     }

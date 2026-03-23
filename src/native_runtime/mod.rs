@@ -19,8 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 
-type PendingMap =
-    Arc<Mutex<HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>>;
+type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>>;
 
 pub struct NativeRuntime {
     stdin_tx: mpsc::UnboundedSender<String>,

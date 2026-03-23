@@ -44,12 +44,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
             "name": name,
             "code": code,
         });
-        let rx = state
-            .native_runtime
-            .as_ref()
-            .unwrap()
-            .send_command(cmd)
-            ?;
+        let rx = state.native_runtime.as_ref().unwrap().send_command(cmd)?;
         let rt = state.rt_handle.clone();
         Ok((rx, rt))
     });
