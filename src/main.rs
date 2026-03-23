@@ -138,6 +138,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         captured_token: String::new(),
         pending_ipc_callbacks: HashMap::new(),
         native_runtime: None,
+        pending_window_save: None,
+        window_save_scheduled: false,
         #[cfg(target_os = "windows")]
         thumbbar: None,
     })));

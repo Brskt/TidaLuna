@@ -601,18 +601,16 @@ wrap_window_delegate! {
             }
             let maximized = window.is_maximized() == 1;
             let batch = with_state(|state| {
-                if maximized {
-                    state.app_settings.save_maximized(true);
-                } else {
-                    state.app_settings.save_window_state(
-                        &crate::settings::WindowState {
-                            x: bounds.x,
-                            y: bounds.y,
-                            width: bounds.width as u32,
-                            height: bounds.height as u32,
-                            maximized: false,
-                        },
-                    );
+                state.pending_window_save = Some(crate::settings::WindowState {
+                    x: bounds.x,
+                    y: bounds.y,
+                    width: bounds.width as u32,
+                    height: bounds.height as u32,
+                    maximized,
+                });
+                if !state.window_save_scheduled {
+                    state.window_save_scheduled = true;
+                    schedule_window_save();
                 }
                 notify_window_state(state, maximized, false)
             });
@@ -621,6 +619,15 @@ wrap_window_delegate! {
             }
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
+            with_state(|state| {
+                if let Some(ws) = state.pending_window_save.take() {
+                    if ws.maximized {
+                        state.app_settings.save_maximized(true);
+                    } else {
+                        state.app_settings.save_window_state(&ws);
+                    }
+                }
+            });
             let bv = self.browser_view.borrow();
             let bv = bv.as_ref().expect("BrowserView is None");
             if let Some(browser) = bv.browser() {
@@ -960,6 +967,31 @@ document.title = "TidaLunar - A TIDAL client";
 
         fn default_client(&self) -> Option<Client> {
             self.client.borrow().clone()
+        }
+    }
+}
+
+fn schedule_window_save() {
+    let mut task = WindowSaveTask::new(0);
+    post_delayed_task(ThreadId::UI, Some(&mut task), 500);
+}
+
+wrap_task! {
+    struct WindowSaveTask {
+        _p: u8,
+    }
+    impl Task {
+        fn execute(&self) {
+            with_state(|state| {
+                state.window_save_scheduled = false;
+                if let Some(ws) = state.pending_window_save.take() {
+                    if ws.maximized {
+                        state.app_settings.save_maximized(true);
+                    } else {
+                        state.app_settings.save_window_state(&ws);
+                    }
+                }
+            });
         }
     }
 }
