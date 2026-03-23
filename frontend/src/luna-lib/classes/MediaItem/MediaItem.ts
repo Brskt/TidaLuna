@@ -126,9 +126,7 @@ export class MediaItem extends ContentBase {
 			"playbackControls/MEDIA_PRODUCT_TRANSITION",
 			unloads,
 			asyncDebounce(async ({ playbackContext }: redux.InterceptPayload<"playbackControls/MEDIA_PRODUCT_TRANSITION">) => {
-				console.log("[DBG:onMediaTransition] interceptor called, actualProductId=", playbackContext?.actualProductId);
 				const mediaItem = await this.fromPlaybackContext(playbackContext);
-				console.log("[DBG:onMediaTransition] fromPlaybackContext resolved, mediaItem id=", mediaItem?.id, "title=", (mediaItem as any)?.tidalItem?.title);
 				if (mediaItem === undefined) return;
 
 				// Detect spatial audio support based on actual playback
@@ -136,9 +134,7 @@ export class MediaItem extends ContentBase {
 					this._supportsSpatialAudio = playbackContext.actualAudioMode !== "STEREO";
 				}
 
-				console.log("[DBG:onMediaTransition] about to emit mediaItem id=", mediaItem.id);
 			await emit(mediaItem, mediaItem.trace.err.withContext("mediaProductTransition.runListeners"));
-			console.log("[DBG:onMediaTransition] emit completed for id=", mediaItem.id);
 			}),
 		),
 	);
@@ -453,7 +449,6 @@ export class MediaItem extends ContentBase {
 		// Use actualAudioQuality as fallback key for cache lookup (handles Atmos/Sony360 fallback quality)
 		const cacheKey = audioQuality ?? this.cache.actualAudioQuality;
 		const cachedFormat = cacheKey !== undefined ? this.cache.format?.[cacheKey] : undefined;
-		console.log(`[DBG:withFormat] id=${this.id} cacheKey=${cacheKey} cachedFormat=`, cachedFormat !== undefined ? JSON.stringify(cachedFormat) : "undefined");
 		if (cachedFormat !== undefined) {
 			listener(cachedFormat);
 			// Trigger updateFormat to complete missing fields (e.g., bitrate from bridge bytes).
@@ -474,9 +469,7 @@ export class MediaItem extends ContentBase {
 		audioQuality ??= Quality.Max.audioQuality;
 		let format = (this.cache.format[audioQuality] ??= {});
 
-		console.log(`[DBG:updateFormat] id=${this.id} quality=${audioQuality} format=`, JSON.stringify(format), "force=", force);
 		if (format.bitrate !== undefined && format.sampleRate !== undefined && force !== true) {
-			console.log(`[DBG:updateFormat] id=${this.id} EARLY RETURN — already has bitrate+sampleRate`);
 			return format;
 		}
 		// If we already have sampleRate + bytes but still no bitrate, compute it now and return.
@@ -494,16 +487,13 @@ export class MediaItem extends ContentBase {
 		// Re-read format from cache — playbackInfo() replaces the cache entry with a new object,
 		// so the local `format` reference captured above would be stale.
 		format = (this.cache.format[audioQuality] ??= {});
-		console.log(`[DBG:updateFormat] id=${this.id} playbackInfo=`, playbackInfo ? "OK" : "null/403");
 		if (!playbackInfo) {
 			// TidaLunar fallback: desktop.tidal.com/v1/playbackinfo returns 403 with web tokens.
 			// Use format data from the Rust player bridge (mediaformat event) — only valid
 			// for the currently playing track (the bridge emits one global mediaformat per load).
 			const currentProductId = (window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId;
-			console.log(`[DBG:updateFormat] id=${this.id} bridge fallback — currentProductId=${currentProductId} this.id=${this.id}`);
 			if (currentProductId !== undefined && String(currentProductId) !== String(this.id)) return undefined;
 			let bf = (window as any).__LUNAR_MEDIA_FORMAT__;
-			console.log(`[DBG:updateFormat] id=${this.id} __LUNAR_MEDIA_FORMAT__=`, bf ? JSON.stringify(bf) : "null");
 			if (!bf?.sampleRate) {
 				// Bridge data not yet available (new track just loaded) — wait up to 5s
 				const waited = await Promise.race([

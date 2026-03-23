@@ -97,7 +97,6 @@ export const createNativePlayerComponent = () => {
                 setSelfLoad(false);
                 seekTarget = null;
                 // Soft-reset format data (don't drain resolvers — playback.ts already did)
-                console.log("[DBG:player] load() soft-reset — __LUNAR_MEDIA_FORMAT__ = null (NO drain)");
                 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
                 sendIpc("player.load", url, streamFormat, encryptionKey);
             },

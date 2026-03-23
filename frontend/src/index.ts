@@ -73,11 +73,9 @@ const BRIDGE_TO_REDUX_STATE: Record<string, string> = {
 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
 let _mediaFormatResolvers: Array<(data: any) => void> = [];
 (window as any).__LUNAR_AWAIT_MEDIA_FORMAT__ = () => new Promise<any>(resolve => {
-    console.log("[DBG:format] await registered, pending resolvers:", _mediaFormatResolvers.length + 1);
     _mediaFormatResolvers.push(resolve);
 });
 (window as any).__LUNAR_RESET_MEDIA_FORMAT__ = () => {
-    console.log("[DBG:format] FULL RESET — draining", _mediaFormatResolvers.length, "resolvers");
     (window as any).__LUNAR_MEDIA_FORMAT__ = null;
     for (const r of _mediaFormatResolvers) r(null);
     _mediaFormatResolvers = [];
@@ -91,7 +89,6 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
         if (!event || typeof event !== "object") continue;
         const type = event.t;
         if (type === "mediaformat") {
-            console.log("[DBG:format] mediaformat arrived:", JSON.stringify(event.v), "| pending resolvers:", _mediaFormatResolvers.length);
             (window as any).__LUNAR_MEDIA_FORMAT__ = event.v;
             for (const r of _mediaFormatResolvers) r(event.v);
             _mediaFormatResolvers = [];
