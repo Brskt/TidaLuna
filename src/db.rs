@@ -64,16 +64,15 @@ impl DbActor {
         Ok(Self { tx, actor_thread_id })
     }
 
-    /// Execute a closure on the database actor thread and return its result.
+    /// Execute a closure on the database actor thread with both connections.
     ///
-    /// The closure receives `(&mut Connection, &mut Connection)` where the
-    /// first is `plugins.db` and the second is `settings.db`.
+    /// Prefer [`call_plugins`] or [`call_settings`] for single-DB operations.
     ///
     /// # Panics
     ///
     /// Panics if called from the db-actor thread itself (re-entrancy would
     /// deadlock: the thread blocks waiting for its own response).
-    pub fn call<F, R>(&self, f: F) -> R
+    fn call<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut Connection, &mut Connection) -> R + Send + 'static,
         R: Send + 'static,
@@ -89,5 +88,23 @@ impl DbActor {
             }))
             .expect("db-actor thread is dead");
         resp_rx.recv().expect("db-actor thread is dead")
+    }
+
+    /// Execute a closure with the `plugins.db` connection.
+    pub fn call_plugins<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Connection) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.call(move |pc, _| f(pc))
+    }
+
+    /// Execute a closure with the `settings.db` connection.
+    pub fn call_settings<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Connection) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.call(move |_, sc| f(sc))
     }
 }

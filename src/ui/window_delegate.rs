@@ -71,7 +71,7 @@ unsafe extern "system" fn frameless_subclass_proc(
 // --- Window Delegate ---
 
 fn load_init_window_state() -> crate::settings::WindowState {
-    crate::state::db().call(|_, sc| crate::settings::load_window_state(sc))
+    crate::state::db().call_settings(crate::settings::load_window_state)
 }
 
 wrap_window_delegate! {
@@ -227,7 +227,7 @@ wrap_window_delegate! {
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
             let pending_ws = with_state(|state| state.pending_window_save.take()).flatten();
             if let Some(ws) = pending_ws {
-                crate::state::db().call(move |_, sc| {
+                crate::state::db().call_settings(move |sc| {
                     if ws.maximized {
                         crate::settings::save_maximized(sc, true);
                     } else {
@@ -275,7 +275,7 @@ wrap_task! {
             })
             .flatten();
             if let Some(ws) = pending_ws {
-                crate::state::db().call(move |_, sc| {
+                crate::state::db().call_settings(move |sc| {
                     if ws.maximized {
                         crate::settings::save_maximized(sc, true);
                     } else {

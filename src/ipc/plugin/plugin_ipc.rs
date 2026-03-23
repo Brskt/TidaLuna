@@ -88,7 +88,7 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
     let channel = msg.channel.clone();
     let args = msg.args.clone();
 
-    let result: Result<String, String> = db.call(move |pc, _| match channel.as_str() {
+    let result: Result<String, String> = db.call_plugins(move |pc| match channel.as_str() {
         "plugin.list" => {
             let plugins = crate::plugins::store::list(pc);
             Ok(serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string()))
@@ -250,7 +250,7 @@ async fn do_plugin_install(id: String, url: String) {
             let install_result = tokio::task::spawn_blocking({
                 let url = url.clone();
                 move || {
-                    crate::state::db().call(move |pc, _| {
+                    crate::state::db().call_plugins(move |pc| {
                         crate::plugins::store::install(pc, &url, &name, &manifest, &code, &hash)
                             .map(|()| crate::plugins::PluginInfo {
                                 url,
