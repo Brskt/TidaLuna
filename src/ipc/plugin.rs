@@ -58,19 +58,17 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             if url.is_empty() {
                 return;
             }
-            let prepared = with_state(|state| {
-                let code = state.plugin_store.get_code(url)?;
-                match state.plugin_manager.prepare_plugin(url, &code) {
-                    Ok(js) => Some(js),
+            let code = with_state(|state| state.plugin_store.get_code(url)).flatten();
+            if let Some(code) = code {
+                match crate::plugins::PluginManager::transpile_and_wrap(url, &code) {
+                    Ok(js) => {
+                        with_state(|state| state.plugin_manager.mark_loaded(url));
+                        eval_js(&js);
+                    }
                     Err(e) => {
                         crate::vprintln!("[PLUGIN] Failed to prepare '{}': {}", url, e);
-                        None
                     }
                 }
-            })
-            .flatten();
-            if let Some(js) = prepared {
-                eval_js(&js);
             }
         }
         "jsrt.disable_plugin" => {
@@ -100,13 +98,28 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
         }
         "jsrt.load_plugins" => {
-            let prepared = with_state(|state| {
-                state
-                    .plugin_manager
-                    .prepare_all_enabled(&state.plugin_store)
+            let plugin_code = with_state(|state| {
+                crate::plugins::PluginManager::collect_enabled_code(&state.plugin_store)
             })
             .unwrap_or_default();
+            let mut prepared = Vec::new();
+            for (url, name, code) in &plugin_code {
+                match crate::plugins::PluginManager::transpile_and_wrap(url, code) {
+                    Ok(js) => {
+                        crate::vprintln!("[PLUGIN] Prepared '{}' ({} bytes)", name, js.len());
+                        prepared.push((url.as_str(), js));
+                    }
+                    Err(e) => {
+                        crate::vprintln!("[PLUGIN] Failed to prepare '{}': {e}", name);
+                    }
+                }
+            }
             crate::vprintln!("[PLUGIN] Loading {} plugins into CEF", prepared.len());
+            with_state(|state| {
+                for (url, _) in &prepared {
+                    state.plugin_manager.mark_loaded(url);
+                }
+            });
             for (url, js) in &prepared {
                 crate::vprintln!("[PLUGIN] Injecting '{}' ({} bytes)", url, js.len());
                 eval_js(js);

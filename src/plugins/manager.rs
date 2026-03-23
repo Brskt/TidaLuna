@@ -23,34 +23,22 @@ impl PluginManager {
         Self::default()
     }
 
-    /// Prepare a plugin for CEF injection.
-    ///
-    /// Returns the wrapped JS code ready to be passed to `eval_js()`,
-    /// or an error if transpilation fails.
-    pub fn prepare_plugin(&mut self, plugin_id: &str, code: &str) -> anyhow::Result<String> {
-        // Always transpile: OXC handles plain JS as a no-op and this avoids
-        // unreliable heuristics for detecting TypeScript.
+    /// Transpile and wrap plugin code for CEF injection (pure, no state mutation).
+    pub fn transpile_and_wrap(plugin_id: &str, code: &str) -> anyhow::Result<String> {
         let js = transpile::transpile_ts(code, &format!("{plugin_id}.mts"))?;
-
-        // Strip ES module syntax (export/import) so code runs in IIFE context.
-        // Quartz-bundled plugins have exports at the end and imports already resolved.
         let js = transpile::strip_esm_syntax(&js);
-
-        // Wrap in security closure
-        let wrapped = wrapper::wrap_plugin_code(plugin_id, &js);
-
-        self.loaded.insert(plugin_id.to_string());
-        Ok(wrapped)
+        Ok(wrapper::wrap_plugin_code(plugin_id, &js))
     }
 
-    /// Prepare all enabled plugins from the store.
-    ///
-    /// Returns a Vec of (plugin_id, wrapped_js) for each successfully prepared plugin.
-    /// Logs errors for plugins that fail to prepare.
-    pub fn prepare_all_enabled(&mut self, store: &PluginStore) -> Vec<(String, String)> {
+    /// Mark a plugin as loaded.
+    pub fn mark_loaded(&mut self, plugin_id: &str) {
+        self.loaded.insert(plugin_id.to_string());
+    }
+
+    /// Collect enabled plugins' code from the store (read-only, no transpilation).
+    pub fn collect_enabled_code(store: &PluginStore) -> Vec<(String, String, String)> {
         let plugins = store.list();
         let mut result = Vec::new();
-
         for info in &plugins {
             if !info.enabled {
                 continue;
@@ -59,22 +47,8 @@ impl PluginManager {
                 crate::vprintln!("[PLUGIN] No code found for '{}'", info.url);
                 continue;
             };
-
-            match self.prepare_plugin(&info.url, &code) {
-                Ok(wrapped) => {
-                    crate::vprintln!(
-                        "[PLUGIN] Prepared '{}' ({} bytes)",
-                        info.name,
-                        wrapped.len()
-                    );
-                    result.push((info.url.clone(), wrapped));
-                }
-                Err(e) => {
-                    crate::vprintln!("[PLUGIN] Failed to prepare '{}': {e}", info.name);
-                }
-            }
+            result.push((info.url.clone(), info.name.clone(), code));
         }
-
         result
     }
 
@@ -104,42 +78,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_prepare_plugin_wraps_code() {
-        let mut mgr = PluginManager::new();
-        let result = mgr
-            .prepare_plugin("test-plugin", "console.log('hello');")
-            .unwrap();
+    fn test_transpile_and_wrap_wraps_code() {
+        let result =
+            PluginManager::transpile_and_wrap("test-plugin", "console.log('hello');").unwrap();
 
-        // Should be wrapped in IIFE
         assert!(result.starts_with("(function("));
-        assert!(result.contains("console.log('hello');"));
+        assert!(result.contains("console.log("));
+        assert!(result.contains("hello"));
         assert!(result.contains("'use strict'"));
     }
 
     #[test]
-    fn test_prepare_plugin_transpiles_ts() {
-        let mut mgr = PluginManager::new();
+    fn test_transpile_and_wrap_transpiles_ts() {
         let ts_code = "const x: number = 42; console.log(x);";
-        let result = mgr.prepare_plugin("ts-plugin", ts_code).unwrap();
+        let result = PluginManager::transpile_and_wrap("ts-plugin", ts_code).unwrap();
 
-        // Type annotation should be stripped
         assert!(!result.contains(": number"));
         assert!(result.contains("42"));
     }
 
     #[test]
-    fn test_prepare_plugin_tracks_loaded() {
+    fn test_mark_loaded_tracks() {
         let mut mgr = PluginManager::new();
         assert!(!mgr.is_loaded("my-plugin"));
 
-        mgr.prepare_plugin("my-plugin", "").unwrap();
+        mgr.mark_loaded("my-plugin");
         assert!(mgr.is_loaded("my-plugin"));
     }
 
     #[test]
     fn test_unload_plugin_generates_cleanup_js() {
         let mut mgr = PluginManager::new();
-        mgr.prepare_plugin("my-plugin", "").unwrap();
+        mgr.mark_loaded("my-plugin");
 
         let js = mgr.unload_plugin("my-plugin");
         assert!(js.is_some());
@@ -158,7 +128,7 @@ mod tests {
     #[test]
     fn test_unload_removes_from_loaded() {
         let mut mgr = PluginManager::new();
-        mgr.prepare_plugin("my-plugin", "").unwrap();
+        mgr.mark_loaded("my-plugin");
         mgr.unload_plugin("my-plugin");
         assert!(!mgr.is_loaded("my-plugin"));
     }
