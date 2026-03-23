@@ -416,7 +416,10 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
         ("bun-linux-x64.zip", "bun-linux-x64")
     };
 
-    let url = format!("https://github.com/oven-sh/bun/releases/latest/download/{archive_name}");
+    const BUN_VERSION: &str = "1.3.11";
+    let url = format!(
+        "https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/{archive_name}"
+    );
     let zip_path = bundle_dir.join(archive_name);
 
     println!("  Downloading Bun from {url}...");
