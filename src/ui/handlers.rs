@@ -2,6 +2,7 @@ use crate::app_state::{IpcMessage, exec_js_on_frame, open_in_os, with_state};
 use crate::ipc::player::handle_ipc_message;
 use crate::ipc::plugin::handle_plugin_ipc;
 use crate::ipc::window::notify_window_state;
+use crate::ui::flush::run_flush_batch;
 use cef::wrapper::message_router::{
     BrowserSideHandler, BrowserSideRouter, MessageRouterBrowserSide,
     MessageRouterBrowserSideHandlerCallbacks, MessageRouterConfig,
@@ -595,7 +596,7 @@ wrap_window_delegate! {
                 return;
             }
             let maximized = window.is_maximized() == 1;
-            with_state(|state| {
+            let batch = with_state(|state| {
                 if maximized {
                     state.app_settings.save_maximized(true);
                 } else {
@@ -609,8 +610,11 @@ wrap_window_delegate! {
                         },
                     );
                 }
-                notify_window_state(state, maximized, false);
+                notify_window_state(state, maximized, false)
             });
+            if let Some(batch) = batch {
+                run_flush_batch(batch);
+            }
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
             let bv = self.browser_view.borrow();

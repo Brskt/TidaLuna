@@ -3,51 +3,131 @@ use crate::bridge::PlayerBridgeEvent;
 use crate::player::{PlaybackState, PlayerEvent};
 use cef::*;
 
-pub(crate) fn flush_bridge_now(state: &mut AppState) {
+pub(crate) struct FlushBatch {
+    browser: Option<Browser>,
+    player_events: Vec<PlayerBridgeEvent>,
+    misc_js: Vec<String>,
+}
+
+pub(crate) fn take_flush_batch(state: &mut AppState) -> FlushBatch {
     if let Some((time, seq)) = state.pending_time_update.take() {
         state
             .pending_player_events
             .push(PlayerBridgeEvent::time(time, seq));
     }
 
-    if !state.pending_player_events.is_empty() {
-        if let Ok(events_json) = serde_json::to_string(&state.pending_player_events) {
-            let js = format!(
-                "if (window.__TIDAL_RS_PLAYER_PUSH__) {{ window.__TIDAL_RS_PLAYER_PUSH__({}); }}",
-                events_json
+    FlushBatch {
+        browser: state.browser.clone(),
+        player_events: std::mem::take(&mut state.pending_player_events),
+        misc_js: std::mem::take(&mut state.pending_misc_js),
+    }
+}
+
+pub(crate) fn run_flush_batch(batch: FlushBatch) {
+    let frame = batch.browser.as_ref().and_then(|b| b.main_frame());
+
+    if !batch.player_events.is_empty()
+        && let Ok(events_json) = serde_json::to_string(&batch.player_events)
+    {
+        let js = format!(
+            "if (window.__TIDAL_RS_PLAYER_PUSH__) {{ window.__TIDAL_RS_PLAYER_PUSH__({}); }}",
+            events_json
+        );
+        if let Some(ref frame) = frame {
+            exec_js_on_frame(frame, &js);
+        } else {
+            crate::vprintln!(
+                "[BRIDGE] flush DROPPED — {}",
+                if batch.browser.is_none() {
+                    "no browser"
+                } else {
+                    "no frame"
+                }
             );
-            if let Some(ref browser) = state.browser
-                && let Some(frame) = browser.main_frame()
-            {
-                exec_js_on_frame(&frame, &js);
-            } else {
-                crate::vprintln!(
-                    "[BRIDGE] flush DROPPED — {}",
-                    if state.browser.is_none() {
-                        "no browser"
-                    } else {
-                        "no frame"
-                    }
-                );
-            }
         }
-        state.pending_player_events.clear();
     }
 
-    if !state.pending_misc_js.is_empty() {
-        let js_batch = state.pending_misc_js.join(";");
-        if let Some(ref browser) = state.browser
-            && let Some(frame) = browser.main_frame()
-        {
-            exec_js_on_frame(&frame, &js_batch);
+    if !batch.misc_js.is_empty() {
+        let js_batch = batch.misc_js.join(";");
+        if let Some(ref frame) = frame {
+            exec_js_on_frame(frame, &js_batch);
         }
-        state.pending_misc_js.clear();
+    }
+}
+
+struct PostLockEffects {
+    batch: Option<FlushBatch>,
+    should_schedule: bool,
+    mc: Option<crate::platform::media_controls::OsMediaControls>,
+    mc_action: MediaControlAction,
+    #[cfg(target_os = "windows")]
+    thumbbar: Option<crate::platform::thumbbar::ThumbBar>,
+    #[cfg(target_os = "windows")]
+    thumbbar_playing: Option<bool>,
+}
+
+enum MediaControlAction {
+    None,
+    SetPlayback(PlaybackState),
+    SetMetadata {
+        title: String,
+        artist: String,
+        duration: Option<f64>,
+    },
+}
+
+fn run_post_lock_effects(mut effects: PostLockEffects) {
+    match effects.mc_action {
+        MediaControlAction::SetPlayback(st) => {
+            if let Some(ref mut mc) = effects.mc {
+                mc.set_playback(st);
+            }
+        }
+        MediaControlAction::SetMetadata {
+            ref title,
+            ref artist,
+            duration,
+        } => {
+            if let Some(ref mut mc) = effects.mc {
+                mc.set_metadata(title, artist, duration);
+            }
+        }
+        MediaControlAction::None => {}
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(playing) = effects.thumbbar_playing {
+        if let Some(ref tb) = effects.thumbbar {
+            tb.set_playing(playing);
+        }
+    }
+
+    // Put back media_controls and thumbbar
+    with_state(|state| {
+        if effects.mc.is_some() {
+            state.media_controls = effects.mc.take();
+        }
+        #[cfg(target_os = "windows")]
+        if effects.thumbbar.is_some() {
+            state.thumbbar = effects.thumbbar.take();
+        }
+    });
+
+    if let Some(batch) = effects.batch {
+        run_flush_batch(batch);
+    }
+    if effects.should_schedule {
+        schedule_flush_task();
     }
 }
 
 pub(crate) fn handle_player_event(event: PlayerEvent) {
-    with_state(|state| {
+    let effects = with_state(|state| {
         let mut should_flush = true;
+        let mut mc_action = MediaControlAction::None;
+        #[cfg(target_os = "windows")]
+        let mut thumbbar_playing: Option<bool> = None;
+
         match event {
             PlayerEvent::TimeUpdate(time, seq) => {
                 state.pending_time_update = Some((time, seq));
@@ -72,13 +152,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     });
                 }
 
-                if let Some(ref mut mc) = state.media_controls {
-                    mc.set_playback(st);
-                }
+                mc_action = MediaControlAction::SetPlayback(st);
 
                 #[cfg(target_os = "windows")]
-                if let Some(ref tb) = state.thumbbar {
-                    tb.set_playing(matches!(
+                {
+                    thumbbar_playing = Some(matches!(
                         st,
                         PlaybackState::Active | PlaybackState::Seeking | PlaybackState::Idle
                     ));
@@ -91,12 +169,15 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             PlayerEvent::Duration(duration, seq) => {
                 state.media_duration = Some(duration);
 
-                if let Some(ref mut mc) = state.media_controls
-                    && let Some(ref meta) = *crate::state::CURRENT_METADATA
-                        .lock()
-                        .expect("CURRENT_METADATA lock poisoned")
+                if let Some(ref meta) = *crate::state::CURRENT_METADATA
+                    .lock()
+                    .expect("CURRENT_METADATA lock poisoned")
                 {
-                    mc.set_metadata(&meta.title, &meta.artist, Some(duration));
+                    mc_action = MediaControlAction::SetMetadata {
+                        title: meta.title.clone(),
+                        artist: meta.artist.clone(),
+                        duration: Some(duration),
+                    };
                 }
 
                 state
@@ -169,13 +250,47 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .push(PlayerBridgeEvent::max_connections());
             }
         }
-        if should_flush {
-            flush_bridge_now(state);
-        } else if !state.flush_scheduled {
+
+        let batch = if should_flush {
+            Some(take_flush_batch(state))
+        } else {
+            None
+        };
+
+        let should_schedule = !should_flush && !state.flush_scheduled && {
             state.flush_scheduled = true;
-            schedule_flush_task();
+            true
+        };
+
+        // Take media_controls/thumbbar only if needed
+        let mc = if matches!(mc_action, MediaControlAction::None) {
+            None
+        } else {
+            state.media_controls.take()
+        };
+
+        #[cfg(target_os = "windows")]
+        let thumbbar = if thumbbar_playing.is_some() {
+            state.thumbbar.take()
+        } else {
+            None
+        };
+
+        PostLockEffects {
+            batch,
+            should_schedule,
+            mc,
+            mc_action,
+            #[cfg(target_os = "windows")]
+            thumbbar,
+            #[cfg(target_os = "windows")]
+            thumbbar_playing,
         }
     });
+
+    if let Some(effects) = effects {
+        run_post_lock_effects(effects);
+    }
 }
 
 fn schedule_flush_task() {
@@ -189,10 +304,13 @@ wrap_task! {
     }
     impl Task {
         fn execute(&self) {
-            with_state(|state| {
+            let batch = with_state(|state| {
                 state.flush_scheduled = false;
-                flush_bridge_now(state);
+                take_flush_batch(state)
             });
+            if let Some(batch) = batch {
+                run_flush_batch(batch);
+            }
         }
     }
 }

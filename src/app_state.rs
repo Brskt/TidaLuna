@@ -57,11 +57,9 @@ pub(crate) struct AppState {
     pub(crate) thumbbar: Option<crate::platform::thumbbar::ThumbBar>,
 }
 
-// SAFETY: AppState fields are non-Send/Sync (Browser, rusqlite::Connection, etc.)
-// but all access is serialized through Arc<Mutex<>>. Async IPC callbacks access
-// AppState from tokio worker threads — the Mutex ensures exclusive access.
+// SAFETY: AppState contains non-Send types (Browser, rusqlite::Connection, etc.)
+// but all access is serialized through Arc<Mutex<>>. The Mutex ensures exclusive access.
 unsafe impl Send for AppState {}
-unsafe impl Sync for AppState {}
 
 pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
 
@@ -83,13 +81,12 @@ pub(crate) fn exec_js_on_frame(frame: &Frame, js: &str) {
 
 #[allow(dead_code)]
 pub(crate) fn eval_js(js: &str) {
-    with_state(|state| {
-        if let Some(ref browser) = state.browser
-            && let Some(frame) = browser.main_frame()
-        {
-            exec_js_on_frame(&frame, js);
-        }
-    });
+    let browser = with_state(|state| state.browser.clone());
+    if let Some(Some(browser)) = browser
+        && let Some(frame) = browser.main_frame()
+    {
+        exec_js_on_frame(&frame, js);
+    }
 }
 
 pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
@@ -116,15 +113,14 @@ pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
 }
 
 pub(crate) fn toggle_devtools() {
-    with_state(|state| {
-        if let Some(ref browser) = state.browser
-            && let Some(host) = browser.host()
-        {
-            if host.has_dev_tools() == 1 {
-                host.close_dev_tools();
-            } else {
-                host.show_dev_tools(None, None, None, None);
-            }
+    let browser = with_state(|state| state.browser.clone());
+    if let Some(Some(browser)) = browser
+        && let Some(host) = browser.host()
+    {
+        if host.has_dev_tools() == 1 {
+            host.close_dev_tools();
+        } else {
+            host.show_dev_tools(None, None, None, None);
         }
-    });
+    }
 }

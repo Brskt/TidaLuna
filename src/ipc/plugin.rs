@@ -1,5 +1,9 @@
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, with_state};
 
+fn take_ipc_callback(id: &str) -> Option<IpcCallback> {
+    with_state(|state| state.pending_ipc_callbacks.remove(id)).flatten()
+}
+
 pub(crate) fn ipc_callback_ok(cb: &IpcCallback, result: &str) {
     cb.lock()
         .expect("IPC callback lock poisoned")
@@ -130,15 +134,13 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             rt.spawn(async move {
                 let result =
                     crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
-                with_state(|state| {
-                    let Some(cb) = state.pending_ipc_callbacks.remove(&id) else {
-                        return;
-                    };
-                    match result {
-                        Ok(json) => ipc_callback_ok(&cb, &json),
-                        Err(e) => ipc_callback_err(&cb, &e),
-                    }
-                });
+                let Some(cb) = take_ipc_callback(&id) else {
+                    return;
+                };
+                match result {
+                    Ok(json) => ipc_callback_ok(&cb, &json),
+                    Err(e) => ipc_callback_err(&cb, &e),
+                }
             });
         });
         return;
@@ -226,8 +228,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             code.len()
         );
 
-        with_state(|state| {
-            // Lazy-init Bun process
+        let spawn_data = with_state(|state| {
             if state.native_runtime.is_none() {
                 match crate::native_runtime::NativeRuntime::spawn(&state.rt_handle) {
                     Ok(rt) => {
@@ -236,11 +237,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
                     }
                     Err(e) => {
                         crate::vprintln!("[NATIVE] Failed to start Bun: {e}");
-                        ipc_callback_err(
-                            &callback,
-                            &format!("Failed to start native runtime: {e}"),
-                        );
-                        return;
+                        return Err(format!("Failed to start native runtime: {e}"));
                     }
                 }
             }
@@ -249,54 +246,62 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             let stdin_tx = state.native_runtime.as_ref().unwrap().stdin_tx_clone();
             let bun_id = state.native_runtime.as_ref().unwrap().next_id_str();
             let rt = state.rt_handle.clone();
+            Ok((pending, stdin_tx, bun_id, rt))
+        });
 
-            rt.spawn(async move {
-                let cmd = serde_json::json!({
-                    "id": bun_id,
-                    "type": "register",
-                    "name": name,
-                    "code": code,
-                });
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                {
-                    if let Ok(mut map) = pending.lock() {
-                        map.insert(bun_id.clone(), tx);
-                    }
-                }
-                let line = serde_json::to_string(&cmd).unwrap_or_default();
-                let _ = stdin_tx.send(line);
+        let Some(Ok((pending, stdin_tx, bun_id, rt))) = spawn_data else {
+            if let Some(Err(e)) = spawn_data {
+                ipc_callback_err(&callback, &e);
+            }
+            return;
+        };
 
-                let result = rx.await;
-
-                match result {
-                    Ok(Ok(response)) => {
-                        let exports = response
-                            .get("exports")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        let channel = format!("__LunaNative.{name}");
-                        crate::vprintln!(
-                            "[NATIVE] Registered '{}': {} exports ({})",
-                            name,
-                            exports.len(),
-                            exports.join(", ")
-                        );
-                        ipc_callback_ok(&callback, &format!("\"{channel}\""));
-                    }
-                    Ok(Err(e)) => {
-                        crate::vprintln!("[NATIVE] Register failed for '{}': {}", name, e);
-                        ipc_callback_err(&callback, &e);
-                    }
-                    Err(_) => {
-                        ipc_callback_err(&callback, "Bun response channel dropped");
-                    }
-                }
+        rt.spawn(async move {
+            let cmd = serde_json::json!({
+                "id": bun_id,
+                "type": "register",
+                "name": name,
+                "code": code,
             });
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            {
+                if let Ok(mut map) = pending.lock() {
+                    map.insert(bun_id.clone(), tx);
+                }
+            }
+            let line = serde_json::to_string(&cmd).unwrap_or_default();
+            let _ = stdin_tx.send(line);
+
+            let result = rx.await;
+
+            match result {
+                Ok(Ok(response)) => {
+                    let exports = response
+                        .get("exports")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let channel = format!("__LunaNative.{name}");
+                    crate::vprintln!(
+                        "[NATIVE] Registered '{}': {} exports ({})",
+                        name,
+                        exports.len(),
+                        exports.join(", ")
+                    );
+                    ipc_callback_ok(&callback, &format!("\"{channel}\""));
+                }
+                Ok(Err(e)) => {
+                    crate::vprintln!("[NATIVE] Register failed for '{}': {}", name, e);
+                    ipc_callback_err(&callback, &e);
+                }
+                Err(_) => {
+                    ipc_callback_err(&callback, "Bun response channel dropped");
+                }
+            }
         });
         return;
     }
@@ -316,46 +321,53 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             .to_string();
         let call_args: Vec<serde_json::Value> = msg.args.iter().skip(1).cloned().collect();
 
-        with_state(|state| {
+        let call_data = with_state(|state| {
             let Some(ref runtime) = state.native_runtime else {
-                ipc_callback_err(&callback, "Native runtime not initialized");
-                return;
+                return Err("Native runtime not initialized".to_string());
             };
 
             let pending = runtime.pending_clone();
             let stdin_tx = runtime.stdin_tx_clone();
             let bun_id = runtime.next_id_str();
             let rt = state.rt_handle.clone();
+            Ok((pending, stdin_tx, bun_id, rt))
+        });
 
-            rt.spawn(async move {
-                let cmd = serde_json::json!({
-                    "id": bun_id,
-                    "type": "call",
-                    "name": module_name,
-                    "fn": export_name,
-                    "args": call_args,
-                });
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                {
-                    if let Ok(mut map) = pending.lock() {
-                        map.insert(bun_id.clone(), tx);
-                    }
-                }
-                let line = serde_json::to_string(&cmd).unwrap_or_default();
-                let _ = stdin_tx.send(line);
+        let Some(Ok((pending, stdin_tx, bun_id, rt))) = call_data else {
+            if let Some(Err(e)) = call_data {
+                ipc_callback_err(&callback, &e);
+            }
+            return;
+        };
 
-                match rx.await {
-                    Ok(Ok(response)) => {
-                        let val = response
-                            .get("result")
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null);
-                        ipc_callback_ok(&callback, &val.to_string());
-                    }
-                    Ok(Err(e)) => ipc_callback_err(&callback, &e),
-                    Err(_) => ipc_callback_err(&callback, "Bun response channel dropped"),
-                }
+        rt.spawn(async move {
+            let cmd = serde_json::json!({
+                "id": bun_id,
+                "type": "call",
+                "name": module_name,
+                "fn": export_name,
+                "args": call_args,
             });
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            {
+                if let Ok(mut map) = pending.lock() {
+                    map.insert(bun_id.clone(), tx);
+                }
+            }
+            let line = serde_json::to_string(&cmd).unwrap_or_default();
+            let _ = stdin_tx.send(line);
+
+            match rx.await {
+                Ok(Ok(response)) => {
+                    let val = response
+                        .get("result")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    ipc_callback_ok(&callback, &val.to_string());
+                }
+                Ok(Err(e)) => ipc_callback_err(&callback, &e),
+                Err(_) => ipc_callback_err(&callback, "Bun response channel dropped"),
+            }
         });
         return;
     }
@@ -375,15 +387,13 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             rt.spawn(async move {
                 let client = &*crate::state::HTTP_CLIENT;
                 let result = fetch_plugin_package(client, &url).await;
-                with_state(|state| {
-                    let Some(cb) = state.pending_ipc_callbacks.remove(&id) else {
-                        return;
-                    };
-                    match result {
-                        Ok(manifest) => ipc_callback_ok(&cb, &manifest),
-                        Err(e) => ipc_callback_err(&cb, &format!("{e:#}")),
-                    }
-                });
+                let Some(cb) = take_ipc_callback(&id) else {
+                    return;
+                };
+                match result {
+                    Ok(manifest) => ipc_callback_ok(&cb, &manifest),
+                    Err(e) => ipc_callback_err(&cb, &format!("{e:#}")),
+                }
             });
         });
         return;
@@ -408,113 +418,112 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
         return;
     }
 
-    with_state(|state| match msg.channel.as_str() {
+    let result: Option<Result<String, String>> = with_state(|state| match msg.channel.as_str() {
         "plugin.list" => {
             let plugins = state.plugin_store.list();
-            let json = serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string());
-            ipc_callback_ok(&callback, &json);
+            Ok(serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string()))
         }
         "plugin.get_code" => {
             let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
             match state.plugin_store.get_code(url) {
                 Some(code) => {
-                    let json = serde_json::to_string(&code).unwrap_or_else(|_| "null".to_string());
-                    ipc_callback_ok(&callback, &json);
+                    Ok(serde_json::to_string(&code).unwrap_or_else(|_| "null".to_string()))
                 }
-                None => ipc_callback_ok(&callback, "null"),
+                None => Ok("null".to_string()),
             }
         }
         "plugin.uninstall" => {
             let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            match state.plugin_store.uninstall(url) {
-                Ok(()) => ipc_callback_ok(&callback, "true"),
-                Err(e) => ipc_callback_err(&callback, &e.to_string()),
-            }
+            state
+                .plugin_store
+                .uninstall(url)
+                .map(|()| "true".to_string())
+                .map_err(|e| e.to_string())
         }
-        "plugin.uninstall_all" => match state.plugin_store.uninstall_all() {
-            Ok(()) => ipc_callback_ok(&callback, "true"),
-            Err(e) => ipc_callback_err(&callback, &e.to_string()),
-        },
+        "plugin.uninstall_all" => state
+            .plugin_store
+            .uninstall_all()
+            .map(|()| "true".to_string())
+            .map_err(|e| e.to_string()),
         "plugin.enable" => {
             let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            match state.plugin_store.enable(url) {
-                Ok(()) => ipc_callback_ok(&callback, "true"),
-                Err(e) => ipc_callback_err(&callback, &e.to_string()),
-            }
+            state
+                .plugin_store
+                .enable(url)
+                .map(|()| "true".to_string())
+                .map_err(|e| e.to_string())
         }
         "plugin.disable" => {
             let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
-            match state.plugin_store.disable(url) {
-                Ok(()) => ipc_callback_ok(&callback, "true"),
-                Err(e) => ipc_callback_err(&callback, &e.to_string()),
-            }
+            state
+                .plugin_store
+                .disable(url)
+                .map(|()| "true".to_string())
+                .map_err(|e| e.to_string())
         }
         "plugin.storage.get" => {
             let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
             let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
             match state.plugin_store.storage_get(ns, key) {
-                Some(val) => {
-                    let json = serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string());
-                    ipc_callback_ok(&callback, &json);
-                }
-                None => ipc_callback_ok(&callback, "null"),
+                Some(val) => Ok(serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string())),
+                None => Ok("null".to_string()),
             }
         }
         "plugin.storage.set" => {
             let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
             let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let value = msg.args.get(2).and_then(|v| v.as_str()).unwrap_or("");
-            match state.plugin_store.storage_set(ns, key, value) {
-                Ok(()) => ipc_callback_ok(&callback, "true"),
-                Err(e) => ipc_callback_err(&callback, &e.to_string()),
-            }
+            state
+                .plugin_store
+                .storage_set(ns, key, value)
+                .map(|()| "true".to_string())
+                .map_err(|e| e.to_string())
         }
         "plugin.storage.del" => {
             let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
             let key = msg.args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            match state.plugin_store.storage_del(ns, key) {
-                Ok(()) => ipc_callback_ok(&callback, "true"),
-                Err(e) => ipc_callback_err(&callback, &e.to_string()),
-            }
+            state
+                .plugin_store
+                .storage_del(ns, key)
+                .map(|()| "true".to_string())
+                .map_err(|e| e.to_string())
         }
         "plugin.storage.keys" => {
             let ns = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
             let keys = state.plugin_store.storage_keys(ns);
-            let json = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
-            ipc_callback_ok(&callback, &json);
+            Ok(serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()))
         }
-        _ => {
-            ipc_callback_err(
-                &callback,
-                &format!("Unknown plugin channel: {}", msg.channel),
-            );
-        }
+        _ => Err(format!("Unknown plugin channel: {}", msg.channel)),
     });
+
+    match result {
+        Some(Ok(json)) => ipc_callback_ok(&callback, &json),
+        Some(Err(e)) => ipc_callback_err(&callback, &e),
+        None => ipc_callback_err(&callback, "AppState not available"),
+    }
 }
 
 async fn handle_proxy_head(id: String, url: String) {
     let client = &*crate::state::HTTP_CLIENT;
     let result = client.head(&url).send().await;
 
-    with_state(|state| {
-        let Some(callback) = state.pending_ipc_callbacks.remove(&id) else {
-            return;
-        };
-        match result {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let content_length = resp.content_length().unwrap_or(0);
-                let json = serde_json::json!({
-                    "status": status,
-                    "contentLength": content_length,
-                });
-                ipc_callback_ok(&callback, &json.to_string());
-            }
-            Err(e) => {
-                ipc_callback_err(&callback, &format!("proxy.head failed: {e}"));
-            }
+    let Some(callback) = take_ipc_callback(&id) else {
+        return;
+    };
+    match result {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let content_length = resp.content_length().unwrap_or(0);
+            let json = serde_json::json!({
+                "status": status,
+                "contentLength": content_length,
+            });
+            ipc_callback_ok(&callback, &json.to_string());
         }
-    });
+        Err(e) => {
+            ipc_callback_err(&callback, &format!("proxy.head failed: {e}"));
+        }
+    }
 }
 
 async fn handle_proxy_fetch(id: String, url: String, headers_json: String) {
@@ -534,63 +543,60 @@ async fn handle_proxy_fetch(id: String, url: String, headers_json: String) {
 
     let result = req.send().await;
 
-    with_state(|state| {
-        let Some(callback) = state.pending_ipc_callbacks.remove(&id) else {
-            return;
-        };
-        match result {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let rt = state.rt_handle.clone();
-                rt.spawn(async move {
-                    let body = resp.text().await.unwrap_or_default();
-                    let json = serde_json::json!({
-                        "status": status,
-                        "body": body,
-                    });
-                    ipc_callback_ok(&callback, &json.to_string());
+    let Some(callback) = take_ipc_callback(&id) else {
+        return;
+    };
+    match result {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            tokio::spawn(async move {
+                let body = resp.text().await.unwrap_or_default();
+                let json = serde_json::json!({
+                    "status": status,
+                    "body": body,
                 });
-            }
-            Err(e) => {
-                ipc_callback_err(&callback, &format!("proxy.fetch failed: {e}"));
-            }
+                ipc_callback_ok(&callback, &json.to_string());
+            });
         }
-    });
+        Err(e) => {
+            ipc_callback_err(&callback, &format!("proxy.fetch failed: {e}"));
+        }
+    }
 }
 
 async fn handle_plugin_install(id: String, url: String) {
     let client = &*crate::state::HTTP_CLIENT;
     let result = fetch_plugin_data(client, &url).await;
 
-    with_state(|state| {
-        let Some(callback) = state.pending_ipc_callbacks.remove(&id) else {
-            return;
-        };
-        match result {
-            Ok((name, manifest, code, hash)) => {
-                match state
+    let Some(callback) = take_ipc_callback(&id) else {
+        return;
+    };
+    match result {
+        Ok((name, manifest, code, hash)) => {
+            let install_result = with_state(|state| {
+                state
                     .plugin_store
                     .install(&url, &name, &manifest, &code, &hash)
-                {
-                    Ok(()) => {
-                        let info = crate::plugins::PluginInfo {
-                            url: url.clone(),
-                            name,
-                            manifest,
-                            hash: Some(hash),
-                            enabled: true,
-                            installed: true,
-                        };
-                        let json =
-                            serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
-                        ipc_callback_ok(&callback, &json);
-                    }
-                    Err(e) => ipc_callback_err(&callback, &e.to_string()),
+                    .map(|()| crate::plugins::PluginInfo {
+                        url: url.clone(),
+                        name,
+                        manifest,
+                        hash: Some(hash),
+                        enabled: true,
+                        installed: true,
+                    })
+            });
+            match install_result {
+                Some(Ok(info)) => {
+                    let json = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
+                    ipc_callback_ok(&callback, &json);
                 }
+                Some(Err(e)) => ipc_callback_err(&callback, &e.to_string()),
+                None => ipc_callback_err(&callback, "AppState not available"),
             }
-            Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
         }
-    });
+        Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
+    }
 }
 
 fn sanitize_plugin_url(url: &str) -> &str {

@@ -134,13 +134,12 @@ wrap_menu_model_delegate! {
                     });
                 }
                 MenuCommand::Exit => {
-                    with_state(|state| {
-                        if let Some(window) = get_cef_window(state) {
-                            window.close();
-                        } else {
-                            quit_message_loop();
-                        }
-                    });
+                    let browser = with_state(|state| state.browser.clone()).flatten();
+                    if let Some(window) = get_cef_window(browser) {
+                        window.close();
+                    } else {
+                        quit_message_loop();
+                    }
                 }
             }
         }
