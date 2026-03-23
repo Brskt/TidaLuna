@@ -37,6 +37,7 @@ pub(crate) fn handle_ipc_message(request: &str) {
     }
 }
 
+#[derive(Default)]
 struct PlayerIpcEffects {
     batch: Option<FlushBatch>,
     mc: Option<crate::platform::media_controls::OsMediaControls>,
@@ -52,11 +53,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         if let Err(e) = state.player.load(url, format, key) {
                             eprintln!("Failed to load track: {}", e);
                         }
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::LoadDash {
                         init_url,
@@ -66,11 +63,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         if let Err(e) = state.player.load_dash(init_url, segment_urls, format) {
                             eprintln!("Failed to load DASH track: {}", e);
                         }
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::Recover {
                         url,
@@ -81,32 +74,20 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         if let Err(e) = state.player.recover(url, format, key, target_time) {
                             eprintln!("Failed to recover track: {}", e);
                         }
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::Preload { url, format, key } => {
                         let track = TrackInfo { url, format, key };
                         state.rt_handle.spawn(async move {
                             crate::audio::preload::start_preload(track).await;
                         });
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::PreloadCancel => {
                         state.rt_handle.spawn(async {
                             crate::audio::preload::cancel_preload().await;
                         });
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::Metadata { payload } => {
                         let meta = crate::util::metadata::parse_track_metadata(&payload);
@@ -120,34 +101,22 @@ fn handle_player_ipc(msg: &IpcMessage) {
                             }
                         }
                         PlayerIpcEffects {
-                            batch: None,
                             mc,
                             mc_metadata,
+                            ..Default::default()
                         }
                     }
                     PlayerIpc::Play => {
                         let _ = state.player.play();
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::Pause => {
                         let _ = state.player.pause();
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::Stop => {
                         let _ = state.player.stop();
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::Seek { time } => {
                         let seq =
@@ -157,42 +126,25 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         let _ = state.player.seek(time);
                         PlayerIpcEffects {
                             batch: Some(batch),
-                            mc: None,
-                            mc_metadata: None,
+                            ..Default::default()
                         }
                     }
                     PlayerIpc::Volume { volume } => {
                         let _ = state.player.set_volume(volume);
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::DevicesGet { request_id } => {
                         let _ = state.player.get_audio_devices(request_id);
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                     PlayerIpc::DevicesSet { id, exclusive } => {
                         let _ = state.player.set_audio_device(id, exclusive);
-                        PlayerIpcEffects {
-                            batch: None,
-                            mc: None,
-                            mc_metadata: None,
-                        }
+                        PlayerIpcEffects::default()
                     }
                 },
                 Err(e) => {
                     crate::vprintln!("[IPC]    Invalid player IPC ({}): {:?}", msg.channel, e);
-                    PlayerIpcEffects {
-                        batch: None,
-                        mc: None,
-                        mc_metadata: None,
-                    }
+                    PlayerIpcEffects::default()
                 }
             },
         );
