@@ -57,18 +57,18 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
         }
         "jsrt.load_plugins" => {
-            let plugin_code = crate::state::db().call(|pc, _| {
+            let plugins = crate::state::db().call(|pc, _| {
                 crate::plugins::store::collect_enabled_code(pc)
             });
             let mut prepared = Vec::new();
-            for (url, name, code) in &plugin_code {
-                match crate::plugins::PluginManager::transpile_and_wrap(url, code) {
+            for p in &plugins {
+                match crate::plugins::PluginManager::transpile_and_wrap(&p.url, &p.code) {
                     Ok(js) => {
-                        crate::vprintln!("[PLUGIN] Prepared '{}' ({} bytes)", name, js.len());
-                        prepared.push((url.as_str(), js));
+                        crate::vprintln!("[PLUGIN] Prepared '{}' ({} bytes)", p.name, js.len());
+                        prepared.push((p.url.as_str(), js));
                     }
                     Err(e) => {
-                        crate::vprintln!("[PLUGIN] Failed to prepare '{}': {e}", name);
+                        crate::vprintln!("[PLUGIN] Failed to prepare '{}': {e}", p.name);
                     }
                 }
             }

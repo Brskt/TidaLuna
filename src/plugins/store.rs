@@ -165,18 +165,33 @@ pub(crate) fn storage_keys(conn: &mut Connection, namespace: &str) -> Vec<String
     }
 }
 
-pub(crate) fn collect_enabled_code(conn: &mut Connection) -> Vec<(String, String, String)> {
-    let plugins = list(conn);
-    let mut result = Vec::new();
-    for info in &plugins {
-        if !info.enabled {
-            continue;
+pub(crate) struct EnabledPlugin {
+    pub url: String,
+    pub name: String,
+    pub code: String,
+}
+
+pub(crate) fn collect_enabled_code(conn: &mut Connection) -> Vec<EnabledPlugin> {
+    let mut stmt = match conn.prepare(
+        "SELECT url, name, code FROM plugins WHERE installed = 1 AND enabled = 1 AND code IS NOT NULL ORDER BY rowid",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::vprintln!("[PLUGINS] Failed to query enabled plugins: {e}");
+            return Vec::new();
         }
-        let Some(code) = get_code(conn, &info.url) else {
-            crate::vprintln!("[PLUGIN] No code found for '{}'", info.url);
-            continue;
-        };
-        result.push((info.url.clone(), info.name.clone(), code));
+    };
+    match stmt.query_map([], |row| {
+        Ok(EnabledPlugin {
+            url: row.get(0)?,
+            name: row.get(1)?,
+            code: row.get(2)?,
+        })
+    }) {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(e) => {
+            crate::vprintln!("[PLUGINS] Failed to query enabled plugins: {e}");
+            Vec::new()
+        }
     }
-    result
 }
