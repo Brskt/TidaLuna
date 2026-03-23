@@ -1,5 +1,33 @@
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, with_state};
 
+fn send_bun_command(
+    pending: &crate::native_runtime::PendingMap,
+    stdin_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    id: &str,
+    cmd: serde_json::Value,
+) -> Result<tokio::sync::oneshot::Receiver<Result<serde_json::Value, String>>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    match pending.lock() {
+        Ok(mut map) => {
+            map.insert(id.to_string(), tx);
+        }
+        Err(e) => return Err(format!("pending lock poisoned: {e}")),
+    }
+    let line = serde_json::to_string(&cmd).unwrap_or_default();
+    if stdin_tx.send(line).is_err() {
+        match pending.lock() {
+            Ok(mut map) => {
+                map.remove(id);
+            }
+            Err(e) => {
+                crate::vprintln!("[NATIVE] pending lock poisoned during cleanup: {e}");
+            }
+        }
+        return Err("Bun stdin channel closed".to_string());
+    }
+    Ok(rx)
+}
+
 fn take_ipc_callback(id: &str) -> Option<IpcCallback> {
     with_state(|state| state.pending_ipc_callbacks.remove(id)).flatten()
 }
@@ -263,18 +291,15 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
                 "name": name,
                 "code": code,
             });
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            {
-                if let Ok(mut map) = pending.lock() {
-                    map.insert(bun_id.clone(), tx);
+            let rx = match send_bun_command(&pending, &stdin_tx, &bun_id, cmd) {
+                Ok(rx) => rx,
+                Err(e) => {
+                    ipc_callback_err(&callback, &e);
+                    return;
                 }
-            }
-            let line = serde_json::to_string(&cmd).unwrap_or_default();
-            let _ = stdin_tx.send(line);
+            };
 
-            let result = rx.await;
-
-            match result {
+            match rx.await {
                 Ok(Ok(response)) => {
                     let exports = response
                         .get("exports")
@@ -348,14 +373,13 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
                 "fn": export_name,
                 "args": call_args,
             });
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            {
-                if let Ok(mut map) = pending.lock() {
-                    map.insert(bun_id.clone(), tx);
+            let rx = match send_bun_command(&pending, &stdin_tx, &bun_id, cmd) {
+                Ok(rx) => rx,
+                Err(e) => {
+                    ipc_callback_err(&callback, &e);
+                    return;
                 }
-            }
-            let line = serde_json::to_string(&cmd).unwrap_or_default();
-            let _ = stdin_tx.send(line);
+            };
 
             match rx.await {
                 Ok(Ok(response)) => {
