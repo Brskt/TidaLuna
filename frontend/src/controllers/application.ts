@@ -22,7 +22,12 @@ export const createApplicationController = () => {
         getProcessUptime: () => 100,
         getVersion: () => "2.38.6.6",
         getWindowsVersionNumber: () => Promise.resolve("10.0.0"),
-        ready: () => sendIpc("web.loaded"),
+        ready: () => {
+            // Skip web.loaded on the OAuth callback route to avoid a redundant
+            // session_clear → set_token cycle during login handover.
+            if (window.location.pathname === "/login/auth") return;
+            sendIpc("web.loaded");
+        },
         reenableAutoUpdater: () => sendIpc("update.reenable"),
         registerDelegate: (d: any) => { delegate = d; },
         reload: () => window.location.reload(),

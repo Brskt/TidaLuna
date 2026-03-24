@@ -1,14 +1,12 @@
-// --- Invoke (request/response) infrastructure ---
+// Reuse the shared listener store created by early_runtime.js.
 
-// --- Event push infrastructure ---
+const sharedListeners: Record<string, Array<(...args: any[]) => void>> =
+    (window as any).__LUNAR_IPC_LISTENERS__ ??= {};
 
-const eventListeners = new Map<string, Set<(...args: any[]) => void>>();
-
-// Called from Rust via exec_js to push events to the frontend
 (window as any).__LUNAR_IPC_EMIT__ = (channel: string, ...args: any[]) => {
-    const listeners = eventListeners.get(channel);
-    if (!listeners) return;
-    for (const cb of listeners) {
+    const cbs = sharedListeners[channel];
+    if (!cbs) return;
+    for (const cb of cbs) {
         try {
             cb(...args);
         } catch (e) {
@@ -56,13 +54,17 @@ export const invokeIpc = (channel: string, ...args: any[]): Promise<any> => {
 };
 
 export const onIpcEvent = (channel: string, callback: (...args: any[]) => void): (() => void) => {
-    let listeners = eventListeners.get(channel);
-    if (!listeners) {
-        listeners = new Set();
-        eventListeners.set(channel, listeners);
-    }
-    listeners.add(callback);
+    if (!sharedListeners[channel]) sharedListeners[channel] = [];
+    sharedListeners[channel].push(callback);
     return () => {
-        listeners!.delete(callback);
+        const cbs = sharedListeners[channel];
+        if (cbs) {
+            const idx = cbs.indexOf(callback);
+            if (idx !== -1) cbs.splice(idx, 1);
+        }
     };
+};
+
+(window as any).__LUNAR_IPC_ON__ = (channel: string, cb: (...args: any[]) => void) => {
+    onIpcEvent(channel, cb);
 };

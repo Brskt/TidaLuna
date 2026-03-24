@@ -90,6 +90,14 @@ pub(crate) fn eval_js(js: &str) {
     }
 }
 
+pub(crate) fn emit_ipc_event(channel: &str) {
+    let js = format!(
+        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}');",
+        channel.replace('\'', "\\'")
+    );
+    eval_js(&js);
+}
+
 pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
     let target = target.as_ref();
     #[cfg(target_os = "windows")]

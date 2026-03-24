@@ -135,6 +135,18 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 open_in_os(url);
             }
         }
+        "window.navigate_self" => {
+            if let Some(url) = msg.args.first().and_then(|v| v.as_str()) {
+                crate::vprintln!("[AUTH]   navigate_self → {}", &url[..url.len().min(120)]);
+                let browser = with_state(|state| state.browser.clone());
+                if let Some(Some(browser)) = browser
+                    && let Some(frame) = browser.main_frame()
+                {
+                    let cef_url = CefString::from(url);
+                    frame.load_url(Some(&cef_url));
+                }
+            }
+        }
         "web.loaded" => {}
         _ => {}
     }

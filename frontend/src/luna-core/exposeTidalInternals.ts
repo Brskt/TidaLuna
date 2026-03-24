@@ -1,7 +1,7 @@
-// TidaLunar adaptation: Replace @uwu/quartz script interception with runtime discovery.
-// Tidal's scripts load normally through CEF — we discover modules after the fact.
-// Strategy 1: webpack cache (webpackChunk push trick or __webpack_require__)
-// Strategy 2: React Fiber tree walk to find Redux Provider's store prop
+// Runtime discovery of Redux store + action creators (replaces @uwu/quartz interception).
+// 1. webpack cache (webpackChunk push trick or __webpack_require__)
+// 2. React Fiber tree walk (fallback)
+// 3. Proxy on webpack cache for lazy-loaded action creators
 
 import { buildActions, interceptors } from "./exposeTidalInternals.patchAction";
 import { getOrCreateLoadingContainer } from "./loadingContainer";
@@ -142,22 +142,99 @@ function findStoreViaReactFiber(): any | null {
 
 // --- Build actions + patch dispatch ---
 
+function isSimpleCreator(val: any): boolean {
+	return typeof val === "function" && typeof val.type === "string" && typeof val.match === "function";
+}
+
+function isThunkCreator(val: any): boolean {
+	return typeof val === "function"
+		&& typeof val.typePrefix === "string"
+		&& typeof val.pending === "function"
+		&& typeof val.fulfilled === "function"
+		&& typeof val.rejected === "function";
+}
+
+function registerAction(val: any): void {
+	if (isSimpleCreator(val)) {
+		buildActions[val.type] = val;
+	} else if (isThunkCreator(val)) {
+		buildActions[val.typePrefix] = val;
+	}
+}
+
+function scanModuleForActions(exports: any): void {
+	if (typeof exports !== "object" && typeof exports !== "function") return;
+	if (typeof exports === "function") {
+		registerAction(exports);
+	}
+	for (const key of Object.keys(exports)) {
+		try {
+			registerAction(exports[key]);
+		} catch (e) { /* skip */ }
+	}
+}
+
+function hookWebpackCache(cache: Record<string, any>): void {
+	// Wrap each cache entry's exports with a setter that scans for action creators
+	// when webpack evaluates a module and writes its exports.
+	//
+	// webpack runtime does: cache[moduleId] = { exports: {} }; factory(module, ...);
+	// The factory mutates module.exports. We intercept that by replacing the cache
+	// entry object with a Proxy whose "set" trap fires on `entry.exports = ...`.
+	const proxiedIds = new Set<string>();
+
+	const cacheProxy = new Proxy(cache, {
+		set(target, prop, value) {
+			target[prop as string] = value;
+			if (typeof prop === "string" && value && typeof value === "object" && !proxiedIds.has(prop)) {
+				proxiedIds.add(prop);
+				wrapModuleEntry(value);
+			}
+			return true;
+		},
+	});
+
+	function wrapModuleEntry(entry: any): void {
+		let currentExports = entry.exports;
+		Object.defineProperty(entry, "exports", {
+			get() { return currentExports; },
+			set(val) {
+				currentExports = val;
+				if (val != null) {
+					scanModuleForActions(val);
+				}
+			},
+			configurable: true,
+			enumerable: true,
+		});
+	}
+
+	const w = window as any;
+	if (w.__webpack_require__?.c === cache) {
+		w.__webpack_require__.c = cacheProxy;
+	}
+	w.__LUNAR_WEBPACK_CACHE__ = cacheProxy;
+}
+
+export function rescanWebpackActions(): void {
+	const w = window as any;
+	const cache = w.__LUNAR_WEBPACK_CACHE__;
+	if (!cache) return;
+	for (const id in cache) {
+		const mod = cache[id];
+		if (mod?.exports) {
+			scanModuleForActions(mod.exports);
+		}
+	}
+}
+
 function populateBuildActions(cache: Record<string, any> | undefined, store: any): void {
 	// Scan webpack cache for RTK action creators (functions with .type and .match)
 	if (cache) {
 		for (const id in cache) {
 			const mod = cache[id];
 			if (!mod?.exports) continue;
-			const exports = mod.exports;
-			if (typeof exports !== "object" && typeof exports !== "function") continue;
-			for (const key of Object.keys(exports)) {
-				try {
-					const val = exports[key];
-					if (typeof val === "function" && typeof val.type === "string" && typeof val.match === "function") {
-						buildActions[val.type] = val;
-					}
-				} catch (e) { console.warn("[luna:core] Interceptor proxy error:", e); }
-			}
+			scanModuleForActions(mod.exports);
 		}
 	}
 
@@ -165,6 +242,9 @@ function populateBuildActions(cache: Record<string, any> | undefined, store: any
 	const originalDispatch = store.dispatch.bind(store);
 	store.dispatch = (action: any) => {
 		if (action && action.type) {
+			if (action.type === "content/LOAD_SINGLE_MEDIA_ITEM" || action.type === "content/LOAD_SINGLE_MEDIA_ITEM_SUCCESS" || action.type === "content/LOAD_SINGLE_MEDIA_ITEM_FAIL") {
+				console.log(`[luna:dispatch-dbg] ${action.type}`, action);
+			}
 			const interceptorSet = interceptors[action.type];
 			if (interceptorSet?.size > 0) {
 				const payload = action.payload !== undefined ? action.payload : action;
@@ -210,10 +290,29 @@ export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 		// Fallback: React Fiber tree walk
 		reduxStore = findStoreViaReactFiber();
 		if (reduxStore) {
-			console.log("[luna] Redux store found via React Fiber (no webpack cache)");
 			// Log global arrays for debugging webpack discovery
 			const arrKeys = Object.keys(window).filter((k) => Array.isArray((window as any)[k]));
+			console.log("[luna] Redux store found via React Fiber (no webpack cache)");
 			console.log("[luna] Global arrays on window:", arrKeys);
+			for (const k of arrKeys) {
+				const arr = (window as any)[k];
+				console.log(`[luna]   window.${k}: length=${arr.length}, push=${arr.push?.name || typeof arr.push}, sample=`, arr[0]?.constructor?.name ?? typeof arr[0]);
+			}
+			const selfArrKeys = Object.keys(self).filter((k) => Array.isArray((self as any)[k]) && !arrKeys.includes(k));
+			if (selfArrKeys.length > 0) {
+				console.log("[luna] Additional arrays on self:", selfArrKeys);
+			}
+			const wpKeys =[...Object.keys(window), ...Object.keys(self)].filter(
+				(k) => /webpack|chunk|modules/i.test(k)
+			);
+			if (wpKeys.length > 0) {
+				console.log("[luna] Webpack-related globals:", wpKeys);
+			}
+			// Try webpack cache one more time — it may have appeared after React mounted
+			cache = getWebpackCache();
+			if (cache) {
+				console.log(`[luna] Webpack cache found on retry (${Object.keys(cache).length} modules)`);
+			}
 			break;
 		}
 
@@ -235,8 +334,26 @@ export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 		}
 	}
 
+	// Import action creators discovered by the export observer (injected before page scripts)
+	const w = window as any;
+	const observerRegistry = w.__LUNAR_BUILD_ACTIONS__;
+	if (observerRegistry && typeof observerRegistry === "object") {
+		const observerCount = Object.keys(observerRegistry).length;
+		if (observerCount > 0) {
+			Object.assign(buildActions, observerRegistry);
+			console.log(`[luna] Imported ${observerCount} action creators from export observer`);
+		}
+	}
+	// Rebind global to buildActions so the observer continues writing into the same object
+	w.__LUNAR_BUILD_ACTIONS__ = buildActions;
+
 	// Discover and register RTK action creators, patch dispatch for interceptors
 	populateBuildActions(cache, reduxStore);
+
+	// Hook webpack cache to discover action creators in lazy-loaded modules
+	if (cache) {
+		hookWebpackCache(cache);
+	}
 
 	messageContainer.innerText = "TIDAL internals discovered!";
 	setTimeout(() => (loadingContainer.style.opacity = "0"), 2000);

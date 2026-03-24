@@ -26,7 +26,7 @@ const credentials: { credentialsStorageKey: string; codeChallenge: string; redir
     window.__TIDAL_RS_CREDENTIALS__ || {
         credentialsStorageKey: "tidal",
         codeChallenge: "",
-        redirectUri: "tidal://auth/",
+        redirectUri: "tidal://login/auth",
         codeVerifier: "",
     };
 
@@ -156,68 +156,7 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
 };
 console.log("Native Interface exposed (sync)");
 
-// Bearer token capture: TIDAL encrypts tokens in AuthDB, so we intercept outgoing requests.
-// Token is forwarded to Rust so plugin fetch requests get the token injected server-side.
-(window as any).__LUNAR_CAPTURED_TOKEN__ = "";
-function captureToken(token: string) {
-    if (token && token !== (window as any).__LUNAR_CAPTURED_TOKEN__) {
-        (window as any).__LUNAR_CAPTURED_TOKEN__ = token;
-        sendIpc("jsrt.set_token", token);
-    }
-}
-
-const origXHROpen = XMLHttpRequest.prototype.open;
-const origXHRSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-XMLHttpRequest.prototype.open = function (this: XMLHttpRequest & { _lunaUrl?: string }, method: string, url: string | URL, ...rest: any[]) {
-    this._lunaUrl = typeof url === "string" ? url : url.href;
-    return origXHROpen.apply(this, [method, url, ...rest] as any);
-};
-XMLHttpRequest.prototype.setRequestHeader = function (this: XMLHttpRequest & { _lunaUrl?: string }, name: string, value: string) {
-    if (name === "Authorization" && value.startsWith("Bearer ") && this._lunaUrl?.includes("tidal.com")) {
-        captureToken(value.slice(7));
-    }
-    return origXHRSetHeader.call(this, name, value);
-};
-
-// CORS proxy: native fetch with fallback to Rust IPC on cross-origin errors
-const nativeFetch = window.fetch.bind(window);
-const proxyFetch = async (url: string, init?: RequestInit): Promise<Response> => {
-    let headersJson = "";
-    if (init?.headers) {
-        const h = init.headers instanceof Headers ? init.headers : new Headers(init.headers as any);
-        const obj: Record<string, string> = {};
-        h.forEach((v, k) => { obj[k] = v; });
-        if (Object.keys(obj).length > 0) headersJson = JSON.stringify(obj);
-    }
-    const result = headersJson
-        ? await invokeIpc("proxy.fetch", url, headersJson)
-        : await invokeIpc("proxy.fetch", url);
-    return new Response(result.body, {
-        status: result.status,
-        headers: { "Content-Type": "application/octet-stream" },
-    });
-};
-window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-
-    if (url.includes("tidal.com") && init?.headers) {
-        const headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers as any);
-        const auth = headers.get("Authorization");
-        if (auth?.startsWith("Bearer ")) {
-            captureToken(auth.slice(7));
-        }
-    }
-
-    try {
-        return await nativeFetch(input, init);
-    } catch (e) {
-        if (!(e instanceof TypeError)) throw e;
-        console.log(`[luna:proxy] CORS fallback: ${url.substring(0, 100)}`);
-        const resp = await proxyFetch(url, init);
-        if (resp.status >= 400) console.warn(`[luna:proxy] ${resp.status} ${url.substring(0, 80)}`);
-        return resp;
-    }
-};
+// Fetch proxy, XHR patch, and token capture live in early_runtime.js (on_context_created).
 
 const init = async () => {
     const now = Date.now();

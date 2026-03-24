@@ -90,9 +90,11 @@ export class LunaPlugin {
 		// Unload plugins on page unload instead.
 		window.addEventListener("beforeunload", () => {
 			for (const plugin of Object.values(LunaPlugin.plugins)) {
-				plugin.unload().catch((err) => {
-					console.error(`[Luna] Failed to unload plugin ${plugin.name}!`, err);
-				});
+				if (typeof plugin.unload === "function") {
+					plugin.unload().catch((err) => {
+						console.error(`[Luna] Failed to unload plugin ${plugin.name}!`, err);
+					});
+				}
 			}
 		});
 	}

@@ -21,8 +21,20 @@ wrap_render_process_handler! {
             frame: Option<&mut Frame>,
             context: Option<&mut V8Context>,
         ) {
+            let frame_for_inject = frame.as_ref().map(|f| (*f).clone());
             self.router
                 .on_context_created(browser.cloned(), frame.cloned(), context.cloned());
+            // cefQuery is now available — inject early runtime before page scripts.
+            if let Some(ref frame) = frame_for_inject {
+                let url = frame.url();
+                let url_str = format!("{}", cef::CefString::from(&url));
+                if url_str.contains("tidal.com") {
+                    crate::app_state::exec_js_on_frame(frame, include_str!("early_runtime.js"));
+                }
+                if url_str.contains("desktop.tidal.com") {
+                    crate::app_state::exec_js_on_frame(frame, include_str!("export_observer.js"));
+                }
+            }
         }
         fn on_context_released(
             &self,
@@ -220,7 +232,7 @@ wrap_browser_process_handler! {
             let pkce_credentials_json =
                 serde_json::to_string(&pkce_credentials).unwrap_or_else(|e| {
                     eprintln!("[PKCE]   Failed to encode credentials for JS: {e}");
-                    "{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"tidal://auth/\",\"codeVerifier\":\"\"}".to_string()
+                    "{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"tidal://login/auth\",\"codeVerifier\":\"\"}".to_string()
                 });
 
             let platform = if cfg!(target_os = "linux") {

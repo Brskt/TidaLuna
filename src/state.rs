@@ -27,6 +27,7 @@ fn build_http_client() -> reqwest::Client {
     // Keep streaming requests unconstrained (no global request timeout),
     // but tune connection setup and pooling for lower latency variance.
     reqwest::Client::builder()
+        .cookie_store(true)
         .user_agent(if cfg!(target_os = "linux") {
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) tidal-hifi/1.12.4-beta Chrome/144.0.7559.96 Electron/40.1.0 Safari/537.36"
         } else {

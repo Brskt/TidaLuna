@@ -21,7 +21,7 @@ fn generate_pkce_credentials() -> PkceCredentials {
     PkceCredentials {
         credentials_storage_key: "tidal".to_string(),
         code_challenge: code_challenge.as_str().to_string(),
-        redirect_uri: "tidal://auth/".to_string(),
+        redirect_uri: "tidal://login/auth".to_string(),
         code_verifier: code_verifier.secret().to_string(),
     }
 }
@@ -49,6 +49,18 @@ fn is_valid_pkce_credentials(c: &PkceCredentials) -> bool {
     c.code_challenge == expected_challenge.as_str()
 }
 
+#[allow(dead_code)]
+pub(crate) fn clear_persisted_credentials(data_dir: &Path) {
+    let path = pkce_credentials_path(data_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => crate::vprintln!("[PKCE]   Deleted persisted credentials"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::vprintln!("[PKCE]   No persisted credentials to delete");
+        }
+        Err(e) => crate::vprintln!("[PKCE]   Failed to delete credentials: {e}"),
+    }
+}
+
 pub(crate) fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredentials {
     let path = pkce_credentials_path(data_dir);
 
@@ -58,9 +70,8 @@ pub(crate) fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredential
         if loaded.credentials_storage_key.trim().is_empty() {
             loaded.credentials_storage_key = "tidal".to_string();
         }
-        if loaded.redirect_uri.trim().is_empty() {
-            loaded.redirect_uri = "tidal://auth/".to_string();
-        }
+        // Always enforce the correct redirect_uri (migration from tidal://auth/)
+        loaded.redirect_uri = "tidal://login/auth".to_string();
         if is_valid_pkce_credentials(&loaded) {
             crate::vprintln!("[PKCE]   Loaded persisted credentials");
             return loaded;

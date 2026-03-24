@@ -96,7 +96,12 @@ wrap_window_delegate! {
                     height: ws.height as i32,
                 }
             } else {
-                Default::default()
+                cef::Rect {
+                    x: 0,
+                    y: 0,
+                    width: ws.width as i32,
+                    height: ws.height as i32,
+                }
             }
         }
         fn initial_show_state(&self, _window: Option<&mut Window>) -> cef::ShowState {
