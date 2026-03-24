@@ -1,5 +1,3 @@
-import { findModuleByProperty, getWebpackModuleCache } from "./core";
-
 export type ReduxInterceptor = (action: any) => any | false | void;
 
 export interface ReduxState {
@@ -13,7 +11,7 @@ export interface ReduxState {
 
 const interceptors = new Map<string, Set<ReduxInterceptor>>();
 
-// --- Redux store discovery ---
+// --- Redux store discovery via React Fiber ---
 
 function isReduxStore(obj: any): boolean {
     return (
@@ -25,34 +23,13 @@ function isReduxStore(obj: any): boolean {
     );
 }
 
-// Try to find the store as a webpack module export
-function findStoreViaWebpack(): any | null {
-    const cache = getWebpackModuleCache();
-    if (!cache) return null;
-
-    for (const id in cache) {
-        const mod = cache[id];
-        if (!mod?.exports) continue;
-        const exports = mod.exports;
-        if (typeof exports !== "object" && typeof exports !== "function") continue;
-
-        if (isReduxStore(exports)) return exports;
-        if (isReduxStore(exports.default)) return exports.default;
-        if (isReduxStore(exports.store)) return exports.store;
-    }
-    return null;
-}
-
-// Check if an element has a React fiber key
 function getFiberKey(el: Element): string | undefined {
     return Object.keys(el).find(
         (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"),
     );
 }
 
-// Find the React fiber root element by scanning the DOM (up to 2 levels deep)
 function findReactRoot(): { element: Element; fiberKey: string } | null {
-    // Known TIDAL root first, then common IDs
     const candidates = [
         document.getElementById("wimp"),
         document.getElementById("root"),
@@ -64,14 +41,12 @@ function findReactRoot(): { element: Element; fiberKey: string } | null {
         if (!el) continue;
         const key = getFiberKey(el);
         if (key) return { element: el, fiberKey: key };
-        // Also check direct children (e.g. #wimp > div)
         for (const child of el.children) {
             const childKey = getFiberKey(child);
             if (childKey) return { element: child, fiberKey: childKey };
         }
     }
 
-    // Generic: scan body's children and grandchildren
     for (const child of document.body.children) {
         const key = getFiberKey(child);
         if (key) return { element: child, fiberKey: key };
@@ -84,12 +59,10 @@ function findReactRoot(): { element: Element; fiberKey: string } | null {
     return null;
 }
 
-// Fallback: walk React's fiber tree to find the Redux Provider's store prop
 function findStoreViaReactFiber(): any | null {
     const reactRoot = findReactRoot();
     if (!reactRoot) return null;
 
-    // BFS through fiber tree looking for a Provider with a store prop
     const queue: any[] = [(reactRoot.element as any)[reactRoot.fiberKey]];
     const seen = new WeakSet();
     while (queue.length > 0) {
@@ -100,7 +73,6 @@ function findStoreViaReactFiber(): any | null {
         if (isReduxStore(fiber.memoizedProps?.store)) {
             return fiber.memoizedProps.store;
         }
-        // react-redux v7+: store is in context Provider value
         if (isReduxStore(fiber.memoizedProps?.value?.store)) {
             return fiber.memoizedProps.value.store;
         }
@@ -112,7 +84,7 @@ function findStoreViaReactFiber(): any | null {
 }
 
 export function findReduxStore(): any | null {
-    return findStoreViaWebpack() || findStoreViaReactFiber();
+    return findStoreViaReactFiber();
 }
 
 // --- Patch dispatch + build ReduxState ---

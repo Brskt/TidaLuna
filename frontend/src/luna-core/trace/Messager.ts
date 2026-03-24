@@ -1,4 +1,3 @@
-import { buildActions } from "../exposeTidalInternals.patchAction";
 import { sanitizeData } from "./sanitizeData";
 
 export class Messager {
@@ -8,12 +7,12 @@ export class Messager {
 		return (await import("../modules")).reduxStore.dispatch(action);
 	}
 	public static Info(...data: any[]) {
-		Messager.dispatch(buildActions["message/MESSAGE_INFO"]?.({ message: sanitizeData(...data), category: "OTHER", severity: "INFO" }));
+		Messager.dispatch({ type: "message/MESSAGE_INFO", payload: { message: sanitizeData(...data), category: "OTHER", severity: "INFO" } });
 	}
 	public static Warn(...data: any[]) {
-		Messager.dispatch(buildActions["message/MESSAGE_WARN"]?.({ message: sanitizeData(...data), category: "OTHER", severity: "MESSAGE_WARN" }));
+		Messager.dispatch({ type: "message/MESSAGE_WARN", payload: { message: sanitizeData(...data), category: "OTHER", severity: "MESSAGE_WARN" } });
 	}
 	public static Error(...data: any[]) {
-		Messager.dispatch(buildActions["message/MESSAGE_ERROR"]?.({ message: sanitizeData(...data), category: "OTHER", severity: "ERROR" }));
+		Messager.dispatch({ type: "message/MESSAGE_ERROR", payload: { message: sanitizeData(...data), category: "OTHER", severity: "ERROR" } });
 	}
 }

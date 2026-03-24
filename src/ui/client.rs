@@ -15,12 +15,6 @@ fn is_tidal_app_host(url: &str) -> bool {
         || url.contains("auth.tidal.com")
 }
 
-// Prepends a snippet to TIDAL's main JS bundle that exposes __webpack_require__
-// globally, before the IIFE executes.
-
-const WEBPACK_EXPOSE_SNIPPET: &str = r#"(function(){var _orig=Function.prototype.call;var _hooked=false;Function.prototype.call=function(){var r=_orig.apply(this,arguments);if(!_hooked&&typeof r==='function'&&r.m&&r.c){_hooked=true;self.__webpack_require__=r;self.__LUNAR_WEBPACK_CACHE__=r.c;Function.prototype.call=_orig;console.log('[luna:wp] __webpack_require__ captured, '+Object.keys(r.c).length+' modules')}return r};setTimeout(function(){Function.prototype.call=_orig},5000)})();
-"#;
-
 wrap_resource_request_handler! {
     struct TidalResourceRequestHandler {
         _p: u8,
@@ -30,117 +24,10 @@ wrap_resource_request_handler! {
             &self,
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
-            request: Option<&mut Request>,
+            _request: Option<&mut Request>,
             _callback: Option<&mut Callback>,
         ) -> ReturnValue {
-            if let Some(req) = request.as_ref() {
-                let u = req.url();
-                let url = format!("{}", CefString::from(&u));
-                if is_tidal_app_host(&url) {
-                    crate::vprintln!(
-                        "[RRH]    on_before_resource_load: {}",
-                        &url[..url.len().min(120)]
-                    );
-                }
-            }
             ReturnValue::CONTINUE
-        }
-        fn resource_response_filter(
-            &self,
-            _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
-            request: Option<&mut Request>,
-            _response: Option<&mut Response>,
-        ) -> Option<ResponseFilter> {
-            let url = request
-                .as_ref()
-                .map(|r| {
-                    let u = r.url();
-                    format!("{}", CefString::from(&u))
-                })
-                .unwrap_or_default();
-            if url.contains("desktop.tidal.com") && url.contains("/index-") && url.ends_with(".js")
-            {
-                crate::vprintln!("[WP-FILTER] Attaching response filter to: {}", url);
-                Some(WebpackExposeFilter::new(Cell::new(false)))
-            } else {
-                None
-            }
-        }
-    }
-}
-
-wrap_response_filter! {
-    struct WebpackExposeFilter {
-        injected: Cell<bool>,
-    }
-    impl ResponseFilter {
-        fn init_filter(&self) -> ::std::os::raw::c_int {
-            1
-        }
-        fn filter(
-            &self,
-            data_in: Option<&mut Vec<u8>>,
-            data_in_read: Option<&mut usize>,
-            data_out: Option<&mut Vec<u8>>,
-            data_out_written: Option<&mut usize>,
-        ) -> ResponseFilterStatus {
-            let Some(input) = data_in else {
-                if let Some(written) = data_out_written {
-                    *written = 0;
-                }
-                return ResponseFilterStatus::DONE;
-            };
-            let Some(output) = data_out else {
-                if let Some(read) = data_in_read {
-                    *read = 0;
-                }
-                return ResponseFilterStatus::ERROR;
-            };
-
-            let snippet = if !self.injected.get() {
-                self.injected.set(true);
-                WEBPACK_EXPOSE_SNIPPET.as_bytes()
-            } else {
-                &[]
-            };
-
-            let needed = snippet.len() + input.len();
-            if needed <= output.len() {
-                // Everything fits
-                output[..snippet.len()].copy_from_slice(snippet);
-                output[snippet.len()..snippet.len() + input.len()].copy_from_slice(input);
-                if let Some(read) = data_in_read {
-                    *read = input.len();
-                }
-                if let Some(written) = data_out_written {
-                    *written = snippet.len() + input.len();
-                }
-                ResponseFilterStatus::NEED_MORE_DATA
-            } else if snippet.len() <= output.len() {
-                // Snippet fits, partial input
-                let avail = output.len() - snippet.len();
-                output[..snippet.len()].copy_from_slice(snippet);
-                output[snippet.len()..snippet.len() + avail].copy_from_slice(&input[..avail]);
-                if let Some(read) = data_in_read {
-                    *read = avail;
-                }
-                if let Some(written) = data_out_written {
-                    *written = snippet.len() + avail;
-                }
-                ResponseFilterStatus::NEED_MORE_DATA
-            } else {
-                // Output buffer too small even for snippet — write what we can
-                let out_len = output.len();
-                output.copy_from_slice(&snippet[..out_len]);
-                if let Some(read) = data_in_read {
-                    *read = 0;
-                }
-                if let Some(written) = data_out_written {
-                    *written = output.len();
-                }
-                ResponseFilterStatus::NEED_MORE_DATA
-            }
         }
     }
 }
@@ -586,9 +473,6 @@ wrap_request_handler! {
                 if is_tidal_app_host(&url) && !url.contains("desktop.tidal.com") {
                     crate::vprintln!("[RRH]    Skipping handler for auth host: {}", &url[..url.len().min(100)]);
                     return None;
-                }
-                if url.contains("/index-") || url.contains("/assets/") {
-                    crate::vprintln!("[WP-RRH] Request: {}", &url[..url.len().min(120)]);
                 }
             }
             Some(TidalResourceRequestHandler::new(0))

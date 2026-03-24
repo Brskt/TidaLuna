@@ -31,9 +31,6 @@ wrap_render_process_handler! {
                 if url_str.contains("tidal.com") {
                     crate::app_state::exec_js_on_frame(frame, include_str!("early_runtime.js"));
                 }
-                if url_str.contains("desktop.tidal.com") {
-                    crate::app_state::exec_js_on_frame(frame, include_str!("export_observer.js"));
-                }
             }
         }
         fn on_context_released(

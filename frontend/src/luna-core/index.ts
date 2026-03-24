@@ -1,7 +1,7 @@
 // @luna/core — TidaLunar entry point
 // Re-exports all upstream APIs. Initialization is deferred via initCore().
 
-export { tidalModules, initTidalInternals, rescanWebpackActions } from "./exposeTidalInternals";
+export { tidalModules, initTidalInternals } from "./exposeTidalInternals";
 export { buildActions, interceptors } from "./exposeTidalInternals.patchAction";
 
 export * as ftch from "./helpers/fetch";
@@ -23,7 +23,7 @@ import { initTidalInternals } from "./exposeTidalInternals";
 import { initModules } from "./modules";
 
 /**
- * Discover TIDAL internals (webpack cache, Redux, action creators) and initialize
+ * Discover TIDAL internals (Redux store via React Fiber) and initialize
  * the module registry. Must be called before loading any plugins.
  */
 export async function initCore(): Promise<void> {

@@ -101,61 +101,6 @@ export const SettingsTransfer = {
     },
 };
 
-// --- Webpack module cache discovery ---
-
-export function getWebpackModuleCache(): Record<string, any> | undefined {
-    const w = window as any;
-    if (w.__LUNAR_WEBPACK_CACHE__) return w.__LUNAR_WEBPACK_CACHE__;
-
-    // Strategy 1: push-trick on webpackChunk* array
-    const chunkName = Object.keys(w).find((k) => k.startsWith("webpackChunk"));
-    if (chunkName && Array.isArray(w[chunkName])) {
-        let cache: Record<string, any> | undefined;
-        try {
-            w[chunkName].push([
-                [Symbol()],
-                {},
-                (require: any) => {
-                    if (require?.c) cache = require.c;
-                },
-            ]);
-        } catch (e) { console.warn("[luna:core] Plugin core error:", e); }
-        if (cache) {
-            w.__LUNAR_WEBPACK_CACHE__ = cache;
-            return cache;
-        }
-    }
-
-    // Strategy 2: __webpack_require__ exposed globally
-    if (typeof w.__webpack_require__?.c === "object") {
-        w.__LUNAR_WEBPACK_CACHE__ = w.__webpack_require__.c;
-        return w.__webpack_require__.c;
-    }
-
-    return undefined;
-}
-
-// --- findModuleByProperty: find webpack modules by exported property names ---
-
-export function findModuleByProperty(...props: string[]): any | undefined {
-    const cache = getWebpackModuleCache();
-    if (!cache) return undefined;
-
-    const check = (obj: any): boolean =>
-        obj != null && typeof obj === "object" && props.every((p) => p in obj);
-
-    for (const id in cache) {
-        const mod = cache[id];
-        if (!mod?.exports) continue;
-        const exports = mod.exports;
-        if (typeof exports !== "object" && typeof exports !== "function") continue;
-
-        if (check(exports.default)) return exports.default;
-        if (check(exports)) return exports;
-    }
-    return undefined;
-}
-
 // --- Setup: expose window.luna and window.require ---
 
 export function setupCore() {
@@ -165,8 +110,6 @@ export function setupCore() {
             Tracer,
             StyleTag,
             unloadSet,
-            findModuleByProperty,
-            getWebpackModuleCache,
             redux: null as any,
             LunaPlugin: { plugins: {} as Record<string, any> },
         },

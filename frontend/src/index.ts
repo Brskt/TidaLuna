@@ -100,10 +100,8 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
                 _forceTimeDispatch = false;
                 _lastTimeDispatch = now;
                 try {
-                    const { buildActions } = require("./luna-core/exposeTidalInternals.patchAction");
                     const { store } = require("./luna-lib/redux/store");
-                    const timeUpdate = buildActions["playbackControls/TIME_UPDATE"];
-                    if (timeUpdate) store.dispatch(timeUpdate(event.v));
+                    store.dispatch({ type: "playbackControls/TIME_UPDATE", payload: event.v });
                 } catch (_) {}
             }
         } else if (type === "duration") {
@@ -139,10 +137,8 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
             const reduxState = BRIDGE_TO_REDUX_STATE[event.v as string];
             if (reduxState) {
                 try {
-                    const { buildActions } = require("./luna-core/exposeTidalInternals.patchAction");
                     const { store } = require("./luna-lib/redux/store");
-                    const setPlaybackState = buildActions["playbackControls/SET_PLAYBACK_STATE"];
-                    if (setPlaybackState) store.dispatch(setPlaybackState(reduxState));
+                    store.dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: reduxState });
                 } catch (_) {}
             }
         }
