@@ -3760,6 +3760,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "url",
  "wasapi",
  "windows-sys 0.61.2",
  "winres",

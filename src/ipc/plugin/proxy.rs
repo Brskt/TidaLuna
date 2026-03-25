@@ -158,7 +158,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
         .and_then(|v| v.as_str())
         .map(|h| h.contains("Authorization"))
         .unwrap_or(false);
-    if !has_auth && (url.contains("api.tidal.com") || url.contains("desktop.tidal.com")) {
+    if !has_auth && crate::ui::nav::needs_token_injection(&url) {
         let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
         if !token.is_empty() {
             req = req.header("Authorization", format!("Bearer {token}"));
@@ -206,7 +206,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                     }
                 }
             }
-            let is_token_endpoint = url.contains("/oauth2/token");
+            let is_token_endpoint = crate::ui::nav::is_token_endpoint(&url);
             let is_4xx = (400..500).contains(&(status as u32));
             let has_auth = opts
                 .get("headers")

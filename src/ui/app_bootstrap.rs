@@ -28,7 +28,7 @@ wrap_render_process_handler! {
             if let Some(ref frame) = frame_for_inject {
                 let url = frame.url();
                 let url_str = format!("{}", cef::CefString::from(&url));
-                if url_str.contains("tidal.com") {
+                if crate::ui::nav::is_tidal_app_host(&url_str) {
                     crate::app_state::exec_js_on_frame(frame, include_str!("early_runtime.js"));
                 }
             }
@@ -229,7 +229,7 @@ wrap_browser_process_handler! {
             let pkce_credentials_json =
                 serde_json::to_string(&pkce_credentials).unwrap_or_else(|e| {
                     eprintln!("[PKCE]   Failed to encode credentials for JS: {e}");
-                    "{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"tidal://login/auth\",\"codeVerifier\":\"\"}".to_string()
+                    format!("{{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"{}\",\"codeVerifier\":\"\"}}", crate::ui::nav::REDIRECT_URI)
                 });
 
             let platform = if cfg!(target_os = "linux") {
@@ -315,7 +315,7 @@ document.title = "TidaLunar - A TIDAL client";
                 background_color: 0xFF111111,
                 ..Default::default()
             };
-            let url = CefString::from("https://desktop.tidal.com/");
+            let url = CefString::from(format!("https://{}/", crate::ui::nav::HOST_DESKTOP).as_str());
 
             let mut client_ref = self.default_client();
             let mut bv_delegate = TidalBrowserViewDelegate::new(0);

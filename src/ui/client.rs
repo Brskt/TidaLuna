@@ -1,19 +1,13 @@
 use crate::app_state::{IpcMessage, exec_js_on_frame, open_in_os, with_state};
 use crate::ipc::player::handle_ipc_message;
 use crate::ipc::plugin::handle_plugin_ipc;
+use crate::ui::nav::{self, PageKind, NavigationPolicy};
 use cef::wrapper::message_router::{
     BrowserSideHandler, BrowserSideRouter, MessageRouterBrowserSideHandlerCallbacks,
 };
 use cef::*;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
-
-/// TIDAL app host that needs our runtime (init_script, early_runtime, auth).
-fn is_tidal_app_host(url: &str) -> bool {
-    url.contains("desktop.tidal.com")
-        || url.contains("login.tidal.com")
-        || url.contains("auth.tidal.com")
-}
 
 wrap_resource_request_handler! {
     struct TidalResourceRequestHandler {
@@ -227,8 +221,8 @@ wrap_life_span_handler! {
             crate::vprintln!("[POPUP]  on_before_popup: {}", &url_dbg[..url_dbg.len().min(120)]);
             if let Some(url) = target_url {
                 let url_str = url.to_string();
-                // Auth popup: configure a native window (not Views) for the login page
-                if is_tidal_app_host(&url_str) && !url_str.contains("desktop.tidal.com") {
+                let kind = PageKind::classify(&url_str);
+                if kind == PageKind::AuthHost {
                     crate::vprintln!("[AUTH]   Opening auth popup: {}", &url_str[..url_str.len().min(120)]);
                     if let Some(wi) = _window_info {
                         wi.window_name = CefString::from("TidaLunar - Login");
@@ -242,7 +236,7 @@ wrap_life_span_handler! {
                     return 0;
                 }
                 if (url_str.starts_with("http://") || url_str.starts_with("https://"))
-                    && !is_tidal_app_host(&url_str)
+                    && kind == PageKind::External
                 {
                     open_in_os(&url_str);
                 }
@@ -307,7 +301,8 @@ wrap_load_handler! {
             if let Some(frame) = frame {
                 let url_userfree = frame.url();
                 let url = format!("{}", CefString::from(&url_userfree));
-                if is_tidal_app_host(&url) {
+                let policy = NavigationPolicy::for_page(PageKind::classify(&url));
+                if policy.inject_init_script {
                     crate::vprintln!("[LOAD]   on_load_start init_script: {}", &url[..url.len().min(80)]);
                     exec_js_on_frame(frame, &self.init_script);
                 }
@@ -326,15 +321,16 @@ wrap_load_handler! {
             {
                 let url_userfree = frame.url();
                 let url = format!("{}", CefString::from(&url_userfree));
-                if is_tidal_app_host(&url) && !url.contains("desktop.tidal.com") {
+                let kind = PageKind::classify(&url);
+                let policy = NavigationPolicy::for_page(kind);
+                if kind == PageKind::AuthHost {
                     crate::vprintln!("[LOAD]   Auth page loaded: {}", &url[..url.len().min(100)]);
                 }
-                if !url.contains("desktop.tidal.com") {
+                if !policy.inject_bundle {
                     return;
                 }
 
-                // /login is the login page; /login/auth is the OAuth callback (not a login page)
-                let is_login = url.contains("/login") && !url.contains("/login/auth");
+                let is_login = kind == PageKind::LoginPage;
                 let prev = self.page_state.get();
 
                 // Transitioning from login to app — stop the player but don't reload.
@@ -404,14 +400,17 @@ wrap_request_handler! {
                 })
                 .unwrap_or_default();
 
+            let kind = PageKind::classify(&url);
+            let policy = NavigationPolicy::for_page(kind);
+
             crate::vprintln!(
                 "[NAV]    on_before_browse: is_redirect={} url={}",
                 _is_redirect,
                 &url[..url.len().min(200)]
             );
 
-            if url.starts_with("tidal://") {
-                let web_url = url.replacen("tidal://", "https://desktop.tidal.com/", 1);
+            if kind == PageKind::TidalCallback {
+                let web_url = url.replacen("tidal://", &format!("https://{}/", nav::HOST_DESKTOP), 1);
                 crate::vprintln!("[AUTH]   Intercepted tidal:// redirect → {}", web_url);
                 with_state(|state| {
                     if let Some(ref browser) = state.browser
@@ -435,9 +434,7 @@ wrap_request_handler! {
                 return 1;
             }
 
-            // Skip router for auth navigations — the router's on_before_browse
-            // can interfere with cross-origin navigation to login/auth hosts
-            if is_tidal_app_host(&url) && !url.contains("desktop.tidal.com") {
+            if policy.bypass_router {
                 crate::vprintln!("[AUTH]   Bypassing router for auth navigation");
                 return 0;
             }
@@ -469,9 +466,9 @@ wrap_request_handler! {
             if let Some(req) = request.as_ref() {
                 let u = req.url();
                 let url = format!("{}", CefString::from(&u));
-                // Don't attach resource handler to auth hosts — it can interfere with navigation
-                if is_tidal_app_host(&url) && !url.contains("desktop.tidal.com") {
-                    crate::vprintln!("[RRH]    Skipping handler for auth host: {}", &url[..url.len().min(100)]);
+                let policy = NavigationPolicy::for_page(PageKind::classify(&url));
+                if !policy.attach_resource_handler {
+                    crate::vprintln!("[RRH]    Skipping handler for: {}", &url[..url.len().min(100)]);
                     return None;
                 }
             }
