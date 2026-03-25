@@ -51,7 +51,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                 Ok(player_ipc) => match player_ipc {
                     PlayerIpc::Load { url, format, key } => {
                         if let Err(e) = state.player.load(url, format, key) {
-                            eprintln!("Failed to load track: {}", e);
+                            crate::vprintln!("[PLAYER] Failed to load track: {}", e);
                         }
                         PlayerIpcEffects::default()
                     }
@@ -61,7 +61,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         format,
                     } => {
                         if let Err(e) = state.player.load_dash(init_url, segment_urls, format) {
-                            eprintln!("Failed to load DASH track: {}", e);
+                            crate::vprintln!("[PLAYER] Failed to load DASH track: {}", e);
                         }
                         PlayerIpcEffects::default()
                     }
@@ -72,7 +72,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         target_time,
                     } => {
                         if let Err(e) = state.player.recover(url, format, key, target_time) {
-                            eprintln!("Failed to recover track: {}", e);
+                            crate::vprintln!("[PLAYER] Failed to recover track: {}", e);
                         }
                         PlayerIpcEffects::default()
                     }

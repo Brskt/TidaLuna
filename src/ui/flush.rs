@@ -144,7 +144,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         if let Some(next) = crate::audio::preload::take_next_track().await {
                             crate::vprintln!("[AUTO]   Loading preloaded next track");
                             if let Err(e) = player.load_and_play(next.url, next.format, next.key) {
-                                eprintln!("[AUTO]   Failed to load next track: {e}");
+                                crate::vprintln!("[AUTO]   Failed to load next track: {e}");
                             }
                         } else {
                             crate::vprintln!("[AUTO]   No preloaded next track");
@@ -259,9 +259,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             None
         };
 
-        let should_schedule = !should_flush && !state.flush_scheduled && {
+        let should_schedule = if !should_flush && !state.flush_scheduled {
             state.flush_scheduled = true;
             true
+        } else {
+            false
         };
 
         // Take media_controls/thumbbar only if needed
