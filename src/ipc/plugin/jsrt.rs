@@ -182,19 +182,6 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
                 eval_js(js);
             }
         }
-        // Channels no longer needed (were for QuickJS) — silently ignore
-        "jsrt.tick"
-        | "jsrt.state_sync"
-        | "jsrt.redux_action"
-        | "jsrt.event"
-        | "jsrt.set_product_id"
-        | "jsrt.dom_query_result"
-        | "jsrt.dom_query_result_all"
-        | "jsrt.dom_raw_query_result"
-        | "jsrt.dom_observe"
-        | "jsrt.dom_event"
-        | "jsrt.dom_mutation"
-        | "jsrt.dom_ready" => {}
         _ => {
             crate::vprintln!("[JSRT] Unknown fire-and-forget channel: {}", msg.channel);
         }
