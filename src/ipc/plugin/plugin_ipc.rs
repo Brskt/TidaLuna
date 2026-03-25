@@ -185,7 +185,7 @@ async fn fetch_plugin_data(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<(String, String, String, String)> {
-    use std::hash::{Hash, Hasher};
+    use std::hash::{Hash, Hasher as _};
 
     let base = sanitize_plugin_url(url);
 
@@ -201,7 +201,7 @@ async fn fetch_plugin_data(
             .error_for_status()?
             .text()
             .await?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = fnv::FnvHasher::default();
         code.hash(&mut hasher);
         let hash = format!("{:x}", hasher.finish());
 
@@ -229,7 +229,7 @@ async fn fetch_plugin_data(
             .unwrap_or("plugin")
             .to_string();
         let manifest = serde_json::json!({"name": &name, "main": &fetch_url}).to_string();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = fnv::FnvHasher::default();
         code.hash(&mut hasher);
         let hash = format!("{:x}", hasher.finish());
 

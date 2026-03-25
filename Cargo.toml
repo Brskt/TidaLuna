@@ -58,6 +58,7 @@ dash-mpd = { version = "0.20", default-features = false }
 souvlaki = "0.8"
 oxc = { version = "0.121", features = ["semantic", "transformer", "codegen"] }
 url = "2"
+fnv = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22.0"
