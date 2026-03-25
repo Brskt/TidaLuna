@@ -285,33 +285,59 @@ fn print_track_banner(format: &str) {
 
 fn try_cache_hit(ctx: &LoadContext, track_id: &str) -> LoadStep {
     let cache_t0 = std::time::Instant::now();
-    let Ok(cache) = AUDIO_CACHE.lock() else {
-        crate::vprintln!("[CACHE]  Lock poisoned, skipping cache lookup");
+
+    // Short lock: index lookup only (no disk I/O)
+    let path = {
+        let Ok(cache) = AUDIO_CACHE.lock() else {
+            crate::vprintln!("[CACHE]  Lock poisoned, skipping cache lookup");
+            return LoadStep::Miss;
+        };
+        cache.lookup_path(track_id)
+    };
+
+    let Some(path) = path else {
+        let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
+        crate::vprintln!(
+            "[CACHE]  Miss ({}) | lookup: {}",
+            track_id.chars().take(40).collect::<String>(),
+            format_ms(cache_ms)
+        );
         return LoadStep::Miss;
     };
-    if let Some(data) = cache.load(track_id) {
-        let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
-        if ctx.is_stale() {
-            return LoadStep::Handled;
+
+    // Disk read outside the lock
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // File missing — clean orphaned index entry
+                if let Ok(cache) = AUDIO_CACHE.lock() {
+                    cache.remove_index_entry(track_id);
+                }
+            }
+            return LoadStep::Miss;
         }
-        crate::vprintln!(
-            "[CACHE]  Hit: {} | {} | read: {} | total: {}",
-            track_id.chars().take(40).collect::<String>(),
-            format_bytes(data.len() as u64),
-            format_ms(cache_ms),
-            format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)
-        );
-        let buffer = RamBuffer::from_complete(data);
-        ctx.publish_load(buffer, true, track_id.to_string());
+    };
+
+    // Short lock: update access metadata
+    if let Ok(cache) = AUDIO_CACHE.lock() {
+        cache.touch(track_id);
+    }
+
+    let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
+    if ctx.is_stale() {
         return LoadStep::Handled;
     }
-    let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
     crate::vprintln!(
-        "[CACHE]  Miss ({}) | lookup: {}",
+        "[CACHE]  Hit: {} | {} | read: {} | total: {}",
         track_id.chars().take(40).collect::<String>(),
-        format_ms(cache_ms)
+        format_bytes(data.len() as u64),
+        format_ms(cache_ms),
+        format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)
     );
-    LoadStep::Miss
+    let buffer = RamBuffer::from_complete(data);
+    ctx.publish_load(buffer, true, track_id.to_string());
+    LoadStep::Handled
 }
 
 async fn try_preload_hit(ctx: &LoadContext, track: &TrackInfo, track_id: &str) -> LoadStep {

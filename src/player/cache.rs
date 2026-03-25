@@ -80,12 +80,9 @@ impl AudioCache {
         self.audio_dir.join(shard).join(&hash)
     }
 
-    /// Load a cached track's audio data into RAM. Returns None on miss.
-    pub fn load(&self, track_id: &str) -> Option<Vec<u8>> {
-        let path = self.file_path(track_id);
-        let data = fs::read(&path).ok()?;
-
-        // Verify entry exists in index
+    /// Check if a track exists in the index and return its file path.
+    /// Does NOT read from disk — suitable for use under a short lock.
+    pub fn lookup_path(&self, track_id: &str) -> Option<PathBuf> {
         let exists: bool = self
             .conn
             .query_row(
@@ -94,24 +91,30 @@ impl AudioCache {
                 |_| Ok(true),
             )
             .unwrap_or(false);
-
-        if !exists {
-            // Orphaned file — clean up
-            if let Err(e) = fs::remove_file(&path) {
-                crate::vprintln!("[CACHE]  Failed to remove orphan {}: {e}", track_id);
-            }
-            return None;
+        if exists {
+            Some(self.file_path(track_id))
+        } else {
+            None
         }
+    }
 
-        // Update access metadata
+    /// Remove an orphaned index entry (file missing from disk).
+    pub fn remove_index_entry(&self, track_id: &str) {
+        let _ = self.conn.execute(
+            "DELETE FROM audio_cache WHERE track_id = ?1",
+            params![track_id],
+        );
+    }
+
+    /// Update access metadata after a successful cache read.
+    pub fn touch(&self, track_id: &str) {
         let now = now_epoch();
         let _ = self.conn.execute(
             "UPDATE audio_cache SET last_access = ?1, access_count = access_count + 1 WHERE track_id = ?2",
             params![now, track_id],
         );
-
-        Some(data)
     }
+
 
     /// Store a fully-downloaded track in the cache.
     /// Atomic: writes to a temp file then renames.
