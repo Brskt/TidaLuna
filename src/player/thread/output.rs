@@ -156,7 +156,12 @@ fn build_cpal_callback(
 
         // Muted during seek — output silence, drain stale data
         if muted.load(Relaxed) {
-            while c.pop().is_ok() {}
+            let n = c.slots();
+            if n > 0
+                && let Ok(chunk) = c.read_chunk(n)
+            {
+                chunk.commit_all();
+            }
             for s in data.iter_mut() {
                 *s = 0.0;
             }
@@ -166,7 +171,12 @@ fn build_cpal_callback(
         // Seek gen changed — drain stale samples from before the seek
         let cur_gen = seek_gen.load(Relaxed);
         if cur_gen != local_gen {
-            while c.pop().is_ok() {}
+            let n = c.slots();
+            if n > 0
+                && let Ok(chunk) = c.read_chunk(n)
+            {
+                chunk.commit_all();
+            }
             local_gen = cur_gen;
         }
 
