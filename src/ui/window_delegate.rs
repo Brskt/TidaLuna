@@ -237,7 +237,7 @@ wrap_window_delegate! {
                 });
             }
             let bv = self.browser_view.borrow();
-            let bv = bv.as_ref().expect("BrowserView is None");
+            let Some(bv) = bv.as_ref() else { return 1; };
             if let Some(browser) = bv.browser() {
                 browser.host().unwrap().try_close_browser()
             } else {
