@@ -156,7 +156,8 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
     let has_auth = opts
         .get("headers")
         .and_then(|v| v.as_str())
-        .map(|h| h.contains("Authorization"))
+        .and_then(|h| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(h).ok())
+        .map(|map| map.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
         .unwrap_or(false);
     if !has_auth && crate::ui::nav::needs_token_injection(&url) {
         let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
@@ -208,48 +209,41 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
             }
             let is_token_endpoint = crate::ui::nav::is_token_endpoint(&url);
             let is_4xx = (400..500).contains(&(status as u32));
-            let has_auth = opts
-                .get("headers")
-                .and_then(|v| v.as_str())
-                .map(|h| h.contains("Authorization"))
-                .unwrap_or(false);
-            tokio::spawn(async move {
-                let body = resp.text().await.unwrap_or_default();
-                if is_4xx {
-                    crate::vprintln!(
-                        "[PROXY]  {} {} auth={} body={}",
-                        status,
-                        &url[..url.len().min(200)],
-                        has_auth,
-                        &body[..body.len().min(400)]
-                    );
-                }
-                // Log auth token endpoint responses (no secrets)
-                if is_token_endpoint {
-                    let error = serde_json::from_str::<serde_json::Value>(&body)
-                        .ok()
-                        .and_then(|v| {
-                            let err = v.get("error")?.as_str()?.to_string();
-                            let desc = v
-                                .get("error_description")
-                                .and_then(|d| d.as_str())
-                                .unwrap_or("");
-                            Some(format!("{err}: {desc}"))
-                        });
-                    match error {
-                        Some(e) => {
-                            crate::vprintln!("[AUTH]   /oauth2/token → {} error={}", status, e)
-                        }
-                        None => crate::vprintln!("[AUTH]   /oauth2/token → {}", status),
+            let body = resp.text().await.unwrap_or_default();
+            if is_4xx {
+                crate::vprintln!(
+                    "[PROXY]  {} {} auth={} body={}",
+                    status,
+                    &url[..url.len().min(200)],
+                    has_auth,
+                    &body[..body.len().min(400)]
+                );
+            }
+            // Log auth token endpoint responses (no secrets)
+            if is_token_endpoint {
+                let error = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        let err = v.get("error")?.as_str()?.to_string();
+                        let desc = v
+                            .get("error_description")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("");
+                        Some(format!("{err}: {desc}"))
+                    });
+                match error {
+                    Some(e) => {
+                        crate::vprintln!("[AUTH]   /oauth2/token → {} error={}", status, e)
                     }
+                    None => crate::vprintln!("[AUTH]   /oauth2/token → {}", status),
                 }
-                let json = serde_json::json!({
-                    "status": status,
-                    "body": body,
-                    "headers": headers_map,
-                });
-                ipc_callback_ok(&callback, &json.to_string());
+            }
+            let json = serde_json::json!({
+                "status": status,
+                "body": body,
+                "headers": headers_map,
             });
+            ipc_callback_ok(&callback, &json.to_string());
         }
         Err(e) => {
             ipc_callback_err(&callback, &format!("proxy.fetch failed: {e}"));
