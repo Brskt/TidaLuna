@@ -3,6 +3,12 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 
+pub(crate) const USER_AGENT: &str = if cfg!(target_os = "linux") {
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) tidal-hifi/1.12.4-beta Chrome/144.0.7559.96 Electron/40.1.0 Safari/537.36"
+} else {
+    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36"
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackInfo {
     pub url: String,
@@ -28,11 +34,7 @@ fn build_http_client() -> reqwest::Client {
     // but tune connection setup and pooling for lower latency variance.
     reqwest::Client::builder()
         .cookie_store(true)
-        .user_agent(if cfg!(target_os = "linux") {
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) tidal-hifi/1.12.4-beta Chrome/144.0.7559.96 Electron/40.1.0 Safari/537.36"
-        } else {
-            "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36"
-        })
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(8))
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(8)
