@@ -74,6 +74,13 @@ pub(super) struct PlayerThread<F> {
     is_exclusive_mode: bool,
     #[cfg(target_os = "windows")]
     exclusive_stream_cancel: Option<Arc<AtomicBool>>,
+    // Volume sync (Windows session volume)
+    #[cfg(target_os = "windows")]
+    _com_guard: Option<crate::platform::volume_sync::ComGuard>,
+    #[cfg(target_os = "windows")]
+    volume_sync: Option<crate::platform::volume_sync::VolumeSync>,
+    #[cfg(target_os = "windows")]
+    volume_rx: Option<mpsc::Receiver<f64>>,
     // Seek state
     seeking: bool,
     seek_target: Option<f64>,
@@ -93,6 +100,15 @@ pub(super) struct PlayerThread<F> {
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub fn new(cmd_rx: mpsc::Receiver<PlayerCommand>, callback: F) -> Option<Self> {
+        #[cfg(target_os = "windows")]
+        let com_guard = match crate::platform::volume_sync::ComGuard::new() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                crate::vprintln!("[VOLUME] COM init failed: {e}, volume sync disabled");
+                None
+            }
+        };
+
         Some(Self {
             cmd_rx,
             callback,
@@ -123,6 +139,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             is_exclusive_mode: false,
             #[cfg(target_os = "windows")]
             exclusive_stream_cancel: None,
+            #[cfg(target_os = "windows")]
+            _com_guard: com_guard,
+            #[cfg(target_os = "windows")]
+            volume_sync: None,
+            #[cfg(target_os = "windows")]
+            volume_rx: None,
             seeking: false,
             seek_target: None,
             seek_wall_start: None,
@@ -172,6 +194,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Poll exclusive WASAPI events
             #[cfg(target_os = "windows")]
             self.poll_exclusive_events();
+
+            // Poll OS volume changes (Windows session volume callback)
+            #[cfg(target_os = "windows")]
+            if let Some(ref rx) = self.volume_rx {
+                let mut last = None;
+                while let Ok(v) = rx.try_recv() {
+                    last = Some(v);
+                }
+                if let Some(v) = last {
+                    (self.callback)(PlayerEvent::VolumeSync(v));
+                }
+            }
 
             // Poll playback state
             self.poll_playback();

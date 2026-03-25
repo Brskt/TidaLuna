@@ -271,6 +271,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.has_track = true;
         self.is_playing = false;
 
+        // Bind OS volume session to the cpal stream's endpoint
+        #[cfg(target_os = "windows")]
+        self.init_volume_sync();
+
         // Pre-seek
         self.pre_seek_pos = None;
         if let Some(pos) = self.pending_resume_seek
@@ -580,7 +584,58 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     pub(super) fn handle_set_volume(&mut self, vol: f64) {
         let vol_f32 = (vol / 100.0) as f32;
+        #[cfg(target_os = "windows")]
+        if let Some(ref vs) = self.volume_sync {
+            if vs.set(vol_f32).is_ok() {
+                // OS session is the real gain — keep software gain neutral
+                self.volume.store(f32::to_bits(1.0), Relaxed);
+                return;
+            }
+            crate::vprintln!("[VOLUME] Session set failed, falling back to software gain");
+            self.volume_sync = None;
+            self.volume_rx = None;
+        }
         self.volume.store(f32::to_bits(vol_f32), Relaxed);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn init_volume_sync(&mut self) {
+        // COM must be initialized on this thread (_com_guard)
+        if self._com_guard.is_none() {
+            return;
+        }
+
+        let device_id = self.current_device_id.as_deref().unwrap_or("default");
+
+        let (tx, rx) = mpsc::channel();
+        match crate::platform::volume_sync::VolumeSync::new(device_id, tx) {
+            Ok(vs) => {
+                // Read initial OS volume and push to frontend
+                match vs.get() {
+                    Ok(initial) => {
+                        let level = (initial * 100.0) as f64;
+                        (self.callback)(PlayerEvent::VolumeSync(level));
+                        // OS session is now the real gain — neutralize software gain
+                        self.volume.store(f32::to_bits(1.0), Relaxed);
+                        crate::vprintln!(
+                            "[VOLUME] Session sync active, initial level: {:.0}%",
+                            level
+                        );
+                    }
+                    Err(e) => {
+                        crate::vprintln!(
+                            "[VOLUME] Initial get failed: {e}, disabling OS volume sync"
+                        );
+                        return;
+                    }
+                }
+                self.volume_sync = Some(vs);
+                self.volume_rx = Some(rx);
+            }
+            Err(e) => {
+                crate::vprintln!("[VOLUME] VolumeSync init failed: {e}, using software gain");
+            }
+        }
     }
 
     pub(super) fn handle_get_audio_devices(&self, req_id: Option<String>) {
