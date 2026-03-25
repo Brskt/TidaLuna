@@ -49,18 +49,6 @@ fn is_valid_pkce_credentials(c: &PkceCredentials) -> bool {
     c.code_challenge == expected_challenge.as_str()
 }
 
-#[allow(dead_code)]
-pub(crate) fn clear_persisted_credentials(data_dir: &Path) {
-    let path = pkce_credentials_path(data_dir);
-    match std::fs::remove_file(&path) {
-        Ok(()) => crate::vprintln!("[PKCE]   Deleted persisted credentials"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::vprintln!("[PKCE]   No persisted credentials to delete");
-        }
-        Err(e) => crate::vprintln!("[PKCE]   Failed to delete credentials: {e}"),
-    }
-}
-
 pub(crate) fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredentials {
     let path = pkce_credentials_path(data_dir);
 
