@@ -34,7 +34,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             if exclusive {
                 self.stop_decode();
                 self.cpal_stream = None;
-                // Exclusive mode bypasses the Windows mixer — drop session volume sync
                 self.volume_sync = None;
                 self.volume_rx = None;
 
@@ -165,6 +164,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let actual_rate = opened.rate;
         let actual_channels = opened.channels;
         self.cpal_muted = Some(opened.muted);
+        self.cpal_mute_ack = Some(opened.mute_ack);
         self.cpal_stream_error = Some(opened.stream_error);
         self.played_samples = opened.played_samples;
 
@@ -197,7 +197,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_handle = Some(decode_handle);
         self.current_buffer = Some(buffer);
 
-        // Rebind OS volume session to the new endpoint
         #[cfg(target_os = "windows")]
         self.init_volume_sync();
 

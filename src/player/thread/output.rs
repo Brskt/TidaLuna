@@ -86,6 +86,7 @@ pub(super) struct OpenedStream {
     pub channels: u16,
     pub seek_gen: Arc<AtomicU32>,
     pub muted: Arc<AtomicBool>,
+    pub mute_ack: Arc<AtomicBool>,
     pub stream_error: Arc<AtomicU8>,
     pub played_samples: Arc<AtomicU64>,
 }
@@ -148,13 +149,13 @@ fn build_cpal_callback(
     volume: Arc<AtomicU32>,
     seek_gen: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
+    mute_ack: Arc<AtomicBool>,
     played_samples: Arc<AtomicU64>,
 ) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send + 'static {
     let mut local_gen: u32 = 0;
     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
         let c = &mut consumer;
 
-        // Muted during seek — output silence, drain stale data
         if muted.load(Relaxed) {
             let n = c.slots();
             if n > 0
@@ -165,6 +166,7 @@ fn build_cpal_callback(
             for s in data.iter_mut() {
                 *s = 0.0;
             }
+            mute_ack.store(true, Relaxed);
             return;
         }
 
@@ -206,6 +208,7 @@ pub(super) fn open_output_stream(
 ) -> Option<OpenedStream> {
     let seek_gen = Arc::new(AtomicU32::new(0));
     let muted = Arc::new(AtomicBool::new(false));
+    let mute_ack = Arc::new(AtomicBool::new(false));
     let stream_error = Arc::new(AtomicU8::new(0));
     let played_samples = Arc::new(AtomicU64::new(0));
 
@@ -230,6 +233,7 @@ pub(super) fn open_output_stream(
             volume.clone(),
             seek_gen.clone(),
             muted.clone(),
+            mute_ack.clone(),
             played_samples.clone(),
         );
         let err_flag = stream_error.clone();
@@ -258,6 +262,7 @@ pub(super) fn open_output_stream(
                 channels: source_channels,
                 seek_gen,
                 muted,
+                mute_ack,
                 stream_error,
                 played_samples,
             });
@@ -285,6 +290,7 @@ pub(super) fn open_output_stream(
         volume.clone(),
         seek_gen.clone(),
         muted.clone(),
+        mute_ack.clone(),
         played_samples.clone(),
     );
     let err_flag = stream_error.clone();
@@ -308,6 +314,7 @@ pub(super) fn open_output_stream(
             channels: ac,
             seek_gen,
             muted,
+            mute_ack,
             stream_error,
             played_samples,
         }),

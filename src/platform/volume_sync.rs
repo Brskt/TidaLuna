@@ -6,22 +6,14 @@ use windows::Win32::System::Com::*;
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::*;
 
-// PKEY_Device_FriendlyName — stable well-known constant, defined manually
-// to avoid pulling in Win32_Devices_FunctionDiscovery.
-// Source: {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
+// PKEY_Device_FriendlyName: {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
 const PKEY_DEVICE_FRIENDLY_NAME: windows::Win32::Foundation::PROPERTYKEY =
     windows::Win32::Foundation::PROPERTYKEY {
         fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
         pid: 14,
     };
 
-/// Anti-feedback GUID. Passed to SetMasterVolume so OnSimpleVolumeChanged
-/// can distinguish our own changes from external ones (Windows mixer).
 const TIDALUNAR_VOLUME_GUID: GUID = GUID::from_u128(0x5449_4441_4c55_4e41_5256_4f4c_5359_4e43);
-
-// ---------------------------------------------------------------------------
-// ComGuard — RAII wrapper for CoInitializeEx / CoUninitialize
-// ---------------------------------------------------------------------------
 
 pub struct ComGuard {
     _needs_uninit: bool,
@@ -32,17 +24,11 @@ impl ComGuard {
         unsafe {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
             if hr.is_ok() {
-                // S_OK or S_FALSE — COM is usable, balance with CoUninitialize
                 Ok(Self {
                     _needs_uninit: true,
                 })
             } else if hr == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
-                // Another component initialized COM with a different apartment model.
-                // COM is still usable with the existing mode — don't uninit on Drop.
-                crate::vprintln!(
-                    "[COM]    Thread already COM-initialized with different apartment model \
-                     (RPC_E_CHANGED_MODE). Volume sync will use existing mode."
-                );
+                crate::vprintln!("[COM]    RPC_E_CHANGED_MODE, using existing apartment model");
                 Ok(Self {
                     _needs_uninit: false,
                 })
@@ -65,10 +51,6 @@ impl Drop for ComGuard {
     }
 }
 
-// ---------------------------------------------------------------------------
-// IAudioSessionEvents callback implementation
-// ---------------------------------------------------------------------------
-
 #[implement(IAudioSessionEvents)]
 struct VolumeCallback {
     tx: mpsc::Sender<f64>,
@@ -81,7 +63,6 @@ impl IAudioSessionEvents_Impl for VolumeCallback_Impl {
         _newmute: windows_core::BOOL,
         eventcontext: *const GUID,
     ) -> Result<()> {
-        // Ignore our own changes (anti-feedback loop)
         if !eventcontext.is_null() {
             let ctx = unsafe { *eventcontext };
             if ctx == TIDALUNAR_VOLUME_GUID {
@@ -132,10 +113,6 @@ impl IAudioSessionEvents_Impl for VolumeCallback_Impl {
     }
 }
 
-// ---------------------------------------------------------------------------
-// VolumeSync — bidirectional OS session volume
-// ---------------------------------------------------------------------------
-
 pub struct VolumeSync {
     simple_volume: ISimpleAudioVolume,
     session_ctl: IAudioSessionControl,
@@ -143,17 +120,6 @@ pub struct VolumeSync {
 }
 
 impl VolumeSync {
-    /// Create a new VolumeSync bound to the same audio session as cpal.
-    ///
-    /// Uses IAudioSessionManager2 to enumerate sessions and find the one
-    /// matching our process ID, then QI for ISimpleAudioVolume on that
-    /// same COM object. This guarantees we operate on cpal's session,
-    /// not a separate default session.
-    ///
-    /// `device_id`: "default" or the friendly name from cpal's device enumeration.
-    /// `tx`: channel to send external volume changes (0–100) back to the player thread.
-    ///
-    /// Assumes COM is already initialized on the calling thread.
     pub fn new(device_id: &str, tx: mpsc::Sender<f64>) -> Result<Self> {
         unsafe {
             let dev_enumerator: IMMDeviceEnumerator =
@@ -187,7 +153,6 @@ impl VolumeSync {
                 )
             })?;
 
-            // QI for ISimpleAudioVolume on the SAME session object
             let simple_volume: ISimpleAudioVolume = session_ctl.cast()?;
 
             let callback: IAudioSessionEvents = VolumeCallback { tx }.into();
@@ -223,13 +188,6 @@ impl Drop for VolumeSync {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Device lookup helpers
-// ---------------------------------------------------------------------------
-
-/// Find an IMMDevice by friendly name.
-/// Best-effort: cpal 0.17 only exposes friendly names, not endpoint IDs.
-/// If multiple devices share the same name, the first match is returned.
 unsafe fn find_device_by_name(enumerator: &IMMDeviceEnumerator, name: &str) -> Result<IMMDevice> {
     let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)? };
     let count = unsafe { collection.GetCount()? };

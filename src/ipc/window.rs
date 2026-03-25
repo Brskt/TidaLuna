@@ -101,6 +101,21 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                         MenuCommand::DevTools as i32,
                         Some(&CefString::from("DevTools (F12)")),
                     );
+                    #[cfg(target_os = "windows")]
+                    {
+                        menu.add_separator();
+                        let vs_enabled = crate::state::db()
+                            .call_settings(|conn| crate::settings::load_volume_sync(conn));
+                        let label = if vs_enabled {
+                            "✓ Sync Volume with OS"
+                        } else {
+                            "   Sync Volume with OS"
+                        };
+                        menu.add_item(
+                            MenuCommand::VolumeSync as i32,
+                            Some(&CefString::from(label)),
+                        );
+                    }
                     menu.add_separator();
                     menu.add_item(
                         MenuCommand::About as i32,

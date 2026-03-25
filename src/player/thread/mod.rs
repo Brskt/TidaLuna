@@ -8,6 +8,8 @@ use super::buffer::RamBuffer;
 use super::resume::ResumeStore;
 use super::{PlayerCommand, PlayerEvent};
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -81,11 +83,16 @@ pub(super) struct PlayerThread<F> {
     volume_sync: Option<crate::platform::volume_sync::VolumeSync>,
     #[cfg(target_os = "windows")]
     volume_rx: Option<mpsc::Receiver<f64>>,
+    #[cfg(target_os = "windows")]
+    volume_sync_enabled: bool,
+    #[cfg(target_os = "windows")]
+    pending_unmute: bool,
     // Seek state
     seeking: bool,
     seek_target: Option<f64>,
     seek_wall_start: Option<std::time::Instant>,
     cpal_muted: Option<Arc<AtomicBool>>,
+    cpal_mute_ack: Option<Arc<AtomicBool>>,
     cpal_stream_error: Option<Arc<AtomicU8>>,
     played_samples: Arc<AtomicU64>,
     // Buffering state
@@ -99,7 +106,11 @@ pub(super) struct PlayerThread<F> {
 }
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
-    pub fn new(cmd_rx: mpsc::Receiver<PlayerCommand>, callback: F) -> Option<Self> {
+    pub fn new(
+        cmd_rx: mpsc::Receiver<PlayerCommand>,
+        callback: F,
+        #[allow(unused_variables)] volume_sync_enabled: bool,
+    ) -> Option<Self> {
         #[cfg(target_os = "windows")]
         let com_guard = match crate::platform::volume_sync::ComGuard::new() {
             Ok(g) => Some(g),
@@ -145,10 +156,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             volume_sync: None,
             #[cfg(target_os = "windows")]
             volume_rx: None,
+            #[cfg(target_os = "windows")]
+            volume_sync_enabled,
+            #[cfg(target_os = "windows")]
+            pending_unmute: false,
             seeking: false,
             seek_target: None,
             seek_wall_start: None,
             cpal_muted: None,
+            cpal_mute_ack: None,
             cpal_stream_error: None,
             played_samples: Arc::new(AtomicU64::new(0)),
             buffer_stalled: false,
@@ -195,7 +211,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             #[cfg(target_os = "windows")]
             self.poll_exclusive_events();
 
-            // Poll OS volume changes (Windows session volume callback)
             #[cfg(target_os = "windows")]
             if let Some(ref rx) = self.volume_rx {
                 let mut last = None;
@@ -204,6 +219,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
                 if let Some(v) = last {
                     (self.callback)(PlayerEvent::VolumeSync(v));
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            if self.pending_unmute {
+                if let Some(ref ack) = self.cpal_mute_ack {
+                    if ack.load(Relaxed) {
+                        ack.store(false, Relaxed);
+                        if let Some(ref muted) = self.cpal_muted {
+                            muted.store(false, Relaxed);
+                        }
+                        self.pending_unmute = false;
+                    }
                 }
             }
 
@@ -248,6 +276,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             PlayerCommand::EmitMaxConnections => {
                 (self.callback)(PlayerEvent::MaxConnectionsReached);
+            }
+            #[cfg(target_os = "windows")]
+            PlayerCommand::SetVolumeSync(enabled) => {
+                self.handle_set_volume_sync(enabled);
             }
         }
     }

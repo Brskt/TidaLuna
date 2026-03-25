@@ -100,6 +100,7 @@ pub enum PlayerEvent {
         code: &'static str,
     },
     MaxConnectionsReached,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     VolumeSync(f64),
 }
 
@@ -184,6 +185,8 @@ enum PlayerCommand {
         code: &'static str,
     },
     EmitMaxConnections,
+    #[cfg(target_os = "windows")]
+    SetVolumeSync(bool),
 }
 
 pub struct Player {
@@ -495,8 +498,14 @@ impl Player {
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
 
+        #[cfg(target_os = "windows")]
+        let volume_sync_enabled =
+            crate::state::db().call_settings(|conn| crate::settings::load_volume_sync(conn));
+        #[cfg(not(target_os = "windows"))]
+        let volume_sync_enabled = true;
+
         std::thread::spawn(move || {
-            if let Some(mut pt) = thread::PlayerThread::new(cmd_rx, callback) {
+            if let Some(mut pt) = thread::PlayerThread::new(cmd_rx, callback, volume_sync_enabled) {
                 pt.run();
             }
         });
@@ -771,6 +780,13 @@ impl Player {
     pub fn set_volume(&self, volume: f64) -> anyhow::Result<()> {
         self.cmd_tx
             .send(PlayerCommand::SetVolume(volume))
+            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn set_volume_sync(&self, enabled: bool) -> anyhow::Result<()> {
+        self.cmd_tx
+            .send(PlayerCommand::SetVolumeSync(enabled))
             .map_err(|_| anyhow::anyhow!("Player thread is dead"))
     }
 

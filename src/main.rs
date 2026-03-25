@@ -106,6 +106,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = &*crate::state::AUDIO_CACHE;
     }
 
+    let data_dir = state::cache_data_dir();
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        crate::vprintln!("[DB] Failed to create data dir {}: {e}", data_dir.display());
+    }
+    let db_actor = db::DbActor::open(&data_dir).expect("Failed to open databases");
+    let _ = state::DB.set(db_actor);
+
     let player = Arc::new(
         Player::new(
             move |event: PlayerEvent| {
@@ -116,13 +123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .expect("Failed to initialize player"),
     );
-
-    let data_dir = state::cache_data_dir();
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        crate::vprintln!("[DB] Failed to create data dir {}: {e}", data_dir.display());
-    }
-    let db_actor = db::DbActor::open(&data_dir).expect("Failed to open databases");
-    let _ = state::DB.set(db_actor);
 
     let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
         player,

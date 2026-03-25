@@ -241,6 +241,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let ring_producer = opened.producer;
         let seek_gen = opened.seek_gen;
         self.cpal_muted = Some(opened.muted);
+        self.cpal_mute_ack = Some(opened.mute_ack);
         self.cpal_stream_error = Some(opened.stream_error);
         self.played_samples = opened.played_samples;
 
@@ -271,7 +272,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.has_track = true;
         self.is_playing = false;
 
-        // Bind OS volume session to the cpal stream's endpoint
         #[cfg(target_os = "windows")]
         self.init_volume_sync();
 
@@ -586,12 +586,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let vol_f32 = (vol / 100.0) as f32;
         #[cfg(target_os = "windows")]
         if let Some(ref vs) = self.volume_sync {
-            if vs.set(vol_f32).is_ok() {
-                // OS session is the real gain — keep software gain neutral
-                self.volume.store(f32::to_bits(1.0), Relaxed);
-                return;
+            match vs.set(vol_f32) {
+                Ok(()) => {
+                    self.volume.store(f32::to_bits(1.0), Relaxed);
+                    return;
+                }
+                Err(_) => {
+                    crate::vprintln!("[VOLUME] Session set failed, falling back to software gain");
+                }
             }
-            crate::vprintln!("[VOLUME] Session set failed, falling back to software gain");
             self.volume_sync = None;
             self.volume_rx = None;
         }
@@ -600,8 +603,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     #[cfg(target_os = "windows")]
     pub(super) fn init_volume_sync(&mut self) {
-        // COM must be initialized on this thread (_com_guard)
-        if self._com_guard.is_none() {
+        if self._com_guard.is_none() || !self.volume_sync_enabled {
             return;
         }
 
@@ -610,12 +612,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let (tx, rx) = mpsc::channel();
         match crate::platform::volume_sync::VolumeSync::new(device_id, tx) {
             Ok(vs) => {
-                // Read initial OS volume and push to frontend
                 match vs.get() {
                     Ok(initial) => {
                         let level = (initial * 100.0) as f64;
                         (self.callback)(PlayerEvent::VolumeSync(level));
-                        // OS session is now the real gain — neutralize software gain
                         self.volume.store(f32::to_bits(1.0), Relaxed);
                         crate::vprintln!(
                             "[VOLUME] Session sync active, initial level: {:.0}%",
@@ -635,6 +635,73 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             Err(e) => {
                 crate::vprintln!("[VOLUME] VolumeSync init failed: {e}, using software gain");
             }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn handle_set_volume_sync(&mut self, enabled: bool) {
+        self.volume_sync_enabled = enabled;
+        if enabled {
+            if self.cpal_stream.is_some() && self._com_guard.is_some() {
+                let app_vol = f32::from_bits(self.volume.load(Relaxed));
+                let device_id = self.current_device_id.as_deref().unwrap_or("default");
+                let (tx, rx) = mpsc::channel();
+                match crate::platform::volume_sync::VolumeSync::new(device_id, tx) {
+                    Ok(vs) => {
+                        if let Err(e) = vs.set(app_vol) {
+                            crate::vprintln!(
+                                "[VOLUME] set failed on re-enable: {e}, staying on software gain"
+                            );
+                            return;
+                        }
+                        self.volume.store(f32::to_bits(1.0), Relaxed);
+                        self.volume_sync = Some(vs);
+                        self.volume_rx = Some(rx);
+                        crate::vprintln!(
+                            "[VOLUME] Session sync re-enabled at {:.0}%",
+                            app_vol * 100.0
+                        );
+                    }
+                    Err(e) => {
+                        crate::vprintln!("[VOLUME] VolumeSync init failed on re-enable: {e}");
+                    }
+                }
+            }
+        } else if let Some(ref vs) = self.volume_sync {
+            let level = match vs.get() {
+                Ok(l) => l,
+                Err(e) => {
+                    crate::vprintln!("[VOLUME] Cannot disable sync: get() failed: {e}");
+                    self.volume_sync_enabled = true;
+                    return;
+                }
+            };
+            // Mute cpal: the audio buffer has samples produced with software_gain=1.0.
+            // Setting session to 1.0 would spike those to max. Muting lets at least
+            // one callback drain the stale buffer before unmute (via mute_ack).
+            if let Some(ref muted) = self.cpal_muted {
+                muted.store(true, Relaxed);
+            }
+            self.volume.store(f32::to_bits(level), Relaxed);
+            if let Err(e) = vs.set(1.0) {
+                self.volume.store(f32::to_bits(1.0), Relaxed);
+                if let Some(ref muted) = self.cpal_muted {
+                    muted.store(false, Relaxed);
+                }
+                crate::vprintln!("[VOLUME] Cannot disable sync: set(1.0) failed: {e}");
+                self.volume_sync_enabled = true;
+                return;
+            }
+            if let Some(ref ack) = self.cpal_mute_ack {
+                ack.store(false, Relaxed);
+            }
+            self.pending_unmute = true;
+            self.volume_sync = None;
+            self.volume_rx = None;
+            crate::vprintln!(
+                "[VOLUME] Session sync disabled, transferred {:.0}% to software gain",
+                level * 100.0
+            );
         }
     }
 

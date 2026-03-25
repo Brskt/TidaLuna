@@ -126,3 +126,20 @@ pub(crate) fn save_window_state(conn: &mut Connection, state: &WindowState) {
 pub(crate) fn save_maximized(conn: &mut Connection, maximized: bool) {
     set(conn, "window.maximized", &maximized.to_string());
 }
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn load_volume_sync(conn: &mut Connection) -> bool {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = 'player.volume_sync'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(true)
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn save_volume_sync(conn: &mut Connection, enabled: bool) {
+    set(conn, "player.volume_sync", &enabled.to_string());
+}
