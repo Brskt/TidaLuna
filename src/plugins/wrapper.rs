@@ -240,8 +240,10 @@ mod tests {
     #[test]
     fn test_wrap_escapes_plugin_id() {
         let result = wrap_plugin_code("it's a \"test\"", "");
-        // Single quotes in the ID should be escaped
-        assert!(result.contains("it\\'s a \\\"test\\\"") || result.contains("it\\'s a"));
+        // Single quotes escaped (embedded in JS single-quoted string)
+        assert!(result.contains("it\\'s a"));
+        // Double quotes pass through unescaped (safe in single-quoted JS context)
+        assert!(result.contains("\"test\""));
     }
 
     #[test]
