@@ -251,6 +251,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::max_connections());
             }
+            PlayerEvent::VolumeSync(v) => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::volume(v));
+            }
         }
 
         let batch = if should_flush {

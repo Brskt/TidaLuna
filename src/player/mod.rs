@@ -100,6 +100,7 @@ pub enum PlayerEvent {
         code: &'static str,
     },
     MaxConnectionsReached,
+    VolumeSync(f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -92,4 +92,12 @@ impl PlayerBridgeEvent {
             v: serde_json::Value::Null,
         }
     }
+
+    pub fn volume(value: f64) -> Self {
+        Self {
+            t: "volume",
+            seq: None,
+            v: serde_json::json!(value),
+        }
+    }
 }
