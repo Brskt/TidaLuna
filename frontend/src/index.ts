@@ -12,7 +12,7 @@ import { createNativePlayerComponent } from "./controllers/player";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, isSelfLoad } from "./audio-proxy";
 import { initWindowControls } from "./ui/window-controls";
-import { invokeIpc, sendIpc } from "./ipc";
+import { invokeIpc, sendIpc, isLoginCallback } from "./ipc";
 
 // @luna/core and @luna/lib — safe to import after bootstrap
 import { initCore, modules, LunaPlugin } from "./luna-core";
@@ -158,6 +158,8 @@ const init = async () => {
     const now = Date.now();
     initWindowControls();
     console.log("Native Interface initialized in", Date.now() - now, "ms");
+
+    if (isLoginCallback()) return;
 
     try {
         await initCore();

@@ -1,4 +1,4 @@
-import { sendIpc } from "../ipc";
+import { sendIpc, isLoginCallback } from "../ipc";
 
 interface SessionDelegate {
     onSessionChanged?: (session: any) => void;
@@ -16,6 +16,7 @@ export const createUserSession = () => {
 
     return {
         clear: () => {
+            if (isLoginCallback()) return;
             sendIpc("jsrt.session_clear");
         },
         registerDelegate: (d: SessionDelegate) => {

@@ -65,6 +65,9 @@ export const onIpcEvent = (channel: string, callback: (...args: any[]) => void):
     };
 };
 
+export const isLoginCallback = (): boolean =>
+    window.location.pathname === ((window as any).__LUNAR_CONFIG__?.loginCallbackPath ?? "/login/auth");
+
 (window as any).__LUNAR_IPC_ON__ = (channel: string, cb: (...args: any[]) => void) => {
     onIpcEvent(channel, cb);
 };

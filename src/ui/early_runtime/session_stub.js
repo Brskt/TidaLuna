@@ -44,6 +44,7 @@ if (!window.nativeInterface) {
         tidalConnect: undefined,
         userSession: {
             clear: function() {
+                if (window.location.pathname === (_cfg.loginCallbackPath || '/login/auth')) return;
                 sendIpc('jsrt.session_clear');
             },
             registerDelegate: function(d) { self.__LUNAR_SESSION_DELEGATE__ = d; },

@@ -1,4 +1,4 @@
-import { sendIpc } from "../ipc";
+import { sendIpc, isLoginCallback } from "../ipc";
 
 export const createApplicationController = () => {
     let delegate: any = null;
@@ -23,9 +23,7 @@ export const createApplicationController = () => {
         getVersion: () => "2.38.6.6",
         getWindowsVersionNumber: () => Promise.resolve("10.0.0"),
         ready: () => {
-            // Skip web.loaded on the OAuth callback route to avoid a redundant
-            // session_clear → set_token cycle during login handover.
-            if (window.location.pathname === ((window as any).__LUNAR_CONFIG__?.loginCallbackPath ?? "/login/auth")) return;
+            if (isLoginCallback()) return;
             sendIpc("web.loaded");
         },
         reenableAutoUpdater: () => sendIpc("update.reenable"),
