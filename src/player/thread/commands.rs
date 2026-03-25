@@ -99,13 +99,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     pub(super) fn resolve_output_device(&self) -> Option<cpal::Device> {
         if let Some(ref id) = self.current_device_id {
-            match super::output::find_output_device(id) {
-                Some(d) => return Some(d),
-                None => {
-                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
-                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
-                }
+            if let Some(d) = super::output::find_output_device(id) {
+                return Some(d);
             }
+            crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
         }
         match cpal::default_host().default_output_device() {
             Some(d) => Some(d),

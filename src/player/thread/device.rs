@@ -1,12 +1,11 @@
 use super::decode::{DecodeThreadConfig, spawn_decode_thread};
-use super::output::{find_output_device, open_output_stream};
+use super::output::open_output_stream;
 use super::{DecodeCommand, PlayerThread};
 use crate::player::buffer::RamBuffer;
 use crate::player::{DeviceErrorKind, PlayerEvent};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
 
-use cpal::traits::HostTrait;
 use symphonia::core::codecs::CODEC_TYPE_NULL;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -107,8 +106,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         was_playing: bool,
         seek_to: f64,
     ) {
-        let _total_len = buffer.total_len();
-
         let probe_reader = buffer.clone();
         let mss = MediaSourceStream::new(Box::new(probe_reader), Default::default());
         let hint = Hint::new();
@@ -148,29 +145,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         drop(probed);
 
-        let device = if let Some(ref id) = self.current_device_id {
-            match find_output_device(id) {
-                Some(d) => d,
-                None => {
-                    crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
-                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
-                    match cpal::default_host().default_output_device() {
-                        Some(d) => d,
-                        None => {
-                            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            match cpal::default_host().default_output_device() {
-                Some(d) => d,
-                None => {
-                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
-                    return;
-                }
-            }
+        let Some(device) = self.resolve_output_device() else {
+            return;
         };
 
         let opened = match open_output_stream(&device, sr, ch, &self.volume) {
