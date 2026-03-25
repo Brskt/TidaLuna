@@ -115,7 +115,6 @@ impl AudioCache {
         );
     }
 
-
     /// Store a fully-downloaded track in the cache.
     /// Atomic: writes to a temp file then renames.
     /// Evicts LRU entries if over capacity.
