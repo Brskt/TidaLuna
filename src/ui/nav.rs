@@ -47,13 +47,11 @@ impl PageKind {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct NavigationPolicy {
     pub inject_early_runtime: bool,
     pub inject_init_script: bool,
     pub inject_bundle: bool,
     pub bypass_router: bool,
-    pub attach_resource_handler: bool,
 }
 
 impl NavigationPolicy {
@@ -64,7 +62,6 @@ impl NavigationPolicy {
                 inject_init_script: true,
                 inject_bundle: true,
                 bypass_router: false,
-                attach_resource_handler: true,
             },
             // TIDAL expects bundle surfaces even on /login (session setup, nativeInterface).
             PageKind::LoginPage => Self {
@@ -72,38 +69,27 @@ impl NavigationPolicy {
                 inject_init_script: true,
                 inject_bundle: true,
                 bypass_router: false,
-                attach_resource_handler: true,
             },
             PageKind::AuthHost => Self {
                 inject_early_runtime: true,
                 inject_init_script: true,
                 inject_bundle: false,
                 bypass_router: true,
-                attach_resource_handler: false,
             },
             PageKind::TidalCallback => Self {
                 inject_early_runtime: false,
                 inject_init_script: false,
                 inject_bundle: false,
                 bypass_router: true,
-                attach_resource_handler: true,
             },
             PageKind::External => Self {
                 inject_early_runtime: false,
                 inject_init_script: false,
                 inject_bundle: false,
                 bypass_router: false,
-                attach_resource_handler: true,
             },
         }
     }
-}
-
-pub(crate) fn is_tidal_app_host(url: &str) -> bool {
-    matches!(
-        PageKind::classify(url),
-        PageKind::DesktopApp | PageKind::LoginPage | PageKind::LoginCallback | PageKind::AuthHost
-    )
 }
 
 pub(crate) fn needs_token_injection(url: &str) -> bool {

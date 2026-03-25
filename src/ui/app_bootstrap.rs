@@ -27,8 +27,8 @@ wrap_render_process_handler! {
             if let Some(ref frame) = frame_for_inject {
                 let url = frame.url();
                 let url_str = format!("{}", cef::CefString::from(&url));
-                if crate::ui::nav::is_tidal_app_host(&url_str) {
-                    use crate::ui::nav;
+                use crate::ui::nav::{self, NavigationPolicy, PageKind};
+                if NavigationPolicy::for_page(PageKind::classify(&url_str)).inject_early_runtime {
                     let preload = format!(
                         "(function(){{\
                         self.__LUNAR_CONFIG__={{\
