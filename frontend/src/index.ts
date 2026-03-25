@@ -106,6 +106,14 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
             }
         } else if (type === "duration") {
             proxySetDuration(event.v);
+        } else if (type === "volume") {
+            try {
+                const { store } = require("./luna-lib/redux/store");
+                store.dispatch({
+                    type: "playbackControls/SET_VOLUME",
+                    payload: { volume: Math.round(event.v) },
+                });
+            } catch (_) {}
         } else if (type === "state") {
             const playing = event.v === "active";
             (window as any).__TL_PLAYING__ = playing;
