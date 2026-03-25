@@ -68,8 +68,6 @@ pub fn strip_esm_syntax(code: &str) -> String {
                 // For `export default function name()` or `export default class name`,
                 // keep the declaration as-is (the name is useful)
                 if decl.starts_with("function") || decl.starts_with("class") {
-                    result.push_str(decl.split_terminator('\n').next().unwrap_or(decl));
-                    // Actually, push the rest from decl start to end properly
                     result.push_str(&rest[decl_start..]);
                     break; // rest of file is consumed
                 }
