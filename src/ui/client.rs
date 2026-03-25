@@ -200,10 +200,9 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
-            let url_dbg = target_url.as_ref().map(|u| u.to_string()).unwrap_or_default();
-            crate::vprintln!("[POPUP]  on_before_popup: {}", &url_dbg[..url_dbg.len().min(120)]);
-            if let Some(url) = target_url {
-                let url_str = url.to_string();
+            let url_str = target_url.as_ref().map(|u| u.to_string()).unwrap_or_default();
+            crate::vprintln!("[POPUP]  on_before_popup: {}", &url_str[..url_str.len().min(120)]);
+            if target_url.is_some() {
                 let kind = PageKind::classify(&url_str);
                 if kind == PageKind::AuthHost {
                     crate::vprintln!("[AUTH]   Opening auth popup: {}", &url_str[..url_str.len().min(120)]);
