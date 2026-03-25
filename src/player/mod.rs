@@ -383,7 +383,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         Ok(r) => {
             if !r.status().is_success() {
                 let status = r.status();
-                eprintln!("[ERROR]  Upstream status: {}", status);
+                crate::vprintln!("[ERROR]  Upstream status: {}", status);
                 if status.as_u16() == 429 {
                     let _ = ctx.cmd_tx.send(PlayerCommand::EmitMaxConnections);
                 } else {
@@ -394,7 +394,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
             r
         }
         Err(e) => {
-            eprintln!("[ERROR]  Request failed: {}", e);
+            crate::vprintln!("[ERROR]  Request failed: {}", e);
             ctx.emit_media_error(format!("request failed: {e}"), "no_such_file");
             return;
         }
@@ -435,7 +435,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
                 ctx.publish_load(buffer, false, track_id.to_string());
             }
             Err(e) => {
-                eprintln!("[ERROR]  Fetch failed: {}", e);
+                crate::vprintln!("[ERROR]  Fetch failed: {}", e);
                 ctx.emit_media_error(format!("fetch failed: {e}"), "no_such_file");
             }
         }
@@ -607,7 +607,7 @@ impl Player {
                 Ok(r) if r.status().is_success() => match r.bytes().await {
                     Ok(b) => b.to_vec(),
                     Err(e) => {
-                        eprintln!("[ERROR]  DASH init segment read failed: {e}");
+                        crate::vprintln!("[ERROR]  DASH init segment read failed: {e}");
                         let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
                             error: format!("DASH init segment: {e}"),
                             code: "no_such_file",
@@ -616,7 +616,7 @@ impl Player {
                     }
                 },
                 Ok(r) => {
-                    eprintln!("[ERROR]  DASH init segment HTTP {}", r.status());
+                    crate::vprintln!("[ERROR]  DASH init segment HTTP {}", r.status());
                     let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
                         error: format!("DASH init HTTP {}", r.status()),
                         code: "no_such_file",
@@ -624,7 +624,7 @@ impl Player {
                     return;
                 }
                 Err(e) => {
-                    eprintln!("[ERROR]  DASH init segment request failed: {e}");
+                    crate::vprintln!("[ERROR]  DASH init segment request failed: {e}");
                     let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
                         error: format!("DASH init request: {e}"),
                         code: "no_such_file",
@@ -675,7 +675,7 @@ impl Player {
                 match result {
                     Ok(data) => total_seg_bytes += data.len(),
                     Err(msg) => {
-                        eprintln!("[ERROR]  {msg}");
+                        crate::vprintln!("[ERROR]  {msg}");
                         let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
                             error: msg.clone(),
                             code: "no_such_file",

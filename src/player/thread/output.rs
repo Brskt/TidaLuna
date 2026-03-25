@@ -392,7 +392,7 @@ impl AudioPipeline {
                     self.remap_channels(&data, src_ch, &mut output);
                 }
                 Err(e) => {
-                    eprintln!("[RESAMPLE] Error: {e}");
+                    crate::vprintln!("[RESAMPLE] Error: {e}");
                 }
             }
 
@@ -445,7 +445,7 @@ impl AudioPipeline {
                 self.remap_channels(used, src_ch, &mut output);
             }
             Err(e) => {
-                eprintln!("[RESAMPLE] Flush error: {e}");
+                crate::vprintln!("[RESAMPLE] Flush error: {e}");
             }
         }
 

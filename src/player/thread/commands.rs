@@ -86,7 +86,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     cancel.clone(),
                 ) && !cancel.load(Relaxed)
                 {
-                    eprintln!("[WASAPI] Stream decode failed: {e}");
+                    crate::vprintln!("[WASAPI] Stream decode failed: {e}");
                 }
             });
 
@@ -180,7 +180,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let probe = match probe_audio_format(&buffer) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[ERROR]  {e}");
+                crate::vprintln!("[ERROR]  {e}");
                 (self.callback)(PlayerEvent::MediaError {
                     error: e,
                     code: "mediaerror",
@@ -388,7 +388,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if let Some(ref stream) = self.cpal_stream {
             match stream.play() {
                 Ok(()) => crate::vprintln!("[PLAY]   cpal stream.play() OK"),
-                Err(e) => eprintln!("[ERROR]  cpal stream.play() failed: {e}"),
+                Err(e) => crate::vprintln!("[ERROR]  cpal stream.play() failed: {e}"),
             }
         } else {
             eprintln!("[ERROR]  start_playback: no cpal stream!");

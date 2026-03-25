@@ -924,7 +924,7 @@ fn render_thread(
                         };
 
                     if let Err(e) = rc.write_to_device(frames_to_write, &write_data, None) {
-                        eprintln!("[WASAPI] write error: {e}");
+                        crate::vprintln!("[WASAPI] write error: {e}");
                     }
 
                     write_cursor += src_chunk_size;

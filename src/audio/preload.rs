@@ -116,7 +116,7 @@ pub async fn start_preload(track: TrackInfo) {
                 // Too large for RAM cache; keep only next_track so auto-load can still proceed.
             }
             Err(e) => {
-                eprintln!("Preload failed: {}", e);
+                crate::vprintln!("[PRELOAD] Failed: {}", e);
             }
         }
     });

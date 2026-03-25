@@ -103,20 +103,20 @@ impl ResumeStore {
         if let Some(parent) = self.path.parent()
             && let Err(e) = fs::create_dir_all(parent)
         {
-            eprintln!("[RESUME] Failed to create state directory: {e}");
+            crate::vprintln!("[RESUME] Failed to create state directory: {e}");
             return;
         }
 
         match serde_json::to_vec(&self.entry) {
             Ok(buf) => {
                 if let Err(e) = fs::write(&self.path, buf) {
-                    eprintln!("[RESUME] Failed to persist state: {e}");
+                    crate::vprintln!("[RESUME] Failed to persist state: {e}");
                 } else {
                     self.dirty = false;
                     self.last_flush = Instant::now();
                 }
             }
-            Err(e) => eprintln!("[RESUME] Failed to serialize state: {e}"),
+            Err(e) => crate::vprintln!("[RESUME] Failed to serialize state: {e}"),
         }
     }
 }

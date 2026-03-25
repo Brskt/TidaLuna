@@ -175,7 +175,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             std::thread::spawn(move || {
                                 if let Some(tid) = track_id {
                                     let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
-                                        eprintln!("[CACHE]  Lock poisoned, skipping store");
+                                        crate::vprintln!("[CACHE]  Lock poisoned, skipping store");
                                         return;
                                     };
                                     match cache.store(&tid, &cache_format, &data) {
@@ -187,7 +187,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                             );
                                         }
                                         Err(e) => {
-                                            eprintln!("[CACHE]  Store failed: {e}");
+                                            crate::vprintln!("[CACHE]  Store failed: {e}");
                                         }
                                     }
                                 }

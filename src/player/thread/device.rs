@@ -63,7 +63,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             cancel.clone(),
                         ) && !cancel.load(Relaxed)
                         {
-                            eprintln!("[WASAPI] Device switch stream decode failed: {e}");
+                            crate::vprintln!("[WASAPI] Device switch stream decode failed: {e}");
                         }
                     });
                     self.has_track = true;
@@ -118,7 +118,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         ) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[ERROR]  Probe failed on device switch: {e}");
+                crate::vprintln!("[ERROR]  Probe failed on device switch: {e}");
                 return;
             }
         };
@@ -131,7 +131,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             Some(t) => t,
             None => {
-                eprintln!("[ERROR]  No audio track on device switch");
+                crate::vprintln!("[ERROR]  No audio track on device switch");
                 return;
             }
         };
