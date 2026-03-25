@@ -9,23 +9,6 @@ use cef::*;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
-wrap_resource_request_handler! {
-    struct TidalResourceRequestHandler {
-        _p: u8,
-    }
-    impl ResourceRequestHandler {
-        fn on_before_resource_load(
-            &self,
-            _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
-            _request: Option<&mut Request>,
-            _callback: Option<&mut Callback>,
-        ) -> ReturnValue {
-            ReturnValue::CONTINUE
-        }
-    }
-}
-
 // --- IPC Query Handler (JS -> Rust via cefQuery) ---
 
 pub(super) struct IpcQueryHandler;
@@ -457,20 +440,13 @@ wrap_request_handler! {
             &self,
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
-            request: Option<&mut Request>,
+            _request: Option<&mut Request>,
             _is_navigation: ::std::os::raw::c_int,
             _is_download: ::std::os::raw::c_int,
             _request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
-            if let Some(req) = request.as_ref() {
-                let u = req.url();
-                let url = format!("{}", CefString::from(&u));
-                if !NavigationPolicy::for_page(PageKind::classify(&url)).attach_resource_handler {
-                    return None;
-                }
-            }
-            Some(TidalResourceRequestHandler::new(0))
+            None
         }
         fn on_render_process_terminated(
             &self,
