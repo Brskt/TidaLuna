@@ -24,9 +24,6 @@ pub struct BufferProgress {
     /// Set by Seek when a Range restart is triggered.
     /// Governor boosts playback rate until ahead is comfortable or timeout.
     seek_boost: AtomicBool,
-    /// Set by the download task after init warmup completes.
-    /// Used by handle_play to defer resume-seek until the HTTP stream is stable.
-    init_warmup_done: AtomicBool,
     /// Set by handle_seek to pause preload during seeks.
     /// Governor reads this and applies a preload cooldown (no rate boost).
     seek_preload_pause: AtomicBool,
@@ -77,7 +74,6 @@ impl BufferProgress {
         self.bitrate_bps.store(0, Relaxed);
         self.playback_active.store(false, Relaxed);
         self.seek_boost.store(false, Relaxed);
-        self.init_warmup_done.store(false, Relaxed);
         self.seek_preload_pause.store(false, Relaxed);
     }
 }
