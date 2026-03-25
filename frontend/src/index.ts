@@ -26,7 +26,7 @@ const credentials: { credentialsStorageKey: string; codeChallenge: string; redir
     window.__TIDAL_RS_CREDENTIALS__ || {
         credentialsStorageKey: "tidal",
         codeChallenge: "",
-        redirectUri: "tidal://login/auth",
+        redirectUri: (window as any).__LUNAR_CONFIG__?.redirectUri ?? "tidal://login/auth",
         codeVerifier: "",
     };
 

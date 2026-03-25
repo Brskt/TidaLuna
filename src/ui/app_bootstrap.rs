@@ -24,12 +24,40 @@ wrap_render_process_handler! {
             let frame_for_inject = frame.as_ref().map(|f| (*f).clone());
             self.router
                 .on_context_created(browser.cloned(), frame.cloned(), context.cloned());
-            // cefQuery is now available — inject early runtime before page scripts.
             if let Some(ref frame) = frame_for_inject {
                 let url = frame.url();
                 let url_str = format!("{}", cef::CefString::from(&url));
                 if crate::ui::nav::is_tidal_app_host(&url_str) {
-                    crate::app_state::exec_js_on_frame(frame, include_str!("early_runtime.js"));
+                    use crate::ui::nav;
+                    let preload = format!(
+                        "(function(){{\
+                        self.__LUNAR_CONFIG__={{\
+                            desktopHost:\"{desktop}\",\
+                            loginHost:\"{login}\",\
+                            authHost:\"{auth}\",\
+                            apiHost:\"{api}\",\
+                            redirectUri:\"{redirect}\",\
+                            loginCallbackPath:\"/login/auth\",\
+                            authHosts:[\"{login}\",\"{auth}\"]\
+                        }};\
+                        {ipc}\
+                        {token}\
+                        {fetch}\
+                        {open}\
+                        {session}\
+                        }})();",
+                        desktop = nav::HOST_DESKTOP,
+                        login = nav::HOST_LOGIN,
+                        auth = nav::HOST_AUTH,
+                        api = nav::HOST_API,
+                        redirect = nav::REDIRECT_URI,
+                        ipc = include_str!("early_runtime/ipc.js"),
+                        token = include_str!("early_runtime/token_capture.js"),
+                        fetch = include_str!("early_runtime/fetch_proxy.js"),
+                        open = include_str!("early_runtime/window_open.js"),
+                        session = include_str!("early_runtime/session_stub.js"),
+                    );
+                    crate::app_state::exec_js_on_frame(frame, &preload);
                 }
             }
         }

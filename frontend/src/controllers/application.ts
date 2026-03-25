@@ -25,7 +25,7 @@ export const createApplicationController = () => {
         ready: () => {
             // Skip web.loaded on the OAuth callback route to avoid a redundant
             // session_clear → set_token cycle during login handover.
-            if (window.location.pathname === "/login/auth") return;
+            if (window.location.pathname === ((window as any).__LUNAR_CONFIG__?.loginCallbackPath ?? "/login/auth")) return;
             sendIpc("web.loaded");
         },
         reenableAutoUpdater: () => sendIpc("update.reenable"),
