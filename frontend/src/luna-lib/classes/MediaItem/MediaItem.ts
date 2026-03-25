@@ -45,14 +45,26 @@ export class MediaItem extends ContentBase {
 		const clearWarnCatch = redux.intercept("message/MESSAGE_WARN", unloads, (message) => {
 			if (message?.message === "The content is no longer available") return true;
 		});
-		const { mediaItem } = await redux.interceptActionResp(
-			() => redux.actions["content/LOAD_SINGLE_MEDIA_ITEM"]({ id: itemId, itemType: contentType }),
-			unloads,
-			["content/LOAD_SINGLE_MEDIA_ITEM_SUCCESS"],
-			["content/LOAD_SINGLE_MEDIA_ITEM_FAIL"],
-		);
-		clearWarnCatch();
-		return mediaItem;
+		try {
+			const { mediaItem } = await redux.interceptActionResp(
+				() => redux.actions["content/LOAD_SINGLE_MEDIA_ITEM"]({ id: itemId, itemType: contentType }),
+				unloads,
+				["content/LOAD_SINGLE_MEDIA_ITEM_SUCCESS"],
+				["content/LOAD_SINGLE_MEDIA_ITEM_FAIL"],
+			);
+			return mediaItem;
+		} catch (e) {
+			// Redux dispatch may not produce SUCCESS/FAIL (wrong payload shape under Vite/Rollup).
+			// Fall back to direct API fetch for tracks only.
+			if (String(e).includes("TIMEOUT") && contentType === "track") {
+				const track = await TidalApi.track(itemId);
+				if (track === undefined) return undefined;
+				return { type: contentType, item: track } as redux.MediaItem;
+			}
+			throw e;
+		} finally {
+			clearWarnCatch();
+		}
 	}
 
 	// #region Static Construction
