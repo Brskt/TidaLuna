@@ -122,6 +122,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             resume_policy,
             load_start,
             cached,
+            format,
         } = req;
         if load_gen != LOAD_SEQ.load(Relaxed) {
             crate::vprintln!("[LOAD #{load_gen}] stale Load, ignoring");
@@ -138,6 +139,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
         self.current_seq = event_seq;
         self.is_cached = cached;
+        self.current_format = format;
         self.buffer_stalled = false;
         self.pending_complete = false;
         self.last_played_snapshot = 0;

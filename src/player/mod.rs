@@ -117,6 +117,7 @@ struct LoadRequest {
     resume_policy: ResumePolicy,
     load_start: std::time::Instant,
     cached: bool,
+    format: String,
 }
 
 enum LoadStep {
@@ -131,6 +132,7 @@ struct LoadContext {
     resume_policy: ResumePolicy,
     auto_play: bool,
     cmd_tx: mpsc::Sender<PlayerCommand>,
+    format: String,
 }
 
 impl LoadContext {
@@ -148,6 +150,7 @@ impl LoadContext {
                 resume_policy: self.resume_policy,
                 load_start: self.load_start,
                 cached,
+                format: self.format.clone(),
             },
             auto_play: self.auto_play,
         });
@@ -541,6 +544,7 @@ impl Player {
             resume_policy,
             auto_play,
             cmd_tx: self.cmd_tx.clone(),
+            format: format.clone(),
         };
 
         let handle = self.rt_handle.spawn(async move {
@@ -706,6 +710,7 @@ impl Player {
                     resume_policy: ResumePolicy::Disabled,
                     load_start,
                     cached: false,
+                    format,
                 },
                 auto_play: true,
             });

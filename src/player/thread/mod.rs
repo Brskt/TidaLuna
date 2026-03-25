@@ -50,6 +50,7 @@ pub(super) struct PlayerThread<F> {
     // Track state
     current_buffer: Option<RamBuffer>,
     current_track_id: Option<String>,
+    current_format: String,
     is_cached: bool,
     is_playing: bool,
     has_track: bool,
@@ -102,6 +103,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             decode_handle: None,
             current_buffer: None,
             current_track_id: None,
+            current_format: String::new(),
             is_cached: false,
             is_playing: false,
             has_track: false,
