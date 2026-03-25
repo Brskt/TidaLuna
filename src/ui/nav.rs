@@ -86,14 +86,14 @@ impl NavigationPolicy {
                 inject_init_script: false,
                 inject_bundle: false,
                 bypass_router: true,
-                attach_resource_handler: false,
+                attach_resource_handler: true,
             },
             PageKind::External => Self {
                 inject_early_runtime: false,
                 inject_init_script: false,
                 inject_bundle: false,
                 bypass_router: false,
-                attach_resource_handler: false,
+                attach_resource_handler: true,
             },
         }
     }

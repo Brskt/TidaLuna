@@ -96,10 +96,10 @@ fn run_post_lock_effects(mut effects: PostLockEffects) {
     }
 
     #[cfg(target_os = "windows")]
-    if let Some(playing) = effects.thumbbar_playing {
-        if let Some(ref tb) = effects.thumbbar {
-            tb.set_playing(playing);
-        }
+    if let Some(playing) = effects.thumbbar_playing
+        && let Some(ref tb) = effects.thumbbar
+    {
+        tb.set_playing(playing);
     }
 
     // Put back media_controls and thumbbar

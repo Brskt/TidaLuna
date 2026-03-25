@@ -1,7 +1,7 @@
 use crate::app_state::{IpcMessage, exec_js_on_frame, open_in_os, with_state};
 use crate::ipc::player::handle_ipc_message;
 use crate::ipc::plugin::handle_plugin_ipc;
-use crate::ui::nav::{self, PageKind, NavigationPolicy};
+use crate::ui::nav::{self, NavigationPolicy, PageKind};
 use cef::wrapper::message_router::{
     BrowserSideHandler, BrowserSideRouter, MessageRouterBrowserSideHandlerCallbacks,
 };
@@ -466,9 +466,7 @@ wrap_request_handler! {
             if let Some(req) = request.as_ref() {
                 let u = req.url();
                 let url = format!("{}", CefString::from(&u));
-                let policy = NavigationPolicy::for_page(PageKind::classify(&url));
-                if !policy.attach_resource_handler {
-                    crate::vprintln!("[RRH]    Skipping handler for: {}", &url[..url.len().min(100)]);
+                if !NavigationPolicy::for_page(PageKind::classify(&url)).attach_resource_handler {
                     return None;
                 }
             }

@@ -393,7 +393,7 @@ fn open_exclusive_stream(
             period_hns: *period,
         };
 
-        match audio_client.initialize_client(&wave_fmt, &Direction::Render, &stream_mode) {
+        match audio_client.initialize_client(wave_fmt, &Direction::Render, &stream_mode) {
             Ok(()) => {
                 let h_event = audio_client
                     .set_get_eventhandle()
@@ -440,7 +440,7 @@ fn open_exclusive_stream(
                         };
 
                         if audio_client2
-                            .initialize_client(&wave_fmt, &Direction::Render, &stream_mode2)
+                            .initialize_client(wave_fmt, &Direction::Render, &stream_mode2)
                             .is_ok()
                         {
                             let h_event = audio_client2

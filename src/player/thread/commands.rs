@@ -582,13 +582,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_set_volume(&mut self, vol: f64) {
         let vol_f32 = (vol / 100.0) as f32;
         self.volume.store(f32::to_bits(vol_f32), Relaxed);
-
-        #[cfg(target_os = "windows")]
-        {
-            if self.is_exclusive_mode {
-                return;
-            }
-        }
     }
 
     pub(super) fn handle_get_audio_devices(&self, req_id: Option<String>) {

@@ -44,31 +44,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.is_exclusive_mode = true;
                 self.exclusive_handle = Some(handle);
 
-                if let Some(ref handle) = self.exclusive_handle {
-                    if let Some(ref buf) = self.current_buffer {
-                        handle.send(ExclusiveCommand::Stop);
-                        let cancel = Arc::new(AtomicBool::new(false));
-                        self.exclusive_stream_cancel = Some(cancel.clone());
+                if let Some(ref handle) = self.exclusive_handle
+                    && let Some(ref buf) = self.current_buffer
+                {
+                    handle.send(ExclusiveCommand::Stop);
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    self.exclusive_stream_cancel = Some(cancel.clone());
 
-                        let cmd_tx = handle.command_sender();
-                        let reader = buf.clone();
-                        let total_len = buf.total_len();
-                        let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
-                        thread::spawn(move || {
-                            if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
-                                reader,
-                                total_len,
-                                stream_id,
-                                cmd_tx,
-                                cancel.clone(),
-                            ) && !cancel.load(Relaxed)
-                            {
-                                eprintln!("[WASAPI] Device switch stream decode failed: {e}");
-                            }
-                        });
-                        self.has_track = true;
-                        self.is_playing = true;
-                    }
+                    let cmd_tx = handle.command_sender();
+                    let reader = buf.clone();
+                    let total_len = buf.total_len();
+                    let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+                    thread::spawn(move || {
+                        if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
+                            reader,
+                            total_len,
+                            stream_id,
+                            cmd_tx,
+                            cancel.clone(),
+                        ) && !cancel.load(Relaxed)
+                        {
+                            eprintln!("[WASAPI] Device switch stream decode failed: {e}");
+                        }
+                    });
+                    self.has_track = true;
+                    self.is_playing = true;
                 }
 
                 self.current_device_id = Some(id.clone());

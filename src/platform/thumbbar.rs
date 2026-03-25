@@ -230,7 +230,7 @@ unsafe fn make_icon(draw: fn(&mut [u8; 16 * 16 * 4])) -> HICON {
             mask_slice.fill(0);
         }
 
-        let mut icon_info = ICONINFO {
+        let icon_info = ICONINFO {
             fIcon: 1, // TRUE = icon
             xHotspot: 0,
             yHotspot: 0,
@@ -238,7 +238,7 @@ unsafe fn make_icon(draw: fn(&mut [u8; 16 * 16 * 4])) -> HICON {
             hbmColor: color_bmp,
         };
 
-        let icon = CreateIconIndirect(&mut icon_info);
+        let icon = CreateIconIndirect(&icon_info);
 
         DeleteObject(color_bmp);
         DeleteObject(mask_bmp);
