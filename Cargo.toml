@@ -19,7 +19,7 @@ strip = true
 
 
 [dependencies]
-cef = { version = "145.6.1", features = ["build-util"] }
+cef = { version = "146.0.0", features = ["build-util"] }
 tokio = { version = "1.50.0", features = [
   "rt-multi-thread",
   "net",
@@ -56,7 +56,7 @@ audioadapter-buffers = "2.0"
 symphonia = { version = "0.5.5", features = ["flac", "aac", "isomp4"] }
 dash-mpd = { version = "0.20", default-features = false }
 souvlaki = "0.8"
-oxc = { version = "0.121", features = ["semantic", "transformer", "codegen"] }
+oxc = { version = "0.122", features = ["semantic", "transformer", "codegen"] }
 url = "2"
 fnv = "1"
 

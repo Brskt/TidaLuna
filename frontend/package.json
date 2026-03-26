@@ -16,12 +16,12 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/semver": "^7.7.1",
-    "esbuild": "^0.27.3",
+    "esbuild": "^0.27.4",
     "material-ui-confirm": "^4.0.0",
     "semver": "^7.7.4"
   },
   "peerDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@inrixia/helpers": "^3.21.2",
