@@ -297,6 +297,10 @@ wrap_load_handler! {
             _can_go_back: i32,
             _can_go_forward: i32,
         ) {
+            crate::vprintln!(
+                "[LOAD]   on_loading_state_change: is_loading={} can_go_back={} can_go_forward={}",
+                is_loading, _can_go_back, _can_go_forward
+            );
             if is_loading == 0
                 && let Some(browser) = browser
                 && let Some(frame) = browser.main_frame()
@@ -354,7 +358,9 @@ wrap_load_handler! {
         ) {
             let url = failed_url.map(|u| u.to_string()).unwrap_or_default();
             let text = error_text.map(|t| t.to_string()).unwrap_or_default();
-            crate::vprintln!("[LOAD]   on_load_error: {} {:?} {}", url, error_code, text);
+            crate::vprintln!("[LOAD]   on_load_error: url={} code={:?} text={}", url, error_code, text);
+            let is_main = _frame.as_ref().map(|f| f.is_main() != 0).unwrap_or(false);
+            crate::vprintln!("[LOAD]   on_load_error: is_main_frame={}", is_main);
         }
     }
 }
