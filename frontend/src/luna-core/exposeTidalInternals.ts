@@ -2,7 +2,6 @@
 // TIDAL uses Vite/Rollup — no webpack runtime, no module cache accessible.
 
 import { interceptors } from "./exposeTidalInternals.patchAction";
-import { getOrCreateLoadingContainer } from "./loadingContainer";
 
 // Best-effort module registry. Empty under Vite/Rollup — no module cache accessible.
 export const tidalModules: Record<string, object> = {};
@@ -109,9 +108,6 @@ function patchDispatch(store: any): void {
 }
 
 export async function initTidalInternals(): Promise<{ reduxStore: any }> {
-	const { messageContainer, loadingContainer } = getOrCreateLoadingContainer();
-	messageContainer.innerText = "Waiting for TIDAL to load...\n";
-
 	const start = Date.now();
 	let reduxStore: any;
 
@@ -125,14 +121,11 @@ export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 	}
 
 	if (!reduxStore) {
-		messageContainer.innerText = "Failed to discover TIDAL internals!";
+		document.title = "TidaLunar — Failed to initialize";
 		throw new Error("[luna] Redux store not found within timeout");
 	}
 
 	patchDispatch(reduxStore);
-
-	messageContainer.innerText = "TIDAL internals discovered!";
-	setTimeout(() => (loadingContainer.style.opacity = "0"), 2000);
 
 	return { reduxStore };
 }
