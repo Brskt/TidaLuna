@@ -26,7 +26,13 @@ pub(crate) fn handle_ipc_message(request: &str) {
         return;
     }
 
-    crate::vprintln!("IPC Message: {}", msg);
+    if msg.channel == "jsrt.set_token" {
+        crate::vprintln!(
+            "IPC Message: IpcMessage {{ channel: \"jsrt.set_token\", args: [<redacted>] }}"
+        );
+    } else {
+        crate::vprintln!("IPC Message: {}", msg);
+    }
 
     if msg.channel.starts_with("player.") {
         handle_player_ipc(&msg);
