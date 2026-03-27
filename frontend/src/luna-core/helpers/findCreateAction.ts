@@ -1,11 +1,13 @@
 /**
  * Finds the name and index of https://redux-toolkit.js.org/api/createAction
- * based on the presence of (`.payload,..."meta"in `) commonly found in Redux Toolkit's `createAction`.
+ * based on the presence of `.payload,...{quote}meta{quote}in ` commonly found in Redux Toolkit's `createAction`.
  */
 export function findCreateActionFunction(code: string): { fnName: string; startIdx: number } | null {
 	// Search for the specific pattern indicating a prepare callback structure.
-	const payloadMetaIndex = code.indexOf(`.payload,..."meta"in `);
-	if (payloadMetaIndex === -1) return null;
+	// Quote-agnostic: TIDAL's bundler may use ", ', or ` as string delimiters.
+	const match = code.match(/\.payload,\.{3}(?:"|'|`)meta(?:"|'|`)in /);
+	if (!match || match.index === undefined) return null;
+	const payloadMetaIndex = match.index;
 
 	// Find the start of the function definition preceding the pattern.
 	const codeBeforePattern = code.slice(0, payloadMetaIndex);
