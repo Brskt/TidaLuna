@@ -24,7 +24,7 @@ export const LunaSettingsTransfer = React.memo(() =>
 		try
 		{
 			//feature flags
-			const featureFlags = redux.store.getState().featureFlags.userOverrides as Record<string, boolean>;;
+			const featureFlags = redux.store.getState().featureFlags.userOverrides as Record<string, boolean>;
 
 			const data = await SettingsTransfer.dump(stripCode, Object.keys(featureFlags).length > 0 ? featureFlags : null);
 
@@ -81,12 +81,7 @@ export const LunaSettingsTransfer = React.memo(() =>
 			//feature flags
 			if (data.featureFlags != null)
 			{
-				const currentFlags = Tidal.featureFlags;
-				for (const [name, value] of Object.entries(data.featureFlags))
-				{
-					if (name in currentFlags && currentFlags[name].value !== value)
-						redux.actions["featureFlags/TOGGLE_USER_OVERRIDE"]({ ...currentFlags[name], value });
-				}
+				redux.actions["featureFlags/SET_USER_OVERRIDES"](data.featureFlags);
 			}
 
 			Messager.Info("Settings imported successfully, restarting...");

@@ -9,7 +9,7 @@ export const pkg = async () => ({
 });
 
 export const relaunch = async () => {
-    console.warn("[luna:native] relaunch() is not supported in TidaLunar");
+    window.location.reload();
 };
 
 export const update = async (_version: string): Promise<string | void> => {
