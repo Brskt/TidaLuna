@@ -80,6 +80,23 @@ wrap_download_handler! {
             _url: Option<&CefString>,
             _request_method: Option<&CefString>,
         ) -> ::std::os::raw::c_int {
+            let allowed = _url
+                .map(|u| u.to_string().starts_with("blob:"))
+                .unwrap_or(false);
+            if allowed { 1 } else { 0 }
+        }
+        fn on_before_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _download_item: Option<&mut DownloadItem>,
+            _suggested_name: Option<&CefString>,
+            callback: Option<&mut BeforeDownloadCallback>,
+        ) -> ::std::os::raw::c_int {
+            if let Some(cb) = callback {
+                let empty = CefString::from("");
+                cb.cont(Some(&empty), 1);
+                return 1;
+            }
             0
         }
     }

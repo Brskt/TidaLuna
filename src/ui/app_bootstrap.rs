@@ -241,6 +241,8 @@ wrap_browser_process_handler! {
                     "profile.password_manager_enabled",
                     "autofill.profile_enabled",
                     "autofill.credit_card_enabled",
+                    "download_bubble.partial_view_enabled",
+                    "download_bubble_enabled",
                 ];
                 for pref in prefs {
                     if let Some(mut val) = cef::value_create() {
