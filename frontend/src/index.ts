@@ -184,7 +184,9 @@ const init = async () => {
             interceptors[action] ??= new Set();
             interceptors[action].add(cb);
         };
-        add("playbackControls/PLAY", () => sendIpc("player.play"));
+        add("playbackControls/PLAY", () => {
+            if (isSelfLoad()) sendIpc("player.play");
+        });
         add("playbackControls/SEEK", (time: number) => {
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;
