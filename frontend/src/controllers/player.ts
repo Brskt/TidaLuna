@@ -14,6 +14,7 @@ export const createNativePlayerComponent = () => {
     // Cleared once a bridge event close to the target arrives (±2s).
     let seekTarget: number | null = null;
     let _time = 0;
+    let _lastVolume = -1;
 
     // Before Player() is called, events are captured as a snapshot of the
     // latest values rather than queued individually.  This avoids unbounded
@@ -122,6 +123,8 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.seek", time);
             },
             setVolume: (volume: number) => {
+                if (volume === _lastVolume) return;
+                _lastVolume = volume;
                 sendIpc("player.volume", volume);
             },
             preload: (url: string, streamFormat: string, encryptionKey: string = "") => {

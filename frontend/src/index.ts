@@ -56,6 +56,7 @@ const PASSTHROUGH_EVENTS = new Set([
 ]);
 let _lastTimeDispatch = 0;
 let _forceTimeDispatch = false;
+let _volumeFromBridge = false;
 
 // Short aliases used by the Rust bridge → SDK event names (carry seq).
 const SEQ_EVENTS: Record<string, string> = {
@@ -109,11 +110,13 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
         } else if (type === "volume") {
             try {
                 const { store } = require("./luna-lib/redux/store");
+                _volumeFromBridge = true;
                 store.dispatch({
                     type: "playbackControls/SET_VOLUME",
                     payload: { volume: Math.round(event.v) },
                 });
-            } catch (_) {}
+                _volumeFromBridge = false;
+            } catch (_) { _volumeFromBridge = false; }
         } else if (type === "state") {
             const playing = event.v === "active";
             (window as any).__TL_PLAYING__ = playing;
@@ -191,7 +194,9 @@ const init = async () => {
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;
         });
-        add("playbackControls/SET_VOLUME", (p: { volume: number }) => sendIpc("player.volume", p.volume));
+        add("playbackControls/SET_VOLUME", (p: { volume: number }) => {
+            if (!_volumeFromBridge) sendIpc("player.volume", p.volume);
+        });
     }
 
     modules["@luna/core"] = LunaCore;
