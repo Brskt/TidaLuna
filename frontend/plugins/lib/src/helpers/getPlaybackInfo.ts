@@ -5,7 +5,7 @@ import { TidalApi } from "../classes/TidalApi";
 
 import type { AudioQuality, ItemId } from "../redux";
 
-import { invokeIpc } from "../../ipc";
+import { invokeIpc } from "../../../../src/ipc";
 
 interface PlaybackInfoBase extends Omit<PlaybackInfoResponse, "manifest"> {
 	mimeType: string;

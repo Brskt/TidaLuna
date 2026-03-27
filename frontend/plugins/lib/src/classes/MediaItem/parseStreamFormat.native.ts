@@ -3,7 +3,7 @@
 // player bridge (mediaformat event) and are applied per-track in updateFormat().
 // For DASH, bitrate/bytes are in the manifest.
 import type { PlaybackInfo } from "../../helpers";
-import { invokeIpc } from "../../../ipc";
+import { invokeIpc } from "../../../../../src/ipc";
 
 type StreamFormat = { bitsPerSample?: number; sampleRate?: number; duration?: number; codec?: string };
 

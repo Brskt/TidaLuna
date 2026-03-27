@@ -1,6 +1,6 @@
 import { invokeIpc } from "../ipc";
 import { LunaPlugin, setUpstreamPlugins } from "./luna-plugin";
-import { LunaPlugin as CoreLunaPlugin, modules } from "../luna-core";
+import { LunaPlugin as CoreLunaPlugin, modules } from "../../render/src";
 
 // Redirect ALL upstream LunaPlugin lifecycle to our LunaPlugin (Rust IPC).
 // The upstream class is used by @luna/ui for display — its static methods

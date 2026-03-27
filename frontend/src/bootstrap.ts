@@ -4,7 +4,7 @@
 
 import { setupIpcBridge } from "./plugins/ipc-bridge";
 
-// Set __ipcRenderer and __platform globals (used by luna-lib/ipc.ts)
+// Set __ipcRenderer and __platform globals (used by plugins/lib/src/ipc.ts)
 setupIpcBridge();
 
 // Initialize window.luna object (window.core.ts adds getters to it)

@@ -40,11 +40,11 @@ export const createPlaybackController = () => {
                         try {
                             if (lastTransitionId !== productId) return;
 
-                            await require("../luna-core/modules").storeReady;
+                            await require("../../render/src/modules").storeReady;
                             if (lastTransitionId !== productId) return;
 
-                            const { interceptors } = require("../luna-core/exposeTidalInternals.patchAction");
-                            const { store } = require("../luna-lib/redux/store");
+                            const { interceptors } = require("../../render/src/exposeTidalInternals.patchAction");
+                            const { store } = require("../../plugins/lib/src/redux/store");
                             const actionType = "playbackControls/MEDIA_PRODUCT_TRANSITION";
 
                             const controls = store.getState().playbackControls;
@@ -53,7 +53,7 @@ export const createPlaybackController = () => {
                             // Get actual audio quality from playbackInfo API (same as TIDAL's SDK)
                             let actualQuality: string | undefined;
                             try {
-                                const { getPlaybackInfo } = require("../luna-lib/helpers/getPlaybackInfo");
+                                const { getPlaybackInfo } = require("../../plugins/lib/src/helpers/getPlaybackInfo");
                                 const state = store.getState();
                                 const streamingQuality = state.settings?.quality?.streaming;
 
@@ -99,7 +99,7 @@ export const createPlaybackController = () => {
 
                             // Dispatch UPDATE_PLAYBACK_CONTEXT — Redux state is frozen, direct mutation fails
                             try {
-                                const { buildActions } = require("../luna-core/exposeTidalInternals.patchAction");
+                                const { buildActions } = require("../../render/src/exposeTidalInternals.patchAction");
                                 const buildAction = buildActions["playbackControls/UPDATE_PLAYBACK_CONTEXT"];
                                 if (buildAction) {
                                     store.dispatch(buildAction(ctx));

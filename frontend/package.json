@@ -3,8 +3,7 @@
   "module": "src/index.ts",
   "type": "module",
   "scripts": {
-    "build:ui": "node scripts/build-luna-ui.mjs",
-    "build": "node scripts/build-luna-ui.mjs && node scripts/build-bundle.mjs"
+    "build": "bun esbuild.config.ts"
   },
   "devDependencies": {
     "@emotion/react": "^11.14.0",

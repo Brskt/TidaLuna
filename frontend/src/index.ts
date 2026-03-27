@@ -15,9 +15,9 @@ import { initWindowControls } from "./ui/window-controls";
 import { invokeIpc, sendIpc, isLoginCallback } from "./ipc";
 
 // @luna/core and @luna/lib — safe to import after bootstrap
-import { initCore, modules, LunaPlugin } from "./luna-core";
-import * as LunaCore from "./luna-core";
-import * as LunaLib from "./luna-lib";
+import { initCore, modules, LunaPlugin } from "../render/src";
+import * as LunaCore from "../render/src";
+import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
 
 // Synchronous initialization: expose nativeInterface immediately so Tidal
@@ -101,7 +101,7 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
                 _forceTimeDispatch = false;
                 _lastTimeDispatch = now;
                 try {
-                    const { store } = require("./luna-lib/redux/store");
+                    const { store } = require("../plugins/lib/src/redux/store");
                     store.dispatch({ type: "playbackControls/TIME_UPDATE", payload: event.v });
                 } catch (_) {}
             }
@@ -109,7 +109,7 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
             proxySetDuration(event.v);
         } else if (type === "volume") {
             try {
-                const { store } = require("./luna-lib/redux/store");
+                const { store } = require("../plugins/lib/src/redux/store");
                 _volumeFromBridge = true;
                 store.dispatch({
                     type: "playbackControls/SET_VOLUME",
@@ -125,7 +125,7 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
                 proxyReset();
                 if (isSelfLoad()) {
                     // Self-loaded tracks bypass NativePlayer — manually advance queue.
-                    const { store } = require("./luna-lib/redux/store");
+                    const { store } = require("../plugins/lib/src/redux/store");
                     const { playQueue: q } = store.getState();
                     const nextId = q.elements[q.currentIndex + 1]?.mediaItemId;
                     if (nextId) {
@@ -148,7 +148,7 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
             const reduxState = BRIDGE_TO_REDUX_STATE[event.v as string];
             if (reduxState) {
                 try {
-                    const { store } = require("./luna-lib/redux/store");
+                    const { store } = require("../plugins/lib/src/redux/store");
                     store.dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: reduxState });
                 } catch (_) {}
             }
@@ -182,7 +182,7 @@ const init = async () => {
 
     // SDK middleware doesn't reach Rust player for DASH/AAC — intercept Redux actions.
     {
-        const { interceptors } = require("./luna-core/exposeTidalInternals.patchAction");
+        const { interceptors } = require("../render/src/exposeTidalInternals.patchAction");
         const add = (action: string, cb: Function) => {
             interceptors[action] ??= new Set();
             interceptors[action].add(cb);

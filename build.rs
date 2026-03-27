@@ -5,8 +5,10 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=frontend/src");
     println!("cargo:rerun-if-changed=frontend/package.json");
-    println!("cargo:rerun-if-changed=frontend/scripts");
     println!("cargo:rerun-if-changed=frontend/plugins");
+    println!("cargo:rerun-if-changed=frontend/render");
+    println!("cargo:rerun-if-changed=frontend/build");
+    println!("cargo:rerun-if-changed=frontend/esbuild.config.ts");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("bundle.js");
@@ -27,24 +29,18 @@ fn main() {
         }
     }
 
-    fn run_bun(frontend_dir: &Path, script: &str) {
-        let status = Command::new("bun")
-            .args(["scripts/".to_owned() + script])
-            .current_dir(frontend_dir)
-            .status()
-            .unwrap_or_else(|e| panic!("Failed to run {script}: {e}"));
-        if !status.success() {
-            panic!("{script} failed");
-        }
-    }
-
     // On Windows via 9P, Bun segfaults. Pre-build from WSL then skip here.
     if cfg!(target_os = "windows") && bundle_path.exists() {
         eprintln!("Windows: skipping bun scripts (using pre-built outputs)");
     } else {
-        run_bun(frontend_dir, "build-luna-ui.mjs");
-        run_bun(frontend_dir, "build-luna-dev.mjs");
-        run_bun(frontend_dir, "build-bundle.mjs");
+        let status = Command::new("bun")
+            .args(["esbuild.config.ts"])
+            .current_dir(frontend_dir)
+            .status()
+            .expect("Failed to run esbuild.config.ts");
+        if !status.success() {
+            panic!("esbuild.config.ts failed");
+        }
     }
 
     std::fs::copy(&bundle_path, &dest_path).expect("Failed to copy bundle.js to OUT_DIR");
