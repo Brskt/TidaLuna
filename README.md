@@ -10,6 +10,7 @@ A desktop TIDAL client written in Rust with CEF (Chromium Embedded Framework) an
 - Resampling via rubato when device sample rate differs from source.
 - Optional exclusive WASAPI mode on Windows (progressive FLAC/AAC to PCM pipeline).
 - Media controls integration (MPRIS on Linux, thumbnail toolbar on Windows).
+- Close-to-tray with system tray icon (Windows, Linux, macOS).
 - Plugin system: hybrid Rust + CEF execution with per-plugin sandboxing.
 - Native plugin modules via Bun child process.
 
@@ -34,6 +35,7 @@ sudo apt-get install -y \
   libgtk-3-dev \
   libglib2.0-dev \
   libgdk-pixbuf-2.0-dev \
+  libappindicator3-dev \
   cmake \
   ninja-build
 ```
