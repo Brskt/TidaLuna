@@ -84,13 +84,13 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     }
                     PlayerIpc::Preload { url, format, key } => {
                         let track = TrackInfo { url, format, key };
-                        state.rt_handle.spawn(async move {
+                        crate::state::rt_handle().spawn(async move {
                             crate::audio::preload::start_preload(track).await;
                         });
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::PreloadCancel => {
-                        state.rt_handle.spawn(async {
+                        crate::state::rt_handle().spawn(async {
                             crate::audio::preload::cancel_preload().await;
                         });
                         PlayerIpcEffects::default()

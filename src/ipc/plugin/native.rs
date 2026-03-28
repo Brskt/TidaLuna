@@ -1,5 +1,5 @@
 use super::{ipc_callback_err, ipc_callback_ok};
-use crate::app_state::{IpcCallback, IpcMessage, with_state};
+use crate::app_state::{IpcCallback, IpcMessage};
 use crate::native_runtime::NativeRuntime;
 use crate::state::{NATIVE_RUNTIME, NATIVE_RUNTIME_INIT};
 
@@ -17,9 +17,7 @@ fn ensure_native_runtime() -> Result<&'static NativeRuntime, String> {
     if let Some(rt) = NATIVE_RUNTIME.get() {
         return Ok(rt);
     }
-    let rt_handle = with_state(|state| state.rt_handle.clone())
-        .ok_or_else(|| "AppState not initialized".to_string())?;
-    let rt = NativeRuntime::spawn(&rt_handle)
+    let rt = NativeRuntime::spawn(crate::state::rt_handle())
         .map_err(|e| format!("Failed to start native runtime: {e}"))?;
     crate::vprintln!("[NATIVE] Bun process started");
     if NATIVE_RUNTIME.set(rt).is_err() {
@@ -72,11 +70,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
             return;
         }
     };
-    let Some(rt) = with_state(|state| state.rt_handle.clone()) else {
-        return;
-    };
-
-    rt.spawn(async move {
+    crate::state::rt_handle().spawn(async move {
         match rx.await {
             Ok(Ok(response)) => {
                 let exports = response
@@ -145,11 +139,7 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
             return;
         }
     };
-    let Some(rt) = with_state(|state| state.rt_handle.clone()) else {
-        return;
-    };
-
-    rt.spawn(async move {
+    crate::state::rt_handle().spawn(async move {
         match rx.await {
             Ok(Ok(response)) => {
                 let val = response

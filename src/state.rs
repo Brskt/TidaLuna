@@ -98,6 +98,15 @@ pub fn cache_data_dir() -> PathBuf {
     }
 }
 
+pub(crate) static RT_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn rt_handle() -> &'static tokio::runtime::Handle {
+    RT_HANDLE
+        .get()
+        .expect("Tokio runtime handle not initialized")
+}
+
 pub(crate) static DB: std::sync::OnceLock<crate::db::DbActor> = std::sync::OnceLock::new();
 
 pub(crate) static NATIVE_RUNTIME: std::sync::OnceLock<crate::native_runtime::NativeRuntime> =

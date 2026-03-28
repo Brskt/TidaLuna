@@ -26,17 +26,16 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
     let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
-        let rt = state.rt_handle.clone();
-        rt.spawn(async move {
-            let result = crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
-            let Some(cb) = take_ipc_callback(&id) else {
-                return;
-            };
-            match result {
-                Ok(json) => ipc_callback_ok(&cb, &json),
-                Err(e) => ipc_callback_err(&cb, &e),
-            }
-        });
+    });
+    crate::state::rt_handle().spawn(async move {
+        let result = crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
+        let Some(cb) = take_ipc_callback(&id) else {
+            return;
+        };
+        match result {
+            Ok(json) => ipc_callback_ok(&cb, &json),
+            Err(e) => ipc_callback_err(&cb, &e),
+        }
     });
 }
 
@@ -50,18 +49,17 @@ pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallbac
     let id = msg.id.clone().unwrap_or_default();
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
-        let rt = state.rt_handle.clone();
-        rt.spawn(async move {
-            let client = &*crate::state::HTTP_CLIENT;
-            let result = fetch_plugin_package(client, &url).await;
-            let Some(cb) = take_ipc_callback(&id) else {
-                return;
-            };
-            match result {
-                Ok(manifest) => ipc_callback_ok(&cb, &manifest),
-                Err(e) => ipc_callback_err(&cb, &format!("{e:#}")),
-            }
-        });
+    });
+    crate::state::rt_handle().spawn(async move {
+        let client = &*crate::state::HTTP_CLIENT;
+        let result = fetch_plugin_package(client, &url).await;
+        let Some(cb) = take_ipc_callback(&id) else {
+            return;
+        };
+        match result {
+            Ok(manifest) => ipc_callback_ok(&cb, &manifest),
+            Err(e) => ipc_callback_err(&cb, &format!("{e:#}")),
+        }
     });
 }
 
@@ -75,10 +73,9 @@ pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
     let id = msg.id.clone().unwrap_or_default();
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
-        let rt = state.rt_handle.clone();
-        rt.spawn(async move {
-            do_plugin_install(id, url).await;
-        });
+    });
+    crate::state::rt_handle().spawn(async move {
+        do_plugin_install(id, url).await;
     });
 }
 

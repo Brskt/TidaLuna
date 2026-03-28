@@ -38,7 +38,6 @@ impl std::fmt::Display for IpcMessage {
 
 pub(crate) struct AppState {
     pub(crate) player: Arc<crate::player::Player>,
-    pub(crate) rt_handle: tokio::runtime::Handle,
     pub(crate) pending_time_update: Option<(f64, u32)>,
     pub(crate) pending_player_events: Vec<crate::bridge::PlayerBridgeEvent>,
     pub(crate) pending_misc_js: Vec<String>,

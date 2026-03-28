@@ -140,7 +140,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
 
                 if st == PlaybackState::Completed {
                     let player = state.player.clone();
-                    state.rt_handle.spawn(async move {
+                    crate::state::rt_handle().spawn(async move {
                         if let Some(next) = crate::audio::preload::take_next_track().await {
                             crate::vprintln!("[AUTO]   Loading preloaded next track");
                             if let Err(e) = player.load_and_play(next.url, next.format, next.key) {

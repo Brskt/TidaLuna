@@ -99,6 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .unwrap();
     let rt_handle = rt.handle().clone();
+    state::RT_HANDLE
+        .set(rt_handle.clone())
+        .expect("RT_HANDLE already initialized");
 
     {
         let _guard = rt.enter();
@@ -126,7 +129,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
         player,
-        rt_handle,
         pending_time_update: None,
         pending_player_events: Vec::new(),
         pending_misc_js: Vec::new(),

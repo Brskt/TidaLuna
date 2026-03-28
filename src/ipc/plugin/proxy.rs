@@ -70,10 +70,9 @@ pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallbac
     let id = msg.id.clone().unwrap_or_default();
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
-        let rt = state.rt_handle.clone();
-        rt.spawn(async move {
-            handle_proxy_fetch(id, url, opts_json).await;
-        });
+    });
+    crate::state::rt_handle().spawn(async move {
+        handle_proxy_fetch(id, url, opts_json).await;
     });
 }
 
@@ -87,10 +86,9 @@ pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, callback: IpcCallback
     let id = msg.id.clone().unwrap_or_default();
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
-        let rt = state.rt_handle.clone();
-        rt.spawn(async move {
-            handle_proxy_head(id, url).await;
-        });
+    });
+    crate::state::rt_handle().spawn(async move {
+        handle_proxy_head(id, url).await;
     });
 }
 
