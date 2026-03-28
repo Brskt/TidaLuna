@@ -59,6 +59,8 @@ souvlaki = "0.8"
 oxc = { version = "0.122", features = ["semantic", "transformer", "codegen"] }
 url = "2"
 fnv = "1"
+tray-icon = { version = "0.21", default-features = false }
+png = "0.17"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.22.0"

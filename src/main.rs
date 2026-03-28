@@ -143,6 +143,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window_save_scheduled: false,
         #[cfg(target_os = "windows")]
         thumbbar: None,
+        close_to_tray: false,
+        force_quit: false,
     })));
 
     let root_cache = state::cache_data_dir().join("cef");

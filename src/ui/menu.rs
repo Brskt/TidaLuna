@@ -153,6 +153,9 @@ wrap_menu_model_delegate! {
                     });
                 }
                 MenuCommand::Exit => {
+                    with_state(|state| {
+                        state.force_quit = true;
+                    });
                     let browser = with_state(|state| state.browser.clone()).flatten();
                     if let Some(window) = get_cef_window(browser) {
                         window.close();

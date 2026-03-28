@@ -270,8 +270,21 @@ wrap_browser_process_handler! {
                 "win32"
             };
 
+            let mut close_to_tray = crate::state::db()
+                .call_settings(crate::settings::load_close_to_tray);
+            if close_to_tray && !crate::platform::tray::create_tray() {
+                close_to_tray = false;
+            }
+            if close_to_tray {
+                crate::app_state::with_state(|state| {
+                    state.close_to_tray = true;
+                });
+            }
+            crate::platform::tray::start_event_polling();
+
             let init_script = format!(
                 r#"window.__TIDAL_RS_PLATFORM__ = '{platform}';
+window.__TIDAL_RS_CLOSE_TO_TRAY__ = {close_to_tray};
 window.__TIDAL_RS_WINDOW_STATE__ = {{
     isMaximized: false,
     isFullscreen: false
@@ -310,6 +323,7 @@ document.title = "TidaLunar - A TIDAL client";
     }}
 }})();"#,
                 platform = platform,
+                close_to_tray = close_to_tray,
                 pkce_credentials_json = pkce_credentials_json
             );
 

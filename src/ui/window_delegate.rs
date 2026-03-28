@@ -193,6 +193,8 @@ wrap_window_delegate! {
             }
         }
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
+            with_state(|state| state.force_quit = false);
+            crate::platform::tray::destroy_tray();
             *self.browser_view.borrow_mut() = None;
         }
         fn on_window_bounds_changed(
@@ -226,6 +228,20 @@ wrap_window_delegate! {
             }
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
+            // Read without consuming — CEF may call can_close multiple times
+            // during the browser close handshake. Cleared in on_window_destroyed.
+            let force_quit = with_state(|state| state.force_quit).unwrap_or(false);
+            if !force_quit {
+                let close_to_tray = with_state(|state| state.close_to_tray).unwrap_or(false);
+                if close_to_tray
+                    && crate::platform::tray::has_tray()
+                    && let Some(window) = _window
+                {
+                    window.hide();
+                    return 0;
+                }
+            }
+
             let pending_ws = with_state(|state| state.pending_window_save.take()).flatten();
             if let Some(ws) = pending_ws {
                 crate::state::db().call_settings(move |sc| {

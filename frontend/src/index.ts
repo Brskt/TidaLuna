@@ -178,6 +178,22 @@ const init = async () => {
     }
     console.log("[luna] Core initialized — Redux store discovered, modules populated");
 
+    // Hydrate close-to-tray from Rust-persisted value and expose setter for Rust
+    {
+        const { store } = require("../plugins/lib/src/redux/store");
+        const setCloseToTray = (enabled: boolean) => {
+            const desktop = store.getState().settings?.desktop;
+            if (desktop && desktop.closeToTray !== enabled) {
+                store.dispatch({
+                    type: "settings/DESKTOP_SETTINGS_UPDATED",
+                    payload: { ...desktop, closeToTray: enabled },
+                });
+            }
+        };
+        (window as any).__LUNAR_SET_CLOSE_TO_TRAY__ = setCloseToTray;
+        setCloseToTray(!!(window as any).__TIDAL_RS_CLOSE_TO_TRAY__);
+    }
+
     // SDK middleware doesn't reach Rust player for DASH/AAC — intercept Redux actions.
     {
         const { interceptors } = require("../render/src/exposeTidalInternals.patchAction");
@@ -196,6 +212,11 @@ const init = async () => {
         // so we forward Redux SET_VOLUME to Rust directly.
         add("playbackControls/SET_VOLUME", (p: { volume: number }) => {
             if (isSelfLoad()) sendIpc("player.volume", p.volume);
+        });
+        add("settings/TOGGLE_CLOSE_TO_TRAY", () => {
+            const { store } = require("../plugins/lib/src/redux/store");
+            const current = store.getState().settings?.desktop?.closeToTray ?? false;
+            sendIpc("settings.close_to_tray", !current);
         });
     }
 

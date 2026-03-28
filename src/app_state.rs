@@ -52,6 +52,8 @@ pub(crate) struct AppState {
     pub(crate) window_save_scheduled: bool,
     #[cfg(target_os = "windows")]
     pub(crate) thumbbar: Option<crate::platform::thumbbar::ThumbBar>,
+    pub(crate) close_to_tray: bool,
+    pub(crate) force_quit: bool,
 }
 
 // SAFETY: AppState contains non-Send CEF/OS handles and thread-sensitive fields

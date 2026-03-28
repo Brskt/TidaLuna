@@ -143,3 +143,18 @@ pub(crate) fn load_volume_sync(conn: &mut Connection) -> bool {
 pub(crate) fn save_volume_sync(conn: &mut Connection, enabled: bool) {
     set(conn, "player.volume_sync", &enabled.to_string());
 }
+
+pub(crate) fn load_close_to_tray(conn: &mut Connection) -> bool {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = 'window.close_to_tray'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(false)
+}
+
+pub(crate) fn save_close_to_tray(conn: &mut Connection, enabled: bool) {
+    set(conn, "window.close_to_tray", &enabled.to_string());
+}

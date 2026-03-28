@@ -163,6 +163,41 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             }
         }
         "web.loaded" => {}
+        "settings.close_to_tray" => {
+            crate::vprintln!("[TRAY]   IPC settings.close_to_tray received");
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
+            crate::state::db().call_settings(move |conn| {
+                crate::settings::save_close_to_tray(conn, enabled);
+            });
+            if enabled {
+                let created = if !crate::platform::tray::has_tray() {
+                    crate::platform::tray::create_tray()
+                } else {
+                    true
+                };
+                with_state(|state| {
+                    state.close_to_tray = created;
+                });
+                if !created {
+                    crate::state::db().call_settings(|conn| {
+                        crate::settings::save_close_to_tray(conn, false);
+                    });
+                    crate::app_state::eval_js(
+                        "if(typeof window.__LUNAR_SET_CLOSE_TO_TRAY__==='function')\
+                         window.__LUNAR_SET_CLOSE_TO_TRAY__(false);",
+                    );
+                }
+            } else {
+                with_state(|state| {
+                    state.close_to_tray = false;
+                });
+                crate::platform::tray::destroy_tray();
+                let browser = with_state(|state| state.browser.clone()).flatten();
+                if let Some(window) = get_cef_window(browser) {
+                    window.show();
+                }
+            }
+        }
         _ => {}
     }
 }
