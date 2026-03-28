@@ -1,6 +1,2 @@
 [alias]
 xtask = "run --package xtask --"
-
-# Required for reqwest's unstable http3 (QUIC) feature
-[build]
-rustflags = ["--cfg", "reqwest_unstable"]
