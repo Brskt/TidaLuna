@@ -1,5 +1,32 @@
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
+use crate::native_runtime::NativeRuntime;
+use crate::state::{NATIVE_RUNTIME, NATIVE_RUNTIME_INIT};
+
+/// Initialize the native runtime (Bun child process) if not already running.
+///
+/// Uses double-check locking: fast path is a single atomic load on `OnceLock::get()`.
+/// Slow path serializes via `NATIVE_RUNTIME_INIT` mutex to prevent double spawn.
+fn ensure_native_runtime() -> Result<&'static NativeRuntime, String> {
+    if let Some(rt) = NATIVE_RUNTIME.get() {
+        return Ok(rt);
+    }
+    let _guard = NATIVE_RUNTIME_INIT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(rt) = NATIVE_RUNTIME.get() {
+        return Ok(rt);
+    }
+    let rt_handle = with_state(|state| state.rt_handle.clone())
+        .ok_or_else(|| "AppState not initialized".to_string())?;
+    let rt = NativeRuntime::spawn(&rt_handle)
+        .map_err(|e| format!("Failed to start native runtime: {e}"))?;
+    crate::vprintln!("[NATIVE] Bun process started");
+    if NATIVE_RUNTIME.set(rt).is_err() {
+        panic!("NATIVE_RUNTIME already initialized under init lock");
+    }
+    Ok(NATIVE_RUNTIME.get().unwrap())
+}
 
 pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
     let name = msg
@@ -25,34 +52,27 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         code.len()
     );
 
-    let spawn_data = with_state(|state| {
-        if state.native_runtime.is_none() {
-            match crate::native_runtime::NativeRuntime::spawn(&state.rt_handle) {
-                Ok(rt) => {
-                    state.native_runtime = Some(rt);
-                    crate::vprintln!("[NATIVE] Bun process started");
-                }
-                Err(e) => {
-                    crate::vprintln!("[NATIVE] Failed to start Bun: {e}");
-                    return Err(format!("Failed to start native runtime: {e}"));
-                }
-            }
-        }
-
-        let cmd = serde_json::json!({
-            "type": "register",
-            "name": name,
-            "code": code,
-        });
-        let rx = state.native_runtime.as_ref().unwrap().send_command(cmd)?;
-        let rt = state.rt_handle.clone();
-        Ok((rx, rt))
-    });
-
-    let Some(Ok((rx, rt))) = spawn_data else {
-        if let Some(Err(e)) = spawn_data {
+    let runtime = match ensure_native_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
             ipc_callback_err(&callback, &e);
+            return;
         }
+    };
+
+    let cmd = serde_json::json!({
+        "type": "register",
+        "name": name,
+        "code": code,
+    });
+    let rx = match runtime.send_command(cmd) {
+        Ok(rx) => rx,
+        Err(e) => {
+            ipc_callback_err(&callback, &e);
+            return;
+        }
+    };
+    let Some(rt) = with_state(|state| state.rt_handle.clone()) else {
         return;
     };
 
@@ -88,6 +108,11 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
     });
 }
 
+/// Handle `__LunaNative.{name}` IPC calls to a registered native module.
+///
+/// INVARIANT: `registerNative` must be called before any `__LunaNative.*` call.
+/// The JS plugin loader guarantees this — registerNative is synchronous in the
+/// plugin load path, and native calls only happen after the module is registered.
 pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
     let module_name = msg
         .channel
@@ -102,26 +127,25 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
         .to_string();
     let call_args: Vec<serde_json::Value> = msg.args.iter().skip(1).cloned().collect();
 
-    let call_data = with_state(|state| {
-        let Some(ref runtime) = state.native_runtime else {
-            return Err("Native runtime not initialized".to_string());
-        };
+    let Some(runtime) = NATIVE_RUNTIME.get() else {
+        ipc_callback_err(&callback, "Native runtime not initialized");
+        return;
+    };
 
-        let cmd = serde_json::json!({
-            "type": "call",
-            "name": module_name,
-            "fn": export_name,
-            "args": call_args,
-        });
-        let rx = runtime.send_command(cmd)?;
-        let rt = state.rt_handle.clone();
-        Ok((rx, rt))
+    let cmd = serde_json::json!({
+        "type": "call",
+        "name": module_name,
+        "fn": export_name,
+        "args": call_args,
     });
-
-    let Some(Ok((rx, rt))) = call_data else {
-        if let Some(Err(e)) = call_data {
+    let rx = match runtime.send_command(cmd) {
+        Ok(rx) => rx,
+        Err(e) => {
             ipc_callback_err(&callback, &e);
+            return;
         }
+    };
+    let Some(rt) = with_state(|state| state.rt_handle.clone()) else {
         return;
     };
 

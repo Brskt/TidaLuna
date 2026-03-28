@@ -100,6 +100,10 @@ pub fn cache_data_dir() -> PathBuf {
 
 pub(crate) static DB: std::sync::OnceLock<crate::db::DbActor> = std::sync::OnceLock::new();
 
+pub(crate) static NATIVE_RUNTIME: std::sync::OnceLock<crate::native_runtime::NativeRuntime> =
+    std::sync::OnceLock::new();
+pub(crate) static NATIVE_RUNTIME_INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn db() -> &'static crate::db::DbActor {
     DB.get().expect("DB actor not initialized")
 }

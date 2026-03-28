@@ -49,7 +49,6 @@ pub(crate) struct AppState {
     pub(crate) plugin_manager: crate::plugins::PluginManager,
     pub(crate) captured_token: String,
     pub(crate) pending_ipc_callbacks: HashMap<String, IpcCallback>,
-    pub(crate) native_runtime: Option<crate::native_runtime::NativeRuntime>,
     pub(crate) pending_window_save: Option<crate::settings::WindowState>,
     pub(crate) window_save_scheduled: bool,
     #[cfg(target_os = "windows")]

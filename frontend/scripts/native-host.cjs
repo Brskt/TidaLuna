@@ -3,6 +3,7 @@ const readline = require("readline");
 const modules = {};
 
 const rl = readline.createInterface({ input: process.stdin });
+rl.on("close", () => process.exit(0));
 
 rl.on("line", async (line) => {
 	let cmd;

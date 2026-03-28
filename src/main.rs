@@ -137,7 +137,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugin_manager: plugins::PluginManager::new(),
         captured_token: String::new(),
         pending_ipc_callbacks: HashMap::new(),
-        native_runtime: None,
         pending_window_save: None,
         window_save_scheduled: false,
         #[cfg(target_os = "windows")]
