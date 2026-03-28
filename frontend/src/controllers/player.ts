@@ -123,6 +123,13 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.seek", time);
             },
             setVolume: (volume: number) => {
+                // The SDK applies a perceptual curve before calling setVolume,
+                // but we want the raw Redux value (0-100) for WASAPI session volume.
+                try {
+                    const { store } = require("../../plugins/lib/src/redux/store");
+                    const raw = store?.getState()?.playbackControls?.volume;
+                    if (raw !== undefined) volume = raw;
+                } catch (_) {}
                 if (volume === _lastVolume) return;
                 _lastVolume = volume;
                 sendIpc("player.volume", volume);
@@ -187,6 +194,7 @@ export const createNativePlayerComponent = () => {
         // emitting events or triggering backend seeks.  The currentTime getter
         // (seekTarget ?? _time) ensures the correct value is always returned.
         _setTime: (t: number) => { _time = t; },
+        syncBridgeVolume: (v: number) => { _lastVolume = v; },
         trigger: (event: string, target: any, gen?: number) => {
             if (event !== "mediacurrenttime") {
                 sendIpc("player.dbg", "trigger", event, target, "listeners=" + (activeEmitter?.listeners?.[event]?.length ?? 0), "playerCalls=" + playerCallCount);

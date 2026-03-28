@@ -56,7 +56,6 @@ const PASSTHROUGH_EVENTS = new Set([
 ]);
 let _lastTimeDispatch = 0;
 let _forceTimeDispatch = false;
-let _volumeFromBridge = false;
 
 // Short aliases used by the Rust bridge → SDK event names (carry seq).
 const SEQ_EVENTS: Record<string, string> = {
@@ -110,13 +109,12 @@ window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
         } else if (type === "volume") {
             try {
                 const { store } = require("../plugins/lib/src/redux/store");
-                _volumeFromBridge = true;
+                (bridge as any).syncBridgeVolume?.(Math.round(event.v));
                 store.dispatch({
                     type: "playbackControls/SET_VOLUME",
                     payload: { volume: Math.round(event.v) },
                 });
-                _volumeFromBridge = false;
-            } catch (_) { _volumeFromBridge = false; }
+            } catch (_) {}
         } else if (type === "state") {
             const playing = event.v === "active";
             (window as any).__TL_PLAYING__ = playing;
@@ -194,8 +192,10 @@ const init = async () => {
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;
         });
+        // Volume: for self-loaded tracks (DASH/AAC) the SDK doesn't call setVolume,
+        // so we forward Redux SET_VOLUME to Rust directly.
         add("playbackControls/SET_VOLUME", (p: { volume: number }) => {
-            if (!_volumeFromBridge) sendIpc("player.volume", p.volume);
+            if (isSelfLoad()) sendIpc("player.volume", p.volume);
         });
     }
 

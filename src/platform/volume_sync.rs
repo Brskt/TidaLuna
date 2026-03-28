@@ -131,27 +131,10 @@ impl VolumeSync {
                 find_device_by_name(&dev_enumerator, device_id)?
             };
 
-            let session_mgr: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
-            let session_enum = session_mgr.GetSessionEnumerator()?;
-            let count = session_enum.GetCount()?;
-            let our_pid = std::process::id();
-
-            let mut found_ctl: Option<IAudioSessionControl> = None;
-            for i in 0..count {
-                let ctl = session_enum.GetSession(i)?;
-                let ctl2: IAudioSessionControl2 = ctl.cast()?;
-                if ctl2.GetProcessId()? == our_pid {
-                    found_ctl = Some(ctl);
-                    break;
-                }
-            }
-
-            let session_ctl = found_ctl.ok_or_else(|| {
-                Error::new(
-                    windows::Win32::Foundation::E_FAIL,
-                    "No audio session found for this process",
-                )
-            })?;
+            // Get the default process-specific session (GUID_NULL, StreamFlags=0).
+            // This matches standard WASAPI behavior and should match cpal's default session.
+            let session_mgr: IAudioSessionManager = device.Activate(CLSCTX_ALL, None)?;
+            let session_ctl = session_mgr.GetAudioSessionControl(None, 0)?;
 
             let simple_volume: ISimpleAudioVolume = session_ctl.cast()?;
 
