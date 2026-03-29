@@ -58,13 +58,24 @@ impl NativeRuntime {
             host_script.display()
         );
 
-        let mut child = Command::new(&bun_path)
-            .arg("run")
+        let mut cmd = Command::new(&bun_path);
+        cmd.arg("run")
             .arg(&host_script)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+
+        // Hide the console window on Windows
+        #[cfg(target_os = "windows")]
+        {
+            #[allow(unused_imports)]
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn Bun: {e}"))?;
 
