@@ -11,7 +11,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { mkdirSync } from "fs";
 
-import { build, defaultBuildOptions, RUNTIME_EXTERNALS, TYPE_ONLY_PACKAGES } from "./build";
+import { build, defaultBuildOptions, RUNTIME_EXTERNALS, TYPE_ONLY_PACKAGES, getLunaDependencyExternals } from "./build";
 import { dynamicExternalsPlugin } from "./build/plugins/dynamicExternals";
 import { typeOnlyPlugin } from "./build/plugins/typeOnly";
 import { coreSelfResolvePlugin } from "./build/plugins/coreSelfResolve";
@@ -41,6 +41,10 @@ const devOutfile = resolve(root, "plugins/dev/dist/luna-dev.mjs");
 // ─── Phase 1: Inline plugins ────────────────────────────────────────────
 // Must run BEFORE bundle.js — src/index.ts imports the generated inline .ts files.
 
+// Merge RUNTIME_EXTERNALS with any luna.dependencies declared in plugin package.json files
+const uiExternals = [...new Set([...RUNTIME_EXTERNALS, ...getLunaDependencyExternals(resolve(root, "plugins/ui/package.json"))])];
+const devExternals = [...new Set([...RUNTIME_EXTERNALS, ...getLunaDependencyExternals(resolve(root, "plugins/dev/package.json"))])];
+
 const lunaUiInline: BuildOptions = {
 	...inlinePluginDefaults,
 	entryPoints: [resolve(root, "plugins/ui/src/index.tsx")],
@@ -49,7 +53,7 @@ const lunaUiInline: BuildOptions = {
 		"plugins/lib.native/src/index.native": resolve(root, "plugins/lib.native/src/index.native.ts"),
 	},
 	plugins: [
-		dynamicExternalsPlugin(RUNTIME_EXTERNALS),
+		dynamicExternalsPlugin(uiExternals),
 		typeOnlyPlugin(TYPE_ONLY_PACKAGES),
 		inlineBundlePlugin({
 			outfile: uiOutfile,
@@ -65,7 +69,7 @@ const lunaDevInline: BuildOptions = {
 	entryPoints: [resolve(root, "plugins/dev/src/index.ts")],
 	outfile: devOutfile,
 	plugins: [
-		dynamicExternalsPlugin(RUNTIME_EXTERNALS),
+		dynamicExternalsPlugin(devExternals),
 		typeOnlyPlugin(TYPE_ONLY_PACKAGES),
 		inlineBundlePlugin({
 			outfile: devOutfile,

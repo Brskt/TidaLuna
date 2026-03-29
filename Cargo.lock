@@ -4336,6 +4336,7 @@ dependencies = [
  "dash-mpd",
  "fnv",
  "futures-util",
+ "getrandom 0.3.4",
  "oauth2",
  "oxc",
  "png",

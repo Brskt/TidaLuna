@@ -30,21 +30,35 @@ fn escape_js(s: &str) -> String {
 /// `code` — already transpiled+bundled JS (no ES module syntax, ready for eval).
 ///
 /// Returns a self-executing JS string safe to pass to `frame.execute_java_script()`.
-pub fn wrap_plugin_code(plugin_id: &str, code: &str) -> String {
+pub fn wrap_plugin_code(plugin_id: &str, code: &str, load_id: u64, nonce: u64) -> String {
     let escaped_id = escape_js(plugin_id);
 
     // Template uses string concatenation to avoid format!() escaping hell with JS braces.
     // The IIFE parameters shadow dangerous globals — they receive `undefined` as arguments.
     let mut js = String::with_capacity(code.len() + 4096);
 
+    // Pre-build ack request string with serde_json (no JS-side JSON.stringify dependency)
+    let ack_request = serde_json::to_string(&serde_json::json!({
+        "channel": "jsrt.plugin_ready",
+        "args": [plugin_id, load_id.to_string(), nonce.to_string()]
+    }))
+    .unwrap_or_default();
+    let escaped_ack = escape_js(&ack_request);
+
     // --- Two-layer IIFE ---
     // Outer (sloppy mode): shadows `eval` and `Function` as parameters.
-    // These names are forbidden in strict mode parameter lists, so the outer
-    // IIFE must NOT have 'use strict'.
-    // Inner (strict mode): shadows all other dangerous globals as parameters.
+    // Captures Promise.prototype.then + cefQuery + nonce BEFORE plugin code runs.
     js.push_str("(function(eval, Function) {\n");
+    // Capture primitives in outer scope — plugin code can't reach these (shadowed below)
+    js.push_str("var __pThen = Promise.prototype.then;\n");
+    js.push_str("var __ackCq = window.cefQuery;\n");
+    js.push_str("var __ackReq = '");
+    js.push_str(&escaped_ack);
+    js.push_str("';\n");
     // Inner IIFE is async to support top-level await (plugin .mjs files are ES modules).
-    js.push_str("(async function(__pid, __cq, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts) {\n");
+    // __pThen, __ackCq, __ackReq are shadowed to undefined in the inner scope.
+    js.push_str("__pThen.call(\n");
+    js.push_str("(async function(__pid, __cq, __gen, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq) {\n");
     js.push_str("'use strict';\n");
 
     // --- Controlled fetch ---
@@ -178,10 +192,27 @@ if (typeof __exports !== 'undefined') {
     );
 
     // --- Inner IIFE close ---
-    // Arguments: pluginId, cefQuery ref, then undefined for all shadowed globals
+    // Arguments: pluginId, cefQuery ref, load_id, then undefined for all shadowed globals
+    // Last 3 undefined shadow __pThen, __ackCq, __ackReq from outer scope
     js.push_str("})('");
     js.push_str(&escaped_id);
-    js.push_str("', window.cefQuery, undefined, undefined, undefined, undefined, undefined, undefined, undefined);\n");
+    js.push_str("', window.cefQuery, ");
+    js.push_str(&load_id.to_string());
+    js.push_str(
+        ", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined)",
+    );
+
+    // --- Plugin ready ack (anti-spoofing renforcé, NOT a full security boundary) ---
+    // Sent via .then() in the OUTER scope after the async IIFE fully resolves.
+    // Uses captured __pThen (original Promise.prototype.then), __ackCq (original cefQuery),
+    // and __ackReq (pre-serialized by Rust). All three are shadowed to undefined in the
+    // inner IIFE, so plugin code cannot access or forge them.
+    // NOTE: This protects against self-spoofing by the current plugin. It does NOT protect
+    // against cross-plugin spoofing (a previously loaded plugin could have patched globals
+    // before this wrapper captured them). Full isolation would require separate V8 isolates.
+    js.push_str(",\nfunction() {\n");
+    js.push_str("__ackCq({ request: __ackReq, onSuccess: function(){}, onFailure: function(c,m){ console.error('[plugin:ready]',c,m); } });\n");
+    js.push_str("});\n");
 
     // --- Outer IIFE close ---
     // Passes undefined for eval and Function
@@ -196,7 +227,12 @@ mod tests {
 
     #[test]
     fn test_wrap_produces_iife() {
-        let result = wrap_plugin_code("https://example.com/plugin.mjs", "console.log('hello');");
+        let result = wrap_plugin_code(
+            "https://example.com/plugin.mjs",
+            "console.log('hello');",
+            0,
+            0,
+        );
         assert!(result.starts_with("(function("));
         assert!(result.contains("'use strict'"));
         assert!(result.contains("console.log('hello');"));
@@ -205,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_wrap_shadows_localstorage() {
-        let result = wrap_plugin_code("test", "");
+        let result = wrap_plugin_code("test", "", 0, 0);
         // localStorage should be a parameter name (shadowed to undefined)
         assert!(result.contains("localStorage"));
         // The IIFE call should pass undefined for it
@@ -214,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_wrap_contains_controlled_fetch() {
-        let result = wrap_plugin_code("test", "");
+        let result = wrap_plugin_code("test", "", 0, 0);
         assert!(result.contains("var fetch = function("));
         assert!(result.contains("plugin.fetch"));
         assert!(result.contains("__cq("));
@@ -222,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_wrap_contains_storage_api() {
-        let result = wrap_plugin_code("test", "");
+        let result = wrap_plugin_code("test", "", 0, 0);
         assert!(result.contains("__idbKeyval"));
         assert!(result.contains("plugin.storage.get"));
         assert!(result.contains("plugin.storage.set"));
@@ -232,14 +268,14 @@ mod tests {
 
     #[test]
     fn test_wrap_contains_unload_tracking() {
-        let result = wrap_plugin_code("test", "");
+        let result = wrap_plugin_code("test", "", 0, 0);
         assert!(result.contains("__pluginUnloads"));
         assert!(result.contains("onUnload"));
     }
 
     #[test]
     fn test_wrap_escapes_plugin_id() {
-        let result = wrap_plugin_code("it's a \"test\"", "");
+        let result = wrap_plugin_code("it's a \"test\"", "", 0, 0);
         // Single quotes escaped (embedded in JS single-quoted string)
         assert!(result.contains("it\\'s a"));
         // Double quotes pass through unescaped (safe in single-quoted JS context)
@@ -248,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_wrap_shadows_dangerous_apis() {
-        let result = wrap_plugin_code("test", "");
+        let result = wrap_plugin_code("test", "", 0, 0);
         // All these should be parameter names (shadowed)
         // WebSocket intentionally NOT shadowed — plugins like DiscordRPC need it.
         for name in &[
@@ -268,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_wrap_cefquery_private() {
-        let result = wrap_plugin_code("test", "");
+        let result = wrap_plugin_code("test", "", 0, 0);
         // cefQuery is captured as __cq (private), not exposed by name
         assert!(result.contains("__cq"));
         assert!(result.contains("window.cefQuery"));

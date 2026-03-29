@@ -3,6 +3,7 @@ import { LunaPlugin } from "@luna/core";
 import React, { useEffect, useState } from "react";
 
 import { LunaPluginHeader } from "../PluginsTab/LunaPluginHeader";
+import { installPluginWithLibraries, uninstallPluginWithDependenciesCheck } from "./pluginInstall";
 
 import ButtonBase from "@mui/material/ButtonBase";
 import Typography from "@mui/material/Typography";
@@ -38,7 +39,7 @@ export const LunaStorePlugin = React.memo(({ url }: { url: string }) => {
 				width: "100%",
 			}}
 			style={{ textAlign: "left" }}
-			onClick={() => (plugin.installed ? plugin.uninstall() : plugin.install())}
+			onClick={() => (plugin.installed ? uninstallPluginWithDependenciesCheck(plugin) : installPluginWithLibraries(plugin))}
 		>
 			<LunaPluginHeader
 				sx={{ transition: "opacity 0.3s ease-in-out", opacity: isHovered ? 0.2 : 1, width: "100%" }}
@@ -47,6 +48,8 @@ export const LunaStorePlugin = React.memo(({ url }: { url: string }) => {
 				loadError={loadError}
 				author={plugin.package?.author}
 				desc={plugin.package?.description}
+				isLibrary={plugin.isLibrary}
+				dependsOn={plugin.dependencyRequirements?.map(d => d.name)}
 			/>
 			<Typography
 				sx={{

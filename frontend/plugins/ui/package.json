@@ -1,6 +1,7 @@
 {
 	"name": "@luna/ui",
 	"description": "Luna UI providing components and settings page",
+	"luna": { "type": "library" },
 	"author": {
 		"name": "Inrixia",
 		"url": "https://github.com/Inrixia",

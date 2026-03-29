@@ -16,8 +16,10 @@ export interface LunaPluginComponentProps extends PropsWithChildren {
 	author?: LunaAuthor | string;
 	desc?: ReactNode;
 	sx?: BoxProps["sx"];
+	isLibrary?: boolean;
+	dependsOn?: string[];
 }
-export const LunaPluginHeader = React.memo(({ name, version, loadError, author, desc, children, sx, link }: LunaPluginComponentProps) => (
+export const LunaPluginHeader = React.memo(({ name, version, loadError, author, desc, children, sx, link, isLibrary, dependsOn }: LunaPluginComponentProps) => (
 	<Box sx={sx}>
 		<Stack direction="row" alignItems="center" spacing={1}>
 			<Typography variant="h6">
@@ -39,9 +41,16 @@ export const LunaPluginHeader = React.memo(({ name, version, loadError, author, 
 					children={loadError}
 				/>
 			)}
-			<Box sx={{ flexGrow: 1 }} /> {/* This pushes the author section to the right */}
+			<Box sx={{ flexGrow: 1 }} />
 			{author && <LunaAuthorDisplay author={author} />}
 		</Stack>
 		{desc && <Typography variant="subtitle2" gutterBottom dangerouslySetInnerHTML={{ __html: desc }} />}
+		{(isLibrary || (dependsOn && dependsOn.length > 0)) && (
+			<Typography variant="caption" sx={{ opacity: 0.6 }}>
+				{isLibrary && "Library"}
+				{isLibrary && dependsOn && dependsOn.length > 0 && " · "}
+				{dependsOn && dependsOn.length > 0 && `Depends on: ${dependsOn.join(", ")}`}
+			</Typography>
+		)}
 	</Box>
 ));

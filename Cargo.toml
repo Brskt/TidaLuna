@@ -59,6 +59,7 @@ souvlaki = "0.8"
 oxc = { version = "0.122", features = ["semantic", "transformer", "codegen"] }
 url = "2"
 fnv = "1"
+getrandom = "0.3"
 tray-icon = { version = "0.21", default-features = false }
 png = "0.17"
 

@@ -1,4 +1,6 @@
 import { type BuildOptions, build as esBuild } from "esbuild";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 
 export const defaultBuildOptions: BuildOptions = {
 	bundle: true,
@@ -22,6 +24,14 @@ export const RUNTIME_EXTERNALS = [
 export const TYPE_ONLY_PACKAGES = [
 	"@octokit/openapi-types",
 ];
+
+/** Read `luna.dependencies` from a package.json and return their names as externals. */
+export const getLunaDependencyExternals = (packageJsonPath: string): string[] => {
+	const pkg = JSON.parse(readFileSync(resolve(packageJsonPath), "utf-8"));
+	return (pkg.luna?.dependencies ?? [])
+		.map((d: { name?: string } | string) => (typeof d === "string" ? d : d?.name))
+		.filter((n: unknown): n is string => typeof n === "string" && (n as string).length > 0);
+};
 
 /**
  * Execute esbuild configs **strictly sequentially**.

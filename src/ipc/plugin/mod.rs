@@ -56,6 +56,18 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
         "plugin.install" => {
             plugin_ipc::handle_plugin_install(&msg, callback);
         }
+        "plugin.check_hash" => {
+            plugin_ipc::handle_plugin_check_hash(&msg, callback);
+        }
+        "plugin.enable" => {
+            plugin_ipc::handle_plugin_enable(&msg, callback);
+        }
+        "plugin.disable" => {
+            plugin_ipc::handle_plugin_disable(&msg, callback);
+        }
+        "jsrt.load_plugins" => {
+            plugin_ipc::handle_jsrt_load_plugins(callback);
+        }
         _ => {
             plugin_ipc::handle_plugin_db(msg, callback);
         }

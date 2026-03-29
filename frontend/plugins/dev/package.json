@@ -1,6 +1,7 @@
 {
 	"name": "@luna/dev",
 	"description": "Developer tools to help with debugging and development of Luna & Luna plugins",
+	"luna": { "type": "library" },
 	"author": {
 		"name": "Inrixia",
 		"url": "https://github.com/Inrixia",

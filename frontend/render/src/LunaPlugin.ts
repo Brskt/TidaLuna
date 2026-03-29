@@ -21,6 +21,15 @@ export type LunaAuthor = {
 	url: string;
 	avatarUrl?: string;
 };
+export type LunaPackageDependency = {
+	name: string;
+	storeUrl: string;
+	devStoreUrl?: string;
+};
+export type LunaPackageMeta = {
+	type?: "plugin" | "library";
+	dependencies?: LunaPackageDependency[];
+};
 export type PluginPackage = {
 	name: string;
 	hash: string;
@@ -35,6 +44,7 @@ export type PluginPackage = {
 	dependencies?: string[];
 	devDependencies?: string[];
 	code?: string;
+	luna?: LunaPackageMeta;
 };
 
 // If adding to this make sure that the values are initalized in LunaPlugin.fromStorage
@@ -299,6 +309,18 @@ export class LunaPlugin {
 	}
 	public get isDev(): boolean {
 		return this.url.startsWith("http://127.0.0.1");
+	}
+
+	public get isLibrary(): boolean {
+		return this.store.package?.luna?.type === "library";
+	}
+
+	public get dependencyRequirements(): LunaPackageDependency[] {
+		return this.store.package?.luna?.dependencies ?? [];
+	}
+
+	public dependsOn(pluginName: string): boolean {
+		return this.dependencyRequirements.some(d => d.name === pluginName);
 	}
 	// #endregion
 

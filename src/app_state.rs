@@ -81,12 +81,16 @@ pub(crate) fn exec_js_on_frame(frame: &Frame, js: &str) {
     frame.execute_java_script(Some(&code), Some(&url), 0);
 }
 
-pub(crate) fn eval_js(js: &str) {
+/// Dispatch JS to the renderer. Returns true if a frame was found and the JS was posted.
+pub(crate) fn eval_js(js: &str) -> bool {
     let browser = with_state(|state| state.browser.clone());
     if let Some(Some(browser)) = browser
         && let Some(frame) = browser.main_frame()
     {
         exec_js_on_frame(&frame, js);
+        true
+    } else {
+        false
     }
 }
 
@@ -95,7 +99,21 @@ pub(crate) fn emit_ipc_event(channel: &str) {
         "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}');",
         channel.replace('\'', "\\'")
     );
-    eval_js(&js);
+    let _ = eval_js(&js);
+}
+
+pub(crate) fn emit_ipc_event_with_args(channel: &str, args: &[&str]) {
+    let escaped_channel = channel.replace('\'', "\\'");
+    let args_js: Vec<String> = args
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "\\'")))
+        .collect();
+    let js = format!(
+        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}',{});",
+        escaped_channel,
+        args_js.join(",")
+    );
+    let _ = eval_js(&js);
 }
 
 pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {

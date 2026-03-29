@@ -9,7 +9,7 @@
  */
 
 import { Signal } from "./signal";
-import { invokeIpc, sendIpc } from "../ipc";
+import { invokeIpc } from "../ipc";
 import { modules } from "./core";
 import { store as obyStore } from "oby";
 
@@ -19,6 +19,17 @@ export type LunaAuthor = {
     name: string;
     url: string;
     avatarUrl?: string;
+};
+
+export type LunaPackageDependency = {
+    name: string;
+    storeUrl: string;
+    devStoreUrl?: string;
+};
+
+export type LunaPackageMeta = {
+    type?: "plugin" | "library";
+    dependencies?: LunaPackageDependency[];
 };
 
 export type PluginPackage = {
@@ -31,6 +42,7 @@ export type PluginPackage = {
     version?: string;
     dependencies?: string[];
     devDependencies?: string[];
+    luna?: LunaPackageMeta;
 };
 
 export type LunaPluginStore = {
@@ -142,6 +154,26 @@ export class LunaPlugin {
         return this.url.startsWith("http://127.0.0.1");
     }
 
+    get isLibrary(): boolean {
+        return this.store.package?.luna?.type === "library";
+    }
+
+    get dependencyRequirements(): LunaPackageDependency[] {
+        return this.store.package?.luna?.dependencies ?? [];
+    }
+
+    dependsOn(pluginName: string): boolean {
+        return this.dependencyRequirements.some(d => d.name === pluginName);
+    }
+
+    static getInstalled(): LunaPlugin[] {
+        return Object.values(LunaPlugin.plugins).filter(p => p.store.installed);
+    }
+
+    static findInstalledDependantsOf(pluginName: string): LunaPlugin[] {
+        return LunaPlugin.getInstalled().filter(p => p.dependsOn(pluginName));
+    }
+
     // --- Event listeners ---
 
     onSetEnabled(callback: (enabled: boolean) => void): () => void {
@@ -168,44 +200,95 @@ export class LunaPlugin {
 
     async install(): Promise<void> {
         this.loading._ = true;
-        console.log(`[luna:plugin] install() called for ${this.url}`);
         try {
+            // 1. Store (installed=1, enabled=0)
             const info = await invokeIpc("plugin.install", this.url);
-            console.log(`[luna:plugin] plugin.install IPC returned for ${this.url}`, info?.name);
             try {
                 const pkg = typeof info.manifest === "string" ? JSON.parse(info.manifest) : info.manifest;
                 if (pkg?.name) this.store.package = pkg;
-            } catch (e) { console.warn("[luna:plugin] Package info fetch failed:", e); }
+            } catch (e) { console.warn("[luna:plugin] Package info parse failed:", e); }
+            if (info.hash) this.store.package.hash = info.hash;
             this.store.installed = true;
-            this.store.enabled = true;
-            this.enabled = true;
             this.name = this.store.package.name;
-            console.log(`[luna:plugin] Sending jsrt.enable_plugin for ${this.url}`);
-            sendIpc("jsrt.enable_plugin", this.url);
             LunaPlugin.plugins[this.url] = this;
+
+            // 2. Enable atomically (Rust: check deps + DB enable + inject)
+            try {
+                await invokeIpc("plugin.enable", this.url);
+                this.store.enabled = true;
+                this.enabled = true;
+            } catch (enableErr) {
+                console.error(`[luna:plugin] Enable failed, attempting cleanup:`, enableErr);
+                // Best-effort cleanup — guard may block if dependants exist
+                let cleaned = false;
+                try {
+                    await invokeIpc("plugin.uninstall", this.url);
+                    cleaned = true;
+                } catch {
+                    // Normal uninstall blocked — try dedicated cleanup for never-dispatched plugins
+                    try {
+                        await invokeIpc("plugin.cleanup_failed_install", this.url);
+                        cleaned = true;
+                    } catch {}
+                }
+
+                if (cleaned) {
+                    this.store.installed = false;
+                    delete LunaPlugin.plugins[this.url];
+                    syncUpstream(this.url, null);
+                } else {
+                    // Zombie remains visible as installed=true, enabled=false
+                    this.store.enabled = false;
+                    this.enabled = false;
+                    syncUpstream(this.url, this);
+                }
+                throw enableErr;
+            }
+
             syncUpstream(this.url, this);
-            this.extractSettings().then(() => {
-                console.log(`[luna:plugin] extractSettings() done for ${this.name}, hasSettings=${!!this.exports?.Settings}`);
-                syncUpstream(this.url, this);
-            });
+            this.extractSettings().then(() => syncUpstream(this.url, this));
         } finally {
             this.loading._ = false;
         }
     }
 
-    async enable(): Promise<void> {
+    async enable(visited = new Set<string>()): Promise<void> {
+        // Cycle = explicit error
+        if (visited.has(this.url)) {
+            console.error(`[luna:plugin] Circular dependency detected for '${this.name}'`);
+            return;
+        }
+        visited.add(this.url);
+
         this.loading._ = true;
-        console.log(`[luna:plugin] enable() called for ${this.url}`);
+        this.loadError._ = undefined; // Clear any previous error (e.g., timeout from last attempt)
         try {
-            this.enabled = true;
+            // Auto-activate disabled dependencies (recursive)
+            for (const dep of this.dependencyRequirements) {
+                const depPlugin = LunaPlugin.getByName(dep.name);
+                if (!depPlugin || !depPlugin.store.installed) {
+                    console.error(`[luna:plugin] Missing dependency '${dep.name}' for '${this.name}'`);
+                    return;
+                }
+                depPlugin.addDependant(this);
+                if (!depPlugin.enabled) {
+                    await depPlugin.enable(visited);
+                    if (!depPlugin.enabled) {
+                        console.error(`[luna:plugin] Dependency '${dep.name}' failed to enable`);
+                        return;
+                    }
+                }
+            }
+
+            // Atomic: check deps + persist + inject
             await invokeIpc("plugin.enable", this.url);
-            console.log(`[luna:plugin] Sending jsrt.enable_plugin for ${this.url}`);
-            sendIpc("jsrt.enable_plugin", this.url);
+            this.enabled = true;
+
             syncUpstream(this.url, this);
-            this.extractSettings().then(() => {
-                console.log(`[luna:plugin] extractSettings() done for ${this.name}, hasSettings=${!!this.exports?.Settings}`);
-                syncUpstream(this.url, this);
-            });
+            this.extractSettings().then(() => syncUpstream(this.url, this));
+        } catch (e) {
+            this.enabled = false;
+            console.error(`[luna:plugin] Failed to enable '${this.name}':`, e);
         } finally {
             this.loading._ = false;
         }
@@ -213,29 +296,30 @@ export class LunaPlugin {
 
     async disable(): Promise<void> {
         this.loading._ = true;
-        console.log(`[luna:plugin] disable() called for ${this.url}`);
         try {
             this.stopReloadLoop();
-            console.log(`[luna:plugin] Sending jsrt.disable_plugin for ${this.url}`);
-            sendIpc("jsrt.disable_plugin", this.url);
+            // Atomic: guard dependants + unload + persist (Rust handles everything)
+            await invokeIpc("plugin.disable", this.url);
+            // Only after Rust confirms:
             this.enabled = false;
             this.exports = undefined;
-            // Clear cached exports so re-enable picks up the fresh instance
             if ((window as any).__pluginExports) {
                 delete (window as any).__pluginExports[this.url];
             }
-            await invokeIpc("plugin.disable", this.url);
             syncUpstream(this.url, this);
         } finally {
             this.loading._ = false;
         }
+        // NO catch — errors propagate to caller (reload, uninstall, UI)
     }
 
     async reload(): Promise<void> {
         this.loading._ = true;
         try {
-            sendIpc("jsrt.disable_plugin", this.url);
-            sendIpc("jsrt.enable_plugin", this.url);
+            await this.disable(); // throws if Rust refuses (dependants)
+            await this.enable();
+        } catch (e) {
+            console.error(`[luna:plugin] Failed to reload '${this.name}':`, e);
         } finally {
             this.loading._ = false;
         }
@@ -245,10 +329,11 @@ export class LunaPlugin {
         await this.disable();
         this.loading._ = true;
         try {
+            // Rust guard may reject — only mutate local state after success
+            await invokeIpc("plugin.uninstall", this.url);
             this.store.installed = false;
             delete LunaPlugin.plugins[this.url];
             syncUpstream(this.url, null);
-            await invokeIpc("plugin.uninstall", this.url);
             for (const dep of this.dependants) {
                 await dep.uninstall();
             }
@@ -330,8 +415,9 @@ export class LunaPlugin {
             if (!this.liveReload || !this.enabled) return;
             this.fetching._ = true;
             try {
-                const info = await invokeIpc("plugin.install", this.url);
-                const newHash = info?.hash;
+                // Read-only hash check — re-fetches code, computes hash, does NOT touch DB
+                const result = await invokeIpc("plugin.check_hash", this.url);
+                const newHash = result?.hash;
                 if (newHash && newHash !== this.store.package.hash) {
                     this.store.package.hash = newHash;
                     await this.reload();
@@ -367,6 +453,7 @@ export class LunaPlugin {
             pkg = { name: info.name };
         }
         if (!pkg.name) pkg.name = info.name;
+        if (info.hash) pkg.hash = info.hash;
 
         const store: LunaPluginStore = {
             url: info.url,
@@ -392,9 +479,36 @@ export class LunaPlugin {
 
         const info = await invokeIpc("plugin.install", cleanUrl);
         const plugin = LunaPlugin.fromPluginInfo(info);
-        if (plugin.enabled) {
-            sendIpc("jsrt.enable_plugin", cleanUrl);
+
+        // Enable atomically (Rust: check deps + persist + inject)
+        try {
+            await invokeIpc("plugin.enable", cleanUrl);
+            plugin.store.enabled = true;
+            plugin.enabled = true;
+        } catch (enableErr) {
+            console.error(`[luna:plugin] Enable failed, attempting cleanup:`, enableErr);
+            let cleaned = false;
+            try {
+                await invokeIpc("plugin.uninstall", cleanUrl);
+                cleaned = true;
+            } catch {
+                try {
+                    await invokeIpc("plugin.cleanup_failed_install", cleanUrl);
+                    cleaned = true;
+                } catch {}
+            }
+            if (cleaned) {
+                plugin.store.installed = false;
+                delete LunaPlugin.plugins[cleanUrl];
+                syncUpstream(cleanUrl, null);
+            } else {
+                plugin.store.enabled = false;
+                plugin.enabled = false;
+                syncUpstream(cleanUrl, plugin);
+            }
+            throw enableErr;
         }
+
         syncUpstream(cleanUrl, plugin);
         plugin.extractSettings().then(() => syncUpstream(cleanUrl, plugin));
         return plugin;

@@ -1,10 +1,27 @@
 use super::transpile;
 use super::wrapper;
 
+/// Runtime state of a plugin in the CEF renderer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PluginState {
+    /// Code dispatched to renderer, awaiting `plugin_ready` ack.
+    /// Fields: (load_id, nonce)
+    Loading(u64, u64),
+    /// Ack received — plugin fully initialized.
+    /// Fields: (load_id, nonce)
+    Ready(u64, u64),
+}
+
+fn random_nonce() -> u64 {
+    let mut buf = [0u8; 8];
+    getrandom::fill(&mut buf).expect("getrandom failed");
+    u64::from_le_bytes(buf)
+}
+
 /// Manages plugin lifecycle: transpile, wrap, prepare for CEF injection.
 ///
 /// The PluginManager does NOT inject code into CEF directly — it returns
-/// JS strings that the caller (main.rs) passes to `eval_js()`.
+/// JS strings that the caller passes to `eval_js()`.
 ///
 /// Flow:
 ///   1. Plugin .mjs loaded from DB (PluginStore)
@@ -13,8 +30,8 @@ use super::wrapper;
 ///   4. Returned as a JS string for injection into CEF
 #[derive(Default)]
 pub struct PluginManager {
-    /// Track which plugins are currently loaded (for unload).
-    loaded: std::collections::HashSet<String>,
+    states: std::collections::HashMap<String, PluginState>,
+    next_load_id: u64,
 }
 
 impl PluginManager {
@@ -22,35 +39,70 @@ impl PluginManager {
         Self::default()
     }
 
-    /// Transpile and wrap plugin code for CEF injection (pure, no state mutation).
-    pub fn transpile_and_wrap(plugin_id: &str, code: &str) -> anyhow::Result<String> {
+    /// Transpile and wrap plugin code for CEF injection.
+    /// The `load_id` is injected into the wrapper for ack correlation.
+    pub fn transpile_and_wrap(
+        plugin_id: &str,
+        code: &str,
+        load_id: u64,
+        nonce: u64,
+    ) -> anyhow::Result<String> {
         let js = transpile::transpile_ts(code, &format!("{plugin_id}.mts"))?;
         let js = transpile::strip_esm_syntax(&js);
-        Ok(wrapper::wrap_plugin_code(plugin_id, &js))
+        Ok(wrapper::wrap_plugin_code(plugin_id, &js, load_id, nonce))
     }
 
-    /// Mark a plugin as loaded.
-    pub fn mark_loaded(&mut self, plugin_id: &str) {
-        self.loaded.insert(plugin_id.to_string());
+    /// Mark a plugin as Loading (code dispatched, awaiting ack).
+    /// Returns `(load_id, nonce)` — both injected into the wrapper for ack correlation.
+    pub fn mark_loading(&mut self, plugin_id: &str) -> (u64, u64) {
+        let load_id = self.next_load_id;
+        self.next_load_id += 1;
+        let nonce = random_nonce();
+        self.states
+            .insert(plugin_id.to_string(), PluginState::Loading(load_id, nonce));
+        (load_id, nonce)
     }
 
-    /// Generate JS to unload a plugin (calls the plugin's cleanup callbacks).
-    ///
-    /// Returns JS code to eval in CEF, or None if the plugin wasn't loaded.
-    pub fn unload_plugin(&mut self, plugin_id: &str) -> Option<String> {
-        if !self.loaded.remove(plugin_id) {
-            return None;
+    /// Transition Loading → Ready if load_id AND nonce match. Returns true if accepted.
+    pub fn mark_ready(&mut self, plugin_id: &str, load_id: u64, nonce: u64) -> bool {
+        match self.states.get(plugin_id) {
+            Some(PluginState::Loading(cid, cn)) if *cid == load_id && *cn == nonce => {
+                self.states
+                    .insert(plugin_id.to_string(), PluginState::Ready(load_id, nonce));
+                true
+            }
+            _ => false,
         }
-
-        let escaped = wrapper::escape_js_for_sq(plugin_id);
-        Some(format!(
-            "if(window.__pluginUnloads&&window.__pluginUnloads['{escaped}']){{window.__pluginUnloads['{escaped}']()}}"
-        ))
     }
 
-    /// Check if a plugin is currently loaded.
+    /// Generate the JS cleanup code for a plugin (static, no state mutation).
+    pub fn generate_unload_js(plugin_id: &str) -> String {
+        let escaped = wrapper::escape_js_for_sq(plugin_id);
+        format!(
+            "if(window.__pluginUnloads&&window.__pluginUnloads['{escaped}']){{window.__pluginUnloads['{escaped}']()}}"
+        )
+    }
+
+    /// Remove a plugin from the state map (call AFTER eval_js dispatch of cleanup).
+    pub fn mark_unloaded(&mut self, plugin_id: &str) {
+        self.states.remove(plugin_id);
+    }
+
+    /// True if the plugin is Loading or Ready.
     pub fn is_loaded(&self, plugin_id: &str) -> bool {
-        self.loaded.contains(plugin_id)
+        self.states.contains_key(plugin_id)
+    }
+
+    /// True only if the plugin has received its ready ack.
+    pub fn is_ready(&self, plugin_id: &str) -> bool {
+        matches!(self.states.get(plugin_id), Some(PluginState::Ready(..)))
+    }
+
+    /// Get the current load_id for a plugin, if any.
+    pub fn current_load_id(&self, plugin_id: &str) -> Option<u64> {
+        self.states.get(plugin_id).map(|s| match s {
+            PluginState::Loading(id, _) | PluginState::Ready(id, _) => *id,
+        })
     }
 }
 
@@ -61,7 +113,8 @@ mod tests {
     #[test]
     fn test_transpile_and_wrap_wraps_code() {
         let result =
-            PluginManager::transpile_and_wrap("test-plugin", "console.log('hello');").unwrap();
+            PluginManager::transpile_and_wrap("test-plugin", "console.log('hello');", 0, 0)
+                .unwrap();
 
         assert!(result.starts_with("(function("));
         assert!(result.contains("console.log("));
@@ -72,45 +125,70 @@ mod tests {
     #[test]
     fn test_transpile_and_wrap_transpiles_ts() {
         let ts_code = "const x: number = 42; console.log(x);";
-        let result = PluginManager::transpile_and_wrap("ts-plugin", ts_code).unwrap();
+        let result = PluginManager::transpile_and_wrap("ts-plugin", ts_code, 0, 0).unwrap();
 
         assert!(!result.contains(": number"));
         assert!(result.contains("42"));
     }
 
     #[test]
-    fn test_mark_loaded_tracks() {
+    fn test_mark_loading_returns_load_id_and_nonce() {
         let mut mgr = PluginManager::new();
-        assert!(!mgr.is_loaded("my-plugin"));
-
-        mgr.mark_loaded("my-plugin");
-        assert!(mgr.is_loaded("my-plugin"));
+        let (id1, _) = mgr.mark_loading("a");
+        let (id2, _) = mgr.mark_loading("b");
+        assert_ne!(id1, id2);
+        assert!(mgr.is_loaded("a"));
+        assert!(mgr.is_loaded("b"));
     }
 
     #[test]
-    fn test_unload_plugin_generates_cleanup_js() {
+    fn test_mark_ready_with_matching_load_id_and_nonce() {
         let mut mgr = PluginManager::new();
-        mgr.mark_loaded("my-plugin");
+        let (load_id, nonce) = mgr.mark_loading("p");
+        assert!(!mgr.is_ready("p"));
+        assert!(mgr.mark_ready("p", load_id, nonce));
+        assert!(mgr.is_ready("p"));
+        assert!(mgr.is_loaded("p"));
+    }
 
-        let js = mgr.unload_plugin("my-plugin");
-        assert!(js.is_some());
+    #[test]
+    fn test_mark_ready_with_stale_load_id_ignored() {
+        let mut mgr = PluginManager::new();
+        let (old_id, old_nonce) = mgr.mark_loading("p");
+        let (_new_id, _new_nonce) = mgr.mark_loading("p"); // reload
+        assert!(!mgr.mark_ready("p", old_id, old_nonce)); // stale
+        assert!(!mgr.is_ready("p"));
+    }
 
-        let js = js.unwrap();
+    #[test]
+    fn test_mark_ready_with_wrong_nonce_rejected() {
+        let mut mgr = PluginManager::new();
+        let (load_id, _nonce) = mgr.mark_loading("p");
+        assert!(!mgr.mark_ready("p", load_id, 99999)); // wrong nonce
+        assert!(!mgr.is_ready("p"));
+    }
+
+    #[test]
+    fn test_is_loaded_during_loading() {
+        let mut mgr = PluginManager::new();
+        mgr.mark_loading("p");
+        assert!(mgr.is_loaded("p"));
+        assert!(!mgr.is_ready("p"));
+    }
+
+    #[test]
+    fn test_mark_unloaded_clears_state() {
+        let mut mgr = PluginManager::new();
+        mgr.mark_loading("p");
+        mgr.mark_unloaded("p");
+        assert!(!mgr.is_loaded("p"));
+        assert!(!mgr.is_ready("p"));
+    }
+
+    #[test]
+    fn test_generate_unload_js_produces_cleanup_code() {
+        let js = PluginManager::generate_unload_js("my-plugin");
         assert!(js.contains("__pluginUnloads"));
         assert!(js.contains("my-plugin"));
-    }
-
-    #[test]
-    fn test_unload_unknown_plugin_returns_none() {
-        let mut mgr = PluginManager::new();
-        assert!(mgr.unload_plugin("unknown").is_none());
-    }
-
-    #[test]
-    fn test_unload_removes_from_loaded() {
-        let mut mgr = PluginManager::new();
-        mgr.mark_loaded("my-plugin");
-        mgr.unload_plugin("my-plugin");
-        assert!(!mgr.is_loaded("my-plugin"));
     }
 }

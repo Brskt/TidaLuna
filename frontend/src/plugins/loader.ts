@@ -1,4 +1,4 @@
-import { invokeIpc } from "../ipc";
+import { invokeIpc, onIpcEvent } from "../ipc";
 import { LunaPlugin, setUpstreamPlugins } from "./luna-plugin";
 import { LunaPlugin as CoreLunaPlugin, modules } from "../../render/src";
 
@@ -85,7 +85,7 @@ export function exposeLoaderApi() {
         const plugin = LunaPlugin.fromPluginInfo({
             url: name,
             name,
-            manifest: { name },
+            manifest: { name, luna: { type: "library" } },
             enabled: true,
             installed: true,
         });
@@ -104,6 +104,24 @@ export function exposeLoaderApi() {
             }
         }).catch(() => {});
     }
+
+    // Resync frontend on plugin lifecycle events from Rust
+    onIpcEvent("jsrt.plugin_failed", (url: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (plugin) {
+            plugin.enabled = false;
+            plugin.store.enabled = false;
+            plugin.loadError._ = "Plugin failed to initialize (timeout)";
+            window.dispatchEvent(new Event("luna:plugins-updated"));
+        }
+    });
+    onIpcEvent("jsrt.plugin_ready_confirmed", (url: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (plugin && plugin.loadError._) {
+            plugin.loadError._ = undefined;
+            window.dispatchEvent(new Event("luna:plugins-updated"));
+        }
+    });
 
     // Populate plugin registry from Rust PluginStore.
     // Plugins execute in Rust, but the UI reads LunaPlugin.plugins for display.

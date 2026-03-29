@@ -12,6 +12,7 @@ import Button from "@mui/material/Button";
 import { LunaSwitch, LunaTrashButton, SpinningButton } from "../../components";
 import { LiveReloadToggle } from "./LiveReloadToggle";
 import { LunaPluginHeader } from "./LunaPluginHeader";
+import { uninstallPluginWithDependenciesCheck } from "../PluginStoreTab/pluginInstall";
 
 import SettingsIcon from "@mui/icons-material/Settings";
 import { grey, red } from "@mui/material/colors";
@@ -90,7 +91,7 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 	// Memoize callbacks
 	const handleReload = React.useCallback(plugin.reload.bind(plugin), [plugin]);
 	const toggleEnabled = React.useCallback((_: unknown, checked: boolean) => (checked ? plugin.enable() : plugin.disable()), [plugin]);
-	const uninstall = React.useCallback(plugin.uninstall.bind(plugin), [plugin]);
+	const uninstall = React.useCallback(() => uninstallPluginWithDependenciesCheck(plugin), [plugin]);
 
 	if (!installed) return null;
 
@@ -129,6 +130,8 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 				loadError={loadError}
 				author={author}
 				desc={desc}
+				isLibrary={plugin.isLibrary}
+				dependsOn={plugin.dependencyRequirements?.map(d => d.name)}
 				children={
 					<>
 						{!isCore && (

@@ -250,8 +250,8 @@ const init = async () => {
         console.error("[luna] Failed to load @luna/dev:", e);
     }
 
-    // Load user plugins — Rust prepares + wraps them, injects into CEF
-    sendIpc("jsrt.load_plugins");
+    // Load user plugins — Rust does dedup + multi-pass + reconciliation, then responds
+    await invokeIpc("jsrt.load_plugins");
     // Populate CEF plugin registry from Rust PluginStore (for @luna/ui display)
     const { exposeLoaderApi } = require("./plugins/loader");
     exposeLoaderApi();
