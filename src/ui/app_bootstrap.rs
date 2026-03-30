@@ -31,6 +31,8 @@ wrap_render_process_handler! {
                 if NavigationPolicy::for_page(PageKind::classify(&url_str)).inject_early_runtime {
                     let preload = format!(
                         "(function(){{\
+                        if(self.__LUNAR_EARLY_RUNTIME__)return;\
+                        if(typeof window.cefQuery!=='function')return;\
                         self.__LUNAR_CONFIG__={{\
                             desktopHost:\"{desktop}\",\
                             loginHost:\"{login}\",\
@@ -45,6 +47,7 @@ wrap_render_process_handler! {
                         {fetch}\
                         {open}\
                         {session}\
+                        self.__LUNAR_EARLY_RUNTIME__=true;\
                         }})();",
                         desktop = nav::HOST_DESKTOP,
                         login = nav::HOST_LOGIN,
