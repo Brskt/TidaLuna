@@ -467,11 +467,11 @@ export class MediaItem extends ContentBase {
 			// Safe from infinite loops: updateFormat's anti-spam guard early-returns for
 			// non-playing tracks that already have sampleRate.
 			if (cachedFormat.bitrate === undefined) {
-				this.updateFormat(audioQuality).then(f => console.log(`[withFormat→updateFormat] id=${this.id} result:`, JSON.stringify(f))).catch(e => console.error(`[withFormat→updateFormat] id=${this.id} ERROR:`, e));
+				this.updateFormat(audioQuality).catch(() => {});
 			}
 		} else {
 			// No cached format — trigger updateFormat so the bridge fallback can populate it
-			this.updateFormat(audioQuality).then(f => console.log(`[withFormat→updateFormat] id=${this.id} result:`, JSON.stringify(f))).catch(e => console.error(`[withFormat→updateFormat] id=${this.id} ERROR:`, e));
+			this.updateFormat(audioQuality).catch(() => {});
 		}
 		return unload;
 	}
