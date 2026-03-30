@@ -5,12 +5,16 @@ if (self.__LUNAR_EARLY_RUNTIME__) return;
 self.__LUNAR_EARLY_RUNTIME__ = true;
 if (typeof window.cefQuery !== 'function') return;
 
+// Capture cefQuery once at early-runtime init — before any plugin or app code runs.
+// sendIpc/invokeIpc use this private reference, so patching window.cefQuery later
+// (e.g., by a plugin) cannot intercept jsrt.set_token or other early-runtime IPC.
+var _cq = window.cefQuery;
 var _cfg = self.__LUNAR_CONFIG__ || {};
 var _ipcId = 0;
 
 function sendIpc(channel, arg) {
     var args = arg !== undefined ? [arg] : [];
-    window.cefQuery({
+    _cq({
         request: JSON.stringify({ channel: channel, args: args }),
         onSuccess: function() {},
         onFailure: function(code, msg) {
@@ -24,7 +28,7 @@ function invokeIpc(channel) {
     for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
     return new Promise(function(resolve, reject) {
         var id = String(++_ipcId);
-        window.cefQuery({
+        _cq({
             request: JSON.stringify({ channel: channel, args: args, id: id }),
             onSuccess: function(response) {
                 if (response.indexOf('E:') === 0) {
@@ -42,9 +46,6 @@ function invokeIpc(channel) {
         });
     });
 }
-
-self.__LUNAR_SEND_IPC__ = sendIpc;
-self.__LUNAR_INVOKE_IPC__ = invokeIpc;
 
 var listeners = self.__LUNAR_IPC_LISTENERS__ = self.__LUNAR_IPC_LISTENERS__ || {};
 self.__LUNAR_IPC_EMIT__ = function(channel) {

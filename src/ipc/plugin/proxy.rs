@@ -217,23 +217,37 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                     &body[..body.len().min(400)]
                 );
             }
-            // Log auth token endpoint responses (no secrets)
+            // Capture token from oauth2/token responses as a Rust-side fallback.
+            // The primary capture path is XHR header interception in token_capture.js.
             if is_token_endpoint {
-                let error = serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|v| {
-                        let err = v.get("error")?.as_str()?.to_string();
-                        let desc = v
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(token) = parsed.get("access_token").and_then(|v| v.as_str())
+                        && !token.is_empty()
+                    {
+                        with_state(|state| {
+                            state.captured_token = token.to_string();
+                        });
+                        crate::ipc::plugin::scrub_pkce_verifier();
+                        crate::vprintln!(
+                            "[AUTH]   /oauth2/token → {} (captured token, {} chars)",
+                            status,
+                            token.len()
+                        );
+                    }
+                    if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
+                        let desc = parsed
                             .get("error_description")
                             .and_then(|d| d.as_str())
                             .unwrap_or("");
-                        Some(format!("{err}: {desc}"))
-                    });
-                match error {
-                    Some(e) => {
-                        crate::vprintln!("[AUTH]   /oauth2/token → {} error={}", status, e)
+                        crate::vprintln!(
+                            "[AUTH]   /oauth2/token → {} error={}: {}",
+                            status,
+                            err,
+                            desc
+                        );
                     }
-                    None => crate::vprintln!("[AUTH]   /oauth2/token → {}", status),
+                } else {
+                    crate::vprintln!("[AUTH]   /oauth2/token → {}", status);
                 }
             }
             let json = serde_json::json!({

@@ -6,6 +6,27 @@ mod proxy;
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
 
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Scrub the PKCE codeVerifier from nativeInterface after successful auth.
+/// Called from both jsrt.set_token (primary path) and proxy.rs oauth2/token (fallback).
+/// Best-effort: eval_js may fail if no renderer frame is available.
+static PKCE_SCRUBBED: AtomicBool = AtomicBool::new(false);
+/// Re-arm the scrub latch so the next login cycle triggers a fresh scrub.
+/// Called from session_clear and session_hard_reset.
+pub(super) fn reset_pkce_scrub() {
+    PKCE_SCRUBBED.store(false, Ordering::SeqCst);
+}
+
+pub(super) fn scrub_pkce_verifier() {
+    if PKCE_SCRUBBED.swap(true, Ordering::SeqCst) {
+        return; // already scrubbed
+    }
+    crate::app_state::eval_js(
+        "try{delete window.nativeInterface.credentials.codeVerifier}catch(e){}",
+    );
+    crate::vprintln!("[AUTH]   PKCE codeVerifier scrub requested");
+}
 
 fn take_ipc_callback(id: &str) -> Option<IpcCallback> {
     with_state(|state| state.pending_ipc_callbacks.remove(id)).flatten()
@@ -27,6 +48,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
     match msg.channel.as_str() {
         "plugin.fetch" => {
             plugin_ipc::handle_plugin_fetch(&msg, callback);
+        }
+        "tidal.fetch" => {
+            plugin_ipc::handle_tidal_fetch(&msg, callback);
         }
         "player.parse_dash" => {
             let xml = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");

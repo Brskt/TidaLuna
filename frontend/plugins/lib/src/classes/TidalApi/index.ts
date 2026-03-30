@@ -4,7 +4,7 @@ import { memoize, memoizeArgless, Semaphore, sleep, statusOK, type Memoized, typ
 
 import type { TApiTrack, TApiTracks } from "./types/Tracks";
 
-import { getCredentials } from "../../helpers";
+import { tidalFetch } from "../../../../../src/ipc";
 import { libTrace } from "../../index.safe";
 import * as redux from "../../redux";
 
@@ -18,25 +18,22 @@ export class TidalApi {
 	public static trace: Tracer = libTrace.withSource("TidalApi").trace;
 	private static unavailableTracks = new Set<redux.ItemId>();
 
-	public static async getAuthHeaders() {
-		const { clientId, token } = await getCredentials();
-		return {
-			Authorization: `Bearer ${token}`,
-			"x-tidal-token": clientId,
-		};
+	public static clientId(): string {
+		return redux.store.getState().session?.clientId ?? "";
 	}
 	public static readonly queryArgs: Memoized<() => string> = memoizeArgless(() => {
 		const store = redux.store.getState();
 		return `countryCode=${store.session.countryCode}&deviceType=DESKTOP&locale=${store.settings.language}`;
 	});
 	public static fetch = memoize(async <T>(url: string): Promise<T | undefined> => {
-		// Retry a failed request once with a 1s delay
+		// Routes through Rust via tidal.fetch IPC — the OAuth token is injected
+		// server-side and never exposed to JavaScript.
+		const cid = this.clientId();
+		if (!cid) throw new Error("TidalApi.fetch called before session is ready (no clientId)");
 		let retry = true;
 		while (true) {
-			const res = await fetch(url, {
-				headers: await this.getAuthHeaders(),
-			});
-			if (statusOK(res.status)) return res.json();
+			const res = await tidalFetch(url, { headers: { "x-tidal-token": cid } });
+			if (statusOK(res.status)) return res.json<T>();
 			if (res.status === 403 || res.status === 404) return undefined;
 			if (!retry) this.trace.err.withContext(url).throw(`${res.status} ${res.statusText}`);
 			retry = false;

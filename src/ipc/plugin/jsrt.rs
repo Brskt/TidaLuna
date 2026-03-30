@@ -10,6 +10,7 @@ fn handle_session_clear() {
     with_state(|state| {
         state.captured_token.clear();
     });
+    super::reset_pkce_scrub();
     crate::vprintln!("[AUTH]   Cleared captured token");
 
     crate::app_state::emit_ipc_event("jsrt.session_cleared");
@@ -32,6 +33,7 @@ fn handle_session_hard_reset() {
     with_state(|state| {
         state.captured_token.clear();
     });
+    super::reset_pkce_scrub();
     crate::vprintln!("[AUTH]   Cleared captured token");
 
     if let Some(cm) = cef::cookie_manager_get_global_manager(None) {
@@ -265,13 +267,17 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             with_state(|state| {
                 state.captured_token = token.to_string();
             });
+            super::scrub_pkce_verifier();
             crate::vprintln!("[PLUGIN] Token captured ({} chars)", token.len());
         }
         "jsrt.session_clear" => {
             handle_session_clear();
         }
         "jsrt.session_hard_reset" => {
-            handle_session_hard_reset();
+            // Destructive: wipes cookies, storage, token. Debug-only guard.
+            if crate::logging::log_level() >= 1 {
+                handle_session_hard_reset();
+            }
         }
         "jsrt.plugin_ready" => {
             let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");

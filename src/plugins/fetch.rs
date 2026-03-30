@@ -117,14 +117,16 @@ pub(crate) async fn plugin_fetch(
 }
 
 /// Check if a URL points to Tidal's API (should receive the OAuth token).
-fn is_tidal_api(url: &str) -> bool {
-    let host = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .and_then(|s| s.split('/').next())
-        .unwrap_or("");
-
-    host == "api.tidal.com" || host == "api.tidalhifi.com" || host == "listen.tidal.com"
+pub(crate) fn is_tidal_api(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or("");
+    host == "api.tidal.com"
+        || host == "api.tidalhifi.com"
+        || host == "listen.tidal.com"
+        || host == "desktop.tidal.com"
+        || host == "openapi.tidal.com"
 }
 
 #[cfg(test)]
@@ -136,8 +138,14 @@ mod tests {
         assert!(is_tidal_api("https://api.tidal.com/v1/tracks/12345"));
         assert!(is_tidal_api("https://api.tidalhifi.com/v1/tracks/12345"));
         assert!(is_tidal_api("https://listen.tidal.com/v1/tracks"));
+        assert!(is_tidal_api("https://desktop.tidal.com/v1/tracks/123"));
+        assert!(is_tidal_api(
+            "https://openapi.tidal.com/v2/tracks?filter[isrc]=US1234"
+        ));
+        assert!(is_tidal_api("https://api.tidal.com:443/v1/tracks"));
         assert!(!is_tidal_api("https://example.com/api"));
         assert!(!is_tidal_api("https://evil.com/api.tidal.com"));
+        assert!(!is_tidal_api("not-a-url"));
     }
 
     #[test]

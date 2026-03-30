@@ -17,7 +17,7 @@ export const createApplicationController = () => {
         applyUpdate: () => sendIpc("update.action"),
         checkForUpdatesSilently: () => sendIpc("updater.check.silently"),
         getDesktopReleaseNotes: () => JSON.stringify({}),
-        getPlatform: () => window.__TIDAL_RS_PLATFORM__,
+        getPlatform: () => window.__TIDALUNAR_PLATFORM__,
         getPlatformTarget: () => "standalone",
         getProcessUptime: () => 100,
         getVersion: () => "2.38.6.6",

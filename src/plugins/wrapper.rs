@@ -2,12 +2,37 @@
 //!
 //! Wraps plugin JS in an IIFE that:
 //!   - Shadows dangerous globals (localStorage, eval, XMLHttpRequest, etc.)
+//!   - Shadows sensitive globals (cefQuery, nativeInterface, IPC helpers, token globals)
 //!   - Provides a controlled `fetch()` that routes through Rust (token injection, audit)
 //!   - Provides a controlled `storage` API (per-plugin SQLite via IPC)
 //!   - Tracks unload callbacks for cleanup
 //!
 //! The real `window.cefQuery` is captured as a private `__cq` parameter —
 //! used internally by the controlled APIs but not exposed to plugin code.
+//!
+//! ## Threat model & limitations
+//!
+//! This wrapper **reduces accidental token exposure** to third-party plugins.
+//! It is **NOT a hard security boundary**.
+//!
+//! All plugins share the same V8 context as the TIDAL app. A determined malicious
+//! plugin can bypass all IIFE-based protections because:
+//!   - `document.defaultView` returns the real `Window` object
+//!   - `window.window` and `window.self` also return the `Window`
+//!   - Prototype chain traversal can reach unshadowed globals
+//!   - No amount of JS-level shadowing can fully hide the real `Window`
+//!
+//! True plugin isolation would require separate V8 isolates, Web Workers,
+//! or separate renderer processes.
+//!
+//! Current protections (defense in depth, weakest to strongest):
+//!   1. IIFE parameter shadowing — blocks bare identifiers only (`cefQuery` blocked,
+//!      `window.cefQuery` not)
+//!   2. XHR/fetch prototype freeze — `Object.defineProperty` with `writable: false,
+//!      configurable: false` (silent failure on reassignment in sloppy mode)
+//!   3. Token never stored as JS global — only in Rust `AppState`, fed via
+//!      closure-private `sendIpc` in the early runtime IIFE
+//!   4. `getCredentials()` / `getAuthHeaders()` removed from `@luna/lib` public API
 
 /// Escape a string for safe embedding in a JS single-quoted string literal.
 pub(super) fn escape_js_for_sq(s: &str) -> String {
@@ -58,7 +83,9 @@ pub fn wrap_plugin_code(plugin_id: &str, code: &str, load_id: u64, nonce: u64) -
     // Inner IIFE is async to support top-level await (plugin .mjs files are ES modules).
     // __pThen, __ackCq, __ackReq are shadowed to undefined in the inner scope.
     js.push_str("__pThen.call(\n");
-    js.push_str("(async function(__pid, __cq, __gen, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq) {\n");
+    // Sensitive globals are shadowed as parameters (receive undefined at call site).
+    // This only blocks bare identifiers — window.X still works (shared V8 context limitation).
+    js.push_str("(async function(__pid, __cq, __gen, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq, __LUNAR_CAPTURED_TOKEN__, __TIDALUNAR_CREDENTIALS__, __LUNAR_SEND_IPC__, __LUNAR_INVOKE_IPC__, __LUNAR_IPC_LISTENERS__, __LUNAR_IPC_ON__, __LUNAR_IPC_EMIT__, __LUNAR_CONFIG__, __LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery) {\n");
     js.push_str("'use strict';\n");
 
     // --- Controlled fetch ---
@@ -183,7 +210,9 @@ window.__pluginUnloads[__pid] = function() {
         r#"
 if (typeof __exports !== 'undefined') {
     if (!window.__pluginExports) window.__pluginExports = {};
-    window.__pluginExports[__pid] = __exports;
+    // Only expose Settings — the sole export consumed by the bundle (extractSettings).
+    // Other exports (unloads, internal state, functions) stay private to the IIFE scope.
+    if (__exports.Settings) window.__pluginExports[__pid] = { Settings: __exports.Settings };
     if (__exports.unloads instanceof Set) {
         for (var __fn of __exports.unloads) __unloads.push(__fn);
     }
@@ -192,14 +221,17 @@ if (typeof __exports !== 'undefined') {
     );
 
     // --- Inner IIFE close ---
-    // Arguments: pluginId, cefQuery ref, load_id, then undefined for all shadowed globals
-    // Last 3 undefined shadow __pThen, __ackCq, __ackReq from outer scope
+    // Arguments: pluginId, cefQuery ref, load_id, then undefined for all shadowed globals.
+    // 10 original shadows (localStorage..importScripts, __pThen, __ackCq, __ackReq)
+    // + 11 security shadows (__LUNAR_CAPTURED_TOKEN__..__LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery)
     js.push_str("})('");
     js.push_str(&escaped_id);
     js.push_str("', window.cefQuery, ");
     js.push_str(&load_id.to_string());
     js.push_str(
-        ", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined)",
+        ", undefined, undefined, undefined, undefined, undefined, undefined, undefined\
+         , undefined, undefined, undefined\
+         , undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined)",
     );
 
     // --- Plugin ready ack (anti-spoofing renforcé, NOT a full security boundary) ---
@@ -297,6 +329,18 @@ mod tests {
             "caches",
             "ServiceWorker",
             "importScripts",
+            // Security shadows — bare identifiers only (window.X still accessible)
+            "__LUNAR_CAPTURED_TOKEN__",
+            "__TIDALUNAR_CREDENTIALS__",
+            "__LUNAR_SEND_IPC__",
+            "__LUNAR_INVOKE_IPC__",
+            "__LUNAR_IPC_LISTENERS__",
+            "__LUNAR_IPC_ON__",
+            "__LUNAR_IPC_EMIT__",
+            "__LUNAR_CONFIG__",
+            "__LUNAR_SESSION_DELEGATE__",
+            "nativeInterface",
+            "cefQuery",
         ] {
             assert!(result.contains(name), "Missing shadowed global: {}", name);
         }

@@ -2,14 +2,14 @@
 // Depends on: sendIpc, _cfg (from ipc.js)
 
 if (!window.nativeInterface) {
-    var creds = window.__TIDAL_RS_CREDENTIALS__ || {
+    var creds = window.__TIDALUNAR_CREDENTIALS__ || {
         credentialsStorageKey: 'tidal',
         codeChallenge: '',
         redirectUri: _cfg.redirectUri || 'tidal://login/auth',
         codeVerifier: ''
     };
     var noop = function() {};
-    var platform = window.__TIDAL_RS_PLATFORM__ || 'win32';
+    var platform = window.__TIDALUNAR_PLATFORM__ || 'win32';
     self.__LUNAR_SESSION_DELEGATE__ = self.__LUNAR_SESSION_DELEGATE__ || null;
     window.nativeInterface = {
         application: {

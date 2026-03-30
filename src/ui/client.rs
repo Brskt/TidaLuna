@@ -27,6 +27,7 @@ impl BrowserSideHandler for IpcQueryHandler {
             && (msg.channel.starts_with("plugin.")
                 || msg.channel.starts_with("proxy.")
                 || msg.channel.starts_with("jsrt.")
+                || msg.channel.starts_with("tidal.")
                 || msg.channel.starts_with("__Luna.")
                 || msg.channel.starts_with("__LunaNative.")
                 || msg.channel == "player.parse_dash")

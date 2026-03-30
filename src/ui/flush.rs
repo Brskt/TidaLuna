@@ -30,7 +30,7 @@ pub(crate) fn run_flush_batch(batch: FlushBatch) {
         && let Ok(events_json) = serde_json::to_string(&batch.player_events)
     {
         let js = format!(
-            "if (window.__TIDAL_RS_PLAYER_PUSH__) {{ window.__TIDAL_RS_PLAYER_PUSH__({}); }}",
+            "if (window.__TIDALUNAR_PLAYER_PUSH__) {{ window.__TIDALUNAR_PLAYER_PUSH__({}); }}",
             events_json
         );
         if let Some(ref frame) = frame {

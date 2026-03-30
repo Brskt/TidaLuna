@@ -68,6 +68,38 @@ export const onIpcEvent = (channel: string, callback: (...args: any[]) => void):
 export const isLoginCallback = (): boolean =>
     window.location.pathname === ((window as any).__LUNAR_CONFIG__?.loginCallbackPath ?? "/login/auth");
 
+/**
+ * Authenticated fetch restricted to TIDAL API hosts.
+ * Routes through Rust via `tidal.fetch` IPC — the OAuth token is injected
+ * server-side and never exposed to JavaScript.
+ */
+export interface TidalFetchResponse {
+	ok: boolean;
+	status: number;
+	statusText: string;
+	url: string;
+	headers: Record<string, string>;
+	json<T = any>(): Promise<T>;
+	text(): Promise<string>;
+}
+export const tidalFetch = async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<TidalFetchResponse> => {
+	const opts: Record<string, unknown> = {};
+	if (init?.method) opts.method = init.method;
+	if (init?.headers && Object.keys(init.headers).length > 0) opts.headers = init.headers;
+	if (init?.body) opts.body = init.body;
+	const optsJson = Object.keys(opts).length > 0 ? JSON.stringify(opts) : "{}";
+	const raw: { ok: boolean; status: number; statusText: string; url: string; headers: Record<string, string>; body: string } = await invokeIpc("tidal.fetch", url, optsJson);
+	return {
+		ok: raw.ok,
+		status: raw.status,
+		statusText: raw.statusText,
+		url: raw.url,
+		headers: raw.headers ?? {},
+		json: <T = any>() => Promise.resolve(JSON.parse(raw.body) as T),
+		text: () => Promise.resolve(raw.body),
+	};
+};
+
 (window as any).__LUNAR_IPC_ON__ = (channel: string, cb: (...args: any[]) => void) => {
     onIpcEvent(channel, cb);
 };

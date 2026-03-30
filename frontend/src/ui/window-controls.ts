@@ -1,11 +1,11 @@
 import { sendIpc } from "../ipc";
 
 export const initWindowControls = () => {
-    const windowState = window.__TIDAL_RS_WINDOW_STATE__ || { isMaximized: false, isFullscreen: false };
+    const windowState = window.__TIDALUNAR_WINDOW_STATE__ || { isMaximized: false, isFullscreen: false };
 
     // Frameless window management (non-Linux only).
     // On Linux, native decorations handle this (with_decorations(true)).
-    const frameless = window.__TIDAL_RS_PLATFORM__ !== "linux";
+    const frameless = window.__TIDALUNAR_PLATFORM__ !== "linux";
 
     // Window controls: minimize, maximize/restore, close (Windows 10/11 style).
     if (frameless && !document.getElementById("window-controls")) {

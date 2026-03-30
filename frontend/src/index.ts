@@ -23,12 +23,13 @@ import * as InrixiaHelpers from "@inrixia/helpers";
 // Synchronous initialization: expose nativeInterface immediately so Tidal
 // detects desktop mode before its own scripts run.
 const credentials: { credentialsStorageKey: string; codeChallenge: string; redirectUri: string; codeVerifier: string } =
-    window.__TIDAL_RS_CREDENTIALS__ || {
+    window.__TIDALUNAR_CREDENTIALS__ || {
         credentialsStorageKey: "tidal",
         codeChallenge: "",
         redirectUri: (window as any).__LUNAR_CONFIG__?.redirectUri ?? "tidal://login/auth",
         codeVerifier: "",
     };
+delete window.__TIDALUNAR_CREDENTIALS__;
 
 window.nativeInterface = {
     application: createApplicationController(),
@@ -43,7 +44,7 @@ window.nativeInterface = {
     userSession: createUserSession(),
     userSettings: createUserSettings(),
     window: createWindowController(
-        window.__TIDAL_RS_WINDOW_STATE__ || { isMaximized: false, isFullscreen: false }
+        window.__TIDALUNAR_WINDOW_STATE__ || { isMaximized: false, isFullscreen: false }
     ),
 };
 window.NativePlayerComponent = createNativePlayerComponent();
@@ -81,7 +82,7 @@ let _mediaFormatResolvers: Array<(data: any) => void> = [];
     _mediaFormatResolvers = [];
 };
 
-window.__TIDAL_RS_PLAYER_PUSH__ = (events: any[]) => {
+window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
     if (!Array.isArray(events)) return;
     const bridge = window.NativePlayerComponent;
     if (!bridge || typeof bridge.trigger !== "function") return;
@@ -191,7 +192,7 @@ const init = async () => {
             }
         };
         (window as any).__LUNAR_SET_CLOSE_TO_TRAY__ = setCloseToTray;
-        setCloseToTray(!!(window as any).__TIDAL_RS_CLOSE_TO_TRAY__);
+        setCloseToTray(!!(window as any).__TIDALUNAR_CLOSE_TO_TRAY__);
     }
 
     // SDK middleware doesn't reach Rust player for DASH/AAC — intercept Redux actions.

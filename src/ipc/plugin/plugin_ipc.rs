@@ -39,6 +39,58 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
     });
 }
 
+/// Authenticated fetch restricted to TIDAL API hosts.
+/// Used by core bundle (@luna/lib) — the token never leaves Rust.
+pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
+    let url = msg
+        .args
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let opts_json = msg
+        .args
+        .get(1)
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}")
+        .to_string();
+    let id = msg.id.clone().unwrap_or_default();
+
+    // Reject non-TIDAL URLs — this channel only serves authenticated TIDAL API requests
+    if !crate::plugins::fetch::is_tidal_api(&url) {
+        ipc_callback_err(
+            &callback,
+            &format!("tidal.fetch rejected: not a TIDAL API URL ({url})"),
+        );
+        return;
+    }
+
+    let opts: crate::plugins::fetch::FetchOpts =
+        serde_json::from_str(&opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
+    let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
+
+    // Reject if the OAuth token hasn't been captured yet — avoids sending unauthenticated
+    // requests that would 403 and get memoized as failures on the frontend.
+    if token.is_empty() {
+        ipc_callback_err(&callback, "tidal.fetch: auth token not yet captured");
+        return;
+    }
+
+    with_state(|state| {
+        state.pending_ipc_callbacks.insert(id.clone(), callback);
+    });
+    crate::state::rt_handle().spawn(async move {
+        let result = crate::plugins::fetch::plugin_fetch("@luna/lib", &url, &opts, &token).await;
+        let Some(cb) = take_ipc_callback(&id) else {
+            return;
+        };
+        match result {
+            Ok(json) => ipc_callback_ok(&cb, &json),
+            Err(e) => ipc_callback_err(&cb, &e),
+        }
+    });
+}
+
 pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg
         .args

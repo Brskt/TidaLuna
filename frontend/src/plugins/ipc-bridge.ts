@@ -23,5 +23,5 @@ export function setupIpcBridge() {
     };
 
     (window as any).__ipcRenderer = ipcRenderer;
-    (window as any).__platform = window.__TIDAL_RS_PLATFORM__ || "linux";
+    (window as any).__platform = window.__TIDALUNAR_PLATFORM__ || "linux";
 }

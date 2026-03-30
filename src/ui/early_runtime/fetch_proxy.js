@@ -41,7 +41,7 @@ function proxyFetch(url, init) {
     });
 }
 
-window.fetch = function(input, init) {
+var _lunaFetch = function(input, init) {
     var url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 
     if (url.indexOf(_tidalDomain) !== -1 && init && init.headers) {
@@ -66,3 +66,15 @@ window.fetch = function(input, init) {
         });
     });
 };
+
+// Lock window.fetch via accessor descriptor (getter/setter).
+// - getter always returns _lunaFetch (our patched version with token capture)
+// - setter is a no-op — TIDAL's analytics (strict mode) can assign without TypeError
+// - configurable:false prevents Object.defineProperty override by plugins
+// _lunaFetch only calls nativeFetch (closure-captured above), never window.fetch.
+Object.defineProperty(window, 'fetch', {
+    get: function() { return _lunaFetch; },
+    set: function() {},
+    enumerable: true,
+    configurable: false
+});

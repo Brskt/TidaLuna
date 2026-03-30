@@ -283,13 +283,13 @@ wrap_browser_process_handler! {
             crate::platform::tray::start_event_polling();
 
             let init_script = format!(
-                r#"window.__TIDAL_RS_PLATFORM__ = '{platform}';
-window.__TIDAL_RS_CLOSE_TO_TRAY__ = {close_to_tray};
-window.__TIDAL_RS_WINDOW_STATE__ = {{
+                r#"window.__TIDALUNAR_PLATFORM__ = '{platform}';
+window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
+window.__TIDALUNAR_WINDOW_STATE__ = {{
     isMaximized: false,
     isFullscreen: false
 }};
-window.__TIDAL_RS_CREDENTIALS__ = {pkce_credentials_json};
+window.__TIDALUNAR_CREDENTIALS__ = {pkce_credentials_json};
 var _cfgTarget = {{ enableDesktopFeatures: true }};
 var _cfgProxy = new Proxy(_cfgTarget, {{
     get: function(t, p) {{ return p === 'enableDesktopFeatures' ? true : t[p]; }},
