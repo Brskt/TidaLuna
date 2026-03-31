@@ -1,6 +1,15 @@
 use cef::*;
 use std::cell::RefCell;
 
+/// Convert a CefStringUserfree to String without the crate's eprintln on null.
+pub(crate) fn userfree_to_string(userfree: &CefStringUserfreeUtf16) -> String {
+    let raw: Option<&cef::sys::_cef_string_utf16_t> = userfree.into();
+    if raw.is_none() {
+        return String::new();
+    }
+    format!("{}", CefString::from(userfree))
+}
+
 const OPAQUE_PREFIX: &str = "luna_";
 
 /// Hosts where a missing Authorization header should be auto-filled with the bearer token.
@@ -38,6 +47,8 @@ pub(crate) fn should_rewrite_token(url: &str) -> bool {
             | "listen.tidal.com"
             | "desktop.tidal.com"
             | "openapi.tidal.com"
+            | "login.tidal.com"
+            | "auth.tidal.com"
     ) || (host == "fp.fa.tidal.com" && parsed.path().starts_with("/license"))
         || (host.starts_with("event-collector.") && host.ends_with(".tidalhi.fi"))
 }
@@ -66,7 +77,10 @@ wrap_resource_request_handler! {
         ) -> ReturnValue {
             if let Some(req) = request {
                 let url_cef = req.url();
-                let url = format!("{}", CefString::from(&url_cef));
+                let url = userfree_to_string(&url_cef);
+                if url.is_empty() {
+                    return ReturnValue::CONTINUE;
+                }
 
                 if crate::ui::nav::is_token_endpoint(&url) {
                     let accept_name = CefString::from("Accept-Encoding");
@@ -79,7 +93,7 @@ wrap_resource_request_handler! {
                     rewrite_authorization_header(req);
                 }
             }
-            ReturnValue::default()
+            ReturnValue::CONTINUE
         }
 
         fn resource_response_filter(
@@ -90,7 +104,7 @@ wrap_resource_request_handler! {
             _response: Option<&mut Response>,
         ) -> Option<ResponseFilter> {
             let url_cef = request?.url();
-            let url = format!("{}", CefString::from(&url_cef));
+            let url = userfree_to_string(&url_cef);
             if crate::ui::nav::is_token_endpoint(&url) {
                 Some(TokenResponseFilter::new(RefCell::new(
                     FilterState::Accumulating(Vec::new()),
@@ -105,7 +119,7 @@ wrap_resource_request_handler! {
 fn rewrite_authorization_header(req: &mut Request) {
     let auth_name = CefString::from("Authorization");
     let auth_val = req.header_by_name(Some(&auth_name));
-    let auth_str = format!("{}", CefString::from(&auth_val));
+    let auth_str = userfree_to_string(&auth_val);
     if !auth_str.starts_with("Bearer ") {
         return;
     }
@@ -148,7 +162,7 @@ fn inject_refresh_token(req: &mut Request, url: &str) {
         return;
     }
     let method_cef = req.method();
-    let method = format!("{}", CefString::from(&method_cef));
+    let method = userfree_to_string(&method_cef);
     if method != "POST" {
         return;
     }

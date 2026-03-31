@@ -26,7 +26,7 @@ wrap_render_process_handler! {
                 .on_context_created(browser.cloned(), frame.cloned(), context.cloned());
             if let Some(ref frame) = frame_for_inject {
                 let url = frame.url();
-                let url_str = format!("{}", cef::CefString::from(&url));
+                let url_str = crate::ui::token_filter::userfree_to_string(&url);
                 use crate::ui::nav::{self, NavigationPolicy, PageKind};
                 if NavigationPolicy::for_page(PageKind::classify(&url_str)).inject_early_runtime {
                     let preload = format!(

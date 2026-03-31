@@ -300,7 +300,7 @@ wrap_load_handler! {
         ) {
             if let Some(frame) = frame {
                 let url_userfree = frame.url();
-                let url = format!("{}", CefString::from(&url_userfree));
+                let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
                 let policy = NavigationPolicy::for_page(PageKind::classify(&url));
                 if policy.inject_init_script {
                     crate::vprintln!("[LOAD]   on_load_start init_script: {}", &url[..url.len().min(80)]);
@@ -324,7 +324,7 @@ wrap_load_handler! {
                 && let Some(frame) = browser.main_frame()
             {
                 let url_userfree = frame.url();
-                let url = format!("{}", CefString::from(&url_userfree));
+                let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
                 let kind = PageKind::classify(&url);
                 let policy = NavigationPolicy::for_page(kind);
                 if kind == PageKind::AuthHost {
@@ -402,7 +402,7 @@ wrap_request_handler! {
                 .as_ref()
                 .map(|r| {
                     let u = r.url();
-                    format!("{}", CefString::from(&u))
+                    crate::ui::token_filter::userfree_to_string(&u)
                 })
                 .unwrap_or_default();
 
@@ -473,7 +473,7 @@ wrap_request_handler! {
                 .as_ref()
                 .map(|r| {
                     let u = r.url();
-                    format!("{}", CefString::from(&u))
+                    crate::ui::token_filter::userfree_to_string(&u)
                 })
                 .unwrap_or_default();
             if crate::ui::token_filter::should_rewrite_token(&url)
