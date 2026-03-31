@@ -4,6 +4,7 @@ mod plugin_ipc;
 mod proxy;
 
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
+pub(crate) use jsrt::load_plugins_if_session_ready;
 
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use std::sync::atomic::{AtomicBool, Ordering};

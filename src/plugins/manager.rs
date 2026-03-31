@@ -88,6 +88,16 @@ impl PluginManager {
         self.states.remove(plugin_id);
     }
 
+    /// All currently loaded plugin URLs.
+    pub fn loaded_urls(&self) -> Vec<String> {
+        self.states.keys().cloned().collect()
+    }
+
+    /// True if no plugins are loaded.
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
     /// True if the plugin is Loading or Ready.
     pub fn is_loaded(&self, plugin_id: &str) -> bool {
         self.states.contains_key(plugin_id)

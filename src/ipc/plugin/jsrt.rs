@@ -7,6 +7,9 @@ use cef::*;
 fn handle_session_clear() {
     crate::vprintln!("[AUTH]   session_clear received");
 
+    // Unload all user plugins before clearing the session
+    unload_all_user_plugins();
+
     with_state(|state| {
         state.captured_token.clear();
         state.token_state = None;
@@ -434,4 +437,42 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             crate::vprintln!("[JSRT] Unknown fire-and-forget channel: {}", msg.channel);
         }
     }
+}
+
+/// Unload all user plugins (cleanup JS + mark_unloaded). Called on session_clear.
+fn unload_all_user_plugins() {
+    let loaded: Vec<String> =
+        with_state(|state| state.plugin_manager.loaded_urls()).unwrap_or_default();
+
+    if loaded.is_empty() {
+        return;
+    }
+
+    crate::vprintln!(
+        "[PLUGIN] Unloading {} user plugin(s) (session clear)",
+        loaded.len()
+    );
+    for url in &loaded {
+        let cleanup_js = crate::plugins::PluginManager::generate_unload_js(url);
+        eval_js(&cleanup_js);
+        with_state(|state| state.plugin_manager.mark_unloaded(url));
+    }
+}
+
+/// Load plugins after a successful login. Safe to call multiple times
+/// (no-op if plugins are already loaded or no session).
+pub(crate) fn load_plugins_if_session_ready() {
+    let (has_session, has_plugins) = with_state(|state| {
+        let session = !state.captured_token.is_empty() || state.token_state.is_some();
+        let plugins = !state.plugin_manager.is_empty();
+        (session, plugins)
+    })
+    .unwrap_or((false, false));
+
+    if !has_session || has_plugins {
+        return;
+    }
+
+    crate::vprintln!("[PLUGIN] Post-login: loading plugins");
+    do_load_plugins_inline();
 }

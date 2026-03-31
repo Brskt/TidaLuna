@@ -364,6 +364,12 @@ wrap_load_handler! {
                         self.bundle_script
                     ),
                 );
+
+                // After post-login SPA navigation to app, load plugins if session is ready
+                // but plugins weren't loaded yet (skipped on login page).
+                if !is_login {
+                    crate::ipc::plugin::load_plugins_if_session_ready();
+                }
             }
         }
         fn on_load_error(
