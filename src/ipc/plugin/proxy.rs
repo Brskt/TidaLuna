@@ -158,6 +158,15 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
 
     if let Some(body) = opts.get("body").and_then(|v| v.as_str()) {
         let body = if crate::ui::nav::is_token_endpoint(&url) {
+            // Capture client_id from token exchange body (defensive: covers proxy path)
+            for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
+                if k == "client_id" && !v.is_empty() {
+                    with_state(|state| {
+                        state.last_client_id = v.to_string();
+                    });
+                    break;
+                }
+            }
             proxy_rewrite_refresh_body(body)
         } else {
             body.to_string()
@@ -431,7 +440,8 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
                 .token_state
                 .as_ref()
                 .map(|ts| ts.current.client_id.clone())
-                .unwrap_or_default(),
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| state.last_client_id.clone()),
         };
 
         let previous = state.token_state.as_ref().map(|ts| ts.current.clone());

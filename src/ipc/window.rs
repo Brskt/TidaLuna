@@ -162,7 +162,9 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 }
             }
         }
-        "web.loaded" => {}
+        "web.loaded" => {
+            crate::ui::proactive_refresh::trigger_if_needed();
+        }
         "settings.close_to_tray" => {
             crate::vprintln!("[TRAY]   IPC settings.close_to_tray received");
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);

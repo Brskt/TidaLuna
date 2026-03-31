@@ -146,13 +146,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thumbbar: None,
         close_to_tray: false,
         force_quit: false,
+        needs_proactive_refresh: false,
+        last_client_id: String::new(),
     })));
 
     let root_cache = state::cache_data_dir().join("cef");
     let profile_cache = root_cache.join("Default");
     std::fs::create_dir_all(&profile_cache).ok();
 
-    if let Some(restored) = reconcile_boot_tokens(&data_dir, &profile_cache) {
+    if let Some((restored, needs_refresh)) = reconcile_boot_tokens(&data_dir, &profile_cache) {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -163,6 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.captured_token = restored.current.access_token.clone();
             }
             state.token_state = Some(restored);
+            state.needs_proactive_refresh = needs_refresh;
         });
     }
 
@@ -197,10 +200,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Returns (token_state, needs_proactive_refresh).
+/// needs_proactive_refresh is true when the SDK blob was seeded with real tokens
+/// (TIDAL will have real JWTs in memory until we push opaques).
 fn reconcile_boot_tokens(
     data_dir: &std::path::Path,
     cef_profile: &std::path::Path,
-) -> Option<platform::secure_store::StoredTokenState> {
+) -> Option<(platform::secure_store::StoredTokenState, bool)> {
     let leveldb_path = cef_profile.join("Local Storage").join("leveldb");
 
     let stored = match platform::secure_store::load(data_dir) {
@@ -242,7 +248,7 @@ fn reconcile_boot_tokens(
             .is_some()
             {
                 vprintln!("[AUTH]   SDK blob seeded successfully");
-                return Some(stored);
+                return Some((stored, true));
             }
             vprintln!("[AUTH]   SDK blob seeding failed");
             return None;
@@ -271,13 +277,13 @@ fn reconcile_boot_tokens(
     // Match against opaque tokens (normal flow)
     if sdk_at == stored.current.opaque_at && sdk_rt == stored.current.opaque_rt {
         vprintln!("[AUTH]   Boot reconciliation: current match (opaque)");
-        return Some(stored);
+        return Some((stored, false));
     }
 
     // Match against real tokens (seeded blob — TIDAL re-persisted them)
     if sdk_at == stored.current.access_token && sdk_rt == stored.current.refresh_token {
         vprintln!("[AUTH]   Boot reconciliation: current match (real)");
-        return Some(stored);
+        return Some((stored, true));
     }
 
     if let Some(ref prev) = stored.previous
@@ -299,7 +305,7 @@ fn reconcile_boot_tokens(
         )
         .is_some()
         {
-            return Some(stored);
+            return Some((stored, false));
         }
         vprintln!("[AUTH]   SDK rewrite failed — purging");
         platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
@@ -312,7 +318,7 @@ fn reconcile_boot_tokens(
         && sdk_rt == prev.refresh_token
     {
         vprintln!("[AUTH]   Boot reconciliation: previous match (real)");
-        return Some(stored);
+        return Some((stored, true));
     }
 
     vprintln!("[AUTH]   Boot reconciliation: no match — purging");

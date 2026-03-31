@@ -3,6 +3,7 @@ mod client;
 pub(crate) mod flush;
 pub(crate) mod menu;
 pub(crate) mod nav;
+pub(crate) mod proactive_refresh;
 pub(crate) mod token_filter;
 mod window_delegate;
 

@@ -55,6 +55,8 @@ pub(crate) struct AppState {
     pub(crate) thumbbar: Option<crate::platform::thumbbar::ThumbBar>,
     pub(crate) close_to_tray: bool,
     pub(crate) force_quit: bool,
+    pub(crate) needs_proactive_refresh: bool,
+    pub(crate) last_client_id: String,
 }
 
 // SAFETY: AppState contains non-Send CEF/OS handles and thread-sensitive fields

@@ -86,6 +86,7 @@ wrap_resource_request_handler! {
                     let accept_name = CefString::from("Accept-Encoding");
                     let accept_val = CefString::from("identity");
                     req.set_header_by_name(Some(&accept_name), Some(&accept_val), 1);
+                    capture_client_id(req);
                     inject_refresh_token(req, &url);
                 }
 
@@ -112,6 +113,46 @@ wrap_resource_request_handler! {
             } else {
                 None
             }
+        }
+    }
+}
+
+fn capture_client_id(req: &mut Request) {
+    let method_cef = req.method();
+    let method = userfree_to_string(&method_cef);
+    if method != "POST" {
+        return;
+    }
+    let Some(post_data) = req.post_data() else {
+        return;
+    };
+    let count = post_data.element_count();
+    if count == 0 {
+        return;
+    }
+    let mut elements: Vec<Option<PostDataElement>> = vec![None; count];
+    post_data.elements(Some(&mut elements));
+    let body_bytes = match elements.first() {
+        Some(Some(el)) => {
+            let count = el.bytes_count();
+            if count == 0 {
+                return;
+            }
+            let mut buf = vec![0u8; count];
+            el.bytes(count, buf.as_mut_ptr());
+            buf
+        }
+        _ => return,
+    };
+    let Ok(body_str) = std::str::from_utf8(&body_bytes) else {
+        return;
+    };
+    for (k, v) in url::form_urlencoded::parse(body_str.as_bytes()) {
+        if k == "client_id" && !v.is_empty() {
+            crate::app_state::with_state(|state| {
+                state.last_client_id = v.to_string();
+            });
+            return;
         }
     }
 }
@@ -466,7 +507,8 @@ fn process_token_response(body: &[u8]) -> ProcessResult {
                 .token_state
                 .as_ref()
                 .map(|ts| ts.current.client_id.clone())
-                .unwrap_or_default(),
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| state.last_client_id.clone()),
         };
 
         let previous = state.token_state.as_ref().map(|ts| ts.current.clone());
