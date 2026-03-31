@@ -321,6 +321,65 @@ fn write_ls_keys(db: &mut rusty_leveldb::DB, entries: &[(&str, &[u8])]) -> Optio
     Some(())
 }
 
+/// Create a fresh SDK credential blob in LevelDB from opaque tokens.
+/// Used when the secure store has tokens but the SDK storage is missing
+/// (TIDAL's SDK may refuse to persist non-JWT opaque tokens).
+pub(crate) fn create_sdk_credentials(
+    leveldb_path: &Path,
+    opaque_at: &str,
+    opaque_rt: &str,
+    expires: u64,
+    user_id: Option<&str>,
+    granted_scopes: &[String],
+) -> Option<()> {
+    let mut salt = [0u8; SALT_LEN];
+    getrandom::fill(&mut salt).ok()?;
+
+    let mut data_key = [0u8; AES_KW_UNWRAPPED_LEN];
+    getrandom::fill(&mut data_key).ok()?;
+
+    let mut counter = [0u8; COUNTER_LEN];
+    getrandom::fill(&mut counter).ok()?;
+
+    // Build the credentials JSON matching TIDAL SDK's schema
+    let credentials_json = serde_json::json!({
+        "accessToken": {
+            "token": opaque_at,
+            "expires": expires,
+            "userId": user_id.unwrap_or(""),
+            "grantedScopes": granted_scopes,
+        },
+        "refreshToken": opaque_rt,
+    });
+    let plaintext = serde_json::to_vec(&credentials_json).ok()?;
+
+    let ciphertext = encrypt_aes_ctr(&data_key, &counter, &plaintext)?;
+
+    // Wrap the data key with AES-KW
+    let wrapping_key = derive_wrapping_key(&salt);
+    let kek = aes_kw::KekAes256::new((&wrapping_key).into());
+    let mut wrapped_key = [0u8; AES_KW_WRAPPED_LEN];
+    kek.wrap(&data_key, &mut wrapped_key).ok()?;
+
+    let opts = rusty_leveldb::Options {
+        create_if_missing: true,
+        compressor: 1,
+        ..rusty_leveldb::Options::default()
+    };
+    let mut db = rusty_leveldb::DB::open(leveldb_path, opts).ok()?;
+    write_ls_keys(
+        &mut db,
+        &[
+            ("AuthDB/tidalSalt", &salt),
+            ("AuthDB/tidalCounter", &counter),
+            ("AuthDB/tidalKey", &wrapped_key),
+            ("AuthDB/tidalData", &ciphertext),
+        ],
+    )?;
+
+    Some(())
+}
+
 pub(crate) fn purge_sdk_credentials(leveldb_path: &Path) {
     let OpenResult::Ok(db) = open_leveldb(leveldb_path) else {
         return;

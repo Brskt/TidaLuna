@@ -197,18 +197,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn sdk_has_opaques(leveldb_path: &std::path::Path) -> bool {
-    use platform::sdk_storage::{ReadSdkResult, read_sdk_credentials};
-    match read_sdk_credentials(leveldb_path) {
-        ReadSdkResult::Parsed { credentials, .. } => credentials
-            .access_token
-            .as_ref()
-            .and_then(|a| a.token.as_deref())
-            .is_some_and(ui::token_filter::is_opaque),
-        _ => false,
-    }
-}
-
 fn reconcile_boot_tokens(
     data_dir: &std::path::Path,
     cef_profile: &std::path::Path,
@@ -218,30 +206,18 @@ fn reconcile_boot_tokens(
     let stored = match platform::secure_store::load(data_dir) {
         Ok(Some(s)) => s,
         Ok(None) | Err(platform::secure_store::StoreError::Unavailable) => {
-            if sdk_has_opaques(&leveldb_path) {
-                platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-                vprintln!("[AUTH]   No secure store + opaque SDK blob — purged");
-            } else {
-                vprintln!("[AUTH]   No secure store — leaving SDK blob (pre-upgrade or fresh)");
-            }
+            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+            vprintln!("[AUTH]   No secure store — purged SDK blob");
             return None;
         }
         Err(platform::secure_store::StoreError::Corrupt) => {
-            if sdk_has_opaques(&leveldb_path) {
-                platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-                vprintln!("[AUTH]   Secure store corrupt + opaque SDK blob — purged");
-            } else {
-                vprintln!("[AUTH]   Secure store corrupt — leaving SDK blob");
-            }
+            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+            vprintln!("[AUTH]   Secure store corrupt — purged SDK blob");
             return None;
         }
         Err(_) => {
-            if sdk_has_opaques(&leveldb_path) {
-                platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-                vprintln!("[AUTH]   Secure store transient error + opaque SDK blob — purged");
-            } else {
-                vprintln!("[AUTH]   Secure store transient error — skipping reconciliation");
-            }
+            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+            vprintln!("[AUTH]   Secure store error — purged SDK blob");
             return None;
         }
     };
@@ -250,7 +226,25 @@ fn reconcile_boot_tokens(
     let sdk_result = read_sdk_credentials(&leveldb_path);
     let (sdk_at, sdk_rt, sdk_crypto, sdk_plaintext) = match sdk_result {
         ReadSdkResult::Missing => {
-            vprintln!("[AUTH]   No SDK storage — fresh session");
+            // TIDAL's SDK validates JWT format — opaque tokens fail validation
+            // and trigger session_clear. Seed with REAL tokens instead.
+            // The blob is AES-256 encrypted and plugins can't access localStorage.
+            vprintln!("[AUTH]   No SDK storage — seeding from secure store");
+            let cur = &stored.current;
+            if platform::sdk_storage::create_sdk_credentials(
+                &leveldb_path,
+                &cur.access_token,
+                &cur.refresh_token,
+                cur.access_expires,
+                cur.user_id.as_deref(),
+                &cur.granted_scopes,
+            )
+            .is_some()
+            {
+                vprintln!("[AUTH]   SDK blob seeded successfully");
+                return Some(stored);
+            }
+            vprintln!("[AUTH]   SDK blob seeding failed");
             return None;
         }
         ReadSdkResult::Corrupt => {
@@ -274,8 +268,15 @@ fn reconcile_boot_tokens(
         }
     };
 
+    // Match against opaque tokens (normal flow)
     if sdk_at == stored.current.opaque_at && sdk_rt == stored.current.opaque_rt {
-        vprintln!("[AUTH]   Boot reconciliation: current match");
+        vprintln!("[AUTH]   Boot reconciliation: current match (opaque)");
+        return Some(stored);
+    }
+
+    // Match against real tokens (seeded blob — TIDAL re-persisted them)
+    if sdk_at == stored.current.access_token && sdk_rt == stored.current.refresh_token {
+        vprintln!("[AUTH]   Boot reconciliation: current match (real)");
         return Some(stored);
     }
 
@@ -303,6 +304,15 @@ fn reconcile_boot_tokens(
         vprintln!("[AUTH]   SDK rewrite failed — purging");
         platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
         return None;
+    }
+
+    // Match previous generation against real tokens too
+    if let Some(ref prev) = stored.previous
+        && sdk_at == prev.access_token
+        && sdk_rt == prev.refresh_token
+    {
+        vprintln!("[AUTH]   Boot reconciliation: previous match (real)");
+        return Some(stored);
     }
 
     vprintln!("[AUTH]   Boot reconciliation: no match — purging");
