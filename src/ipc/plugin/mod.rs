@@ -18,7 +18,7 @@ pub(super) fn reset_pkce_scrub() {
     PKCE_SCRUBBED.store(false, Ordering::SeqCst);
 }
 
-pub(super) fn scrub_pkce_verifier() {
+pub(crate) fn scrub_pkce_verifier() {
     if PKCE_SCRUBBED.swap(true, Ordering::SeqCst) {
         return; // already scrubbed
     }

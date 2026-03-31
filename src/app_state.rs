@@ -47,6 +47,7 @@ pub(crate) struct AppState {
     pub(crate) media_duration: Option<f64>,
     pub(crate) plugin_manager: crate::plugins::PluginManager,
     pub(crate) captured_token: String,
+    pub(crate) token_state: Option<crate::platform::secure_store::StoredTokenState>,
     pub(crate) pending_ipc_callbacks: HashMap<String, IpcCallback>,
     pub(crate) pending_window_save: Option<crate::settings::WindowState>,
     pub(crate) window_save_scheduled: bool,

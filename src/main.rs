@@ -138,6 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         media_duration: None,
         plugin_manager: plugins::PluginManager::new(),
         captured_token: String::new(),
+        token_state: None,
         pending_ipc_callbacks: HashMap::new(),
         pending_window_save: None,
         window_save_scheduled: false,
