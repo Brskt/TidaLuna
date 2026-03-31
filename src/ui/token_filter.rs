@@ -3,6 +3,26 @@ use std::cell::RefCell;
 
 const OPAQUE_PREFIX: &str = "luna_";
 
+/// Hosts where a missing Authorization header should be auto-filled with the bearer token.
+/// Subset of should_rewrite_token — excludes telemetry/DRM hosts that don't need OAuth.
+pub(crate) fn needs_auto_injection(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let host = parsed.host_str().unwrap_or("");
+    matches!(
+        host,
+        "api.tidal.com"
+            | "api.tidalhifi.com"
+            | "listen.tidal.com"
+            | "desktop.tidal.com"
+            | "openapi.tidal.com"
+    )
+}
+
 pub(crate) fn should_rewrite_token(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
@@ -196,7 +216,7 @@ fn inject_refresh_token(req: &mut Request, url: &str) {
             && ts.previous_valid_until.is_none_or(|until| now <= until)
             && rt_value == prev.opaque_rt
         {
-            return Some(prev.refresh_token.clone());
+            return Some(ts.current.refresh_token.clone());
         }
         None
     })

@@ -92,17 +92,10 @@ impl NavigationPolicy {
     }
 }
 
-pub(crate) fn needs_token_injection(url: &str) -> bool {
-    let Ok(parsed) = Url::parse(url) else {
-        return false;
-    };
-    let host = parsed.host_str().unwrap_or("");
-    host == HOST_API || host == HOST_DESKTOP
-}
-
 pub(crate) fn is_token_endpoint(url: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
     };
-    parsed.path().contains(PATH_OAUTH_TOKEN)
+    let host = parsed.host_str().unwrap_or("");
+    (host == HOST_AUTH || host == HOST_LOGIN) && parsed.path().contains(PATH_OAUTH_TOKEN)
 }

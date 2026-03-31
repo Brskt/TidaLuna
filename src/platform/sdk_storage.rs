@@ -96,8 +96,6 @@ fn encrypt_aes_ctr(
 }
 
 pub(crate) struct CryptoParams {
-    pub salt: [u8; SALT_LEN],
-    pub wrapped_key: Vec<u8>,
     pub data_key: [u8; AES_KW_UNWRAPPED_LEN],
 }
 
@@ -112,12 +110,6 @@ pub(crate) struct SdkCredentials {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SdkAccessToken {
     pub token: Option<String>,
-    pub expires: Option<u64>,
-    pub user_id: Option<String>,
-    pub client_id: Option<String>,
-    pub granted_scopes: Option<Vec<String>>,
-    pub requested_scopes: Option<Vec<String>>,
-    pub client_unique_key: Option<String>,
 }
 
 pub(crate) enum ReadSdkResult {
@@ -195,11 +187,7 @@ pub(crate) fn read_sdk_credentials(leveldb_path: &Path) -> ReadSdkResult {
         return ReadSdkResult::Corrupt;
     };
 
-    let crypto = CryptoParams {
-        salt,
-        wrapped_key: wrapped_bytes,
-        data_key,
-    };
+    let crypto = CryptoParams { data_key };
 
     ReadSdkResult::Parsed {
         credentials: Box::new(credentials),
@@ -331,4 +319,17 @@ fn write_ls_keys(db: &mut rusty_leveldb::DB, entries: &[(&str, &[u8])]) -> Optio
     }
     db.write(batch, true).ok()?;
     Some(())
+}
+
+pub(crate) fn purge_sdk_credentials(leveldb_path: &Path) {
+    let OpenResult::Ok(db) = open_leveldb(leveldb_path) else {
+        return;
+    };
+    let mut db = *db;
+    let mut batch = rusty_leveldb::WriteBatch::default();
+    for suffix in ["Salt", "Counter", "Key", "Data"] {
+        let key = leveldb_key(&format!("AuthDB/tidal{suffix}"));
+        batch.delete(&key);
+    }
+    let _ = db.write(batch, true);
 }

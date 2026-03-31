@@ -9,15 +9,22 @@ fn handle_session_clear() {
 
     with_state(|state| {
         state.captured_token.clear();
+        state.token_state = None;
     });
+    let data_dir = crate::state::cache_data_dir();
+    if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
+        crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");
+    }
+    crate::app_state::eval_js(
+        "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}",
+    );
     super::reset_pkce_scrub();
-    crate::vprintln!("[AUTH]   Cleared captured token");
+    crate::vprintln!("[AUTH]   Cleared captured token + token state + SDK auth blob");
 
     crate::app_state::emit_ipc_event("jsrt.session_cleared");
     crate::vprintln!("[AUTH]   Notified frontend: session_cleared");
 }
 
-// --- Session hard reset ---
 // Aggressive cleanup: cookies, storage, token. Used for debug/manual logout only.
 
 static HARD_RESET_IN_PROGRESS: std::sync::atomic::AtomicBool =
@@ -32,9 +39,14 @@ fn handle_session_hard_reset() {
 
     with_state(|state| {
         state.captured_token.clear();
+        state.token_state = None;
     });
+    let data_dir = crate::state::cache_data_dir();
+    if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
+        crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");
+    }
     super::reset_pkce_scrub();
-    crate::vprintln!("[AUTH]   Cleared captured token");
+    crate::vprintln!("[AUTH]   Cleared captured token + token state");
 
     if let Some(cm) = cef::cookie_manager_get_global_manager(None) {
         let empty = cef::CefString::from("");

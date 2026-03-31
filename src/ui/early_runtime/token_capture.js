@@ -3,7 +3,7 @@
 
 var _lastToken = '';
 function captureToken(token) {
-    if (token && token !== _lastToken) {
+    if (token && token !== _lastToken && token.indexOf('luna_') !== 0) {
         _lastToken = token;
         sendIpc('jsrt.set_token', token);
     }

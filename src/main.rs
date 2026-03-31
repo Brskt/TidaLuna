@@ -152,6 +152,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile_cache = root_cache.join("Default");
     std::fs::create_dir_all(&profile_cache).ok();
 
+    if let Some(restored) = reconcile_boot_tokens(&data_dir, &profile_cache) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let token_valid = restored.current.access_expires > now_secs;
+        app_state::with_state(|state| {
+            if token_valid {
+                state.captured_token = restored.current.access_token.clone();
+            }
+            state.token_state = Some(restored);
+        });
+    }
+
     let root_cache_cef = CefString::from(root_cache.to_string_lossy().as_ref());
     let profile_cache_cef = CefString::from(profile_cache.to_string_lossy().as_ref());
 
@@ -181,4 +195,117 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_message_loop();
     shutdown();
     Ok(())
+}
+
+fn sdk_has_opaques(leveldb_path: &std::path::Path) -> bool {
+    use platform::sdk_storage::{ReadSdkResult, read_sdk_credentials};
+    match read_sdk_credentials(leveldb_path) {
+        ReadSdkResult::Parsed { credentials, .. } => credentials
+            .access_token
+            .as_ref()
+            .and_then(|a| a.token.as_deref())
+            .is_some_and(ui::token_filter::is_opaque),
+        _ => false,
+    }
+}
+
+fn reconcile_boot_tokens(
+    data_dir: &std::path::Path,
+    cef_profile: &std::path::Path,
+) -> Option<platform::secure_store::StoredTokenState> {
+    let leveldb_path = cef_profile.join("Local Storage").join("leveldb");
+
+    let stored = match platform::secure_store::load(data_dir) {
+        Ok(Some(s)) => s,
+        Ok(None) | Err(platform::secure_store::StoreError::Unavailable) => {
+            if sdk_has_opaques(&leveldb_path) {
+                platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+                vprintln!("[AUTH]   No secure store + opaque SDK blob — purged");
+            } else {
+                vprintln!("[AUTH]   No secure store — leaving SDK blob (pre-upgrade or fresh)");
+            }
+            return None;
+        }
+        Err(platform::secure_store::StoreError::Corrupt) => {
+            if sdk_has_opaques(&leveldb_path) {
+                platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+                vprintln!("[AUTH]   Secure store corrupt + opaque SDK blob — purged");
+            } else {
+                vprintln!("[AUTH]   Secure store corrupt — leaving SDK blob");
+            }
+            return None;
+        }
+        Err(_) => {
+            if sdk_has_opaques(&leveldb_path) {
+                platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+                vprintln!("[AUTH]   Secure store transient error + opaque SDK blob — purged");
+            } else {
+                vprintln!("[AUTH]   Secure store transient error — skipping reconciliation");
+            }
+            return None;
+        }
+    };
+
+    use platform::sdk_storage::{ReadSdkResult, read_sdk_credentials};
+    let sdk_result = read_sdk_credentials(&leveldb_path);
+    let (sdk_at, sdk_rt, sdk_crypto, sdk_plaintext) = match sdk_result {
+        ReadSdkResult::Missing => {
+            vprintln!("[AUTH]   No SDK storage — fresh session");
+            return None;
+        }
+        ReadSdkResult::Corrupt => {
+            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+            vprintln!("[AUTH]   SDK storage corrupt — purged");
+            return None;
+        }
+        ReadSdkResult::Parsed {
+            credentials,
+            crypto,
+            plaintext,
+        } => {
+            let at = credentials
+                .access_token
+                .as_ref()
+                .and_then(|a| a.token.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let rt = credentials.refresh_token.unwrap_or_default();
+            (at, rt, crypto, plaintext)
+        }
+    };
+
+    if sdk_at == stored.current.opaque_at && sdk_rt == stored.current.opaque_rt {
+        vprintln!("[AUTH]   Boot reconciliation: current match");
+        return Some(stored);
+    }
+
+    if let Some(ref prev) = stored.previous
+        && sdk_at == prev.opaque_at
+        && sdk_rt == prev.opaque_rt
+    {
+        vprintln!("[AUTH]   Boot reconciliation: previous match, rewriting SDK blob");
+        if platform::sdk_storage::rewrite_sdk_credentials(
+            &leveldb_path,
+            &sdk_plaintext,
+            &platform::sdk_storage::RewriteFields {
+                opaque_at: &stored.current.opaque_at,
+                opaque_rt: Some(&stored.current.opaque_rt),
+                expires: Some(stored.current.access_expires),
+                user_id: stored.current.user_id.as_deref(),
+                granted_scopes: Some(&stored.current.granted_scopes),
+            },
+            &sdk_crypto,
+        )
+        .is_some()
+        {
+            return Some(stored);
+        }
+        vprintln!("[AUTH]   SDK rewrite failed — purging");
+        platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+        return None;
+    }
+
+    vprintln!("[AUTH]   Boot reconciliation: no match — purging");
+    platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
+    None
 }

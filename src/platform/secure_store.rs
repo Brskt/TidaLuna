@@ -21,6 +21,8 @@ pub(crate) struct TokenGeneration {
     pub client_id: String,
 }
 
+#[derive(Debug)]
+#[allow(dead_code)] // Unavailable only constructed on Linux
 pub(crate) enum StoreError {
     /// Backend not available (no Secret Service on Linux, no Keychain, etc.)
     Unavailable,

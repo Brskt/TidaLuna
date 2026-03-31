@@ -469,7 +469,20 @@ wrap_request_handler! {
             _request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
-            None
+            let url = _request
+                .as_ref()
+                .map(|r| {
+                    let u = r.url();
+                    format!("{}", CefString::from(&u))
+                })
+                .unwrap_or_default();
+            if crate::ui::token_filter::should_rewrite_token(&url)
+                || crate::ui::nav::is_token_endpoint(&url)
+            {
+                Some(crate::ui::token_filter::TokenResourceHandler::new())
+            } else {
+                None
+            }
         }
         fn on_render_process_terminated(
             &self,
