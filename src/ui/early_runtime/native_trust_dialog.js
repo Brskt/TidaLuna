@@ -1,6 +1,6 @@
 // Fragment 7 — Native plugin trust dialog
 // Shows a blocking modal overlay when a native plugin requests access
-// to a restricted module (fs, net, child_process, etc.).
+// to a restricted module (fs, child_process, os, etc.).
 // The user must Allow or Deny before the plugin can proceed.
 
 self.__LUNAR_IPC_ON__('native.trust_request', function(pluginName, moduleName, codeHash, manifest) {
@@ -41,7 +41,7 @@ self.__LUNAR_IPC_ON__('native.trust_request', function(pluginName, moduleName, c
         authorBlock.style.cssText = 'display:flex;align-items:center;gap:10px;margin:0 0 14px;padding:10px 14px;background:#222;border-radius:4px';
 
         var avatarSrc = author.avatarUrl;
-        // Fallback: derive GitHub avatar from author URL if gravatar fails
+        // Fallback: derive GitHub avatar from author URL if no avatarUrl in manifest
         if (!avatarSrc && author.url && author.url.indexOf('github.com/') !== -1) {
             var ghUser = author.url.split('github.com/')[1];
             if (ghUser) avatarSrc = 'https://github.com/' + ghUser.split('/')[0] + '.png?size=64';
@@ -115,7 +115,6 @@ self.__LUNAR_IPC_ON__('native.trust_request', function(pluginName, moduleName, c
     accessLine.appendChild(accessValue);
     infoBlock.appendChild(accessLine);
 
-    // Permission description — inside the info block, under the access line
     var permDesc = document.createElement('div');
     permDesc.style.cssText = 'margin-top:6px;padding-top:6px;border-top:1px solid #333;color:#aaa;font-size:12px';
     permDesc.textContent = info.desc;

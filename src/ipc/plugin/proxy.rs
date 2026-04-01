@@ -93,6 +93,23 @@ pub(super) fn leaks_real_token(url: &str, payload: Option<&str>) -> bool {
     .unwrap_or(false)
 }
 
+/// Restrict proxy channels to Tidal domains only.
+/// Returns true (and sends an IPC error) if the URL is rejected.
+fn reject_non_tidal(url: &str, channel: &str, callback: &IpcCallback) -> bool {
+    if !crate::ui::token_filter::should_rewrite_token(url)
+        && !crate::ui::nav::is_token_endpoint(url)
+    {
+        crate::vprintln!(
+            "[PROXY]  REJECTED {} to non-Tidal URL: {}",
+            channel,
+            &url[..url.len().min(80)]
+        );
+        ipc_callback_err(callback, &format!("{channel}: non-Tidal URL rejected"));
+        return true;
+    }
+    false
+}
+
 pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg
         .args
@@ -108,17 +125,7 @@ pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallbac
         .to_string();
     let id = msg.id.clone().unwrap_or_default();
 
-    // Restrict proxy.fetch to Tidal domains only.
-    // This channel is the CORS fallback used by the early runtime (closure-scoped).
-    // Plugins should use plugin.fetch for network requests, not proxy.fetch.
-    if !crate::ui::token_filter::should_rewrite_token(&url)
-        && !crate::ui::nav::is_token_endpoint(&url)
-    {
-        crate::vprintln!(
-            "[PROXY]  REJECTED proxy.fetch to non-Tidal URL: {}",
-            &url[..url.len().min(80)]
-        );
-        ipc_callback_err(&callback, "proxy.fetch: non-Tidal URL rejected");
+    if reject_non_tidal(&url, "proxy.fetch", &callback) {
         return;
     }
 
@@ -139,15 +146,7 @@ pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, callback: IpcCallback
         .to_string();
     let id = msg.id.clone().unwrap_or_default();
 
-    // Restrict proxy.head to Tidal domains only (same rationale as proxy.fetch).
-    if !crate::ui::token_filter::should_rewrite_token(&url)
-        && !crate::ui::nav::is_token_endpoint(&url)
-    {
-        crate::vprintln!(
-            "[PROXY]  REJECTED proxy.head to non-Tidal URL: {}",
-            &url[..url.len().min(80)]
-        );
-        ipc_callback_err(&callback, "proxy.head: non-Tidal URL rejected");
+    if reject_non_tidal(&url, "proxy.head", &callback) {
         return;
     }
 

@@ -453,7 +453,6 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
     let db = crate::state::db();
     let channel = msg.channel.clone();
     let args = msg.args.clone();
-    let args_for_trust = args.clone();
 
     let result: Result<String, String> = db.call_plugins(move |pc| match channel.as_str() {
         "plugin.list" => {
@@ -552,7 +551,7 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
         && (channel_ref == "plugin.uninstall" || channel_ref == "plugin.uninstall_all")
     {
         let name = if channel_ref == "plugin.uninstall" {
-            args_for_trust
+            msg.args
                 .first()
                 .and_then(|v| v.as_str())
                 .and_then(|url| {
@@ -564,7 +563,6 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
             "%".to_string() // uninstall_all → clear all trust
         };
         if !name.is_empty() {
-            // Clear persisted trust decisions (DB)
             let db_name = name.clone();
             crate::state::db().call_settings(move |conn| {
                 let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &db_name);

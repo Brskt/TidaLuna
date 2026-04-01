@@ -5,33 +5,21 @@ use crate::state::{NATIVE_RUNTIME, NATIVE_RUNTIME_INIT};
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use tokio::sync::watch;
 
-/// Pending trust requests: keyed by "code_hash::plugin::module".
+/// Pending trust requests: keyed by "name::module".
 /// Uses watch channels so multiple concurrent register calls for the same
 /// plugin can share a single dialog prompt.
 type TrustMap = HashMap<String, watch::Sender<Option<bool>>>;
 
-static PENDING_TRUST: Mutex<Option<TrustMap>> = Mutex::new(None);
-
-fn pending_trust_map() -> &'static Mutex<Option<TrustMap>> {
-    let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
-        *guard = Some(HashMap::new());
-    }
-    drop(guard);
-    &PENDING_TRUST
-}
+static PENDING_TRUST: LazyLock<Mutex<TrustMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Clear in-memory watch channels for a plugin (called on uninstall).
 /// Keys are "name::module", so we remove any key starting with the plugin prefix.
 pub(super) fn clear_pending_trust(plugin_prefix: &str) {
-    let map = pending_trust_map();
-    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(ref mut m) = *guard {
-        m.retain(|key, _| !key.starts_with(plugin_prefix));
-    }
+    let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|key, _| !key.starts_with(plugin_prefix));
 }
 
 fn compute_code_hash(code: &str) -> String {
@@ -115,7 +103,6 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         }
     });
 
-    // Load existing trust decisions from DB
     let trust_grants: HashMap<String, bool> = {
         let decisions = crate::state::db().call_settings({
             let hash = code_hash.clone();
@@ -128,19 +115,12 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
             .collect()
     };
 
-    let trust_json: serde_json::Value = if trust_grants.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::json!(trust_grants)
-    };
-
     do_register(
         runtime,
         name,
         code,
         code_hash,
         trust_grants,
-        trust_json,
         manifest_json,
         callback,
     );
@@ -153,10 +133,14 @@ fn do_register(
     code: String,
     code_hash: String,
     mut trust_grants: HashMap<String, bool>,
-    trust_json: serde_json::Value,
     manifest_json: String,
     callback: IpcCallback,
 ) {
+    let trust_json: serde_json::Value = if trust_grants.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(trust_grants)
+    };
     let cmd = serde_json::json!({
         "type": "register",
         "name": name,
@@ -207,12 +191,10 @@ fn do_register(
                 ipc_callback_ok(&callback, &format!("\"{channel}\""));
             }
             Ok(Err(e)) => {
-                // Check for TRUST_REQUIRED sentinel
                 if let Some(raw) = e.strip_prefix("TRUST_REQUIRED:") {
                     // Trim stack trace — only keep the module name (first line, no whitespace)
                     let module = raw.lines().next().unwrap_or(raw).trim().to_string();
 
-                    // Fail fast if this module was previously denied
                     if trust_grants.get(&module) == Some(&false) {
                         crate::vprintln!(
                             "[NATIVE] Trust previously denied for '{}' → module '{}'",
@@ -241,16 +223,12 @@ fn do_register(
                     // calls may have slightly different code (settings extraction trim).
                     let trust_key = format!("{}::{}", name, module);
                     let mut rx = {
-                        let map = pending_trust_map();
-                        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
-                        let m = guard.as_mut().unwrap();
-                        if let Some(existing_tx) = m.get(&trust_key) {
-                            // Another register call already showed the dialog — just subscribe
+                        let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(existing_tx) = guard.get(&trust_key) {
                             existing_tx.subscribe()
                         } else {
-                            // First request for this module — create channel and show dialog
                             let (tx, sub_rx) = watch::channel(None);
-                            m.insert(trust_key.clone(), tx);
+                            guard.insert(trust_key.clone(), tx);
                             drop(guard);
 
                             // Pass manifest JSON as 4th arg for author info in dialog.
@@ -271,23 +249,38 @@ fn do_register(
                         }
                     };
 
-                    // Wait for the user's decision.
+                    // Wait for the user's decision (60s timeout → deny).
                     // Check current value first — a late subscriber may find the
                     // answer already set by an earlier register call.
                     let granted = if let Some(val) = *rx.borrow() {
                         val
                     } else {
-                        loop {
-                            if rx.changed().await.is_err() {
-                                break false;
+                        let wait = async {
+                            loop {
+                                if rx.changed().await.is_err() {
+                                    break false;
+                                }
+                                if let Some(val) = *rx.borrow() {
+                                    break val;
+                                }
                             }
-                            if let Some(val) = *rx.borrow() {
-                                break val;
+                        };
+                        match tokio::time::timeout(std::time::Duration::from_secs(60), wait).await {
+                            Ok(val) => val,
+                            Err(_) => {
+                                crate::vprintln!(
+                                    "[NATIVE] Trust dialog timeout for '{}' → module '{}'",
+                                    name,
+                                    module
+                                );
+                                // Clean up the pending entry so it doesn't leak
+                                let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
+                                guard.remove(&trust_key);
+                                false
                             }
                         }
                     };
 
-                    // Save to DB
                     {
                         let hash = code_hash.clone();
                         let plugin = name.clone();
@@ -319,17 +312,13 @@ fn do_register(
                         return;
                     }
 
-                    // Re-try register with the newly granted module
                     trust_grants.insert(module, true);
-                    let updated_trust = serde_json::json!(trust_grants);
-                    // Recursive retry — will loop back here if another module is needed
                     do_register(
                         runtime,
                         name,
                         code,
                         code_hash,
                         trust_grants,
-                        updated_trust,
                         manifest_json,
                         callback,
                     );
@@ -416,11 +405,9 @@ pub(super) fn handle_native_trust_response(msg: &IpcMessage, callback: IpcCallba
     // Don't remove the sender — late subscribers need to see the value.
     let trust_key = format!("{plugin}::{module}");
     let sent = {
-        let map = pending_trust_map();
-        let guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
         guard
-            .as_ref()
-            .and_then(|m| m.get(&trust_key))
+            .get(&trust_key)
             .map(|tx| tx.send(Some(granted)).is_ok())
             .unwrap_or(false)
     };

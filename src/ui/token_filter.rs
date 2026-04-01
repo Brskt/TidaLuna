@@ -65,7 +65,7 @@ pub(crate) fn is_opaque(value: &str) -> bool {
 }
 
 // Unconditionally cancels the request. Used by the exfiltration guard
-// to block sendBeacon (RT_PING) and WebSocket upgrades to non-Tidal domains.
+// to block sendBeacon (RT_PING) to non-Tidal domains.
 wrap_resource_request_handler! {
     pub(super) struct ExfilBlockHandler;
 

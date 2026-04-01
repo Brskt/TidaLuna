@@ -10,7 +10,7 @@ Object.defineProperty(navigator, 'sendBeacon', {
     configurable: false
 });
 
-// --- HTMLImageElement.prototype.src: only allow *.tidal.com + data/blob ---
+// --- HTMLImageElement.prototype.src: allowlist (tidal.com, gravatar, github, data/blob) ---
 var _origSrcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
 if (_origSrcDesc && _origSrcDesc.set) {
     Object.defineProperty(HTMLImageElement.prototype, 'src', {

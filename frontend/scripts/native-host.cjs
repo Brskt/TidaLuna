@@ -32,14 +32,16 @@ const BLOCKED_MODULES = new Set([
     "os", "vm", "v8", "inspector",
 ]);
 
+function canonicalize(id) {
+    return id.startsWith("node:") ? id.slice(5) : id;
+}
+
 function isSafe(id) {
-    var canonical = id.startsWith("node:") ? id.slice(5) : id;
-    return SAFE_MODULES.has(id) || SAFE_MODULES.has(canonical);
+    return SAFE_MODULES.has(id) || SAFE_MODULES.has(canonicalize(id));
 }
 
 function isBlocked(id) {
-    var canonical = id.startsWith("node:") ? id.slice(5) : id;
-    return BLOCKED_MODULES.has(id) || BLOCKED_MODULES.has(canonical);
+    return BLOCKED_MODULES.has(id) || BLOCKED_MODULES.has(canonicalize(id));
 }
 
 // ── Mocked process (filtered env, no exit/kill/binding) ─────────────────
@@ -62,33 +64,13 @@ const mockedProcess = Object.freeze({
     argv: Object.freeze([...process.argv]),
 });
 
-// ── globalThis proxy (masks dangerous globals) ──────────────────────────
-const BLOCKED_GLOBALS = new Set([
-    "Bun", "Worker", "ShadowRealm",
-    "eval", "Function",
-]);
-
-// Plain frozen object instead of Proxy — avoids JSC Proxy edge cases
-// that break bundled code iterating globalThis properties.
-var safeGlobal = Object.create(null);
-Object.getOwnPropertyNames(globalThis).forEach(function(key) {
-    if (BLOCKED_GLOBALS.has(key)) return;
-    if (key === "process") return;
-    if (key === "global" || key === "globalThis") return;
-    try { safeGlobal[key] = globalThis[key]; } catch(e) {}
-});
-safeGlobal.process = mockedProcess;
-safeGlobal.global = safeGlobal;
-safeGlobal.globalThis = safeGlobal;
-Object.freeze(safeGlobal);
-
 // ── Proxied require factory ─────────────────────────────────────────────
 function makeRequireProxy(trustedModules) {
     return function proxiedRequire(id) {
         if (isSafe(id)) return require(id);
 
         if (isBlocked(id)) {
-            var canonical = id.startsWith("node:") ? id.slice(5) : id;
+            var canonical = canonicalize(id);
             if (trustedModules.has(id) || trustedModules.has(canonical)) {
                 return require(id);
             }
@@ -121,21 +103,17 @@ function containsDynamicImport(code) {
 
 // ── Eval wrapper ────────────────────────────────────────────────────────
 // Shadows dangerous globals as parameters set to undefined.
-// globalThis and global are replaced with the safe proxy.
-// NOTE: this intentionally uses dynamic code evaluation (new Function)
-// because Bun does not support vm.createContext. This is the plugin
-// loading mechanism, not arbitrary user input.
+// Uses new Function() because Bun does not support vm.createContext.
+// This is the plugin loading mechanism, not arbitrary user input.
 // "eval" and "Function" cannot be shadowed as parameters:
 // - eval: strict mode forbids it as a parameter name
 // - Function: plugins use Function.prototype (fundamental built-in)
-// The globalThis proxy masks both on property access, but direct
-// eval(...) and new Function(...) calls remain available.
+// Direct eval(...) and new Function(...) calls remain available.
 // This is a known JS-level limitation — same as constructor chaining.
 // Web APIs (fetch, WebSocket, etc.) are NOT shadowed — plugins don't
 // have the real token, so network access can't exfiltrate it.
-// This matches upstream TidaLuna which exposes all Web APIs freely.
 // Only Bun-specific APIs and realm-creating primitives are blocked.
-// globalThis/global CANNOT be shadowed — node-inspect-extracted and similar
+// globalThis/global are NOT replaced — node-inspect-extracted and similar
 // libraries iterate globalThis properties for primordial capture, and any
 // replacement (Proxy or frozen object) breaks them. globalThis.Bun remains
 // accessible as a known limitation. Bare `Bun` identifier is shadowed.
