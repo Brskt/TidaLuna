@@ -48,7 +48,6 @@ wrap_render_process_handler! {
                         {open}\
                         {session}\
                         {exfil}\
-                        {native_trust}\
                         self.__LUNAR_EARLY_RUNTIME__=true;\
                         }})();",
                         desktop = nav::HOST_DESKTOP,
@@ -62,7 +61,6 @@ wrap_render_process_handler! {
                         open = include_str!("early_runtime/window_open.js"),
                         session = include_str!("early_runtime/session_stub.js"),
                         exfil = include_str!("early_runtime/exfil_guard.js"),
-                        native_trust = include_str!("early_runtime/native_trust_dialog.js"),
                     );
                     crate::app_state::exec_js_on_frame(frame, &preload);
                 }

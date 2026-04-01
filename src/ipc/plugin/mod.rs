@@ -72,9 +72,6 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
         "__Luna.registerNative" => {
             native::handle_register_native(&msg, callback);
         }
-        "__Luna.native_trust_response" => {
-            native::handle_native_trust_response(&msg, callback);
-        }
         ch if ch.starts_with("__LunaNative.") => {
             native::handle_native_call(&msg, callback);
         }
