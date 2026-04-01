@@ -18,6 +18,9 @@ if (_origSrcDesc && _origSrcDesc.set) {
         set: function(url) {
             if (typeof url === 'string' && url.indexOf('://') !== -1
                 && url.indexOf('tidal.com') === -1
+                && url.indexOf('gravatar.com') === -1
+                && url.indexOf('github.com') === -1
+                && url.indexOf('githubusercontent.com') === -1
                 && url.indexOf('data:') !== 0
                 && url.indexOf('blob:') !== 0) {
                 return;

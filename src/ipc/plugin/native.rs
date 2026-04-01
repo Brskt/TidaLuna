@@ -100,6 +100,21 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         code.trim().len()
     );
 
+    // Load plugin manifest for author info in trust dialog.
+    // Plugin name is "DiscordRPC/discord.native.ts" → URL prefix is "DiscordRPC".
+    let plugin_prefix = name.split('/').next().unwrap_or(&name).to_string();
+    let manifest_json: String = crate::state::db().call_plugins({
+        let prefix = plugin_prefix.clone();
+        move |pc| {
+            pc.query_row(
+                "SELECT manifest FROM plugins WHERE name = ?1 AND installed = 1",
+                rusqlite::params![prefix],
+                |row| row.get(0),
+            )
+            .unwrap_or_default()
+        }
+    });
+
     // Load existing trust decisions from DB
     let trust_grants: HashMap<String, bool> = {
         let decisions = crate::state::db().call_settings({
@@ -126,6 +141,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         code_hash,
         trust_grants,
         trust_json,
+        manifest_json,
         callback,
     );
 }
@@ -138,6 +154,7 @@ fn do_register(
     code_hash: String,
     mut trust_grants: HashMap<String, bool>,
     trust_json: serde_json::Value,
+    manifest_json: String,
     callback: IpcCallback,
 ) {
     let cmd = serde_json::json!({
@@ -225,10 +242,20 @@ fn do_register(
                             m.insert(trust_key.clone(), tx);
                             drop(guard);
 
-                            crate::app_state::emit_ipc_event_with_args(
-                                "native.trust_request",
-                                &[&name, &module, &code_hash],
+                            // Pass manifest JSON as 4th arg for author info in dialog.
+                            // Use eval_js directly because emit_ipc_event_with_args
+                            // wraps args in single quotes which breaks JSON.
+                            let escaped_name = name.replace('\\', "\\\\").replace('\'', "\\'");
+                            let escaped_mod = module.replace('\\', "\\\\").replace('\'', "\\'");
+                            let escaped_hash = code_hash.replace('\\', "\\\\").replace('\'', "\\'");
+                            let js = format!(
+                                "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('native.trust_request','{}','{}','{}',{});",
+                                escaped_name,
+                                escaped_mod,
+                                escaped_hash,
+                                if manifest_json.is_empty() { "null".to_string() } else { manifest_json.clone() }
                             );
+                            crate::app_state::eval_js(&js);
                             sub_rx
                         }
                     };
@@ -292,6 +319,7 @@ fn do_register(
                         code_hash,
                         trust_grants,
                         updated_trust,
+                        manifest_json,
                         callback,
                     );
                     return;
