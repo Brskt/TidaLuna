@@ -212,7 +212,7 @@ async fn do_plugin_enable(id: String, url: String) {
         return;
     };
 
-    let (_manifest, code) = match db_result {
+    let (manifest, code) = match db_result {
         Ok(v) => v,
         Err(e) => {
             ipc_callback_err(&callback, &e);
@@ -220,9 +220,14 @@ async fn do_plugin_enable(id: String, url: String) {
         }
     };
 
+    let plugin_name: String = serde_json::from_str::<serde_json::Value>(&manifest)
+        .ok()
+        .and_then(|v| v.get("name")?.as_str().map(String::from))
+        .unwrap_or_default();
+
     // 2. Mark loading (generates load_id for wrapper correlation)
     let (load_id, nonce) =
-        with_state(|state| state.plugin_manager.mark_loading(&url)).unwrap_or((0, 0));
+        with_state(|state| state.plugin_manager.mark_loading(&url, &plugin_name)).unwrap_or((0, 0));
 
     // 3. Transpile + wrap (load_id + nonce injected into wrapper for ack)
     let js = match crate::plugins::PluginManager::transpile_and_wrap(&url, &code, load_id, nonce) {
@@ -705,6 +710,12 @@ async fn do_plugin_install(id: String, url: String) {
             .await;
             match install_result {
                 Ok(Ok(info)) => {
+                    // Clear native trust on (re)install so updated code re-prompts.
+                    let trust_name = info.name.clone();
+                    crate::state::db().call_settings(move |conn| {
+                        let _ =
+                            crate::native_runtime::trust::clear_trust_by_plugin(conn, &trust_name);
+                    });
                     let json = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
                     ipc_callback_ok(&callback, &json);
                 }

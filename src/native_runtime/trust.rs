@@ -5,19 +5,20 @@ pub(crate) struct TrustDecision {
     pub granted: bool,
 }
 
-/// Load all persisted trust decisions for a (code_hash, plugin) pair.
-pub(crate) fn load_trust(
-    conn: &mut Connection,
-    code_hash: &str,
-    plugin: &str,
-) -> Vec<TrustDecision> {
-    let mut stmt = match conn
-        .prepare("SELECT module, granted FROM native_trust WHERE code_hash = ?1 AND plugin = ?2")
-    {
+/// Load persisted trust decisions for a plugin, deduplicated by module.
+/// Not filtered by hash — settings extraction can produce slightly
+/// different code (and thus a different hash) for the same plugin.
+/// When multiple rows exist for the same module (different hashes),
+/// keeps only the most recently inserted decision (highest rowid).
+pub(crate) fn load_trust(conn: &mut Connection, plugin: &str) -> Vec<TrustDecision> {
+    let mut stmt = match conn.prepare(
+        "SELECT module, granted FROM native_trust WHERE plugin = ?1 \
+         AND rowid IN (SELECT MAX(rowid) FROM native_trust WHERE plugin = ?1 GROUP BY module)",
+    ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    stmt.query_map(params![code_hash, plugin], |row| {
+    stmt.query_map(params![plugin], |row| {
         Ok(TrustDecision {
             module: row.get(0)?,
             granted: row.get::<_, i32>(1)? != 0,
