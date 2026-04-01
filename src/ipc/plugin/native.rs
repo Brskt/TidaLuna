@@ -193,6 +193,17 @@ fn do_register(
                 // Clean up watch channels for this plugin to prevent stale decisions
                 // from being reused if the plugin is updated (different code hash).
                 clear_pending_trust(&name);
+                // Clean up old trust entries from previous code versions.
+                {
+                    let hash = code_hash.clone();
+                    let plugin = name.clone();
+                    crate::state::db().call_settings(move |conn| {
+                        let _ = conn.execute(
+                            "DELETE FROM native_trust WHERE plugin = ?1 AND code_hash != ?2",
+                            rusqlite::params![plugin, hash],
+                        );
+                    });
+                }
                 ipc_callback_ok(&callback, &format!("\"{channel}\""));
             }
             Ok(Err(e)) => {
