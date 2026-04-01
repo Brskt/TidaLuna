@@ -36,6 +36,13 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS native_trust (
+            code_hash TEXT NOT NULL,
+            plugin    TEXT NOT NULL,
+            module    TEXT NOT NULL,
+            granted   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (code_hash, plugin, module)
         );",
     )?;
 

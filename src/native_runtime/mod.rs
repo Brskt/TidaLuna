@@ -11,6 +11,8 @@
 //!   4. App exit → tokio runtime dropped → stdin/stdout tasks cancelled →
 //!      pipes closed → native-host.cjs readline emits 'close' → process.exit(0)
 
+pub(crate) mod trust;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +67,33 @@ impl NativeRuntime {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+
+        // Hygiene: strip inherited env, only pass safe vars (matches upstream TidaLuna).
+        // This is NOT a security boundary — absolute paths and OS APIs remain accessible.
+        cmd.env_clear();
+        for key in [
+            // Upstream TidaLuna whitelist (temp/home/path)
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "XDG_RUNTIME_DIR",
+            "HOME",
+            "USERPROFILE",
+            "PATH",
+            "APPDATA",
+            // Windows system vars (required for DLL loading, crypto, etc.)
+            "SystemRoot",
+            "WINDIR",
+            "SYSTEMDRIVE",
+            "COMSPEC",
+            "PATHEXT",
+            "PROGRAMDATA",
+        ] {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
+        }
+        cmd.current_dir(std::env::temp_dir());
 
         // Hide the console window on Windows
         #[cfg(target_os = "windows")]

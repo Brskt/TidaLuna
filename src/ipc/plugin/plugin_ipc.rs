@@ -453,6 +453,7 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
     let db = crate::state::db();
     let channel = msg.channel.clone();
     let args = msg.args.clone();
+    let args_for_trust = args.clone();
 
     let result: Result<String, String> = db.call_plugins(move |pc| match channel.as_str() {
         "plugin.list" => {
@@ -544,6 +545,34 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
         }
         _ => Err(format!("Unknown plugin channel: {}", channel)),
     });
+
+    // On successful uninstall, clear native trust decisions so reinstalling re-prompts.
+    let channel_ref = msg.channel.as_str();
+    if result.is_ok()
+        && (channel_ref == "plugin.uninstall" || channel_ref == "plugin.uninstall_all")
+    {
+        let name = if channel_ref == "plugin.uninstall" {
+            args_for_trust
+                .first()
+                .and_then(|v| v.as_str())
+                .and_then(|url| {
+                    // Re-derive plugin name from URL (same logic as the uninstall branch)
+                    url.rsplit_once('/').map(|(_, n)| n.to_string())
+                })
+                .unwrap_or_default()
+        } else {
+            "%".to_string() // uninstall_all → clear all trust
+        };
+        if !name.is_empty() {
+            // Clear persisted trust decisions (DB)
+            let db_name = name.clone();
+            crate::state::db().call_settings(move |conn| {
+                let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &db_name);
+            });
+            // Clear in-memory watch channels so reinstall re-prompts
+            super::native::clear_pending_trust(&name);
+        }
+    }
 
     match result {
         Ok(json) => ipc_callback_ok(&callback, &json),

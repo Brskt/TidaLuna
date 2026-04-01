@@ -3,10 +3,44 @@ use crate::app_state::{IpcCallback, IpcMessage};
 use crate::native_runtime::NativeRuntime;
 use crate::state::{NATIVE_RUNTIME, NATIVE_RUNTIME_INIT};
 
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::Mutex;
+use tokio::sync::watch;
+
+/// Pending trust requests: keyed by "code_hash::plugin::module".
+/// Uses watch channels so multiple concurrent register calls for the same
+/// plugin can share a single dialog prompt.
+type TrustMap = HashMap<String, watch::Sender<Option<bool>>>;
+
+static PENDING_TRUST: Mutex<Option<TrustMap>> = Mutex::new(None);
+
+fn pending_trust_map() -> &'static Mutex<Option<TrustMap>> {
+    let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(HashMap::new());
+    }
+    drop(guard);
+    &PENDING_TRUST
+}
+
+/// Clear in-memory watch channels for a plugin (called on uninstall).
+/// Keys are "name::module", so we remove any key starting with the plugin prefix.
+pub(super) fn clear_pending_trust(plugin_prefix: &str) {
+    let map = pending_trust_map();
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut m) = *guard {
+        m.retain(|key, _| !key.starts_with(plugin_prefix));
+    }
+}
+
+fn compute_code_hash(code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(code.trim().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// Initialize the native runtime (Bun child process) if not already running.
-///
-/// Uses double-check locking: fast path is a single atomic load on `OnceLock::get()`.
-/// Slow path serializes via `NATIVE_RUNTIME_INIT` mutex to prevent double spawn.
 fn ensure_native_runtime() -> Result<&'static NativeRuntime, String> {
     if let Some(rt) = NATIVE_RUNTIME.get() {
         return Ok(rt);
@@ -58,10 +92,59 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         }
     };
 
+    let code_hash = compute_code_hash(&code);
+    crate::vprintln!(
+        "[NATIVE] Code hash for '{}': {} (trimmed len={})",
+        name,
+        &code_hash[..16],
+        code.trim().len()
+    );
+
+    // Load existing trust decisions from DB
+    let trust_grants: HashMap<String, bool> = {
+        let decisions = crate::state::db().call_settings({
+            let hash = code_hash.clone();
+            let plugin = name.clone();
+            move |conn| crate::native_runtime::trust::load_trust(conn, &hash, &plugin)
+        });
+        decisions
+            .into_iter()
+            .map(|d| (d.module, d.granted))
+            .collect()
+    };
+
+    let trust_json: serde_json::Value = if trust_grants.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(trust_grants)
+    };
+
+    do_register(
+        runtime,
+        name,
+        code,
+        code_hash,
+        trust_grants,
+        trust_json,
+        callback,
+    );
+}
+
+/// Send register command to Bun, handle TRUST_REQUIRED sentinel.
+fn do_register(
+    runtime: &'static NativeRuntime,
+    name: String,
+    code: String,
+    code_hash: String,
+    mut trust_grants: HashMap<String, bool>,
+    trust_json: serde_json::Value,
+    callback: IpcCallback,
+) {
     let cmd = serde_json::json!({
         "type": "register",
         "name": name,
         "code": code,
+        "trust": trust_json,
     });
     let rx = match runtime.send_command(cmd) {
         Ok(rx) => rx,
@@ -70,6 +153,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
             return;
         }
     };
+
     crate::state::rt_handle().spawn(async move {
         match rx.await {
             Ok(Ok(response)) => {
@@ -89,9 +173,130 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
                     exports.len(),
                     exports.join(", ")
                 );
+                // Clean up watch channels for this plugin to prevent stale decisions
+                // from being reused if the plugin is updated (different code hash).
+                clear_pending_trust(&name);
                 ipc_callback_ok(&callback, &format!("\"{channel}\""));
             }
             Ok(Err(e)) => {
+                // Check for TRUST_REQUIRED sentinel
+                if let Some(raw) = e.strip_prefix("TRUST_REQUIRED:") {
+                    // Trim stack trace — only keep the module name (first line, no whitespace)
+                    let module = raw.lines().next().unwrap_or(raw).trim().to_string();
+
+                    // Fail fast if this module was previously denied
+                    if trust_grants.get(&module) == Some(&false) {
+                        crate::vprintln!(
+                            "[NATIVE] Trust previously denied for '{}' → module '{}'",
+                            name,
+                            module
+                        );
+                        ipc_callback_err(
+                            &callback,
+                            &format!(
+                                "Plugin '{}' denied access to module '{}' (persisted)",
+                                name, module
+                            ),
+                        );
+                        return;
+                    }
+
+                    crate::vprintln!(
+                        "[NATIVE] Trust required for '{}' → module '{}'",
+                        name,
+                        module
+                    );
+
+                    // Check if a dialog is already pending for this module.
+                    // If so, subscribe to the same watch channel — no duplicate popup.
+                    // Dedup key uses name::module (no hash) because concurrent register
+                    // calls may have slightly different code (settings extraction trim).
+                    let trust_key = format!("{}::{}", name, module);
+                    let mut rx = {
+                        let map = pending_trust_map();
+                        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+                        let m = guard.as_mut().unwrap();
+                        if let Some(existing_tx) = m.get(&trust_key) {
+                            // Another register call already showed the dialog — just subscribe
+                            existing_tx.subscribe()
+                        } else {
+                            // First request for this module — create channel and show dialog
+                            let (tx, sub_rx) = watch::channel(None);
+                            m.insert(trust_key.clone(), tx);
+                            drop(guard);
+
+                            crate::app_state::emit_ipc_event_with_args(
+                                "native.trust_request",
+                                &[&name, &module, &code_hash],
+                            );
+                            sub_rx
+                        }
+                    };
+
+                    // Wait for the user's decision.
+                    // Check current value first — a late subscriber may find the
+                    // answer already set by an earlier register call.
+                    let granted = if let Some(val) = *rx.borrow() {
+                        val
+                    } else {
+                        loop {
+                            if rx.changed().await.is_err() {
+                                break false;
+                            }
+                            if let Some(val) = *rx.borrow() {
+                                break val;
+                            }
+                        }
+                    };
+
+                    // Save to DB
+                    {
+                        let hash = code_hash.clone();
+                        let plugin = name.clone();
+                        let mod_name = module.clone();
+                        crate::state::db().call_settings(move |conn| {
+                            if let Err(e) = crate::native_runtime::trust::save_trust(
+                                conn, &hash, &plugin, &mod_name, granted,
+                            ) {
+                                crate::vprintln!(
+                                    "[NATIVE] Failed to save trust for {}::{}: {}",
+                                    plugin,
+                                    mod_name,
+                                    e
+                                );
+                            }
+                        });
+                    }
+
+                    if !granted {
+                        crate::vprintln!(
+                            "[NATIVE] Trust denied for '{}' → module '{}'",
+                            name,
+                            module
+                        );
+                        ipc_callback_err(
+                            &callback,
+                            &format!("Plugin '{}' denied access to module '{}'", name, module),
+                        );
+                        return;
+                    }
+
+                    // Re-try register with the newly granted module
+                    trust_grants.insert(module, true);
+                    let updated_trust = serde_json::json!(trust_grants);
+                    // Recursive retry — will loop back here if another module is needed
+                    do_register(
+                        runtime,
+                        name,
+                        code,
+                        code_hash,
+                        trust_grants,
+                        updated_trust,
+                        callback,
+                    );
+                    return;
+                }
+
                 crate::vprintln!("[NATIVE] Register failed for '{}': {}", name, e);
                 ipc_callback_err(&callback, &e);
             }
@@ -103,10 +308,6 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
 }
 
 /// Handle `__LunaNative.{name}` IPC calls to a registered native module.
-///
-/// INVARIANT: `registerNative` must be called before any `__LunaNative.*` call.
-/// The JS plugin loader guarantees this — registerNative is synchronous in the
-/// plugin load path, and native calls only happen after the module is registered.
 pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
     let module_name = msg
         .channel
@@ -152,4 +353,53 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
             Err(_) => ipc_callback_err(&callback, "Bun response channel dropped"),
         }
     });
+}
+
+/// Handle trust dialog response from CEF.
+/// Called when user clicks Allow or Deny in the native trust dialog overlay.
+pub(super) fn handle_native_trust_response(msg: &IpcMessage, callback: IpcCallback) {
+    let plugin = msg
+        .args
+        .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let module = msg
+        .args
+        .get(1)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // args[2] = code_hash (not used in dedup key, only for logging)
+    let granted = msg.args.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Key must match the dedup key in do_register (name::module, no hash).
+    // Don't remove the sender — late subscribers need to see the value.
+    let trust_key = format!("{plugin}::{module}");
+    let sent = {
+        let map = pending_trust_map();
+        let guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .and_then(|m| m.get(&trust_key))
+            .map(|tx| tx.send(Some(granted)).is_ok())
+            .unwrap_or(false)
+    };
+
+    if sent {
+        crate::vprintln!(
+            "[NATIVE] Trust response for '{}::{}': {}",
+            plugin,
+            module,
+            if granted { "ALLOWED" } else { "DENIED" }
+        );
+    } else {
+        crate::vprintln!(
+            "[NATIVE] No pending trust request for '{}::{}'",
+            plugin,
+            module
+        );
+    }
+
+    ipc_callback_ok(&callback, "true");
 }
