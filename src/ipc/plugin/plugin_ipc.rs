@@ -20,6 +20,25 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
         .and_then(|v| v.as_str())
         .unwrap_or("{}")
         .to_string();
+
+    // Block non-Tidal requests that carry a real token in URL or opts (body/headers).
+    if !crate::plugins::fetch::is_tidal_api(&url) {
+        let payload = if opts_json == "{}" {
+            None
+        } else {
+            Some(opts_json.as_str())
+        };
+        if super::proxy::leaks_real_token(&url, payload) {
+            crate::vprintln!(
+                "[PLUGIN:FETCH] BLOCKED token exfiltration from '{}' to {}",
+                plugin_id,
+                &url[..url.len().min(80)]
+            );
+            ipc_callback_err(&callback, "plugin.fetch: request blocked");
+            return;
+        }
+    }
+
     let id = msg.id.clone().unwrap_or_default();
     let opts: crate::plugins::fetch::FetchOpts =
         serde_json::from_str(&opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());

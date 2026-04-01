@@ -54,6 +54,45 @@ fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
     })
 }
 
+/// Check if text contains any real OAuth token (access or refresh, current or previous).
+/// Defence-in-depth against naive exfiltration of tokens obtained via localStorage.
+pub(super) fn leaks_real_token(url: &str, payload: Option<&str>) -> bool {
+    with_state(|state| {
+        let mut tokens: Vec<&str> = Vec::new();
+
+        // captured_token may be set before token_state (window between jsrt.set_token
+        // and the first /oauth2/token response).
+        if !state.captured_token.is_empty() {
+            tokens.push(state.captured_token.as_str());
+        }
+
+        if let Some(ref ts) = state.token_state {
+            tokens.push(ts.current.access_token.as_str());
+            tokens.push(ts.current.refresh_token.as_str());
+            if let Some(ref prev) = ts.previous {
+                tokens.push(prev.access_token.as_str());
+                tokens.push(prev.refresh_token.as_str());
+            }
+        }
+
+        for tok in &tokens {
+            if tok.is_empty() {
+                continue;
+            }
+            if url.contains(tok) {
+                return true;
+            }
+            if let Some(p) = payload
+                && p.contains(tok)
+            {
+                return true;
+            }
+        }
+        false
+    })
+    .unwrap_or(false)
+}
+
 pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg
         .args
@@ -68,6 +107,21 @@ pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallbac
         .unwrap_or("")
         .to_string();
     let id = msg.id.clone().unwrap_or_default();
+
+    // Restrict proxy.fetch to Tidal domains only.
+    // This channel is the CORS fallback used by the early runtime (closure-scoped).
+    // Plugins should use plugin.fetch for network requests, not proxy.fetch.
+    if !crate::ui::token_filter::should_rewrite_token(&url)
+        && !crate::ui::nav::is_token_endpoint(&url)
+    {
+        crate::vprintln!(
+            "[PROXY]  REJECTED proxy.fetch to non-Tidal URL: {}",
+            &url[..url.len().min(80)]
+        );
+        ipc_callback_err(&callback, "proxy.fetch: non-Tidal URL rejected");
+        return;
+    }
+
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
     });
@@ -84,6 +138,19 @@ pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, callback: IpcCallback
         .unwrap_or("")
         .to_string();
     let id = msg.id.clone().unwrap_or_default();
+
+    // Restrict proxy.head to Tidal domains only (same rationale as proxy.fetch).
+    if !crate::ui::token_filter::should_rewrite_token(&url)
+        && !crate::ui::nav::is_token_endpoint(&url)
+    {
+        crate::vprintln!(
+            "[PROXY]  REJECTED proxy.head to non-Tidal URL: {}",
+            &url[..url.len().min(80)]
+        );
+        ipc_callback_err(&callback, "proxy.head: non-Tidal URL rejected");
+        return;
+    }
+
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
     });
