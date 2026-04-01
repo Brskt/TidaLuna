@@ -92,12 +92,12 @@ var transpiler;
 try { transpiler = new Bun.Transpiler({ loader: "js" }); } catch (e) { /* fallback below */ }
 
 function containsDynamicImport(code) {
-    if (!transpiler) return false; // can't check — allow (defence-in-depth, not primary barrier)
+    if (!transpiler) return true; // can't verify — block (fail-closed)
     try {
         var result = transpiler.scan(code);
         return result.imports.some(function(i) { return i.kind === "dynamic-import"; });
     } catch (e) {
-        return false;
+        return true; // unparseable — block (fail-closed)
     }
 }
 
@@ -113,16 +113,27 @@ function containsDynamicImport(code) {
 // Web APIs (fetch, WebSocket, etc.) are NOT shadowed — plugins don't
 // have the real token, so network access can't exfiltrate it.
 // Only Bun-specific APIs and realm-creating primitives are blocked.
-// globalThis/global are NOT replaced — node-inspect-extracted and similar
-// libraries iterate globalThis properties for primordial capture, and any
-// replacement (Proxy or frozen object) breaks them. globalThis.Bun remains
-// accessible as a known limitation. Bare `Bun` identifier is shadowed.
 const SHADOW_PARAMS = [
     "module", "exports", "require",
     "Bun",
     "Worker", "ShadowRealm",
     "process",
 ];
+
+// Block globalThis.Bun and globalThis.process so plugins can't bypass
+// parameter shadows via property access on the global object.
+// Bun.Transpiler is already captured (line 92), nothing else is needed.
+// Capture real process handles before overwriting — IPC loop needs them.
+var _realStdin = process.stdin;
+var _realStdout = process.stdout;
+var _realExit = process.exit.bind(process);
+delete globalThis.Bun;
+Object.defineProperty(globalThis, 'Bun', {
+    value: undefined, writable: false, configurable: false
+});
+Object.defineProperty(globalThis, 'process', {
+    value: mockedProcess, writable: false, configurable: false
+});
 
 function evalPlugin(code, proxiedRequire) {
     var m = { exports: {} };
@@ -146,8 +157,8 @@ function hashCode(code) {
 const modules = {};
 
 // ── IPC ─────────────────────────────────────────────────────────────────
-const rl = readline.createInterface({ input: process.stdin });
-rl.on("close", () => process.exit(0));
+const rl = readline.createInterface({ input: _realStdin });
+rl.on("close", () => _realExit(0));
 
 rl.on("line", async (line) => {
     var cmd;
@@ -209,9 +220,9 @@ rl.on("line", async (line) => {
 });
 
 function respond(id, data) {
-    process.stdout.write(JSON.stringify({ id, ...data }) + "\n");
+    _realStdout.write(JSON.stringify({ id, ...data }) + "\n");
 }
 
 function respondError(id, error) {
-    process.stdout.write(JSON.stringify({ id, error }) + "\n");
+    _realStdout.write(JSON.stringify({ id, error }) + "\n");
 }
