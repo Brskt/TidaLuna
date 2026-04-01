@@ -31,6 +31,9 @@ fn random_nonce() -> u64 {
 #[derive(Default)]
 pub struct PluginManager {
     states: std::collections::HashMap<String, PluginState>,
+    /// Reverse mapping: plugin manifest name → plugin URL.
+    /// Used to validate `registerNative` callers.
+    name_to_url: std::collections::HashMap<String, String>,
     next_load_id: u64,
 }
 
@@ -53,14 +56,23 @@ impl PluginManager {
     }
 
     /// Mark a plugin as Loading (code dispatched, awaiting ack).
+    /// `name` is the manifest name (e.g. "DiscordRPC") — stored in the reverse
+    /// mapping so `registerNative` can validate the caller.
     /// Returns `(load_id, nonce)` — both injected into the wrapper for ack correlation.
-    pub fn mark_loading(&mut self, plugin_id: &str) -> (u64, u64) {
+    pub fn mark_loading(&mut self, plugin_id: &str, name: &str) -> (u64, u64) {
         let load_id = self.next_load_id;
         self.next_load_id += 1;
         let nonce = random_nonce();
         self.states
             .insert(plugin_id.to_string(), PluginState::Loading(load_id, nonce));
+        self.name_to_url
+            .insert(name.to_string(), plugin_id.to_string());
         (load_id, nonce)
+    }
+
+    /// Look up the URL for a plugin by manifest name.
+    pub fn url_for_name(&self, name: &str) -> Option<&str> {
+        self.name_to_url.get(name).map(|s| s.as_str())
     }
 
     /// Transition Loading → Ready if load_id AND nonce match. Returns true if accepted.
@@ -86,6 +98,7 @@ impl PluginManager {
     /// Remove a plugin from the state map (call AFTER eval_js dispatch of cleanup).
     pub fn mark_unloaded(&mut self, plugin_id: &str) {
         self.states.remove(plugin_id);
+        self.name_to_url.retain(|_, url| url != plugin_id);
     }
 
     /// All currently loaded plugin URLs.
@@ -144,8 +157,8 @@ mod tests {
     #[test]
     fn test_mark_loading_returns_load_id_and_nonce() {
         let mut mgr = PluginManager::new();
-        let (id1, _) = mgr.mark_loading("a");
-        let (id2, _) = mgr.mark_loading("b");
+        let (id1, _) = mgr.mark_loading("a", "a");
+        let (id2, _) = mgr.mark_loading("b", "b");
         assert_ne!(id1, id2);
         assert!(mgr.is_loaded("a"));
         assert!(mgr.is_loaded("b"));
@@ -154,7 +167,7 @@ mod tests {
     #[test]
     fn test_mark_ready_with_matching_load_id_and_nonce() {
         let mut mgr = PluginManager::new();
-        let (load_id, nonce) = mgr.mark_loading("p");
+        let (load_id, nonce) = mgr.mark_loading("p", "p");
         assert!(!mgr.is_ready("p"));
         assert!(mgr.mark_ready("p", load_id, nonce));
         assert!(mgr.is_ready("p"));
@@ -164,8 +177,8 @@ mod tests {
     #[test]
     fn test_mark_ready_with_stale_load_id_ignored() {
         let mut mgr = PluginManager::new();
-        let (old_id, old_nonce) = mgr.mark_loading("p");
-        let (_new_id, _new_nonce) = mgr.mark_loading("p"); // reload
+        let (old_id, old_nonce) = mgr.mark_loading("p", "p");
+        let (_new_id, _new_nonce) = mgr.mark_loading("p", "p"); // reload
         assert!(!mgr.mark_ready("p", old_id, old_nonce)); // stale
         assert!(!mgr.is_ready("p"));
     }
@@ -173,7 +186,7 @@ mod tests {
     #[test]
     fn test_mark_ready_with_wrong_nonce_rejected() {
         let mut mgr = PluginManager::new();
-        let (load_id, _nonce) = mgr.mark_loading("p");
+        let (load_id, _nonce) = mgr.mark_loading("p", "p");
         assert!(!mgr.mark_ready("p", load_id, 99999)); // wrong nonce
         assert!(!mgr.is_ready("p"));
     }
@@ -181,7 +194,7 @@ mod tests {
     #[test]
     fn test_is_loaded_during_loading() {
         let mut mgr = PluginManager::new();
-        mgr.mark_loading("p");
+        mgr.mark_loading("p", "p");
         assert!(mgr.is_loaded("p"));
         assert!(!mgr.is_ready("p"));
     }
@@ -189,7 +202,7 @@ mod tests {
     #[test]
     fn test_mark_unloaded_clears_state() {
         let mut mgr = PluginManager::new();
-        mgr.mark_loading("p");
+        mgr.mark_loading("p", "p");
         mgr.mark_unloaded("p");
         assert!(!mgr.is_loaded("p"));
         assert!(!mgr.is_ready("p"));

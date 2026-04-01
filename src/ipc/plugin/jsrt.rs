@@ -151,7 +151,7 @@ pub(super) fn do_load_plugins_inline() {
 
                     if deps_satisfied {
                         let (load_id, nonce) =
-                            with_state(|state| state.plugin_manager.mark_loading(&p.url))
+                            with_state(|state| state.plugin_manager.mark_loading(&p.url, &p.name))
                                 .unwrap_or((0, 0));
                         match crate::plugins::PluginManager::transpile_and_wrap(
                             &p.url, &p.code, load_id, nonce,
@@ -337,20 +337,22 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
                 return;
             }
             let url_owned = url.to_owned();
-            let (code, deps_ok) = crate::state::db().call_plugins(move |pc| {
+            let (code, plugin_name, deps_ok) = crate::state::db().call_plugins(move |pc| {
                 let code = crate::plugins::store::get_code(pc, &url_owned);
-                let manifest: Option<String> = pc
+                let row: Option<(String, String)> = pc
                     .query_row(
-                        "SELECT manifest FROM plugins WHERE url = ?1",
+                        "SELECT name, manifest FROM plugins WHERE url = ?1",
                         rusqlite::params![url_owned],
-                        |row| row.get(0),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .ok();
-                let deps_satisfied = manifest
-                    .as_deref()
-                    .map(|m| crate::plugins::store::check_dependencies_satisfied(pc, m).is_ok())
-                    .unwrap_or(true);
-                (code, deps_satisfied)
+                let (name, manifest) = row.unwrap_or_default();
+                let deps_satisfied = if manifest.is_empty() {
+                    true
+                } else {
+                    crate::plugins::store::check_dependencies_satisfied(pc, &manifest).is_ok()
+                };
+                (code, name, deps_satisfied)
             });
             if !deps_ok {
                 crate::vprintln!(
@@ -361,7 +363,8 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
             if let Some(code) = code {
                 let (load_id, nonce) =
-                    with_state(|state| state.plugin_manager.mark_loading(url)).unwrap_or((0, 0));
+                    with_state(|state| state.plugin_manager.mark_loading(url, &plugin_name))
+                        .unwrap_or((0, 0));
                 match crate::plugins::PluginManager::transpile_and_wrap(url, &code, load_id, nonce)
                 {
                     Ok(js) => {
