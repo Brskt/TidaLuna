@@ -28,7 +28,6 @@ pub(crate) fn load_trust(conn: &mut Connection, plugin: &str) -> Vec<TrustDecisi
     .unwrap_or_default()
 }
 
-/// Persist a single trust decision.
 pub(crate) fn save_trust(
     conn: &mut Connection,
     code_hash: &str,
@@ -39,21 +38,6 @@ pub(crate) fn save_trust(
     conn.execute(
         "INSERT OR REPLACE INTO native_trust (code_hash, plugin, module, granted) VALUES (?1, ?2, ?3, ?4)",
         params![code_hash, plugin, module, granted as i32],
-    )?;
-    Ok(())
-}
-
-/// Clear all trust decisions for a (code_hash, plugin) pair.
-/// Called when plugin code changes (hash mismatch).
-#[allow(dead_code)]
-pub(crate) fn clear_trust(
-    conn: &mut Connection,
-    code_hash: &str,
-    plugin: &str,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM native_trust WHERE code_hash = ?1 AND plugin = ?2",
-        params![code_hash, plugin],
     )?;
     Ok(())
 }

@@ -66,16 +66,21 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         return;
     }
 
+    // "DiscordRPC/discord.native.ts" → "DiscordRPC"
+    // "@scope/pkg/foo.native.ts" → "@scope/pkg"
+    let plugin_prefix = name
+        .rsplit_once('/')
+        .map(|(p, _)| p)
+        .unwrap_or(&name)
+        .to_string();
+
     // Validate that the plugin prefix maps to a currently loaded plugin.
     // Prevents a malicious plugin from calling registerNative with another
     // plugin's name to inherit its trust grants.
-    // "DiscordRPC/discord.native.ts" → "DiscordRPC"
-    // "@scope/pkg/foo.native.ts" → "@scope/pkg"
-    let plugin_prefix = name.rsplit_once('/').map(|(p, _)| p).unwrap_or(&name);
     let is_active = crate::app_state::with_state(|state| {
         state
             .plugin_manager
-            .url_for_name(plugin_prefix)
+            .url_for_name(&plugin_prefix)
             .is_some_and(|url| state.plugin_manager.is_loaded(url))
     })
     .unwrap_or(false);
@@ -113,11 +118,6 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         code.trim().len()
     );
 
-    let plugin_prefix = name
-        .rsplit_once('/')
-        .map(|(p, _)| p)
-        .unwrap_or(&name)
-        .to_string();
     let manifest_json: String = crate::state::db().call_plugins({
         let prefix = plugin_prefix.clone();
         move |pc| {
@@ -242,8 +242,6 @@ fn do_register(
                             guard.insert(trust_key.clone(), tx);
                             drop(guard);
 
-                            // Show trust dialog in a separate CEF window.
-                            // Isolated from the main renderer — plugins can't interact with it.
                             let dialog_key = trust_key.clone();
                             let dialog_rx = crate::ui::trust_dialog::show_trust_dialog(
                                 &name,

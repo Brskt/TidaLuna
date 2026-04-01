@@ -122,7 +122,7 @@ const SHADOW_PARAMS = [
 
 // Block globalThis.Bun and globalThis.process so plugins can't bypass
 // parameter shadows via property access on the global object.
-// Bun.Transpiler is already captured (line 92), nothing else is needed.
+// Bun.Transpiler is already captured (line 92) — the only Bun API the host uses.
 // Capture real process handles before overwriting — IPC loop needs them.
 var _realStdin = process.stdin;
 var _realStdout = process.stdout;

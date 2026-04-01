@@ -10,6 +10,9 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
+const TRUST_ALLOW: &str = "trust://allow";
+const TRUST_DENY: &str = "trust://deny";
+
 /// Show a trust dialog and return the user's decision via a oneshot channel.
 /// Can be called from any thread — internally posts to the CEF UI thread.
 pub(crate) fn show_trust_dialog(
@@ -34,7 +37,8 @@ fn escape_html(s: &str) -> String {
 
 fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
     // "DiscordRPC/discord.native.ts" → plugin="DiscordRPC", file="discord.native.ts"
-    let (display_plugin, display_file) = match plugin_name.split_once('/') {
+    // "@scope/pkg/foo.native.ts" → plugin="@scope/pkg", file="foo.native.ts"
+    let (display_plugin, display_file) = match plugin_name.rsplit_once('/') {
         Some((p, f)) => (p, Some(f)),
         None => (plugin_name, None),
     };
@@ -69,7 +73,6 @@ fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
         other => (other, ""),
     };
 
-    // Extract author info from manifest
     let manifest: serde_json::Value =
         serde_json::from_str(manifest_json).unwrap_or(serde_json::Value::Null);
     let author = manifest.get("author");
@@ -90,7 +93,6 @@ fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Build author block HTML
     let author_block = if !author_name.is_empty() {
         let avatar_html = if !avatar_url.is_empty() {
             format!(
@@ -141,7 +143,6 @@ fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
         String::new()
     };
 
-    // Build file line
     let file_html = display_file
         .map(|f| {
             format!(
@@ -151,7 +152,6 @@ fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
         })
         .unwrap_or_default();
 
-    // Module description
     let desc_html = if !module_desc.is_empty() {
         format!(
             r#"<div style="margin-top:6px;padding-top:6px;border-top:1px solid #333;color:#aaa;font-size:12px">{desc}</div>"#,
@@ -217,8 +217,8 @@ button {{
         </ul>
     </div>
     <div class="actions">
-        <button class="deny" onclick="location.href='trust://deny'">Deny</button>
-        <button class="allow" onclick="location.href='trust://allow'">Allow</button>
+        <button class="deny" onclick="location.href='{deny_url}'">Deny</button>
+        <button class="allow" onclick="location.href='{allow_url}'">Allow</button>
     </div>
 </div>
 </body>
@@ -228,6 +228,8 @@ button {{
         file_html = file_html,
         module_label = escape_html(module_label),
         desc_html = desc_html,
+        allow_url = TRUST_ALLOW,
+        deny_url = TRUST_DENY,
     )
 }
 
@@ -254,9 +256,9 @@ wrap_request_handler! {
                 })
                 .unwrap_or_default();
 
-            let granted = if url == "trust://allow" || url == "trust://allow/" {
+            let granted = if url.starts_with(TRUST_ALLOW) {
                 Some(true)
-            } else if url == "trust://deny" || url == "trust://deny/" {
+            } else if url.starts_with(TRUST_DENY) {
                 Some(false)
             } else {
                 None
