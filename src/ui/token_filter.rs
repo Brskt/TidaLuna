@@ -64,6 +64,24 @@ pub(crate) fn is_opaque(value: &str) -> bool {
     value.starts_with(OPAQUE_PREFIX)
 }
 
+// Unconditionally cancels the request. Used by the exfiltration guard
+// to block sendBeacon (RT_PING) and WebSocket upgrades to non-Tidal domains.
+wrap_resource_request_handler! {
+    pub(super) struct ExfilBlockHandler;
+
+    impl ResourceRequestHandler {
+        fn on_before_resource_load(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _request: Option<&mut Request>,
+            _callback: Option<&mut Callback>,
+        ) -> ReturnValue {
+            ReturnValue::CANCEL
+        }
+    }
+}
+
 wrap_resource_request_handler! {
     pub(super) struct TokenResourceHandler;
 

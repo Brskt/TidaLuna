@@ -60,8 +60,8 @@ var _lunaFetch = function(input, init) {
 
     return nativeFetch(input, init).catch(function(err) {
         if (!(err instanceof TypeError)) throw err;
-        // Only proxy Tidal domains — Rust rejects non-Tidal URLs on proxy.fetch.
-        if (url.indexOf('tidal.com') === -1 && url.indexOf('tidalhifi.com') === -1 && url.indexOf('tidalhi.fi') === -1) throw err;
+        // Only proxy *.tidal.com — Rust rejects non-Tidal URLs on proxy.fetch.
+        if (url.indexOf('tidal.com') === -1) throw err;
         return proxyFetch(url, init).then(function(resp) {
             if (resp.status >= 400) console.warn('[luna:proxy] ' + resp.status + ' ' + url.substring(0, 80));
             return resp;

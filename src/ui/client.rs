@@ -486,6 +486,19 @@ wrap_request_handler! {
                 || crate::ui::nav::is_token_endpoint(&url)
             {
                 Some(crate::ui::token_filter::TokenResourceHandler::new())
+            } else if !crate::ui::nav::is_tidal_origin(&url) {
+                // Exfiltration guard: block sendBeacon to non-Tidal domains.
+                // TIDAL doesn't use sendBeacon — safe to block unconditionally.
+                if let Some(req) = _request.as_ref()
+                    && req.resource_type() == ResourceType::PING
+                {
+                    crate::vprintln!(
+                        "[EXFIL]  BLOCKED sendBeacon to {}",
+                        &url[..url.len().min(80)]
+                    );
+                    return Some(crate::ui::token_filter::ExfilBlockHandler::new());
+                }
+                None
             } else {
                 None
             }

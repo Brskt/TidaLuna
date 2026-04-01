@@ -47,6 +47,7 @@ wrap_render_process_handler! {
                         {fetch}\
                         {open}\
                         {session}\
+                        {exfil}\
                         self.__LUNAR_EARLY_RUNTIME__=true;\
                         }})();",
                         desktop = nav::HOST_DESKTOP,
@@ -59,6 +60,7 @@ wrap_render_process_handler! {
                         fetch = include_str!("early_runtime/fetch_proxy.js"),
                         open = include_str!("early_runtime/window_open.js"),
                         session = include_str!("early_runtime/session_stub.js"),
+                        exfil = include_str!("early_runtime/exfil_guard.js"),
                     );
                     crate::app_state::exec_js_on_frame(frame, &preload);
                 }

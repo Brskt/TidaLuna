@@ -92,6 +92,16 @@ impl NavigationPolicy {
     }
 }
 
+/// Broad check: does the URL belong to a Tidal-owned domain?
+/// Used by the exfiltration guard to distinguish Tidal traffic from external.
+pub(crate) fn is_tidal_origin(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return url.starts_with('/');
+    };
+    let host = parsed.host_str().unwrap_or("");
+    host == "tidal.com" || host.ends_with(".tidal.com")
+}
+
 pub(crate) fn is_token_endpoint(url: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
