@@ -96,9 +96,7 @@ pub(super) fn leaks_real_token(url: &str, payload: Option<&str>) -> bool {
 /// Restrict proxy channels to Tidal domains only.
 /// Returns true (and sends an IPC error) if the URL is rejected.
 fn reject_non_tidal(url: &str, channel: &str, callback: &IpcCallback) -> bool {
-    if !crate::ui::token_filter::should_rewrite_token(url)
-        && !crate::ui::nav::is_token_endpoint(url)
-    {
+    if !crate::ui::nav::is_tidal_origin(url) && !crate::ui::nav::is_token_endpoint(url) {
         crate::vprintln!(
             "[PROXY]  REJECTED {} to non-Tidal URL: {}",
             channel,
