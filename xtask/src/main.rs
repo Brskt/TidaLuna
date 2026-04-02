@@ -100,7 +100,9 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         // Linux/Windows: flat directory with exe + CEF files
         let exe_src = target_dir.join(EXE_NAME);
         let exe_dst = bundle_dir.join(EXE_NAME);
-        fs::copy(&exe_src, &exe_dst).map_err(|e| format!("failed to copy exe: {e}"))?;
+        if fs::hard_link(&exe_src, &exe_dst).is_err() {
+            fs::copy(&exe_src, &exe_dst).map_err(|e| format!("failed to copy exe: {e}"))?;
+        }
         println!("  Copied {EXE_NAME}");
 
         copy_cef_files(&cef_dir, &bundle_dir)?;
@@ -335,7 +337,7 @@ fn create_symlink(_target: &Path, _link: &Path) -> Result<(), String> {
 // Linux / Windows helpers (flat bundle)
 // ---------------------------------------------------------------------------
 
-/// Copy files from CEF dir to bundle (skip .exe, .lib, directories, build files)
+/// Link or copy files from CEF dir to bundle (skip .exe, .lib, directories, build files).
 fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
     let skip_extensions = ["exe", "lib"];
     let skip_names = ["CMakeLists.txt", "cmake", "include", "libcef_dll"];
@@ -347,12 +349,10 @@ fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // Skip directories (locales handled separately), build artifacts, headers
         if path.is_dir() || skip_names.contains(&name.as_str()) {
             continue;
         }
 
-        // Skip .exe and .lib files
         if let Some(ext) = path.extension()
             && skip_extensions.contains(&ext.to_string_lossy().as_ref())
         {
@@ -360,29 +360,33 @@ fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
         }
 
         let dst = bundle_dir.join(&name);
-        fs::copy(&path, &dst).map_err(|e| format!("failed to copy {name}: {e}"))?;
+        if fs::hard_link(&path, &dst).is_err() {
+            fs::copy(&path, &dst).map_err(|e| format!("failed to copy {name}: {e}"))?;
+        }
         count += 1;
     }
     println!("  Copied {count} CEF files");
     Ok(())
 }
 
-/// Copy all files from a directory (flat, no recursion)
+/// Link or copy all files from a directory (flat, no recursion).
 fn copy_dir_flat(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("failed to create {}: {e}", dst.display()))?;
 
     for entry in fs::read_dir(src).into_iter().flatten().flatten() {
         if entry.path().is_file() {
             let dest = dst.join(entry.file_name());
-            fs::copy(entry.path(), &dest)
-                .map_err(|e| format!("failed to copy {}: {e}", entry.path().display()))?;
+            if fs::hard_link(entry.path(), &dest).is_err() {
+                fs::copy(entry.path(), &dest)
+                    .map_err(|e| format!("failed to copy {}: {e}", entry.path().display()))?;
+            }
         }
     }
     Ok(())
 }
 
 /// Download Bun binary from GitHub releases into the bundle directory.
-/// Skips download if `bun` (or `bun.exe`) already exists in the bundle.
+/// Uses a cache directory to avoid re-downloading on every build.
 fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     let bun_name = if cfg!(target_os = "windows") {
         "bun.exe"
@@ -390,8 +394,28 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
         "bun"
     };
     let bun_dst = bundle_dir.join(bun_name);
-    if bun_dst.exists() {
-        println!("  Bun already present");
+
+    const BUN_VERSION: &str = "1.3.11";
+
+    // Cache dir persists across builds (dist/ is cleaned each time)
+    let cache_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("cannot find project root")?
+        .join(".cache")
+        .join("bun");
+    fs::create_dir_all(&cache_dir).map_err(|e| format!("failed to create cache dir: {e}"))?;
+
+    let cached_bun = cache_dir.join(format!("bun-v{BUN_VERSION}{}", if cfg!(target_os = "windows") { ".exe" } else { "" }));
+
+    // If cached binary exists for this version, just copy it
+    if cached_bun.exists() && fs::metadata(&cached_bun).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+        fs::copy(&cached_bun, &bun_dst).map_err(|e| format!("failed to copy cached bun: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&bun_dst, fs::Permissions::from_mode(0o755));
+        }
+        println!("  Bun v{BUN_VERSION} (cached)");
         return Ok(());
     }
 
@@ -407,13 +431,12 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
         ("bun-linux-x64.zip", "bun-linux-x64")
     };
 
-    const BUN_VERSION: &str = "1.3.11";
     let url = format!(
         "https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/{archive_name}"
     );
-    let zip_path = bundle_dir.join(archive_name);
+    let zip_path = cache_dir.join(archive_name);
 
-    println!("  Downloading Bun from {url}...");
+    println!("  Downloading Bun v{BUN_VERSION} from {url}...");
     let status = Command::new("curl")
         .args(["-fSL", "-o"])
         .arg(&zip_path)
@@ -429,11 +452,10 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
 
     println!("  Extracting {bun_name}...");
     if cfg!(target_os = "windows") {
-        // Use PowerShell to extract on Windows
         let ps_cmd = format!(
             "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
             zip_path.display(),
-            bundle_dir.display()
+            cache_dir.display()
         );
         let status = Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps_cmd])
@@ -447,7 +469,7 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
             .args(["-o", "-q"])
             .arg(&zip_path)
             .arg("-d")
-            .arg(bundle_dir)
+            .arg(&cache_dir)
             .status()
             .map_err(|e| format!("unzip failed: {e}"))?;
         if !status.success() {
@@ -455,31 +477,29 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
         }
     }
 
-    // Move bun binary from inner directory to bundle root
-    let inner_bun = bundle_dir.join(inner_dir).join(bun_name);
+    // Move bun binary from inner directory to cache
+    let inner_bun = cache_dir.join(inner_dir).join(bun_name);
     if inner_bun.exists() {
-        fs::rename(&inner_bun, &bun_dst).map_err(|e| format!("failed to move bun binary: {e}"))?;
-        // Clean up inner directory
-        let _ = fs::remove_dir_all(bundle_dir.join(inner_dir));
+        fs::rename(&inner_bun, &cached_bun).map_err(|e| format!("failed to move bun: {e}"))?;
+        let _ = fs::remove_dir_all(cache_dir.join(inner_dir));
     }
-
-    // Clean up zip
     let _ = fs::remove_file(&zip_path);
 
-    if bun_dst.exists() {
-        // Make executable on Unix
+    if cached_bun.exists() {
+        fs::copy(&cached_bun, &bun_dst).map_err(|e| format!("failed to copy bun: {e}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&bun_dst, fs::Permissions::from_mode(0o755));
         }
-        println!("  Bun installed ({bun_name})");
+        println!("  Bun v{BUN_VERSION} installed");
     } else {
         println!("  Warning: Bun binary not found after extraction");
     }
 
     Ok(())
 }
+
 
 fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
     if cfg!(target_os = "windows") {
