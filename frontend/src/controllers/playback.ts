@@ -91,7 +91,7 @@ export const createPlaybackController = () => {
                             } catch (e) { console.error("[luna:playback] playbackInfo/self-load error:", e); }
 
                             const oldCtx = controls.playbackContext ?? {};
-                            const ctx = { ...oldCtx, actualProductId: productId, actualAudioQuality: actualQuality ?? oldCtx.actualAudioQuality, actualDuration: item.duration ?? oldCtx.actualDuration ?? 0, actualVideoQuality: null };
+                            const ctx = { ...oldCtx, actualProductId: productId, actualAudioQuality: actualQuality ?? oldCtx.actualAudioQuality, actualDuration: item.duration ?? oldCtx.actualDuration ?? 0, actualVideoQuality: null, bitDepth: pbi?.bitDepth ?? oldCtx.bitDepth ?? null, sampleRate: pbi?.sampleRate ?? oldCtx.sampleRate ?? null };
                             const oldMp = controls.mediaProduct ?? {};
                             const mp = { ...oldMp, productId, productType: item.type ?? "track" };
 
