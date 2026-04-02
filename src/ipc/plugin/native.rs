@@ -130,6 +130,19 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         }
     });
 
+    // Reject path traversal in plugin names (malicious manifest with "../" in name)
+    if plugin_prefix.contains("..") {
+        ipc_callback_err(&callback, "registerNative: invalid plugin name");
+        return;
+    }
+    let native_base = crate::state::cache_data_dir().join("native");
+    let data_dir_path = native_base.join(&plugin_prefix);
+    if !data_dir_path.starts_with(&native_base) {
+        ipc_callback_err(&callback, "registerNative: invalid plugin name");
+        return;
+    }
+    let data_dir = data_dir_path.to_string_lossy().to_string();
+
     let trust_grants: HashMap<String, bool> = {
         let decisions = crate::state::db().call_settings({
             let plugin = name.clone();
@@ -148,6 +161,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         code_hash,
         trust_grants,
         manifest_json,
+        data_dir,
         callback,
     );
 }
@@ -160,6 +174,7 @@ fn do_register(
     code_hash: String,
     mut trust_grants: HashMap<String, bool>,
     manifest_json: String,
+    data_dir: String,
     callback: IpcCallback,
 ) {
     let trust_json: serde_json::Value = if trust_grants.is_empty() {
@@ -172,6 +187,7 @@ fn do_register(
         "name": name,
         "code": code,
         "trust": trust_json,
+        "dataDir": data_dir,
     });
     let rx = match runtime.send_command(cmd) {
         Ok(rx) => rx,
@@ -322,6 +338,7 @@ fn do_register(
                         code_hash,
                         trust_grants,
                         manifest_json,
+                        data_dir,
                         callback,
                     );
                     return;
