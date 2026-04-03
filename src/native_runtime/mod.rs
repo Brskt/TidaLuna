@@ -76,7 +76,6 @@ impl NativeRuntime {
             "TMPDIR",
             "TMP",
             "TEMP",
-            "XDG_RUNTIME_DIR",
             "HOME",
             "USERPROFILE",
             "PATH",
