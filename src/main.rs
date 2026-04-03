@@ -147,6 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         close_to_tray: false,
         force_quit: false,
         needs_proactive_refresh: false,
+        needs_blob_purge: false,
         last_client_id: String::new(),
     })));
 
@@ -166,6 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             state.token_state = Some(restored);
             state.needs_proactive_refresh = needs_refresh;
+            state.needs_blob_purge = needs_refresh;
         });
     }
 

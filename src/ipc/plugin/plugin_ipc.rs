@@ -408,6 +408,7 @@ pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
         return;
     }
 
+    super::jsrt::purge_sdk_auth_blob_if_needed();
     super::jsrt::do_load_plugins_inline();
     ipc_callback_ok(&callback, "true");
 }

@@ -1,6 +1,24 @@
 use crate::app_state::{IpcMessage, eval_js, with_state};
 use cef::*;
 
+const JS_PURGE_SDK_BLOB: &str = "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}";
+
+/// Purge real tokens from SDK localStorage blob before plugin code runs.
+/// TIDAL SDK already holds tokens in memory (credentialsProvider) — the blob
+/// is no longer needed and would be readable by plugins that escape the IIFE.
+pub(super) fn purge_sdk_auth_blob_if_needed() {
+    let needs = with_state(|state| {
+        let n = state.needs_blob_purge;
+        state.needs_blob_purge = false;
+        n
+    })
+    .unwrap_or(false);
+    if needs {
+        eval_js(JS_PURGE_SDK_BLOB);
+        crate::vprintln!("[AUTH]   Purged SDK auth blob from localStorage (pre-plugin)");
+    }
+}
+
 // Soft clear: token only. TIDAL calls this during "not logged in" flow —
 // must not destroy cookies/localStorage/sessionStorage.
 
@@ -18,9 +36,7 @@ fn handle_session_clear() {
     if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
         crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");
     }
-    crate::app_state::eval_js(
-        "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}",
-    );
+    crate::app_state::eval_js(JS_PURGE_SDK_BLOB);
     super::reset_pkce_scrub();
     crate::vprintln!("[AUTH]   Cleared captured token + token state + SDK auth blob");
 
@@ -477,5 +493,6 @@ pub(crate) fn load_plugins_if_session_ready() {
     }
 
     crate::vprintln!("[PLUGIN] Post-login: loading plugins");
+    purge_sdk_auth_blob_if_needed();
     do_load_plugins_inline();
 }

@@ -56,6 +56,7 @@ pub(crate) struct AppState {
     pub(crate) close_to_tray: bool,
     pub(crate) force_quit: bool,
     pub(crate) needs_proactive_refresh: bool,
+    pub(crate) needs_blob_purge: bool,
     pub(crate) last_client_id: String,
 }
 
