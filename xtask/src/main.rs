@@ -405,10 +405,21 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
         .join("bun");
     fs::create_dir_all(&cache_dir).map_err(|e| format!("failed to create cache dir: {e}"))?;
 
-    let cached_bun = cache_dir.join(format!("bun-v{BUN_VERSION}{}", if cfg!(target_os = "windows") { ".exe" } else { "" }));
+    let cached_bun = cache_dir.join(format!(
+        "bun-v{BUN_VERSION}{}",
+        if cfg!(target_os = "windows") {
+            ".exe"
+        } else {
+            ""
+        }
+    ));
 
     // If cached binary exists for this version, just copy it
-    if cached_bun.exists() && fs::metadata(&cached_bun).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+    if cached_bun.exists()
+        && fs::metadata(&cached_bun)
+            .map(|m| m.len() > 1_000_000)
+            .unwrap_or(false)
+    {
         fs::copy(&cached_bun, &bun_dst).map_err(|e| format!("failed to copy cached bun: {e}"))?;
         #[cfg(unix)]
         {
@@ -499,7 +510,6 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
 
     Ok(())
 }
-
 
 fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
     if cfg!(target_os = "windows") {
