@@ -2,6 +2,7 @@
 //
 // Plugins are loaded in a wrapper that shadows dangerous globals.
 // Only whitelisted modules pass through require() directly.
+// Forbidden modules are permanently blocked (no trust possible).
 // Blocked modules throw TRUST_REQUIRED:<module> — Rust parses this
 // sentinel, prompts the user, and re-sends the register command
 // with the module granted.
@@ -30,21 +31,28 @@ const { fileURLToPath } = require("url");
 // ── Module whitelist (pass through, no trust needed) ────────────────────
 const SAFE_MODULES = new Set([
     // Data/utility (no system or network access)
-    "assert", "buffer", "console", "constants", "crypto", "domain",
-    "events", "path", "punycode", "querystring", "stream",
-    "string_decoder", "timers", "tty", "url", "util", "zlib",
+    "assert", "assert/strict", "buffer", "console", "constants", "crypto",
+    "domain", "events", "path", "punycode", "querystring", "stream",
+    "string_decoder", "timers", "timers/promises", "url", "util", "zlib",
     "path/posix", "path/win32", "stream/consumers", "stream/web",
-    "util/types", "diagnostics_channel",
-    "async_hooks", "perf_hooks", "trace_events", "wasi",
+    "stream/promises", "util/types", "sys",
+    "async_hooks", "perf_hooks",
     // Network — allowed freely (same rationale as fetch: no real token in Bun)
-    "net", "http", "https", "http2", "tls", "dns",
+    "net", "http", "https", "http2", "tls", "dns", "dns/promises",
+]);
+
+// ── Permanently blocked modules (no trust possible) ─────────────────────
+const FORBIDDEN_MODULES = new Set([
+    "child_process", "cluster", "vm", "v8",
+    "inspector", "inspector/promises", "module", "repl", "process",
+    "wasi", "tty", "trace_events",
 ]);
 
 // ── Blocked modules (require explicit user trust) ───────────────────────
 // These provide filesystem/subprocess/system access — can read tokens from disk.
 const BLOCKED_MODULES = new Set([
-    "fs", "fs/promises", "child_process", "worker_threads", "cluster",
-    "os", "vm", "v8", "inspector", "dgram",
+    "fs", "fs/promises", "os", "dgram",
+    "diagnostics_channel", "worker_threads",
 ]);
 
 // ── Pre-load safe modules so Bun internal closures capture refs ────────
@@ -60,6 +68,10 @@ function canonicalize(id) {
 
 function isSafe(id) {
     return SAFE_MODULES.has(id) || SAFE_MODULES.has(canonicalize(id));
+}
+
+function isForbidden(id) {
+    return FORBIDDEN_MODULES.has(id) || FORBIDDEN_MODULES.has(canonicalize(id));
 }
 
 function isBlocked(id) {
@@ -126,7 +138,7 @@ var _SetPrototypeHas = Set.prototype.has;
         "dlopen", "chdir",
         "setuid", "setgid", "seteuid", "setegid",
         "getuid", "getgid", "geteuid", "getegid", "getgroups",
-        "_rawDebug",
+        "_rawDebug", "_linkedBinding", "report",
     ]);
     var allowedBindings = new Set(["http_parser", "uv", "buffer", "constants", "config"]);
     var origBinding = _FunctionPrototypeBind.call(realProcess.binding, realProcess);
@@ -204,6 +216,10 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir) {
         if (id === "console" || id === "node:console") return globalThis.console;
 
         if (isSafe(id)) return require(id);
+
+        if (isForbidden(id)) {
+            throw new Error("[sandbox] require('" + canonicalize(id) + "') is permanently blocked");
+        }
 
         if (isBlocked(id)) {
             var canonical = canonicalize(id);
@@ -306,6 +322,8 @@ function containsDynamicImport(code) {
         "stdin", "stdout", "stderr",
         "plugin", "build",
         "$",
+        "mmap", "allocUnsafe", "sql", "redis", "s3",
+        "env", "embeddedFiles",
     ];
     _ArrayPrototypeForEach.call(DANGEROUS, function(key) {
         if (key in realBun) {

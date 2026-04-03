@@ -72,6 +72,11 @@ fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
             "Debugger",
             "Attach a debugger to inspect and control this process.",
         ),
+        "diagnostics_channel" => (
+            "Diagnostics",
+            "Observe internal events such as HTTP requests and DNS queries.",
+        ),
+        "dgram" => ("UDP Sockets", "Send and receive UDP network packets."),
         other => (other, ""),
     };
 
