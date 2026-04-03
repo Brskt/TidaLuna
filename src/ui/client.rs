@@ -366,13 +366,10 @@ wrap_load_handler! {
                     ),
                 );
 
-                // After post-login SPA navigation to app, load plugins if session is ready
-                // but plugins weren't loaded yet (skipped on login page).
-                if !is_login {
-                    crate::ipc::plugin::load_plugins_if_session_ready();
-                    if prev == PageState::Login {
-                        crate::app_state::emit_ipc_event("jsrt.post_login_init");
-                    }
+                // After post-login SPA navigation to app, signal JS to re-run init().
+                // Plugin loading is handled by init() → invokeIpc("jsrt.load_plugins").
+                if !is_login && prev == PageState::Login {
+                    crate::app_state::emit_ipc_event("jsrt.post_login_init");
                 }
             }
         }

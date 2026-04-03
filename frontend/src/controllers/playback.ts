@@ -52,12 +52,13 @@ export const createPlaybackController = () => {
 
                             // Get actual audio quality from playbackInfo API (same as TIDAL's SDK)
                             let actualQuality: string | undefined;
+                            let pbi: any;
                             try {
                                 const { getPlaybackInfo } = require("../../plugins/lib/src/helpers/getPlaybackInfo");
                                 const state = store.getState();
                                 const streamingQuality = state.settings?.quality?.streaming;
 
-                                let pbi = await getPlaybackInfo(productId, streamingQuality);
+                                pbi = await getPlaybackInfo(productId, streamingQuality);
                                 if (!pbi && streamingQuality) {
                                     const trackItem = state.content?.mediaItems?.[productId]?.item ?? state.content?.tracks?.[productId];
                                     const fallbackQuality = trackItem?.audioQuality;

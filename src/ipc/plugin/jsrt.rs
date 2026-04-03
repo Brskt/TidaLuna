@@ -477,22 +477,3 @@ fn unload_all_user_plugins() {
         with_state(|state| state.plugin_manager.mark_unloaded(url));
     }
 }
-
-/// Load plugins after a successful login. Safe to call multiple times
-/// (no-op if plugins are already loaded or no session).
-pub(crate) fn load_plugins_if_session_ready() {
-    let (has_session, has_plugins) = with_state(|state| {
-        let session = !state.captured_token.is_empty() || state.token_state.is_some();
-        let plugins = !state.plugin_manager.is_empty();
-        (session, plugins)
-    })
-    .unwrap_or((false, false));
-
-    if !has_session || has_plugins {
-        return;
-    }
-
-    crate::vprintln!("[PLUGIN] Post-login: loading plugins");
-    purge_sdk_auth_blob_if_needed();
-    do_load_plugins_inline();
-}
