@@ -15,7 +15,7 @@ export const LunaVersionInfo = React.memo(() => {
 						style={{ width: 72, height: 72, borderRadius: 16, boxShadow: "0 2px 12px #0002" }}
 					/>
 					<div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-						<h2>Thanks for using TIDALuna!</h2>
+						<h2>Thanks for using TIDALunar!</h2>
 						<div style={{ fontSize: 18, margin: 0 }}>
 							<strong>Version:</strong> <span style={{ color: "#31d8ff" }}>{version || "Unknown"}</span>
 						</div>

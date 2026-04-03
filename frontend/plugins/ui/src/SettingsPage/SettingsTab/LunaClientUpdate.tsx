@@ -34,9 +34,9 @@ export const LunaClientUpdate = React.memo(() => {
 		setSelectedRelease(releases[0].tag_name);
 	};
 
-	React.useEffect(() => {
-		updateReleases();
-	}, []);
+	// React.useEffect(() => {
+	// 	updateReleases();
+	// }, []);
 
 	let action;
 	let desc;
@@ -73,7 +73,7 @@ export const LunaClientUpdate = React.memo(() => {
 			/>
 			<LunaButton
 				sx={{ height: 48 }}
-				disabled={!!busy}
+				disabled={true /* !!busy */}
 				children={action}
 				title={desc}
 				onClick={async () => {
@@ -126,7 +126,7 @@ export const LunaClientUpdate = React.memo(() => {
 			<LunaButton
 				sx={{ height: 48, marginLeft: 2 }}
 				color="error"
-				disabled={!!busy}
+				disabled={true /* !!busy */}
 				children={"Factory Reset"}
 				title={"Warning! This will reset luna to a clean install with no plugins."}
 				onClick={async () => {

@@ -67,24 +67,24 @@ ipcRenderer.onOpenUrl(unloads, (reqUrl) => {
 	if (url.pathname.startsWith("//settings")) settingsPage.open();
 });
 
-setTimeout(async () => {
-	const latestReleaseTag = (await fetchReleases())
-		.filter((release) => !release.prerelease)
-		.map((rel) => rel.tag_name)
-		.sort(semverRcompare)[0];
-	if (semverGt(latestReleaseTag, (await pkg()).version!, true)) {
-		const res = await confirm({
-			title: (
-				<>
-					New version available! <b>{latestReleaseTag}</b>
-				</>
-			),
-			description: "There is a new TidaLuna client version available. Open settings to update?",
-			confirmationText: "Open Settings",
-			cancellationText: "Close",
-		});
-		if (!res.confirmed) return;
-		currentSettingsTab._ = "Settings";
-		settingsPage.open();
-	}
-});
+// setTimeout(async () => {
+// 	const latestReleaseTag = (await fetchReleases())
+// 		.filter((release) => !release.prerelease)
+// 		.map((rel) => rel.tag_name)
+// 		.sort(semverRcompare)[0];
+// 	if (semverGt(latestReleaseTag, (await pkg()).version!, true)) {
+// 		const res = await confirm({
+// 			title: (
+// 				<>
+// 					New version available! <b>{latestReleaseTag}</b>
+// 				</>
+// 			),
+// 			description: "There is a new TidaLuna client version available. Open settings to update?",
+// 			confirmationText: "Open Settings",
+// 			cancellationText: "Close",
+// 		});
+// 		if (!res.confirmed) return;
+// 		currentSettingsTab._ = "Settings";
+// 		settingsPage.open();
+// 	}
+// });
