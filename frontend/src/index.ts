@@ -12,7 +12,7 @@ import { createNativePlayerComponent } from "./controllers/player";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, isSelfLoad } from "./audio-proxy";
 import { initWindowControls } from "./ui/window-controls";
-import { invokeIpc, sendIpc, isLoginCallback } from "./ipc";
+import { invokeIpc, sendIpc, isLoginCallback, onIpcEvent } from "./ipc";
 
 // @luna/core and @luna/lib — safe to import after bootstrap
 import { initCore, modules, LunaPlugin } from "../render/src";
@@ -169,7 +169,15 @@ const init = async () => {
     initWindowControls();
     console.log("Native Interface initialized in", Date.now() - now, "ms");
 
-    if (isLoginCallback()) return;
+    if (isLoginCallback()) {
+        // Bundle runs on /login/auth but TIDAL's React app isn't mounted yet.
+        // Rust emits jsrt.post_login_init when the SPA navigates to the app.
+        const unsub = onIpcEvent("jsrt.post_login_init", () => {
+            unsub();
+            setTimeout(init, 0);
+        });
+        return;
+    }
 
     try {
         await initCore();

@@ -334,7 +334,8 @@ wrap_load_handler! {
                     return;
                 }
 
-                let is_login = kind == PageKind::LoginPage;
+                let is_login =
+                    matches!(kind, PageKind::LoginPage | PageKind::LoginCallback);
                 let prev = self.page_state.get();
 
                 // Transitioning from login to app — stop the player but don't reload.
@@ -369,6 +370,9 @@ wrap_load_handler! {
                 // but plugins weren't loaded yet (skipped on login page).
                 if !is_login {
                     crate::ipc::plugin::load_plugins_if_session_ready();
+                    if prev == PageState::Login {
+                        crate::app_state::emit_ipc_event("jsrt.post_login_init");
+                    }
                 }
             }
         }
