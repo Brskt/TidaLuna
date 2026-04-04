@@ -1,9 +1,9 @@
 [workspace]
-members = ["xtask"]
+members = ["xtask", "updater"]
 
 [package]
 name = "tidalunar"
-version = "0.1.1"
+version = "0.0.1-alpha"
 edition = "2024"
 
 
