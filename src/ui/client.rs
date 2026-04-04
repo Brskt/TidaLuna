@@ -30,6 +30,7 @@ impl BrowserSideHandler for IpcQueryHandler {
                 || msg.channel.starts_with("tidal.")
                 || msg.channel.starts_with("__Luna.")
                 || msg.channel.starts_with("__LunaNative.")
+                || msg.channel.starts_with("updater.")
                 || msg.channel == "player.parse_dash")
             && msg.id.is_some()
         {
@@ -370,6 +371,13 @@ wrap_load_handler! {
                 // Plugin loading is handled by init() → invokeIpc("jsrt.load_plugins").
                 if !is_login && prev == PageState::Login {
                     crate::app_state::emit_ipc_event("jsrt.post_login_init");
+                    // Check for updates after login
+                    crate::updater::trigger_update_check();
+                }
+
+                // Also check on first app load (not coming from login)
+                if !is_login && prev == PageState::Initial {
+                    crate::updater::trigger_update_check();
                 }
             }
         }

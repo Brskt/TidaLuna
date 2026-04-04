@@ -92,6 +92,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
         "jsrt.load_plugins" => {
             plugin_ipc::handle_jsrt_load_plugins(callback);
         }
+        "updater.check" => {
+            crate::updater::handle_updater_check(callback);
+        }
         _ => {
             plugin_ipc::handle_plugin_db(msg, callback);
         }

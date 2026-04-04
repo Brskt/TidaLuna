@@ -200,6 +200,19 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 }
             }
         }
+        "updater.apply" => {
+            crate::updater::handle_updater_apply(msg);
+        }
+        "updater.dismiss" => {
+            crate::updater::handle_updater_dismiss(msg);
+        }
+        "updater.set_auto_check" => {
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
+            crate::state::db().call_settings(move |conn| {
+                crate::settings::save_update_auto_check(conn, enabled);
+            });
+            crate::vprintln!("[UPDATER] Auto-check set to {enabled}");
+        }
         _ => {}
     }
 }
