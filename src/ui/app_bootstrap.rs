@@ -287,9 +287,13 @@ wrap_browser_process_handler! {
             }
             crate::platform::tray::start_event_polling();
 
+            let auto_check = crate::state::db()
+                .call_settings(crate::settings::load_update_auto_check);
+
             let init_script = format!(
                 r#"window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
+window.__TIDALUNAR_AUTO_CHECK__ = {auto_check};
 window.__TIDALUNAR_WINDOW_STATE__ = {{
     isMaximized: false,
     isFullscreen: false

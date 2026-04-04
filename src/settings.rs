@@ -165,3 +165,41 @@ pub(crate) fn load_close_to_tray(conn: &mut Connection) -> bool {
 pub(crate) fn save_close_to_tray(conn: &mut Connection, enabled: bool) {
     set(conn, "window.close_to_tray", &enabled.to_string());
 }
+
+pub(crate) fn load_update_auto_check(conn: &mut Connection) -> bool {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = 'updater.auto_check'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(true)
+}
+
+pub(crate) fn save_update_auto_check(conn: &mut Connection, enabled: bool) {
+    set(conn, "updater.auto_check", &enabled.to_string());
+}
+
+pub(crate) fn load_update_skip_version(conn: &mut Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = 'updater.skip_version'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
+pub(crate) fn save_update_skip_version(conn: &mut Connection, version: &str) {
+    set(conn, "updater.skip_version", version);
+}
+
+#[allow(dead_code)]
+pub(crate) fn clear_update_skip_version(conn: &mut Connection) {
+    if let Err(e) = conn.execute(
+        "DELETE FROM settings WHERE key = 'updater.skip_version'",
+        [],
+    ) {
+        crate::vprintln!("[SETTINGS] Failed to clear updater.skip_version: {e}");
+    }
+}

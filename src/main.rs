@@ -12,6 +12,7 @@ mod plugins;
 mod settings;
 mod state;
 mod ui;
+mod updater;
 mod util;
 
 use app_state::{APP_STATE, AppState};
@@ -115,6 +116,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let db_actor = db::DbActor::open(&data_dir).expect("Failed to open databases");
     let _ = state::DB.set(db_actor);
+
+    // Recover from any interrupted update before continuing startup
+    updater::recover_interrupted_update();
 
     let player = Arc::new(
         Player::new(
