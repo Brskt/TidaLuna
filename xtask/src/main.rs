@@ -1,6 +1,14 @@
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -9,6 +17,9 @@ fn main() {
         Some("clippy") => clippy(),
         Some("fmt") => fmt(),
         Some("bundle") => bundle(&args[1..]),
+        Some("build-updater") => build_updater(&args[1..]),
+        Some("generate-keypair") => generate_keypair(),
+        Some("sign-manifest") => sign_manifest(),
         Some(cmd) => {
             eprintln!("Unknown command: {cmd}");
             eprintln!();
@@ -31,10 +42,14 @@ fn usage() {
     eprintln!("Usage: cargo xtask <command>");
     eprintln!();
     eprintln!("Commands:");
-    eprintln!("  clippy    Run clippy with strict warnings");
-    eprintln!("  fmt       Check formatting");
-    eprintln!("  bundle    Build and create distributable bundle (dev by default)");
-    eprintln!("            --release  Build in release mode (optimized, slower)");
+    eprintln!("  clippy           Run clippy with strict warnings");
+    eprintln!("  fmt              Check formatting");
+    eprintln!("  bundle           Build and create distributable bundle (dev by default)");
+    eprintln!("                   --release  Build in release mode (optimized, slower)");
+    eprintln!("  build-updater    Build the updater crate and copy to dist/updater/");
+    eprintln!("                   --release  Build in release mode");
+    eprintln!("  generate-keypair Generate an Ed25519 keypair for update signing");
+    eprintln!("  sign-manifest    Sign dist/manifest.json using $UPDATE_SIGNING_KEY");
 }
 
 fn clippy() -> Result<(), String> {
@@ -55,6 +70,28 @@ fn clippy() -> Result<(), String> {
 fn fmt() -> Result<(), String> {
     run("cargo", &["fmt", "--all", "--", "--check"])
 }
+
+// ---------------------------------------------------------------------------
+// Manifest types
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    version: String,
+    min_version: String,
+    target: String,
+    files: BTreeMap<String, FileEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FileEntry {
+    sha256: String,
+    size: u64,
+}
+
+// ---------------------------------------------------------------------------
+// bundle
+// ---------------------------------------------------------------------------
 
 fn bundle(flags: &[String]) -> Result<(), String> {
     const EXE_NAME: &str = if cfg!(target_os = "windows") {
@@ -130,9 +167,237 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         strip_binaries(&bundle_dir)?;
     }
 
+    // 8. Generate manifest.json
+    generate_manifest(&bundle_dir)?;
+
     println!("Bundle created in: {}", bundle_dir.display());
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Manifest generation
+// ---------------------------------------------------------------------------
+
+fn target_triple() -> String {
+    let os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        "amd64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "unknown"
+    };
+
+    format!("{os}-{arch}")
+}
+
+fn sha256_file(path: &Path) -> Result<(String, u64), String> {
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    let size = metadata.len();
+
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("read error {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    Ok((hash, size))
+}
+
+fn collect_files(
+    dir: &Path,
+    base: &Path,
+    files: &mut BTreeMap<String, FileEntry>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .strip_prefix(base)
+            .map_err(|e| format!("strip prefix: {e}"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if path.is_dir() {
+            collect_files(&path, base, files)?;
+        } else if name != "manifest.json" && name != "manifest.json.sig" {
+            let (sha256, size) = sha256_file(&path)?;
+            files.insert(name, FileEntry { sha256, size });
+        }
+    }
+    Ok(())
+}
+
+fn read_workspace_version() -> Result<String, String> {
+    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("cannot find project root")?;
+    let cargo_toml = fs::read_to_string(project_root.join("Cargo.toml"))
+        .map_err(|e| format!("cannot read root Cargo.toml: {e}"))?;
+
+    // Simple parse — look for version = "x.y.z" in [package] section
+    for line in cargo_toml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("version") {
+            if let Some(v) = trimmed.split('"').nth(1) {
+                return Ok(v.to_string());
+            }
+        }
+    }
+    Err("version not found in root Cargo.toml".to_string())
+}
+
+fn generate_manifest(bundle_dir: &Path) -> Result<(), String> {
+    let version = read_workspace_version()?;
+
+    // min_version defaults to same as version for now — adjust per release
+    let min_version = version.clone();
+
+    let mut files = BTreeMap::new();
+    collect_files(bundle_dir, bundle_dir, &mut files)?;
+
+    let manifest = Manifest {
+        version,
+        min_version,
+        target: target_triple(),
+        files,
+    };
+
+    let json =
+        serde_json::to_string_pretty(&manifest).map_err(|e| format!("serialize manifest: {e}"))?;
+    fs::write(bundle_dir.join("manifest.json"), &json)
+        .map_err(|e| format!("write manifest.json: {e}"))?;
+
+    println!("  Generated manifest.json ({} files)", manifest.files.len());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// generate-keypair
+// ---------------------------------------------------------------------------
+
+fn generate_keypair() -> Result<(), String> {
+    let mut csprng = rand::rngs::OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let verifying_key = VerifyingKey::from(&signing_key);
+
+    let private_b64 = BASE64.encode(signing_key.to_bytes());
+    let public_bytes = verifying_key.to_bytes();
+
+    println!("=== Ed25519 Update Signing Keypair ===");
+    println!();
+    println!("PRIVATE KEY (store in GitHub Secret UPDATE_SIGNING_KEY):");
+    println!("{private_b64}");
+    println!();
+    println!("PUBLIC KEY (embed in updater binary):");
+    println!("const UPDATE_PUBLIC_KEY: [u8; 32] = {public_bytes:?};");
+    println!();
+    println!("PUBLIC KEY (base64):");
+    println!("{}", BASE64.encode(public_bytes));
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// sign-manifest
+// ---------------------------------------------------------------------------
+
+fn sign_manifest() -> Result<(), String> {
+    let key_b64 = std::env::var("UPDATE_SIGNING_KEY")
+        .map_err(|_| "UPDATE_SIGNING_KEY environment variable not set".to_string())?;
+
+    let key_bytes = BASE64
+        .decode(key_b64.trim())
+        .map_err(|e| format!("invalid base64 in UPDATE_SIGNING_KEY: {e}"))?;
+
+    let key_array: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "UPDATE_SIGNING_KEY must be exactly 32 bytes (base64-encoded)".to_string())?;
+
+    let signing_key = SigningKey::from_bytes(&key_array);
+
+    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("cannot find project root")?;
+    let manifest_path = project_root.join("dist/manifest.json");
+    let sig_path = project_root.join("dist/manifest.json.sig");
+
+    let manifest_bytes = fs::read(&manifest_path)
+        .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
+
+    let signature = signing_key.sign(&manifest_bytes);
+    let sig_b64 = BASE64.encode(signature.to_bytes());
+
+    fs::write(&sig_path, &sig_b64)
+        .map_err(|e| format!("cannot write {}: {e}", sig_path.display()))?;
+
+    println!("Signed manifest.json -> manifest.json.sig");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// build-updater
+// ---------------------------------------------------------------------------
+
+fn build_updater(flags: &[String]) -> Result<(), String> {
+    let release = flags.iter().any(|f| f == "--release");
+
+    let mut args = vec!["build", "--package", "updater"];
+    if release {
+        args.push("--release");
+    }
+    run("cargo", &args)?;
+
+    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("cannot find project root")?;
+    let target_dir = project_root
+        .join("target")
+        .join(if release { "release" } else { "debug" });
+    let bundle_dir = project_root.join("dist");
+
+    let updater_name = if cfg!(target_os = "windows") {
+        "updater.exe"
+    } else {
+        "updater"
+    };
+
+    let src = target_dir.join(updater_name);
+    let dst_dir = bundle_dir.join("updater");
+    fs::create_dir_all(&dst_dir).map_err(|e| format!("create updater dir: {e}"))?;
+
+    let dst = dst_dir.join(updater_name);
+    fs::copy(&src, &dst).map_err(|e| format!("copy updater binary: {e}"))?;
+
+    println!("Updater binary copied to {}", dst.display());
+
+    // Regenerate manifest to include the updater binary
+    generate_manifest(&bundle_dir)?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CEF directory finder
+// ---------------------------------------------------------------------------
 
 /// Find the CEF distribution directory inside target/release/build/cef-dll-sys-*/out/
 fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
