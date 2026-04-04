@@ -1,9 +1,8 @@
-name: Build
+name: CI
 
 on:
   push:
     branches: [lunar-cef]
-    tags: ['v*']
   pull_request:
     branches: [lunar-cef]
 
@@ -12,6 +11,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Lint
+  # ---------------------------------------------------------------------------
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -39,7 +42,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: taplo-cli
+          tool: taplo-cli,cargo-deny
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -50,171 +53,136 @@ jobs:
         run: cargo xtask fmt
       - name: Clippy
         run: cargo xtask clippy
+      - name: Deny check
+        run: cargo deny check advisories bans sources
 
-  build-linux-amd64:
+  # ---------------------------------------------------------------------------
+  # Build
+  # ---------------------------------------------------------------------------
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: windows-amd64
+            os: windows-latest
+          - target: windows-arm64
+            os: windows-11-arm
+          - target: macos-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libasound2-dev \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libgdk-pixbuf-2.0-dev \
+            cmake \
+            ninja-build
+
+      - name: Install Ninja
+        if: runner.os == 'Windows'
+        run: choco install ninja -y
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and bundle
+        run: cargo xtask bundle --release
+
+      - name: Build updater
+        if: runner.os != 'macOS'
+        run: cargo xtask build-updater --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tidalunar-${{ matrix.target }}
+          path: dist/
+
+  # ---------------------------------------------------------------------------
+  # Check
+  # ---------------------------------------------------------------------------
+
+  check:
+    if: always()
+    needs:
+      - lint
+      - build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}
 
-      - name: Install system dependencies
+  # ---------------------------------------------------------------------------
+  # Auto-tag
+  # ---------------------------------------------------------------------------
+
+  auto-tag:
+    needs: check
+    if: github.ref == 'refs/heads/lunar-cef' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create tag if version changed
+        id: tag
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libasound2-dev \
-            libdbus-1-dev \
-            libgtk-3-dev \
-            libglib2.0-dev \
-            libgdk-pixbuf-2.0-dev \
-            cmake \
-            ninja-build
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TAG="$VERSION"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "name=$TAG" >> "$GITHUB_OUTPUT"
+            echo "Created tag $TAG"
+          fi
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build and bundle
-        run: cargo xtask bundle --release
-
-      - name: Build updater
-        run: cargo xtask build-updater --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: tidalunar-linux-amd64
-          path: dist/
-
-  build-linux-arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libasound2-dev \
-            libdbus-1-dev \
-            libgtk-3-dev \
-            libglib2.0-dev \
-            libgdk-pixbuf-2.0-dev \
-            cmake \
-            ninja-build
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build and bundle
-        run: cargo xtask bundle --release
-
-      - name: Build updater
-        run: cargo xtask build-updater --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: tidalunar-linux-arm64
-          path: dist/
-
-  build-windows-amd64:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Install Ninja
-        run: choco install ninja -y
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build and bundle
-        run: cargo xtask bundle --release
-
-      - name: Build updater
-        run: cargo xtask build-updater --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: tidalunar-windows-amd64
-          path: dist/
-
-  build-windows-arm64:
-    runs-on: windows-11-arm
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Install Ninja
-        run: choco install ninja -y
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build and bundle
-        run: cargo xtask bundle --release
-
-      - name: Build updater
-        run: cargo xtask build-updater --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: tidalunar-windows-arm64
-          path: dist/
-
-  build-macos-arm64:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build and bundle
-        run: cargo xtask bundle --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: tidalunar-macos-arm64
-          path: dist/
+  # ---------------------------------------------------------------------------
+  # Release
+  # ---------------------------------------------------------------------------
 
   release:
-    needs: [build-linux-amd64, build-linux-arm64, build-windows-amd64, build-windows-arm64]
+    needs: auto-tag
+    if: needs.auto-tag.outputs.tag != ''
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v7
         with:
-          path: artifacts/
+          fetch-depth: 0
+
+      - name: Download artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ github.run_id }}" --dir artifacts/
 
       - name: Install signing dependency
         run: pip install cryptography
@@ -225,24 +193,21 @@ jobs:
         run: |
           mkdir -p release-assets
 
-          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
+          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64 macos-arm64; do
             dir="artifacts/tidalunar-${target}"
             if [ ! -d "$dir" ]; then
               echo "Warning: $dir not found, skipping"
               continue
             fi
 
-            # Rename manifest to platform-specific name
             if [ -f "$dir/manifest.json" ]; then
               cp "$dir/manifest.json" "release-assets/manifest-${target}.json"
             fi
 
-            # Sign manifest
             if [ -n "$UPDATE_SIGNING_KEY" ] && [ -f "release-assets/manifest-${target}.json" ]; then
               python3 scripts/sign-manifest.py "release-assets/manifest-${target}.json"
             fi
 
-            # Zip the bundle
             (cd "$dir" && zip -r "$GITHUB_WORKSPACE/release-assets/tidalunar-${target}.zip" .)
             echo "Created tidalunar-${target}.zip"
           done
@@ -252,7 +217,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ needs.auto-tag.outputs.tag }}
         run: |
           gh release create "$TAG_NAME" \
             --title "$TAG_NAME" \
