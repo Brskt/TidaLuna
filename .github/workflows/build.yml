@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [lunar-cef]
+    tags: ['v*']
   pull_request:
     branches: [lunar-cef]
 
@@ -79,6 +80,9 @@ jobs:
       - name: Build and bundle
         run: cargo xtask bundle --release
 
+      - name: Build updater
+        run: cargo xtask build-updater --release
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -114,6 +118,9 @@ jobs:
       - name: Build and bundle
         run: cargo xtask bundle --release
 
+      - name: Build updater
+        run: cargo xtask build-updater --release
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -138,6 +145,9 @@ jobs:
       - name: Build and bundle
         run: cargo xtask bundle --release
 
+      - name: Build updater
+        run: cargo xtask build-updater --release
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -161,6 +171,9 @@ jobs:
 
       - name: Build and bundle
         run: cargo xtask bundle --release
+
+      - name: Build updater
+        run: cargo xtask build-updater --release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -188,3 +201,60 @@ jobs:
         with:
           name: tidalunar-macos-arm64
           path: dist/
+
+  release:
+    needs: [build-linux-amd64, build-linux-arm64, build-windows-amd64, build-windows-arm64]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts/
+
+      - name: Install signing dependency
+        run: pip install cryptography
+
+      - name: Prepare and sign release assets
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          mkdir -p release-assets
+
+          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
+            dir="artifacts/tidalunar-${target}"
+            if [ ! -d "$dir" ]; then
+              echo "Warning: $dir not found, skipping"
+              continue
+            fi
+
+            # Rename manifest to platform-specific name
+            if [ -f "$dir/manifest.json" ]; then
+              cp "$dir/manifest.json" "release-assets/manifest-${target}.json"
+            fi
+
+            # Sign manifest
+            if [ -n "$UPDATE_SIGNING_KEY" ] && [ -f "release-assets/manifest-${target}.json" ]; then
+              python3 scripts/sign-manifest.py "release-assets/manifest-${target}.json"
+            fi
+
+            # Zip the bundle
+            (cd "$dir" && zip -r "$GITHUB_WORKSPACE/release-assets/tidalunar-${target}.zip" .)
+            echo "Created tidalunar-${target}.zip"
+          done
+
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --generate-notes \
+            release-assets/*
