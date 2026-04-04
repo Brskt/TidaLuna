@@ -3,6 +3,7 @@ import { ConfirmProvider } from "material-ui-confirm";
 import React from "react";
 import semverGt from "semver/functions/gt";
 import semverRcompare from "semver/functions/rcompare";
+import { createRoot } from "react-dom/client";
 
 import { ContextMenu, ipcRenderer } from "@luna/lib";
 
@@ -13,6 +14,7 @@ import { lunaMuiTheme } from "./lunaTheme";
 import { currentSettingsTab, LunaPage } from "./SettingsPage";
 import { storeUrls } from "./SettingsPage/PluginStoreTab";
 import { fetchReleases } from "./SettingsPage/SettingsTab/LunaClientUpdate";
+import { UpdateToast } from "./components/UpdateToast";
 
 import { pkg } from "plugins/lib.native/src/index.native";
 import { unloads } from "./index.safe";
@@ -67,24 +69,15 @@ ipcRenderer.onOpenUrl(unloads, (reqUrl) => {
 	if (url.pathname.startsWith("//settings")) settingsPage.open();
 });
 
-// setTimeout(async () => {
-// 	const latestReleaseTag = (await fetchReleases())
-// 		.filter((release) => !release.prerelease)
-// 		.map((rel) => rel.tag_name)
-// 		.sort(semverRcompare)[0];
-// 	if (semverGt(latestReleaseTag, (await pkg()).version!, true)) {
-// 		const res = await confirm({
-// 			title: (
-// 				<>
-// 					New version available! <b>{latestReleaseTag}</b>
-// 				</>
-// 			),
-// 			description: "There is a new TidaLuna client version available. Open settings to update?",
-// 			confirmationText: "Open Settings",
-// 			cancellationText: "Close",
-// 		});
-// 		if (!res.confirmed) return;
-// 		currentSettingsTab._ = "Settings";
-// 		settingsPage.open();
-// 	}
-// });
+// Mount update toast (always visible, listens for updater.available IPC)
+const toastRoot = document.createElement("div");
+toastRoot.id = "luna-update-toast";
+document.body.appendChild(toastRoot);
+unloads.add(() => toastRoot.remove());
+const toastReactRoot = createRoot(toastRoot);
+unloads.add(() => toastReactRoot.unmount());
+toastReactRoot.render(
+	<ThemeProvider theme={lunaMuiTheme}>
+		<UpdateToast unloads={unloads} />
+	</ThemeProvider>,
+);
