@@ -2,6 +2,10 @@
 /dist
 /.cache
 
+# Auto-generated frontend inline bundles
+frontend/src/plugins/luna-ui-inline.ts
+frontend/src/plugins/luna-dev-inline.ts
+
 # IDEs
 .idea/
 
