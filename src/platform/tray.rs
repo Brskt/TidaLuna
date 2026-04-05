@@ -33,7 +33,11 @@ fn decode_icon() -> Option<Icon> {
             return None;
         }
     };
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let Some(buf_size) = reader.output_buffer_size() else {
+        crate::vprintln!("[TRAY]   PNG buffer size overflow");
+        return None;
+    };
+    let mut buf = vec![0u8; buf_size];
     let info = match reader.next_frame(&mut buf) {
         Ok(i) => i,
         Err(e) => {

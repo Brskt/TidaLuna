@@ -25,7 +25,7 @@ pub(super) fn clear_pending_trust(plugin_prefix: &str) {
 fn compute_code_hash(code: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(code.trim().as_bytes());
-    format!("{:x}", hasher.finalize())
+    base16ct::lower::encode_string(&hasher.finalize())
 }
 
 /// Initialize the native runtime (Bun child process) if not already running.
