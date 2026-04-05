@@ -171,6 +171,10 @@ fn parse_args() -> Result<Args> {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    if std::env::args().len() <= 1 {
+        return;
+    }
+
     if let Err(e) = run() {
         eprintln!("Update failed: {e:#}");
         show_error(&format!("TidaLunar update failed:\n{e:#}"));
@@ -688,7 +692,7 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(base16ct::lower::encode_string(&hasher.finalize()))
 }
 
 // ---------------------------------------------------------------------------

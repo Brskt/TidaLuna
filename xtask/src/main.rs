@@ -381,10 +381,7 @@ fn build_updater(flags: &[String]) -> Result<(), String> {
     };
 
     let src = target_dir.join(updater_name);
-    let dst_dir = bundle_dir.join("updater");
-    fs::create_dir_all(&dst_dir).map_err(|e| format!("create updater dir: {e}"))?;
-
-    let dst = dst_dir.join(updater_name);
+    let dst = bundle_dir.join(updater_name);
     fs::copy(&src, &dst).map_err(|e| format!("copy updater binary: {e}"))?;
 
     println!("Updater binary copied to {}", dst.display());

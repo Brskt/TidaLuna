@@ -517,7 +517,7 @@ pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
         }
     };
 
-    let updater_path = app_dir.join("updater").join(UPDATER_EXE);
+    let updater_path = app_dir.join(UPDATER_EXE);
     if !updater_path.exists() {
         crate::vprintln!(
             "[UPDATER] Updater binary not found at {}",

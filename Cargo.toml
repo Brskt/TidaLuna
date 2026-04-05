@@ -69,7 +69,9 @@ getrandom = "0.4.2"
 tray-icon = { version = "0.22.0", default-features = false }
 png = "0.18.1"
 tokio-util = "0.7.18"
-zip = { version = "8.5.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "8.5.0", default-features = false, features = [
+  "deflate-flate2-zlib-rs",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.23.0"
