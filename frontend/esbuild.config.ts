@@ -9,8 +9,7 @@
 import { type BuildOptions } from "esbuild";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { mkdirSync } from "fs";
-
+import { mkdirSync, readFileSync } from "fs";
 import { build, defaultBuildOptions, RUNTIME_EXTERNALS, TYPE_ONLY_PACKAGES, getLunaDependencyExternals } from "./build";
 import { dynamicExternalsPlugin } from "./build/plugins/dynamicExternals";
 import { typeOnlyPlugin } from "./build/plugins/typeOnly";
@@ -19,6 +18,10 @@ import { inlineBundlePlugin } from "./build/plugins/inlineBundle";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = __dirname;
+
+// Read version from Cargo.toml (single source of truth)
+const cargoToml = readFileSync(resolve(root, "../Cargo.toml"), "utf-8");
+const appVersion = cargoToml.match(/^version\s*=\s*"(.+)"/m)?.[1] ?? "unknown";
 
 // Ensure output directories exist
 mkdirSync(resolve(root, "dist"), { recursive: true });
@@ -33,6 +36,7 @@ const inlinePluginDefaults: Partial<BuildOptions> = {
 	jsx: "automatic",
 	jsxImportSource: "react",
 	supported: { "top-level-await": true },
+	define: { __TIDALUNAR_VERSION__: JSON.stringify(appVersion) },
 };
 
 const uiOutfile = resolve(root, "plugins/ui/dist/luna-ui.mjs");

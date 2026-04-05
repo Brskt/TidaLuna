@@ -38,6 +38,7 @@ declare global {
 		};
 	}
 	const __platform: string;
+	const __TIDALUNAR_VERSION__: string;
 	const __ipcRenderer: {
 		invoke: (...args: any[]) => Promise<any>;
 		send: (...args: any[]) => void;

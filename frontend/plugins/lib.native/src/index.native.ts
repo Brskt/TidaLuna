@@ -4,7 +4,7 @@
  */
 
 export const pkg = async () => ({
-    version: "0.0.0-tidalunar",
+    version: __TIDALUNAR_VERSION__,
     name: "TidaLunar",
 });
 
