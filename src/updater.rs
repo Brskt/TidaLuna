@@ -491,9 +491,12 @@ fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
 }
 
 /// Simple semver comparison: returns true if `remote` > `current`.
+/// Strips pre-release suffixes (e.g. "-alpha") before comparing numeric parts.
 fn is_newer(remote: &str, current: &str) -> bool {
     let parse = |s: &str| -> (u32, u32, u32) {
-        let mut parts = s.split('.');
+        // Strip pre-release suffix: "0.0.2-alpha" → "0.0.2"
+        let numeric = s.split('-').next().unwrap_or(s);
+        let mut parts = numeric.split('.');
         let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
