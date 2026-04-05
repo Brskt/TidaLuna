@@ -119,6 +119,7 @@ struct Args {
     pid: u32,
     version: String,
     app_dir: PathBuf,
+    skip_download: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -126,6 +127,7 @@ fn parse_args() -> Result<Args> {
     let mut pid = None;
     let mut version = None;
     let mut app_dir = None;
+    let mut skip_download = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -148,6 +150,9 @@ fn parse_args() -> Result<Args> {
                     args.get(i).context("--app-dir requires a value")?,
                 ));
             }
+            "--skip-download" => {
+                skip_download = true;
+            }
             other => bail!("unknown argument: {other}"),
         }
         i += 1;
@@ -157,6 +162,7 @@ fn parse_args() -> Result<Args> {
         pid: pid.context("--pid is required")?,
         version: version.context("--version is required")?,
         app_dir: app_dir.context("--app-dir is required")?,
+        skip_download,
     })
 }
 
@@ -194,50 +200,83 @@ fn run() -> Result<()> {
     eprintln!("[updater] Checking file locks...");
     probe_exclusive_access(&args.app_dir)?;
 
-    // 3. Fetch release info from GitHub
-    eprintln!("[updater] Fetching release v{}...", args.version);
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("TidaLunar-Updater/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("failed to create HTTP client")?;
-
-    let release = fetch_release(&client, &args.version)?;
-
-    // 4. Download and verify manifest
-    eprintln!("[updater] Downloading manifest...");
-    let (manifest, _manifest_bytes) = download_and_verify_manifest(&client, &release)?;
-
-    // 5. Anti-downgrade check
-    if manifest.target != TARGET {
-        bail!(
-            "manifest target mismatch: expected {TARGET}, got {}",
-            manifest.target
-        );
-    }
-
-    // 6. Download zip, extract to staging, diff files
     let staging_dir = args.app_dir.join(".update-staging");
-    if staging_dir.exists() {
-        fs::remove_dir_all(&staging_dir).context("failed to clean old staging dir")?;
-    }
-    fs::create_dir_all(&staging_dir).context("failed to create staging dir")?;
+    let manifest_name = format!("manifest-{TARGET}.json");
 
-    eprintln!("[updater] Downloading update package...");
-    let zip_asset_name = format!("tidalunar-{TARGET}.zip");
-    let zip_url = release
-        .assets
-        .iter()
-        .find(|a| a.name == zip_asset_name)
-        .context(format!("release missing asset: {zip_asset_name}"))?
-        .browser_download_url
-        .clone();
+    let manifest = if args.skip_download {
+        // Pre-downloaded by main process — re-verify signature and validate version
+        eprintln!("[updater] Using pre-downloaded staging...");
+        let sig_name = format!("{manifest_name}.sig");
 
-    let zip_path = staging_dir.join("update.zip");
-    download_file(&client, &zip_url, &zip_path)?;
+        let manifest_bytes =
+            fs::read(staging_dir.join(&manifest_name)).context("read staged manifest")?;
+        let sig_b64 =
+            fs::read_to_string(staging_dir.join(&sig_name)).context("read staged signature")?;
 
-    eprintln!("[updater] Extracting...");
-    extract_zip(&zip_path, &staging_dir)?;
-    fs::remove_file(&zip_path).ok(); // clean up zip
+        verify_manifest_signature(&manifest_bytes, &sig_b64)?;
+
+        let manifest: Manifest =
+            serde_json::from_slice(&manifest_bytes).context("parse staged manifest")?;
+
+        if manifest.version != args.version {
+            bail!(
+                "staged manifest version mismatch: expected {}, got {}",
+                args.version,
+                manifest.version
+            );
+        }
+        if manifest.target != TARGET {
+            bail!(
+                "manifest target mismatch: expected {TARGET}, got {}",
+                manifest.target
+            );
+        }
+
+        manifest
+    } else {
+        // Full download path (original behavior)
+        eprintln!("[updater] Fetching release v{}...", args.version);
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(format!("TidaLunar-Updater/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .context("failed to create HTTP client")?;
+
+        let release = fetch_release(&client, &args.version)?;
+
+        eprintln!("[updater] Downloading manifest...");
+        let (manifest, _manifest_bytes) = download_and_verify_manifest(&client, &release)?;
+
+        if manifest.target != TARGET {
+            bail!(
+                "manifest target mismatch: expected {TARGET}, got {}",
+                manifest.target
+            );
+        }
+
+        if staging_dir.exists() {
+            fs::remove_dir_all(&staging_dir).context("failed to clean old staging dir")?;
+        }
+        fs::create_dir_all(&staging_dir).context("failed to create staging dir")?;
+
+        eprintln!("[updater] Downloading update package...");
+        let zip_asset_name = format!("tidalunar-{TARGET}.zip");
+        let zip_url = release
+            .assets
+            .iter()
+            .find(|a| a.name == zip_asset_name)
+            .context(format!("release missing asset: {zip_asset_name}"))?
+            .browser_download_url
+            .clone();
+
+        let zip_path = staging_dir.join("update.zip");
+        download_file(&client, &zip_url, &zip_path)?;
+
+        eprintln!("[updater] Extracting...");
+        extract_zip(&zip_path, &staging_dir)?;
+        fs::remove_file(&zip_path).ok();
+
+        manifest
+    };
 
     // 7. Determine which files need updating
     eprintln!("[updater] Comparing files...");
@@ -498,7 +537,7 @@ fn try_exclusive_access(path: &Path) -> Result<bool> {
 
 fn fetch_release(client: &reqwest::blocking::Client, version: &str) -> Result<GhRelease> {
     let url = format!(
-        "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/v{version}"
+        "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/{version}"
     );
     let resp = client
         .get(&url)
@@ -516,6 +555,22 @@ fn fetch_release(client: &reqwest::blocking::Client, version: &str) -> Result<Gh
 
     resp.json::<GhRelease>()
         .context("failed to parse release JSON")
+}
+
+/// Verify an Ed25519 signature over manifest bytes.
+fn verify_manifest_signature(manifest_bytes: &[u8], sig_b64: &str) -> Result<()> {
+    let sig_bytes = BASE64
+        .decode(sig_b64.trim())
+        .context("invalid base64 in signature")?;
+    let signature =
+        Signature::from_slice(&sig_bytes).context("invalid Ed25519 signature format")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&UPDATE_PUBLIC_KEY).context("invalid embedded public key")?;
+    verifying_key
+        .verify(manifest_bytes, &signature)
+        .context("manifest signature verification FAILED — update rejected")?;
+    eprintln!("[updater] Manifest signature verified");
+    Ok(())
 }
 
 fn download_and_verify_manifest(
@@ -558,21 +613,7 @@ fn download_and_verify_manifest(
         .text()
         .context("read signature")?;
 
-    // Verify signature
-    let sig_bytes = BASE64
-        .decode(sig_b64.trim())
-        .context("invalid base64 in signature")?;
-    let signature =
-        Signature::from_slice(&sig_bytes).context("invalid Ed25519 signature format")?;
-
-    let verifying_key =
-        VerifyingKey::from_bytes(&UPDATE_PUBLIC_KEY).context("invalid embedded public key")?;
-
-    verifying_key
-        .verify(&manifest_bytes, &signature)
-        .context("manifest signature verification FAILED — update rejected")?;
-
-    eprintln!("[updater] Manifest signature verified");
+    verify_manifest_signature(&manifest_bytes, &sig_b64)?;
 
     // Parse manifest
     let manifest: Manifest =

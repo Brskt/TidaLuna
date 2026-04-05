@@ -95,6 +95,12 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
         "updater.check" => {
             crate::updater::handle_updater_check(callback);
         }
+        "updater.download" => {
+            crate::updater::handle_updater_download(&msg, callback);
+        }
+        "updater.status" => {
+            crate::updater::handle_updater_status(callback);
+        }
         _ => {
             plugin_ipc::handle_plugin_db(msg, callback);
         }

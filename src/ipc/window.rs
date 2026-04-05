@@ -206,6 +206,9 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         "updater.dismiss" => {
             crate::updater::handle_updater_dismiss(msg);
         }
+        "updater.cancel" => {
+            crate::updater::handle_updater_cancel();
+        }
         "updater.set_auto_check" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
             crate::state::db().call_settings(move |conn| {
