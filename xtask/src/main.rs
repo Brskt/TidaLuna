@@ -217,7 +217,7 @@ fn sha256_file(path: &Path) -> Result<(String, u64), String> {
         }
         hasher.update(&buf[..n]);
     }
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = base16ct::lower::encode_string(&hasher.finalize());
     Ok((hash, size))
 }
 
@@ -295,8 +295,9 @@ fn generate_manifest(bundle_dir: &Path) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn generate_keypair() -> Result<(), String> {
-    let mut csprng = rand::rngs::OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).map_err(|e| format!("getrandom failed: {e}"))?;
+    let signing_key = SigningKey::from_bytes(&secret);
     let verifying_key = VerifyingKey::from(&signing_key);
 
     let private_b64 = BASE64.encode(signing_key.to_bytes());
