@@ -6,17 +6,7 @@ use futures_util::StreamExt;
 
 const PRELOAD_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
-use crate::util::fmt::format_ms;
-
-fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * KB;
-    if (bytes as f64) >= MB {
-        format!("{:.1} MB", bytes as f64 / MB)
-    } else {
-        format!("{:.0} KB", bytes as f64 / KB)
-    }
-}
+use crate::util::fmt::{format_bytes, format_ms};
 
 async fn fetch_and_decrypt_inner(
     url: &str,

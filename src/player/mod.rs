@@ -195,19 +195,7 @@ pub struct Player {
     load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-pub(crate) use crate::util::fmt::format_ms;
-
-pub(crate) fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
-}
+pub(crate) use crate::util::fmt::{format_bytes, format_ms};
 
 fn http_version_str(v: reqwest::Version) -> &'static str {
     if v == reqwest::Version::HTTP_3 {
@@ -744,16 +732,18 @@ impl Player {
         self.load_with_policy(url, format, key, policy, false)
     }
 
-    pub fn play(&self) -> anyhow::Result<()> {
+    fn send_cmd(&self, cmd: PlayerCommand) -> anyhow::Result<()> {
         self.cmd_tx
-            .send(PlayerCommand::Play)
+            .send(cmd)
             .map_err(|_| anyhow::anyhow!("Player thread is dead"))
     }
 
+    pub fn play(&self) -> anyhow::Result<()> {
+        self.send_cmd(PlayerCommand::Play)
+    }
+
     pub fn pause(&self) -> anyhow::Result<()> {
-        self.cmd_tx
-            .send(PlayerCommand::Pause)
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+        self.send_cmd(PlayerCommand::Pause)
     }
 
     pub fn stop(&self) -> anyhow::Result<()> {
@@ -766,42 +756,30 @@ impl Player {
         if let Some(prev) = self.load_handle.lock().unwrap().take() {
             prev.abort();
         }
-        self.cmd_tx
-            .send(PlayerCommand::Stop(event_seq))
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+        self.send_cmd(PlayerCommand::Stop(event_seq))
     }
 
     pub fn seek(&self, time: f64) -> anyhow::Result<()> {
-        self.cmd_tx
-            .send(PlayerCommand::Seek(time))
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+        self.send_cmd(PlayerCommand::Seek(time))
     }
 
     pub fn set_volume(&self, volume: f64) -> anyhow::Result<()> {
-        self.cmd_tx
-            .send(PlayerCommand::SetVolume(volume))
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+        self.send_cmd(PlayerCommand::SetVolume(volume))
     }
 
     #[cfg(target_os = "windows")]
     pub fn set_volume_sync(&self, enabled: bool) -> anyhow::Result<()> {
-        self.cmd_tx
-            .send(PlayerCommand::SetVolumeSync(enabled))
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+        self.send_cmd(PlayerCommand::SetVolumeSync(enabled))
     }
 
     pub fn get_audio_devices(&self, req_id: Option<String>) -> anyhow::Result<()> {
-        self.cmd_tx
-            .send(PlayerCommand::GetAudioDevices(req_id))
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+        self.send_cmd(PlayerCommand::GetAudioDevices(req_id))
     }
 
     pub fn set_audio_device(&self, device_id: String, exclusive: bool) -> anyhow::Result<()> {
-        self.cmd_tx
-            .send(PlayerCommand::SetAudioDevice {
-                id: device_id,
-                exclusive,
-            })
-            .map_err(|_| anyhow::anyhow!("Player thread is dead"))
+        self.send_cmd(PlayerCommand::SetAudioDevice {
+            id: device_id,
+            exclusive,
+        })
     }
 }
