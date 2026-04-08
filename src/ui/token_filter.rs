@@ -135,32 +135,46 @@ wrap_resource_request_handler! {
     }
 }
 
-fn capture_client_id(req: &mut Request) {
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn read_post_body(req: &mut Request) -> Option<Vec<u8>> {
     let method_cef = req.method();
     let method = userfree_to_string(&method_cef);
     if method != "POST" {
-        return;
+        return None;
     }
-    let Some(post_data) = req.post_data() else {
-        return;
-    };
+    let post_data = req.post_data()?;
     let count = post_data.element_count();
     if count == 0 {
-        return;
+        return None;
     }
     let mut elements: Vec<Option<PostDataElement>> = vec![None; count];
     post_data.elements(Some(&mut elements));
-    let body_bytes = match elements.first() {
-        Some(Some(el)) => {
-            let count = el.bytes_count();
-            if count == 0 {
-                return;
-            }
-            let mut buf = vec![0u8; count];
-            el.bytes(count, buf.as_mut_ptr());
-            buf
+    let total: usize = elements.iter().flatten().map(|el| el.bytes_count()).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut body = Vec::with_capacity(total);
+    for el in elements.into_iter().flatten() {
+        let n = el.bytes_count();
+        if n == 0 {
+            continue;
         }
-        _ => return,
+        let mut buf = vec![0u8; n];
+        el.bytes(n, buf.as_mut_ptr());
+        body.extend_from_slice(&buf);
+    }
+    if body.is_empty() { None } else { Some(body) }
+}
+
+fn capture_client_id(req: &mut Request) {
+    let Some(body_bytes) = read_post_body(req) else {
+        return;
     };
     let Ok(body_str) = std::str::from_utf8(&body_bytes) else {
         return;
@@ -193,10 +207,7 @@ fn rewrite_authorization_header(req: &mut Request) {
             return Some(ts.current.access_token.clone());
         }
         if let Some(ref prev) = ts.previous {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let now = now_unix_secs();
             if let Some(valid_until) = ts.previous_valid_until
                 && now > valid_until
             {
@@ -220,35 +231,9 @@ fn inject_refresh_token(req: &mut Request, url: &str) {
     if !crate::ui::nav::is_token_endpoint(url) {
         return;
     }
-    let method_cef = req.method();
-    let method = userfree_to_string(&method_cef);
-    if method != "POST" {
-        return;
-    }
-
-    let Some(post_data) = req.post_data() else {
+    let Some(body_bytes) = read_post_body(req) else {
         return;
     };
-    let count = post_data.element_count();
-    if count == 0 {
-        return;
-    }
-    let mut elements: Vec<Option<PostDataElement>> = vec![None; count];
-    post_data.elements(Some(&mut elements));
-
-    let body_bytes = match elements.first() {
-        Some(Some(el)) => {
-            let count = el.bytes_count();
-            if count == 0 {
-                return;
-            }
-            let mut buf = vec![0u8; count];
-            el.bytes(count, buf.as_mut_ptr());
-            buf
-        }
-        _ => return,
-    };
-
     let Ok(body_str) = std::str::from_utf8(&body_bytes) else {
         return;
     };
@@ -277,10 +262,7 @@ fn inject_refresh_token(req: &mut Request, url: &str) {
 
     let real_rt = crate::app_state::with_state(|state| {
         let ts = state.token_state.as_ref()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = now_unix_secs();
 
         if rt_value == ts.current.opaque_rt {
             return Some(ts.current.refresh_token.clone());
@@ -492,10 +474,7 @@ fn process_token_response(body: &[u8]) -> ProcessResult {
         .unwrap_or_default();
 
     crate::app_state::with_state(|state| {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_secs = now_unix_secs();
 
         let (real_rt, ort) = if let Some(ref rt) = refresh_token {
             (rt.clone(), generate_opaque())
