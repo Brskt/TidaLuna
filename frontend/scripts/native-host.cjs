@@ -37,8 +37,6 @@ const SAFE_MODULES = new Set([
     "path/posix", "path/win32", "stream/consumers", "stream/web",
     "stream/promises", "util/types", "sys",
     "async_hooks", "perf_hooks",
-    // Network — allowed freely (same rationale as fetch: no real token in Bun)
-    "net", "http", "https", "http2", "tls", "dns", "dns/promises",
 ]);
 
 // ── Permanently blocked modules (no trust possible) ─────────────────────
@@ -49,16 +47,23 @@ const FORBIDDEN_MODULES = new Set([
 ]);
 
 // ── Blocked modules (require explicit user trust) ───────────────────────
-// These provide filesystem/subprocess/system access — can read tokens from disk.
+// These provide filesystem/subprocess/system/network access — require explicit user trust.
 const BLOCKED_MODULES = new Set([
     "fs", "fs/promises", "os", "dgram",
     "diagnostics_channel", "worker_threads",
+    // Network — raw TCP/TLS/HTTP connections to arbitrary servers
+    "net", "http", "https", "http2", "tls", "dns", "dns/promises",
 ]);
 
-// ── Pre-load safe modules so Bun internal closures capture refs ────────
+// ── Pre-load safe + blocked modules so Bun internal closures capture refs ──
 // Must happen before any globalThis mutation. Lazy init (bindings, stream
 // internals) completes now with mutable prototypes — we freeze later.
+// Blocked modules are pre-loaded too so their exports can be frozen (prevents
+// cross-plugin mutation when two plugins both receive network trust).
 SAFE_MODULES.forEach(function(id) {
+    try { require(id); } catch (_) {}
+});
+BLOCKED_MODULES.forEach(function(id) {
     try { require(id); } catch (_) {}
 });
 
@@ -348,48 +353,11 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Harden fetch — block file:// and unix sockets ─────────────────────
+// ── Block fetch — native plugins must use require('http'/'https') with trust dialog ──
 ;(function hardenFetch() {
-    var realFetch = globalThis.fetch;
-    if (!realFetch) return;
-    function extractUrl(input) {
-        if (typeof input === "string") return input;
-        if (_RealURL && input instanceof _RealURL) return input.href;
-        if (_RealRequest && input instanceof _RealRequest) return input.url;
-        return String(input);
-    }
-    var hardenedFetch = function(input, init) {
-        var url = extractUrl(input);
-        if (/^file:/i.test(url))
-            throw new Error("[sandbox] fetch file:// is not allowed");
-        if (init && init.unix)
-            throw new Error("[sandbox] fetch unix socket is not allowed");
-        // Normalize Request input — decompose into plain URL + init to strip
-        // attacker-subclassed Request. Enumerate all standard RequestInit fields.
-        if (_RealRequest && input instanceof _RealRequest) {
-            var safeInit = {
-                method:         input.method,
-                headers:        input.headers,
-                body:           input.body,
-                signal:         input.signal,
-                redirect:       input.redirect,
-                cache:          input.cache,
-                credentials:    input.credentials,
-                keepalive:      input.keepalive,
-                mode:           input.mode,
-                referrer:       input.referrer,
-                referrerPolicy: input.referrerPolicy,
-                integrity:      input.integrity,
-                duplex:         input.duplex,
-            };
-            // Caller-supplied init wins (mirrors native fetch behaviour)
-            if (init) { for (var k in init) safeInit[k] = init[k]; }
-            return realFetch.call(globalThis, url, safeInit);
-        }
-        return realFetch.call(globalThis, input, init);
-    };
     _ObjectDefineProperty(globalThis, "fetch", {
-        value: hardenedFetch, writable: false, configurable: false,
+        value: function() { throw new Error("[sandbox] fetch is not available — use require('http') or require('https')"); },
+        writable: false, configurable: false,
     });
 })();
 
@@ -440,16 +408,21 @@ function containsDynamicImport(code) {
     // by freezeSafeModuleExports() below instead.
 })();
 
-// ── Freeze SAFE_MODULES exports ───────────────────────────────────────
+// ── Freeze module exports (safe + blocked) ────────────────────────────
 // Prevents plugins from mutating shared module exports to influence
-// host behavior or other plugins.
-;(function freezeSafeModuleExports() {
-    SAFE_MODULES.forEach(function(id) {
-        try {
-            var mod = hostRequire(id);
-            if (mod && typeof mod === "object") _ObjectFreeze(mod);
-        } catch (_) {}
-    });
+// host behavior or other plugins. Blocked modules are frozen too so
+// cross-plugin mutation is prevented when multiple plugins have trust.
+;(function freezeModuleExports() {
+    function freezeSet(set) {
+        set.forEach(function(id) {
+            try {
+                var mod = hostRequire(id);
+                if (mod && typeof mod === "object") _ObjectFreeze(mod);
+            } catch (_) {}
+        });
+    }
+    freezeSet(SAFE_MODULES);
+    freezeSet(BLOCKED_MODULES);
 })();
 
 // ── Eval wrapper ────────────────────────────────────────────────────────

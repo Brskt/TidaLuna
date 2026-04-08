@@ -8,6 +8,17 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use tokio::sync::watch;
 
+/// Network modules are granted as a group — one dialog covers all of them.
+const NETWORK_MODULES: &[&str] = &[
+    "net",
+    "http",
+    "https",
+    "http2",
+    "tls",
+    "dns",
+    "dns/promises",
+];
+
 /// Pending trust requests: keyed by "name::module".
 /// Uses watch channels so multiple concurrent register calls for the same
 /// plugin can share a single dialog prompt.
@@ -294,12 +305,28 @@ fn do_register(
                         }
                     };
 
+                    let is_net = NETWORK_MODULES.contains(&module.as_str());
+
+                    // Persist trust/denial (entire network group if applicable)
                     {
                         let hash = code_hash.clone();
                         let plugin = name.clone();
                         let mod_name = module.clone();
                         crate::state::db().call_settings(move |conn| {
-                            if let Err(e) = crate::native_runtime::trust::save_trust(
+                            if is_net {
+                                for &m in NETWORK_MODULES {
+                                    if let Err(e) = crate::native_runtime::trust::save_trust(
+                                        conn, &hash, &plugin, m, granted,
+                                    ) {
+                                        crate::vprintln!(
+                                            "[NATIVE] Failed to save trust for {}::{}: {}",
+                                            plugin,
+                                            m,
+                                            e
+                                        );
+                                    }
+                                }
+                            } else if let Err(e) = crate::native_runtime::trust::save_trust(
                                 conn, &hash, &plugin, &mod_name, granted,
                             ) {
                                 crate::vprintln!(
@@ -330,7 +357,14 @@ fn do_register(
                         return;
                     }
 
-                    trust_grants.insert(module, true);
+                    // Grant in-memory (entire network group if applicable)
+                    if is_net {
+                        for &m in NETWORK_MODULES {
+                            trust_grants.insert(m.to_string(), true);
+                        }
+                    } else {
+                        trust_grants.insert(module, true);
+                    }
                     do_register(
                         runtime,
                         name,

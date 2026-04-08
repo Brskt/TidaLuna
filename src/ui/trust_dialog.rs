@@ -77,6 +77,10 @@ fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
             "Observe internal events such as HTTP requests and DNS queries.",
         ),
         "dgram" => ("UDP Sockets", "Send and receive UDP network packets."),
+        "net" | "http" | "https" | "http2" | "tls" | "dns" | "dns/promises" => (
+            "Network Access",
+            "Open connections and make requests to any server (TCP, HTTP, TLS, DNS).",
+        ),
         other => (other, ""),
     };
 
