@@ -10,6 +10,22 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+fn install_executable(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::copy(src, dst).map_err(|e| format!("failed to copy {}: {e}", src.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o755));
+    }
+    Ok(())
+}
+
+fn project_root() -> Result<&'static Path, String> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| "cannot find project root".to_string())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -112,9 +128,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     run("cargo", &args)?;
 
     // 2. Locate project root and target dir
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("cannot find project root")?;
+    let project_root = project_root()?;
     let target_dir = project_root
         .join("target")
         .join(if release { "release" } else { "debug" });
@@ -295,9 +309,7 @@ fn collect_files(
 }
 
 fn read_workspace_version() -> Result<String, String> {
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("cannot find project root")?;
+    let project_root = project_root()?;
     let cargo_toml = fs::read_to_string(project_root.join("Cargo.toml"))
         .map_err(|e| format!("cannot read root Cargo.toml: {e}"))?;
 
@@ -383,9 +395,7 @@ fn sign_manifest() -> Result<(), String> {
 
     let signing_key = SigningKey::from_bytes(&key_array);
 
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("cannot find project root")?;
+    let project_root = project_root()?;
     let manifest_path = project_root.join("dist/manifest.json");
     let sig_path = project_root.join("dist/manifest.json.sig");
 
@@ -415,9 +425,7 @@ fn build_updater(flags: &[String]) -> Result<(), String> {
     }
     run("cargo", &args)?;
 
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("cannot find project root")?;
+    let project_root = project_root()?;
     let target_dir = project_root
         .join("target")
         .join(if release { "release" } else { "debug" });
@@ -713,11 +721,7 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     const BUN_VERSION: &str = "1.3.11";
 
     // Cache dir persists across builds (dist/ is cleaned each time)
-    let cache_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("cannot find project root")?
-        .join(".cache")
-        .join("bun");
+    let cache_dir = project_root()?.join(".cache").join("bun");
     fs::create_dir_all(&cache_dir).map_err(|e| format!("failed to create cache dir: {e}"))?;
 
     let cached_bun = cache_dir.join(format!(
@@ -735,12 +739,7 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
             .map(|m| m.len() > 1_000_000)
             .unwrap_or(false)
     {
-        fs::copy(&cached_bun, &bun_dst).map_err(|e| format!("failed to copy cached bun: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&bun_dst, fs::Permissions::from_mode(0o755));
-        }
+        install_executable(&cached_bun, &bun_dst)?;
         println!("  Bun v{BUN_VERSION} (cached)");
         return Ok(());
     }
@@ -812,12 +811,7 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     let _ = fs::remove_file(&zip_path);
 
     if cached_bun.exists() {
-        fs::copy(&cached_bun, &bun_dst).map_err(|e| format!("failed to copy bun: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&bun_dst, fs::Permissions::from_mode(0o755));
-        }
+        install_executable(&cached_bun, &bun_dst)?;
         println!("  Bun v{BUN_VERSION} installed");
     } else {
         println!("  Warning: Bun binary not found after extraction");
@@ -851,17 +845,7 @@ fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
 
             if path.is_file() && should_strip(&name) {
                 let size_before = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-
-                let mut args: Vec<&str> = strip_args.to_vec();
-                let path_str = path.to_string_lossy().to_string();
-                args.push(&path_str);
-
-                let status = Command::new("strip")
-                    .args(&args)
-                    .status()
-                    .map_err(|e| format!("strip failed for {name}: {e}"))?;
-
-                if status.success() {
+                if run_strip(&path, strip_args)? {
                     let size_after = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     let saved_mb = (size_before.saturating_sub(size_after)) as f64 / 1_048_576.0;
                     println!("  Stripped {name} ({saved_mb:.1} MB saved)");
@@ -883,6 +867,17 @@ fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn run_strip(path: &Path, strip_args: &[&str]) -> Result<bool, String> {
+    let path_str = path.to_string_lossy().to_string();
+    let mut args: Vec<&str> = strip_args.to_vec();
+    args.push(&path_str);
+    let status = Command::new("strip")
+        .args(&args)
+        .status()
+        .map_err(|e| format!("strip failed for {}: {e}", path.display()))?;
+    Ok(status.success())
+}
+
 fn strip_macos_app(bundle_dir: &Path, strip_args: &[&str]) -> Result<(), String> {
     fn walk_strip(dir: &Path, strip_args: &[&str]) -> Result<(), String> {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -892,14 +887,7 @@ fn strip_macos_app(bundle_dir: &Path, strip_args: &[&str]) -> Result<(), String>
             } else if path.is_file() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.ends_with(".dylib") || name == "Chromium Embedded Framework" {
-                    let mut args: Vec<&str> = strip_args.to_vec();
-                    let path_str = path.to_string_lossy().to_string();
-                    args.push(&path_str);
-                    let status = Command::new("strip")
-                        .args(&args)
-                        .status()
-                        .map_err(|e| format!("strip failed for {name}: {e}"))?;
-                    if status.success() {
+                    if run_strip(&path, strip_args)? {
                         println!("  Stripped {name}");
                     }
                 }
