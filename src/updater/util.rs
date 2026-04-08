@@ -6,14 +6,6 @@ use sha2::{Digest, Sha256};
 
 use super::types::{GhRelease, Manifest};
 
-pub(super) fn extract_version_arg(msg: &crate::app_state::IpcMessage) -> String {
-    msg.args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
 pub(super) async fn fetch_gh_release(
     client: &reqwest::Client,
     endpoint: &str,

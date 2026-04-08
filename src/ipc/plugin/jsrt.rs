@@ -294,7 +294,7 @@ pub(super) fn do_load_plugins_inline() {
 pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
     match msg.channel.as_str() {
         "jsrt.set_token" => {
-            let token = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let token = msg.arg(0);
             if crate::ui::token_filter::is_opaque(token) {
                 crate::vprintln!("[AUTH]   Ignoring opaque token from renderer");
             } else {
@@ -315,7 +315,7 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
         }
         "jsrt.plugin_ready" => {
-            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let url = msg.arg(0);
             let load_id: u64 = msg
                 .args
                 .get(1)
@@ -348,7 +348,7 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
         }
         "jsrt.enable_plugin" => {
-            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let url = msg.arg(0);
             if url.is_empty() {
                 return;
             }
@@ -426,7 +426,7 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             }
         }
         "jsrt.disable_plugin" => {
-            let url = msg.args.first().and_then(|v| v.as_str()).unwrap_or("");
+            let url = msg.arg(0);
             if url.is_empty() {
                 return;
             }

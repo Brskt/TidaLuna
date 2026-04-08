@@ -8,7 +8,7 @@ use super::UPDATER_EXE;
 use super::check::check_for_update;
 use super::download::{cleanup_staging, download_update};
 use super::types::{Manifest, UPDATER_STATE, UpdateInfo, UpdaterPhase};
-use super::util::{exe_dir, extract_version_arg};
+use super::util::exe_dir;
 
 /// Handle `updater.check` — manual check triggered by UI.
 /// Returns JSON UpdateInfo or null.
@@ -27,7 +27,7 @@ pub(crate) fn handle_updater_download(
     msg: &crate::app_state::IpcMessage,
     callback: crate::app_state::IpcCallback,
 ) {
-    let version = extract_version_arg(msg);
+    let version = msg.arg(0).to_string();
 
     if version.is_empty() {
         crate::ipc::plugin::ipc_callback_err(&callback, "missing version argument");
@@ -106,7 +106,7 @@ pub(crate) fn handle_updater_status(callback: crate::app_state::IpcCallback) {
 
 /// Handle `updater.apply` — user confirmed, spawn updater and quit.
 pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
-    let version = extract_version_arg(msg);
+    let version = msg.arg(0).to_string();
 
     if version.is_empty() {
         crate::vprintln!("[UPDATER] apply called without version");
@@ -196,7 +196,7 @@ pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
 
 /// Handle `updater.dismiss` — user clicked "Skip this version".
 pub(crate) fn handle_updater_dismiss(msg: &crate::app_state::IpcMessage) {
-    let version = extract_version_arg(msg);
+    let version = msg.arg(0).to_string();
 
     if !version.is_empty() {
         crate::vprintln!("[UPDATER] Dismissed version v{version}");

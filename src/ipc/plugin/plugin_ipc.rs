@@ -2,24 +2,10 @@ use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, with_state};
 
 pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
-    let plugin_id = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let url = msg
-        .args
-        .get(1)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let opts_json = msg
-        .args
-        .get(2)
-        .and_then(|v| v.as_str())
-        .unwrap_or("{}")
-        .to_string();
+    let plugin_id = msg.arg(0).to_string();
+    let url = msg.arg(1).to_string();
+    let raw_opts = msg.arg(2);
+    let opts_json = if raw_opts.is_empty() { "{}" } else { raw_opts }.to_string();
 
     // Block non-Tidal requests that carry a real token in URL or opts (body/headers).
     if !crate::plugins::fetch::is_tidal_api(&url) {
@@ -39,41 +25,22 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
         }
     }
 
-    let id = msg.id.clone().unwrap_or_default();
-    let opts: crate::plugins::fetch::FetchOpts =
-        serde_json::from_str(&opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
-    let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
-    with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
-    });
-    crate::state::rt_handle().spawn(async move {
-        let result = crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
-        let Some(cb) = take_ipc_callback(&id) else {
-            return;
-        };
-        match result {
-            Ok(json) => ipc_callback_ok(&cb, &json),
-            Err(e) => ipc_callback_err(&cb, &e),
-        }
-    });
+    dispatch_authenticated_fetch(
+        plugin_id,
+        url,
+        &opts_json,
+        msg.id.clone().unwrap_or_default(),
+        callback,
+        None,
+    );
 }
 
 /// Authenticated fetch restricted to TIDAL API hosts.
 /// Used by core bundle (@luna/lib) — the token never leaves Rust.
 pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let opts_json = msg
-        .args
-        .get(1)
-        .and_then(|v| v.as_str())
-        .unwrap_or("{}")
-        .to_string();
-    let id = msg.id.clone().unwrap_or_default();
+    let url = msg.arg(0).to_string();
+    let raw_opts = msg.arg(1);
+    let opts_json = if raw_opts.is_empty() { "{}" } else { raw_opts }.to_string();
 
     // Reject non-TIDAL URLs — this channel only serves authenticated TIDAL API requests
     if !crate::plugins::fetch::is_tidal_api(&url) {
@@ -84,23 +51,42 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
         return;
     }
 
-    let opts: crate::plugins::fetch::FetchOpts =
-        serde_json::from_str(&opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
-    let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
-
     // Reject if the OAuth token hasn't been captured yet — avoids sending unauthenticated
     // requests that would 403 and get memoized as failures on the frontend.
+    let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
     if token.is_empty() {
         ipc_callback_err(&callback, "tidal.fetch: auth token not yet captured");
         return;
     }
 
+    dispatch_authenticated_fetch(
+        "@luna/lib".to_string(),
+        url,
+        &opts_json,
+        msg.id.clone().unwrap_or_default(),
+        callback,
+        Some(token),
+    );
+}
+
+fn dispatch_authenticated_fetch(
+    plugin_id: String,
+    url: String,
+    opts_json: &str,
+    msg_id: String,
+    callback: IpcCallback,
+    pre_validated_token: Option<String>,
+) {
+    let opts: crate::plugins::fetch::FetchOpts =
+        serde_json::from_str(opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
+    let token = pre_validated_token
+        .unwrap_or_else(|| with_state(|state| state.captured_token.clone()).unwrap_or_default());
     with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
+        state.pending_ipc_callbacks.insert(msg_id.clone(), callback);
     });
     crate::state::rt_handle().spawn(async move {
-        let result = crate::plugins::fetch::plugin_fetch("@luna/lib", &url, &opts, &token).await;
-        let Some(cb) = take_ipc_callback(&id) else {
+        let result = crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
+        let Some(cb) = take_ipc_callback(&msg_id) else {
             return;
         };
         match result {
@@ -111,12 +97,7 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
 }
 
 pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
         let client = &*crate::state::HTTP_CLIENT;
         match fetch_plugin_package(client, &url).await {
@@ -127,12 +108,7 @@ pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallbac
 }
 
 pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
         match do_plugin_install(url).await {
             Ok(info) => {
@@ -147,12 +123,7 @@ pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
 /// Atomic enable: check deps → DB enable → transpile → eval_js → mark_loaded.
 /// DB-first: if transpile/inject fails, reverts enabled to 0.
 pub(super) fn handle_plugin_enable(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
         match do_plugin_enable(url).await {
             Ok(()) => ipc_callback_ok(&callback, "true"),
@@ -294,12 +265,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
 
 /// Atomic disable: guard dependants → DB disable → eval_js cleanup → mark_unloaded.
 pub(super) fn handle_plugin_disable(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
         match do_plugin_disable(url).await {
             Ok(()) => ipc_callback_ok(&callback, "true"),
@@ -370,12 +336,7 @@ pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
 /// Check for code changes without modifying the DB. Returns `{ hash: "..." }` or error.
 /// Used by live reload polling.
 pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let url = msg.arg(0).to_string();
     let id = msg.id.clone().unwrap_or_default();
     with_state(|state| {
         state.pending_ipc_callbacks.insert(id.clone(), callback);
@@ -393,10 +354,7 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, callback: IpcCallback) 
             Ok(resp) => match resp.error_for_status() {
                 Ok(resp) => match resp.text().await {
                     Ok(code) => {
-                        use std::hash::{Hash, Hasher as _};
-                        let mut hasher = fnv::FnvHasher::default();
-                        code.hash(&mut hasher);
-                        let hash = format!("{:x}", hasher.finish());
+                        let hash = fnv_hash_str(&code);
                         let json = format!(r#"{{"hash":"{hash}"}}"#);
                         ipc_callback_ok(&cb, &json);
                     }
@@ -414,131 +372,139 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
     let channel = msg.channel.clone();
     let args = msg.args.clone();
 
-    let result: Result<String, String> = db.call_plugins(move |pc| match channel.as_str() {
-        "plugin.list" => {
-            let plugins = crate::plugins::store::list(pc);
-            Ok(serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string()))
-        }
-        "plugin.get_code" => {
-            let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            match crate::plugins::store::get_code(pc, url) {
-                Some(code) => {
-                    Ok(serde_json::to_string(&code).unwrap_or_else(|_| "null".to_string()))
-                }
-                None => Ok("null".to_string()),
+    // Result is (json_response, optional canonical name for trust clearing)
+    let result: Result<(String, Option<String>), String> =
+        db.call_plugins(move |pc| match channel.as_str() {
+            "plugin.list" => {
+                let plugins = crate::plugins::store::list(pc);
+                Ok((
+                    serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string()),
+                    None,
+                ))
             }
-        }
-        "plugin.uninstall" => {
-            let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            // Guard: fail-closed check for dependants
-            let name = crate::plugins::store::get_name_by_url(pc, url).unwrap_or_default();
-            if !name.is_empty() {
-                match crate::plugins::store::find_dependants(pc, &name) {
-                    Err(msg) => return Err(msg),
-                    Ok(deps) if !deps.is_empty() => {
-                        return Err(format!(
-                            "Cannot uninstall '{name}': required by {}",
-                            deps.join(", ")
-                        ));
+            "plugin.get_code" => {
+                let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                match crate::plugins::store::get_code(pc, url) {
+                    Some(code) => Ok((
+                        serde_json::to_string(&code).unwrap_or_else(|_| "null".to_string()),
+                        None,
+                    )),
+                    None => Ok(("null".to_string(), None)),
+                }
+            }
+            "plugin.uninstall" => {
+                let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let name = crate::plugins::store::get_name_by_url(pc, url).unwrap_or_default();
+                if !name.is_empty() {
+                    match crate::plugins::store::find_dependants(pc, &name) {
+                        Err(msg) => return Err(msg),
+                        Ok(deps) if !deps.is_empty() => {
+                            return Err(format!(
+                                "Cannot uninstall '{name}': required by {}",
+                                deps.join(", ")
+                            ));
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                }
+                crate::plugins::store::uninstall(pc, url)
+                    .map(|()| ("true".to_string(), Some(name)))
+                    .map_err(|e| e.to_string())
+            }
+            "plugin.uninstall_all" => crate::plugins::store::uninstall_all(pc)
+                .map(|()| ("true".to_string(), Some(String::new())))
+                .map_err(|e| e.to_string()),
+            "plugin.storage.get" => {
+                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                match crate::plugins::store::storage_get(pc, ns, key) {
+                    Some(val) => Ok((
+                        serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string()),
+                        None,
+                    )),
+                    None => Ok(("null".to_string(), None)),
                 }
             }
-            crate::plugins::store::uninstall(pc, url)
-                .map(|()| "true".to_string())
-                .map_err(|e| e.to_string())
-        }
-        "plugin.uninstall_all" => crate::plugins::store::uninstall_all(pc)
-            .map(|()| "true".to_string())
-            .map_err(|e| e.to_string()),
-        "plugin.storage.get" => {
-            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            match crate::plugins::store::storage_get(pc, ns, key) {
-                Some(val) => Ok(serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string())),
-                None => Ok("null".to_string()),
+            "plugin.storage.set" => {
+                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let value = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
+                crate::plugins::store::storage_set(pc, ns, key, value)
+                    .map(|()| ("true".to_string(), None))
+                    .map_err(|e| e.to_string())
             }
-        }
-        "plugin.storage.set" => {
-            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let value = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
-            crate::plugins::store::storage_set(pc, ns, key, value)
-                .map(|()| "true".to_string())
-                .map_err(|e| e.to_string())
-        }
-        "plugin.storage.del" => {
-            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            crate::plugins::store::storage_del(pc, ns, key)
-                .map(|()| "true".to_string())
-                .map_err(|e| e.to_string())
-        }
-        "plugin.storage.keys" => {
-            let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let keys = crate::plugins::store::storage_keys(pc, ns);
-            Ok(serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()))
-        }
-        "plugin.cleanup_failed_install" => {
-            let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            // Triple guard: enabled=0 AND ever_dispatched=0
-            let (enabled, ever_dispatched): (bool, bool) = pc
-                .query_row(
-                    "SELECT enabled, ever_dispatched FROM plugins WHERE url = ?1 AND installed = 1",
-                    rusqlite::params![url],
-                    |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
-                )
-                .unwrap_or((true, true));
-            if enabled {
-                return Err("Cannot cleanup: plugin is currently enabled.".to_string());
+            "plugin.storage.del" => {
+                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                crate::plugins::store::storage_del(pc, ns, key)
+                    .map(|()| ("true".to_string(), None))
+                    .map_err(|e| e.to_string())
             }
-            if ever_dispatched {
-                return Err(
-                    "Cannot cleanup: plugin code was previously dispatched. Use plugin.uninstall instead."
-                        .to_string(),
-                );
+            "plugin.storage.keys" => {
+                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let keys = crate::plugins::store::storage_keys(pc, ns);
+                Ok((
+                    serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()),
+                    None,
+                ))
             }
-            crate::plugins::store::uninstall(pc, url)
-                .map(|()| "true".to_string())
-                .map_err(|e| e.to_string())
-        }
-        _ => Err(format!("Unknown plugin channel: {}", channel)),
-    });
+            "plugin.cleanup_failed_install" => {
+                let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                // Triple guard: enabled=0 AND ever_dispatched=0
+                let (enabled, ever_dispatched): (bool, bool) = pc
+                    .query_row(
+                        "SELECT enabled, ever_dispatched FROM plugins WHERE url = ?1 AND installed = 1",
+                        rusqlite::params![url],
+                        |row| Ok((row.get::<_, i32>(0)? != 0, row.get::<_, i32>(1)? != 0)),
+                    )
+                    .unwrap_or((true, true));
+                if enabled {
+                    return Err("Cannot cleanup: plugin is currently enabled.".to_string());
+                }
+                if ever_dispatched {
+                    return Err(
+                        "Cannot cleanup: plugin code was previously dispatched. Use plugin.uninstall instead."
+                            .to_string(),
+                    );
+                }
+                crate::plugins::store::uninstall(pc, url)
+                    .map(|()| ("true".to_string(), None))
+                    .map_err(|e| e.to_string())
+            }
+            _ => Err(format!("Unknown plugin channel: {}", channel)),
+        });
 
-    // On successful uninstall, clear native trust decisions so reinstalling re-prompts.
-    let channel_ref = msg.channel.as_str();
-    if result.is_ok()
-        && (channel_ref == "plugin.uninstall" || channel_ref == "plugin.uninstall_all")
-    {
-        let name = if channel_ref == "plugin.uninstall" {
-            msg.args
-                .first()
-                .and_then(|v| v.as_str())
-                .and_then(|url| {
-                    // Re-derive plugin name from URL (same logic as the uninstall branch)
-                    url.rsplit_once('/').map(|(_, n)| n.to_string())
-                })
-                .unwrap_or_default()
+    // Clear native trust decisions using the canonical name returned by the DB layer.
+    if let Ok((_, Some(ref name))) = result {
+        let db_name = if name.is_empty() {
+            "%".to_string() // uninstall_all: SQL LIKE wildcard
         } else {
-            "%".to_string() // uninstall_all → clear all trust
+            name.clone()
         };
-        if !name.is_empty() {
-            let db_name = name.clone();
-            crate::state::db().call_settings(move |conn| {
-                let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &db_name);
-            });
-            // Clear in-memory watch channels so reinstall re-prompts
-            super::native::clear_pending_trust(&name);
-        }
+        crate::state::db().call_settings(move |conn| {
+            let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &db_name);
+        });
+        // Delimit with "/" to avoid prefix collisions (e.g. "foo" matching "foobar/...")
+        let trust_prefix = if name.is_empty() {
+            String::new() // uninstall_all: clear all pending trust
+        } else {
+            format!("{name}/")
+        };
+        super::native::clear_pending_trust(&trust_prefix);
     }
 
     match result {
-        Ok(json) => ipc_callback_ok(&callback, &json),
+        Ok((json, _)) => ipc_callback_ok(&callback, &json),
         Err(e) => ipc_callback_err(&callback, &e),
     }
 }
 
-// --- Fetch helpers ---
+fn fnv_hash_str(s: &str) -> String {
+    use std::hash::{Hash, Hasher as _};
+    let mut hasher = fnv::FnvHasher::default();
+    s.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
 
 fn sanitize_plugin_url(url: &str) -> &str {
     url.trim_end_matches(".mjs.map")
@@ -567,8 +533,6 @@ async fn fetch_plugin_data(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<(String, String, String, String)> {
-    use std::hash::{Hash, Hasher as _};
-
     let base = sanitize_plugin_url(url);
 
     if let Ok(manifest_str) = fetch_plugin_package(client, base).await {
@@ -583,9 +547,7 @@ async fn fetch_plugin_data(
             .error_for_status()?
             .text()
             .await?;
-        let mut hasher = fnv::FnvHasher::default();
-        code.hash(&mut hasher);
-        let hash = format!("{:x}", hasher.finish());
+        let hash = fnv_hash_str(&code);
 
         Ok((name, manifest_str, code, hash))
     } else {
@@ -611,9 +573,7 @@ async fn fetch_plugin_data(
             .unwrap_or("plugin")
             .to_string();
         let manifest = serde_json::json!({"name": &name, "main": &fetch_url}).to_string();
-        let mut hasher = fnv::FnvHasher::default();
-        code.hash(&mut hasher);
-        let hash = format!("{:x}", hasher.finish());
+        let hash = fnv_hash_str(&code);
 
         Ok((name, manifest, code, hash))
     }

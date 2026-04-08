@@ -36,6 +36,12 @@ impl std::fmt::Display for IpcMessage {
     }
 }
 
+impl IpcMessage {
+    pub(crate) fn arg(&self, index: usize) -> &str {
+        self.args.get(index).and_then(|v| v.as_str()).unwrap_or("")
+    }
+}
+
 pub(crate) struct AppState {
     pub(crate) player: Arc<crate::player::Player>,
     pub(crate) pending_time_update: Option<(f64, u32)>,

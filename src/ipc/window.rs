@@ -146,7 +146,8 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             // + DragHandler forwarding to Window::set_draggable_regions.
         }
         "window.open_url" => {
-            if let Some(url) = msg.args.first().and_then(|v| v.as_str()) {
+            let url = msg.arg(0);
+            if !url.is_empty() {
                 if crate::app_state::is_safe_open_url(url) {
                     open_in_os(url);
                 } else {
@@ -155,7 +156,8 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             }
         }
         "window.navigate_self" => {
-            if let Some(url) = msg.args.first().and_then(|v| v.as_str()) {
+            let url = msg.arg(0);
+            if !url.is_empty() {
                 let kind = crate::ui::nav::PageKind::classify(url);
                 let allowed = crate::app_state::is_safe_open_url(url)
                     && matches!(kind, crate::ui::nav::PageKind::AuthHost);
