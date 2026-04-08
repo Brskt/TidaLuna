@@ -25,7 +25,14 @@ export const LunaAuthorDisplay = React.memo((props: { author: LunaAuthor | strin
 				spacing={1}
 				alignItems="center"
 				onClick={() => {
-					window.open(author.url, "_blank");
+					try {
+						const parsed = new URL(author.url);
+						if (parsed.protocol === "https:" || (parsed.protocol === "http:" && /^(localhost|127\.0\.0\.1)(:|$)/.test(parsed.host))) {
+							window.open(author.url, "_blank", "noopener,noreferrer");
+						}
+					} catch {
+						// invalid URL — ignore
+					}
 				}}
 				{...props}
 				sx={{

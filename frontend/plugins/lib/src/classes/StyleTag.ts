@@ -38,7 +38,7 @@ export class StyleTag {
 		this._css = css?.trim();
 		if (this._css === undefined || this._css === "") this.remove();
 		else {
-			this.styleTag.innerHTML = this._css;
+			this.styleTag.textContent = this._css;
 			if (!this.styleTag.isConnected) this.add();
 		}
 	}
