@@ -72,6 +72,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Set DLL search directory to bin/cef/ so delay-loaded libcef.dll is found
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(dir) = exe_dir {
+            let cef_dir = dir.join("bin").join("cef");
+            let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(cef_dir.as_os_str())
+                .chain(std::iter::once(0))
+                .collect();
+            windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW(wide.as_ptr());
+        }
+    }
+
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
     let args = cef::args::Args::new();
@@ -180,6 +195,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let user_agent = CefString::from(crate::state::USER_AGENT);
 
+    // CEF resources (.pak, locales, icudtl.dat) live in bin/cef/
+    let cef_res_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("bin").join("cef")))
+        .unwrap_or_default();
+    let resources_dir_path = CefString::from(cef_res_dir.to_string_lossy().as_ref());
+
     let settings = Settings {
         no_sandbox: 0,
         root_cache_path: root_cache_cef,
@@ -187,6 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_agent,
         background_color: 0xFF111111,
         chrome_app_icon_id: 101,
+        resources_dir_path,
         ..Default::default()
     };
 

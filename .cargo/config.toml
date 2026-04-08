@@ -1,2 +1,9 @@
 [alias]
 xtask = "run --package xtask --"
+
+# CEF lives in bin/cef/ — delay-load so AddDllDirectory works before first call
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/DELAYLOAD:libcef.dll", "-C", "link-arg=delayimp.lib"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN/bin/cef"]

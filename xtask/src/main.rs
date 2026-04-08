@@ -124,44 +124,94 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     let cef_dir = find_cef_dir(&target_dir)?;
     println!("CEF dir: {}", cef_dir.display());
 
-    // 4. Create clean bundle directory
-    if bundle_dir.exists() {
-        fs::remove_dir_all(&bundle_dir).map_err(|e| format!("failed to clean dist/: {e}"))?;
-    }
+    // 4. Ensure bundle directory exists (incremental — no full wipe)
     fs::create_dir_all(&bundle_dir).map_err(|e| format!("failed to create dist/: {e}"))?;
+
+    // 4b. Pre-clean: delete files from previous manifest that won't be in the new build.
+    //     This runs BEFORE copying new files so stale artifacts don't contaminate the output.
+    {
+        let old_manifest_path = bundle_dir.join("manifest.json");
+        if old_manifest_path.exists() {
+            let data = fs::read_to_string(&old_manifest_path).unwrap_or_default();
+            if let Some(old_files) = serde_json::from_str::<serde_json::Value>(&data)
+                .ok()
+                .and_then(|v| v.get("files")?.as_object().cloned())
+            {
+                // Known files in the new layout (anything outside these paths is stale)
+                let new_layout_prefixes: &[&str] = if cfg!(target_os = "macos") {
+                    &[] // macOS uses .app bundle, no flat layout
+                } else {
+                    &["bin/cef/", "bin/bun", "bin/native-host"]
+                };
+                let new_layout_roots: &[&str] = if cfg!(target_os = "macos") {
+                    &[]
+                } else {
+                    &[
+                        EXE_NAME,
+                        "updater.exe",
+                        "updater",
+                        "manifest.json",
+                        "archive.json",
+                    ]
+                };
+
+                let mut cleaned = 0u32;
+                for old_path in old_files.keys() {
+                    let dominated = new_layout_roots.iter().any(|r| old_path == *r)
+                        || new_layout_prefixes.iter().any(|p| old_path.starts_with(p));
+                    if !dominated {
+                        if fs::remove_file(bundle_dir.join(old_path)).is_ok() {
+                            cleaned += 1;
+                        }
+                    }
+                }
+                // Remove empty dirs left behind
+                for old_path in old_files.keys() {
+                    if let Some(parent) = Path::new(old_path).parent() {
+                        if !parent.as_os_str().is_empty() {
+                            let _ = fs::remove_dir(bundle_dir.join(parent));
+                        }
+                    }
+                }
+                if cleaned > 0 {
+                    println!("  Pre-cleaned {cleaned} stale files from previous layout");
+                }
+            }
+        }
+    }
 
     // 5. Platform-specific bundling
     if cfg!(target_os = "macos") {
         bundle_macos(EXE_NAME, &target_dir, &cef_dir, &bundle_dir)?;
     } else {
-        // Linux/Windows: flat directory with exe + CEF files
+        // Linux/Windows: structured layout
+        // Root: exe + updater + manifest
         let exe_src = target_dir.join(EXE_NAME);
         let exe_dst = bundle_dir.join(EXE_NAME);
-        if fs::hard_link(&exe_src, &exe_dst).is_err() {
-            fs::copy(&exe_src, &exe_dst).map_err(|e| format!("failed to copy exe: {e}"))?;
-        }
+        link_or_copy(&exe_src, &exe_dst)?;
         println!("  Copied {EXE_NAME}");
 
-        copy_cef_files(&cef_dir, &bundle_dir)?;
+        // bin/cef/: all CEF runtime files
+        let bin_dir = bundle_dir.join("bin");
+        let cef_bundle_dir = bin_dir.join("cef");
+        fs::create_dir_all(&cef_bundle_dir)
+            .map_err(|e| format!("failed to create bin/cef/: {e}"))?;
+
+        copy_cef_files(&cef_dir, &cef_bundle_dir)?;
 
         let locales_src = cef_dir.join("locales");
-        let locales_dst = bundle_dir.join("locales");
+        let locales_dst = cef_bundle_dir.join("locales");
         if locales_src.is_dir() {
             copy_dir_flat(&locales_src, &locales_dst)?;
-            println!("  Copied locales/");
+            println!("  Copied bin/cef/locales/");
         }
     }
 
-    // 6. Copy native-host.cjs for Bun native module runtime
-    let host_script = project_root.join("frontend/scripts/native-host.cjs");
-    if host_script.exists() {
-        fs::copy(&host_script, bundle_dir.join("native-host.cjs"))
-            .map_err(|e| format!("failed to copy native-host.cjs: {e}"))?;
-        println!("  Copied native-host.cjs");
-    }
-
-    // 7. Download Bun binary if not already in bundle
-    download_bun(&bundle_dir)?;
+    // 6. Ensure bin/ exists + download Bun binary
+    // native-host.cjs is embedded in the exe (include_str!), NOT shipped on disk.
+    let bin_dir = bundle_dir.join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin/: {e}"))?;
+    download_bun(&bin_dir)?;
 
     if release {
         strip_binaries(&bundle_dir)?;
@@ -601,6 +651,15 @@ fn create_symlink(_target: &Path, _link: &Path) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Link or copy files from CEF dir to bundle (skip .exe, .lib, directories, build files).
+/// Hard-link or copy a file, removing any existing destination first.
+fn link_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    let _ = fs::remove_file(dst);
+    if fs::hard_link(src, dst).is_err() {
+        fs::copy(src, dst).map_err(|e| format!("failed to copy {}: {e}", src.display()))?;
+    }
+    Ok(())
+}
+
 fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
     let skip_extensions = ["exe", "lib"];
     let skip_names = ["CMakeLists.txt", "cmake", "include", "libcef_dll"];
@@ -623,9 +682,7 @@ fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
         }
 
         let dst = bundle_dir.join(&name);
-        if fs::hard_link(&path, &dst).is_err() {
-            fs::copy(&path, &dst).map_err(|e| format!("failed to copy {name}: {e}"))?;
-        }
+        link_or_copy(&path, &dst)?;
         count += 1;
     }
     println!("  Copied {count} CEF files");
@@ -639,10 +696,7 @@ fn copy_dir_flat(src: &Path, dst: &Path) -> Result<(), String> {
     for entry in fs::read_dir(src).into_iter().flatten().flatten() {
         if entry.path().is_file() {
             let dest = dst.join(entry.file_name());
-            if fs::hard_link(entry.path(), &dest).is_err() {
-                fs::copy(entry.path(), &dest)
-                    .map_err(|e| format!("failed to copy {}: {e}", entry.path().display()))?;
-            }
+            link_or_copy(&entry.path(), &dest)?;
         }
     }
     Ok(())
@@ -790,29 +844,33 @@ fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
     };
 
     let mut stripped = 0u32;
-    for entry in fs::read_dir(bundle_dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+    // Scan root + bin/ for strippable binaries
+    let dirs_to_scan = [bundle_dir.to_path_buf(), bundle_dir.join("bin")];
+    for scan_dir in &dirs_to_scan {
+        for entry in fs::read_dir(scan_dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
 
-        if path.is_file() && should_strip(&name) {
-            let size_before = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if path.is_file() && should_strip(&name) {
+                let size_before = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
-            let mut args: Vec<&str> = strip_args.to_vec();
-            let path_str = path.to_string_lossy().to_string();
-            args.push(&path_str);
+                let mut args: Vec<&str> = strip_args.to_vec();
+                let path_str = path.to_string_lossy().to_string();
+                args.push(&path_str);
 
-            let status = Command::new("strip")
-                .args(&args)
-                .status()
-                .map_err(|e| format!("strip failed for {name}: {e}"))?;
+                let status = Command::new("strip")
+                    .args(&args)
+                    .status()
+                    .map_err(|e| format!("strip failed for {name}: {e}"))?;
 
-            if status.success() {
-                let size_after = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                let saved_mb = (size_before.saturating_sub(size_after)) as f64 / 1_048_576.0;
-                println!("  Stripped {name} ({saved_mb:.1} MB saved)");
-                stripped += 1;
-            } else {
-                println!("  Warning: strip failed for {name}");
+                if status.success() {
+                    let size_after = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    let saved_mb = (size_before.saturating_sub(size_after)) as f64 / 1_048_576.0;
+                    println!("  Stripped {name} ({saved_mb:.1} MB saved)");
+                    stripped += 1;
+                } else {
+                    println!("  Warning: strip failed for {name}");
+                }
             }
         }
     }
