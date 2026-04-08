@@ -103,6 +103,7 @@ struct JournalFile {
 
 #[derive(Deserialize)]
 struct GhRelease {
+    #[allow(dead_code)]
     tag_name: String,
     assets: Vec<GhAsset>,
 }
@@ -551,7 +552,7 @@ fn probe_exclusive_access(app_dir: &Path) -> Result<()> {
 
         let mut locked = true;
         for attempt in 1..=3 {
-            if try_exclusive_access(&path)? {
+            if try_exclusive_access(path)? {
                 locked = false;
                 break;
             }

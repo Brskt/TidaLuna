@@ -53,6 +53,8 @@ jobs:
         run: cargo xtask fmt
       - name: Clippy
         run: cargo xtask clippy
+      - name: Clippy (updater)
+        run: cargo clippy --package updater -- -D warnings
       - name: Deny check
         run: cargo deny check advisories bans sources
 
