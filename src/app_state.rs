@@ -120,6 +120,18 @@ pub(crate) fn emit_ipc_event_with_args(channel: &str, args: &[&str]) {
     let _ = eval_js(&js);
 }
 
+pub(crate) fn emit_ipc_event_with_data(channel: &str, data: &impl serde::Serialize) {
+    let json = match serde_json::to_string(data) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    let js = format!(
+        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}',{json});",
+        channel.replace('\'', "\\'")
+    );
+    let _ = eval_js(&js);
+}
+
 /// Only allow `https://` URLs to be opened by the OS.
 /// Prevents plugins from opening local files, executables, or dangerous protocol handlers.
 pub(crate) fn is_safe_open_url(target: &str) -> bool {
