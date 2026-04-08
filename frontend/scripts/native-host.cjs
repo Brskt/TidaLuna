@@ -534,6 +534,10 @@ function canonicalizeFsPath(p) {
     if (typeof p !== 'string')
         throw new Error("[sandbox] invalid path type");
     var resolved = pathMod.resolve(p);
+    // Block UNC/device paths on Windows - they bypass startsWith containment checks
+    if (process.platform === 'win32'
+        && pathMod.win32.parse(resolved).root.startsWith('\\\\'))
+        throw new Error("[sandbox] UNC/device paths are not allowed");
     try {
         return realFs.realpathSync(resolved);
     } catch (_) {
