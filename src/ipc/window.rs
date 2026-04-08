@@ -147,7 +147,11 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         }
         "window.open_url" => {
             if let Some(url) = msg.args.first().and_then(|v| v.as_str()) {
-                open_in_os(url);
+                if crate::app_state::is_safe_open_url(url) {
+                    open_in_os(url);
+                } else {
+                    crate::vprintln!("[IPC]    Blocked window.open_url: not https");
+                }
             }
         }
         "window.navigate_self" => {

@@ -120,6 +120,14 @@ pub(crate) fn emit_ipc_event_with_args(channel: &str, args: &[&str]) {
     let _ = eval_js(&js);
 }
 
+/// Only allow `https://` URLs to be opened by the OS.
+/// Prevents plugins from opening local files, executables, or dangerous protocol handlers.
+pub(crate) fn is_safe_open_url(target: &str) -> bool {
+    url::Url::parse(target)
+        .map(|u| u.scheme() == "https")
+        .unwrap_or(false)
+}
+
 pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
     let target = target.as_ref();
     #[cfg(target_os = "windows")]
