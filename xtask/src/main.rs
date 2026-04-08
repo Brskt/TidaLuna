@@ -181,6 +181,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     }
 
     // 5. Platform-specific bundling
+    let bin_dir = bundle_dir.join("bin");
     if cfg!(target_os = "macos") {
         bundle_macos(EXE_NAME, &target_dir, &cef_dir, &bundle_dir)?;
     } else {
@@ -192,7 +193,6 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         println!("  Copied {EXE_NAME}");
 
         // bin/cef/: all CEF runtime files
-        let bin_dir = bundle_dir.join("bin");
         let cef_bundle_dir = bin_dir.join("cef");
         fs::create_dir_all(&cef_bundle_dir)
             .map_err(|e| format!("failed to create bin/cef/: {e}"))?;
@@ -207,9 +207,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         }
     }
 
-    // 6. Ensure bin/ exists + download Bun binary
-    // native-host.cjs is embedded in the exe (include_str!), NOT shipped on disk.
-    let bin_dir = bundle_dir.join("bin");
+    // 6. Download Bun binary into bin/
     fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin/: {e}"))?;
     download_bun(&bin_dir)?;
 

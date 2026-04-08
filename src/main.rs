@@ -72,17 +72,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
     // Set DLL search directory to bin/cef/ so delay-loaded libcef.dll is found
     #[cfg(target_os = "windows")]
-    unsafe {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        if let Some(dir) = exe_dir {
-            let cef_dir = dir.join("bin").join("cef");
-            let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(cef_dir.as_os_str())
-                .chain(std::iter::once(0))
-                .collect();
+    if let Some(ref dir) = exe_dir {
+        let cef_dir = dir.join("bin").join("cef");
+        let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(cef_dir.as_os_str())
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
             windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW(wide.as_ptr());
         }
     }
@@ -196,9 +197,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_agent = CefString::from(crate::state::USER_AGENT);
 
     // CEF resources (.pak, locales, icudtl.dat) live in bin/cef/
-    let cef_res_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("bin").join("cef")))
+    let cef_res_dir = exe_dir
+        .as_ref()
+        .map(|d| d.join("bin").join("cef"))
         .unwrap_or_default();
     let resources_dir_path = CefString::from(cef_res_dir.to_string_lossy().as_ref());
 

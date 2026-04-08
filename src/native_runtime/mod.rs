@@ -36,8 +36,8 @@ impl NativeRuntime {
     /// Never written to disk — sent to Bun via stdin at spawn.
     const HOST_SCRIPT: &str = include_str!("../../frontend/scripts/native-host.cjs");
 
-    /// Bootstrap: reads stdin until __END__, wraps in CJS Function() with
-    /// require/module/exports params, then eval'd code reuses globalThis.__rl for IPC.
+    /// Bootstrap: Function() wrapper provides a proper CJS module scope
+    /// (require/module/exports) that direct execution wouldn't have.
     const BOOTSTRAP: &str = r#"let b=[];const r=require("readline").createInterface({input:process.stdin});globalThis.__rl=r;r.on("line",function h(l){if(l==="__END__"){r.removeListener("line",h);new Function("require","module","exports","__dirname","__filename",b.join("\n"))(require,{exports:{}},{},"/","[stdin]")}else b.push(l)})"#;
 
     pub fn spawn(rt: &tokio::runtime::Handle) -> anyhow::Result<Self> {

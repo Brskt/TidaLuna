@@ -412,8 +412,7 @@ fn run() -> Result<()> {
     // Delete obsolete files (from old layout)
     for del_path in &journal.deleted_files {
         let to_delete = args.app_dir.join(del_path);
-        if to_delete.exists() {
-            fs::remove_file(&to_delete).ok();
+        if fs::remove_file(&to_delete).is_ok() {
             eprintln!("[updater] Removed obsolete: {del_path}");
         }
     }

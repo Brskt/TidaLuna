@@ -117,19 +117,11 @@ pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallbac
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let id = msg.id.clone().unwrap_or_default();
-    with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
-    });
     crate::state::rt_handle().spawn(async move {
         let client = &*crate::state::HTTP_CLIENT;
-        let result = fetch_plugin_package(client, &url).await;
-        let Some(cb) = take_ipc_callback(&id) else {
-            return;
-        };
-        match result {
-            Ok(manifest) => ipc_callback_ok(&cb, &manifest),
-            Err(e) => ipc_callback_err(&cb, &format!("{e:#}")),
+        match fetch_plugin_package(client, &url).await {
+            Ok(manifest) => ipc_callback_ok(&callback, &manifest),
+            Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
         }
     });
 }

@@ -202,17 +202,10 @@ pub(crate) fn recover_interrupted_update() {
                 fs::remove_file(&backup).ok();
             }
             for del_path in &journal.deleted_files {
-                let p = std::path::Path::new(del_path);
-                if p.is_absolute()
-                    || p.components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
+                if !is_safe_relative_path(del_path, &app_dir) {
                     continue;
                 }
-                let to_delete = app_dir.join(del_path);
-                if to_delete.starts_with(&app_dir) {
-                    fs::remove_file(&to_delete).ok();
-                }
+                fs::remove_file(app_dir.join(del_path)).ok();
             }
         }
         other => {
@@ -889,6 +882,23 @@ fn detect_staged_update() -> Option<String> {
     } else {
         None
     }
+}
+
+/// Reject absolute paths and directory-escape components.
+fn is_safe_relative_path(rel: &str, base: &Path) -> bool {
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        return false;
+    }
+    for c in p.components() {
+        if matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+        ) {
+            return false;
+        }
+    }
+    base.join(rel).starts_with(base)
 }
 
 fn exe_dir() -> Option<PathBuf> {

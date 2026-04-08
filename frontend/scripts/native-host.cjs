@@ -678,8 +678,7 @@ function getGrantStore(pluginName) {
 const modules = {};
 
 // ── IPC ─────────────────────────────────────────────────────────────────
-// Use the bootstrap's readline instance (stdin bootstrap → eval → IPC on same rl)
-// Falls back to creating own instance for direct `bun run native-host.cjs` usage (dev).
+// Reuse bootstrap readline if available, fall back to own instance for standalone dev usage.
 const rl = globalThis.__rl || readline.createInterface({ input: hostStdin });
 rl.on("close", () => hostExit(0));
 
