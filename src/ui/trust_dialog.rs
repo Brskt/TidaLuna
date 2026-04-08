@@ -56,7 +56,7 @@ fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
         ),
         "worker_threads" => (
             "Worker Threads",
-            "Run JavaScript code in parallel background threads.",
+            "Use inter-thread communication APIs (messaging, ports).",
         ),
         "cluster" => ("Cluster", "Spawn multiple copies of this process."),
         "os" => (

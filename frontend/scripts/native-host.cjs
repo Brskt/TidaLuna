@@ -66,6 +66,8 @@ SAFE_MODULES.forEach(function(id) {
 BLOCKED_MODULES.forEach(function(id) {
     try { require(id); } catch (_) {}
 });
+// Pre-load worker_threads so the safe shim below can capture its exports before hardening
+try { require("worker_threads"); } catch (_) {}
 
 function canonicalize(id) {
     return id.startsWith("node:") ? id.slice(5) : id;
@@ -126,6 +128,24 @@ var _FunctionPrototypeBind = Function.prototype.bind;
 var _RealFunction = Function;
 var _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 var _SetPrototypeHas = Set.prototype.has;
+
+// ── worker_threads shim (fail-closed allowlist, no Worker) ────────────
+// Exposes only communication/utility APIs. Worker constructor is blocked
+// to prevent spawning unsandboxed threads with full require access.
+var shimmedWorkerThreads = (function() {
+    var real;
+    try { real = require("worker_threads"); } catch (_) { return null; }
+    var allowed = [
+        "MessageChannel", "MessagePort", "BroadcastChannel",
+        "receiveMessageOnPort", "markAsUncloneable", "markAsUntransferable",
+        "isMainThread", "parentPort", "workerData", "threadId", "resourceLimits",
+    ];
+    var shim = _ObjectCreate(null);
+    _ArrayPrototypeForEach.call(allowed, function(key) {
+        if (key in real) shim[key] = real[key];
+    });
+    return _ObjectFreeze(shim);
+})();
 
 // ── Harden globalThis.process via Proxy ───────────────────────────────
 // Cannot fully replace — Bun's network modules need process.nextTick etc.
@@ -222,12 +242,21 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir) {
 
         if (isSafe(id)) return require(id);
 
+        var canonical = canonicalize(id);
+
         if (isForbidden(id)) {
-            throw new Error("[sandbox] require('" + canonicalize(id) + "') is permanently blocked");
+            throw new Error("[sandbox] require('" + canonical + "') is permanently blocked");
         }
 
         if (isBlocked(id)) {
-            var canonical = canonicalize(id);
+            // worker_threads: return safe shim (no Worker constructor) when trusted
+            if (canonical === "worker_threads") {
+                if (!shimmedWorkerThreads)
+                    throw new Error("[sandbox] worker_threads is not available in this environment");
+                if (trustedModules.has(id) || trustedModules.has(canonical))
+                    return shimmedWorkerThreads;
+                throw new Error("TRUST_REQUIRED:" + canonical);
+            }
             // fs/fs-promises: return sandboxed facade instead of real module
             if (canonical === "fs" && sandboxedFs) {
                 if (trustedModules.has(id) || trustedModules.has(canonical))
