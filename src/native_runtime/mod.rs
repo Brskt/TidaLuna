@@ -32,37 +32,31 @@ pub struct NativeRuntime {
 }
 
 impl NativeRuntime {
-    /// Spawn a Bun child process running `native-host.cjs`.
-    ///
-    /// Looks for the Bun binary and host script next to the current executable,
-    /// falling back to `bun` in PATH for development.
+    /// The native-host sandbox script, embedded at compile time.
+    /// Never written to disk — sent to Bun via stdin at spawn.
+    const HOST_SCRIPT: &str = include_str!("../../frontend/scripts/native-host.cjs");
+
+    /// Bootstrap: reads stdin until __END__, wraps in CJS Function() with
+    /// require/module/exports params, then eval'd code reuses globalThis.__rl for IPC.
+    const BOOTSTRAP: &str = r#"let b=[];const r=require("readline").createInterface({input:process.stdin});globalThis.__rl=r;r.on("line",function h(l){if(l==="__END__"){r.removeListener("line",h);new Function("require","module","exports","__dirname","__filename",b.join("\n"))(require,{exports:{}},{},"/","[stdin]")}else b.push(l)})"#;
+
     pub fn spawn(rt: &tokio::runtime::Handle) -> anyhow::Result<Self> {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Find Bun binary
+        // Find bundled Bun binary — no PATH fallback (fail closed)
         let bun_path = find_binary(&exe_dir, if cfg!(windows) { "bun.exe" } else { "bun" })
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Bun binary not found. Native plugin modules require Bun in dist/ or PATH."
-                )
+                anyhow::anyhow!("Bun binary not found. Native plugin modules require Bun in bin/.")
             })?;
 
-        // Find host script
-        let host_script = find_file(&exe_dir, "native-host.cjs")
-            .ok_or_else(|| anyhow::anyhow!("native-host.cjs not found next to executable."))?;
-
-        crate::vprintln!(
-            "[BUN]    Spawning: {} run {}",
-            bun_path.display(),
-            host_script.display()
-        );
+        crate::vprintln!("[BUN]    Spawning: {}", bun_path.display());
 
         let mut cmd = Command::new(&bun_path);
-        cmd.arg("run")
-            .arg(&host_script)
+        cmd.arg("-e")
+            .arg(Self::BOOTSTRAP)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -114,9 +108,21 @@ impl NativeRuntime {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
 
-        // Task: write commands to stdin
+        // Task: send embedded sandbox script, then relay IPC commands to stdin
         rt.spawn(async move {
             let mut writer = BufWriter::new(stdin);
+
+            // Send the embedded native-host.cjs sandbox script
+            if writer
+                .write_all(Self::HOST_SCRIPT.as_bytes())
+                .await
+                .is_err()
+                || writer.write_all(b"\n__END__\n").await.is_err()
+                || writer.flush().await.is_err()
+            {
+                return;
+            }
+
             while let Some(line) = stdin_rx.recv().await {
                 if writer.write_all(line.as_bytes()).await.is_err() {
                     break;
@@ -160,9 +166,11 @@ impl NativeRuntime {
                     Ok(parsed)
                 };
 
-                if let Ok(mut map) = pending_clone.lock()
-                    && let Some(tx) = map.remove(&id)
-                {
+                let tx = pending_clone
+                    .lock()
+                    .ok()
+                    .and_then(|mut map| map.remove(&id));
+                if let Some(tx) = tx {
                     let _ = tx.send(result);
                 }
             }
@@ -233,16 +241,16 @@ impl NativeRuntime {
 
 /// Find a binary next to the executable, or fall back to bare name (resolved via PATH by OS).
 fn find_binary(exe_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    // bin/ subdirectory (new layout)
+    let bin = exe_dir.join("bin").join(name);
+    if bin.exists() {
+        return Some(bin);
+    }
+    // Flat layout (backward compat)
     let local = exe_dir.join(name);
     if local.exists() {
         return Some(local);
     }
-    // Fallback: bare name — OS resolves via PATH (for dev environments with bun installed)
-    Some(PathBuf::from(name))
-}
-
-/// Find a file next to the executable.
-fn find_file(exe_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
-    let path = exe_dir.join(name);
-    if path.exists() { Some(path) } else { None }
+    // No PATH fallback — fail closed for security
+    None
 }
