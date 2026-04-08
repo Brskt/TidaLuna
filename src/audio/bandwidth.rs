@@ -306,10 +306,10 @@ impl GovernorState {
         if bp.total_len.load(Relaxed) == 0 {
             self.preload_cooldown_until = None;
         }
-        let cooldown_active = self
-            .preload_cooldown_until
-            .is_some_and(|t| Instant::now() < t);
-        if self.gate == PreloadGate::Active && self.boost_start.is_none() && !cooldown_active {
+        if self.gate == PreloadGate::Active
+            && self.boost_start.is_none()
+            && !self.is_preload_cooldown_active()
+        {
             serve_queue(
                 &mut self.preload_queue,
                 &mut self.preload_bucket,
@@ -347,17 +347,10 @@ impl GovernorState {
 
     fn update_boost(&mut self, bp: &BufferProgress) {
         let bitrate = bp.bitrate_bps.load(Relaxed);
-        let (boost_rate, boost_burst, boost_ahead_threshold) = boost_params(bitrate);
+        let (boost_rate, _, boost_ahead_threshold) = boost_params(bitrate);
 
         if bp.take_seek_boost() {
-            if self.boost_start.is_none() {
-                self.saved_rate = self.playback_bucket.rate;
-                self.saved_burst = self.playback_bucket.burst;
-            }
-            self.playback_bucket.rate = boost_rate;
-            self.playback_bucket.burst = boost_burst;
-            self.playback_bucket.tokens = boost_burst;
-            self.boost_start = Some(Instant::now());
+            self.enter_boost(bitrate);
             self.preload_cooldown_until =
                 Some(Instant::now() + std::time::Duration::from_millis(1500));
             crate::vprintln2!(
@@ -421,14 +414,8 @@ impl GovernorState {
         if starving {
             let since = self.starvation_since.get_or_insert(Instant::now());
             if since.elapsed().as_millis() as u64 >= STARVATION_DELAY_MS {
-                // Enter starvation boost through the same mechanism as seek boost
-                self.saved_rate = self.playback_bucket.rate;
-                self.saved_burst = self.playback_bucket.burst;
-                let (boost_rate, boost_burst, _) = boost_params(bitrate);
-                self.playback_bucket.rate = boost_rate;
-                self.playback_bucket.burst = boost_burst;
-                self.playback_bucket.tokens = boost_burst;
-                self.boost_start = Some(Instant::now());
+                debug_assert!(self.boost_start.is_none());
+                self.enter_boost(bitrate);
                 self.starvation_since = None;
                 // No preload cooldown for starvation boost (unlike seek boost)
                 let ahead_secs = if bitrate > 0 {
@@ -487,6 +474,23 @@ impl GovernorState {
                 }
             }
         }
+    }
+
+    fn is_preload_cooldown_active(&self) -> bool {
+        self.preload_cooldown_until
+            .is_some_and(|t| Instant::now() < t)
+    }
+
+    fn enter_boost(&mut self, bitrate: u64) {
+        let (boost_rate, boost_burst, _) = boost_params(bitrate);
+        if self.boost_start.is_none() {
+            self.saved_rate = self.playback_bucket.rate;
+            self.saved_burst = self.playback_bucket.burst;
+        }
+        self.playback_bucket.rate = boost_rate;
+        self.playback_bucket.burst = boost_burst;
+        self.playback_bucket.tokens = boost_burst;
+        self.boost_start = Some(Instant::now());
     }
 
     fn exit_boost(&mut self) {
@@ -613,12 +617,9 @@ async fn governor_loop(mut rx: mpsc::Receiver<TokenRequest>, bp: Arc<BufferProgr
                         }
                         TrafficClass::Preload => {
                             state.preload_queue.push_back(r);
-                            let cooldown_active = state
-                                .preload_cooldown_until
-                                .is_some_and(|t| Instant::now() < t);
                             if state.gate == PreloadGate::Active
                                 && state.boost_start.is_none()
-                                && !cooldown_active
+                                && !state.is_preload_cooldown_active()
                             {
                                 state.preload_bucket.refill();
                                 serve_queue(
