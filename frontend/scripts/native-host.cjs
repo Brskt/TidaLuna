@@ -44,6 +44,7 @@ const FORBIDDEN_MODULES = new Set([
     "child_process", "cluster", "vm", "v8",
     "inspector", "inspector/promises", "module", "repl", "process",
     "wasi", "tty", "trace_events",
+    "bun:ffi", "bun:jsc", "bun:sqlite",
 ]);
 
 // ── Blocked modules (require explicit user trust) ───────────────────────
