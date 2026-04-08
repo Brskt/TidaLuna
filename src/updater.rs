@@ -70,6 +70,8 @@ struct Journal {
     version: String,
     state: String,
     files: Vec<JournalFile>,
+    #[serde(default)]
+    deleted_files: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -190,7 +192,7 @@ pub(crate) fn recover_interrupted_update() {
             }
         }
         "committed" => {
-            // Cleanup: remove .bak files
+            // Cleanup: remove .bak files + obsolete files from old layout
             crate::vprintln!(
                 "[UPDATER] Cleaning up completed update v{}",
                 journal.version
@@ -198,6 +200,19 @@ pub(crate) fn recover_interrupted_update() {
             for jf in &journal.files {
                 let backup = app_dir.join(&jf.backup);
                 fs::remove_file(&backup).ok();
+            }
+            for del_path in &journal.deleted_files {
+                let p = std::path::Path::new(del_path);
+                if p.is_absolute()
+                    || p.components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    continue;
+                }
+                let to_delete = app_dir.join(del_path);
+                if to_delete.starts_with(&app_dir) {
+                    fs::remove_file(&to_delete).ok();
+                }
             }
         }
         other => {

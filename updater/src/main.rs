@@ -82,6 +82,8 @@ struct Journal {
     version: String,
     state: JournalState,
     files: Vec<JournalFile>,
+    #[serde(default)]
+    deleted_files: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq)]
@@ -332,6 +334,34 @@ fn run() -> Result<()> {
         file_names.join(", ")
     );
 
+    // 7b. Determine files to delete (present in old manifest but absent in new)
+    let old_manifest_path = args.app_dir.join("manifest.json");
+    let deleted_files: Vec<String> = if old_manifest_path.exists() {
+        let old_data = fs::read_to_string(&old_manifest_path).unwrap_or_default();
+        if let Ok(old_manifest) = serde_json::from_str::<Manifest>(&old_data) {
+            old_manifest
+                .files
+                .keys()
+                .filter(|p| {
+                    !manifest.files.contains_key(p.as_str())
+                        && is_safe_relative_path(p, &args.app_dir)
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    if !deleted_files.is_empty() {
+        eprintln!(
+            "[updater] {} files to remove: {}",
+            deleted_files.len(),
+            deleted_files.join(", ")
+        );
+    }
+
     // 8. Write transaction journal
     let journal_path = args.app_dir.join(".update-journal.json");
     let journal = Journal {
@@ -345,6 +375,7 @@ fn run() -> Result<()> {
                 is_new: *is_new,
             })
             .collect(),
+        deleted_files,
     };
     write_journal(&journal_path, &journal)?;
 
@@ -378,11 +409,21 @@ fn run() -> Result<()> {
         }
     }
 
+    // Delete obsolete files (from old layout)
+    for del_path in &journal.deleted_files {
+        let to_delete = args.app_dir.join(del_path);
+        if to_delete.exists() {
+            fs::remove_file(&to_delete).ok();
+            eprintln!("[updater] Removed obsolete: {del_path}");
+        }
+    }
+
     // Mark journal as committed
     let committed = Journal {
         version: journal.version,
         state: JournalState::Committed,
         files: journal.files,
+        deleted_files: journal.deleted_files,
     };
     write_journal(&journal_path, &committed)?;
 
@@ -445,18 +486,66 @@ fn wait_for_pid(pid: u32) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Path safety
+// ---------------------------------------------------------------------------
+
+/// Reject absolute paths and directory-escape components (e.g. "..", prefix).
+/// Returns true only if `app_dir.join(rel)` resolves to a path under `app_dir`.
+fn is_safe_relative_path(rel: &str, app_dir: &Path) -> bool {
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        return false;
+    }
+    for component in p.components() {
+        match component {
+            std::path::Component::ParentDir | std::path::Component::Prefix(_) => return false,
+            _ => {}
+        }
+    }
+    // Final check: canonicalize-free containment
+    app_dir.join(rel).starts_with(app_dir)
+}
+
+// ---------------------------------------------------------------------------
 // File lock probing
 // ---------------------------------------------------------------------------
 
 fn probe_exclusive_access(app_dir: &Path) -> Result<()> {
-    let critical_files: &[&str] = if cfg!(target_os = "windows") {
-        &["tidalunar.exe", "libcef.dll", "bun.exe"]
+    // Check the exe at root
+    let exe_name = if cfg!(target_os = "windows") {
+        "tidalunar.exe"
     } else {
-        &["tidalunar", "libcef.so", "bun"]
+        "tidalunar"
     };
+    let mut paths_to_check: Vec<std::path::PathBuf> = vec![app_dir.join(exe_name)];
 
-    for name in critical_files {
-        let path = app_dir.join(name);
+    // Check CEF DLLs in both old (root) and new (bin/cef/) layouts
+    let cef_libs: &[&str] = if cfg!(target_os = "windows") {
+        &[
+            "libcef.dll",
+            "chrome_elf.dll",
+            "libEGL.dll",
+            "libGLESv2.dll",
+        ]
+    } else {
+        &["libcef.so"]
+    };
+    for lib in cef_libs {
+        for subdir in &["", "cef", "bin/cef"] {
+            paths_to_check.push(app_dir.join(subdir).join(lib));
+        }
+    }
+
+    // Check bun in both old (root) and new (bin/) layouts
+    let bun_name = if cfg!(target_os = "windows") {
+        "bun.exe"
+    } else {
+        "bun"
+    };
+    paths_to_check.push(app_dir.join(bun_name));
+    paths_to_check.push(app_dir.join("bin").join(bun_name));
+
+    for path in &paths_to_check {
         if !path.exists() {
             continue;
         }
@@ -467,12 +556,14 @@ fn probe_exclusive_access(app_dir: &Path) -> Result<()> {
                 locked = false;
                 break;
             }
-            eprintln!("[updater] {name} is locked, retry {attempt}/3...");
+            let display = path.file_name().unwrap_or_default().to_string_lossy();
+            eprintln!("[updater] {display} is locked, retry {attempt}/3...");
             thread::sleep(Duration::from_secs(2));
         }
 
         if locked {
-            bail!("{name} is still locked by another process — cannot update");
+            let display = path.file_name().unwrap_or_default().to_string_lossy();
+            bail!("{display} is still locked by another process — cannot update");
         }
     }
     Ok(())
