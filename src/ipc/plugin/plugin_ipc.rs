@@ -141,12 +141,14 @@ pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let id = msg.id.clone().unwrap_or_default();
-    with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
-    });
     crate::state::rt_handle().spawn(async move {
-        do_plugin_install(id, url).await;
+        match do_plugin_install(url).await {
+            Ok(info) => {
+                let json = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
+                ipc_callback_ok(&callback, &json);
+            }
+            Err(e) => ipc_callback_err(&callback, &e),
+        }
     });
 }
 
@@ -159,22 +161,21 @@ pub(super) fn handle_plugin_enable(msg: &IpcMessage, callback: IpcCallback) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let id = msg.id.clone().unwrap_or_default();
-    with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
-    });
     crate::state::rt_handle().spawn(async move {
-        do_plugin_enable(id, url).await;
+        match do_plugin_enable(url).await {
+            Ok(()) => ipc_callback_ok(&callback, "true"),
+            Err(e) => ipc_callback_err(&callback, &e),
+        }
     });
 }
 
-async fn do_plugin_enable(id: String, url: String) {
+async fn do_plugin_enable(url: String) -> Result<(), String> {
     let db = crate::state::db();
 
     // 1. Check deps + set enabled=1 + get code (all DB ops)
-    let db_result: Result<(String, String), String> = {
+    let (manifest, code) = {
         let url = url.clone();
-        match tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             db.call_plugins(move |pc| {
                 // Get manifest and code
                 let (manifest, code): (String, String) = pc
@@ -202,28 +203,23 @@ async fn do_plugin_enable(id: String, url: String) {
             })
         })
         .await
-        {
-            Ok(r) => r,
-            Err(e) => Err(format!("spawn_blocking failed: {e}")),
-        }
-    };
-
-    let Some(callback) = take_ipc_callback(&id) else {
-        return;
-    };
-
-    let (manifest, code) = match db_result {
-        Ok(v) => v,
-        Err(e) => {
-            ipc_callback_err(&callback, &e);
-            return;
-        }
-    };
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    }?;
 
     let plugin_name: String = serde_json::from_str::<serde_json::Value>(&manifest)
         .ok()
         .and_then(|v| v.get("name")?.as_str().map(String::from))
         .unwrap_or_default();
+
+    // Helper to revert DB enable on failure
+    async fn revert_enable(url: &str) {
+        let revert_url = url.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::state::db()
+                .call_plugins(move |pc| crate::plugins::store::disable(pc, &revert_url));
+        })
+        .await;
+    }
 
     // 2. Mark loading (generates load_id for wrapper correlation)
     let (load_id, nonce) =
@@ -233,32 +229,17 @@ async fn do_plugin_enable(id: String, url: String) {
     let js = match crate::plugins::PluginManager::transpile_and_wrap(&url, &code, load_id, nonce) {
         Ok(js) => js,
         Err(e) => {
-            // Revert in-memory + DB
             with_state(|state| state.plugin_manager.mark_unloaded(&url));
-            let revert_url = url.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = crate::state::db()
-                    .call_plugins(move |pc| crate::plugins::store::disable(pc, &revert_url));
-            })
-            .await;
-            ipc_callback_err(&callback, &format!("Failed to prepare: {e}"));
-            return;
+            revert_enable(&url).await;
+            return Err(format!("Failed to prepare: {e}"));
         }
     };
 
     // 4. Dispatch to renderer
-    let dispatched = eval_js(&js);
-    if !dispatched {
-        // No renderer frame — revert everything
+    if !eval_js(&js) {
         with_state(|state| state.plugin_manager.mark_unloaded(&url));
-        let revert_url = url.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = crate::state::db()
-                .call_plugins(move |pc| crate::plugins::store::disable(pc, &revert_url));
-        })
-        .await;
-        ipc_callback_err(&callback, "No renderer frame available");
-        return;
+        revert_enable(&url).await;
+        return Err("No renderer frame available".to_string());
     }
 
     // 5. Persistent flag: code was dispatched — critical for cleanup guard correctness.
@@ -279,14 +260,8 @@ async fn do_plugin_enable(id: String, url: String) {
             let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&url);
             eval_js(&cleanup_js);
             with_state(|state| state.plugin_manager.mark_unloaded(&url));
-            let revert_url = url.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = crate::state::db()
-                    .call_plugins(move |pc| crate::plugins::store::disable(pc, &revert_url));
-            })
-            .await;
-            ipc_callback_err(&callback, "Failed to persist dispatch flag");
-            return;
+            revert_enable(&url).await;
+            return Err("Failed to persist dispatch flag".to_string());
         }
     }
 
@@ -322,7 +297,7 @@ async fn do_plugin_enable(id: String, url: String) {
         });
     }
 
-    ipc_callback_ok(&callback, "true");
+    Ok(())
 }
 
 /// Atomic disable: guard dependants → DB disable → eval_js cleanup → mark_unloaded.
@@ -333,22 +308,21 @@ pub(super) fn handle_plugin_disable(msg: &IpcMessage, callback: IpcCallback) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let id = msg.id.clone().unwrap_or_default();
-    with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
-    });
     crate::state::rt_handle().spawn(async move {
-        do_plugin_disable(id, url).await;
+        match do_plugin_disable(url).await {
+            Ok(()) => ipc_callback_ok(&callback, "true"),
+            Err(e) => ipc_callback_err(&callback, &e),
+        }
     });
 }
 
-async fn do_plugin_disable(id: String, url: String) {
+async fn do_plugin_disable(url: String) -> Result<(), String> {
     let db = crate::state::db();
 
     // 1. Guard: check enabled dependants + DB disable
-    let guard_result: Result<(), String> = {
+    {
         let url = url.clone();
-        match tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             db.call_plugins(move |pc| {
                 let name = crate::plugins::store::get_name_by_url(pc, &url)
                     .ok_or_else(|| format!("Plugin not found: {url}"))?;
@@ -370,20 +344,8 @@ async fn do_plugin_disable(id: String, url: String) {
             })
         })
         .await
-        {
-            Ok(r) => r,
-            Err(e) => Err(format!("spawn_blocking failed: {e}")),
-        }
-    };
-
-    let Some(callback) = take_ipc_callback(&id) else {
-        return;
-    };
-
-    if let Err(e) = guard_result {
-        ipc_callback_err(&callback, &e);
-        return;
-    }
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    }?;
 
     // 2. Unload from renderer (best-effort)
     let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&url);
@@ -392,7 +354,7 @@ async fn do_plugin_disable(id: String, url: String) {
     // 3. Bookkeeping AFTER dispatch
     with_state(|state| state.plugin_manager.mark_unloaded(&url));
 
-    ipc_callback_ok(&callback, "true");
+    Ok(())
 }
 
 /// jsrt.load_plugins as request-response: runs multi-pass + reconciliation, then responds.
@@ -592,7 +554,10 @@ fn sanitize_plugin_url(url: &str) -> &str {
         .trim_end_matches(".json")
 }
 
-async fn fetch_plugin_package(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
+pub(super) async fn fetch_plugin_package(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<String> {
     let base = sanitize_plugin_url(url);
     let json_url = format!("{base}.json");
     let manifest_str = client
@@ -662,68 +627,53 @@ async fn fetch_plugin_data(
     }
 }
 
-async fn do_plugin_install(id: String, url: String) {
+async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, String> {
     let client = &*crate::state::HTTP_CLIENT;
-    let result = fetch_plugin_data(client, &url).await;
+    let (name, manifest, code, hash) = fetch_plugin_data(client, &url)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
 
-    let Some(callback) = take_ipc_callback(&id) else {
-        return;
-    };
-    match result {
-        Ok((name, manifest, code, hash)) => {
-            // Validate luna.type if present
-            match crate::plugins::store::parse_luna_meta(&manifest) {
-                Err(msg) => {
-                    ipc_callback_err(&callback, &msg);
-                    return;
-                }
-                Ok(Some(ref meta)) => {
-                    if let Some(ref t) = meta.plugin_type
-                        && t != "plugin"
-                        && t != "library"
-                    {
-                        ipc_callback_err(
-                            &callback,
-                            &format!("Invalid luna.type '{t}' in manifest"),
-                        );
-                        return;
-                    }
-                }
-                Ok(None) => {} // no luna field — fine
-            }
-
-            let install_result = tokio::task::spawn_blocking({
-                let url = url.clone();
-                move || {
-                    crate::state::db().call_plugins(move |pc| {
-                        crate::plugins::store::install(pc, &url, &name, &manifest, &code, &hash)
-                            .map(|()| crate::plugins::PluginInfo {
-                                url,
-                                name,
-                                manifest,
-                                hash: Some(hash),
-                                enabled: false,
-                                installed: true,
-                            })
-                    })
-                }
-            })
-            .await;
-            match install_result {
-                Ok(Ok(info)) => {
-                    // Clear native trust on (re)install so updated code re-prompts.
-                    let trust_name = info.name.clone();
-                    crate::state::db().call_settings(move |conn| {
-                        let _ =
-                            crate::native_runtime::trust::clear_trust_by_plugin(conn, &trust_name);
-                    });
-                    let json = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
-                    ipc_callback_ok(&callback, &json);
-                }
-                Ok(Err(e)) => ipc_callback_err(&callback, &e.to_string()),
-                Err(e) => ipc_callback_err(&callback, &format!("spawn_blocking failed: {e}")),
+    // Validate luna.type if present
+    match crate::plugins::store::parse_luna_meta(&manifest) {
+        Err(msg) => return Err(msg),
+        Ok(Some(ref meta)) => {
+            if let Some(ref t) = meta.plugin_type
+                && t != "plugin"
+                && t != "library"
+            {
+                return Err(format!("Invalid luna.type '{t}' in manifest"));
             }
         }
-        Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
+        Ok(None) => {} // no luna field — fine
     }
+
+    let install_result = tokio::task::spawn_blocking({
+        let url = url.clone();
+        move || {
+            crate::state::db().call_plugins(move |pc| {
+                crate::plugins::store::install(pc, &url, &name, &manifest, &code, &hash).map(|()| {
+                    crate::plugins::PluginInfo {
+                        url,
+                        name,
+                        manifest,
+                        hash: Some(hash),
+                        enabled: false,
+                        installed: true,
+                    }
+                })
+            })
+        }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+
+    let info = install_result?;
+
+    // Clear native trust on (re)install so updated code re-prompts.
+    let trust_name = info.name.clone();
+    crate::state::db().call_settings(move |conn| {
+        let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &trust_name);
+    });
+
+    Ok(info)
 }
