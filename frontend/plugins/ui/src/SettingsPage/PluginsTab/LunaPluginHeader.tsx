@@ -44,7 +44,7 @@ export const LunaPluginHeader = React.memo(({ name, version, loadError, author, 
 			<Box sx={{ flexGrow: 1 }} />
 			{author && <LunaAuthorDisplay author={author} />}
 		</Stack>
-		{desc && <Typography variant="subtitle2" gutterBottom dangerouslySetInnerHTML={{ __html: desc }} />}
+		{desc && <Typography variant="subtitle2" gutterBottom>{desc}</Typography>}
 		{(isLibrary || (dependsOn && dependsOn.length > 0)) && (
 			<Typography variant="caption" sx={{ opacity: 0.6 }}>
 				{isLibrary && "Library"}

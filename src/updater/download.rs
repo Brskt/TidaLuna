@@ -7,7 +7,7 @@ use tokio_util::bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 
 use super::types::{GhRelease, Manifest, UPDATER_STATE, UpdaterPhase};
-use super::util::{exe_dir, fetch_gh_release, sha256_file};
+use super::util::{exe_dir, fetch_gh_release, is_safe_relative_path, sha256_file};
 
 macro_rules! check_cancel {
     ($cancel:expr) => {
@@ -206,6 +206,10 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), anyhow::Error> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("zip entry")?;
         let name = entry.name().to_string();
+
+        if !is_safe_relative_path(&name, dest) {
+            bail!("zip entry has unsafe path: {name}");
+        }
 
         if entry.is_dir() {
             fs::create_dir_all(dest.join(&name)).ok();
