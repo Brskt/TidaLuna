@@ -12,6 +12,8 @@ pub struct DashManifest {
     pub sample_rate: Option<u32>,
     #[serde(default)]
     pub bandwidth: Option<u32>,
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
 }
 
 /// Parse a DASH MPD XML string and extract segment URLs.
@@ -91,11 +93,17 @@ pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
         sample_rate
     );
 
+    let duration_secs = mpd
+        .mediaPresentationDuration
+        .as_ref()
+        .map(|d| d.as_secs_f64());
+
     Ok(DashManifest {
         init_url,
         segment_urls,
         codec,
         sample_rate,
         bandwidth,
+        duration_secs,
     })
 }

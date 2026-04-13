@@ -1,4 +1,4 @@
-// Bootstrap MUST be first — sets up globals before @luna/core imports.
+// Bootstrap MUST be first - sets up globals before @luna/core imports.
 import "./bootstrap";
 
 import { createApplicationController } from "./controllers/application";
@@ -8,13 +8,14 @@ import { createPlaybackController } from "./controllers/playback";
 import { createUserSession } from "./controllers/session";
 import { createUserSettings } from "./controllers/settings";
 import { createWindowController } from "./controllers/window";
+import { createTidalConnectController, createRemoteDesktopController, setupConnectEventListeners } from "./connect";
 import { createNativePlayerComponent } from "./controllers/player";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, isSelfLoad } from "./audio-proxy";
 import { initWindowControls } from "./ui/window-controls";
 import { invokeIpc, sendIpc, isLoginCallback, onIpcEvent } from "./ipc";
 
-// @luna/core and @luna/lib — safe to import after bootstrap
+// @luna/core and @luna/lib - safe to import after bootstrap
 import { initCore, modules, LunaPlugin } from "../render/src";
 import * as LunaCore from "../render/src";
 import * as LunaLib from "../plugins/lib/src";
@@ -36,11 +37,11 @@ window.nativeInterface = {
     audioHack: createAudioHack(),
     chromecast: undefined,
     credentials,
-    features: { chromecast: false, tidalConnect: false },
+    features: { chromecast: false, tidalConnect: true, remoteDesktop: true },
     navigation: createNavigationController(),
     playback: createPlaybackController(),
-    remoteDesktop: undefined,
-    tidalConnect: undefined,
+    remoteDesktop: createRemoteDesktopController(),
+    tidalConnect: createTidalConnectController(),
     userSession: createUserSession(),
     userSettings: createUserSettings(),
     window: createWindowController(
@@ -48,6 +49,15 @@ window.nativeInterface = {
     ),
 };
 window.NativePlayerComponent = createNativePlayerComponent();
+
+// Wire up TIDAL Connect event listeners once the store is available
+try {
+    const { store } = require("../plugins/lib/src/redux/store");
+    setupConnectEventListeners(store);
+} catch {
+    // Store not yet available - listeners will be set up when Redux initializes
+}
+
 // Bridge event types that map 1:1 (event.t === trigger name, no seq).
 const PASSTHROUGH_EVENTS = new Set([
     "devices", "devicedisconnected", "deviceexclusivemodenotallowed",
@@ -123,7 +133,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             if (event.v === "completed") {
                 proxyReset();
                 if (isSelfLoad()) {
-                    // Self-loaded tracks bypass NativePlayer — manually advance queue.
+                    // Self-loaded tracks bypass NativePlayer - manually advance queue.
                     const { store } = require("../plugins/lib/src/redux/store");
                     const { playQueue: q } = store.getState();
                     const nextId = q.elements[q.currentIndex + 1]?.mediaItemId;
@@ -185,7 +195,7 @@ const init = async () => {
         console.error("[luna] initCore() failed:", e);
         return;
     }
-    console.log("[luna] Core initialized — Redux store discovered, modules populated");
+    console.log("[luna] Core initialized - Redux store discovered, modules populated");
 
     // Hydrate close-to-tray from Rust-persisted value and expose setter for Rust
     {
@@ -203,7 +213,7 @@ const init = async () => {
         setCloseToTray(!!(window as any).__TIDALUNAR_CLOSE_TO_TRAY__);
     }
 
-    // SDK middleware doesn't reach Rust player for DASH/AAC — intercept Redux actions.
+    // SDK middleware doesn't reach Rust player for DASH/AAC - intercept Redux actions.
     {
         const { interceptors } = require("../render/src/exposeTidalInternals.patchAction");
         const add = (action: string, cb: Function) => {
@@ -259,7 +269,7 @@ const init = async () => {
         console.error("[luna] Failed to load @luna/dev:", e);
     }
 
-    // Load user plugins — Rust does dedup + multi-pass + reconciliation, then responds
+    // Load user plugins - Rust does dedup + multi-pass + reconciliation, then responds
     await invokeIpc("jsrt.load_plugins");
     // Populate CEF plugin registry from Rust PluginStore (for @luna/ui display)
     const { exposeLoaderApi } = require("./plugins/loader");

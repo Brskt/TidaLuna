@@ -64,6 +64,7 @@ pub(crate) struct AppState {
     pub(crate) needs_proactive_refresh: bool,
     pub(crate) needs_blob_purge: bool,
     pub(crate) last_client_id: String,
+    pub(crate) connect: Option<crate::connect::ConnectManager>,
 }
 
 // SAFETY: AppState contains non-Send CEF/OS handles and thread-sensitive fields

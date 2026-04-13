@@ -1,4 +1,4 @@
-// Fragment 5/5 — Minimal nativeInterface stub + session delegate
+// Fragment 5/5 - Minimal nativeInterface stub + session delegate
 // Depends on: sendIpc, _cfg (from ipc.js)
 
 if (!window.nativeInterface) {
@@ -30,7 +30,7 @@ if (!window.nativeInterface) {
         audioHack: { registerDelegate: noop },
         chromecast: undefined,
         credentials: creds,
-        features: { chromecast: false, tidalConnect: false },
+        features: { chromecast: false, tidalConnect: true, remoteDesktop: true },
         navigation: { registerDelegate: noop },
         playback: {
             registerDelegate: noop,
@@ -40,8 +40,39 @@ if (!window.nativeInterface) {
             seek: noop,
             setVolume: noop,
         },
-        remoteDesktop: undefined,
-        tidalConnect: undefined,
+        remoteDesktop: {
+            initialize: noop,
+            startBroadcasting: noop,
+            stopBroadcasting: noop,
+            statusUpdated: noop,
+            progressUpdated: noop,
+            playbackCompleted: noop,
+            requestNextMedia: noop,
+            disconnect: noop,
+            setRepeatMode: noop,
+            setShuffle: noop,
+        },
+        tidalConnect: {
+            initialize: noop,
+            discoverDevices: noop,
+            refreshDevices: noop,
+            connectToDevice: noop,
+            disconnect: noop,
+            setAuthentication: noop,
+            loadMedia: noop,
+            loadQueue: noop,
+            playNext: noop,
+            playPrevious: noop,
+            playOrPause: noop,
+            seek: noop,
+            selectQueueItem: noop,
+            refreshQueue: noop,
+            setVolume: noop,
+            setMute: noop,
+            setRepeatMode: noop,
+            setShuffle: noop,
+            updateQuality: noop,
+        },
         userSession: {
             clear: function() {
                 if (window.location.pathname === (_cfg.loginCallbackPath || '/login/auth')) return;

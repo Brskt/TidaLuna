@@ -2,6 +2,7 @@
 mod app_state;
 mod audio;
 mod bridge;
+mod connect;
 mod db;
 mod ipc;
 mod logging;
@@ -169,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         needs_proactive_refresh: false,
         needs_blob_purge: false,
         last_client_id: String::new(),
+        connect: Some(crate::connect::ConnectManager::new()),
     })));
 
     let root_cache = state::cache_data_dir().join("cef");
@@ -226,6 +228,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     run_message_loop();
+
+    // Shutdown Connect before CEF shutdown
+    app_state::with_state(|state| {
+        if let Some(ref mut cm) = state.connect {
+            // Use the runtime to run async shutdown
+            if let Some(rt) = crate::state::RT_HANDLE.get() {
+                rt.block_on(cm.shutdown());
+            }
+        }
+        state.connect = None;
+    });
+    crate::ui::flush::set_connect_bridge_tx(None);
+
     shutdown();
     Ok(())
 }
@@ -243,17 +258,17 @@ fn reconcile_boot_tokens(
         Ok(Some(s)) => s,
         Ok(None) | Err(platform::secure_store::StoreError::Unavailable) => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   No secure store — purged SDK blob");
+            vprintln!("[AUTH]   No secure store - purged SDK blob");
             return None;
         }
         Err(platform::secure_store::StoreError::Corrupt) => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   Secure store corrupt — purged SDK blob");
+            vprintln!("[AUTH]   Secure store corrupt - purged SDK blob");
             return None;
         }
         Err(_) => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   Secure store error — purged SDK blob");
+            vprintln!("[AUTH]   Secure store error - purged SDK blob");
             return None;
         }
     };
@@ -262,10 +277,10 @@ fn reconcile_boot_tokens(
     let sdk_result = read_sdk_credentials(&leveldb_path);
     let (sdk_at, sdk_rt, sdk_crypto, sdk_plaintext) = match sdk_result {
         ReadSdkResult::Missing => {
-            // TIDAL's SDK validates JWT format — opaque tokens fail validation
+            // TIDAL's SDK validates JWT format - opaque tokens fail validation
             // and trigger session_clear. Seed with REAL tokens instead.
             // The blob is AES-256 encrypted and plugins can't access localStorage.
-            vprintln!("[AUTH]   No SDK storage — seeding from secure store");
+            vprintln!("[AUTH]   No SDK storage - seeding from secure store");
             let cur = &stored.current;
             if platform::sdk_storage::create_sdk_credentials(
                 &leveldb_path,
@@ -285,7 +300,7 @@ fn reconcile_boot_tokens(
         }
         ReadSdkResult::Corrupt => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   SDK storage corrupt — purged");
+            vprintln!("[AUTH]   SDK storage corrupt - purged");
             return None;
         }
         ReadSdkResult::Parsed {
@@ -310,7 +325,7 @@ fn reconcile_boot_tokens(
         return Some((stored, false));
     }
 
-    // Match against real tokens (seeded blob — TIDAL re-persisted them)
+    // Match against real tokens (seeded blob - TIDAL re-persisted them)
     if sdk_at == stored.current.access_token && sdk_rt == stored.current.refresh_token {
         vprintln!("[AUTH]   Boot reconciliation: current match (real)");
         return Some((stored, true));
@@ -337,7 +352,7 @@ fn reconcile_boot_tokens(
         {
             return Some((stored, false));
         }
-        vprintln!("[AUTH]   SDK rewrite failed — purging");
+        vprintln!("[AUTH]   SDK rewrite failed - purging");
         platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
         return None;
     }
@@ -351,7 +366,7 @@ fn reconcile_boot_tokens(
         return Some((stored, true));
     }
 
-    vprintln!("[AUTH]   Boot reconciliation: no match — purging");
+    vprintln!("[AUTH]   Boot reconciliation: no match - purging");
     platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
     None
 }

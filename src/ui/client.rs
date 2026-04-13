@@ -31,9 +31,23 @@ impl BrowserSideHandler for IpcQueryHandler {
                 || msg.channel.starts_with("__Luna.")
                 || msg.channel.starts_with("__LunaNative.")
                 || msg.channel.starts_with("updater.")
+                || msg.channel.starts_with("connect.")
                 || msg.channel == "player.parse_dash")
             && msg.id.is_some()
         {
+            if msg.channel.starts_with("connect.") {
+                if let Some(ref frame) = _frame
+                    && frame.is_main() == 0
+                {
+                    callback
+                        .lock()
+                        .expect("IPC callback lock poisoned")
+                        .failure(403, "Connect IPC restricted to main frame");
+                    return true;
+                }
+                crate::connect::ipc::handle_connect_invoke(msg, callback);
+                return true;
+            }
             handle_plugin_ipc(msg, callback);
             return true;
         }
@@ -339,7 +353,7 @@ wrap_load_handler! {
                     matches!(kind, PageKind::LoginPage | PageKind::LoginCallback);
                 let prev = self.page_state.get();
 
-                // Transitioning from login to app — stop the player but don't reload.
+                // Transitioning from login to app - stop the player but don't reload.
                 if prev == PageState::Login && !is_login {
                     with_state(|state| {
                         let _ = state.player.stop();
@@ -497,7 +511,7 @@ wrap_request_handler! {
                 Some(crate::ui::token_filter::TokenResourceHandler::new())
             } else if !crate::ui::nav::is_tidal_origin(&url) {
                 // Exfiltration guard: block sendBeacon to non-Tidal domains.
-                // TIDAL doesn't use sendBeacon — safe to block unconditionally.
+                // TIDAL doesn't use sendBeacon - safe to block unconditionally.
                 if let Some(req) = _request.as_ref()
                     && req.resource_type() == ResourceType::PING
                 {

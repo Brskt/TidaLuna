@@ -1,7 +1,29 @@
 use crate::app_state::{AppState, exec_js_on_frame, with_state};
 use crate::bridge::PlayerBridgeEvent;
+use crate::connect::receiver::speaker_bridge::BridgeEvent;
+use crate::connect::types::PlayerState as ConnectPlayerState;
 use crate::player::{PlaybackState, PlayerEvent};
 use cef::*;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::mpsc;
+
+/// Monotonic counter stamped on each bridge event. The receiver drops events
+/// whose generation doesn't match the current media, preventing stale events
+/// from a previous track from affecting the new one after rapid skips.
+pub(crate) static CONNECT_ENGINE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Fast check to skip the mutex lock when no receiver is active.
+static CONNECT_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Sender for Connect bridge events. Set when receiver is active, None otherwise.
+static CONNECT_BRIDGE_TX: std::sync::Mutex<Option<mpsc::Sender<BridgeEvent>>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn set_connect_bridge_tx(tx: Option<mpsc::Sender<BridgeEvent>>) {
+    let active = tx.is_some();
+    *CONNECT_BRIDGE_TX.lock().unwrap() = tx;
+    CONNECT_BRIDGE_ACTIVE.store(active, Ordering::Release);
+}
 
 pub(crate) struct FlushBatch {
     browser: Option<Browser>,
@@ -37,7 +59,7 @@ pub(crate) fn run_flush_batch(batch: FlushBatch) {
             exec_js_on_frame(frame, &js);
         } else {
             crate::vprintln!(
-                "[BRIDGE] flush DROPPED — {}",
+                "[BRIDGE] flush DROPPED - {}",
                 if batch.browser.is_none() {
                     "no browser"
                 } else {
@@ -122,6 +144,8 @@ fn run_post_lock_effects(mut effects: PostLockEffects) {
 }
 
 pub(crate) fn handle_player_event(event: PlayerEvent) {
+    forward_to_connect_bridge(&event);
+
     let effects = with_state(|state| {
         let mut should_flush = true;
         let mut mc_action = MediaControlAction::None;
@@ -332,5 +356,73 @@ wrap_task! {
         fn execute(&self) {
             handle_player_event(self.event.clone());
         }
+    }
+}
+
+/// Forward player events to the Connect receiver bridge (if active).
+fn forward_to_connect_bridge(event: &PlayerEvent) {
+    if !CONNECT_BRIDGE_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    if matches!(event, PlayerEvent::TimeUpdate(..)) {
+        // Log once to confirm the bridge forwarding path is live
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            crate::vprintln!("[connect::bridge] First TimeUpdate forwarded to receiver");
+        }
+    }
+    let guard = match CONNECT_BRIDGE_TX.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let tx = match guard.as_ref() {
+        Some(tx) => tx,
+        None => return,
+    };
+
+    let engine_gen = CONNECT_ENGINE_GEN.load(Ordering::Relaxed);
+
+    let bridge_event = match event {
+        PlayerEvent::StateChange(state, _seq) => match state {
+            PlaybackState::Ready => Some(BridgeEvent::Prepared { engine_gen }),
+            PlaybackState::Active => Some(BridgeEvent::StatusUpdated {
+                state: ConnectPlayerState::Playing,
+                engine_gen,
+            }),
+            PlaybackState::Paused => Some(BridgeEvent::StatusUpdated {
+                state: ConnectPlayerState::Paused,
+                engine_gen,
+            }),
+            PlaybackState::Idle => Some(BridgeEvent::StatusUpdated {
+                state: ConnectPlayerState::Buffering,
+                engine_gen,
+            }),
+            PlaybackState::Completed => Some(BridgeEvent::PlaybackCompleted {
+                has_next_media: false,
+                engine_gen,
+            }),
+            PlaybackState::Stopped => Some(BridgeEvent::StatusUpdated {
+                state: ConnectPlayerState::Idle,
+                engine_gen,
+            }),
+            _ => None,
+        },
+        PlayerEvent::TimeUpdate(seconds, _seq) => {
+            let ms = (*seconds * 1000.0) as u64;
+            Some(BridgeEvent::ProgressUpdated {
+                progress_ms: ms,
+                duration_ms: 0,
+                engine_gen,
+            })
+        }
+        PlayerEvent::MediaError { error, .. } => Some(BridgeEvent::PlaybackError {
+            status_code: error.clone(),
+            engine_gen,
+        }),
+        _ => None,
+    };
+
+    if let Some(evt) = bridge_event {
+        let _ = tx.try_send(evt);
     }
 }

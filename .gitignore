@@ -11,3 +11,6 @@ frontend/src/plugins/luna-dev-inline.ts
 
 # direnv
 .direnv
+
+# TIDAL Connect server private key (extracted from TIDAL Desktop, not redistributed)
+src/connect/ws/certs/tidal_server_key.pem

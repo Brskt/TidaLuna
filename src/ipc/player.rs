@@ -36,6 +36,8 @@ pub(crate) fn handle_ipc_message(request: &str) {
 
     if msg.channel.starts_with("player.") {
         handle_player_ipc(&msg);
+    } else if msg.channel.starts_with("connect.") {
+        crate::connect::ipc::handle_connect_ipc(&msg);
     } else if msg.channel.starts_with("jsrt.") {
         handle_jsrt_fire_and_forget(&msg);
     } else {
