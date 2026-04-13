@@ -44,6 +44,11 @@ jobs:
         with:
           tool: taplo-cli,cargo-deny
 
+      - name: Write TIDAL Connect private key
+        env:
+          TIDAL_SERVER_KEY_PEM: ${{ secrets.TIDAL_SERVER_KEY_PEM }}
+        run: printf '%s' "$TIDAL_SERVER_KEY_PEM" > src/connect/ws/certs/tidal_server_key.pem
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
@@ -103,6 +108,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: oven-sh/setup-bun@v2
+
+      - name: Write TIDAL Connect private key
+        env:
+          TIDAL_SERVER_KEY_PEM: ${{ secrets.TIDAL_SERVER_KEY_PEM }}
+        shell: bash
+        run: printf '%s' "$TIDAL_SERVER_KEY_PEM" > src/connect/ws/certs/tidal_server_key.pem
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
