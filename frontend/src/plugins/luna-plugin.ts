@@ -1,5 +1,5 @@
 /**
- * LunaPlugin — port of TidaLuna's LunaPlugin class for TidaLunar.
+ * LunaPlugin - port of TidaLuna's LunaPlugin class for TidaLunar.
  *
  * This is a thin CEF-side proxy. It:
  * - Stores display state (name, url, enabled, installed, package)
@@ -219,13 +219,13 @@ export class LunaPlugin {
                 this.enabled = true;
             } catch (enableErr) {
                 console.error(`[luna:plugin] Enable failed, attempting cleanup:`, enableErr);
-                // Best-effort cleanup — guard may block if dependants exist
+                // Best-effort cleanup - guard may block if dependants exist
                 let cleaned = false;
                 try {
                     await invokeIpc("plugin.uninstall", this.url);
                     cleaned = true;
                 } catch {
-                    // Normal uninstall blocked — try dedicated cleanup for never-dispatched plugins
+                    // Normal uninstall blocked - try dedicated cleanup for never-dispatched plugins
                     try {
                         await invokeIpc("plugin.cleanup_failed_install", this.url);
                         cleaned = true;
@@ -310,7 +310,7 @@ export class LunaPlugin {
         } finally {
             this.loading._ = false;
         }
-        // NO catch — errors propagate to caller (reload, uninstall, UI)
+        // NO catch - errors propagate to caller (reload, uninstall, UI)
     }
 
     async reload(): Promise<void> {
@@ -329,7 +329,7 @@ export class LunaPlugin {
         await this.disable();
         this.loading._ = true;
         try {
-            // Rust guard may reject — only mutate local state after success
+            // Rust guard may reject - only mutate local state after success
             await invokeIpc("plugin.uninstall", this.url);
             this.store.installed = false;
             delete LunaPlugin.plugins[this.url];
@@ -348,7 +348,7 @@ export class LunaPlugin {
 
     // --- Settings extraction ---
     // Load plugin code in CEF (as blob URL) to extract the Settings React component.
-    // Plugin .mjs files resolve deps via luna.core.modules (Quartz pattern) — no transform needed.
+    // Plugin .mjs files resolve deps via luna.core.modules (Quartz pattern) - no transform needed.
     // Side effects are reversed via the plugin's unloads Set after extraction.
     // Timeout prevents hanging on top-level awaits (ReactiveStore, observePromise, etc.).
     async extractSettings(): Promise<void> {
@@ -356,7 +356,7 @@ export class LunaPlugin {
             // Try reading exports from the running plugin instance first.
             // The security wrapper registers exports on window.__pluginExports
             // so the Settings component shares state with the actual plugin.
-            // The plugin runs in an async IIFE — exports may not be registered yet.
+            // The plugin runs in an async IIFE - exports may not be registered yet.
             // Wait briefly for the plugin to finish executing before falling back.
             for (let attempt = 0; attempt < 10; attempt++) {
                 const pluginExports = (window as any).__pluginExports?.[this.url];
@@ -387,7 +387,7 @@ export class LunaPlugin {
                     this.exports = { Settings: mod.Settings };
                     console.log(`[luna:plugin] Settings extracted for ${this.name}`);
                 }
-                // Clean up side effects — plugin logic runs via Rust wrapper, not this import
+                // Clean up side effects - plugin logic runs via Rust wrapper, not this import
                 if (mod.unloads instanceof Set) {
                     const fns = Array.from(mod.unloads);
                     for (let i = fns.length - 1; i >= 0; i--) {
@@ -415,7 +415,7 @@ export class LunaPlugin {
             if (!this.liveReload || !this.enabled) return;
             this.fetching._ = true;
             try {
-                // Read-only hash check — re-fetches code, computes hash, does NOT touch DB
+                // Read-only hash check - re-fetches code, computes hash, does NOT touch DB
                 const result = await invokeIpc("plugin.check_hash", this.url);
                 const newHash = result?.hash;
                 if (newHash && newHash !== this.store.package.hash) {
@@ -533,7 +533,7 @@ export class LunaPlugin {
     }
 
     /**
-     * Resolve a plugin from storage/URL — used by Plugin Store UI.
+     * Resolve a plugin from storage/URL - used by Plugin Store UI.
      * Fetches package metadata from {url}.json (Rust-side) for proper
      * name/author/description. Does NOT install or enable the plugin.
      */
@@ -569,7 +569,7 @@ export class LunaPlugin {
         return plugin;
     }
 
-    /** Alias for store.package — used by Plugin Store UI */
+    /** Alias for store.package - used by Plugin Store UI */
     get package(): PluginPackage {
         return this.store.package;
     }

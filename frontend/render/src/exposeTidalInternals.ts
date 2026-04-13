@@ -1,9 +1,9 @@
 // Runtime discovery of Redux store via React Fiber tree walk.
-// TIDAL uses Vite/Rollup — no webpack runtime, no module cache accessible.
+// TIDAL uses Vite/Rollup - no webpack runtime, no module cache accessible.
 
 import { interceptors } from "./exposeTidalInternals.patchAction";
 
-// Best-effort module registry. Empty under Vite/Rollup — no module cache accessible.
+// Best-effort module registry. Empty under Vite/Rollup - no module cache accessible.
 export const tidalModules: Record<string, object> = {};
 
 const POLL_INTERVAL = 100;
@@ -121,7 +121,7 @@ export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 	}
 
 	if (!reduxStore) {
-		document.title = "TidaLunar — Failed to initialize";
+		document.title = "TidaLunar - Failed to initialize";
 		throw new Error("[luna] Redux store not found within timeout");
 	}
 

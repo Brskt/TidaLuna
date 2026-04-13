@@ -105,7 +105,7 @@ impl GovernorHandle {
             reply: tx,
         };
         if self.request_tx.send(req).await.is_err() {
-            return; // governor dead — fallback
+            return; // governor dead - fallback
         }
         let _ = rx.await;
     }
@@ -182,7 +182,7 @@ impl PreloadGate {
                 PreloadGate::Paused if secs > 2.0 => PreloadGate::Active,
                 other => other,
             },
-            // Bitrate unknown — fallback byte-based (assume ~200 KB/s)
+            // Bitrate unknown - fallback byte-based (assume ~200 KB/s)
             None => match self {
                 PreloadGate::Active if ahead < 200_000 => PreloadGate::Paused,
                 PreloadGate::Paused if ahead > 400_000 => PreloadGate::Active,
@@ -396,7 +396,7 @@ impl GovernorState {
             return;
         }
 
-        // Download complete — no starvation possible
+        // Download complete - no starvation possible
         let written = bp.written.load(Relaxed);
         if written >= total_len {
             self.starvation_since = None;
@@ -435,7 +435,7 @@ impl GovernorState {
     }
 
     fn update_playback_throttle(&mut self, bp: &BufferProgress) {
-        // Don't throttle during seek boost — data is needed urgently
+        // Don't throttle during seek boost - data is needed urgently
         if self.boost_start.is_some() {
             if self.playback_throttled {
                 self.playback_throttled = false;
@@ -465,7 +465,7 @@ impl GovernorState {
                 }
             }
             None => {
-                // Bitrate unknown — fallback byte-based
+                // Bitrate unknown - fallback byte-based
                 let ahead = bp.ahead();
                 if !self.playback_throttled && ahead > 1_000_000 {
                     self.playback_throttled = true;

@@ -1,4 +1,4 @@
-// TidaLunar: IPC adapter — routes through __ipcRenderer globals set by our bootstrap
+// TidaLunar: IPC adapter - routes through __ipcRenderer globals set by our bootstrap
 import type { AnyFn } from "@inrixia/helpers";
 import type { LunaUnloads } from "@luna/core";
 

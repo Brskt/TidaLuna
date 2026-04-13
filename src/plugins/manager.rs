@@ -7,7 +7,7 @@ pub enum PluginState {
     /// Code dispatched to renderer, awaiting `plugin_ready` ack.
     /// Fields: (load_id, nonce)
     Loading(u64, u64),
-    /// Ack received — plugin fully initialized.
+    /// Ack received - plugin fully initialized.
     /// Fields: (load_id, nonce)
     Ready(u64, u64),
 }
@@ -20,7 +20,7 @@ fn random_nonce() -> u64 {
 
 /// Manages plugin lifecycle: transpile, wrap, prepare for CEF injection.
 ///
-/// The PluginManager does NOT inject code into CEF directly — it returns
+/// The PluginManager does NOT inject code into CEF directly - it returns
 /// JS strings that the caller passes to `eval_js()`.
 ///
 /// Flow:
@@ -56,9 +56,9 @@ impl PluginManager {
     }
 
     /// Mark a plugin as Loading (code dispatched, awaiting ack).
-    /// `name` is the manifest name (e.g. "DiscordRPC") — stored in the reverse
+    /// `name` is the manifest name (e.g. "DiscordRPC") - stored in the reverse
     /// mapping so `registerNative` can validate the caller.
-    /// Returns `(load_id, nonce)` — both injected into the wrapper for ack correlation.
+    /// Returns `(load_id, nonce)` - both injected into the wrapper for ack correlation.
     pub fn mark_loading(&mut self, plugin_id: &str, name: &str) -> (u64, u64) {
         let load_id = self.next_load_id;
         self.next_load_id += 1;

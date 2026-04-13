@@ -1,5 +1,5 @@
 /**
- * Minimal counting Semaphore — drop-in for @inrixia/helpers Semaphore.
+ * Minimal counting Semaphore - drop-in for @inrixia/helpers Semaphore.
  * Used by LunaPlugin to prevent concurrent loads.
  */
 export class Semaphore {

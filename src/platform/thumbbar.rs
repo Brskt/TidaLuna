@@ -1,6 +1,6 @@
 //! Windows taskbar thumbnail toolbar buttons (Previous / Play-Pause / Next).
 //!
-//! Uses the `ITaskbarList3` COM interface via a raw vtable wrapper — only the
+//! Uses the `ITaskbarList3` COM interface via a raw vtable wrapper - only the
 //! four methods we need are typed, the rest are placeholder `usize` slots.
 //! Icons are 16×16 BGRA bitmaps created at runtime via `CreateIconIndirect`.
 
@@ -81,7 +81,7 @@ const BTN_NEXT: u32 = 2;
 
 // ---- THUMBBUTTON flags / masks (windows-sys uses flat constants) ----
 
-// THB_ICON = 0x2 — the hIcon field is valid
+// THB_ICON = 0x2 - the hIcon field is valid
 const THB_ICON: i32 = 0x2;
 // THBF_ENABLED = 0x0
 const THBF_ENABLED: i32 = 0x0;
@@ -140,7 +140,7 @@ fn draw_tri_left(buf: &mut [u8; 16 * 16 * 4], x_end: u32, max_w: f32) {
     }
 }
 
-/// |◀  — thin bar + left-pointing triangle
+/// |◀  - thin bar + left-pointing triangle
 fn draw_prev(buf: &mut [u8; 16 * 16 * 4]) {
     for row in 4u32..=12 {
         set_px(buf, row, 3, 0xFF);
@@ -149,12 +149,12 @@ fn draw_prev(buf: &mut [u8; 16 * 16 * 4]) {
     draw_tri_left(buf, 12, 7.0);
 }
 
-/// ▶  — right-pointing triangle (play)
+/// ▶  - right-pointing triangle (play)
 fn draw_play(buf: &mut [u8; 16 * 16 * 4]) {
     draw_tri_right(buf, 5, 7.0);
 }
 
-/// ⏸  — two vertical bars (pause)
+/// ⏸  - two vertical bars (pause)
 fn draw_pause(buf: &mut [u8; 16 * 16 * 4]) {
     for row in 4u32..=12 {
         set_px(buf, row, 5, 0xFF);
@@ -164,7 +164,7 @@ fn draw_pause(buf: &mut [u8; 16 * 16 * 4]) {
     }
 }
 
-/// ▶|  — right-pointing triangle + thin bar
+/// ▶|  - right-pointing triangle + thin bar
 fn draw_next(buf: &mut [u8; 16 * 16 * 4]) {
     draw_tri_right(buf, 3, 7.0);
     for row in 4u32..=12 {
@@ -290,7 +290,7 @@ impl ThumbBar {
             let hr = ((*vtbl).thumb_bar_add_buttons)(obj, hwnd, 3, buttons.as_ptr());
             if hr != S_OK {
                 crate::vprintln!("[THUMBBAR] ThumbBarAddButtons failed: 0x{:08X}", hr);
-                // Still return Some — the COM object is valid, buttons may show later
+                // Still return Some - the COM object is valid, buttons may show later
             }
 
             Some(ThumbBar {

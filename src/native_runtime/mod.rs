@@ -1,6 +1,6 @@
 //! Bun child process manager for native plugin modules.
 //!
-//! Plugins can include `.native.ts` files — CJS bundles targeting Node.js.
+//! Plugins can include `.native.ts` files - CJS bundles targeting Node.js.
 //! In upstream TidaLuna (Electron), these run in Node.js main process.
 //! Here we spawn a Bun child process and communicate via JSON lines on stdin/stdout.
 //!
@@ -33,7 +33,7 @@ pub struct NativeRuntime {
 
 impl NativeRuntime {
     /// The native-host sandbox script, embedded at compile time.
-    /// Never written to disk — sent to Bun via stdin at spawn.
+    /// Never written to disk - sent to Bun via stdin at spawn.
     const HOST_SCRIPT: &str = include_str!("../../frontend/scripts/native-host.cjs");
 
     /// Bootstrap: Function() wrapper provides a proper CJS module scope
@@ -46,7 +46,7 @@ impl NativeRuntime {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // Find bundled Bun binary — no PATH fallback (fail closed)
+        // Find bundled Bun binary - no PATH fallback (fail closed)
         let bun_path = find_binary(&exe_dir, if cfg!(windows) { "bun.exe" } else { "bun" })
             .ok_or_else(|| {
                 anyhow::anyhow!("Bun binary not found. Native plugin modules require Bun in bin/.")
@@ -63,7 +63,7 @@ impl NativeRuntime {
             .kill_on_drop(true);
 
         // Hygiene: strip inherited env, only pass safe vars (matches upstream TidaLuna).
-        // This is NOT a security boundary — absolute paths and OS APIs remain accessible.
+        // This is NOT a security boundary - absolute paths and OS APIs remain accessible.
         cmd.env_clear();
         for key in [
             // Upstream TidaLuna whitelist (temp/home/path)
@@ -175,7 +175,7 @@ impl NativeRuntime {
                 }
             }
 
-            // EOF — Bun process exited. Drain all pending with errors.
+            // EOF - Bun process exited. Drain all pending with errors.
             if let Ok(mut map) = pending_clone.lock() {
                 for (_, tx) in map.drain() {
                     let _ = tx.send(Err("Bun process exited".to_string()));
@@ -202,10 +202,10 @@ impl NativeRuntime {
 
     /// Send a command to the Bun process and return a receiver for the response.
     ///
-    /// This is synchronous — safe to call under a lock. The caller `.await`s the
+    /// This is synchronous - safe to call under a lock. The caller `.await`s the
     /// receiver outside the lock to get the result.
     ///
-    /// The command JSON must NOT contain an `"id"` field — one is assigned
+    /// The command JSON must NOT contain an `"id"` field - one is assigned
     /// automatically and injected into the command before sending.
     pub fn send_command(
         &self,
@@ -251,6 +251,6 @@ fn find_binary(exe_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     if local.exists() {
         return Some(local);
     }
-    // No PATH fallback — fail closed for security
+    // No PATH fallback - fail closed for security
     None
 }

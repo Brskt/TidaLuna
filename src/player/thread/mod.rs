@@ -35,7 +35,7 @@ enum DecodeEvent {
     Finished,
     /// Decode error (non-fatal, logged).
     Error(String),
-    /// Seek completed — audio output can resume.
+    /// Seek completed - audio output can resume.
     SeekComplete,
 }
 

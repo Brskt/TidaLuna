@@ -54,7 +54,7 @@ export function updateMetadata(item: any) {
             album: item.album || "",
             artwork,
         });
-        sendIpc("player.dbg", "[MediaSession] metadata:", item.title, "—", item.artist);
+        sendIpc("player.dbg", "[MediaSession] metadata:", item.title, "-", item.artist);
     } catch (e) {
         sendIpc("player.dbg", "[MediaSession] metadata failed: " + e);
     }

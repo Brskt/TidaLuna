@@ -6,7 +6,7 @@ pub(crate) struct TrustDecision {
 }
 
 /// Load persisted trust decisions for a plugin, deduplicated by module.
-/// Not filtered by hash — settings extraction can produce slightly
+/// Not filtered by hash - settings extraction can produce slightly
 /// different code (and thus a different hash) for the same plugin.
 /// When multiple rows exist for the same module (different hashes),
 /// keeps only the most recently inserted decision (highest rowid).

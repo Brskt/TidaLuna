@@ -10,7 +10,7 @@ use super::download::{cleanup_staging, download_update};
 use super::types::{Manifest, UPDATER_STATE, UpdateInfo, UpdaterPhase};
 use super::util::exe_dir;
 
-/// Handle `updater.check` — manual check triggered by UI.
+/// Handle `updater.check` - manual check triggered by UI.
 /// Returns JSON UpdateInfo or null.
 pub(crate) fn handle_updater_check(callback: crate::app_state::IpcCallback) {
     crate::state::rt_handle().spawn(async move {
@@ -104,7 +104,7 @@ pub(crate) fn handle_updater_status(callback: crate::app_state::IpcCallback) {
     });
 }
 
-/// Handle `updater.apply` — user confirmed, spawn updater and quit.
+/// Handle `updater.apply` - user confirmed, spawn updater and quit.
 pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
     let version = msg.arg(0).to_string();
 
@@ -194,7 +194,7 @@ pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
     }
 }
 
-/// Handle `updater.dismiss` — user clicked "Skip this version".
+/// Handle `updater.dismiss` - user clicked "Skip this version".
 pub(crate) fn handle_updater_dismiss(msg: &crate::app_state::IpcMessage) {
     let version = msg.arg(0).to_string();
 

@@ -9,7 +9,7 @@ export const defaultBuildOptions: BuildOptions = {
 	target: "esnext",
 };
 
-/** Modules resolved at runtime via window.require() — shared by UI and dev inline builds. */
+/** Modules resolved at runtime via window.require() - shared by UI and dev inline builds. */
 export const RUNTIME_EXTERNALS = [
 	"@luna/core",
 	"@luna/lib",
@@ -20,7 +20,7 @@ export const RUNTIME_EXTERNALS = [
 	"react/jsx-runtime",
 ];
 
-/** Packages that only export TypeScript types — no JS at runtime. */
+/** Packages that only export TypeScript types - no JS at runtime. */
 export const TYPE_ONLY_PACKAGES = [
 	"@octokit/openapi-types",
 ];

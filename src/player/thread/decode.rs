@@ -190,7 +190,7 @@ fn decode_loop(cfg: DecodeThreadConfig) {
     let mut first_push_logged = false;
 
     loop {
-        // Process commands — block when paused (zero CPU), poll when active.
+        // Process commands - block when paused (zero CPU), poll when active.
         loop {
             let cmd = if paused {
                 match cmd_rx.recv() {
@@ -234,7 +234,7 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                 if e.kind() == std::io::ErrorKind::UnexpectedEof
                     || e.kind() == std::io::ErrorKind::Interrupted =>
             {
-                // EOF — flush resampler pipeline before signaling completion
+                // EOF - flush resampler pipeline before signaling completion
                 if let Some(ref mut pipe) = pipeline {
                     let flushed = pipe.flush();
                     let mut off = 0;

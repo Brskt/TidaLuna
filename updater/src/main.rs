@@ -211,7 +211,7 @@ fn run() -> Result<()> {
     let manifest_name = format!("manifest-{TARGET}.json");
 
     let manifest = if args.skip_download {
-        // Pre-downloaded by main process — re-verify signature and validate version
+        // Pre-downloaded by main process - re-verify signature and validate version
         eprintln!("[updater] Using pre-downloaded staging...");
         let sig_name = format!("{manifest_name}.sig");
 
@@ -380,7 +380,7 @@ fn run() -> Result<()> {
     };
     write_journal(&journal_path, &journal)?;
 
-    // 9. Commit phase — rename originals to .bak, move staged to final
+    // 9. Commit phase - rename originals to .bak, move staged to final
     eprintln!("[updater] Applying update...");
     for jf in &journal.files {
         let original = args.app_dir.join(&jf.path);
@@ -403,7 +403,7 @@ fn run() -> Result<()> {
 
         // Move staged → final position
         if let Err(e) = fs::rename(&staged, &original) {
-            // rename failed — try copy as fallback (cross-device)
+            // rename failed - try copy as fallback (cross-device)
             fs::copy(&staged, &original)
                 .with_context(|| format!("failed to install {} (rename: {e})", jf.path))?;
             fs::remove_file(&staged).ok();
@@ -563,7 +563,7 @@ fn probe_exclusive_access(app_dir: &Path) -> Result<()> {
 
         if locked {
             let display = path.file_name().unwrap_or_default().to_string_lossy();
-            bail!("{display} is still locked by another process — cannot update");
+            bail!("{display} is still locked by another process - cannot update");
         }
     }
     Ok(())
@@ -618,7 +618,7 @@ fn try_exclusive_access(path: &Path) -> Result<bool> {
     let fd = file.as_raw_fd();
     let result = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
     if result == 0 {
-        // Got the lock — unlock and report accessible
+        // Got the lock - unlock and report accessible
         unsafe { flock(fd, LOCK_UN) };
         Ok(true)
     } else {
@@ -663,7 +663,7 @@ fn verify_manifest_signature(manifest_bytes: &[u8], sig_b64: &str) -> Result<()>
         VerifyingKey::from_bytes(&UPDATE_PUBLIC_KEY).context("invalid embedded public key")?;
     verifying_key
         .verify(manifest_bytes, &signature)
-        .context("manifest signature verification FAILED — update rejected")?;
+        .context("manifest signature verification FAILED - update rejected")?;
     eprintln!("[updater] Manifest signature verified");
     Ok(())
 }
@@ -824,7 +824,7 @@ fn recover_journal(app_dir: &Path) -> Result<bool> {
                 let original = app_dir.join(&jf.path);
                 let backup = app_dir.join(&jf.backup);
                 if jf.is_new {
-                    // No original existed — remove the newly installed file
+                    // No original existed - remove the newly installed file
                     fs::remove_file(&original).ok();
                 } else if backup.exists() {
                     if original.exists() {
@@ -884,7 +884,7 @@ fn relaunch(app_dir: &Path) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — app will create its own
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW - app will create its own
     }
 
     cmd.spawn()

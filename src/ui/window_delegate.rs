@@ -234,7 +234,7 @@ wrap_window_delegate! {
             }
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
-            // Read without consuming — CEF may call can_close multiple times
+            // Read without consuming - CEF may call can_close multiple times
             // during the browser close handshake. Cleared in on_window_destroyed.
             let force_quit = with_state(|state| state.force_quit).unwrap_or(false);
             if !force_quit {

@@ -201,7 +201,7 @@ async fn do_refresh(refresh_token: String, client_id: String) {
 
     let masked = &at[..at.len().min(12)];
     crate::vprintln!(
-        "[AUTH]   Proactive refresh complete ({}... {} chars) — opaques pushed to SDK",
+        "[AUTH]   Proactive refresh complete ({}... {} chars) - opaques pushed to SDK",
         masked,
         at.len()
     );

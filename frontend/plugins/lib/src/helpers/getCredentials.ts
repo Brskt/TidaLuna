@@ -8,7 +8,7 @@ export type TidalCredentials = {
 	userId: string;
 };
 
-/** @deprecated Token is now managed server-side by Rust. Use TidalApi.fetch() instead — authentication is handled transparently. */
+/** @deprecated Token is now managed server-side by Rust. Use TidalApi.fetch() instead - authentication is handled transparently. */
 export const getCredentials = async (): Promise<never> => {
-	throw new Error("getCredentials() removed for security. Use TidalApi.fetch() — authentication is handled transparently.");
+	throw new Error("getCredentials() removed for security. Use TidalApi.fetch() - authentication is handled transparently.");
 };

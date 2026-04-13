@@ -10,7 +10,7 @@ type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static
 /// All SQLite operations go through [`call`](DbActor::call), which sends a
 /// closure to the dedicated thread and blocks until the result is ready.
 ///
-/// `DbActor` is `Clone + Send + Sync` — it only holds a channel sender and
+/// `DbActor` is `Clone + Send + Sync` - it only holds a channel sender and
 /// the actor thread ID (for re-entrancy detection).
 #[derive(Clone)]
 pub(crate) struct DbActor {
@@ -79,7 +79,7 @@ impl DbActor {
     {
         assert!(
             std::thread::current().id() != self.actor_thread_id,
-            "DbActor::call() invoked from the db-actor thread — this would deadlock"
+            "DbActor::call() invoked from the db-actor thread - this would deadlock"
         );
         let (resp_tx, resp_rx) = mpsc::sync_channel::<R>(0);
         self.tx

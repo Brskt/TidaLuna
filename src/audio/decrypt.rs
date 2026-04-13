@@ -100,7 +100,7 @@ impl FlacDecryptor {
     }
 
     /// Decrypt in-place: applies AES-128-CTR keystream directly on the mutable buffer.
-    /// Avoids heap allocations — the caller's buffer IS the output.
+    /// Avoids heap allocations - the caller's buffer IS the output.
     pub fn decrypt_in_place(&self, data: &mut [u8], byte_offset: u64) -> anyhow::Result<()> {
         if data.is_empty() {
             return Ok(());

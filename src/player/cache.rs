@@ -81,7 +81,7 @@ impl AudioCache {
     }
 
     /// Check if a track exists in the index and return its file path.
-    /// Does NOT read from disk — suitable for use under a short lock.
+    /// Does NOT read from disk - suitable for use under a short lock.
     pub fn lookup_path(&self, track_id: &str) -> Option<PathBuf> {
         let exists: bool = self
             .conn

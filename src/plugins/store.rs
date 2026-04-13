@@ -30,9 +30,9 @@ pub(crate) struct LunaDependency {
 }
 
 /// Parse the `luna` field from a plugin manifest JSON string.
-/// - `Ok(None)`: no `luna` field — classic plugin without metadata
+/// - `Ok(None)`: no `luna` field - classic plugin without metadata
 /// - `Ok(Some(meta))`: valid `luna` field
-/// - `Err(msg)`: `luna` field present but malformed — caller must block the operation
+/// - `Err(msg)`: `luna` field present but malformed - caller must block the operation
 pub(crate) fn parse_luna_meta(manifest: &str) -> Result<Option<LunaMeta>, String> {
     let json: serde_json::Value =
         serde_json::from_str(manifest).map_err(|e| format!("Invalid manifest JSON: {e}"))?;
@@ -72,7 +72,7 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         [],
     ) {
         Ok(_) => {
-            // New column — backfill ALL installed plugins (fail-closed:
+            // New column - backfill ALL installed plugins (fail-closed:
             // any existing plugin may have been dispatched in a past session)
             conn.execute(
                 "UPDATE plugins SET ever_dispatched = 1 WHERE installed = 1",
@@ -230,7 +230,7 @@ fn find_dependants_inner(
     let mut dependants = Vec::new();
     for (name, manifest) in &rows {
         match parse_luna_meta(manifest) {
-            Ok(None) => {} // no luna field — not a dependant
+            Ok(None) => {} // no luna field - not a dependant
             Ok(Some(meta)) => {
                 if meta.dependencies.iter().any(|d| d.name == plugin_name) {
                     dependants.push(name.clone());
@@ -388,7 +388,7 @@ pub(crate) fn collect_enabled_code(conn: &mut Connection) -> Vec<EnabledPlugin> 
 /// Losers are DELETEd from both `plugins` and `plugin_storage`.
 /// Returns `(url, name)` pairs of deleted duplicates.
 pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
-    // Collect (name, url) pairs for losers — must finish all borrows before mutating
+    // Collect (name, url) pairs for losers - must finish all borrows before mutating
     let losers: Vec<(String, String)> = {
         let mut dup_stmt = match conn.prepare(
             "SELECT name FROM plugins WHERE installed = 1 GROUP BY name HAVING COUNT(*) > 1",

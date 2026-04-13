@@ -70,7 +70,7 @@ export const isLoginCallback = (): boolean =>
 
 /**
  * Authenticated fetch restricted to TIDAL API hosts.
- * Routes through Rust via `tidal.fetch` IPC — the OAuth token is injected
+ * Routes through Rust via `tidal.fetch` IPC - the OAuth token is injected
  * server-side and never exposed to JavaScript.
  */
 export interface TidalFetchResponse {

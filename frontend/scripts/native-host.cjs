@@ -1,9 +1,9 @@
-// Native plugin host — sandboxed with module trust + global hardening.
+// Native plugin host - sandboxed with module trust + global hardening.
 //
 // Plugins are loaded in a wrapper that shadows dangerous globals.
 // Only whitelisted modules pass through require() directly.
 // Forbidden modules are permanently blocked (no trust possible).
-// Blocked modules throw TRUST_REQUIRED:<module> — Rust parses this
+// Blocked modules throw TRUST_REQUIRED:<module> - Rust parses this
 // sentinel, prompts the user, and re-sends the register command
 // with the module granted.
 //
@@ -19,7 +19,7 @@
 // - SAFE_MODULES exports frozen (prevents cross-plugin mutation)
 //
 // This is a JS-level guardrail, not an OS-level sandbox.
-// Function constructor remains available — constructed code lands in
+// Function constructor remains available - constructed code lands in
 // the same hardened realm with no privileged access.
 
 const readline = require("readline");
@@ -48,17 +48,17 @@ const FORBIDDEN_MODULES = new Set([
 ]);
 
 // ── Blocked modules (require explicit user trust) ───────────────────────
-// These provide filesystem/subprocess/system/network access — require explicit user trust.
+// These provide filesystem/subprocess/system/network access - require explicit user trust.
 const BLOCKED_MODULES = new Set([
     "fs", "fs/promises", "os", "dgram",
     "diagnostics_channel", "worker_threads",
-    // Network — raw TCP/TLS/HTTP connections to arbitrary servers
+    // Network - raw TCP/TLS/HTTP connections to arbitrary servers
     "net", "http", "https", "http2", "tls", "dns", "dns/promises",
 ]);
 
 // ── Pre-load safe + blocked modules so Bun internal closures capture refs ──
 // Must happen before any globalThis mutation. Lazy init (bindings, stream
-// internals) completes now with mutable prototypes — we freeze later.
+// internals) completes now with mutable prototypes - we freeze later.
 // Blocked modules are pre-loaded too so their exports can be frozen (prevents
 // cross-plugin mutation when two plugins both receive network trust).
 SAFE_MODULES.forEach(function(id) {
@@ -107,7 +107,7 @@ const mockedProcess = Object.freeze({
 });
 
 // ── Host-private refs (captured before globalThis hardening) ───────────
-// After this point, host code must use these — not the globals.
+// After this point, host code must use these - not the globals.
 var hostStdin = process.stdin;
 var hostStdout = process.stdout;
 var hostStderr = process.stderr;
@@ -121,7 +121,7 @@ var _JSONStringify = JSON.stringify;
 var _JSONParse = JSON.parse;
 var _RealRequest = typeof Request !== "undefined" ? Request : undefined;
 var _RealURL = typeof URL !== "undefined" ? URL : undefined;
-// Prototype methods — immune to prototype pollution
+// Prototype methods - immune to prototype pollution
 var _ArrayPrototypeJoin = Array.prototype.join;
 var _ArrayPrototypeForEach = Array.prototype.forEach;
 var _ArrayPrototypePush = Array.prototype.push;
@@ -149,11 +149,11 @@ var shimmedWorkerThreads = (function() {
 })();
 
 // ── Harden globalThis.process via Proxy ───────────────────────────────
-// Cannot fully replace — Bun's network modules need process.nextTick etc.
+// Cannot fully replace - Bun's network modules need process.nextTick etc.
 // Proxy blocks dangerous properties while passing safe internals through.
 // process.binding() is filtered to only the names http/net/tls need at
 // require-time (http_parser, uv). Since SAFE_MODULES are pre-loaded above,
-// binding is never actually called again — the filter is defense-in-depth.
+// binding is never actually called again - the filter is defense-in-depth.
 ;(function hardenProcess() {
     var realProcess = process;
     var blockedKeys = new Set([
@@ -193,7 +193,7 @@ var shimmedWorkerThreads = (function() {
 })();
 
 // ── Neutralize console (IPC spoofing prevention) ──────────────────────
-// console.log writes to stdout — the same fd as host IPC (JSON lines).
+// console.log writes to stdout - the same fd as host IPC (JSON lines).
 // A plugin could forge IPC responses via console.log. Redirect all
 // console output to stderr only.
 ;(function hardenConsole() {
@@ -217,7 +217,7 @@ var shimmedWorkerThreads = (function() {
 
 // ── Neuter Async/Generator constructors ────────────────────────────────
 // Prevents import() bypass via (async function(){}).constructor("return await import('fs')")().
-// Function.prototype.constructor is NOT touched — breaks stream/events/util.
+// Function.prototype.constructor is NOT touched - breaks stream/events/util.
 ;(function neuterAsyncConstructors() {
     var ctors = [
         (async function(){}).constructor,
@@ -238,7 +238,7 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir) {
         if (id === "@luna/native-data" || id === "node:@luna/native-data")
             return _ObjectFreeze({ dir: dataDir });
 
-        // Return hardened console (stderr-only) — real require('console') is stdout-backed
+        // Return hardened console (stderr-only) - real require('console') is stdout-backed
         if (id === "console" || id === "node:console") return globalThis.console;
 
         if (isSafe(id)) return require(id);
@@ -276,12 +276,12 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir) {
             throw new Error("TRUST_REQUIRED:" + canonical);
         }
 
-        // Relative/absolute paths — blocked
+        // Relative/absolute paths - blocked
         if (id.startsWith(".") || id.startsWith("/") || /^[a-zA-Z]:/.test(id)) {
             throw new Error("[sandbox] require('" + id + "') blocked: paths not allowed");
         }
 
-        // Unknown third-party — blocked
+        // Unknown third-party - blocked
         throw new Error("[sandbox] require('" + id + "') blocked: not in whitelist");
     };
 }
@@ -291,16 +291,16 @@ var transpiler;
 try { transpiler = new Bun.Transpiler({ loader: "js" }); } catch (e) { /* fallback below */ }
 
 function containsDynamicImport(code) {
-    if (!transpiler) return true; // can't verify — block (fail-closed)
+    if (!transpiler) return true; // can't verify - block (fail-closed)
     try {
         var result = transpiler.scan(code);
         return result.imports.some(function(i) { return i.kind === "dynamic-import"; });
     } catch (e) {
-        return true; // unparseable — block (fail-closed)
+        return true; // unparseable - block (fail-closed)
     }
 }
 
-// ── Harden eval — scan for dynamic import() before delegating ─────────
+// ── Harden eval - scan for dynamic import() before delegating ─────────
 // eval("import('fs')") bypasses containsDynamicImport (AST scan of source)
 // because the import() is inside a string literal. This wrapper scans the
 // final runtime string. Runs on the evaluated string, so concatenation
@@ -317,7 +317,7 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Harden Function constructor — scan for dynamic import() ───────────
+// ── Harden Function constructor - scan for dynamic import() ───────────
 // new Function("return import('fs')")() and (function(){}).constructor("...")
 // bypass containsDynamicImport the same way as eval. Replace both
 // globalThis.Function and Function.prototype.constructor with a scanning
@@ -341,10 +341,10 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Harden globalThis.Bun — neuter dangerous methods in-place ─────────
+// ── Harden globalThis.Bun - neuter dangerous methods in-place ─────────
 // globalThis.Bun is non-configurable in Bun 1.3.x (ReadOnly|DontDelete),
 // so we cannot replace it. But properties ON the Bun object (spawn, file,
-// write, etc.) are writable — we neuter them individually.
+// write, etc.) are writable - we neuter them individually.
 ;(function hardenBun() {
     var realBun = globalThis.Bun;
     if (!realBun) return;
@@ -373,7 +373,7 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Block globalThis.require/module/exports — prevent proxy bypass ────
+// ── Block globalThis.require/module/exports - prevent proxy bypass ────
 ;(function hardenGlobalRequire() {
     _ArrayPrototypeForEach.call(["require", "module", "exports", "__dirname", "__filename"], function(prop) {
         _ObjectDefineProperty(globalThis, prop, {
@@ -383,17 +383,17 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Block fetch — native plugins must use require('http'/'https') with trust dialog ──
+// ── Block fetch - native plugins must use require('http'/'https') with trust dialog ──
 ;(function hardenFetch() {
     _ObjectDefineProperty(globalThis, "fetch", {
-        value: function() { throw new Error("[sandbox] fetch is not available — use require('http') or require('https')"); },
+        value: function() { throw new Error("[sandbox] fetch is not available - use require('http') or require('https')"); },
         writable: false, configurable: false,
     });
 })();
 
 // ── Block realm creators and dangerous network globals on globalThis ──
 ;(function hardenGlobals() {
-    // Realm creators + WebSocket — no upstream plugin uses the browser WebSocket global
+    // Realm creators + WebSocket - no upstream plugin uses the browser WebSocket global
     // (DiscordRPC uses net IPC, ws-based plugins use require('ws') which goes through
     // http/net SAFE_MODULES, not globalThis.WebSocket)
     _ArrayPrototypeForEach.call(["Worker", "ShadowRealm", "WebSocket"], function(prop) {
@@ -432,7 +432,7 @@ function containsDynamicImport(code) {
     });
 
     // Built-in prototypes (Object, Array, Function, String, Promise, Error, etc.)
-    // are NOT frozen — npm packages bundled into plugins assign to inherited
+    // are NOT frozen - npm packages bundled into plugins assign to inherited
     // property names (e.g. node-inspect-extracted), which throws in strict mode
     // when the prototype is frozen. The shared-module mutation vector is covered
     // by freezeSafeModuleExports() below instead.
@@ -457,9 +457,9 @@ function containsDynamicImport(code) {
 
 // ── Eval wrapper ────────────────────────────────────────────────────────
 // Shadows dangerous globals as parameters set to undefined.
-// Parameter shadows are defense-in-depth — globalThis is hardened above.
+// Parameter shadows are defense-in-depth - globalThis is hardened above.
 // "eval" and "Function" cannot be shadowed (strict mode / fundamental built-in).
-// Direct eval(...) and Function(...) remain available — known JS-level
+// Direct eval(...) and Function(...) remain available - known JS-level
 // limitation. Constructed code lands in the same hardened realm.
 const SHADOW_PARAMS = [
     "module", "exports", "require",
@@ -493,10 +493,10 @@ var _protoSnapshot = (function() {
 })();
 function restorePrototypes() {
     // Restore modified/deleted descriptors to their startup state.
-    // Added properties are NOT deleted — plugins may install polyfills at
+    // Added properties are NOT deleted - plugins may install polyfills at
     // registration time that their exported functions need during later calls.
     // The snapshot covers all security-critical built-in methods; a plugin
-    // cannot shadow e.g. Array.prototype.push via an addition — it would
+    // cannot shadow e.g. Array.prototype.push via an addition - it would
     // need to modify the existing descriptor, which IS caught here.
     for (var i = 0; i < _protoSnapshot.length; i++) {
         try { _ObjectDefineProperty(_protoSnapshot[i][0], _protoSnapshot[i][1], _protoSnapshot[i][2]); } catch(_) {}

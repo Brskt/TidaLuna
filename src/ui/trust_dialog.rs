@@ -1,4 +1,4 @@
-//! Native trust dialog — separate CEF window, isolated from the main renderer.
+//! Native trust dialog - separate CEF window, isolated from the main renderer.
 //!
 //! JS in the main TIDAL page cannot interact with this window:
 //! different browser, different Client, no shared IPC channel.
@@ -16,7 +16,7 @@ const DIALOG_W: i32 = 620;
 const DIALOG_H: i32 = 460;
 
 /// Show a trust dialog and return the user's decision via a oneshot channel.
-/// Can be called from any thread — internally posts to the CEF UI thread.
+/// Can be called from any thread - internally posts to the CEF UI thread.
 pub(crate) fn show_trust_dialog(
     plugin_name: &str,
     module_name: &str,

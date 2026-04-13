@@ -273,7 +273,7 @@ fn print_track_banner(format: &str) {
         None => ("Unknown", "Unknown", format_upper.as_str()),
     };
     crate::vprintln!("══════════════════════════════════════════");
-    crate::vprintln!("  {} — {}", title, artist);
+    crate::vprintln!("  {} - {}", title, artist);
     crate::vprintln!("  Quality: {} | Format: {}", quality, format);
     crate::vprintln!("══════════════════════════════════════════");
 }
@@ -305,7 +305,7 @@ fn try_cache_hit(ctx: &LoadContext, track_id: &str) -> LoadStep {
         Ok(d) => d,
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                // File missing — clean orphaned index entry
+                // File missing - clean orphaned index entry
                 if let Ok(cache) = AUDIO_CACHE.lock() {
                     cache.remove_index_entry(track_id);
                 }
@@ -585,7 +585,7 @@ impl Player {
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         crate::vprintln!(
-            "[DASH-LOAD #{load_gen}] start — {} segments",
+            "[DASH-LOAD #{load_gen}] start - {} segments",
             segment_urls.len()
         );
         print_track_banner(&format);

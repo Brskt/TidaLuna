@@ -31,7 +31,6 @@ export const InstallFromUrl = React.memo(() => {
 	const [err, setErr] = React.useState<string | null>(null);
 	const [value, setValue] = React.useState<string>("");
 
-	// Define the core logic for loading the plugin
 	const loadPlugin = React.useCallback(async (urlValue: string) => {
 		if (urlValue === "") return;
 		try {

@@ -6,7 +6,7 @@ export type LunaActions = {
 	[K in ActionType]: (payload: ActionPayloads[K]) => MaybePromise<VoidLike>;
 };
 
-// Under Vite/Rollup, no module cache is accessible — buildActions is empty.
+// Under Vite/Rollup, no module cache is accessible - buildActions is empty.
 // Raw dispatch ({ type, payload }) is the normal path, not a fallback.
 export const actions: LunaActions = new Proxy({} as LunaActions, {
 	get(_, type: string) {

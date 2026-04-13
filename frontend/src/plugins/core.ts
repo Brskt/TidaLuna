@@ -1,4 +1,4 @@
-// Module registry — maps module names (e.g. "@luna/core") to their exports
+// Module registry - maps module names (e.g. "@luna/core") to their exports
 export const modules: Record<string, any> = {};
 
 // --- Tracer: console wrapper with plugin name prefix ---
@@ -68,7 +68,7 @@ export const ftch = {
 };
 
 // --- Messager: toast notification system ---
-// Stub — logs to console. A real toast UI can be added later.
+// Stub - logs to console. A real toast UI can be added later.
 
 export const Messager = {
     Info(...args: any[]) {

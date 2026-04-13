@@ -86,7 +86,7 @@ async fn download_update_inner(
 
     let manifest_name = super::manifest_name();
     let sig_name = format!("{manifest_name}.sig");
-    // Written last — acts as the completion marker for --skip-download
+    // Written last - acts as the completion marker for --skip-download
     fs::write(staging.join(&manifest_name), &manifest_bytes).context("write staged manifest")?;
     fs::write(staging.join(&sig_name), &sig_bytes).context("write staged signature")?;
 

@@ -1,5 +1,5 @@
 // TidaLunar: Extract stream format metadata from PlaybackInfo.
-// For BTS/FLAC, bytes are NOT available from the API — they come from the Rust
+// For BTS/FLAC, bytes are NOT available from the API - they come from the Rust
 // player bridge (mediaformat event) and are applied per-track in updateFormat().
 // For DASH, bitrate/bytes are in the manifest.
 import type { PlaybackInfo } from "../../helpers";

@@ -2,7 +2,7 @@ import type { Plugin } from "esbuild";
 
 /**
  * Resolves type-only packages to an empty module.
- * These packages export only TypeScript types — no JS at runtime.
+ * These packages export only TypeScript types - no JS at runtime.
  */
 export const typeOnlyPlugin = (packages: string[]): Plugin => ({
 	name: "type-only-empty",

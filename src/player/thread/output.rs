@@ -170,7 +170,7 @@ fn build_cpal_callback(
             return;
         }
 
-        // Seek gen changed — drain stale samples from before the seek
+        // Seek gen changed - drain stale samples from before the seek
         let cur_gen = seek_gen.load(Relaxed);
         if cur_gen != local_gen {
             let n = c.slots();

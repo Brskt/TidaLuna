@@ -36,13 +36,13 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
 }
 
 /// Authenticated fetch restricted to TIDAL API hosts.
-/// Used by core bundle (@luna/lib) — the token never leaves Rust.
+/// Used by core bundle (@luna/lib) - the token never leaves Rust.
 pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg.arg(0).to_string();
     let raw_opts = msg.arg(1);
     let opts_json = if raw_opts.is_empty() { "{}" } else { raw_opts }.to_string();
 
-    // Reject non-TIDAL URLs — this channel only serves authenticated TIDAL API requests
+    // Reject non-TIDAL URLs - this channel only serves authenticated TIDAL API requests
     if !crate::plugins::fetch::is_tidal_api(&url) {
         ipc_callback_err(
             &callback,
@@ -51,7 +51,7 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
         return;
     }
 
-    // Reject if the OAuth token hasn't been captured yet — avoids sending unauthenticated
+    // Reject if the OAuth token hasn't been captured yet - avoids sending unauthenticated
     // requests that would 403 and get memoized as failures on the frontend.
     let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
     if token.is_empty() {
@@ -205,7 +205,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         return Err("No renderer frame available".to_string());
     }
 
-    // 5. Persistent flag: code was dispatched — critical for cleanup guard correctness.
+    // 5. Persistent flag: code was dispatched - critical for cleanup guard correctness.
     //    If this fails, revert the activation: better a failed enable than an inconsistent flag.
     {
         let url_flag = url.clone();
@@ -217,7 +217,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         let flag_ok = matches!(flag_result, Ok(Ok(())));
         if !flag_ok {
             crate::vprintln!(
-                "[PLUGIN] Failed to persist ever_dispatched for '{}' — reverting activation",
+                "[PLUGIN] Failed to persist ever_dispatched for '{}' - reverting activation",
                 url
             );
             let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&url);
@@ -241,7 +241,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
             .unwrap_or(false);
             if still_loading {
                 crate::vprintln!(
-                    "[PLUGIN] Timeout: '{}' never sent ready ack (gen={}) — marking failed",
+                    "[PLUGIN] Timeout: '{}' never sent ready ack (gen={}) - marking failed",
                     timeout_url,
                     load_id
                 );
@@ -323,7 +323,7 @@ pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
             .unwrap_or(false);
 
     if !has_session {
-        crate::vprintln!("[PLUGIN] Skipping plugin load — no active session");
+        crate::vprintln!("[PLUGIN] Skipping plugin load - no active session");
         ipc_callback_ok(&callback, "true");
         return;
     }
@@ -596,7 +596,7 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
                 return Err(format!("Invalid luna.type '{t}' in manifest"));
             }
         }
-        Ok(None) => {} // no luna field — fine
+        Ok(None) => {} // no luna field - fine
     }
 
     let install_result = tokio::task::spawn_blocking({

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use tokio::sync::watch;
 
-/// Network modules are granted as a group — one dialog covers all of them.
+/// Network modules are granted as a group - one dialog covers all of them.
 const NETWORK_MODULES: &[&str] = &[
     "net",
     "http",
@@ -232,7 +232,7 @@ fn do_register(
             }
             Ok(Err(e)) => {
                 if let Some(raw) = e.strip_prefix("TRUST_REQUIRED:") {
-                    // Trim stack trace — only keep the module name (first line, no whitespace)
+                    // Trim stack trace - only keep the module name (first line, no whitespace)
                     let module = raw.lines().next().unwrap_or(raw).trim().to_string();
 
                     if trust_grants.get(&module) == Some(&false) {
@@ -258,7 +258,7 @@ fn do_register(
                     );
 
                     // Dedup: if a dialog is already pending for this module,
-                    // subscribe to the same watch channel — no duplicate popup.
+                    // subscribe to the same watch channel - no duplicate popup.
                     let trust_key = format!("{}::{}", name, module);
                     let mut rx = {
                         let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
@@ -275,7 +275,7 @@ fn do_register(
                                 &module,
                                 &manifest_json,
                             );
-                            // Broadcast result without removing the key — late
+                            // Broadcast result without removing the key - late
                             // subscribers can still dedup via rx.borrow(). The key
                             // is removed after save_trust makes the decision durable.
                             crate::state::rt_handle().spawn(async move {
@@ -290,7 +290,7 @@ fn do_register(
                     };
 
                     // Wait for the dialog result.
-                    // Check current value first — a late subscriber may find the
+                    // Check current value first - a late subscriber may find the
                     // answer already set by an earlier concurrent register call.
                     let granted = if let Some(val) = *rx.borrow() {
                         val
@@ -338,7 +338,7 @@ fn do_register(
                             }
                         });
                     }
-                    // DB is durable — safe to remove the dedup key now.
+                    // DB is durable - safe to remove the dedup key now.
                     {
                         let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
                         guard.remove(&trust_key);

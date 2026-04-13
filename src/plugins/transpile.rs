@@ -42,7 +42,7 @@ pub fn strip_esm_syntax(code: &str) -> String {
                     let ws = skip_ws(after_brace);
                     let tail = &after_brace[ws..];
                     if tail.starts_with("from") && is_keyword_boundary(tail.as_bytes(), 0, 4) {
-                        // `export { ... } from "..."` — re-export, skip entirely
+                        // `export { ... } from "..."` - re-export, skip entirely
                         let from_rest = &tail[4..];
                         i += skip_to_semicolon_or_newline(code, i, from_rest);
                     } else {
@@ -86,13 +86,13 @@ pub fn strip_esm_syntax(code: &str) -> String {
                 i += 6 + after_export; // skip "export" + whitespace
                 continue;
             } else if rest.starts_with('*') {
-                // `export * from "..."` — skip entire statement
+                // `export * from "..."` - skip entire statement
                 i += skip_to_semicolon_or_newline(code, i, rest);
                 continue;
             }
         }
 
-        // Check for `import` keyword (fallback — Quartz plugins shouldn't have these)
+        // Check for `import` keyword (fallback - Quartz plugins shouldn't have these)
         if b == b'i'
             && i + 6 <= len
             && &code[i..i + 6] == "import"
@@ -132,7 +132,7 @@ pub fn strip_esm_syntax(code: &str) -> String {
                         // `import { a, b } from "mod"`
                         result.push_str(&format!("const {specifiers} = {modules_ref};"));
                     } else {
-                        // `import Default from "mod"` — or mixed `import Default, { a } from "mod"`
+                        // `import Default from "mod"` - or mixed `import Default, { a } from "mod"`
                         if let Some(comma) = specifiers.find(',') {
                             let default_name = specifiers[..comma].trim();
                             let named = specifiers[comma + 1..].trim();
@@ -175,7 +175,7 @@ fn convert_export_specifiers(specifiers: &str) -> String {
                 let exported = spec[as_pos + 4..].trim();
                 Some(format!("{exported}: {local}"))
             } else {
-                // `export { foo }` — same name for local and exported
+                // `export { foo }` - same name for local and exported
                 Some(format!("{spec}: {spec}"))
             }
         })
@@ -411,7 +411,7 @@ mod tests {
         // "export" inside a string should not be stripped
         let code = r#"var s="export{foo}";console.log(s);"#;
         let result = strip_esm_syntax(code);
-        // The string content is tricky — our parser looks at keyword boundaries,
+        // The string content is tricky - our parser looks at keyword boundaries,
         // so "export{ inside a string won't match because `"` precedes `e`
         assert!(result.contains("console.log(s);"));
     }

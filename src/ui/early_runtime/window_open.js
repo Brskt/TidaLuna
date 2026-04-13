@@ -1,4 +1,4 @@
-// Fragment 4/5 — window.open interceptor for auth flows
+// Fragment 4/5 - window.open interceptor for auth flows
 // Depends on: sendIpc, _cfg (from ipc.js)
 
 var _authHosts = _cfg.authHosts || [];

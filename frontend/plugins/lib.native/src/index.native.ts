@@ -1,5 +1,5 @@
 /**
- * Stub for @luna/lib.native — functions that require Electron/Node.js in TidaLuna.
+ * Stub for @luna/lib.native - functions that require Electron/Node.js in TidaLuna.
  * In TidaLunar (CEF), these are either no-ops or adapted to Rust IPC.
  */
 

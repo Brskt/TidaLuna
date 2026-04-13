@@ -1,4 +1,4 @@
-// Fragment 3/5 — Fetch proxy with CORS fallback via Rust
+// Fragment 3/5 - Fetch proxy with CORS fallback via Rust
 // Depends on: invokeIpc, captureToken, _tidalDomain (from previous fragments)
 
 var nativeFetch = window.fetch.bind(window);
@@ -60,7 +60,7 @@ var _lunaFetch = function(input, init) {
 
     return nativeFetch(input, init).catch(function(err) {
         if (!(err instanceof TypeError)) throw err;
-        // Only proxy *.tidal.com — Rust rejects non-Tidal URLs on proxy.fetch.
+        // Only proxy *.tidal.com - Rust rejects non-Tidal URLs on proxy.fetch.
         if (url.indexOf('tidal.com') === -1) throw err;
         return proxyFetch(url, init).then(function(resp) {
             if (resp.status >= 400) console.warn('[luna:proxy] ' + resp.status + ' ' + url.substring(0, 80));
@@ -71,7 +71,7 @@ var _lunaFetch = function(input, init) {
 
 // Lock window.fetch via accessor descriptor (getter/setter).
 // - getter always returns _lunaFetch (our patched version with token capture)
-// - setter is a no-op — TIDAL's analytics (strict mode) can assign without TypeError
+// - setter is a no-op - TIDAL's analytics (strict mode) can assign without TypeError
 // - configurable:false prevents Object.defineProperty override by plugins
 // _lunaFetch only calls nativeFetch (closure-captured above), never window.fetch.
 Object.defineProperty(window, 'fetch', {

@@ -1,7 +1,7 @@
 import type { Store } from "redux";
 import { findModuleByProperty } from "./helpers/findModule";
 
-// Bundled fallbacks — used when TIDAL's webpack cache isn't accessible
+// Bundled fallbacks - used when TIDAL's webpack cache isn't accessible
 import * as React from "react";
 import * as ReactDOMClient from "react-dom/client";
 import * as jsxRuntime from "react/jsx-runtime";
@@ -29,7 +29,7 @@ export function initModules(store: Store): void {
 	reduxStore = store;
 	_resolveStoreReady();
 
-	// Expose react — try TIDAL's webpack cache first, fall back to bundled packages
+	// Expose react - try TIDAL's webpack cache first, fall back to bundled packages
 	modules["react"] = findModuleByProperty((key, value) => key === "createElement" && typeof value === "function");
 	if (!modules["react"]) {
 		const reactMod = { ...React, default: React };

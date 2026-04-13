@@ -3,7 +3,7 @@ import { LunaPlugin, setUpstreamPlugins } from "./luna-plugin";
 import { LunaPlugin as CoreLunaPlugin, modules } from "../../render/src";
 
 // Redirect ALL upstream LunaPlugin lifecycle to our LunaPlugin (Rust IPC).
-// The upstream class is used by @luna/ui for display — its static methods
+// The upstream class is used by @luna/ui for display - its static methods
 // and prototype methods must route through our system, not execute in CEF.
 
 // Static: fromStorage is the main entry point used by Plugin Store UI.
@@ -13,7 +13,7 @@ CoreLunaPlugin.fromStorage = async function (storeInit: any): Promise<any> {
     return LunaPlugin.fromStorage(storeInit);
 };
 
-// Prototype overrides — safety net in case an upstream instance is created
+// Prototype overrides - safety net in case an upstream instance is created
 // through a path we didn't intercept. Each finds our instance by URL and delegates.
 CoreLunaPlugin.prototype.load = async function () { return this; };
 
@@ -71,7 +71,7 @@ export function exposeLoaderApi() {
     luna.core.listPlugins = () => invokeIpc("plugin.list");
     luna.core.loadedPlugins = LunaPlugin.plugins;
 
-    // Register core plugins — fetch manifests from upstream GitHub repo.
+    // Register core plugins - fetch manifests from upstream GitHub repo.
     // Maps core plugin name → subdirectory in Inrixia/TidaLuna/plugins/
     const corePluginPaths: Record<string, string> = {
         "@luna/lib.native": "lib.native",
@@ -94,7 +94,7 @@ export function exposeLoaderApi() {
             plugin.exports = { Settings: mod.Settings };
         }
         (CoreLunaPlugin.plugins as any)[name] = plugin;
-        // Fetch full manifest in background — updates description/author when ready
+        // Fetch full manifest in background - updates description/author when ready
         const url = `https://raw.githubusercontent.com/Inrixia/TidaLuna/master/plugins/${dir}/package.json`;
         fetch(url).then(r => r.json()).then((pkg: any) => {
             if (pkg?.name) {

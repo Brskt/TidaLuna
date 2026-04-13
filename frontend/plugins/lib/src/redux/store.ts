@@ -1,7 +1,7 @@
 import type { TidalStoreState } from "./types/store";
 import type { Store } from "redux";
 
-// TidaLunar: Use a lazy proxy — reduxStore is not available at import time,
+// TidaLunar: Use a lazy proxy - reduxStore is not available at import time,
 // it's populated by initCore() later. This proxy defers all property access.
 export const store: Store<TidalStoreState> = new Proxy({} as Store<TidalStoreState>, {
 	get(_, prop) {

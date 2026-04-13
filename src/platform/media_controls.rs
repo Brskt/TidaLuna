@@ -31,7 +31,7 @@ impl OsMediaControls {
         };
 
         match controls.attach(handle_media_event) {
-            Ok(()) => crate::vprintln!("[MEDIA]  attach() OK — buttons enabled, type=Music"),
+            Ok(()) => crate::vprintln!("[MEDIA]  attach() OK - buttons enabled, type=Music"),
             Err(e) => {
                 crate::vprintln!("[MEDIA]  attach() FAILED: {e}");
                 return None;

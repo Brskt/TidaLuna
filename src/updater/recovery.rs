@@ -47,7 +47,7 @@ pub(crate) fn recover_interrupted_update() {
                 let original = app_dir.join(&jf.path);
                 let backup = app_dir.join(&jf.backup);
                 if jf.is_new {
-                    // No original existed — remove the newly installed file
+                    // No original existed - remove the newly installed file
                     fs::remove_file(&original).ok();
                 } else if backup.exists() {
                     if original.exists() {

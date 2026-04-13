@@ -16,7 +16,7 @@ export const inlineBundlePlugin = (opts: {
 		build.onEnd(() => {
 			const code = readFileSync(opts.outfile, "utf-8");
 			const escaped = JSON.stringify(code);
-			const module = `// AUTO-GENERATED — do not edit. Rebuild with: bun esbuild.config.ts\nexport const ${opts.exportName} = ${escaped};\n`;
+			const module = `// AUTO-GENERATED - do not edit. Rebuild with: bun esbuild.config.ts\nexport const ${opts.exportName} = ${escaped};\n`;
 			writeFileSync(opts.inlinePath, module);
 			console.log(`  Generated ${opts.inlinePath} (${(code.length / 1024).toFixed(1)} KB)`);
 		});

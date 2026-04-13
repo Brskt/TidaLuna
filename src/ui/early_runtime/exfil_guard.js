@@ -1,4 +1,4 @@
-// Fragment 6/6 — Exfiltration guard: lock sendBeacon + Image src
+// Fragment 6/6 - Exfiltration guard: lock sendBeacon + Image src
 // Defence-in-depth: CEF-level blocking is the structural guarantee.
 // These JS locks raise the bar for plugins that escape the IIFE wrapper.
 

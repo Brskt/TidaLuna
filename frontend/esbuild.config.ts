@@ -1,9 +1,9 @@
 /**
- * Centralized esbuild configuration — single entry point for all frontend builds.
+ * Centralized esbuild configuration - single entry point for all frontend builds.
  *
  * Build order is strict and sequential:
- *   Phase 1: Inline plugins (luna-ui, luna-dev) — generates .ts string constants
- *   Phase 2: Main bundle (bundle.js) — imports the inline .ts from Phase 1
+ *   Phase 1: Inline plugins (luna-ui, luna-dev) - generates .ts string constants
+ *   Phase 2: Main bundle (bundle.js) - imports the inline .ts from Phase 1
  *   Phase 3: Standalone ESM modules (luna-core, luna-lib, oby, helpers)
  */
 import { type BuildOptions } from "esbuild";
@@ -23,7 +23,6 @@ const root = __dirname;
 const cargoToml = readFileSync(resolve(root, "../Cargo.toml"), "utf-8");
 const appVersion = cargoToml.match(/^version\s*=\s*"(.+)"/m)?.[1] ?? "unknown";
 
-// Ensure output directories exist
 mkdirSync(resolve(root, "dist"), { recursive: true });
 mkdirSync(resolve(root, "plugins/ui/dist"), { recursive: true });
 mkdirSync(resolve(root, "plugins/dev/dist"), { recursive: true });
@@ -43,7 +42,7 @@ const uiOutfile = resolve(root, "plugins/ui/dist/luna-ui.mjs");
 const devOutfile = resolve(root, "plugins/dev/dist/luna-dev.mjs");
 
 // ─── Phase 1: Inline plugins ────────────────────────────────────────────
-// Must run BEFORE bundle.js — src/index.ts imports the generated inline .ts files.
+// Must run BEFORE bundle.js - src/index.ts imports the generated inline .ts files.
 
 // Merge RUNTIME_EXTERNALS with any luna.dependencies declared in plugin package.json files
 const uiExternals = [...new Set([...RUNTIME_EXTERNALS, ...getLunaDependencyExternals(resolve(root, "plugins/ui/package.json"))])];
@@ -85,7 +84,7 @@ const lunaDevInline: BuildOptions = {
 };
 
 // ─── Phase 2: Main bundle ───────────────────────────────────────────────
-// Depends on Phase 1 — bundles src/index.ts which imports luna-ui-inline.ts and luna-dev-inline.ts.
+// Depends on Phase 1 - bundles src/index.ts which imports luna-ui-inline.ts and luna-dev-inline.ts.
 
 const mainBundle: BuildOptions = {
 	...defaultBuildOptions,

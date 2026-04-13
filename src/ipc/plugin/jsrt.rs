@@ -4,7 +4,7 @@ use cef::*;
 const JS_PURGE_SDK_BLOB: &str = "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}";
 
 /// Purge real tokens from SDK localStorage blob before plugin code runs.
-/// TIDAL SDK already holds tokens in memory (credentialsProvider) — the blob
+/// TIDAL SDK already holds tokens in memory (credentialsProvider) - the blob
 /// is no longer needed and would be readable by plugins that escape the IIFE.
 pub(super) fn purge_sdk_auth_blob_if_needed() {
     let needs = with_state(|state| {
@@ -19,7 +19,7 @@ pub(super) fn purge_sdk_auth_blob_if_needed() {
     }
 }
 
-// Soft clear: token only. TIDAL calls this during "not logged in" flow —
+// Soft clear: token only. TIDAL calls this during "not logged in" flow -
 // must not destroy cookies/localStorage/sessionStorage.
 
 fn handle_session_clear() {
@@ -191,9 +191,9 @@ pub(super) fn do_load_plugins_inline() {
                                         loaded_names.insert(p.name);
                                         progress = true;
                                     } else {
-                                        // Flag failed — revert to avoid inconsistent state
+                                        // Flag failed - revert to avoid inconsistent state
                                         crate::vprintln!(
-                                            "[PLUGIN] Failed to persist ever_dispatched for '{}' — reverting",
+                                            "[PLUGIN] Failed to persist ever_dispatched for '{}' - reverting",
                                             p.name
                                         );
                                         let cleanup =
@@ -270,7 +270,7 @@ pub(super) fn do_load_plugins_inline() {
                 .unwrap_or(false);
                 if still_loading {
                     crate::vprintln!(
-                        "[PLUGIN] Startup timeout: '{}' (gen={}) never ready — marking failed",
+                        "[PLUGIN] Startup timeout: '{}' (gen={}) never ready - marking failed",
                         url,
                         load_id
                     );
@@ -391,9 +391,9 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
                                 crate::plugins::store::mark_ever_dispatched(pc, &url_flag)
                             });
                             if flag_ok.is_err() {
-                                // Flag failed — revert
+                                // Flag failed - revert
                                 crate::vprintln!(
-                                    "[PLUGIN] Failed to persist ever_dispatched for '{}' — reverting",
+                                    "[PLUGIN] Failed to persist ever_dispatched for '{}' - reverting",
                                     url
                                 );
                                 let cleanup =
@@ -406,7 +406,7 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
                                 });
                             }
                         } else {
-                            // No frame — revert
+                            // No frame - revert
                             with_state(|state| state.plugin_manager.mark_unloaded(url));
                             let url_dis = url.to_owned();
                             crate::state::db().call_plugins(move |pc| {

@@ -243,12 +243,12 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// ExclusiveHandle – public API
+// ExclusiveHandle - public API
 // ---------------------------------------------------------------------------
 
 impl ExclusiveHandle {
     /// Spawn the WASAPI render thread for the given device.
-    /// `device_id` – wasapi device id string, or "default".
+    /// `device_id` - wasapi device id string, or "default".
     pub fn spawn(device_id: String) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ExclusiveCommand>();
         let (event_tx, event_rx) = mpsc::channel::<ExclusiveEvent>();

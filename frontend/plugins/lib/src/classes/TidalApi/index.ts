@@ -26,7 +26,7 @@ export class TidalApi {
 		return `countryCode=${store.session.countryCode}&deviceType=DESKTOP&locale=${store.settings.language}`;
 	});
 	public static fetch = memoize(async <T>(url: string): Promise<T | undefined> => {
-		// Routes through Rust via tidal.fetch IPC — the OAuth token is injected
+		// Routes through Rust via tidal.fetch IPC - the OAuth token is injected
 		// server-side and never exposed to JavaScript.
 		const cid = this.clientId();
 		if (!cid) throw new Error("TidalApi.fetch called before session is ready (no clientId)");

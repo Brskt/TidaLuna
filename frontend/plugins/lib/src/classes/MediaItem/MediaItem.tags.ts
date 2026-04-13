@@ -115,7 +115,6 @@ export const makeTags = async (mediaItem: MediaItem): Promise<MetaTags> => {
 
 	tags.lyrics = lyrics?.subtitles ?? lyrics?.lyrics;
 
-	// Ensure core tags are set
 	tags.album ??= "Unknown Album";
 
 	return { tags, coverUrl };

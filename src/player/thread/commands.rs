@@ -272,7 +272,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.has_track = true;
         self.is_playing = false;
 
-        // Volume sync: only init once — rebinding at each track causes drift because
+        // Volume sync: only init once - rebinding at each track causes drift because
         // the PID-based session lookup can pick a stale/wrong session during transitions.
         // Re-init happens on device switch (device.rs) or toggle (handle_set_volume_sync).
         #[cfg(target_os = "windows")]
@@ -351,7 +351,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.allow_startup_auto_resume = false;
 
         if !self.has_track {
-            crate::vprintln!("[PLAY]   ignored — no track loaded (has_track=false)");
+            crate::vprintln!("[PLAY]   ignored - no track loaded (has_track=false)");
             return;
         }
 

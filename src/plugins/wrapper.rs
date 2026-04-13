@@ -7,7 +7,7 @@
 //!   - Provides a controlled `storage` API (per-plugin SQLite via IPC)
 //!   - Tracks unload callbacks for cleanup
 //!
-//! The real `window.cefQuery` is captured as a private `__cq` parameter —
+//! The real `window.cefQuery` is captured as a private `__cq` parameter -
 //! used internally by the controlled APIs but not exposed to plugin code.
 //!
 //! ## Threat model & limitations
@@ -26,11 +26,11 @@
 //! or separate renderer processes.
 //!
 //! Current protections (defense in depth, weakest to strongest):
-//!   1. IIFE parameter shadowing — blocks bare identifiers only (`cefQuery` blocked,
+//!   1. IIFE parameter shadowing - blocks bare identifiers only (`cefQuery` blocked,
 //!      `window.cefQuery` not)
-//!   2. XHR/fetch prototype freeze — `Object.defineProperty` with `writable: false,
+//!   2. XHR/fetch prototype freeze - `Object.defineProperty` with `writable: false,
 //!      configurable: false` (silent failure on reassignment in sloppy mode)
-//!   3. Token never stored as JS global — only in Rust `AppState`, fed via
+//!   3. Token never stored as JS global - only in Rust `AppState`, fed via
 //!      closure-private `sendIpc` in the early runtime IIFE
 //!   4. `getCredentials()` / `getAuthHeaders()` removed from `@luna/lib` public API
 
@@ -51,15 +51,15 @@ fn escape_js(s: &str) -> String {
 
 /// Wrap plugin code in a security closure for CEF injection.
 ///
-/// `plugin_id` — unique identifier (URL) for the plugin, used for storage namespace & audit.
-/// `code` — already transpiled+bundled JS (no ES module syntax, ready for eval).
+/// `plugin_id` - unique identifier (URL) for the plugin, used for storage namespace & audit.
+/// `code` - already transpiled+bundled JS (no ES module syntax, ready for eval).
 ///
 /// Returns a self-executing JS string safe to pass to `frame.execute_java_script()`.
 pub fn wrap_plugin_code(plugin_id: &str, code: &str, load_id: u64, nonce: u64) -> String {
     let escaped_id = escape_js(plugin_id);
 
     // Template uses string concatenation to avoid format!() escaping hell with JS braces.
-    // The IIFE parameters shadow dangerous globals — they receive `undefined` as arguments.
+    // The IIFE parameters shadow dangerous globals - they receive `undefined` as arguments.
     let mut js = String::with_capacity(code.len() + 4096);
 
     // Pre-build ack request string with serde_json (no JS-side JSON.stringify dependency)
@@ -74,7 +74,7 @@ pub fn wrap_plugin_code(plugin_id: &str, code: &str, load_id: u64, nonce: u64) -
     // Outer (sloppy mode): shadows `eval` and `Function` as parameters.
     // Captures Promise.prototype.then + cefQuery + nonce BEFORE plugin code runs.
     js.push_str("(function(eval, Function) {\n");
-    // Capture primitives in outer scope — plugin code can't reach these (shadowed below)
+    // Capture primitives in outer scope - plugin code can't reach these (shadowed below)
     js.push_str("var __pThen = Promise.prototype.then;\n");
     js.push_str("var __ackCq = window.cefQuery;\n");
     js.push_str("var __ackReq = '");
@@ -84,7 +84,7 @@ pub fn wrap_plugin_code(plugin_id: &str, code: &str, load_id: u64, nonce: u64) -
     // __pThen, __ackCq, __ackReq are shadowed to undefined in the inner scope.
     js.push_str("__pThen.call(\n");
     // Sensitive globals are shadowed as parameters (receive undefined at call site).
-    // This only blocks bare identifiers — window.X still works (shared V8 context limitation).
+    // This only blocks bare identifiers - window.X still works (shared V8 context limitation).
     js.push_str("(async function(__pid, __cq, __gen, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq, __LUNAR_CAPTURED_TOKEN__, __TIDALUNAR_CREDENTIALS__, __LUNAR_SEND_IPC__, __LUNAR_INVOKE_IPC__, __LUNAR_IPC_LISTENERS__, __LUNAR_IPC_ON__, __LUNAR_IPC_EMIT__, __LUNAR_CONFIG__, __LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery) {\n");
     js.push_str("'use strict';\n");
 
@@ -210,7 +210,7 @@ window.__pluginUnloads[__pid] = function() {
         r#"
 if (typeof __exports !== 'undefined') {
     if (!window.__pluginExports) window.__pluginExports = {};
-    // Only expose Settings — the sole export consumed by the bundle (extractSettings).
+    // Only expose Settings - the sole export consumed by the bundle (extractSettings).
     // Other exports (unloads, internal state, functions) stay private to the IIFE scope.
     if (__exports.Settings) window.__pluginExports[__pid] = { Settings: __exports.Settings };
     if (__exports.unloads instanceof Set) {
@@ -318,7 +318,7 @@ mod tests {
     fn test_wrap_shadows_dangerous_apis() {
         let result = wrap_plugin_code("test", "", 0, 0);
         // All these should be parameter names (shadowed)
-        // WebSocket intentionally NOT shadowed — plugins like DiscordRPC need it.
+        // WebSocket intentionally NOT shadowed - plugins like DiscordRPC need it.
         for name in &[
             "eval",
             "Function",
@@ -329,7 +329,7 @@ mod tests {
             "caches",
             "ServiceWorker",
             "importScripts",
-            // Security shadows — bare identifiers only (window.X still accessible)
+            // Security shadows - bare identifiers only (window.X still accessible)
             "__LUNAR_CAPTURED_TOKEN__",
             "__TIDALUNAR_CREDENTIALS__",
             "__LUNAR_SEND_IPC__",

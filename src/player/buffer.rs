@@ -221,7 +221,7 @@ impl Read for RamBuffer {
                 self.shared.finished_atomic.store(false, Relaxed);
             }
 
-            // Data not available — determine action:
+            // Data not available - determine action:
             //   cursor < buf_start  → data was discarded, need Range restart
             //   cursor > buf_end + SEEK_LOOKAHEAD → too far ahead, Range restart
             //   cursor <= buf_end + SEEK_LOOKAHEAD → wait for download to catch up

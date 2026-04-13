@@ -3,7 +3,7 @@ import { invokeIpc, sendIpc, onIpcEvent } from "../ipc";
 export function setupIpcBridge() {
     const ipcRenderer = {
         invoke: (channel: string, ...args: any[]) => {
-            // Native module registration — forward to Rust which proxies to Node.js
+            // Native module registration - forward to Rust which proxies to Node.js
             if (channel === "__Luna.registerNative") {
                 return invokeIpc(channel, ...args);
             }

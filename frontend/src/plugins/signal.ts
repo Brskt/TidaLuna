@@ -1,5 +1,5 @@
 /**
- * Minimal reactive Signal — drop-in for @inrixia/helpers Signal.
+ * Minimal reactive Signal - drop-in for @inrixia/helpers Signal.
  * Holds a value, notifies listeners on change.
  *
  * Access pattern: signal._ (get/set), signal.onValue(cb) → unsubscribe

@@ -97,7 +97,7 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.dbg", "SDK→load", streamFormat);
                 setSelfLoad(false);
                 seekTarget = null;
-                // Soft-reset format data (don't drain resolvers — playback.ts already did)
+                // Soft-reset format data (don't drain resolvers - playback.ts already did)
                 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
                 sendIpc("player.load", url, streamFormat, encryptionKey);
             },
@@ -153,7 +153,7 @@ export const createNativePlayerComponent = () => {
         };
         activePlayer = player;
 
-        // Capture snapshot and clear — any new trigger() calls after this
+        // Capture snapshot and clear - any new trigger() calls after this
         // point go through processEvent() directly via activeEmitter.
         const captured = snapshot;
         snapshot = null;
@@ -190,7 +190,7 @@ export const createNativePlayerComponent = () => {
 
     return {
         Player,
-        // Internal setter for playback controller — updates _time without
+        // Internal setter for playback controller - updates _time without
         // emitting events or triggering backend seeks.  The currentTime getter
         // (seekTarget ?? _time) ensures the correct value is always returned.
         _setTime: (t: number) => { _time = t; },
@@ -204,7 +204,7 @@ export const createNativePlayerComponent = () => {
                 if (gen > activeGen) activeGen = gen;
             }
 
-            // Before Player() — update snapshot with latest values.
+            // Before Player() - update snapshot with latest values.
             // Each event type overwrites the previous value, so only the
             // most recent state is kept (no unbounded growth).
             if (snapshot) {

@@ -138,7 +138,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     let cef_dir = find_cef_dir(&target_dir)?;
     println!("CEF dir: {}", cef_dir.display());
 
-    // 4. Ensure bundle directory exists (incremental — no full wipe)
+    // 4. Ensure bundle directory exists (incremental - no full wipe)
     fs::create_dir_all(&bundle_dir).map_err(|e| format!("failed to create dist/: {e}"))?;
 
     // 4b. Pre-clean: delete files from previous manifest that won't be in the new build.
@@ -313,7 +313,7 @@ fn read_workspace_version() -> Result<String, String> {
     let cargo_toml = fs::read_to_string(project_root.join("Cargo.toml"))
         .map_err(|e| format!("cannot read root Cargo.toml: {e}"))?;
 
-    // Simple parse — look for version = "x.y.z" in [package] section
+    // Simple parse - look for version = "x.y.z" in [package] section
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("version") {
@@ -328,7 +328,7 @@ fn read_workspace_version() -> Result<String, String> {
 fn generate_manifest(bundle_dir: &Path) -> Result<(), String> {
     let version = read_workspace_version()?;
 
-    // min_version defaults to same as version for now — adjust per release
+    // min_version defaults to same as version for now - adjust per release
     let min_version = version.clone();
 
     let mut files = BTreeMap::new();
@@ -497,7 +497,7 @@ fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
     if let Some(best) = candidates.into_iter().next() {
         return Ok(best);
     }
-    Err("CEF directory not found — run `cargo build --release` first".to_string())
+    Err("CEF directory not found - run `cargo build --release` first".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +550,7 @@ fn bundle_macos(
     // Write main Info.plist
     write_info_plist(&contents, exe_name, false)?;
 
-    // Create helper apps — CEF subprocess helpers reuse the main binary.
+    // Create helper apps - CEF subprocess helpers reuse the main binary.
     // CEF identifies the subprocess role via --type= argument.
     let helpers = [
         "Helper",

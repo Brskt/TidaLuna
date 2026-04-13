@@ -470,7 +470,7 @@ export class MediaItem extends ContentBase {
 				this.updateFormat(audioQuality).catch(() => {});
 			}
 		} else {
-			// No cached format — trigger updateFormat so the bridge fallback can populate it
+			// No cached format - trigger updateFormat so the bridge fallback can populate it
 			this.updateFormat(audioQuality).catch(() => {});
 		}
 		return unload;
@@ -496,18 +496,18 @@ export class MediaItem extends ContentBase {
 		}
 
 		const playbackInfo = await this.playbackInfo(audioQuality);
-		// Re-read format from cache — playbackInfo() replaces the cache entry with a new object,
+		// Re-read format from cache - playbackInfo() replaces the cache entry with a new object,
 		// so the local `format` reference captured above would be stale.
 		format = (this.cache.format[audioQuality] ??= {});
 		if (!playbackInfo) {
 			// TidaLunar fallback: desktop.tidal.com/v1/playbackinfo returns 403 with web tokens.
-			// Use format data from the Rust player bridge (mediaformat event) — only valid
+			// Use format data from the Rust player bridge (mediaformat event) - only valid
 			// for the currently playing track (the bridge emits one global mediaformat per load).
 			const currentProductId = (window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId;
 			if (currentProductId !== undefined && String(currentProductId) !== String(this.id)) return undefined;
 			let bf = (window as any).__LUNAR_MEDIA_FORMAT__;
 			if (!bf?.sampleRate) {
-				// Bridge data not yet available (new track just loaded) — wait up to 5s
+				// Bridge data not yet available (new track just loaded) - wait up to 5s
 				const waited = await Promise.race([
 					(window as any).__LUNAR_AWAIT_MEDIA_FORMAT__?.(),
 					new Promise<null>(r => setTimeout(() => r(null), 5000)),

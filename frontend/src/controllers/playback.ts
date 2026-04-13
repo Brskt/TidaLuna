@@ -98,7 +98,7 @@ export const createPlaybackController = () => {
 
                             (window as any).__LUNAR_CURRENT_PRODUCT_ID__ = productId;
 
-                            // Dispatch UPDATE_PLAYBACK_CONTEXT — Redux state is frozen, direct mutation fails
+                            // Dispatch UPDATE_PLAYBACK_CONTEXT - Redux state is frozen, direct mutation fails
                             try {
                                 const { buildActions } = require("../../render/src/exposeTidalInternals.patchAction");
                                 const buildAction = buildActions["playbackControls/UPDATE_PLAYBACK_CONTEXT"];

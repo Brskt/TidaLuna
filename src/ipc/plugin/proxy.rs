@@ -314,7 +314,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                     );
                 }
             }
-            // Mirror Set-Cookie to CEF's cookie jar (JS can't — forbidden header).
+            // Mirror Set-Cookie to CEF's cookie jar (JS can't - forbidden header).
             if !set_cookies.is_empty() {
                 crate::vprintln!(
                     "[PROXY]  Mirroring {} Set-Cookie header(s) for {}",

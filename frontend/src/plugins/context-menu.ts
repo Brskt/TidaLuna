@@ -1,5 +1,5 @@
 /**
- * ContextMenu — port of TidaLuna's @luna/lib ContextMenu class.
+ * ContextMenu - port of TidaLuna's @luna/lib ContextMenu class.
  *
  * Allows plugins to add buttons to TIDAL's context menus.
  * Intercepts contextMenu/OPEN Redux action to detect when menus open.

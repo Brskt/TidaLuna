@@ -1,7 +1,7 @@
-// Fragment 1/5 — IPC via cefQuery + event bus
+// Fragment 1/5 - IPC via cefQuery + event bus
 // Guard (__LUNAR_EARLY_RUNTIME__) and cefQuery check are in the Rust preload assembler.
 
-// Capture cefQuery once at early-runtime init — before any plugin or app code runs.
+// Capture cefQuery once at early-runtime init - before any plugin or app code runs.
 // sendIpc/invokeIpc use this private reference, so patching window.cefQuery later
 // (e.g., by a plugin) cannot intercept jsrt.set_token or other early-runtime IPC.
 var _cq = window.cefQuery;

@@ -7,7 +7,7 @@
 ///   3. Executes the fetch via reqwest (async)
 ///   4. Returns a Response-like JSON
 ///
-/// The token is never exposed to the plugin — it's injected server-side.
+/// The token is never exposed to the plugin - it's injected server-side.
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -26,7 +26,7 @@ fn default_method() -> String {
 
 /// Execute a plugin fetch request.
 ///
-/// `token` — OAuth token to inject for Tidal API calls (empty = no injection).
+/// `token` - OAuth token to inject for Tidal API calls (empty = no injection).
 /// Returns a JSON string with `{ok, status, statusText, url, headers, body}`.
 pub(crate) async fn plugin_fetch(
     plugin_id: &str,

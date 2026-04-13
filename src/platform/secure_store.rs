@@ -84,7 +84,7 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
 
     let path = data_dir.join("auth_tokens.dpapi");
     // Best-effort durability: sync_all flushes file content, persist does an atomic
-    // rename. Directory fsync is not done — a power loss right after persist could
+    // rename. Directory fsync is not done - a power loss right after persist could
     // lose the entry, which is acceptable (triggers re-login, not corruption).
     let mut f = tempfile::NamedTempFile::new_in(data_dir).map_err(|_| StoreError::Backend)?;
     f.write_all(&encrypted).map_err(|_| StoreError::Backend)?;

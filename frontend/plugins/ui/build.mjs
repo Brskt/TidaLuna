@@ -21,7 +21,7 @@ const EXTERNALS = [
     "react/jsx-runtime",
 ];
 
-// Type-only packages — resolve to empty module (no JS at runtime)
+// Type-only packages - resolve to empty module (no JS at runtime)
 const TYPE_ONLY_PACKAGES = [
     "@octokit/openapi-types",
 ];

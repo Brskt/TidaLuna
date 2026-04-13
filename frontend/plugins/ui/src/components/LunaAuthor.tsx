@@ -31,7 +31,7 @@ export const LunaAuthorDisplay = React.memo((props: { author: LunaAuthor | strin
 							window.open(author.url, "_blank", "noopener,noreferrer");
 						}
 					} catch {
-						// invalid URL — ignore
+						// invalid URL - ignore
 					}
 				}}
 				{...props}

@@ -1,4 +1,4 @@
-// @luna/core — TidaLunar entry point
+// @luna/core - TidaLunar entry point
 // Re-exports all upstream APIs. Initialization is deferred via initCore().
 
 export { tidalModules, initTidalInternals } from "./exposeTidalInternals";
