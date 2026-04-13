@@ -7,10 +7,10 @@ pub(crate) mod speaker_bridge;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use cef::*;
 use crate::connect::mdns::advertiser::{AdvertiseConfig, MdnsAdvertiser};
 use crate::connect::types::ReceiverConfig;
 use crate::connect::ws::server::{IncomingMessage, ServerEvent, WsServer};
+use cef::*;
 
 use client_comm::{ClientCommunicator, DispatchedCommand, classify_command};
 use playback::{PlaybackController, PlaybackInternalEvent, PlaybackNotifyEvent};
@@ -345,11 +345,7 @@ fn emit_receiver_metadata(media: &crate::connect::types::MediaInfo) {
         None
     };
     // Post to CEF UI thread - OsMediaControls (SMTC) requires UI thread access.
-    let mut task = ReceiverMetadataTask::new(
-        title.to_string(),
-        artist.to_string(),
-        duration_secs,
-    );
+    let mut task = ReceiverMetadataTask::new(title.to_string(), artist.to_string(), duration_secs);
     post_task(ThreadId::UI, Some(&mut task));
 
     // Emit full MediaInfo to frontend for player bar + Redux updates

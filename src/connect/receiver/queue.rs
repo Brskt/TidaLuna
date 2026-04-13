@@ -802,7 +802,10 @@ impl QueueManager {
         {
             crate::vprintln!("[connect::queue] Raw items count: {}", items.len());
             if let Some(first) = items.first() {
-                crate::vprintln!("[connect::queue] First item keys: {:?}", first.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                crate::vprintln!(
+                    "[connect::queue] First item keys: {:?}",
+                    first.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                );
                 if let Err(e) = serde_json::from_value::<QueueItem>(first.clone()) {
                     crate::vprintln!("[connect::queue] First item parse FAILED: {}", e);
                 }
@@ -844,8 +847,14 @@ impl QueueManager {
                 item_id_hint.as_deref().unwrap_or("?"),
                 self.current_media_id_hint.as_deref().unwrap_or("?"),
                 found,
-                self.queue_items.first().map(|i| i.item_id.as_str()).unwrap_or("?"),
-                self.queue_items.first().map(|i| i.media_id.as_str()).unwrap_or("?")
+                self.queue_items
+                    .first()
+                    .map(|i| i.item_id.as_str())
+                    .unwrap_or("?"),
+                self.queue_items
+                    .first()
+                    .map(|i| i.media_id.as_str())
+                    .unwrap_or("?")
             );
         }
 
@@ -992,7 +1001,6 @@ impl QueueManager {
             }
         };
 
-
         let manifest_b64 = match body.get("manifest").and_then(|v| v.as_str()) {
             Some(m) => m,
             None => {
@@ -1040,12 +1048,11 @@ impl QueueManager {
                     cd["dashSegmentUrls"] =
                         serde_json::to_value(&dash.segment_urls).unwrap_or_default();
                     // Inject duration from DASH manifest if metadata doesn't have it
-                    if let Some(secs) = dash.duration_secs {
-                        if let Some(ref mut md) = media.metadata {
-                            if md.duration.is_none() {
-                                md.duration = Some((secs * 1000.0) as u64);
-                            }
-                        }
+                    if let Some(secs) = dash.duration_secs
+                        && let Some(ref mut md) = media.metadata
+                        && md.duration.is_none()
+                    {
+                        md.duration = Some((secs * 1000.0) as u64);
                     }
                     crate::vprintln!(
                         "[connect::queue] DASH resolved: {} segments",
