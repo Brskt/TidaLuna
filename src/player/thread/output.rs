@@ -183,19 +183,50 @@ fn build_cpal_callback(
         }
 
         let v = f32::from_bits(volume.load(Relaxed));
-        let mut played: u64 = 0;
-        for sample in data.iter_mut() {
-            if let Ok(s) = c.pop() {
-                *sample = s * v;
-                played += 1;
-            } else {
-                *sample = 0.0;
+        let to_read = c.slots().min(data.len());
+        if to_read > 0
+            && let Ok(chunk) = c.read_chunk(to_read)
+        {
+            let (s1, s2) = chunk.as_slices();
+            let split = s1.len();
+            for (dst, src) in data[..split].iter_mut().zip(s1.iter()) {
+                *dst = *src * v;
             }
+            for (dst, src) in data[split..to_read].iter_mut().zip(s2.iter()) {
+                *dst = *src * v;
+            }
+            chunk.commit_all();
+            played_samples.fetch_add(to_read as u64, Relaxed);
         }
-        if played > 0 {
-            played_samples.fetch_add(played, Relaxed);
+        for s in data[to_read..].iter_mut() {
+            *s = 0.0;
         }
     }
+}
+
+/// Choose a CPAL output buffer size.
+///
+/// On Linux (ALSA/PipeWire) the `Default` period can land around 10-20 ms,
+/// which underruns easily under VM scheduling jitter. We query the device's
+/// supported range and pick the power of two nearest to ~100 ms clamped into
+/// that range. On other platforms, or when the device does not advertise a
+/// range, we return `Default` unchanged.
+fn preferred_buffer_size(_device: &cpal::Device, _rate: u32) -> cpal::BufferSize {
+    #[cfg(target_os = "linux")]
+    {
+        let target = ((_rate as usize * 100) / 1000).next_power_of_two() as u32;
+        if let Ok(configs) = _device.supported_output_configs() {
+            for cfg in configs {
+                if cfg.min_sample_rate() <= _rate
+                    && _rate <= cfg.max_sample_rate()
+                    && let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size()
+                {
+                    return cpal::BufferSize::Fixed(target.clamp(*min, *max));
+                }
+            }
+        }
+    }
+    cpal::BufferSize::Default
 }
 
 // --- open_output_stream ---
@@ -223,7 +254,7 @@ pub(super) fn open_output_stream(
         let config = cpal::StreamConfig {
             channels: source_channels,
             sample_rate: source_rate,
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: preferred_buffer_size(device, source_rate),
         };
         let ring_size = source_rate as usize * source_channels as usize * 2;
         let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
@@ -273,7 +304,11 @@ pub(super) fn open_output_stream(
     let default = device.default_output_config().ok()?;
     let ar = default.sample_rate();
     let ac = default.channels();
-    let cfg = default.config();
+    let cfg = cpal::StreamConfig {
+        channels: ac,
+        sample_rate: ar,
+        buffer_size: preferred_buffer_size(device, ar),
+    };
 
     crate::vprintln!(
         "[CPAL]   Source rate {}Hz unsupported, using device default: {}Hz/{}ch",
