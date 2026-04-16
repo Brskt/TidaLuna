@@ -6,7 +6,7 @@
 // but unreadable), or Parsed. Never panics, never returns partial results.
 
 use aes::Aes256;
-use aes::cipher::{KeyIvInit, StreamCipher};
+use aes::cipher::{KeyInit, KeyIvInit, StreamCipher};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -68,9 +68,9 @@ fn unwrap_data_key(
     if wrapped.len() != AES_KW_WRAPPED_LEN {
         return None;
     }
-    let kek = aes_kw::KekAes256::new(wrapping_key.into());
+    let kek = aes_kw::KwAes256::new_from_slice(wrapping_key).expect("key is 32 bytes");
     let mut buf = [0u8; AES_KW_UNWRAPPED_LEN];
-    kek.unwrap(wrapped, &mut buf).ok()?;
+    kek.unwrap_key(wrapped, &mut buf).ok()?;
     Some(buf)
 }
 
@@ -357,9 +357,9 @@ pub(crate) fn create_sdk_credentials(
 
     // Wrap the data key with AES-KW
     let wrapping_key = derive_wrapping_key(&salt);
-    let kek = aes_kw::KekAes256::new((&wrapping_key).into());
+    let kek = aes_kw::KwAes256::new_from_slice(&wrapping_key).expect("key is 32 bytes");
     let mut wrapped_key = [0u8; AES_KW_WRAPPED_LEN];
-    kek.wrap(&data_key, &mut wrapped_key).ok()?;
+    kek.wrap_key(&data_key, &mut wrapped_key).ok()?;
 
     let opts = rusty_leveldb::Options {
         create_if_missing: true,

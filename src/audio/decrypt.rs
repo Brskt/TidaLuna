@@ -1,6 +1,6 @@
 use aes::Aes128;
 use aes::Aes256;
-use aes::cipher::{BlockDecryptMut, KeyIvInit, StreamCipher};
+use aes::cipher::{BlockModeDecrypt, KeyIvInit, StreamCipher};
 use base64::Engine;
 use cbc::Decryptor as CbcDecryptor;
 use ctr::Ctr128BE;
@@ -48,7 +48,7 @@ impl FlacDecryptor {
 
         let mut decrypted = encrypted_key.to_vec();
         let decrypted_key = decryptor
-            .decrypt_padded_mut::<aes::cipher::block_padding::Pkcs7>(&mut decrypted)
+            .decrypt_padded::<aes::cipher::block_padding::Pkcs7>(&mut decrypted)
             .map_err(|e| anyhow::anyhow!("CBC decryption failed: {}", e))?;
 
         if decrypted_key.len() < 24 {
