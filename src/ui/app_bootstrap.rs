@@ -293,11 +293,18 @@ wrap_browser_process_handler! {
             let receiver_always_on = crate::state::db()
                 .call_settings(crate::settings::load_receiver_always_on);
 
+            #[cfg(target_os = "windows")]
+            let volume_sync = crate::state::db()
+                .call_settings(crate::settings::load_volume_sync);
+            #[cfg(not(target_os = "windows"))]
+            let volume_sync: bool = false;
+
             let init_script = format!(
                 r#"window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
 window.__TIDALUNAR_AUTO_CHECK__ = {auto_check};
 window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
+window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
 window.__TIDALUNAR_WINDOW_STATE__ = {{
     isMaximized: false,
     isFullscreen: false

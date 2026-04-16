@@ -10,6 +10,7 @@ import { LunaFeatureFlags } from "./LunaFeatureFlags";
 import { LunaSettingsTransfer } from "./LunaSettingsTransfer";
 import { LunaUpdateSettings } from "./LunaUpdateSettings";
 import { LunaVersionInfo } from "./LunaVersionInfo";
+import { LunaVolumeSyncSettings } from "./LunaVolumeSyncSettings";
 
 export const SettingsTab = React.memo(() => {
 	const corePlugins = [];
@@ -22,6 +23,7 @@ export const SettingsTab = React.memo(() => {
 			<LunaVersionInfo />
 			<LunaUpdateSettings />
 			<LunaConnectSettings />
+			<LunaVolumeSyncSettings />
 			<LunaSettingsTransfer />
 			<LunaFeatureFlags />
 			<LunaSettings title="Luna core plugins" desc="Plugins providing core luna functionality">

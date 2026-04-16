@@ -54,9 +54,6 @@ pub(crate) enum MenuCommand {
     ClearCache = 6,
     OpenData = 7,
 
-    #[cfg(target_os = "windows")]
-    VolumeSync = 8,
-
     PlayPause = 10,
     Next = 11,
     Prev = 12,
@@ -74,9 +71,6 @@ impl TryFrom<i32> for MenuCommand {
             5 => Ok(Self::Exit),
             6 => Ok(Self::ClearCache),
             7 => Ok(Self::OpenData),
-            #[cfg(target_os = "windows")]
-            8 => Ok(Self::VolumeSync),
-
             10 => Ok(Self::PlayPause),
             11 => Ok(Self::Next),
             12 => Ok(Self::Prev),
@@ -136,20 +130,6 @@ wrap_menu_model_delegate! {
                 MenuCommand::Stop => {
                     with_state(|state| {
                         let _ = state.player.stop();
-                    });
-                }
-                #[cfg(target_os = "windows")]
-                MenuCommand::VolumeSync => {
-                    with_state(|state| {
-                        let db = crate::state::db();
-                        let current = db.call_settings(|conn| {
-                            crate::settings::load_volume_sync(conn)
-                        });
-                        let new_val = !current;
-                        db.call_settings(move |conn| {
-                            crate::settings::save_volume_sync(conn, new_val);
-                        });
-                        let _ = state.player.set_volume_sync(new_val);
                     });
                 }
                 MenuCommand::Exit => {
