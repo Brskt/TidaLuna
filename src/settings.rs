@@ -181,6 +181,21 @@ pub(crate) fn save_update_auto_check(conn: &mut Connection, enabled: bool) {
     set(conn, "updater.auto_check", &enabled.to_string());
 }
 
+pub(crate) fn load_receiver_always_on(conn: &mut Connection) -> bool {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = 'connect.receiver_always_on'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(true)
+}
+
+pub(crate) fn save_receiver_always_on(conn: &mut Connection, enabled: bool) {
+    set(conn, "connect.receiver_always_on", &enabled.to_string());
+}
+
 pub(crate) fn load_update_skip_version(conn: &mut Connection) -> Option<String> {
     conn.query_row(
         "SELECT value FROM settings WHERE key = 'updater.skip_version'",

@@ -290,10 +290,14 @@ wrap_browser_process_handler! {
             let auto_check = crate::state::db()
                 .call_settings(crate::settings::load_update_auto_check);
 
+            let receiver_always_on = crate::state::db()
+                .call_settings(crate::settings::load_receiver_always_on);
+
             let init_script = format!(
                 r#"window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
 window.__TIDALUNAR_AUTO_CHECK__ = {auto_check};
+window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
 window.__TIDALUNAR_WINDOW_STATE__ = {{
     isMaximized: false,
     isFullscreen: false
