@@ -26,6 +26,63 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use ui::flush::PlayerEventTask;
 
+/// Populate WAYLAND_DISPLAY and XDG_RUNTIME_DIR when launched from a shell
+/// without a graphical session env, so CEF ozone can reach the compositor.
+#[cfg(target_os = "linux")]
+fn ensure_wayland_env() {
+    use std::os::unix::fs::MetadataExt;
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        let uid = std::fs::metadata("/proc/self")
+            .ok()
+            .map(|m| m.uid())
+            .unwrap_or(1000);
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
+        }
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none()
+        && let Some(rt_dir) = std::env::var_os("XDG_RUNTIME_DIR")
+    {
+        let socket = std::path::Path::new(&rt_dir).join("wayland-0");
+        if socket.exists() {
+            unsafe {
+                std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            }
+        }
+    }
+}
+
+/// Re-exec the browser with `--ozone-platform=wayland` prepended when a Wayland
+/// socket is reachable. Chromium reads this switch from argv very early, before
+/// `OnBeforeCommandLineProcessing` runs, so appending it there is ignored.
+#[cfg(target_os = "linux")]
+fn reexec_for_wayland_if_needed() {
+    if std::env::args().any(|a| a.starts_with("--ozone-platform")) {
+        return;
+    }
+    if std::env::args().any(|a| a.starts_with("--type=")) {
+        return;
+    }
+    let wayland_ok = std::env::var_os("WAYLAND_DISPLAY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !wayland_ok {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--ozone-platform=wayland");
+    cmd.args(std::env::args_os().skip(1));
+    let err = std::os::unix::process::CommandExt::exec(&mut cmd);
+    eprintln!(
+        "Failed to re-exec {} with Wayland ozone switch: {err}",
+        exe.display()
+    );
+    std::process::exit(1);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     if logging::log_level() >= 1 {
@@ -89,6 +146,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        ensure_wayland_env();
+        reexec_for_wayland_if_needed();
+    }
+
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
     let args = cef::args::Args::new();
@@ -98,6 +161,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let switch = CefString::from("type");
     let is_browser = cmd_line.has_switch(Some(&switch)) != 1;
+
+    #[cfg(target_os = "linux")]
+    if is_browser && let Some(ref dir) = exe_dir {
+        use std::os::unix::fs::MetadataExt;
+        let sandbox = dir.join("bin").join("cef").join("chrome-sandbox");
+        let report_error = || {
+            eprintln!("Chromium sandbox is not configured correctly.");
+            eprintln!("Run these commands once after extraction:");
+            eprintln!("    sudo chown root:root {}", sandbox.display());
+            eprintln!("    sudo chmod 4755 {}", sandbox.display());
+        };
+        match std::fs::metadata(&sandbox) {
+            Err(e) => {
+                eprintln!("chrome-sandbox not found at {}: {e}", sandbox.display());
+                report_error();
+                std::process::exit(1);
+            }
+            Ok(meta) => {
+                let is_setuid_root = meta.uid() == 0 && (meta.mode() & 0o4000) != 0;
+                if !is_setuid_root {
+                    report_error();
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 
     let renderer_config = MessageRouterConfig::default();
     let renderer_router = RendererSideRouter::new(renderer_config);
