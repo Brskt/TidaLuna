@@ -338,11 +338,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Shutdown Connect before CEF shutdown
     app_state::with_state(|state| {
-        if let Some(ref mut cm) = state.connect {
-            // Use the runtime to run async shutdown
-            if let Some(rt) = crate::state::RT_HANDLE.get() {
-                rt.block_on(cm.shutdown());
-            }
+        if let Some(ref mut cm) = state.connect
+            && let Some(rt) = crate::state::RT_HANDLE.get()
+        {
+            rt.block_on(cm.shutdown());
         }
         state.connect = None;
     });
@@ -352,7 +351,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Returns (token_state, needs_proactive_refresh).
 /// needs_proactive_refresh is true when the SDK blob was seeded with real tokens
 /// (TIDAL will have real JWTs in memory until we push opaques).
 fn reconcile_boot_tokens(

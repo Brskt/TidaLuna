@@ -341,7 +341,6 @@ pub(crate) fn create_sdk_credentials(
     let mut counter = [0u8; COUNTER_LEN];
     getrandom::fill(&mut counter).ok()?;
 
-    // Build the credentials JSON matching TIDAL SDK's schema
     let credentials_json = serde_json::json!({
         "accessToken": {
             "token": opaque_at,
@@ -355,7 +354,6 @@ pub(crate) fn create_sdk_credentials(
 
     let ciphertext = encrypt_aes_ctr(&data_key, &counter, &plaintext)?;
 
-    // Wrap the data key with AES-KW
     let wrapping_key = derive_wrapping_key(&salt);
     let kek = aes_kw::KwAes256::new_from_slice(&wrapping_key).expect("key is 32 bytes");
     let mut wrapped_key = [0u8; AES_KW_WRAPPED_LEN];
