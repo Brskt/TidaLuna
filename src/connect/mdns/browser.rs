@@ -2,7 +2,8 @@ use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::connect::types::{DeviceType, MdnsDevice, consts};
+use crate::connect::consts;
+use crate::connect::types::{DeviceType, MdnsDevice};
 
 pub(crate) enum BrowserEvent {
     DeviceFound(MdnsDevice),

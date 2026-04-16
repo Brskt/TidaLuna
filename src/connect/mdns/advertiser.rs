@@ -2,7 +2,7 @@ use md5::{Digest, Md5};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::sync::Arc;
 
-use crate::connect::types::consts;
+use crate::connect::consts;
 
 pub(crate) struct AdvertiseConfig {
     pub friendly_name: String,
@@ -96,6 +96,13 @@ impl MdnsAdvertiser {
             let _ = self.daemon.unregister(&fullname);
             crate::vprintln!("[connect::mdns] Stopped advertising");
         }
+    }
+
+    /// Borrow the shared daemon so callers can drive a bounded shutdown
+    /// through `MdnsBackend`. The daemon thread is not owned exclusively
+    /// by the advertiser, so shutdown is the caller's responsibility.
+    pub(crate) fn daemon(&self) -> Arc<ServiceDaemon> {
+        self.daemon.clone()
     }
 }
 

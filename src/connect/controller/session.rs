@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::connect::types::{MdnsDevice, SessionCommand, SessionNotification, consts};
+use crate::connect::consts;
+use crate::connect::types::{MdnsDevice, SessionCommand, SessionNotification};
 use crate::connect::ws::client::WsClient;
 
 struct ActiveSession {

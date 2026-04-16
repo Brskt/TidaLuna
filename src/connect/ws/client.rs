@@ -2,10 +2,12 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 
-use crate::connect::types::{PendingRequests, consts};
+use crate::connect::ws::pending::PendingRequests;
 
 pub(crate) enum WsClientEvent {
     Message(serde_json::Value),
@@ -18,10 +20,11 @@ pub(crate) enum WsClientEvent {
 pub(crate) struct WsClient {
     write_tx: mpsc::Sender<WsMessage>,
     pending: Arc<PendingRequests>,
-    read_task: tokio::task::JoinHandle<()>,
-    write_task: tokio::task::JoinHandle<()>,
-    heartbeat_task: tokio::task::JoinHandle<()>,
     connected: Arc<AtomicBool>,
+    /// Cooperative cancellation for the three per-connection tasks.
+    /// Triggered from `shutdown()` (sync) so the tasks can flush and close
+    /// the WS stream gracefully instead of being aborted mid-frame.
+    cancel: CancellationToken,
 }
 
 impl WsClient {
@@ -55,44 +58,53 @@ impl WsClient {
         let connected = Arc::new(AtomicBool::new(true));
         let pending = Arc::new(PendingRequests::new());
         let (write_tx, write_rx) = mpsc::channel::<WsMessage>(64);
+        let cancel = CancellationToken::new();
 
-        // Write task: forward mpsc → WS sink
-        let write_task = tokio::spawn(write_loop(write, write_rx));
+        // Write task: forward mpsc → WS sink, exit on cancel.
+        {
+            let cancel = cancel.clone();
+            tokio::spawn(write_loop(write, write_rx, cancel));
+        }
 
         // Pong tracker for heartbeat
         let pong_received = Arc::new(AtomicBool::new(true));
 
-        // Read task: WS stream → dispatch
-        let read_task = {
+        // Read task: WS stream → dispatch, exit on cancel.
+        {
             let pending = pending.clone();
             let event_tx = event_tx.clone();
             let connected = connected.clone();
             let pong_received = pong_received.clone();
+            let cancel = cancel.clone();
             tokio::spawn(async move {
-                read_loop(read, pending, event_tx, connected, pong_received).await;
-            })
-        };
+                read_loop(read, pending, event_tx, connected, pong_received, cancel).await;
+            });
+        }
 
-        // Heartbeat task
-        let heartbeat_task = {
+        // Heartbeat task. The shared `connected` flag doubles as the
+        // heartbeat's alive check; when `shutdown()` clears it the loop
+        // exits on its next tick.
+        {
             let write_tx = write_tx.clone();
             let event_tx = event_tx.clone();
             let connected = connected.clone();
             let pong_received = pong_received.clone();
             tokio::spawn(async move {
-                heartbeat_loop(write_tx, event_tx, pong_received, connected).await;
-            })
-        };
+                super::heartbeat::run(write_tx, pong_received, connected, move || async move {
+                    crate::vprintln!("[connect::ws] Ping timeout - connection lost");
+                    let _ = event_tx.send(WsClientEvent::ConnectionLost).await;
+                })
+                .await;
+            });
+        }
 
         crate::vprintln!("[connect::ws] Connected to {}", url);
 
         Ok(Self {
             write_tx,
             pending,
-            read_task,
-            write_task,
-            heartbeat_task,
             connected,
+            cancel,
         })
     }
 
@@ -138,13 +150,17 @@ impl WsClient {
         Ok(())
     }
 
-    /// Shutdown the connection. Idempotent, Arc-compatible (&self).
+    /// Shutdown the connection. Sync, idempotent, Arc-compatible (`&self`).
+    ///
+    /// Flips `connected` (which the heartbeat observes as its alive flag),
+    /// cancels the shared token so `read_loop`/`write_loop` exit their
+    /// `select!` arms, and fails any pending request waiters. The three
+    /// tasks unwind gracefully on their own; we no longer `abort()` them
+    /// so the WS stream gets a chance to close properly.
     pub fn shutdown(&self) {
         self.connected.store(false, Ordering::Relaxed);
+        self.cancel.cancel();
         self.pending.fail_all();
-        self.heartbeat_task.abort();
-        self.read_task.abort();
-        self.write_task.abort();
         crate::vprintln!("[connect::ws] Disconnected");
     }
 
@@ -161,10 +177,20 @@ async fn write_loop(
         WsMessage,
     >,
     mut rx: mpsc::Receiver<WsMessage>,
+    cancel: CancellationToken,
 ) {
-    while let Some(msg) = rx.recv().await {
-        if write.send(msg).await.is_err() {
-            break;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            msg = rx.recv() => match msg {
+                Some(m) => {
+                    if write.send(m).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
         }
     }
     let _ = write.close().await;
@@ -180,8 +206,17 @@ async fn read_loop(
     event_tx: mpsc::Sender<WsClientEvent>,
     connected: Arc<AtomicBool>,
     pong_received: Arc<AtomicBool>,
+    cancel: CancellationToken,
 ) {
-    while let Some(result) = read.next().await {
+    loop {
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            r = read.next() => match r {
+                Some(r) => r,
+                None => break,
+            },
+        };
         match result {
             Ok(WsMessage::Text(text)) => {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -212,36 +247,4 @@ async fn read_loop(
     connected.store(false, Ordering::Relaxed);
     pending.fail_all();
     let _ = event_tx.send(WsClientEvent::ConnectionLost).await;
-}
-
-async fn heartbeat_loop(
-    write_tx: mpsc::Sender<WsMessage>,
-    event_tx: mpsc::Sender<WsClientEvent>,
-    pong_received: Arc<AtomicBool>,
-    connected: Arc<AtomicBool>,
-) {
-    let mut interval = tokio::time::interval(Duration::from_millis(consts::PING_INTERVAL_MS));
-
-    loop {
-        interval.tick().await;
-        if !connected.load(Ordering::Relaxed) {
-            break;
-        }
-
-        pong_received.store(false, Ordering::Relaxed);
-        if write_tx.send(WsMessage::Ping(vec![].into())).await.is_err() {
-            break;
-        }
-
-        // Wait for pong within the remaining timeout window
-        let pong_wait = Duration::from_millis(consts::PING_TIMEOUT_MS - consts::PING_INTERVAL_MS);
-        tokio::time::sleep(pong_wait).await;
-
-        if !pong_received.load(Ordering::Relaxed) && connected.load(Ordering::Relaxed) {
-            crate::vprintln!("[connect::ws] Ping timeout - connection lost");
-            connected.store(false, Ordering::Relaxed);
-            let _ = event_tx.send(WsClientEvent::ConnectionLost).await;
-            break;
-        }
-    }
 }

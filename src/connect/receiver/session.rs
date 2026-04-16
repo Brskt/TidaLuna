@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 
-use crate::connect::types::{SessionStatus, consts};
+use crate::connect::consts;
+use crate::connect::types::SessionStatus;
 
 // ── State machine ────────────────────────────────────────────────────
 

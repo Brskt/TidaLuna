@@ -4,10 +4,14 @@ pub(crate) mod queue;
 pub(crate) mod session;
 pub(crate) mod speaker_bridge;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::connect::mdns::advertiser::{AdvertiseConfig, MdnsAdvertiser};
+use crate::connect::runtime::TaskGroup;
 use crate::connect::types::ReceiverConfig;
 use crate::connect::ws::server::{IncomingMessage, ServerEvent, WsServer};
 use cef::*;
@@ -18,9 +22,12 @@ use queue::{QueueManager, QueueNotifyEvent};
 use session::{ReceiverSession, SessionInternalEvent, SessionNotifyEvent};
 use speaker_bridge::{BridgeEvent, SpeakerBridge};
 
+/// Deadline for the receiver's graceful shutdown. After this window the
+/// TaskGroup aborts stragglers and reports them in the `ShutdownReport`.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+
 pub(crate) struct ConnectReceiver {
-    cancel: CancellationToken,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Arc<TaskGroup>,
     advertiser: Option<MdnsAdvertiser>,
 }
 
@@ -29,7 +36,8 @@ impl ConnectReceiver {
         config: ReceiverConfig,
         advertiser: Option<MdnsAdvertiser>,
     ) -> anyhow::Result<(Self, mpsc::Sender<BridgeEvent>)> {
-        let cancel = CancellationToken::new();
+        let tasks = Arc::new(TaskGroup::new());
+        let cancel = tasks.cancel_token();
 
         // Channels
         let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingMessage>(128);
@@ -63,21 +71,24 @@ impl ConnectReceiver {
         let queue_mgr = QueueManager::new(reqwest::Client::new(), queue_tx);
         let client_comm = ClientCommunicator::new(server);
 
-        // Main routing loop with all 6 channel arms
+        // Main routing loop with all 6 channel arms.
         let routing_cancel = cancel.clone();
-        let routing_task = tokio::spawn(routing_loop(
-            client_comm,
-            session_mgr,
-            playback_ctrl,
-            queue_mgr,
-            bridge_rx,
-            incoming_rx,
-            server_event_rx,
-            session_rx,
-            playback_rx,
-            queue_rx,
-            routing_cancel,
-        ));
+        tasks.spawn(
+            "receiver-routing",
+            routing_loop(
+                client_comm,
+                session_mgr,
+                playback_ctrl,
+                queue_mgr,
+                bridge_rx,
+                incoming_rx,
+                server_event_rx,
+                session_rx,
+                playback_rx,
+                queue_rx,
+                routing_cancel,
+            ),
+        )?;
 
         crate::vprintln!(
             "[connect::receiver] Started on port {} as '{}'",
@@ -87,8 +98,7 @@ impl ConnectReceiver {
 
         Ok((
             Self {
-                cancel,
-                tasks: vec![routing_task],
+                tasks,
                 advertiser: adv,
             },
             bridge_tx,
@@ -96,14 +106,29 @@ impl ConnectReceiver {
     }
 
     pub async fn shutdown(&mut self) {
-        self.cancel.cancel();
-        if let Some(ref mut adv) = self.advertiser {
+        // Stop advertising (unregister + goodbye packet) and then drive a
+        // bounded shutdown of the mDNS daemon thread via `MdnsBackend`.
+        // The backend is idempotent: if the daemon is already stopped,
+        // it short-circuits to `AlreadyStopped`.
+        use crate::connect::mdns::backend::MdnsBackend;
+        if let Some(ref mut adv) = self.advertiser.take() {
             adv.stop();
+            let backend = crate::connect::mdns::backend::ProdMdnsBackend::new(adv.daemon());
+            let outcome = backend.shutdown(Duration::from_millis(500)).await;
+            crate::vprintln!("[connect::receiver] mdns shutdown: {:?}", outcome);
         }
-        for task in self.tasks.drain(..) {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
-        }
-        crate::vprintln!("[connect::receiver] Shut down");
+
+        // TaskGroup::shutdown cancels the shared token, waits for
+        // cooperating tasks, aborts stragglers, and returns a classified
+        // report. Panics are visible here because the project forces
+        // `panic = "unwind"` (see runtime.rs const_assert).
+        let report = self.tasks.shutdown(SHUTDOWN_DEADLINE).await;
+        crate::vprintln!(
+            "[connect::receiver] Shutdown report: graceful={:?} aborted={:?} panicked={:?}",
+            report.graceful_completed,
+            report.aborted,
+            report.panicked,
+        );
     }
 }
 

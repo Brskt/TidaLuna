@@ -21,6 +21,11 @@ version = "0.0.2-alpha"
 edition = "2024"
 
 
+[profile.dev]
+# Required for src/connect/runtime.rs TaskGroup to report panics via JoinError::into_panic.
+# Verified at compile-time via `const _: () = assert!(cfg!(panic = "unwind"))` in runtime.rs.
+panic = "unwind"
+
 [profile.dev.package."*"]
 opt-level = 2
 
@@ -28,7 +33,7 @@ opt-level = 2
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = true
 
 
@@ -81,13 +86,15 @@ tokio = { version = "1.51.0", features = [
   "process",
   "io-util",
 ] }
-tokio-util = "0.7.18"
+tokio-util = { version = "0.7.18", features = ["rt"] }
 tracing = "0.1.44"
 tray-icon = { version = "0.22.0", default-features = false }
 url = "2.5.8"
 zip = { workspace = true }
 
 # TIDAL Connect
+arc-swap = "1.9.1"
+async-trait = "0.1.89"
 gethostname = "1.1.0"
 md-5 = "0.11.0"
 mdns-sd = "0.19.0"
@@ -129,3 +136,7 @@ keyring = { version = "3.6.3", default-features = false, features = [
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1.12"
+
+[dev-dependencies]
+insta = { version = "1.47.2", features = ["json", "redactions"] }
+proptest = "1.11.0"

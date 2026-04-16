@@ -1,11 +1,19 @@
+pub(crate) mod bridge;
+pub(crate) mod consts;
 pub(crate) mod controller;
 pub(crate) mod ipc;
 pub(crate) mod mdns;
 pub(crate) mod receiver;
+pub(crate) mod runtime;
+#[cfg(test)]
+pub(crate) mod testing;
+pub(crate) mod token_state;
 pub(crate) mod types;
 pub(crate) mod ws;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 
 use controller::TidalConnectController;
@@ -13,13 +21,16 @@ use mdns::advertiser::MdnsAdvertiser;
 use mdns::browser::{BrowserEvent, MdnsBrowser};
 use receiver::ConnectReceiver;
 use receiver::speaker_bridge::BridgeEvent;
+use runtime::TaskGroup;
 use types::ReceiverConfig;
+
+const CONTROLLER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
 pub(crate) struct ConnectManager {
     controller: Option<Arc<Mutex<TidalConnectController>>>,
     receiver: Option<ConnectReceiver>,
     bridge_tx: Option<mpsc::Sender<BridgeEvent>>,
-    controller_tasks: Vec<tokio::task::JoinHandle<()>>,
+    controller_tasks: Arc<TaskGroup>,
 }
 
 impl ConnectManager {
@@ -28,7 +39,7 @@ impl ConnectManager {
             controller: None,
             receiver: None,
             bridge_tx: None,
-            controller_tasks: Vec::new(),
+            controller_tasks: Arc::new(TaskGroup::new()),
         }
     }
 
@@ -44,23 +55,26 @@ impl ConnectManager {
         self.controller = Some(controller.clone());
 
         // Spawn browser event polling task on the tokio runtime
-        // (init_controller may be called from the CEF UI thread, not a tokio context)
+        // (init_controller may be called from the CEF UI thread, not a tokio context).
+        // The TaskGroup requires a tokio context at spawn time, so enter the
+        // runtime before invoking it.
         let ctrl = controller.clone();
         let Some(rt) = crate::state::RT_HANDLE.get() else {
             anyhow::bail!("Tokio runtime not available");
         };
-        let task = rt.spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                let devices = {
-                    let mut guard = ctrl.lock().unwrap();
-                    guard.handle_browser_event(event);
-                    guard.discovered_devices().to_vec()
-                };
-                // Emit to frontend - must post to CEF UI thread
-                ipc::post_emit_with_data("connect.devices_received", &devices);
-            }
-        });
-        self.controller_tasks.push(task);
+        let _guard = rt.enter();
+        self.controller_tasks
+            .spawn("controller-browser-loop", async move {
+                while let Some(event) = event_rx.recv().await {
+                    let devices = {
+                        let mut guard = ctrl.lock().unwrap();
+                        guard.handle_browser_event(event);
+                        guard.discovered_devices().to_vec()
+                    };
+                    // Emit to frontend - must post to CEF UI thread
+                    ipc::post_emit_with_data("connect.devices_received", &devices);
+                }
+            })?;
 
         crate::vprintln!("[connect] Controller initialized");
         Ok(())
@@ -76,12 +90,12 @@ impl ConnectManager {
         let (receiver, bridge_tx) = ConnectReceiver::start(config, advertiser).await?;
         self.receiver = Some(receiver);
         self.bridge_tx = Some(bridge_tx.clone());
-        crate::ui::flush::set_connect_bridge_tx(Some(bridge_tx));
+        crate::connect::bridge::set_active(Some(bridge_tx));
         Ok(())
     }
 
     pub(crate) async fn stop_receiver(&mut self) {
-        crate::ui::flush::set_connect_bridge_tx(None);
+        crate::connect::bridge::set_active(None);
         self.bridge_tx = None;
         if let Some(mut receiver) = self.receiver.take() {
             receiver.shutdown().await;
@@ -134,8 +148,15 @@ impl ConnectManager {
 
     pub(crate) async fn shutdown(&mut self) {
         self.stop_receiver().await;
-        for task in self.controller_tasks.drain(..) {
-            task.abort();
+        let report = self
+            .controller_tasks
+            .shutdown(CONTROLLER_SHUTDOWN_DEADLINE)
+            .await;
+        if !report.panicked.is_empty() {
+            crate::vprintln!(
+                "[connect] Controller task panics on shutdown: {:?}",
+                report.panicked
+            );
         }
         if let Some(ctrl) = self.controller.take()
             && let Ok(mut guard) = ctrl.lock()

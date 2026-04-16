@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
+
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::connect::types::consts;
+use crate::connect::runtime::TaskGroup;
 
 pub(crate) struct IncomingMessage {
     pub socket_id: u32,
@@ -20,6 +21,10 @@ pub(crate) enum ServerEvent {
     ClientDisconnected(u32),
 }
 
+/// Per-client task handles. These stay outside the server's `TaskGroup`
+/// because the task names in `TaskGroup` must be unique `&'static str`s;
+/// per-client tasks have dynamic socket-id suffixes and are cancelled
+/// directly on disconnect or server shutdown.
 struct ClientHandle {
     write_tx: mpsc::Sender<WsMessage>,
     _read_task: tokio::task::JoinHandle<()>,
@@ -28,10 +33,12 @@ struct ClientHandle {
 
 /// WebSocket server for the receiver (accepts connections from mobile TIDAL clients).
 pub(crate) struct WsServer {
-    listener_task: Option<tokio::task::JoinHandle<()>>,
+    tasks: Arc<TaskGroup>,
     clients: Arc<RwLock<HashMap<u32, ClientHandle>>>,
     running: Arc<AtomicBool>,
 }
+
+const SERVER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
 impl WsServer {
     /// Start listening on the given port.
@@ -47,11 +54,13 @@ impl WsServer {
         let next_socket_id = Arc::new(AtomicU32::new(1));
         let running = Arc::new(AtomicBool::new(true));
 
-        let listener_task = {
+        let tasks = Arc::new(TaskGroup::new());
+        {
             let clients = clients.clone();
             let next_socket_id = next_socket_id.clone();
-            let running = running.clone();
-            tokio::spawn(async move {
+            let running_for_task = running.clone();
+            tasks.spawn(
+                "ws-server-listener",
                 accept_loop(
                     listener,
                     tls_acceptor,
@@ -59,16 +68,15 @@ impl WsServer {
                     next_socket_id,
                     incoming_tx,
                     server_event_tx,
-                    running,
-                )
-                .await;
-            })
-        };
+                    running_for_task,
+                ),
+            )?;
+        }
 
         crate::vprintln!("[connect::ws::server] Listening on port {}", port);
 
         Ok(Self {
-            listener_task: Some(listener_task),
+            tasks,
             clients,
             running,
         })
@@ -107,8 +115,14 @@ impl WsServer {
     pub async fn shutdown(&mut self) {
         self.running.store(false, Ordering::Relaxed);
 
-        if let Some(task) = self.listener_task.take() {
-            task.abort();
+        // Cancel + await the listener via the TaskGroup; per-client tasks
+        // are untracked (dynamic names) and are aborted below.
+        let report = self.tasks.shutdown(SERVER_SHUTDOWN_DEADLINE).await;
+        if !report.panicked.is_empty() {
+            crate::vprintln!(
+                "[connect::ws::server] Listener panicked: {:?}",
+                report.panicked
+            );
         }
 
         let mut clients = self.clients.write().await;
@@ -207,7 +221,13 @@ async fn accept_loop(
             let pong_received = pong_received.clone();
             let client_alive = client_alive.clone();
             tokio::spawn(async move {
-                client_heartbeat(socket_id, write_tx, pong_received, client_alive).await;
+                super::heartbeat::run(write_tx, pong_received, client_alive, move || async move {
+                    crate::vprintln!(
+                        "[connect::ws::server] Client {} ping timeout - disconnecting",
+                        socket_id
+                    );
+                })
+                .await;
             })
         };
 
@@ -285,42 +305,6 @@ async fn client_read_loop(
     let _ = server_event_tx
         .send(ServerEvent::ClientDisconnected(socket_id))
         .await;
-}
-
-async fn client_heartbeat(
-    socket_id: u32,
-    write_tx: mpsc::Sender<WsMessage>,
-    pong_received: Arc<AtomicBool>,
-    client_alive: Arc<AtomicBool>,
-) {
-    let mut interval = tokio::time::interval(Duration::from_millis(consts::PING_INTERVAL_MS));
-
-    loop {
-        interval.tick().await;
-        if !client_alive.load(Ordering::Relaxed) {
-            break;
-        }
-
-        pong_received.store(false, Ordering::Relaxed);
-        if write_tx.send(WsMessage::Ping(vec![].into())).await.is_err() {
-            break;
-        }
-
-        let pong_wait = Duration::from_millis(consts::PING_TIMEOUT_MS - consts::PING_INTERVAL_MS);
-        tokio::time::sleep(pong_wait).await;
-
-        if !pong_received.load(Ordering::Relaxed) && client_alive.load(Ordering::Relaxed) {
-            crate::vprintln!(
-                "[connect::ws::server] Client {} ping timeout - disconnecting",
-                socket_id
-            );
-            client_alive.store(false, Ordering::Relaxed);
-            // Drop write_tx to close the channel - this propagates through
-            // client_write_loop → TCP close → client_read_loop → ClientDisconnected
-            drop(write_tx);
-            return;
-        }
-    }
 }
 
 /// Build a TLS acceptor using the embedded TIDAL Connect server cert+key.

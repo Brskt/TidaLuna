@@ -87,7 +87,7 @@ impl PlaybackController {
         self.media_seq_no = media_seq_no;
         self.engine_gen += 1;
         // Sync the shared atomic so flush.rs stamps events with the same gen
-        crate::ui::flush::CONNECT_ENGINE_GEN
+        crate::connect::bridge::ENGINE_GEN
             .store(self.engine_gen, std::sync::atomic::Ordering::Relaxed);
 
         // Stop current playback if active
@@ -171,7 +171,7 @@ impl PlaybackController {
         }
         self.state = PbState::Stopped;
         self.engine_gen += 1;
-        crate::ui::flush::CONNECT_ENGINE_GEN
+        crate::connect::bridge::ENGINE_GEN
             .store(self.engine_gen, std::sync::atomic::Ordering::Relaxed);
         self.bridge.stop();
         self.current_media = None;
@@ -204,7 +204,7 @@ impl PlaybackController {
 
     pub async fn reset(&mut self) {
         self.engine_gen += 1;
-        crate::ui::flush::CONNECT_ENGINE_GEN
+        crate::connect::bridge::ENGINE_GEN
             .store(self.engine_gen, std::sync::atomic::Ordering::Relaxed);
         self.state = PbState::NoEngine;
         self.current_media = None;

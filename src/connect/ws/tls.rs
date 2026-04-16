@@ -72,6 +72,14 @@ impl ServerCertVerifier for TidalCertVerifier {
                 // Hostname mismatch is expected - devices use IP addresses.
                 // The CA chain was still validated by the inner verifier before
                 // it rejected the hostname, so the cert is authentic.
+                //
+                // Logged so a LAN MITM can be spotted in traces: a legitimate
+                // device mismatch happens once per connection attempt, while
+                // a hostile peer could trigger a flood of these.
+                crate::vprintln!(
+                    "[connect::ws::tls] Accepted TIDAL-signed cert despite hostname mismatch: {:?}",
+                    server_name
+                );
                 Ok(ServerCertVerified::assertion())
             }
             Err(e) => Err(e),
