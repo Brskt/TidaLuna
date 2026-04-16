@@ -101,6 +101,7 @@ export const LunaUpdateSettings = React.memo(() => {
 
 	const handleAutoCheckToggle = useCallback((_: any, checked: boolean) => {
 		setAutoCheck(checked);
+		(window as any).__TIDALUNAR_AUTO_CHECK__ = checked;
 		ipcRenderer.send("updater.set_auto_check", checked);
 	}, []);
 

@@ -9,6 +9,7 @@ export const LunaConnectSettings = React.memo(() => {
 
 	const handleToggle = useCallback((_: any, checked: boolean) => {
 		setAlwaysOn(checked);
+		(window as any).__TIDALUNAR_RECEIVER_ALWAYS_ON__ = checked;
 		ipcRenderer.send("connect.receiver.set_always_on", checked);
 	}, []);
 
