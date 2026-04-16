@@ -17,7 +17,7 @@ o.innerHTML='<div style="background:#1a1a2e;border-radius:12px;padding:32px;max-
 <div style="text-align:center;margin-bottom:20px;">\
 <img src="data:image/png;base64,{logo}" style="width:64px;height:64px;margin-bottom:12px;border-radius:12px;">\
 <h1 style="margin:0;font-size:20px;font-weight:600;letter-spacing:0.5px;">TidaLunar</h1>\
-<p style="margin:4px 0 0;color:#888;font-size:13px;">v{ver} &middot; alpha</p>\
+<p style="margin:4px 0 0;color:#888;font-size:13px;">v{ver}</p>\
 </div>\
 <p style="text-align:center;color:#aaa;font-size:13px;margin:0 0 12px;">A native TIDAL client built with Rust</p>\
 <div style="text-align:center;margin-bottom:20px;font-size:13px;"><a href="https://github.com/Inrixia/TidaLuna" target="_blank" style="color:#5b8def;text-decoration:none;">GitHub</a> &middot; <a href="https://discord.gg/jK3uHrJGx4" target="_blank" style="color:#7289da;text-decoration:none;">Discord</a></div>\
