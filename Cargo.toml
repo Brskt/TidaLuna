@@ -17,7 +17,7 @@ zip = { version = "8.5.1", default-features = false, features = [
 
 [package]
 name = "tidalunar"
-version = "0.0.2-alpha"
+version = "0.0.3-alpha"
 edition = "2024"
 
 
