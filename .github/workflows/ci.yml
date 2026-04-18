@@ -28,6 +28,7 @@ jobs:
             pkg-config \
             libasound2-dev \
             libdbus-1-dev \
+            libx11-dev \
             libglib2.0-dev \
             libgdk-pixbuf-2.0-dev \
             cmake \
@@ -94,6 +95,7 @@ jobs:
             pkg-config \
             libasound2-dev \
             libdbus-1-dev \
+            libx11-dev \
             libglib2.0-dev \
             libgdk-pixbuf-2.0-dev \
             cmake \
