@@ -1,6 +1,5 @@
 use std::fs;
 
-use cef::ImplWindow;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -181,8 +180,7 @@ pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
             crate::app_state::with_state(|state| {
                 state.force_quit = true;
             });
-            let browser = crate::app_state::with_state(|state| state.browser.clone()).flatten();
-            if let Some(window) = crate::ipc::window::get_cef_window(browser) {
+            if let Some(window) = crate::ui::app_window::AppWindow::current() {
                 window.close();
             } else {
                 cef::quit_message_loop();

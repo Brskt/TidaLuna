@@ -1,4 +1,5 @@
 use crate::app_state::{AppState, IpcMessage, open_in_os, toggle_devtools, with_state};
+use crate::ui::app_window::AppWindow;
 use crate::ui::flush::{FlushBatch, run_flush_batch, take_flush_batch};
 use crate::ui::menu::{HamburgerMenuDelegate, MenuCommand};
 use cef::*;
@@ -6,54 +7,26 @@ use cef::*;
 pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
     match msg.channel.as_str() {
         "window.close" => {
-            let browser = with_state(|state| state.browser.clone());
-            if let Some(window) = get_cef_window(browser.flatten()) {
+            if let Some(window) = AppWindow::current() {
                 window.close();
             } else {
                 quit_message_loop();
             }
         }
         "window.minimize" => {
-            let browser = with_state(|state| state.browser.clone());
-            if let Some(window) = get_cef_window(browser.flatten()) {
-                #[cfg(target_os = "windows")]
-                {
-                    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-                    let hwnd = window.window_handle().0 as windows_sys::Win32::Foundation::HWND;
-                    if !hwnd.is_null() {
-                        unsafe {
-                            PostMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE as usize, 0);
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
+            if let Some(window) = AppWindow::current() {
                 window.minimize();
             }
         }
         "window.maximize" | "window.unmaximize" => {
-            let browser = with_state(|state| state.browser.clone()).flatten();
-            if let Some(window) = get_cef_window(browser) {
-                let maximized = window.is_maximized() == 1;
-                #[cfg(target_os = "windows")]
-                {
-                    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-                    let hwnd = window.window_handle().0 as windows_sys::Win32::Foundation::HWND;
-                    if !hwnd.is_null() {
-                        let cmd = if maximized { SC_RESTORE } else { SC_MAXIMIZE };
-                        unsafe {
-                            PostMessageW(hwnd, WM_SYSCOMMAND, cmd as usize, 0);
-                        }
-                    }
+            if let Some(window) = AppWindow::current() {
+                let was_max = window.is_maximized();
+                if was_max {
+                    window.restore();
+                } else {
+                    window.maximize();
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    if maximized {
-                        window.restore();
-                    } else {
-                        window.maximize();
-                    }
-                }
-                let batch = with_state(|state| notify_window_state(state, !maximized, false));
+                let batch = with_state(|state| notify_window_state(state, !was_max, false));
                 if let Some(batch) = batch {
                     run_flush_batch(batch);
                 }
@@ -73,8 +46,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 "Clear Cache".to_string()
             };
 
-            let browser = with_state(|state| state.browser.clone()).flatten();
-            if let Some(window) = get_cef_window(browser) {
+            if let Some(window) = AppWindow::current() {
                 let mut delegate = HamburgerMenuDelegate::new(0);
                 if let Some(mut menu) = menu_model_create(Some(&mut delegate)) {
                     menu.add_item(
@@ -192,8 +164,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                     state.close_to_tray = false;
                 });
                 crate::platform::tray::destroy_tray();
-                let browser = with_state(|state| state.browser.clone()).flatten();
-                if let Some(window) = get_cef_window(browser) {
+                if let Some(window) = AppWindow::current() {
                     window.show();
                 }
             }
@@ -240,9 +211,4 @@ pub(crate) fn notify_window_state(
     );
     state.pending_misc_js.push(js);
     take_flush_batch(state)
-}
-
-pub(crate) fn get_cef_window(mut browser: Option<Browser>) -> Option<Window> {
-    let bv = browser_view_get_for_browser(browser.as_mut())?;
-    bv.window()
 }

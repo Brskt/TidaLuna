@@ -60,7 +60,7 @@ impl IAudioSessionEvents_Impl for VolumeCallback_Impl {
     fn OnSimpleVolumeChanged(
         &self,
         newvolume: f32,
-        _newmute: windows_core::BOOL,
+        _newmute: BOOL,
         eventcontext: *const GUID,
     ) -> Result<()> {
         if !eventcontext.is_null() {

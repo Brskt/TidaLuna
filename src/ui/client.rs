@@ -74,9 +74,7 @@ wrap_drag_handler! {
             _frame: Option<&mut Frame>,
             regions: Option<&[DraggableRegion]>,
         ) {
-            if let Some(bv) = browser_view_get_for_browser(browser)
-                && let Some(window) = bv.window()
-            {
+            if let Some(window) = crate::ui::app_window::AppWindow::from_browser(browser) {
                 window.set_draggable_regions(regions);
             }
         }
@@ -281,7 +279,6 @@ wrap_life_span_handler! {
             crate::vprintln!("[CEF]    on_before_close: popup={}", is_popup);
             self.router.on_before_close(browser.cloned());
             if !is_popup {
-                // Only clear state and quit for the main browser
                 with_state(|state| {
                     state.browser = None;
                 });
@@ -547,10 +544,7 @@ wrap_display_handler! {
     }
     impl DisplayHandler {
         fn on_title_change(&self, browser: Option<&mut Browser>, title: Option<&CefString>) {
-            let mut browser = browser.cloned();
-            if let Some(bv) = browser_view_get_for_browser(browser.as_mut())
-                && let Some(window) = bv.window()
-            {
+            if let Some(window) = crate::ui::app_window::AppWindow::from_browser(browser) {
                 window.set_title(title);
             }
         }

@@ -1,5 +1,5 @@
 use crate::app_state::{eval_js, open_in_os, toggle_devtools, with_state};
-use crate::ipc::window::get_cef_window;
+use crate::ui::app_window::AppWindow;
 use cef::*;
 
 pub(crate) fn about_dialog_js() -> String {
@@ -136,8 +136,7 @@ wrap_menu_model_delegate! {
                     with_state(|state| {
                         state.force_quit = true;
                     });
-                    let browser = with_state(|state| state.browser.clone()).flatten();
-                    if let Some(window) = get_cef_window(browser) {
+                    if let Some(window) = AppWindow::current() {
                         window.close();
                     } else {
                         quit_message_loop();

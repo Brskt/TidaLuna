@@ -1,13 +1,25 @@
 use cef::*;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(not(target_os = "linux"))]
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
+#[cfg(not(target_os = "linux"))]
 use tray_icon::{Icon, TrayIconBuilder};
 
+#[cfg(target_os = "linux")]
+use tray_item::{IconSource, TrayItem};
+
+#[cfg(not(target_os = "linux"))]
 struct Tray {
     _icon: tray_icon::TrayIcon,
     show_id: MenuId,
     quit_id: MenuId,
+}
+
+#[cfg(target_os = "linux")]
+struct Tray {
+    _item: TrayItem,
 }
 
 thread_local! {
@@ -23,7 +35,19 @@ fn assert_ui_thread() {
     );
 }
 
+#[cfg(not(target_os = "linux"))]
 fn decode_icon() -> Option<Icon> {
+    let (buf, width, height) = decode_rgba()?;
+    match Icon::from_rgba(buf, width, height) {
+        Ok(icon) => Some(icon),
+        Err(e) => {
+            crate::vprintln!("[TRAY]   Failed to create icon: {e}");
+            None
+        }
+    }
+}
+
+fn decode_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let png_data = include_bytes!("../../tidaluna.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(png_data));
     let mut reader = match decoder.read_info() {
@@ -46,15 +70,10 @@ fn decode_icon() -> Option<Icon> {
         }
     };
     buf.truncate(info.buffer_size());
-    match Icon::from_rgba(buf, info.width, info.height) {
-        Ok(icon) => Some(icon),
-        Err(e) => {
-            crate::vprintln!("[TRAY]   Failed to create icon: {e}");
-            None
-        }
-    }
+    Some((buf, info.width, info.height))
 }
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn create_tray() -> bool {
     assert_ui_thread();
 
@@ -102,6 +121,42 @@ pub(crate) fn create_tray() -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn create_tray() -> bool {
+    assert_ui_thread();
+
+    let Some((data, width, height)) = decode_rgba() else {
+        return false;
+    };
+
+    let icon = IconSource::Data {
+        data,
+        width: width as i32,
+        height: height as i32,
+    };
+
+    let mut item = match TrayItem::new("TidaLunar", icon) {
+        Ok(i) => i,
+        Err(e) => {
+            crate::vprintln!("[TRAY]   Failed to create tray item: {e}");
+            return false;
+        }
+    };
+
+    if let Err(e) = item.add_menu_item("Show", post_show_window) {
+        crate::vprintln!("[TRAY]   Failed to add Show item: {e}");
+        return false;
+    }
+    if let Err(e) = item.add_menu_item("Quit", post_force_quit) {
+        crate::vprintln!("[TRAY]   Failed to add Quit item: {e}");
+        return false;
+    }
+
+    crate::vprintln!("[TRAY]   Created tray item (ksni)");
+    TRAY.with(|t| *t.borrow_mut() = Some(Tray { _item: item }));
+    true
+}
+
 pub(crate) fn destroy_tray() {
     assert_ui_thread();
     TRAY.with(|t| {
@@ -118,18 +173,9 @@ pub(crate) fn has_tray() -> bool {
 }
 
 fn show_window() {
-    let browser = crate::app_state::with_state(|s| s.browser.clone()).flatten();
-    if let Some(window) = crate::ipc::window::get_cef_window(browser) {
+    if let Some(window) = crate::ui::app_window::AppWindow::current() {
         window.show();
-        #[cfg(target_os = "windows")]
-        {
-            let hwnd = window.window_handle().0 as windows_sys::Win32::Foundation::HWND;
-            if !hwnd.is_null() {
-                unsafe {
-                    windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
-                }
-            }
-        }
+        window.focus_foreground();
     }
 }
 
@@ -137,14 +183,26 @@ fn force_quit() {
     crate::app_state::with_state(|state| {
         state.force_quit = true;
     });
-    let browser = crate::app_state::with_state(|s| s.browser.clone()).flatten();
-    if let Some(window) = crate::ipc::window::get_cef_window(browser) {
+    if let Some(window) = crate::ui::app_window::AppWindow::current() {
         window.close();
     } else {
         quit_message_loop();
     }
 }
 
+#[cfg(target_os = "linux")]
+fn post_show_window() {
+    let mut task = TrayShowWindowTask::new(0);
+    post_task(ThreadId::UI, Some(&mut task));
+}
+
+#[cfg(target_os = "linux")]
+fn post_force_quit() {
+    let mut task = TrayForceQuitTask::new(0);
+    post_task(ThreadId::UI, Some(&mut task));
+}
+
+#[cfg(not(target_os = "linux"))]
 fn poll_events() {
     let ids = TRAY.with(|t| {
         t.borrow()
@@ -184,6 +242,7 @@ fn poll_events() {
 
 // --- CEF polling task ---
 
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn start_event_polling() {
     if POLLING_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -192,6 +251,14 @@ pub(crate) fn start_event_polling() {
     post_delayed_task(ThreadId::UI, Some(&mut task), 100);
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn start_event_polling() {
+    // Linux uses tray-item/ksni which dispatches callbacks on its own thread;
+    // callbacks post tasks back to the CEF UI thread, so no polling loop needed.
+    POLLING_STARTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(not(target_os = "linux"))]
 wrap_task! {
     struct TrayPollTask {
         _p: u8,
@@ -201,6 +268,30 @@ wrap_task! {
             poll_events();
             let mut task = TrayPollTask::new(0);
             post_delayed_task(ThreadId::UI, Some(&mut task), 100);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+wrap_task! {
+    struct TrayShowWindowTask {
+        _p: u8,
+    }
+    impl Task {
+        fn execute(&self) {
+            show_window();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+wrap_task! {
+    struct TrayForceQuitTask {
+        _p: u8,
+    }
+    impl Task {
+        fn execute(&self) {
+            force_quit();
         }
     }
 }

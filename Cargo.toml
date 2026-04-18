@@ -52,7 +52,6 @@ dash-mpd = { version = "0.20.2", default-features = false }
 fnv = "1.0.7"
 futures-util = "0.3.32"
 getrandom = { workspace = true }
-hmac = "0.13.0"
 oauth2 = { version = "5.0.0", default-features = false }
 oxc = { version = "0.126.0", features = ["semantic", "transformer", "codegen"] }
 pbkdf2 = "0.13.0-rc.10"
@@ -89,7 +88,6 @@ tokio = { version = "1.52.0", features = [
 ] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tracing = "0.1.44"
-tray-icon = { version = "0.22.0", default-features = false }
 url = "2.5.8"
 zip = { workspace = true }
 
@@ -106,6 +104,9 @@ tokio-tungstenite = { version = "0.29.0", features = [
   "rustls-tls-native-roots",
 ] }
 
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.22.0", default-features = false }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.23.0"
 windows = { version = "0.62.2", features = [
@@ -115,6 +116,9 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Com_StructuredStorage",
   "Win32_UI_Shell_PropertiesSystem",
 ] }
+# Required by the `windows::core::implement` proc-macro which expands to
+# absolute `::windows_core::...` paths, needing the crate name in the dep
+# graph even though `windows::core` already re-exports it.
 windows-core = "0.62.2"
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
@@ -134,10 +138,7 @@ keyring = { version = "3.6.3", default-features = false, features = [
   "crypto-rust",
   "linux-native-sync-persistent",
 ] }
+tray-item = { version = "0.10.0", default-features = false, features = ["ksni"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1.12"
-
-[dev-dependencies]
-insta = { version = "1.47.2", features = ["json", "redactions"] }
-proptest = "1.11.0"

@@ -1,4 +1,5 @@
 mod app_bootstrap;
+pub(crate) mod app_window;
 mod client;
 pub(crate) mod flush;
 pub(crate) mod menu;
