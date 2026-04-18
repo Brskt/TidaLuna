@@ -3,11 +3,33 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 
-pub(crate) const USER_AGENT: &str = if cfg!(target_os = "linux") {
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) tidal-hifi/1.12.4-beta Chrome/144.0.7559.96 Electron/40.1.0 Safari/537.36"
-} else {
-    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) TIDAL/1.12.4-beta Chrome/142.0.7444.235 Electron/39.2.7 Safari/537.36"
-};
+fn build_user_agent(os_token: &str) -> String {
+    format!(
+        "Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) TidaLunar/{ver} Chrome/{cmaj}.{cmin}.{cbld}.{cpat} Safari/537.36",
+        os = os_token,
+        ver = env!("CARGO_PKG_VERSION"),
+        cmaj = cef::sys::CHROME_VERSION_MAJOR,
+        cmin = cef::sys::CHROME_VERSION_MINOR,
+        cbld = cef::sys::CHROME_VERSION_BUILD,
+        cpat = cef::sys::CHROME_VERSION_PATCH,
+    )
+}
+
+pub(crate) static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
+    let os = if cfg!(target_os = "linux") {
+        "X11; Linux x86_64"
+    } else {
+        "Windows NT 10.0; WOW64"
+    };
+    build_user_agent(os)
+});
+
+// TIDAL's bar component renders only when navigator.userAgent contains a
+// Windows OS token. We override at the JS layer so HTTP traffic keeps the
+// honest Linux UA above.
+#[cfg(target_os = "linux")]
+pub(crate) static JS_USER_AGENT: LazyLock<String> =
+    LazyLock::new(|| build_user_agent("Windows NT 10.0; WOW64"));
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackInfo {
@@ -34,7 +56,7 @@ fn build_http_client() -> reqwest::Client {
     // but tune connection setup and pooling for lower latency variance.
     reqwest::Client::builder()
         .cookie_store(true)
-        .user_agent(USER_AGENT)
+        .user_agent(USER_AGENT.as_str())
         .connect_timeout(Duration::from_secs(8))
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(8)

@@ -299,8 +299,20 @@ wrap_browser_process_handler! {
             #[cfg(not(target_os = "windows"))]
             let volume_sync: bool = false;
 
+            // TIDAL's web frontend gates its native titlebar component on a
+            // Windows platform token in navigator.userAgent. On Linux we keep the
+            // real Linux UA for network traffic (CefSettings.user_agent) but
+            // expose a Windows-like UA to JavaScript so the titlebar renders.
+            #[cfg(target_os = "linux")]
+            let ua_override = format!(
+                r#"(function(){{try{{var UA={ua:?};var AV=UA.replace('Mozilla/','');Object.defineProperty(Navigator.prototype,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(navigator,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(Navigator.prototype,'appVersion',{{get:function(){{return AV;}},configurable:true}});Object.defineProperty(navigator,'appVersion',{{get:function(){{return AV;}},configurable:true}});}}catch(e){{}}}})();"#,
+                ua = crate::state::JS_USER_AGENT.as_str(),
+            );
+            #[cfg(not(target_os = "linux"))]
+            let ua_override = String::new();
+
             let init_script = format!(
-                r#"window.__TIDALUNAR_PLATFORM__ = '{platform}';
+                r#"{ua_override}window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
 window.__TIDALUNAR_AUTO_CHECK__ = {auto_check};
 window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
@@ -342,6 +354,7 @@ document.title = "TidaLunar - A TIDAL client";
         document.addEventListener('DOMContentLoaded', inject);
     }}
 }})();"#,
+                ua_override = ua_override,
                 platform = platform,
                 close_to_tray = close_to_tray,
                 pkce_credentials_json = pkce_credentials_json

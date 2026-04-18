@@ -26,58 +26,40 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use ui::flush::PlayerEventTask;
 
-/// Populate WAYLAND_DISPLAY and XDG_RUNTIME_DIR when launched from a shell
-/// without a graphical session env, so CEF ozone can reach the compositor.
+/// Populate DISPLAY when launched from a shell without a graphical session env,
+/// so the X11 ozone backend can reach the X server (XWayland under a Wayland
+/// session, or a native X server).
 #[cfg(target_os = "linux")]
-fn ensure_wayland_env() {
-    use std::os::unix::fs::MetadataExt;
-    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-        let uid = std::fs::metadata("/proc/self")
-            .ok()
-            .map(|m| m.uid())
-            .unwrap_or(1000);
+fn ensure_x11_env() {
+    if std::env::var_os("DISPLAY").is_none() {
         unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
-        }
-    }
-    if std::env::var_os("WAYLAND_DISPLAY").is_none()
-        && let Some(rt_dir) = std::env::var_os("XDG_RUNTIME_DIR")
-    {
-        let socket = std::path::Path::new(&rt_dir).join("wayland-0");
-        if socket.exists() {
-            unsafe {
-                std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
-            }
+            std::env::set_var("DISPLAY", ":0");
         }
     }
 }
 
-/// Re-exec the browser with `--ozone-platform=wayland` prepended when a Wayland
-/// socket is reachable. Chromium reads this switch from argv very early, before
-/// `OnBeforeCommandLineProcessing` runs, so appending it there is ignored.
+/// Re-exec the browser with `--ozone-platform=x11` prepended so Chromium uses
+/// the X11 backend (served by XWayland on a Wayland session). Chromium reads
+/// this switch from argv very early, before `OnBeforeCommandLineProcessing`,
+/// so appending it there is ignored. The X11 window is decorated by the
+/// window manager, which works on GNOME Mutter where Wayland SSD does not.
 #[cfg(target_os = "linux")]
-fn reexec_for_wayland_if_needed() {
+fn reexec_for_x11_if_needed() {
     if std::env::args().any(|a| a.starts_with("--ozone-platform")) {
         return;
     }
     if std::env::args().any(|a| a.starts_with("--type=")) {
         return;
     }
-    let wayland_ok = std::env::var_os("WAYLAND_DISPLAY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    if !wayland_ok {
-        return;
-    }
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
     let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("--ozone-platform=wayland");
+    cmd.arg("--ozone-platform=x11");
     cmd.args(std::env::args_os().skip(1));
     let err = std::os::unix::process::CommandExt::exec(&mut cmd);
     eprintln!(
-        "Failed to re-exec {} with Wayland ozone switch: {err}",
+        "Failed to re-exec {} with X11 ozone switch: {err}",
         exe.display()
     );
     std::process::exit(1);
@@ -148,8 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(target_os = "linux")]
     {
-        ensure_wayland_env();
-        reexec_for_wayland_if_needed();
+        ensure_x11_env();
+        reexec_for_x11_if_needed();
     }
 
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
@@ -303,7 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root_cache_cef = CefString::from(root_cache.to_string_lossy().as_ref());
     let profile_cache_cef = CefString::from(profile_cache.to_string_lossy().as_ref());
 
-    let user_agent = CefString::from(crate::state::USER_AGENT);
+    let user_agent = CefString::from(crate::state::USER_AGENT.as_str());
 
     // CEF resources (.pak, locales, icudtl.dat) live in bin/cef/
     let cef_res_dir = exe_dir
