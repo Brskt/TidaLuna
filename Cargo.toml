@@ -116,9 +116,6 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Com_StructuredStorage",
   "Win32_UI_Shell_PropertiesSystem",
 ] }
-# Required by the `windows::core::implement` proc-macro which expands to
-# absolute `::windows_core::...` paths, needing the crate name in the dep
-# graph even though `windows::core` already re-exports it.
 windows-core = "0.62.2"
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
