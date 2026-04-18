@@ -132,6 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         ensure_x11_env();
         reexec_for_x11_if_needed();
+        platform::desktop_entry::install();
     }
 
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);

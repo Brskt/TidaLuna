@@ -145,6 +145,21 @@ wrap_window_delegate! {
                 window.set_window_app_icon(Some(&mut icon));
             }
 
+            // CEF Views creates X11 windows directly and ignores Chromium's
+            // --class switch, so the window has no WM_CLASS by default and
+            // GNOME cannot match the installed .desktop entry. Set it via
+            // XSetClassHint here.
+            #[cfg(target_os = "linux")]
+            {
+                let xid = window.window_handle();
+                if xid != 0 {
+                    crate::platform::x11_class::set_wm_class(
+                        xid,
+                        crate::platform::desktop_entry::WM_CLASS,
+                    );
+                }
+            }
+
             #[cfg(target_os = "windows")]
             {
                 use windows_sys::Win32::UI::Shell::SetWindowSubclass;

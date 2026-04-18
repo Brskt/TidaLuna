@@ -1,4 +1,6 @@
 pub(crate) mod auth;
+#[cfg(target_os = "linux")]
+pub(crate) mod desktop_entry;
 pub(crate) mod js_actions;
 pub(crate) mod media_controls;
 pub(crate) mod sdk_storage;
@@ -8,3 +10,5 @@ pub(crate) mod thumbbar;
 pub(crate) mod tray;
 #[cfg(target_os = "windows")]
 pub(crate) mod volume_sync;
+#[cfg(target_os = "linux")]
+pub(crate) mod x11_class;
