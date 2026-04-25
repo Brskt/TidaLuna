@@ -535,6 +535,8 @@ fn bundle_macos(
         fs::create_dir_all(dir).map_err(|e| format!("create dir: {e}"))?;
     }
 
+    let version = read_workspace_version()?;
+
     // Copy main binary
     let exe_src = target_dir.join(exe_name);
     fs::copy(&exe_src, macos_dir.join(exe_name)).map_err(|e| format!("copy main binary: {e}"))?;
@@ -548,7 +550,7 @@ fn bundle_macos(
     println!("  Copied {framework}");
 
     // Write main Info.plist
-    write_info_plist(&contents, exe_name, false)?;
+    write_info_plist(&contents, exe_name, &version, false)?;
 
     // Create helper apps - CEF subprocess helpers reuse the main binary.
     // CEF identifies the subprocess role via --type= argument.
@@ -568,14 +570,19 @@ fn bundle_macos(
         fs::create_dir_all(&helper_macos).map_err(|e| format!("create helper dir: {e}"))?;
         fs::copy(&exe_src, helper_macos.join(&helper_name))
             .map_err(|e| format!("copy helper binary: {e}"))?;
-        write_info_plist(&helper_contents, &helper_name, true)?;
+        write_info_plist(&helper_contents, &helper_name, &version, true)?;
     }
     println!("  Created {} helper apps", helpers.len());
 
     Ok(())
 }
 
-fn write_info_plist(contents_dir: &Path, name: &str, is_helper: bool) -> Result<(), String> {
+fn write_info_plist(
+    contents_dir: &Path,
+    name: &str,
+    version: &str,
+    is_helper: bool,
+) -> Result<(), String> {
     let identifier = name
         .to_lowercase()
         .replace(' ', "-")
@@ -598,8 +605,10 @@ fn write_info_plist(contents_dir: &Path, name: &str, is_helper: bool) -> Result<
     <string>com.tidalunar.{identifier}</string>
     <key>CFBundleName</key>
     <string>{name}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>{version}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>

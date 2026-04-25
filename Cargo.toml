@@ -19,6 +19,10 @@ zip = { version = "8.5.1", default-features = false, features = [
 name = "tidalunar"
 version = "0.0.4-alpha"
 edition = "2024"
+description = "A native TIDAL client"
+authors = ["Inrixia"]
+homepage = "https://github.com/Inrixia/TidaLuna"
+repository = "https://github.com/Inrixia/TidaLuna"
 
 
 [profile.dev]
