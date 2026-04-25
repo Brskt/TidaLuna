@@ -83,6 +83,11 @@ jobs:
           - target: macos-arm64
             os: macos-latest
     runs-on: ${{ matrix.os }}
+    env:
+      # Job-scoped so the Sign step's `if: env.WINDOWS_SIGNING_PFX != ''` can
+      # see the value (GitHub's documented secret-gating pattern).
+      WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+      WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
     steps:
       - uses: actions/checkout@v5
 
@@ -125,11 +130,90 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo xtask build-updater --release
 
-      - name: Upload artifact
+      - name: Install NSIS
+        if: startsWith(matrix.target, 'windows-')
+        run: choco install nsis -y --no-progress
+
+      - name: Package Windows installer
+        if: startsWith(matrix.target, 'windows-')
+        shell: pwsh
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          $arch = if ($env:MATRIX_TARGET -eq 'windows-amd64') { 'amd64' } else { 'arm64' }
+          cargo xtask package --release --arch $arch
+
+      - name: Sign Windows installer
+        if: startsWith(matrix.target, 'windows-') && env.WINDOWS_SIGNING_PFX != ''
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX))
+          & "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign `
+            /f "$env:RUNNER_TEMP\cert.pfx" `
+            /p "$env:WINDOWS_SIGNING_PFX_PASSWORD" `
+            /tr http://timestamp.digicert.com `
+            /td sha256 /fd sha256 `
+            target\installer\tidalunar-windows-*.exe
+          Remove-Item "$env:RUNNER_TEMP\cert.pfx"
+
+      - name: Smoke test installer (silent install)
+        if: startsWith(matrix.target, 'windows-')
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target\installer\tidalunar-windows-*.exe | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\TidaLunar\tidalunar.exe")) {
+            throw "Installer ran but tidalunar.exe missing in install dir"
+          }
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\TidaLunar\updater.exe")) {
+            throw "Installer ran but updater.exe missing in install dir"
+          }
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\TidaLunar\manifest.json")) {
+            throw "Installer ran but manifest.json missing in install dir"
+          }
+          if (-not (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\TidaLunar" -ErrorAction SilentlyContinue)) {
+            throw "Installer ran but registry entry missing"
+          }
+          Start-Process -FilePath "$env:LOCALAPPDATA\Programs\TidaLunar\Uninstall.exe" -ArgumentList "/S" -Wait
+          Start-Sleep -Seconds 2
+          if (Test-Path "$env:LOCALAPPDATA\Programs\TidaLunar\tidalunar.exe") {
+            throw "Uninstaller ran but tidalunar.exe still present"
+          }
+
+      - name: Smoke test cleanup-stale helper
+        if: startsWith(matrix.target, 'windows-')
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'cleanup-fixture'
+          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
+          'old-only' | Out-File "$fixture\removed.dat" -Encoding ascii
+          'shared'   | Out-File "$fixture\kept.dat"    -Encoding ascii
+          @{
+            version = '0.0.1'; min_version = '0.0.0'; target = 'windows-amd64';
+            files = @{ 'removed.dat' = @{ sha256='00'; size=8 }; 'kept.dat' = @{ sha256='00'; size=6 } }
+          } | ConvertTo-Json -Depth 4 | Out-File "$fixture\old.json" -Encoding ascii
+          @{
+            version = '0.0.2'; min_version = '0.0.0'; target = 'windows-amd64';
+            files = @{ 'kept.dat' = @{ sha256='00'; size=6 } }
+          } | ConvertTo-Json -Depth 4 | Out-File "$fixture\new.json" -Encoding ascii
+
+          & dist\updater.exe --cleanup-stale --app-dir $fixture --old-manifest "$fixture\old.json" --new-manifest "$fixture\new.json"
+          if ($LASTEXITCODE -ne 0) { throw "cleanup-stale exited $LASTEXITCODE" }
+          if (Test-Path "$fixture\removed.dat") { throw "cleanup-stale did not remove old-only file" }
+          if (-not (Test-Path "$fixture\kept.dat")) { throw "cleanup-stale removed a still-current file" }
+
+      - name: Upload bundle artifact
         uses: actions/upload-artifact@v7
         with:
           name: tidalunar-${{ matrix.target }}
           path: dist/
+
+      - name: Upload installer artifact
+        if: startsWith(matrix.target, 'windows-')
+        uses: actions/upload-artifact@v7
+        with:
+          name: tidalunar-${{ matrix.target }}-installer
+          path: target/installer/tidalunar-windows-*.exe
 
   # ---------------------------------------------------------------------------
   # Check
@@ -223,6 +307,19 @@ jobs:
 
             (cd "$dir" && zip -r "$GITHUB_WORKSPACE/release-assets/tidalunar-${target}.zip" .)
             echo "Created tidalunar-${target}.zip"
+
+            case "$target" in
+              windows-*)
+                inst_dir="artifacts/tidalunar-${target}-installer"
+                if [ -d "$inst_dir" ]; then
+                  installer=$(ls "$inst_dir"/tidalunar-windows-*.exe 2>/dev/null | head -1)
+                  if [ -n "$installer" ]; then
+                    cp "$installer" "release-assets/$(basename "$installer")"
+                    echo "Copied installer: $(basename "$installer")"
+                  fi
+                fi
+                ;;
+            esac
           done
 
           ls -la release-assets/
