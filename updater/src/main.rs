@@ -13,6 +13,10 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod cleanup;
+#[cfg(target_os = "windows")]
+mod lock;
+
 // ---------------------------------------------------------------------------
 // Public key for update signature verification
 // Replace with actual key from `cargo xtask generate-keypair`
@@ -64,15 +68,15 @@ const TARGET: &str = {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
-struct Manifest {
-    version: String,
-    min_version: String,
-    target: String,
-    files: BTreeMap<String, FileEntry>,
+pub(crate) struct Manifest {
+    pub(crate) version: String,
+    pub(crate) min_version: String,
+    pub(crate) target: String,
+    pub(crate) files: BTreeMap<String, FileEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct FileEntry {
+pub(crate) struct FileEntry {
     sha256: String,
     size: u64,
 }
@@ -174,6 +178,12 @@ fn parse_args() -> Result<Args> {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // Cleanup-stale bypasses run()'s mutex/relaunch/MessageBox path - the
+    // installer that invokes this already holds the mutex.
+    if std::env::args().nth(1).as_deref() == Some("--cleanup-stale") {
+        std::process::exit(run_cleanup_stale());
+    }
+
     if std::env::args().len() <= 1 {
         return;
     }
@@ -195,8 +205,76 @@ fn main() {
     }
 }
 
+fn run_cleanup_stale() -> i32 {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let mut app_dir: Option<PathBuf> = None;
+    let mut old_manifest: Option<PathBuf> = None;
+    let mut new_manifest: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--app-dir" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("[cleanup-stale] --app-dir requires a value");
+                    return 2;
+                };
+                app_dir = Some(PathBuf::from(v));
+            }
+            "--old-manifest" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("[cleanup-stale] --old-manifest requires a value");
+                    return 2;
+                };
+                old_manifest = Some(PathBuf::from(v));
+            }
+            "--new-manifest" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("[cleanup-stale] --new-manifest requires a value");
+                    return 2;
+                };
+                new_manifest = Some(PathBuf::from(v));
+            }
+            other => {
+                eprintln!("[cleanup-stale] unknown argument: {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    let (Some(app), Some(old), Some(new)) = (app_dir, old_manifest, new_manifest) else {
+        eprintln!("[cleanup-stale] need --app-dir, --old-manifest, --new-manifest");
+        return 2;
+    };
+    match cleanup::cleanup_stale(&app, &old, &new) {
+        Ok(n) => {
+            eprintln!("[cleanup-stale] removed {n} stale file(s)");
+            0
+        }
+        Err(e) => {
+            eprintln!("[cleanup-stale] failed: {e:#}");
+            1
+        }
+    }
+}
+
 fn run() -> Result<()> {
     let args = parse_args()?;
+
+    // Cross-process install/update mutex. SID-scoped Global\ name; serialises
+    // against an installer holding the same lock. RAII via Drop: released on
+    // function return / process exit. Cleanup-mode bypasses this path entirely
+    // (see fn main).
+    #[cfg(target_os = "windows")]
+    let _install_lock = match lock::try_acquire()? {
+        Some(lock) => lock,
+        None => {
+            show_error("Another TidaLunar installer is running. Update aborted.");
+            bail!("install/update mutex held by another process");
+        }
+    };
 
     // 1. Wait for the app to exit
     eprintln!("[updater] Waiting for PID {} to exit...", args.pid);
@@ -336,25 +414,9 @@ fn run() -> Result<()> {
     );
 
     // 7b. Determine files to delete (present in old manifest but absent in new)
-    let old_manifest_path = args.app_dir.join("manifest.json");
-    let deleted_files: Vec<String> = if old_manifest_path.exists() {
-        let old_data = fs::read_to_string(&old_manifest_path).unwrap_or_default();
-        if let Ok(old_manifest) = serde_json::from_str::<Manifest>(&old_data) {
-            old_manifest
-                .files
-                .keys()
-                .filter(|p| {
-                    !manifest.files.contains_key(p.as_str())
-                        && is_safe_relative_path(p, &args.app_dir)
-                })
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
+    let deleted_files: Vec<String> = cleanup::read_manifest(&args.app_dir.join("manifest.json"))
+        .map(|old_manifest| cleanup::diff_removed(&old_manifest, &manifest, &args.app_dir))
+        .unwrap_or_default();
     if !deleted_files.is_empty() {
         eprintln!(
             "[updater] {} files to remove: {}",
@@ -491,7 +553,7 @@ fn wait_for_pid(pid: u32) -> Result<()> {
 
 /// Reject absolute paths and directory-escape components (e.g. "..", prefix).
 /// Returns true only if `app_dir.join(rel)` resolves to a path under `app_dir`.
-fn is_safe_relative_path(rel: &str, app_dir: &Path) -> bool {
+pub(crate) fn is_safe_relative_path(rel: &str, app_dir: &Path) -> bool {
     let p = Path::new(rel);
     if p.is_absolute() {
         return false;
