@@ -34,6 +34,7 @@ fn main() {
         Some("fmt") => fmt(),
         Some("bundle") => bundle(&args[1..]),
         Some("build-updater") => build_updater(&args[1..]),
+        Some("package") => package(&args[1..]),
         Some("generate-keypair") => generate_keypair(),
         Some("sign-manifest") => sign_manifest(),
         Some(cmd) => {
@@ -64,6 +65,11 @@ fn usage() {
     eprintln!("                   --release  Build in release mode (optimized, slower)");
     eprintln!("  build-updater    Build the updater crate and copy to dist/updater/");
     eprintln!("                   --release  Build in release mode");
+    eprintln!("  package          Build a Windows NSIS installer from dist/");
+    eprintln!("                   --release  Build payload in release-mode (recommended)");
+    eprintln!(
+        "                   --arch <amd64|arm64>  Required: payload arch (matches matrix.target in CI)"
+    );
     eprintln!("  generate-keypair Generate an Ed25519 keypair for update signing");
     eprintln!("  sign-manifest    Sign dist/manifest.json using $UPDATE_SIGNING_KEY");
 }
@@ -535,7 +541,10 @@ fn bundle_macos(
         fs::create_dir_all(dir).map_err(|e| format!("create dir: {e}"))?;
     }
 
-    let version = read_workspace_version()?;
+    // Apple's CFBundleVersion / CFBundleShortVersionString reject prerelease
+    // suffixes during signing/notarization. Strip `-alpha` etc. and pad to 3
+    // dotted-numeric parts (the conventional Apple form).
+    let version = numeric_version(&read_workspace_version()?, 3);
 
     // Copy main binary
     let exe_src = target_dir.join(exe_name);
@@ -917,5 +926,190 @@ fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
         exit(status.code().unwrap_or(1));
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// package - Build a Windows NSIS installer from dist/
+// ---------------------------------------------------------------------------
+
+/// Map a semver string like `0.0.4-alpha` to a fixed-arity dotted-numeric form
+/// for installer/bundle metadata that rejects prerelease suffixes:
+///   * NSIS `VIProductVersion` requires exactly 4 numeric parts
+///   * Apple `CFBundleVersion` / `CFBundleShortVersionString` reject `-alpha`
+///     and conventionally use 3 parts
+///
+/// Drops any prerelease/build suffix, keeps only leading digits per part,
+/// pads missing components with `0`, truncates to `parts`.
+fn numeric_version(version: &str, parts: usize) -> String {
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let mut out: Vec<String> = core
+        .split('.')
+        .map(|p| {
+            p.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        })
+        .filter(|p| !p.is_empty())
+        .collect();
+    while out.len() < parts {
+        out.push("0".into());
+    }
+    out.truncate(parts);
+    out.join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::numeric_version;
+
+    #[test]
+    fn drops_prerelease_suffix() {
+        assert_eq!(numeric_version("0.0.4-alpha", 4), "0.0.4.0");
+        assert_eq!(numeric_version("1.2.3-rc.1", 4), "1.2.3.0");
+        assert_eq!(numeric_version("0.0.4-alpha", 3), "0.0.4");
+    }
+
+    #[test]
+    fn drops_build_metadata() {
+        assert_eq!(numeric_version("1.2.3+build.42", 4), "1.2.3.0");
+    }
+
+    #[test]
+    fn pads_missing_parts() {
+        assert_eq!(numeric_version("1", 4), "1.0.0.0");
+        assert_eq!(numeric_version("1.2", 4), "1.2.0.0");
+        assert_eq!(numeric_version("1.2", 3), "1.2.0");
+    }
+
+    #[test]
+    fn truncates_extra_parts() {
+        assert_eq!(numeric_version("1.2.3.4.5", 4), "1.2.3.4");
+        assert_eq!(numeric_version("1.2.3.4", 3), "1.2.3");
+    }
+
+    #[test]
+    fn passes_through_already_normal() {
+        assert_eq!(numeric_version("1.2.3.4", 4), "1.2.3.4");
+        assert_eq!(numeric_version("1.2.3", 3), "1.2.3");
+    }
+
+    #[test]
+    fn handles_garbage_suffix_per_part() {
+        assert_eq!(numeric_version("1abc.2def.3ghi", 4), "1.2.3.0");
+    }
+}
+
+fn package(flags: &[String]) -> Result<(), String> {
+    // --arch is required (no host-default - would mis-name cross-built ARM64
+    // payloads as amd64).
+    let mut arch: Option<String> = None;
+    let mut i = 0;
+    while i < flags.len() {
+        match flags[i].as_str() {
+            "--release" => {} // payload was built by `bundle`
+            "--arch" => {
+                i += 1;
+                arch = Some(flags.get(i).ok_or("--arch requires a value")?.clone());
+            }
+            other => return Err(format!("unknown argument: {other}")),
+        }
+        i += 1;
+    }
+    let arch = arch.ok_or(
+        "--arch <amd64|arm64> is required (no host-default to avoid cross-build mismatch)",
+    )?;
+    if arch != "amd64" && arch != "arm64" {
+        return Err(format!("--arch must be amd64 or arm64, got: {arch}"));
+    }
+
+    let project_root = project_root()?;
+    let dist = project_root.join("dist");
+    if !dist.is_dir()
+        || fs::read_dir(&dist)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_none()
+    {
+        return Err("dist/ is empty or missing - run `cargo xtask bundle` first".into());
+    }
+    if !dist.join("manifest.json").is_file() {
+        return Err("dist/manifest.json missing - run `cargo xtask bundle` first".into());
+    }
+    if !dist.join("updater.exe").is_file() {
+        return Err("dist/updater.exe missing - run `cargo xtask build-updater` first".into());
+    }
+
+    // Validate dist payload arch matches --arch.
+    let manifest_data =
+        fs::read_to_string(dist.join("manifest.json")).map_err(|e| e.to_string())?;
+    let manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| e.to_string())?;
+    let expected = format!("windows-{arch}");
+    if manifest.target != expected {
+        return Err(format!(
+            "dist/ payload target {} does not match --arch {} (expected {})",
+            manifest.target, arch, expected
+        ));
+    }
+
+    if Command::new("makensis").arg("/VERSION").output().is_err() {
+        return Err(
+            "makensis not on PATH - install via `apt install nsis` (Linux) or `choco install nsis` (Windows)"
+                .into(),
+        );
+    }
+
+    let out_dir = project_root.join("target").join("installer");
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+
+    // Remove any prior installers for this arch so older builds (typically a
+    // version-suffixed .exe restored from cache or left from a local version
+    // bump) cannot be picked up by downstream globbers in CI (signtool,
+    // Get-ChildItem | Select-Object -First 1, upload-artifact path glob).
+    let stale_prefix = format!("tidalunar-windows-{arch}-");
+    for entry in fs::read_dir(&out_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(&stale_prefix) && name_str.ends_with(".exe") {
+            fs::remove_file(entry.path())
+                .map_err(|e| format!("remove stale installer {name_str}: {e}"))?;
+        }
+    }
+
+    let version = read_workspace_version()?;
+    // NSIS VIProductVersion requires X.X.X.X with all numeric components, so
+    // strip any semver prerelease/build suffix and pad to 4 parts. The
+    // human-readable version still ships in DisplayVersion + filename.
+    let version_numeric = numeric_version(&version, 4);
+    let nsi = project_root
+        .join("installer")
+        .join("windows")
+        .join("tidalunar.nsi");
+
+    println!(
+        "Packaging installer: target={expected} version={version} (numeric={version_numeric})"
+    );
+    let status = Command::new("makensis")
+        .arg(format!("-DVERSION={version}"))
+        .arg(format!("-DVERSION_NUMERIC={version_numeric}"))
+        .arg(format!("-DARCH={arch}"))
+        .arg(format!("-DDIST_DIR={}", dist.display()))
+        .arg(format!("-DOUT_DIR={}", out_dir.display()))
+        .arg(&nsi)
+        .status()
+        .map_err(|e| format!("makensis spawn: {e}"))?;
+    if !status.success() {
+        return Err(format!("makensis failed: {status}"));
+    }
+
+    let exe = out_dir.join(format!("tidalunar-windows-{arch}-{version}.exe"));
+    if !exe.is_file() {
+        return Err(format!(
+            "expected installer at {} but file is missing",
+            exe.display()
+        ));
+    }
+    println!("Installer created: {}", exe.display());
     Ok(())
 }
