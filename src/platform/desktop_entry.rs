@@ -16,6 +16,25 @@ const ICON_DATA: &[u8] = include_bytes!("../../tidaluna.png");
 pub(crate) const WM_CLASS: &str = "tidalunar";
 
 pub(crate) fn install() {
+    // If we're running from a packaged install (.deb), the system already
+    // ships /usr/share/applications/tidalunar.desktop pointing at
+    // /usr/bin/tidalunar (the launcher). Writing a user-level entry here
+    // would shadow the system one and bypass the launcher script (which
+    // does first-launch extraction, the protocol-version gate, and the
+    // CHROME_DEVEL_SANDBOX env export).
+    if Path::new("/usr/bin/tidalunar").exists()
+        && Path::new("/usr/share/applications/tidalunar.desktop").exists()
+    {
+        // Clean up any stale user-level entry left from a prior unpackaged run.
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let stale = home
+                .join(".local/share/applications")
+                .join(format!("{WM_CLASS}.desktop"));
+            let _ = fs::remove_file(&stale);
+        }
+        return;
+    }
+
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };

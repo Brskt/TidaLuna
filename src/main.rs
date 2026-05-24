@@ -146,26 +146,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_browser = cmd_line.has_switch(Some(&switch)) != 1;
 
     #[cfg(target_os = "linux")]
-    if is_browser && let Some(ref dir) = exe_dir {
+    if is_browser {
         use std::os::unix::fs::MetadataExt;
-        let sandbox = dir.join("bin").join("cef").join("chrome-sandbox");
-        let report_error = || {
-            eprintln!("Chromium sandbox is not configured correctly.");
-            eprintln!("Run these commands once after extraction:");
-            eprintln!("    sudo chown root:root {}", sandbox.display());
-            eprintln!("    sudo chmod 4755 {}", sandbox.display());
-        };
-        match std::fs::metadata(&sandbox) {
-            Err(e) => {
-                eprintln!("chrome-sandbox not found at {}: {e}", sandbox.display());
-                report_error();
-                std::process::exit(1);
-            }
-            Ok(meta) => {
-                let is_setuid_root = meta.uid() == 0 && (meta.mode() & 0o4000) != 0;
-                if !is_setuid_root {
-                    report_error();
-                    std::process::exit(1);
+        use std::path::PathBuf;
+
+        // Resolution order:
+        //   1. CHROME_DEVEL_SANDBOX env (set by /usr/bin/tidalunar.real launcher
+        //      under packaged install, points at /opt/tidalunar/bin/cef/chrome-sandbox).
+        //   2. exe_dir-relative bin/cef/chrome-sandbox (covers unpackaged dev runs
+        //      and the .tar.gz "no system helper" case).
+        let sandbox_path: Option<PathBuf> = std::env::var_os("CHROME_DEVEL_SANDBOX")
+            .map(PathBuf::from)
+            .or_else(|| {
+                exe_dir
+                    .as_ref()
+                    .map(|d| d.join("bin").join("cef").join("chrome-sandbox"))
+            });
+
+        if let Some(path) = sandbox_path {
+            match std::fs::metadata(&path) {
+                Ok(meta) => {
+                    let mode = meta.mode();
+                    let is_setuid_root = meta.uid() == 0 && (mode & 0o4000) != 0;
+                    let is_executable = (mode & 0o111) != 0;
+                    // Both are valid:
+                    //   - setuid root → legacy SUID sandbox (postinst chmod 4755
+                    //     when unprivileged userns is unavailable)
+                    //   - normal executable, not setuid → namespace sandbox
+                    //     (Chromium picks userns automatically when chrome-sandbox
+                    //     is present but not setuid root)
+                    // Fail fast only if the file exists but is unreadable / not
+                    // executable: that's an administrative misconfiguration we
+                    // want loud rather than a silent fallback to no sandbox.
+                    if !is_setuid_root && !is_executable {
+                        eprintln!(
+                            "chrome-sandbox at {} is neither setuid-root nor a normal executable.",
+                            path.display()
+                        );
+                        eprintln!("Reinstall the .deb or fix the binary's permissions.");
+                        std::process::exit(1);
+                    }
+                }
+                Err(_) => {
+                    // Absence is acceptable. .tar.gz installs ship no helper at
+                    // all; Chromium falls back to namespace sandbox when userns
+                    // is available, or surfaces a clear log message when it
+                    // isn't (Ubuntu 24.04+ apparmor restriction without the
+                    // .deb's profile). That's the right place for the message,
+                    // not here.
                 }
             }
         }
