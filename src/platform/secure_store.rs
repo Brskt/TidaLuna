@@ -22,9 +22,9 @@ pub(crate) struct TokenGeneration {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // Unavailable only constructed on Linux
+#[allow(dead_code)] // not every variant is constructed on every platform
 pub(crate) enum StoreError {
-    /// Backend not available (no Secret Service on Linux, no Keychain, etc.)
+    /// Backend not available (no Keychain, DPAPI failure, etc.)
     Unavailable,
     /// Backend accessible but operation failed (permission, I/O, lock)
     Backend,
@@ -167,58 +167,47 @@ fn delete_platform(_data_dir: &Path) -> Result<(), StoreError> {
     }
 }
 
-// --- Linux: keyring ---
+// --- Linux: 0600 file ---
+//
+// No Secret Service / keyring: it only ever protected against local OS-level
+// threats (other users, offline disk access), which are out of scope here, and
+// it forces a keyring-unlock password prompt on every fresh session. The token
+// is kept away from plugins by path containment, not at-rest encryption: JS
+// plugins have no filesystem access, and native (Bun) plugins get an fs facade
+// scoped to cache_data_dir()/native/<plugin>/, so they cannot reach this file in
+// the data-dir root. A 0600 file in the data dir therefore satisfies the
+// in-scope boundary with no prompt.
 
 #[cfg(target_os = "linux")]
-fn save_platform(_data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
-    let entry =
-        keyring::Entry::new("com.tidaluna", "auth_state").map_err(|_| StoreError::Unavailable)?;
-    entry
-        .set_secret(plaintext)
-        .map_err(|e| match classify_keyring_error(&e) {
-            KeyringErrorKind::NoAccess => StoreError::Unavailable,
-            KeyringErrorKind::Other => StoreError::Backend,
-        })
+fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = data_dir.join("auth_tokens.json");
+    let mut f = tempfile::NamedTempFile::new_in(data_dir).map_err(|_| StoreError::Backend)?;
+    f.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| StoreError::Backend)?;
+    f.write_all(plaintext).map_err(|_| StoreError::Backend)?;
+    f.as_file().sync_all().map_err(|_| StoreError::Backend)?;
+    f.persist(&path).map_err(|_| StoreError::Backend)?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn load_platform(_data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
-    let entry =
-        keyring::Entry::new("com.tidaluna", "auth_state").map_err(|_| StoreError::Unavailable)?;
-    match entry.get_secret() {
+fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
+    match std::fs::read(data_dir.join("auth_tokens.json")) {
         Ok(v) => Ok(Some(v)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(match classify_keyring_error(&e) {
-            KeyringErrorKind::NoAccess => StoreError::Unavailable,
-            KeyringErrorKind::Other => StoreError::Backend,
-        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(StoreError::Backend),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn delete_platform(_data_dir: &Path) -> Result<(), StoreError> {
-    let entry =
-        keyring::Entry::new("com.tidaluna", "auth_state").map_err(|_| StoreError::Unavailable)?;
-    match entry.delete_credential() {
+fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
+    match std::fs::remove_file(data_dir.join("auth_tokens.json")) {
         Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(match classify_keyring_error(&e) {
-            KeyringErrorKind::NoAccess => StoreError::Unavailable,
-            KeyringErrorKind::Other => StoreError::Backend,
-        }),
-    }
-}
-
-#[cfg(target_os = "linux")]
-enum KeyringErrorKind {
-    NoAccess,
-    Other,
-}
-
-#[cfg(target_os = "linux")]
-fn classify_keyring_error(e: &keyring::Error) -> KeyringErrorKind {
-    match e {
-        keyring::Error::NoStorageAccess(_) => KeyringErrorKind::NoAccess,
-        _ => KeyringErrorKind::Other,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(StoreError::Backend),
     }
 }
