@@ -215,13 +215,30 @@ wrap_app! {
                 cmd.append_switch(Some(&name));
             }
 
-            let switch = format!("disable-features={}", CEF_DISABLED_FEATURES.join(","));
-            let switch_cef = CefString::from(switch.as_str());
-            cmd.append_switch(Some(&switch_cef));
+            let disable = CEF_DISABLED_FEATURES.join(",");
+            let disable_name = CefString::from("disable-features");
+            let disable_val = CefString::from(disable.as_str());
+            cmd.append_switch_with_value(Some(&disable_name), Some(&disable_val));
 
-            let enable = format!("enable-features={}", CEF_ENABLED_FEATURES.join(","));
-            let enable_cef = CefString::from(enable.as_str());
-            cmd.append_switch(Some(&enable_cef));
+            let enable = CEF_ENABLED_FEATURES.join(",");
+            let enable_name = CefString::from("enable-features");
+            let enable_val = CefString::from(enable.as_str());
+            cmd.append_switch_with_value(Some(&enable_name), Some(&enable_val));
+
+            // Linux: force Chromium's "basic" password store. Otherwise OSCrypt
+            // reaches for the Secret Service (gnome-libsecret/kwallet) to protect
+            // its cookie-encryption key, which pops a keyring-unlock dialog on
+            // first launch. The TIDAL token is kept out of the CEF store and
+            // persisted separately, so at-rest cookie encryption isn't relied on.
+            // Must use the name/value form: append_switch("password-store=basic")
+            // stores the whole string as the switch key, so OSCrypt's in-process
+            // GetSwitchValueASCII("password-store") lookup would miss it.
+            #[cfg(target_os = "linux")]
+            {
+                let name = CefString::from("password-store");
+                let value = CefString::from("basic");
+                cmd.append_switch_with_value(Some(&name), Some(&value));
+            }
 
             crate::vprintln!("[CEF]    Command line switches applied");
         }
