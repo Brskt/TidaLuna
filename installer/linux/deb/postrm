@@ -1,0 +1,27 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        if [ -f /etc/apparmor.d/tidalunar ] && hash apparmor_parser 2>/dev/null; then
+            apparmor_parser --remove /etc/apparmor.d/tidalunar 2>/dev/null || true
+            rm -f /etc/apparmor.d/tidalunar
+        fi
+        ;;
+    remove)
+        # Drop the alternative on removal (not just purge) so /usr/bin/tidalunar
+        # isn't left dangling. Not on upgrade - postinst re-adds it.
+        if type update-alternatives >/dev/null 2>&1; then
+            update-alternatives --remove 'tidalunar' '/usr/bin/tidalunar.real' || true
+        fi
+        ;;
+    upgrade|deconfigure)
+        # No-op: keep the AppArmor profile + alternative during the upgrade transition.
+        ;;
+esac
+
+if hash update-desktop-database 2>/dev/null; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+
+#DEBHELPER#

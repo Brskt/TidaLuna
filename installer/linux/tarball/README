@@ -1,0 +1,32 @@
+TidaLunar - Linux .tar.gz package
+==================================
+
+Quick start:
+  tar -xzf tidalunar-<version>-linux-<arch>.tar.gz
+  cd tidalunar-<version>-linux-<arch>/
+  ./tidalunar
+
+Sandbox status
+==============
+This .tar.gz package does NOT install the Chromium sandbox helper.
+Depending on your distro, TidaLunar will run with one of:
+
+  * Namespace sandbox (Debian 12+, Fedora 39+, Arch, openSUSE Leap 15.5+,
+    Linux Mint 22, Ubuntu 22.04) -- sandboxing active.
+  * Seccomp-only or no sandbox (Ubuntu 24.04+ with default kernel
+    hardening, or kernels without unprivileged user namespaces) --
+    reduced sandboxing.
+
+If you want the full Chromium sandbox on Ubuntu 24.04+, install the .deb
+package instead:
+
+  sudo dpkg -i tidalunar_<version>_<arch>.deb
+
+The .deb ships a setuid sandbox helper, an AppArmor profile, and a
+runtime probe that picks the right sandbox mode at install time.
+
+Updates
+=======
+TidaLunar self-updates silently into a copy under
+~/.local/share/tidalunar/. The .tar.gz file you ran is only used for
+the initial install; you can delete it after first launch.

@@ -2,7 +2,7 @@
 ;
 ; Variability injected via -D defines from `cargo xtask package`:
 ;   ${VERSION}    e.g. 0.0.4-alpha - DisplayVersion + filename
-;   ${ARCH}       amd64 | arm64    - output filename
+;   ${ARCH}       x64 | arm64      - output filename (Windows arch token)
 ;   ${DIST_DIR}   absolute path to dist/, source for File /r
 ;   ${OUT_DIR}    absolute path to target/installer/, OutFile destination
 
@@ -21,7 +21,7 @@ SetCompressor /SOLID lzma
 Name           "TidaLunar"
 RequestExecutionLevel user
 InstallDir     "$LOCALAPPDATA\Programs\TidaLunar"
-OutFile        "${OUT_DIR}\tidalunar-windows-${ARCH}-${VERSION}.exe"
+OutFile        "${OUT_DIR}\tidalunar_${VERSION}_${ARCH}.exe"
 Icon           "..\..\tidaluna.ico"
 UninstallIcon  "..\..\tidaluna.ico"
 

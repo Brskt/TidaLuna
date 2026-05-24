@@ -1,0 +1,16 @@
+Package: tidalunar
+Version: {VERSION}
+Section: sound
+Priority: optional
+Architecture: {ARCH}
+Maintainer: Brskt <contact@ancelade.com>
+Depends: libc6 (>= 2.35), libnss3, libgbm1, libasound2, libxrandr2, libxcomposite1, libxdamage1, libxfixes3, libxkbcommon0, libpango-1.0-0, libcairo2, libcups2, libdbus-1-3, libatk1.0-0, libatk-bridge2.0-0, libdrm2, libnspr4, libgtk-3-0, zstd
+Recommends: apparmor (>= 4.0~)
+Description: Native TIDAL desktop client
+ TidaLunar is a Rust desktop wrapper around CEF (Chromium Embedded Framework)
+ that hosts TIDAL's web app with native window decorations, system tray,
+ plugin sandboxing via Bun, and TIDAL Connect receiver support.
+ .
+ The .deb ships a small system bootstrap (sandbox helper, AppArmor profile,
+ launcher) and extracts the application payload to ~/.local/share/tidalunar/
+ on first launch. In-app updates apply silently to user home.

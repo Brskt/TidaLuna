@@ -35,6 +35,7 @@ fn main() {
         Some("bundle") => bundle(&args[1..]),
         Some("build-updater") => build_updater(&args[1..]),
         Some("package") => package(&args[1..]),
+        Some("delta") => delta(&args[1..]),
         Some("generate-keypair") => generate_keypair(),
         Some("sign-manifest") => sign_manifest(),
         Some(cmd) => {
@@ -65,11 +66,21 @@ fn usage() {
     eprintln!("                   --release  Build in release mode (optimized, slower)");
     eprintln!("  build-updater    Build the updater crate and copy to dist/updater/");
     eprintln!("                   --release  Build in release mode");
-    eprintln!("  package          Build a Windows NSIS installer from dist/");
-    eprintln!("                   --release  Build payload in release-mode (recommended)");
+    eprintln!("  package          Build a platform installer from dist/");
+    eprintln!("                   --release  Build payload in release mode (recommended)");
+    eprintln!(
+        "                   --target <windows-nsis|linux-deb|linux-tarball>  Format (default: windows-nsis)"
+    );
     eprintln!(
         "                   --arch <amd64|arm64>  Required: payload arch (matches matrix.target in CI)"
     );
+    eprintln!("  delta            Build a consecutive-delta archive from dist/ vs an old manifest");
+    eprintln!("                   --target <win32|linux>  Required: archive flavor");
+    eprintln!("                   --arch <amd64|arm64>    Required");
+    eprintln!(
+        "                   --old-manifest <path>   Required: previous release's manifest.json"
+    );
+    eprintln!("                   --dist <dir>            New bundle dir (default: dist)");
     eprintln!("  generate-keypair Generate an Ed25519 keypair for update signing");
     eprintln!("  sign-manifest    Sign dist/manifest.json using $UPDATE_SIGNING_KEY");
 }
@@ -97,12 +108,26 @@ fn fmt() -> Result<(), String> {
 // Manifest types
 // ---------------------------------------------------------------------------
 
+/// Minimum `SANDBOX_PROTOCOL_VERSION` the Linux .deb's system bootstrap must
+/// have for in-app updates produced by this xtask to be safe to apply.
+///
+/// Bump this value when CEF's major version changes or libcef changes the
+/// SUID-sandbox helper protocol. The corresponding
+/// `/usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION` file is written from this
+/// constant by the .deb packaging pipeline, and the in-app updater compares
+/// the value here (read via the manifest field) against the system file.
+const LINUX_SANDBOX_PROTOCOL_REQUIRED: u32 = 1;
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     version: String,
     min_version: String,
     target: String,
     files: BTreeMap<String, FileEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox_protocol_required: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delta_from: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -337,14 +362,37 @@ fn generate_manifest(bundle_dir: &Path) -> Result<(), String> {
     // min_version defaults to same as version for now - adjust per release
     let min_version = version.clone();
 
+    let target = target_triple();
+
+    // Linux: declare the sandbox-helper protocol this payload requires. The
+    // .deb launcher reads it from $USER_DIR/SANDBOX_PROTOCOL_REQUIRED to gate
+    // against a stale system bootstrap. Written before collect_files so it
+    // ships in the manifest, the update archives, and the payload tarball, and
+    // is re-applied by in-app updates.
+    if target.starts_with("linux-") {
+        fs::write(
+            bundle_dir.join("SANDBOX_PROTOCOL_REQUIRED"),
+            format!("{LINUX_SANDBOX_PROTOCOL_REQUIRED}\n"),
+        )
+        .map_err(|e| format!("write SANDBOX_PROTOCOL_REQUIRED: {e}"))?;
+    }
+
     let mut files = BTreeMap::new();
     collect_files(bundle_dir, bundle_dir, &mut files)?;
 
+    let sandbox_protocol_required = if target.starts_with("linux-") {
+        Some(LINUX_SANDBOX_PROTOCOL_REQUIRED)
+    } else {
+        None
+    };
     let manifest = Manifest {
         version,
         min_version,
-        target: target_triple(),
+        target,
         files,
+        sandbox_protocol_required,
+        // CI stamps the real previous version into the published manifest.
+        delta_from: None,
     };
 
     let json =
@@ -1000,14 +1048,239 @@ mod tests {
     }
 }
 
-fn package(flags: &[String]) -> Result<(), String> {
-    // --arch is required (no host-default - would mis-name cross-built ARM64
-    // payloads as amd64).
+#[cfg(test)]
+mod manifest_emission_tests {
+    use super::*;
+
+    #[test]
+    fn linux_manifest_emits_protocol_required() {
+        let manifest = Manifest {
+            version: "0.0.5-alpha".to_string(),
+            min_version: "0.0.4-alpha".to_string(),
+            target: "linux-amd64".to_string(),
+            files: BTreeMap::new(),
+            sandbox_protocol_required: Some(LINUX_SANDBOX_PROTOCOL_REQUIRED),
+            delta_from: None,
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(
+            json.contains("\"sandbox_protocol_required\":1"),
+            "Linux manifest must carry the protocol field; got: {json}"
+        );
+    }
+
+    #[test]
+    fn windows_manifest_omits_protocol_required() {
+        let manifest = Manifest {
+            version: "0.0.5-alpha".to_string(),
+            min_version: "0.0.4-alpha".to_string(),
+            target: "windows-amd64".to_string(),
+            files: BTreeMap::new(),
+            sandbox_protocol_required: None,
+            delta_from: None,
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(
+            !json.contains("sandbox_protocol_required"),
+            "Windows manifest must omit the protocol field; got: {json}"
+        );
+    }
+}
+
+/// Files in `new` that are new or whose sha256 differs from `old`. Files only
+/// in `old` (removed) are not returned; deletions are handled by the updater's
+/// manifest diff at apply time, not by the delta archive.
+fn delta_changed_files(old: &Manifest, new: &Manifest) -> Vec<String> {
+    new.files
+        .iter()
+        .filter(|(path, entry)| {
+            old.files
+                .get(path.as_str())
+                .map(|o| o.sha256 != entry.sha256)
+                .unwrap_or(true)
+        })
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+fn delta(flags: &[String]) -> Result<(), String> {
+    let mut target: Option<String> = None;
     let mut arch: Option<String> = None;
+    let mut old_manifest: Option<String> = None;
+    let mut dist: Option<String> = None;
+    let mut i = 0;
+    while i < flags.len() {
+        match flags[i].as_str() {
+            "--target" => {
+                i += 1;
+                target = Some(flags.get(i).ok_or("--target requires a value")?.clone());
+            }
+            "--arch" => {
+                i += 1;
+                arch = Some(flags.get(i).ok_or("--arch requires a value")?.clone());
+            }
+            "--old-manifest" => {
+                i += 1;
+                old_manifest = Some(
+                    flags
+                        .get(i)
+                        .ok_or("--old-manifest requires a value")?
+                        .clone(),
+                );
+            }
+            "--dist" => {
+                i += 1;
+                dist = Some(flags.get(i).ok_or("--dist requires a value")?.clone());
+            }
+            other => return Err(format!("unknown delta flag: {other}")),
+        }
+        i += 1;
+    }
+    let target = target.ok_or("--target is required (win32|linux)")?;
+    let arch = arch.ok_or("--arch is required (amd64|arm64)")?;
+    if arch != "amd64" && arch != "arm64" {
+        return Err(format!("--arch must be amd64 or arm64, got: {arch}"));
+    }
+    let old_manifest_path = old_manifest.ok_or("--old-manifest is required")?;
+
+    let project_root = project_root()?;
+    let dist_dir = match dist {
+        Some(d) => PathBuf::from(d),
+        None => project_root.join("dist"),
+    };
+
+    let new: Manifest = serde_json::from_str(
+        &fs::read_to_string(dist_dir.join("manifest.json"))
+            .map_err(|e| format!("read new manifest: {e}"))?,
+    )
+    .map_err(|e| format!("parse new manifest: {e}"))?;
+    let old: Manifest = serde_json::from_str(
+        &fs::read_to_string(&old_manifest_path).map_err(|e| format!("read old manifest: {e}"))?,
+    )
+    .map_err(|e| format!("parse old manifest: {e}"))?;
+
+    let changed = delta_changed_files(&old, &new);
+    println!(
+        "delta: {} changed/new files vs {}",
+        changed.len(),
+        old.version
+    );
+
+    // Token + extension mirror src/updater/mod.rs::ARCHIVE_SUFFIX.
+    let (token, ext) = match (target.as_str(), arch.as_str()) {
+        ("win32", "amd64") => ("win32_x64", "zip"),
+        ("win32", "arm64") => ("win32_arm64", "zip"),
+        ("linux", "amd64") => ("linux_amd64", "tar.gz"),
+        ("linux", "arm64") => ("linux_arm64", "tar.gz"),
+        _ => {
+            return Err(format!(
+                "unsupported --target/--arch combo: {target}/{arch}"
+            ));
+        }
+    };
+    let version = new.version.clone();
+    let out_dir = project_root.join("target").join("installer");
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let out = out_dir.join(format!("tidalunar_{version}_update_{token}.{ext}"));
+
+    match target.as_str() {
+        "linux" => {
+            // Wrapped top-level dir, matching the full tarball so the updater's
+            // strip-1 extraction works unchanged.
+            let wrap = format!("tidalunar_{version}_update_{token}");
+            let stage_root = out_dir.join(format!("delta-build-{token}"));
+            if stage_root.exists() {
+                fs::remove_dir_all(&stage_root).map_err(|e| e.to_string())?;
+            }
+            let stage = stage_root.join(&wrap);
+            for rel in &changed {
+                let from = dist_dir.join(rel);
+                let to = stage.join(rel);
+                if let Some(p) = to.parent() {
+                    fs::create_dir_all(p).map_err(|e| e.to_string())?;
+                }
+                fs::copy(&from, &to).map_err(|e| format!("copy {rel}: {e}"))?;
+            }
+            let status = Command::new("tar")
+                .args(["-czf"])
+                .arg(&out)
+                .args(["-C"])
+                .arg(&stage_root)
+                .arg(&wrap)
+                .status()
+                .map_err(|e| format!("tar spawn: {e}"))?;
+            if !status.success() {
+                return Err(format!("tar failed: {status}"));
+            }
+        }
+        "win32" => {
+            // Flat zip, matching the full windows bundle.
+            use std::io::Write as _;
+            let file = fs::File::create(&out).map_err(|e| format!("create zip: {e}"))?;
+            let mut zip = zip::ZipWriter::new(file);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for rel in &changed {
+                let data = fs::read(dist_dir.join(rel)).map_err(|e| format!("read {rel}: {e}"))?;
+                zip.start_file(rel.replace('\\', "/"), opts)
+                    .map_err(|e| e.to_string())?;
+                zip.write_all(&data).map_err(|e| e.to_string())?;
+            }
+            zip.finish().map_err(|e| e.to_string())?;
+        }
+        _ => unreachable!(),
+    }
+    println!("delta archive created: {}", out.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod delta_diff_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn entry(sha: &str) -> FileEntry {
+        FileEntry {
+            sha256: sha.to_string(),
+            size: 1,
+        }
+    }
+
+    fn manifest_with(files: &[(&str, &str)]) -> Manifest {
+        Manifest {
+            version: "0.0.5-alpha".into(),
+            min_version: "0.0.4-alpha".into(),
+            target: "linux-amd64".into(),
+            files: files
+                .iter()
+                .map(|(p, s)| (p.to_string(), entry(s)))
+                .collect::<BTreeMap<_, _>>(),
+            sandbox_protocol_required: None,
+            delta_from: None,
+        }
+    }
+
+    #[test]
+    fn changed_set_includes_new_and_modified_only() {
+        let old = manifest_with(&[("a", "h1"), ("b", "h2"), ("gone", "h3")]);
+        let new = manifest_with(&[("a", "h1"), ("b", "h2_changed"), ("c", "h4")]);
+        let mut changed = delta_changed_files(&old, &new);
+        changed.sort();
+        assert_eq!(changed, vec!["b".to_string(), "c".to_string()]);
+    }
+}
+
+fn package(flags: &[String]) -> Result<(), String> {
+    let mut arch: Option<String> = None;
+    let mut target: String = "windows-nsis".into();
     let mut i = 0;
     while i < flags.len() {
         match flags[i].as_str() {
             "--release" => {} // payload was built by `bundle`
+            "--target" => {
+                i += 1;
+                target = flags.get(i).ok_or("--target requires a value")?.clone();
+            }
             "--arch" => {
                 i += 1;
                 arch = Some(flags.get(i).ok_or("--arch requires a value")?.clone());
@@ -1023,6 +1296,17 @@ fn package(flags: &[String]) -> Result<(), String> {
         return Err(format!("--arch must be amd64 or arm64, got: {arch}"));
     }
 
+    match target.as_str() {
+        "windows-nsis" => package_windows_nsis(&arch),
+        "linux-deb" => package_linux_deb(&arch),
+        "linux-tarball" => package_linux_tarball(&arch),
+        other => Err(format!(
+            "unknown --target: {other} (expected windows-nsis | linux-deb | linux-tarball)"
+        )),
+    }
+}
+
+fn package_windows_nsis(arch: &str) -> Result<(), String> {
     let project_root = project_root()?;
     let dist = project_root.join("dist");
     if !dist.is_dir()
@@ -1062,16 +1346,19 @@ fn package(flags: &[String]) -> Result<(), String> {
     let out_dir = project_root.join("target").join("installer");
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
 
+    // Windows arch token for filenames (x64 instead of Debian's amd64).
+    let win_arch = if arch == "amd64" { "x64" } else { "arm64" };
+
     // Remove any prior installers for this arch so older builds (typically a
     // version-suffixed .exe restored from cache or left from a local version
     // bump) cannot be picked up by downstream globbers in CI (signtool,
     // Get-ChildItem | Select-Object -First 1, upload-artifact path glob).
-    let stale_prefix = format!("tidalunar-windows-{arch}-");
+    let stale_suffix = format!("_{win_arch}.exe");
     for entry in fs::read_dir(&out_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.starts_with(&stale_prefix) && name_str.ends_with(".exe") {
+        if name_str.starts_with("tidalunar_") && name_str.ends_with(&stale_suffix) {
             fs::remove_file(entry.path())
                 .map_err(|e| format!("remove stale installer {name_str}: {e}"))?;
         }
@@ -1093,7 +1380,7 @@ fn package(flags: &[String]) -> Result<(), String> {
     let status = Command::new("makensis")
         .arg(format!("-DVERSION={version}"))
         .arg(format!("-DVERSION_NUMERIC={version_numeric}"))
-        .arg(format!("-DARCH={arch}"))
+        .arg(format!("-DARCH={win_arch}"))
         .arg(format!("-DDIST_DIR={}", dist.display()))
         .arg(format!("-DOUT_DIR={}", out_dir.display()))
         .arg(&nsi)
@@ -1103,7 +1390,7 @@ fn package(flags: &[String]) -> Result<(), String> {
         return Err(format!("makensis failed: {status}"));
     }
 
-    let exe = out_dir.join(format!("tidalunar-windows-{arch}-{version}.exe"));
+    let exe = out_dir.join(format!("tidalunar_{version}_{win_arch}.exe"));
     if !exe.is_file() {
         return Err(format!(
             "expected installer at {} but file is missing",
@@ -1111,5 +1398,271 @@ fn package(flags: &[String]) -> Result<(), String> {
         ));
     }
     println!("Installer created: {}", exe.display());
+    Ok(())
+}
+
+fn package_linux_deb(arch: &str) -> Result<(), String> {
+    let project_root = project_root()?;
+    let dist = project_root.join("dist");
+    if !dist.is_dir()
+        || fs::read_dir(&dist)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_none()
+    {
+        return Err("dist/ is empty or missing - run `cargo xtask bundle` first".into());
+    }
+    if !dist.join("manifest.json").is_file() {
+        return Err("dist/manifest.json missing - run `cargo xtask bundle` first".into());
+    }
+    if !dist.join("updater").is_file() {
+        return Err("dist/updater missing - run `cargo xtask build-updater` first".into());
+    }
+
+    // Validate dist payload arch matches --arch.
+    let manifest_data =
+        fs::read_to_string(dist.join("manifest.json")).map_err(|e| e.to_string())?;
+    let manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| e.to_string())?;
+    let expected = format!("linux-{arch}");
+    if manifest.target != expected {
+        return Err(format!(
+            "dist/ payload target {} does not match --arch {} (expected {})",
+            manifest.target, arch, expected
+        ));
+    }
+
+    if Command::new("dpkg-deb").arg("--version").output().is_err() {
+        return Err("dpkg-deb not on PATH - install dpkg-dev (apt install dpkg-dev)".into());
+    }
+
+    let version = read_workspace_version()?;
+    let out_dir = project_root.join("target").join("installer");
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+
+    // Wipe any prior deb-build for this arch.
+    let stage = out_dir.join(format!("deb-build-{arch}"));
+    if stage.exists() {
+        fs::remove_dir_all(&stage).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+
+    // 1. DEBIAN/ control + scripts
+    let debian_dir = stage.join("DEBIAN");
+    fs::create_dir_all(&debian_dir).map_err(|e| e.to_string())?;
+
+    let installer_deb = project_root.join("installer").join("linux").join("deb");
+    let control_template = fs::read_to_string(installer_deb.join("control.in"))
+        .map_err(|e| format!("read control.in: {e}"))?;
+    let control = control_template
+        .replace("{VERSION}", &version)
+        .replace("{ARCH}", arch);
+    fs::write(debian_dir.join("control"), control).map_err(|e| e.to_string())?;
+
+    for script in ["postinst", "postrm"] {
+        let src = installer_deb.join(script);
+        let dst = debian_dir.join(script);
+        fs::copy(&src, &dst).map_err(|e| format!("copy {script}: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dst, fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("chmod {script}: {e}"))?;
+        }
+    }
+
+    // 2. /usr/bin/tidalunar.real launcher
+    let usr_bin = stage.join("usr").join("bin");
+    fs::create_dir_all(&usr_bin).map_err(|e| e.to_string())?;
+    let launcher_dst = usr_bin.join("tidalunar.real");
+    fs::copy(installer_deb.join("tidalunar-launcher.sh"), &launcher_dst)
+        .map_err(|e| format!("copy launcher: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&launcher_dst, fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 3. /usr/share/applications/tidalunar.desktop
+    let usr_apps = stage.join("usr").join("share").join("applications");
+    fs::create_dir_all(&usr_apps).map_err(|e| e.to_string())?;
+    fs::copy(
+        installer_deb.join("tidalunar.desktop.in"),
+        usr_apps.join("tidalunar.desktop"),
+    )
+    .map_err(|e| format!("copy desktop: {e}"))?;
+
+    // 4. /usr/share/icons/hicolor/{size}/apps/tidalunar.png via convert.
+    let icon_src = project_root.join("tidaluna.png");
+    if !icon_src.is_file() {
+        return Err("tidaluna.png missing at project root".into());
+    }
+    for size in [16u32, 32, 64, 128, 256, 512] {
+        let icon_dir = stage
+            .join("usr")
+            .join("share")
+            .join("icons")
+            .join("hicolor")
+            .join(format!("{size}x{size}"))
+            .join("apps");
+        fs::create_dir_all(&icon_dir).map_err(|e| e.to_string())?;
+        let dst = icon_dir.join("tidalunar.png");
+        let status = Command::new("convert")
+            .arg(&icon_src)
+            .args(["-resize", &format!("{size}x{size}")])
+            .arg(&dst)
+            .status()
+            .map_err(|e| format!("convert spawn: {e}"))?;
+        if !status.success() {
+            return Err(format!("convert failed for size {size}"));
+        }
+    }
+
+    // 5. /etc/apparmor.d/tidalunar
+    let etc_apparmor = stage.join("etc").join("apparmor.d");
+    fs::create_dir_all(&etc_apparmor).map_err(|e| e.to_string())?;
+    fs::copy(
+        installer_deb.join("apparmor-profile"),
+        etc_apparmor.join("tidalunar"),
+    )
+    .map_err(|e| format!("copy apparmor profile: {e}"))?;
+
+    // 6. /opt/tidalunar/bin/cef/chrome-sandbox (from dist/)
+    let opt_cef = stage.join("opt").join("tidalunar").join("bin").join("cef");
+    fs::create_dir_all(&opt_cef).map_err(|e| e.to_string())?;
+    let cs_src = dist.join("bin").join("cef").join("chrome-sandbox");
+    if !cs_src.is_file() {
+        return Err(format!(
+            "{} missing - run `cargo xtask bundle` first",
+            cs_src.display()
+        ));
+    }
+    fs::copy(&cs_src, opt_cef.join("chrome-sandbox"))
+        .map_err(|e| format!("copy chrome-sandbox: {e}"))?;
+    // Default mode 0755; postinst probes and chmods to 4755 if needed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            opt_cef.join("chrome-sandbox"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // 7. /usr/lib/tidalunar/payload.tar.zst + SANDBOX_PROTOCOL_VERSION
+    let usr_lib = stage.join("usr").join("lib").join("tidalunar");
+    fs::create_dir_all(&usr_lib).map_err(|e| e.to_string())?;
+    let payload = usr_lib.join("payload.tar.zst");
+
+    println!("Compressing payload tarball (this may take a minute)...");
+    let tar_status = Command::new("tar")
+        .args(["-I", "zstd -19", "-cf"])
+        .arg(&payload)
+        .args(["-C"])
+        .arg(&dist)
+        .arg(".")
+        .status()
+        .map_err(|e| format!("tar spawn: {e}"))?;
+    if !tar_status.success() {
+        return Err(format!("tar failed: {tar_status}"));
+    }
+
+    fs::write(
+        usr_lib.join("SANDBOX_PROTOCOL_VERSION"),
+        format!("{}\n", LINUX_SANDBOX_PROTOCOL_REQUIRED),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 8. dpkg-deb --build
+    let out_deb = out_dir.join(format!("tidalunar_{version}_{arch}.deb"));
+    println!("Building .deb at {}", out_deb.display());
+    let status = Command::new("dpkg-deb")
+        .args(["--build", "--root-owner-group"])
+        .arg(&stage)
+        .arg(&out_deb)
+        .status()
+        .map_err(|e| format!("dpkg-deb spawn: {e}"))?;
+    if !status.success() {
+        return Err(format!("dpkg-deb failed: {status}"));
+    }
+
+    println!(".deb created: {}", out_deb.display());
+    Ok(())
+}
+
+fn package_linux_tarball(arch: &str) -> Result<(), String> {
+    let project_root = project_root()?;
+    let dist = project_root.join("dist");
+    if !dist.is_dir() {
+        return Err("dist/ missing - run `cargo xtask bundle` first".into());
+    }
+
+    let manifest_data =
+        fs::read_to_string(dist.join("manifest.json")).map_err(|e| e.to_string())?;
+    let manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| e.to_string())?;
+    let expected = format!("linux-{arch}");
+    if manifest.target != expected {
+        return Err(format!(
+            "dist/ payload target {} does not match --arch {} (expected {})",
+            manifest.target, arch, expected
+        ));
+    }
+
+    let version = read_workspace_version()?;
+    let out_dir = project_root.join("target").join("installer");
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+
+    let stage_root = out_dir.join(format!("tarball-build-{arch}"));
+    if stage_root.exists() {
+        fs::remove_dir_all(&stage_root).map_err(|e| e.to_string())?;
+    }
+    let bundle_name = format!("tidalunar_{version}_linux_{arch}");
+    let stage = stage_root.join(&bundle_name);
+    fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+
+    // Recursively copy dist/ into stage/.
+    copy_dir_all(&dist, &stage)?;
+
+    // Drop in the README.
+    fs::copy(
+        project_root
+            .join("installer")
+            .join("linux")
+            .join("tarball")
+            .join("README"),
+        stage.join("README"),
+    )
+    .map_err(|e| format!("copy README: {e}"))?;
+
+    let out_tarball = out_dir.join(format!("{bundle_name}.tar.gz"));
+    let status = Command::new("tar")
+        .arg("-czf")
+        .arg(&out_tarball)
+        .arg("-C")
+        .arg(&stage_root)
+        .arg(&bundle_name)
+        .status()
+        .map_err(|e| format!("tar spawn: {e}"))?;
+    if !status.success() {
+        return Err(format!("tar failed: {status}"));
+    }
+
+    println!(".tar.gz created: {}", out_tarball.display());
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| format!("copy {}: {e}", from.display()))?;
+        }
+    }
     Ok(())
 }

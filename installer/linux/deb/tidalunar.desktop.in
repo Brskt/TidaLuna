@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=TidaLunar
+GenericName=Music Player
+Comment=A native TIDAL client
+Exec=/usr/bin/tidalunar %U
+Terminal=false
+Type=Application
+Icon=tidalunar
+StartupWMClass=tidalunar
+Categories=AudioVideo;Audio;Music;

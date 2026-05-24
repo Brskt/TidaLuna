@@ -1,0 +1,57 @@
+#!/bin/bash
+set -e
+
+# 1. Symlink launcher via update-alternatives.
+if type update-alternatives >/dev/null 2>&1; then
+    if [ -L '/usr/bin/tidalunar' ] && [ -e '/usr/bin/tidalunar' ] && [ "$(readlink '/usr/bin/tidalunar')" != '/etc/alternatives/tidalunar' ]; then
+        rm -f '/usr/bin/tidalunar'
+    fi
+    update-alternatives --install '/usr/bin/tidalunar' 'tidalunar' '/usr/bin/tidalunar.real' 100 || ln -sf '/usr/bin/tidalunar.real' '/usr/bin/tidalunar'
+else
+    ln -sf '/usr/bin/tidalunar.real' '/usr/bin/tidalunar'
+fi
+
+# 2. chrome-sandbox chmod: choose mode by the real unprivileged-userns policy.
+#    This script runs as root, whose own namespace capability is NOT
+#    representative of the non-root runtime user, so probe the kernel policy
+#    directly instead of `unshare --user true`. Setuid (4755) is the safe
+#    superset whenever unprivileged userns is restricted.
+SANDBOX='/opt/tidalunar/bin/cef/chrome-sandbox'
+userns_ok=0
+if [ -L /proc/self/ns/user ]; then
+    if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+        [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 0 ] && userns_ok=1
+    elif [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+        [ "$(cat /proc/sys/kernel/unprivileged_userns_clone)" = 1 ] && userns_ok=1
+    else
+        userns_ok=1
+    fi
+fi
+if [ "$userns_ok" = 1 ]; then
+    chmod 0755 "$SANDBOX" || true
+else
+    chmod 4755 "$SANDBOX" || true
+fi
+
+# 3. AppArmor profile install (Ubuntu 24+; gracefully skipped on 22.04 which
+#    doesn't support abi/4.0).
+if apparmor_status --enabled > /dev/null 2>&1; then
+    APPARMOR_PROFILE_TARGET='/etc/apparmor.d/tidalunar'
+    if apparmor_parser --skip-kernel-load --debug "$APPARMOR_PROFILE_TARGET" > /dev/null 2>&1; then
+        if ! { [ -x '/usr/bin/ischroot' ] && /usr/bin/ischroot; } && hash apparmor_parser 2>/dev/null; then
+            apparmor_parser --replace --write-cache --skip-read-cache "$APPARMOR_PROFILE_TARGET"
+        fi
+    else
+        echo "Skipping the installation of the AppArmor profile as this version of AppArmor does not seem to support the bundled profile"
+    fi
+fi
+
+# 4. Refresh desktop and icon caches.
+if hash update-desktop-database 2>/dev/null; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+if hash gtk-update-icon-cache 2>/dev/null; then
+    gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+fi
+
+#DEBHELPER#
