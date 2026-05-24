@@ -15,6 +15,10 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 zip = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+flate2 = { workspace = true }
+tar = { workspace = true }
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1.12"
 

@@ -14,6 +14,8 @@ sha2 = "0.11.0"
 zip = { version = "8.5.1", default-features = false, features = [
   "deflate-flate2-zlib-rs",
 ] }
+flate2 = "1.1"
+tar = "0.4"
 
 [package]
 name = "tidalunar"
@@ -135,10 +137,8 @@ windows-sys = { version = "0.61.2", features = [
 security-framework = "3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = [
-  "crypto-rust",
-  "linux-native-sync-persistent",
-] }
+flate2 = { workspace = true }
+tar = { workspace = true }
 tray-item = { version = "0.10.0", default-features = false, features = [
   "ksni",
 ] }

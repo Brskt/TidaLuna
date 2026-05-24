@@ -71,11 +71,27 @@ pub(crate) async fn check_for_update() -> Option<UpdateInfo> {
         return None;
     }
 
-    let zip_name = super::zip_name();
+    // Linux-only: advisory check that the system bootstrap supports the
+    // manifest's required sandbox-helper protocol. Catches the "user has not
+    // run apt upgrade yet" case early so we don't waste bandwidth on a
+    // download we'd refuse to apply. The authoritative gate (after signature
+    // verification) lives in updater/src/main.rs::run.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = super::util::enforce_sandbox_protocol_gate(&manifest) {
+        crate::vprintln!("[UPDATER] {e}");
+        crate::app_state::emit_ipc_event_with_args("updater.bootstrap_behind", &[&format!("{e}")]);
+        return None;
+    }
+
+    let archive_name = if manifest.delta_from.as_deref() == Some(current_version) {
+        super::delta_archive_name(remote_version)
+    } else {
+        super::archive_name(remote_version)
+    };
     let download_size = release
         .assets
         .iter()
-        .find(|a| a.name == zip_name)
+        .find(|a| a.name == archive_name)
         .map(|a| a.size)
         .unwrap_or(0);
 

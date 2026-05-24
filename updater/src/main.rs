@@ -63,6 +63,78 @@ const TARGET: &str = {
     }
 };
 
+/// Delta archive asset name for a version, e.g.
+/// `tidalunar_0.0.6-alpha_update_win32_x64.zip`.
+fn delta_archive_name(version: &str) -> String {
+    format!("tidalunar_{version}_update_{ARCHIVE_SUFFIX}")
+}
+
+/// Platform suffix for the release archive (`{os}_{arch}.{ext}`). Mirrors
+/// `src/updater/mod.rs::ARCHIVE_SUFFIX`. Windows ships a flat `.zip`, Linux a
+/// `.tar.gz` whose entries are wrapped in one top-level directory.
+const ARCHIVE_SUFFIX: &str = {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        "win32_x64.zip"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        "win32_arm64.zip"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "linux_amd64.tar.gz"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "linux_arm64.tar.gz"
+    }
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        "unsupported"
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Sandbox protocol gate (Linux .deb cross-track compatibility)
+// ---------------------------------------------------------------------------
+
+/// Read /usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION. `None` = file absent
+/// (not a packaged .deb install: tar.gz/dev, gate N/A); `Some(0)` = present but
+/// malformed. Mirrors src/updater/util.rs::read_system_sandbox_protocol; the
+/// standalone updater is intentionally dependency-free so this is duplicated.
+#[cfg(target_os = "linux")]
+fn read_system_sandbox_protocol() -> Option<u32> {
+    fs::read_to_string("/usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION")
+        .ok()
+        .map(|s| s.trim().parse::<u32>().unwrap_or(0))
+}
+
+#[cfg(target_os = "linux")]
+fn enforce_sandbox_protocol_gate(manifest: &Manifest) -> Result<(), anyhow::Error> {
+    use anyhow::bail;
+    // No system protocol file -> not a .deb install -> gate does not apply.
+    let Some(system) = read_system_sandbox_protocol() else {
+        return Ok(());
+    };
+    let required = manifest.sandbox_protocol_required.unwrap_or(0);
+    if required > system {
+        bail!(
+            "Update v{} requires sandbox helper protocol {}, but system has {}. \
+             Run 'sudo apt upgrade tidalunar' and re-launch.",
+            manifest.version,
+            required,
+            system,
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -73,6 +145,17 @@ pub(crate) struct Manifest {
     pub(crate) min_version: String,
     pub(crate) target: String,
     pub(crate) files: BTreeMap<String, FileEntry>,
+    /// Linux-only: minimum value of `/usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION`
+    /// the system bootstrap must have for this update to be safe to apply.
+    /// Defaults to `None` for backwards compatibility with manifests generated
+    /// before the field was added (2026-04). Mirrors the field in
+    /// `src/updater/types.rs::Manifest` (the in-app updater).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sandbox_protocol_required: Option<u32>,
+    /// Mirrors `src/updater/types.rs::Manifest::delta_from`: the previous
+    /// release this update's delta archive diffs against, or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) delta_from: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -317,6 +400,9 @@ fn run() -> Result<()> {
             );
         }
 
+        #[cfg(target_os = "linux")]
+        enforce_sandbox_protocol_gate(&manifest)?;
+
         manifest
     } else {
         // Full download path (original behavior)
@@ -338,27 +424,59 @@ fn run() -> Result<()> {
             );
         }
 
+        #[cfg(target_os = "linux")]
+        enforce_sandbox_protocol_gate(&manifest)?;
+
         if staging_dir.exists() {
             fs::remove_dir_all(&staging_dir).context("failed to clean old staging dir")?;
         }
         fs::create_dir_all(&staging_dir).context("failed to create staging dir")?;
 
         eprintln!("[updater] Downloading update package...");
-        let zip_asset_name = format!("tidalunar-{TARGET}.zip");
-        let zip_url = release
-            .assets
-            .iter()
-            .find(|a| a.name == zip_asset_name)
-            .context(format!("release missing asset: {zip_asset_name}"))?
-            .browser_download_url
-            .clone();
+        // The currently-installed app version comes from its bundled manifest,
+        // NOT env!("CARGO_PKG_VERSION") (which is the updater binary's own
+        // version, unrelated to the app). delta_from is an app version.
+        let installed_version = fs::read_to_string(args.app_dir.join("manifest.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Manifest>(&s).ok())
+            .map(|m| m.version);
+        let use_delta = matches!(
+            (&manifest.delta_from, &installed_version),
+            (Some(d), Some(i)) if d == i
+        );
+        let delta_name = delta_archive_name(&args.version);
+        let (archive_name, archive_url) = {
+            let delta = if use_delta {
+                release.assets.iter().find(|a| a.name == delta_name)
+            } else {
+                None
+            };
+            match delta {
+                Some(a) => {
+                    eprintln!(
+                        "[updater] Using delta from v{}",
+                        installed_version.as_deref().unwrap_or("?")
+                    );
+                    (delta_name.clone(), a.browser_download_url.clone())
+                }
+                None => {
+                    let full = format!("tidalunar_{}_{ARCHIVE_SUFFIX}", args.version);
+                    let a = release
+                        .assets
+                        .iter()
+                        .find(|x| x.name == full)
+                        .context(format!("release missing asset: {full}"))?;
+                    (full, a.browser_download_url.clone())
+                }
+            }
+        };
 
-        let zip_path = staging_dir.join("update.zip");
-        download_file(&client, &zip_url, &zip_path)?;
+        let archive_path = staging_dir.join(&archive_name);
+        download_file(&client, &archive_url, &archive_path)?;
 
         eprintln!("[updater] Extracting...");
-        extract_zip(&zip_path, &staging_dir)?;
-        fs::remove_file(&zip_path).ok();
+        extract_archive(&archive_path, &staging_dir)?;
+        fs::remove_file(&archive_path).ok();
 
         manifest
     };
@@ -794,6 +912,19 @@ fn download_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> 
     Ok(())
 }
 
+fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    return extract_zip(archive_path, dest_dir);
+    #[cfg(target_os = "linux")]
+    return extract_tar_gz(archive_path, dest_dir);
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (archive_path, dest_dir);
+        anyhow::bail!("update extraction unsupported on this platform");
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn extract_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
     let file = fs::File::open(zip_path).context("open zip")?;
     let mut archive = zip::ZipArchive::new(file).context("parse zip")?;
@@ -821,15 +952,53 @@ fn extract_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
         let mut out_file = fs::File::create(&out_path)
             .with_context(|| format!("create {}", out_path.display()))?;
         std::io::copy(&mut entry, &mut out_file).with_context(|| format!("extract {name}"))?;
+    }
+    Ok(())
+}
 
-        // Preserve executable permission on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Some(mode) = entry.unix_mode() {
-                fs::set_permissions(&out_path, fs::Permissions::from_mode(mode)).ok();
-            }
+/// Extract a `.tar.gz` whose entries are wrapped in a single top-level
+/// directory, stripping it so files land at `dest_dir` root to match the
+/// manifest's relative paths. Unix modes from the tar header are preserved.
+#[cfg(target_os = "linux")]
+fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
+    let file = fs::File::open(archive_path).context("open tar.gz")?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry in archive.entries().context("read tar entries")? {
+        let mut entry = entry.context("tar entry")?;
+        let path = entry.path().context("tar entry path")?.into_owned();
+
+        // Drop the single leading component (tidalunar_{version}_linux_{arch}/).
+        let mut comps = path.components();
+        comps.next();
+        let rel = comps.as_path();
+        if rel.as_os_str().is_empty() {
+            continue;
         }
+
+        let rel_str = rel.to_string_lossy();
+        if !is_safe_relative_path(&rel_str, dest_dir) {
+            anyhow::bail!("tar entry has unsafe path: {}", path.display());
+        }
+
+        let out_path = dest_dir.join(rel);
+        let etype = entry.header().entry_type();
+        if etype.is_dir() {
+            fs::create_dir_all(&out_path).ok();
+            continue;
+        }
+        if !etype.is_file() {
+            // Plain files only; reject symlinks/hardlinks/devices (traversal
+            // vector in an archive not hash-bound before extraction).
+            anyhow::bail!("tar entry {rel_str} has disallowed type {etype:?}");
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        entry
+            .unpack(&out_path)
+            .with_context(|| format!("extract {rel_str}"))?;
     }
     Ok(())
 }
@@ -984,4 +1153,43 @@ fn show_error(msg: &str) {
 #[cfg(not(target_os = "windows"))]
 fn show_error(msg: &str) {
     eprintln!("ERROR: {msg}");
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn manifest_roundtrip_with_protocol_field() {
+        let json = r#"{
+            "version": "0.0.5-alpha",
+            "min_version": "0.0.4-alpha",
+            "target": "linux-amd64",
+            "files": {},
+            "sandbox_protocol_required": 1
+        }"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.sandbox_protocol_required, Some(1));
+        let serialized = serde_json::to_string(&m).unwrap();
+        assert!(serialized.contains("\"sandbox_protocol_required\":1"));
+    }
+
+    #[test]
+    fn manifest_roundtrip_without_protocol_field_defaults_none() {
+        let json = r#"{
+            "version": "0.0.4-alpha",
+            "min_version": "0.0.4-alpha",
+            "target": "windows-amd64",
+            "files": {}
+        }"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.sandbox_protocol_required, None);
+    }
+
+    #[test]
+    fn manifest_delta_from_roundtrip() {
+        let json = r#"{"version":"0.0.5-alpha","min_version":"0.0.4-alpha","target":"linux-amd64","files":{},"delta_from":"0.0.4-alpha"}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.delta_from.as_deref(), Some("0.0.4-alpha"));
+    }
 }

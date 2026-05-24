@@ -15,6 +15,19 @@ pub(super) struct Manifest {
     pub(super) min_version: String,
     pub(super) target: String,
     pub(super) files: BTreeMap<String, FileEntry>,
+    /// Linux-only: minimum value of `/usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION`
+    /// the system bootstrap must have for this update to be safe to apply.
+    /// Defaults to `None` for backwards compatibility with manifests generated
+    /// before the field was added (2026-04). On non-Linux platforms the field
+    /// is always omitted at packaging time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) sandbox_protocol_required: Option<u32>,
+    /// Version this release's delta archive diffs against (the immediately
+    /// previous release). `None` when no delta exists. Stamped by CI, not by
+    /// `xtask bundle`. The updater downloads the delta only when this equals
+    /// its own current version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) delta_from: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -113,5 +126,60 @@ impl Manifest {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_roundtrip_with_protocol_field() {
+        let json = r#"{
+            "version": "0.0.5-alpha",
+            "min_version": "0.0.4-alpha",
+            "target": "linux-amd64",
+            "files": {},
+            "sandbox_protocol_required": 1
+        }"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.sandbox_protocol_required, Some(1));
+        let serialized = serde_json::to_string(&m).unwrap();
+        assert!(serialized.contains("\"sandbox_protocol_required\":1"));
+    }
+
+    #[test]
+    fn manifest_roundtrip_without_protocol_field_defaults_none() {
+        // Older manifests (pre-2026-04) did not have this field.
+        let json = r#"{
+            "version": "0.0.4-alpha",
+            "min_version": "0.0.4-alpha",
+            "target": "windows-amd64",
+            "files": {}
+        }"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.sandbox_protocol_required, None);
+    }
+
+    #[test]
+    fn manifest_roundtrip_with_delta_from() {
+        let json = r#"{
+            "version": "0.0.5-alpha",
+            "min_version": "0.0.4-alpha",
+            "target": "linux-amd64",
+            "files": {},
+            "delta_from": "0.0.4-alpha"
+        }"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.delta_from.as_deref(), Some("0.0.4-alpha"));
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"delta_from\":\"0.0.4-alpha\""));
+    }
+
+    #[test]
+    fn manifest_without_delta_from_defaults_none() {
+        let json = r#"{"version":"0.0.4-alpha","min_version":"0.0.4-alpha","target":"linux-amd64","files":{}}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.delta_from, None);
     }
 }

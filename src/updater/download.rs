@@ -56,33 +56,60 @@ async fn download_update_inner(
     let (manifest_bytes, sig_bytes, manifest): (Bytes, Bytes, Manifest) =
         download_manifest_and_sig(client, &release).await?;
     manifest.verify_target()?;
+    #[cfg(target_os = "linux")]
+    super::util::enforce_sandbox_protocol_gate(&manifest)?;
     check_cancel!(cancel);
 
     let staging = prepare_staging_dir(&app_dir)?;
 
-    let zip_name = super::zip_name();
-    let zip_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == zip_name)
-        .with_context(|| format!("release missing {zip_name}"))?;
+    let current = env!("CARGO_PKG_VERSION");
+    let use_delta = manifest.delta_from.as_deref() == Some(current);
+    let (archive_name, archive_asset) = {
+        let delta_name = super::delta_archive_name(version);
+        let delta = if use_delta {
+            release.assets.iter().find(|a| a.name == delta_name)
+        } else {
+            None
+        };
+        match delta {
+            Some(a) => {
+                crate::vprintln!("[UPDATER] Using delta from v{current}");
+                (delta_name, a)
+            }
+            None => {
+                let full = super::archive_name(version);
+                let a = release
+                    .assets
+                    .iter()
+                    .find(|x| x.name == full)
+                    .with_context(|| format!("release missing {full}"))?;
+                (full, a)
+            }
+        }
+    };
 
-    let zip_path = staging.join("update.zip");
-    stream_zip_to_staging(client, &zip_asset.browser_download_url, &zip_path, cancel).await?;
+    let archive_path = staging.join(&archive_name);
+    stream_to_file(
+        client,
+        &archive_asset.browser_download_url,
+        &archive_path,
+        cancel,
+    )
+    .await?;
     check_cancel!(cancel);
 
     crate::vprintln!("[UPDATER] Extracting...");
     {
-        let zip = zip_path.clone();
+        let archive = archive_path.clone();
         let dest = staging.clone();
-        tokio::task::spawn_blocking(move || extract_zip(&zip, &dest))
+        tokio::task::spawn_blocking(move || extract_archive(&archive, &dest))
             .await
             .context("extract task panicked")??;
     }
-    fs::remove_file(&zip_path).ok();
+    fs::remove_file(&archive_path).ok();
     check_cancel!(cancel);
 
-    verify_staged_files(&manifest, &staging)?;
+    verify_staged_files(&manifest, &staging, use_delta)?;
 
     let manifest_name = super::manifest_name();
     let sig_name = format!("{manifest_name}.sig");
@@ -142,41 +169,50 @@ async fn download_manifest_and_sig(
     Ok((manifest_bytes, sig_bytes, manifest))
 }
 
-async fn stream_zip_to_staging(
+async fn stream_to_file(
     client: &reqwest::Client,
-    zip_url: &str,
-    zip_path: &Path,
+    url: &str,
+    dest: &Path,
     cancel: &CancellationToken,
 ) -> Result<(), anyhow::Error> {
-    let zip_name = zip_path
+    let name = dest
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("update.zip");
-    crate::vprintln!("[UPDATER] Downloading {zip_name}...");
+        .unwrap_or("update");
+    crate::vprintln!("[UPDATER] Downloading {name}...");
 
-    let zip_resp = client.get(zip_url).send().await.context("download zip")?;
+    let resp = client.get(url).send().await.context("download archive")?;
 
-    if !zip_resp.status().is_success() {
-        bail!("zip download returned {}", zip_resp.status());
+    if !resp.status().is_success() {
+        bail!("archive download returned {}", resp.status());
     }
 
-    let mut file = fs::File::create(zip_path).context("create zip file")?;
-    let mut stream = zip_resp.bytes_stream();
+    let mut file = fs::File::create(dest).context("create archive file")?;
+    let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         check_cancel!(cancel);
-        let chunk = chunk.context("read zip chunk")?;
-        std::io::Write::write_all(&mut file, &chunk).context("write zip chunk")?;
+        let chunk = chunk.context("read archive chunk")?;
+        std::io::Write::write_all(&mut file, &chunk).context("write archive chunk")?;
     }
 
     Ok(())
 }
 
-fn verify_staged_files(manifest: &Manifest, staging: &Path) -> Result<(), anyhow::Error> {
+fn verify_staged_files(
+    manifest: &Manifest,
+    staging: &Path,
+    is_delta: bool,
+) -> Result<(), anyhow::Error> {
     crate::vprintln!("[UPDATER] Verifying staged files...");
     for (rel_path, entry) in &manifest.files {
         let staged_path = staging.join(rel_path);
         if !staged_path.exists() {
-            bail!("staged file missing: {rel_path}");
+            if is_delta {
+                // Delta archive: unchanged files are not shipped; the existing
+                // local copy is trusted (current version == manifest.delta_from).
+                continue;
+            }
+            bail!("staged file missing from full archive: {rel_path}");
         }
         let hash =
             sha256_file(&staged_path).with_context(|| format!("hash staged file {rel_path}"))?;
@@ -199,6 +235,19 @@ fn prepare_staging_dir(app_dir: &Path) -> Result<PathBuf, anyhow::Error> {
     Ok(staging)
 }
 
+fn extract_archive(archive_path: &Path, dest: &Path) -> Result<(), anyhow::Error> {
+    #[cfg(target_os = "windows")]
+    return extract_zip(archive_path, dest);
+    #[cfg(target_os = "linux")]
+    return extract_tar_gz(archive_path, dest);
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (archive_path, dest);
+        bail!("update extraction unsupported on this platform");
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), anyhow::Error> {
     let file = fs::File::open(zip_path).context("open zip")?;
     let mut archive = zip::ZipArchive::new(file).context("parse zip")?;
@@ -224,14 +273,55 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), anyhow::Error> {
         let mut out_file = fs::File::create(&out_path)
             .with_context(|| format!("create {}", out_path.display()))?;
         std::io::copy(&mut entry, &mut out_file).with_context(|| format!("extract {name}"))?;
+    }
+    Ok(())
+}
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Some(mode) = entry.unix_mode() {
-                fs::set_permissions(&out_path, fs::Permissions::from_mode(mode)).ok();
-            }
+/// Extract a `.tar.gz` whose entries are wrapped in a single top-level
+/// directory (the portable tarball layout), stripping that directory so files
+/// land at `dest` root to match the manifest's relative paths. Unix modes from
+/// the tar header are preserved (keeps chrome-sandbox executable).
+#[cfg(target_os = "linux")]
+fn extract_tar_gz(archive_path: &Path, dest: &Path) -> Result<(), anyhow::Error> {
+    let file = fs::File::open(archive_path).context("open tar.gz")?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry in archive.entries().context("read tar entries")? {
+        let mut entry = entry.context("tar entry")?;
+        let path = entry.path().context("tar entry path")?.into_owned();
+
+        // Drop the single leading component (tidalunar_{version}_linux_{arch}/).
+        let mut comps = path.components();
+        comps.next();
+        let rel = comps.as_path();
+        if rel.as_os_str().is_empty() {
+            continue;
         }
+
+        let rel_str = rel.to_string_lossy();
+        if !is_safe_relative_path(&rel_str, dest) {
+            bail!("tar entry has unsafe path: {}", path.display());
+        }
+
+        let out_path = dest.join(rel);
+        let etype = entry.header().entry_type();
+        if etype.is_dir() {
+            fs::create_dir_all(&out_path).ok();
+            continue;
+        }
+        if !etype.is_file() {
+            // The payload is plain files only. Reject symlinks/hardlinks/devices:
+            // in an archive that isn't hash-bound before extraction, they are a
+            // traversal vector (a symlink target escapes is_safe_relative_path).
+            bail!("tar entry {rel_str} has disallowed type {etype:?}");
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        entry
+            .unpack(&out_path)
+            .with_context(|| format!("extract {rel_str}"))?;
     }
     Ok(())
 }
