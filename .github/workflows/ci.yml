@@ -104,7 +104,9 @@ jobs:
             libglib2.0-dev \
             libgdk-pixbuf-2.0-dev \
             cmake \
-            ninja-build
+            ninja-build \
+            dpkg-dev \
+            imagemagick
 
       - name: Install Ninja
         if: runner.os == 'Windows'
@@ -130,6 +132,31 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo xtask build-updater --release
 
+      - name: Package Linux installers
+        if: startsWith(matrix.target, 'linux-')
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          arch=$([ "$MATRIX_TARGET" = 'linux-amd64' ] && echo amd64 || echo arm64)
+          cargo xtask package --release --arch "$arch" --target linux-deb
+          cargo xtask package --release --arch "$arch" --target linux-tarball
+
+      - name: Smoke test .deb (install + layout + purge)
+        if: startsWith(matrix.target, 'linux-')
+        run: |
+          deb=$(ls target/installer/tidalunar_*.deb | head -1)
+          sudo apt-get install -y "./$deb"
+          test -x /usr/bin/tidalunar.real || { echo "launcher missing"; exit 1; }
+          test -e /usr/bin/tidalunar || { echo "alternatives symlink missing"; exit 1; }
+          test -f /opt/tidalunar/bin/cef/chrome-sandbox || { echo "chrome-sandbox missing"; exit 1; }
+          test -f /etc/apparmor.d/tidalunar || { echo "apparmor profile missing"; exit 1; }
+          test -f /usr/lib/tidalunar/payload.tar.zst || { echo "payload missing"; exit 1; }
+          test -f /usr/share/applications/tidalunar.desktop || { echo "desktop entry missing"; exit 1; }
+          proto=$(cat /usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION)
+          [ "$proto" = "1" ] || { echo "unexpected protocol version: $proto"; exit 1; }
+          sudo dpkg -P tidalunar
+          test ! -e /usr/bin/tidalunar.real || { echo "purge left launcher behind"; exit 1; }
+
       - name: Install NSIS
         if: startsWith(matrix.target, 'windows-')
         run: choco install nsis -y --no-progress
@@ -153,14 +180,14 @@ jobs:
             /p "$env:WINDOWS_SIGNING_PFX_PASSWORD" `
             /tr http://timestamp.digicert.com `
             /td sha256 /fd sha256 `
-            target\installer\tidalunar-windows-*.exe
+            target\installer\tidalunar_*.exe
           Remove-Item "$env:RUNNER_TEMP\cert.pfx"
 
       - name: Smoke test installer (silent install)
         if: startsWith(matrix.target, 'windows-')
         shell: pwsh
         run: |
-          $installer = Get-ChildItem target\installer\tidalunar-windows-*.exe | Select-Object -First 1
+          $installer = Get-ChildItem target\installer\tidalunar_*.exe | Select-Object -First 1
           Start-Process -FilePath $installer.FullName -ArgumentList "/S" -Wait
           if (-not (Test-Path "$env:LOCALAPPDATA\Programs\TidaLunar\tidalunar.exe")) {
             throw "Installer ran but tidalunar.exe missing in install dir"
@@ -213,7 +240,16 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: tidalunar-${{ matrix.target }}-installer
-          path: target/installer/tidalunar-windows-*.exe
+          path: target/installer/tidalunar_*.exe
+
+      - name: Upload installer artifact (Linux)
+        if: startsWith(matrix.target, 'linux-')
+        uses: actions/upload-artifact@v7
+        with:
+          name: tidalunar-${{ matrix.target }}-installer
+          path: |
+            target/installer/tidalunar_*.deb
+            target/installer/tidalunar_*_linux_*.tar.gz
 
   # ---------------------------------------------------------------------------
   # Check
@@ -287,6 +323,8 @@ jobs:
       - name: Prepare and sign release assets
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          VERSION: ${{ needs.auto-tag.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p release-assets
 
@@ -301,22 +339,83 @@ jobs:
               cp "$dir/manifest.json" "release-assets/manifest-${target}.json"
             fi
 
+            # Consecutive delta: diff this build against the previous release's
+            # manifest, ship only changed files, and stamp delta_from BEFORE
+            # signing (so the signature covers it). macOS is not an updater
+            # target, so it is skipped.
+            case "$target" in
+              windows-amd64) dtarget=win32; darch=amd64; dasset="tidalunar_${VERSION}_update_win32_x64.zip" ;;
+              windows-arm64) dtarget=win32; darch=arm64; dasset="tidalunar_${VERSION}_update_win32_arm64.zip" ;;
+              linux-amd64)   dtarget=linux; darch=amd64; dasset="tidalunar_${VERSION}_update_linux_amd64.tar.gz" ;;
+              linux-arm64)   dtarget=linux; darch=arm64; dasset="tidalunar_${VERSION}_update_linux_arm64.tar.gz" ;;
+              *)             dtarget="" ;;
+            esac
+            if [ -n "$dtarget" ] && [ -f "release-assets/manifest-${target}.json" ]; then
+              # Newest published (non-draft) release that isn't the current tag.
+              prev_tag=$(gh release list --limit 30 --json tagName,isDraft \
+                --jq '[.[] | select(.tagName != env.VERSION and .isDraft == false)] | .[0].tagName' 2>/dev/null || true)
+              prev_dir="/tmp/prev-${target}"
+              if [ -n "$prev_tag" ] && \
+                 gh release download "$prev_tag" --pattern "manifest-${target}.json" \
+                   --dir "$prev_dir" --clobber 2>/dev/null \
+                 && [ -f "$prev_dir/manifest-${target}.json" ]; then
+                # Delta build is best-effort: failure or an empty diff falls back
+                # to full-archive-only (no delta_from stamp), never aborts release.
+                if cargo xtask delta --target "$dtarget" --arch "$darch" \
+                     --old-manifest "$prev_dir/manifest-${target}.json" --dist "$dir" \
+                   && [ -f "target/installer/$dasset" ]; then
+                  cp "target/installer/$dasset" "release-assets/$dasset"
+                  tmp=$(mktemp)
+                  jq --arg v "$prev_tag" '.delta_from = $v' \
+                    "release-assets/manifest-${target}.json" > "$tmp" \
+                    && mv "$tmp" "release-assets/manifest-${target}.json"
+                  echo "Built delta for $target from $prev_tag -> $dasset"
+                else
+                  echo "Delta build skipped/failed for $target; full archive only"
+                fi
+              else
+                echo "No previous release manifest for $target; shipping full archive only"
+              fi
+            fi
+
             if [ -n "$UPDATE_SIGNING_KEY" ] && [ -f "release-assets/manifest-${target}.json" ]; then
               python3 scripts/sign-manifest.py "release-assets/manifest-${target}.json"
             fi
 
-            (cd "$dir" && zip -r "$GITHUB_WORKSPACE/release-assets/tidalunar-${target}.zip" .)
-            echo "Created tidalunar-${target}.zip"
+            # Bundle archive = both the human portable download and the updater
+            # payload. Windows ships a flat .zip; Linux uses the .tar.gz emitted
+            # by `cargo xtask package` (copied below), so no zip there. macOS is
+            # not an updater target and keeps its plain bundle zip.
+            case "$target" in
+              windows-amd64) bundle_zip="tidalunar_${VERSION}_win32_x64.zip" ;;
+              windows-arm64) bundle_zip="tidalunar_${VERSION}_win32_arm64.zip" ;;
+              macos-arm64)   bundle_zip="tidalunar-macos-arm64.zip" ;;
+              *)             bundle_zip="" ;;
+            esac
+            if [ -n "$bundle_zip" ]; then
+              (cd "$dir" && zip -r "$GITHUB_WORKSPACE/release-assets/$bundle_zip" .)
+              echo "Created $bundle_zip"
+            fi
 
             case "$target" in
               windows-*)
                 inst_dir="artifacts/tidalunar-${target}-installer"
                 if [ -d "$inst_dir" ]; then
-                  installer=$(ls "$inst_dir"/tidalunar-windows-*.exe 2>/dev/null | head -1)
+                  installer=$(ls "$inst_dir"/tidalunar_*.exe 2>/dev/null | head -1)
                   if [ -n "$installer" ]; then
                     cp "$installer" "release-assets/$(basename "$installer")"
                     echo "Copied installer: $(basename "$installer")"
                   fi
+                fi
+                ;;
+              linux-*)
+                inst_dir="artifacts/tidalunar-${target}-installer"
+                if [ -d "$inst_dir" ]; then
+                  for f in "$inst_dir"/tidalunar_*.deb "$inst_dir"/tidalunar_*_linux_*.tar.gz; do
+                    [ -f "$f" ] || continue
+                    cp "$f" "release-assets/$(basename "$f")"
+                    echo "Copied installer: $(basename "$f")"
+                  done
                 fi
                 ;;
             esac
