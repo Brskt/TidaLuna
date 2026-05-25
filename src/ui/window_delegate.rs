@@ -92,6 +92,9 @@ wrap_window_delegate! {
     }
     impl PanelDelegate {}
     impl WindowDelegate {
+        fn window_runtime_style(&self) -> RuntimeStyle {
+            RuntimeStyle::ALLOY
+        }
         fn initial_bounds(&self, _window: Option<&mut Window>) -> cef::Rect {
             let ws = self.init_window_state.get_or_init(load_init_window_state);
             if ws.has_position() && !ws.maximized {
@@ -291,7 +294,11 @@ wrap_browser_view_delegate! {
         _p: u8,
     }
     impl ViewDelegate {}
-    impl BrowserViewDelegate {}
+    impl BrowserViewDelegate {
+        fn browser_runtime_style(&self) -> RuntimeStyle {
+            RuntimeStyle::ALLOY
+        }
+    }
 }
 
 // --- Window Save Task ---

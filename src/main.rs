@@ -66,8 +66,10 @@ fn reexec_for_x11_if_needed() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Only the browser process gets a console. CEF subprocesses re-exec this
+    // exe with a --type= switch; without this guard each would spawn its own.
     #[cfg(target_os = "windows")]
-    if logging::log_level() >= 1 {
+    if logging::log_level() >= 1 && !std::env::args().any(|a| a.starts_with("--type=")) {
         unsafe {
             windows_sys::Win32::System::Console::AllocConsole();
         }
@@ -322,6 +324,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|d| d.join("bin").join("cef"))
         .unwrap_or_default();
     let resources_dir_path = CefString::from(cef_res_dir.to_string_lossy().as_ref());
+    // CEF 147 (cef crate 148) wants the locales dir set explicitly.
+    let locales_dir_path = CefString::from(cef_res_dir.join("locales").to_string_lossy().as_ref());
 
     let settings = Settings {
         no_sandbox: 0,
@@ -331,6 +335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         background_color: 0xFF111111,
         chrome_app_icon_id: 101,
         resources_dir_path,
+        locales_dir_path,
         ..Default::default()
     };
 

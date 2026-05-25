@@ -244,7 +244,7 @@ wrap_life_span_handler! {
                         {
                             wi.style = 0x00CF0000; // WS_OVERLAPPEDWINDOW
                         }
-                        wi.runtime_style = RuntimeStyle::DEFAULT;
+                        wi.runtime_style = RuntimeStyle::ALLOY;
                     }
                     return 0;
                 }
