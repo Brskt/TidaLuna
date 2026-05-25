@@ -41,7 +41,7 @@ export class MediaItem extends ContentBase {
 	}
 
 	private static async fetchMediaItem(itemId: redux.ItemId, contentType: redux.ContentType) {
-		// Supress missing content warning when programatically loading mediaItems
+		// Suppress missing content warning when programmatically loading mediaItems
 		const clearWarnCatch = redux.intercept("message/MESSAGE_WARN", unloads, (message) => {
 			if (message?.message === "The content is no longer available") return true;
 		});
@@ -95,7 +95,7 @@ export class MediaItem extends ContentBase {
 		return bestMediaItem;
 	});
 	public static async fromPlaybackContext(playbackContext?: redux.PlaybackContext) {
-		// This has to be here to avoid ciclic requirements breaking
+		// This has to be here to avoid cyclic requirements breaking
 		playbackContext ??= PlayState.playbackContext;
 		if (playbackContext?.actualProductId === undefined) return undefined;
 		const mediaItem = await this.fromId(playbackContext.actualProductId, playbackContext.actualVideoQuality === null ? "track" : "video");

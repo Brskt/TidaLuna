@@ -33,7 +33,7 @@ export class Playlist extends ContentBase implements MediaCollection {
 		return this.tidalPlaylist.numberOfTracks!;
 	}
 	/**
-	 * Equivilent to `TidalApi.playlistItems`
+	 * Equivalent to `TidalApi.playlistItems`
 	 */
 	public tMediaItems: () => Promise<redux.MediaItem[]> = asyncDebounce(async () => {
 		const playlistIitems = await TidalApi.playlistItems(this.uuid);

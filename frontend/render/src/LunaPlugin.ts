@@ -47,7 +47,7 @@ export type PluginPackage = {
 	luna?: LunaPackageMeta;
 };
 
-// If adding to this make sure that the values are initalized in LunaPlugin.fromStorage
+// If adding to this make sure that the values are initialized in LunaPlugin.fromStorage
 export type LunaPluginStorage = {
 	url: string;
 	package: PluginPackage;
@@ -92,7 +92,7 @@ export class LunaPlugin {
 		return Object.values(this.plugins).filter((p) => p.name === name);
 	}
 
-	// Static list of Luna plugins that should be seperate from user plugins
+	// Static list of Luna plugins that should be separate from user plugins
 	public static readonly corePlugins: Set<string> = new Set(["@luna/lib", "@luna/lib.native", "@luna/ui", "@luna/dev", "@luna/linux"]);
 
 	static {
@@ -204,7 +204,7 @@ export class LunaPlugin {
 		this.trace = LunaPlugin.trace.withSource(`[${this.name}]${devSuffix}`).trace;
 		// Enabled has to be setup first because liveReload below accesses it
 		this._enabled = new Signal(this.store.enabled, (next) => {
-			// Protect against disabling permanantly in the background if loading causes a error
+			// Protect against disabling permanently in the background if loading causes a error
 			// Restarting the client will attempt to load again
 			if (this.loadError._ === undefined) this.store.enabled = next;
 		});
@@ -263,7 +263,7 @@ export class LunaPlugin {
 	// #region Dependants
 	public readonly dependants: Set<LunaPlugin> = new Set();
 	public addDependant(plugin: LunaPlugin) {
-		if (!(plugin instanceof LunaPlugin)) throw new Error("Cannot add dependancy to non plugin!");
+		if (!(plugin instanceof LunaPlugin)) throw new Error("Cannot add dependency to non plugin!");
 		this.dependants.add(plugin);
 	}
 	// #endregion

@@ -105,7 +105,7 @@ export class PlayState {
 	 * Play the current track, or a specific track if mediaItemId is provided.
 	 * mediaItemId is not validated, you should use `MediaItem.play`
 	 *
-	 * If `mediaItemId` is provided, equivilent to:
+	 * If `mediaItemId` is provided, equivalent to:
 	 * ```ts
 	 * PlayState.playNext(mediaItemId);
 	 * PlayState.next();
