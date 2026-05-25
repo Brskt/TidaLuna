@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::time::Duration;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 pub(super) struct DecodeThreadConfig {
     pub buffer: RamBuffer,
@@ -45,16 +45,18 @@ struct DecodeContext<'a> {
 fn do_decode_seek(
     time: f64,
     format: &mut dyn symphonia::core::formats::FormatReader,
-    decoder: &mut dyn symphonia::core::codecs::Decoder,
+    decoder: &mut dyn AudioDecoder,
     pipeline: &mut Option<AudioPipeline>,
     ctx: &DecodeContext,
 ) {
     let seek_start = std::time::Instant::now();
+    let Some(time_pos) = symphonia::core::units::Time::try_from_secs_f64(time) else {
+        crate::vprintln!("[SEEK]   invalid seek target: {time}");
+        let _ = ctx.event_tx.send(DecodeEvent::SeekComplete);
+        return;
+    };
     let seek_to = SeekTo::Time {
-        time: symphonia::core::units::Time {
-            seconds: time as u64,
-            frac: time.fract(),
-        },
+        time: time_pos,
         track_id: Some(ctx.track_id),
     };
     match format.seek(SeekMode::Coarse, seek_to) {
@@ -65,22 +67,19 @@ fn do_decode_seek(
                 p.reset();
             }
             ctx.seek_gen.fetch_add(1, Relaxed);
-            let out_ts = seeked.actual_ts * ctx.output_rate as u64 / ctx.source_rate as u64;
+            let actual_ts = seeked.actual_ts.get() as u64;
+            let out_ts = actual_ts * ctx.output_rate as u64 / ctx.source_rate as u64;
             ctx.decoded_samples
                 .store(out_ts * ctx.output_channels as u64, Relaxed);
             let _ = ctx.event_tx.send(DecodeEvent::SeekComplete);
             let seek_ms = seek_dur.as_secs_f64() * 1000.0;
             if seek_ms >= 1.0 {
-                crate::vprintln!(
-                    "[SEEK]   decode: {:.0}ms (ts: {})",
-                    seek_ms,
-                    seeked.actual_ts
-                );
+                crate::vprintln!("[SEEK]   decode: {:.0}ms (ts: {})", seek_ms, actual_ts);
             } else {
                 crate::vprintln!(
                     "[SEEK]   decode: {:.0}µs (ts: {})",
                     seek_dur.as_micros(),
-                    seeked.actual_ts
+                    actual_ts
                 );
             }
         }
@@ -108,23 +107,21 @@ fn decode_loop(cfg: DecodeThreadConfig) {
     let hint = Hint::new();
     let format_opts = FormatOptions::default();
     let metadata_opts = MetadataOptions::default();
-    let decoder_opts = DecoderOptions::default();
+    let decoder_opts = AudioDecoderOptions::default();
 
-    let probed =
-        match symphonia::default::get_probe().format(&hint, mss, &format_opts, &metadata_opts) {
-            Ok(p) => p,
+    let mut format =
+        match symphonia::default::get_probe().probe(&hint, mss, format_opts, metadata_opts) {
+            Ok(f) => f,
             Err(e) => {
                 let _ = event_tx.send(DecodeEvent::Error(format!("probe failed: {e}")));
                 return;
             }
         };
 
-    let mut format = probed.format;
-
     let track = match format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .find(|t| matches!(&t.codec_params, Some(CodecParameters::Audio(_))))
     {
         Some(t) => t.clone(),
         None => {
@@ -134,11 +131,20 @@ fn decode_loop(cfg: DecodeThreadConfig) {
     };
 
     let track_id = track.id;
-    let source_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let source_channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
+    let audio_params = match &track.codec_params {
+        Some(CodecParameters::Audio(p)) => p,
+        _ => unreachable!("track was selected as audio"),
+    };
+    let codec_id = audio_params.codec;
+    let source_rate = audio_params.sample_rate.unwrap_or(44100);
+    let source_channels = audio_params
+        .channels
+        .as_ref()
+        .map(|c| c.count())
+        .unwrap_or(2);
 
     let mut decoder =
-        match symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts) {
+        match symphonia::default::get_codecs().make_audio_decoder(audio_params, &decoder_opts) {
             Ok(d) => d,
             Err(e) => {
                 let _ = event_tx.send(DecodeEvent::Error(format!("codec init failed: {e}")));
@@ -167,7 +173,7 @@ fn decode_loop(cfg: DecodeThreadConfig) {
 
     crate::vprintln!(
         "[DECODE] Probe OK: {} {}Hz/{}ch | output: {}Hz/{}ch",
-        super::output::codec_name(track.codec_params.codec),
+        super::output::codec_name(codec_id),
         source_rate,
         source_channels,
         output_rate,
@@ -184,7 +190,7 @@ fn decode_loop(cfg: DecodeThreadConfig) {
         event_tx: &event_tx,
     };
 
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut sample_vec: Vec<f32> = Vec::new();
     let mut paused = true;
     let mut first_packet_logged = false;
     let mut first_push_logged = false;
@@ -229,12 +235,9 @@ fn decode_loop(cfg: DecodeThreadConfig) {
         }
 
         let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof
-                    || e.kind() == std::io::ErrorKind::Interrupted =>
-            {
-                // EOF - flush resampler pipeline before signaling completion
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                // End of stream - flush resampler pipeline before signaling completion
                 if let Some(ref mut pipe) = pipeline {
                     let flushed = pipe.flush();
                     let mut off = 0;
@@ -264,7 +267,7 @@ fn decode_loop(cfg: DecodeThreadConfig) {
             }
         };
 
-        if packet.track_id() != track_id {
+        if packet.track_id != track_id {
             continue;
         }
 
@@ -281,16 +284,11 @@ fn decode_loop(cfg: DecodeThreadConfig) {
             }
         };
 
-        let spec = *decoded.spec();
         let num_frames = decoded.frames();
 
-        // Initialize sample buffer with decoder's max capacity to avoid reallocations
-        let sbuf =
-            sample_buf.get_or_insert_with(|| SampleBuffer::new(decoded.capacity() as u64, spec));
-
-        sbuf.copy_interleaved_ref(decoded);
-
-        let source_samples = sbuf.samples();
+        sample_vec.clear();
+        decoded.copy_to_vec_interleaved::<f32>(&mut sample_vec);
+        let source_samples = sample_vec.as_slice();
 
         if !first_packet_logged {
             first_packet_logged = true;

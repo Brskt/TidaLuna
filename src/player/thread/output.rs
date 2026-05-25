@@ -20,19 +20,16 @@ pub(super) fn format_duration_mmss(secs: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
-pub(super) fn codec_name(codec: symphonia::core::codecs::CodecType) -> &'static str {
-    use symphonia::core::codecs;
+pub(super) fn codec_name(codec: symphonia::core::codecs::audio::AudioCodecId) -> &'static str {
+    use symphonia::core::codecs::audio::well_known::*;
     match codec {
-        codecs::CODEC_TYPE_FLAC => "flac",
-        codecs::CODEC_TYPE_AAC => "aac",
-        codecs::CODEC_TYPE_MP3 => "mp3",
-        codecs::CODEC_TYPE_VORBIS => "vorbis",
-        codecs::CODEC_TYPE_OPUS => "opus",
-        codecs::CODEC_TYPE_PCM_S16LE
-        | codecs::CODEC_TYPE_PCM_S24LE
-        | codecs::CODEC_TYPE_PCM_S32LE
-        | codecs::CODEC_TYPE_PCM_F32LE => "pcm",
-        codecs::CODEC_TYPE_ALAC => "alac",
+        CODEC_ID_FLAC => "flac",
+        CODEC_ID_AAC => "aac",
+        CODEC_ID_MP3 => "mp3",
+        CODEC_ID_VORBIS => "vorbis",
+        CODEC_ID_OPUS => "opus",
+        CODEC_ID_PCM_S16LE | CODEC_ID_PCM_S24LE | CODEC_ID_PCM_S32LE | CODEC_ID_PCM_F32LE => "pcm",
+        CODEC_ID_ALAC => "alac",
         _ => "unknown",
     }
 }
@@ -104,41 +101,44 @@ pub(super) struct ProbeInfo {
 pub(super) fn probe_audio_format(
     buffer: &crate::player::buffer::RamBuffer,
 ) -> Result<ProbeInfo, String> {
+    use symphonia::core::codecs::CodecParameters;
+    use symphonia::core::formats::probe::Hint;
     use symphonia::core::io::MediaSourceStream;
 
     let reader = buffer.clone();
     let mss = MediaSourceStream::new(Box::new(reader), Default::default());
-    let probed = symphonia::default::get_probe()
-        .format(
-            &symphonia::core::probe::Hint::new(),
+    let format = symphonia::default::get_probe()
+        .probe(
+            &Hint::new(),
             mss,
-            &symphonia::core::formats::FormatOptions::default(),
-            &symphonia::core::meta::MetadataOptions::default(),
+            symphonia::core::formats::FormatOptions::default(),
+            symphonia::core::meta::MetadataOptions::default(),
         )
         .map_err(|e| format!("Probe failed: {e}"))?;
 
-    let track = probed
-        .format
+    let (track, params) = format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .find_map(|t| match &t.codec_params {
+            Some(CodecParameters::Audio(p)) => Some((t, p)),
+            _ => None,
+        })
         .ok_or_else(|| "No audio track found".to_string())?;
 
-    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+    let sample_rate = params.sample_rate.unwrap_or(44100);
     Ok(ProbeInfo {
         sample_rate,
-        channels: track
-            .codec_params
+        channels: params
             .channels
+            .as_ref()
             .map(|c| c.count() as u16)
             .unwrap_or(2),
         duration: track
-            .codec_params
-            .n_frames
+            .num_frames
             .map(|n| n as f64 / sample_rate as f64)
             .unwrap_or(0.0),
-        bit_depth: track.codec_params.bits_per_sample,
-        codec: codec_name(track.codec_params.codec),
+        bit_depth: params.bits_per_sample,
+        codec: codec_name(params.codec),
     })
 }
 

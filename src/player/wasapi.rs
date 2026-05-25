@@ -4,12 +4,12 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use symphonia::core::audio::RawSampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 use wasapi::{
     AudioClient, AudioRenderClient, DeviceEnumerator, Direction, Handle, SampleType, StreamMode,
@@ -88,29 +88,30 @@ pub(super) struct ExclusiveHandle {
 // FLAC -> PCM decoding (symphonia)
 // ---------------------------------------------------------------------------
 
-fn append_interleaved_i32_as_pcm(raw_bytes: &[u8], bits_per_sample: u32, out: &mut Vec<u8>) {
+fn append_interleaved_i32_as_pcm(samples: &[i32], bits_per_sample: u32, out: &mut Vec<u8>) {
     if bits_per_sample <= 16 {
         // i32 samples -> take upper 16 bits (little-endian: bytes [2..4]).
-        let frame_count = raw_bytes.len() / 4;
-        out.reserve(frame_count * 2);
-        for i in 0..frame_count {
-            let offset = i * 4;
-            out.push(raw_bytes[offset + 2]);
-            out.push(raw_bytes[offset + 3]);
+        out.reserve(samples.len() * 2);
+        for &s in samples {
+            let b = s.to_le_bytes();
+            out.push(b[2]);
+            out.push(b[3]);
         }
     } else if bits_per_sample <= 24 {
         // i32 samples -> take upper 24 bits (bytes [1..4]).
-        let frame_count = raw_bytes.len() / 4;
-        out.reserve(frame_count * 3);
-        for i in 0..frame_count {
-            let offset = i * 4;
-            out.push(raw_bytes[offset + 1]);
-            out.push(raw_bytes[offset + 2]);
-            out.push(raw_bytes[offset + 3]);
+        out.reserve(samples.len() * 3);
+        for &s in samples {
+            let b = s.to_le_bytes();
+            out.push(b[1]);
+            out.push(b[2]);
+            out.push(b[3]);
         }
     } else {
         // 32-bit: pass through all 4 bytes.
-        out.extend_from_slice(raw_bytes);
+        out.reserve(samples.len() * 4);
+        for &s in samples {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
     }
 }
 
@@ -133,26 +134,34 @@ where
     let mut hint = Hint::new();
     hint.with_extension("flac");
 
-    let probed = symphonia::default::get_probe()
-        .format(
+    let mut format_reader = symphonia::default::get_probe()
+        .probe(
             &hint,
             mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|e| format!("probe failed: {e}"))?;
 
-    let mut format_reader = probed.format;
     let track = format_reader
-        .default_track()
-        .ok_or("no default track")?
+        .tracks()
+        .iter()
+        .find(|t| matches!(&t.codec_params, Some(CodecParameters::Audio(_))))
+        .ok_or("no audio track")?
         .clone();
 
-    let codec_params = &track.codec_params;
+    let codec_params = match &track.codec_params {
+        Some(CodecParameters::Audio(p)) => p,
+        _ => return Err("no audio track".to_string()),
+    };
     let sample_rate = codec_params.sample_rate.ok_or("no sample rate")?;
-    let channels = codec_params.channels.ok_or("no channel info")?.count() as u32;
+    let channels = codec_params
+        .channels
+        .as_ref()
+        .ok_or("no channel info")?
+        .count() as u32;
     let bits_per_sample = codec_params.bits_per_sample.ok_or("no bits_per_sample")?;
-    let n_frames = codec_params.n_frames.unwrap_or(0);
+    let n_frames = track.num_frames.unwrap_or(0);
     let duration_secs = if sample_rate > 0 && n_frames > 0 {
         n_frames as f64 / sample_rate as f64
     } else {
@@ -178,8 +187,10 @@ where
         .map_err(|_| "failed to send StartStream".to_string())?;
 
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
         .map_err(|e| format!("decoder creation failed: {e}"))?;
+
+    let mut sample_buf: Vec<i32> = Vec::new();
 
     loop {
         if cancel.load(Relaxed) {
@@ -187,18 +198,8 @@ where
         }
 
         let packet = match format_reader.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(symphonia::core::errors::Error::IoError(e)) => {
-                if cancel.load(Relaxed) {
-                    return Ok(());
-                }
-                return Err(format!("decode io error: {e}"));
-            }
+            Ok(Some(p)) => p,
+            Ok(None) => break,
             Err(e) => {
                 if cancel.load(Relaxed) {
                     return Ok(());
@@ -207,7 +208,7 @@ where
             }
         };
 
-        if packet.track_id() != track.id {
+        if packet.track_id != track.id {
             continue;
         }
 
@@ -216,13 +217,11 @@ where
             Err(_) => continue,
         };
 
-        let spec = *decoded.spec();
-        let num_frames = decoded.capacity();
-        let mut raw_buf = RawSampleBuffer::<i32>::new(num_frames as u64, spec);
-        raw_buf.copy_interleaved_ref(decoded);
+        sample_buf.clear();
+        decoded.copy_to_vec_interleaved::<i32>(&mut sample_buf);
 
         let mut chunk = Vec::new();
-        append_interleaved_i32_as_pcm(raw_buf.as_bytes(), bits_per_sample, &mut chunk);
+        append_interleaved_i32_as_pcm(&sample_buf, bits_per_sample, &mut chunk);
 
         if !chunk.is_empty()
             && cmd_tx

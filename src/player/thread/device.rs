@@ -6,11 +6,11 @@ use crate::player::{DeviceErrorKind, PlayerEvent};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
 
-use symphonia::core::codecs::CODEC_TYPE_NULL;
+use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 #[cfg(target_os = "windows")]
 use crate::player::{EXCLUSIVE_STREAM_SEQ, wasapi};
@@ -112,40 +112,34 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let mss = MediaSourceStream::new(Box::new(probe_reader), Default::default());
         let hint = Hint::new();
 
-        let probed = match symphonia::default::get_probe().format(
+        let format = match symphonia::default::get_probe().probe(
             &hint,
             mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         ) {
-            Ok(p) => p,
+            Ok(f) => f,
             Err(e) => {
                 crate::vprintln!("[ERROR]  Probe failed on device switch: {e}");
                 return;
             }
         };
 
-        let track = match probed
-            .format
-            .tracks()
-            .iter()
-            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        {
-            Some(t) => t,
+        let (sr, ch) = match format.tracks().iter().find_map(|t| match &t.codec_params {
+            Some(CodecParameters::Audio(p)) => Some(p),
+            _ => None,
+        }) {
+            Some(p) => (
+                p.sample_rate.unwrap_or(44100),
+                p.channels.as_ref().map(|c| c.count() as u16).unwrap_or(2),
+            ),
             None => {
                 crate::vprintln!("[ERROR]  No audio track on device switch");
                 return;
             }
         };
 
-        let sr = track.codec_params.sample_rate.unwrap_or(44100);
-        let ch = track
-            .codec_params
-            .channels
-            .map(|c| c.count() as u16)
-            .unwrap_or(2);
-
-        drop(probed);
+        drop(format);
 
         let Some(device) = self.resolve_output_device() else {
             return;
