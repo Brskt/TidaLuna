@@ -460,6 +460,9 @@ wrap_window_delegate! {
     }
     impl PanelDelegate {}
     impl WindowDelegate {
+        fn window_runtime_style(&self) -> RuntimeStyle {
+            RuntimeStyle::ALLOY
+        }
         fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
             1
         }
@@ -519,7 +522,11 @@ wrap_browser_view_delegate! {
         _p: u8,
     }
     impl ViewDelegate {}
-    impl BrowserViewDelegate {}
+    impl BrowserViewDelegate {
+        fn browser_runtime_style(&self) -> RuntimeStyle {
+            RuntimeStyle::ALLOY
+        }
+    }
 }
 
 // --- Task to create the dialog on the CEF UI thread ---
