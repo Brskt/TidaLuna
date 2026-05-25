@@ -1336,12 +1336,30 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
         ));
     }
 
-    if Command::new("makensis").arg("/VERSION").output().is_err() {
-        return Err(
-            "makensis not on PATH - install via `apt install nsis` (Linux) or `choco install nsis` (Windows)"
-                .into(),
-        );
+    // Prefer makensis on PATH, but fall back to the standard NSIS install
+    // location on Windows: `choco install nsis` drops makensis.exe under
+    // Program Files without reliably adding it to PATH.
+    fn resolve_makensis() -> Option<PathBuf> {
+        if Command::new("makensis").arg("/VERSION").output().is_ok() {
+            return Some(PathBuf::from("makensis"));
+        }
+        #[cfg(windows)]
+        {
+            for var in ["ProgramFiles(x86)", "ProgramW6432", "ProgramFiles"] {
+                if let Some(base) = std::env::var_os(var) {
+                    let candidate = Path::new(&base).join("NSIS").join("makensis.exe");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
     }
+    let makensis = resolve_makensis().ok_or_else(|| {
+        "makensis not found - install via `apt install nsis` (Linux) or `choco install nsis` (Windows)"
+            .to_string()
+    })?;
 
     let out_dir = project_root.join("target").join("installer");
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
@@ -1377,7 +1395,7 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
     println!(
         "Packaging installer: target={expected} version={version} (numeric={version_numeric})"
     );
-    let status = Command::new("makensis")
+    let status = Command::new(&makensis)
         .arg(format!("-DVERSION={version}"))
         .arg(format!("-DVERSION_NUMERIC={version_numeric}"))
         .arg(format!("-DARCH={win_arch}"))
