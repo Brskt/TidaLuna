@@ -51,6 +51,9 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
 
       - name: Check TOML formatting
         run: taplo fmt --check
@@ -60,8 +63,6 @@ jobs:
         run: typos
       - name: Clippy
         run: cargo xtask clippy
-      - name: Clippy (updater)
-        run: cargo clippy --package updater -- -D warnings
       - name: Deny check
         run: cargo deny check advisories bans sources
 
@@ -126,6 +127,9 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
 
       - name: Build and bundle
         run: cargo xtask bundle --release
