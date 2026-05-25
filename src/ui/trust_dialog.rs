@@ -273,7 +273,7 @@ fn get_main_hwnd() -> windows_sys::Win32::Foundation::HWND {
 /// Center the dialog on the main app window, clamped to the monitor work area.
 /// Returns false if positioning failed (caller should fall back to center_window).
 #[cfg(target_os = "windows")]
-fn center_on_parent(window: &mut Window, dialog_w: i32, dialog_h: i32) -> bool {
+pub(super) fn center_on_parent(window: &mut Window, dialog_w: i32, dialog_h: i32) -> bool {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
@@ -346,7 +346,7 @@ fn center_on_parent(window: &mut Window, dialog_w: i32, dialog_h: i32) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn center_on_parent(_window: &mut Window, _dialog_w: i32, _dialog_h: i32) -> bool {
+pub(super) fn center_on_parent(_window: &mut Window, _dialog_w: i32, _dialog_h: i32) -> bool {
     false
 }
 
