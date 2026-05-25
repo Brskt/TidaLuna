@@ -1662,7 +1662,7 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
 
     println!("Compressing payload tarball (this may take a minute)...");
     let tar_status = Command::new("tar")
-        .args(["-I", "zstd -10 -T0", "-cf"])
+        .args(["-I", "zstd -19 -T0", "-cf"])
         .arg(&payload)
         .args(["-C"])
         .arg(&dist)
@@ -1679,11 +1679,15 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    // 8. dpkg-deb --build
+    // 8. dpkg-deb --build. -Znone: the data.tar's bulk is the already-zstd
+    //    payload.tar.zst (incompressible), so dpkg's default recompression
+    //    would burn time re-squeezing it for no gain. Skipping it keeps the
+    //    build fast; the few MB of uncompressed control files are negligible
+    //    next to the payload. (Same rationale as `SetCompress off` on Windows.)
     let out_deb = out_dir.join(format!("tidalunar_{version}_{arch}.deb"));
     println!("Building .deb at {}", out_deb.display());
     let status = Command::new("dpkg-deb")
-        .args(["--build", "--root-owner-group"])
+        .args(["--build", "--root-owner-group", "-Znone"])
         .arg(&stage)
         .arg(&out_deb)
         .status()
