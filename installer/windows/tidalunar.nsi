@@ -1,18 +1,22 @@
 ; TidaLunar Windows installer.
 ;
 ; Variability injected via -D defines from `cargo xtask package`:
-;   ${VERSION}    e.g. 0.0.4-alpha - DisplayVersion + filename
-;   ${ARCH}       x64 | arm64      - output filename (Windows arch token)
-;   ${DIST_DIR}   absolute path to dist/, source for File /r
-;   ${OUT_DIR}    absolute path to target/installer/, OutFile destination
+;   ${VERSION}      e.g. 0.0.4-alpha - DisplayVersion + filename
+;   ${ARCH}         x64 | arm64      - output filename (Windows arch token)
+;   ${PAYLOAD_7Z}   absolute path to the pre-built solid payload.7z
+;   ${SEVENZR_EXE}  absolute path to the official 7zr.exe to embed + ship
+;   ${PAYLOAD_KB}   decompressed payload size in KB, for AddSize
+;   ${OUT_DIR}      absolute path to target/installer/, OutFile destination
 
 Unicode true
 
-; Solid LZMA: compresses all files together so cross-file redundancy in CEF
-; DLLs and locales is exploited. Cuts installer size by ~60% vs default zlib
-; on this codebase. Trade-off: slower makensis build, slower install-time
-; decompression (single-threaded).
-SetCompressor /SOLID lzma
+; The bundle is pre-compressed into payload.7z by `cargo xtask package` using
+; multithreaded 7-Zip (solid LZMA2), then unpacked at install time by the
+; embedded official 7zr.exe. 7-Zip's LZMA2 is smaller (newer codec + executable
+; filter) and ~2x faster to build than makensis' single-threaded builtin LZMA on
+; the CEF payload. So makensis only needs cheap zlib for the small stub files;
+; the already-compressed .7z is stored verbatim (SetCompress off around it).
+SetCompressor zlib
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
@@ -321,9 +325,34 @@ Section "TidaLunar" SecMain
     DetailPrint "Could not preserve old manifest; cleanup will be skipped this run."
   manifest_rename_done:
 
-  ; 5. Copy new bundle. File /r overlays files; orphans (files removed in
-  ;    new version) survive this step and are cleaned in step 7.
-  File /r "${DIST_DIR}\*"
+  ; 5. Unpack new bundle. The payload ships as a solid .7z (built by
+  ;    `cargo xtask package`) and is extracted over $INSTDIR by the embedded
+  ;    official 7zr.exe. Overlay semantics match the old `File /r`: orphaned
+  ;    files from a prior version survive and are cleaned in step 7. AddSize
+  ;    accounts for the decompressed footprint, which NSIS cannot measure
+  ;    inside the archive.
+  AddSize ${PAYLOAD_KB}
+
+  ; 7zr.exe + the already-compressed payload go to $PLUGINSDIR (auto-wiped on
+  ; exit). SetCompress off keeps makensis from pointlessly recompressing the
+  ; .7z; /oname pins the staged names regardless of the source basenames.
+  SetOutPath $PLUGINSDIR
+  File /oname=7zr.exe "${SEVENZR_EXE}"
+  SetCompress off
+  File /oname=payload.7z "${PAYLOAD_7Z}"
+  SetCompress auto
+  SetOutPath $INSTDIR
+
+  nsExec::ExecToLog '"$PLUGINSDIR\7zr.exe" x "$PLUGINSDIR\payload.7z" -o"$INSTDIR" -y -bso0 -bsp0'
+  Pop $0
+  StrCmp $0 "error" payload_extract_failed
+  IntCmp $0 0 payload_extract_ok payload_extract_failed payload_extract_failed
+  payload_extract_failed:
+    MessageBox MB_OK|MB_ICONSTOP \
+      "Failed to unpack the TidaLunar payload (7zr result: $0). Close any antivirus blocker and retry."
+    Abort
+  payload_extract_ok:
+  Delete "$PLUGINSDIR\payload.7z"
 
   ; 6. Post-copy write-handle probe: confirms File /r's write handles have
   ;    been released. NOT a proof of CreateProcess readiness - Defender

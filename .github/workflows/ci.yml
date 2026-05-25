@@ -167,6 +167,23 @@ jobs:
         if: startsWith(matrix.target, 'windows-')
         run: choco install nsis -y --no-progress
 
+      - name: Fetch 7zr.exe extractor (signature-verified)
+        if: startsWith(matrix.target, 'windows-')
+        shell: pwsh
+        run: |
+          # Official 7-Zip standalone extractor, embedded in the installer to
+          # unpack the payload.7z that `cargo xtask package` builds. Verify the
+          # Authenticode signature instead of pinning a hash so it survives
+          # 7-Zip point releases while still proving authenticity.
+          $dst = Join-Path $env:RUNNER_TEMP '7zr.exe'
+          Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $dst
+          $sig = Get-AuthenticodeSignature $dst
+          if ($sig.Status -ne 'Valid') { throw "7zr.exe signature invalid: $($sig.Status)" }
+          if ($sig.SignerCertificate.Subject -notmatch 'Igor Pavlov') {
+            throw "7zr.exe unexpected signer: $($sig.SignerCertificate.Subject)"
+          }
+          "TIDALUNAR_7ZR_EXE=$dst" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Package Windows installer
         if: startsWith(matrix.target, 'windows-')
         shell: pwsh

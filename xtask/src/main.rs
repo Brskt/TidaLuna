@@ -768,6 +768,23 @@ fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Sum the byte size of every regular file under `dir`, recursively.
+/// Used for the installer's manual `AddSize` estimate: NSIS can't see inside
+/// the pre-compressed payload.7z, so it needs the decompressed total.
+fn dir_size_bytes(dir: &Path) -> Result<u64, String> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let ft = entry.file_type().map_err(|e| e.to_string())?;
+        if ft.is_dir() {
+            total += dir_size_bytes(&entry.path())?;
+        } else if ft.is_file() {
+            total += entry.metadata().map_err(|e| e.to_string())?.len();
+        }
+    }
+    Ok(total)
+}
+
 /// Link or copy all files from a directory (flat, no recursion).
 fn copy_dir_flat(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("failed to create {}: {e}", dst.display()))?;
@@ -1399,6 +1416,67 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
         .join("windows")
         .join("tidalunar.nsi");
 
+    // Pre-compress the payload OUTSIDE makensis. makensis' builtin LZMA is
+    // single-threaded and uses an outdated codec with no executable filter; on
+    // the CEF payload that measured ~14% larger and ~2x slower than 7-Zip's
+    // multithreaded LZMA2. So we build the solid .7z here and have the installer
+    // extract it at run time via the bundled official 7zr.exe (see tidalunar.nsi).
+    fn resolve_7z() -> Option<PathBuf> {
+        for cand in ["7z", "7za"] {
+            if Command::new(cand).output().is_ok() {
+                return Some(PathBuf::from(cand));
+            }
+        }
+        #[cfg(windows)]
+        {
+            for var in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+                if let Some(base) = std::env::var_os(var) {
+                    let candidate = Path::new(&base).join("7-Zip").join("7z.exe");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    }
+    let sevenzip =
+        resolve_7z().ok_or("7z/7za not found - install p7zip-full (Linux) or 7-Zip (Windows)")?;
+
+    // Official, signed 7-Zip standalone extractor shipped INSIDE the installer
+    // to decompress payload.7z on the user's machine. Sourced via env (CI
+    // downloads + Authenticode-verifies it) so no binary blob lives in git.
+    let sevenzr = std::env::var_os("TIDALUNAR_7ZR_EXE")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .ok_or(
+            "7zr.exe not found - set TIDALUNAR_7ZR_EXE to the official 7-Zip standalone \
+             extractor (CI downloads it; locally point it at a trusted 7zr.exe)",
+        )?;
+
+    // Build the solid, max-compression payload archive. cwd = dist so entries
+    // store at archive root (no `dist/` prefix), matching extraction straight
+    // into $INSTDIR. -mmt=on uses all runner cores.
+    let payload = out_dir.join("payload.7z");
+    let _ = fs::remove_file(&payload);
+    println!("Compressing payload with 7-Zip (LZMA2, solid, multithreaded)...");
+    let status = Command::new(&sevenzip)
+        .current_dir(&dist)
+        .args(["a", "-t7z", "-mx=9", "-ms=on", "-mmt=on"])
+        .arg(&payload)
+        .arg(".")
+        .status()
+        .map_err(|e| format!("7z spawn: {e}"))?;
+    if !status.success() {
+        return Err(format!("7z failed: {status}"));
+    }
+    if !payload.is_file() {
+        return Err("7z reported success but payload.7z is missing".into());
+    }
+
+    // AddSize wants the decompressed total in KB (NSIS can't see inside the .7z).
+    let payload_kb = dir_size_bytes(&dist)?.div_ceil(1024);
+
     println!(
         "Packaging installer: target={expected} version={version} (numeric={version_numeric})"
     );
@@ -1406,7 +1484,9 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
         .arg(format!("-DVERSION={version}"))
         .arg(format!("-DVERSION_NUMERIC={version_numeric}"))
         .arg(format!("-DARCH={win_arch}"))
-        .arg(format!("-DDIST_DIR={}", dist.display()))
+        .arg(format!("-DPAYLOAD_7Z={}", payload.display()))
+        .arg(format!("-DSEVENZR_EXE={}", sevenzr.display()))
+        .arg(format!("-DPAYLOAD_KB={payload_kb}"))
         .arg(format!("-DOUT_DIR={}", out_dir.display()))
         .arg(&nsi)
         .status()
