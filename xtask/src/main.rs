@@ -1662,7 +1662,7 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
 
     println!("Compressing payload tarball (this may take a minute)...");
     let tar_status = Command::new("tar")
-        .args(["-I", "zstd -19 -T0", "-cf"])
+        .args(["-I", "zstd -10 -T0", "-cf"])
         .arg(&payload)
         .args(["-C"])
         .arg(&dist)
