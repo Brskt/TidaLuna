@@ -86,18 +86,25 @@ fn usage() {
 }
 
 fn clippy() -> Result<(), String> {
-    run(
-        "cargo",
-        &[
-            "clippy",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-            "-D",
-            "clippy::all",
-        ],
-    )
+    // The updater is a separate workspace member that the default invocation
+    // skips, so lint it explicitly with the same flags.
+    for pkg in ["tidalunar", "updater"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--package",
+                pkg,
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+                "-D",
+                "clippy::all",
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn fmt() -> Result<(), String> {
@@ -1575,7 +1582,7 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
 
     println!("Compressing payload tarball (this may take a minute)...");
     let tar_status = Command::new("tar")
-        .args(["-I", "zstd -19", "-cf"])
+        .args(["-I", "zstd -10 -T0", "-cf"])
         .arg(&payload)
         .args(["-C"])
         .arg(&dist)
