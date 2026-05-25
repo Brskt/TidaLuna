@@ -1443,9 +1443,9 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
     let sevenzip =
         resolve_7z().ok_or("7z/7za not found - install p7zip-full (Linux) or 7-Zip (Windows)")?;
 
-    // Official, signed 7-Zip standalone extractor shipped INSIDE the installer
-    // to decompress payload.7z on the user's machine. Sourced via env (CI
-    // downloads + Authenticode-verifies it) so no binary blob lives in git.
+    // Official 7-Zip standalone extractor shipped INSIDE the installer to
+    // decompress payload.7z on the user's machine. Sourced via env (CI
+    // downloads it and pins its SHA-256) so no binary blob lives in git.
     let sevenzr = std::env::var_os("TIDALUNAR_7ZR_EXE")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
