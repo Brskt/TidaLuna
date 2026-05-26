@@ -52,24 +52,43 @@ export const createNativePlayerComponent = () => {
     const Player = () => {
         playerCallCount++;
         sendIpc("player.dbg", "Player() called", "count=" + playerCallCount);
+
+        // Release the previous emitter's listeners before it is orphaned.  The
+        // old player object returned to the SDK still closes over its emitter,
+        // so without this the SDK's accumulated callbacks (and the React state
+        // they capture) stay reachable for the whole session.
+        activeEmitter?.listeners.clear();
+
         const eventEmitter = {
-            listeners: {} as Record<string, Function[]>,
+            // One Set per event type: Set.add deduplicates by callback
+            // reference, matching the WHATWG addEventListener contract, so the
+            // SDK re-subscribing on every render no longer stacks listeners.
+            listeners: new Map<string, Set<Function>>(),
             addListener(event: string, cb: any) {
-                if (!this.listeners[event]) this.listeners[event] = [];
-                this.listeners[event].push(cb);
+                let set = this.listeners.get(event);
+                if (!set) this.listeners.set(event, (set = new Set()));
+                set.add(cb);
             },
             removeListener(event: string, cb: any) {
-                if (this.listeners[event]) {
-                    this.listeners[event] = this.listeners[event].filter((x: any) => x !== cb);
-                }
+                this.listeners.get(event)?.delete(cb);
             },
             on(event: string, cb: any) {
                 this.addListener(event, cb);
             },
             emit(event: string, arg: any) {
-                if (this.listeners[event]) {
-                    this.listeners[event].forEach(cb => cb(arg));
+                const set = this.listeners.get(event);
+                if (!set || set.size === 0) return;
+                if (set.size === 1) {
+                    // Hot path (e.g. mediacurrenttime usually has one listener):
+                    // read the single callback up front so it can't re-enter
+                    // mid-dispatch, and skip the snapshot allocation.
+                    const only = set.values().next().value;
+                    if (only) only(arg);
+                    return;
                 }
+                // Snapshot so a listener added or removed during dispatch
+                // doesn't affect the current pass.
+                for (const cb of [...set]) cb(arg);
             }
         };
 
@@ -197,7 +216,7 @@ export const createNativePlayerComponent = () => {
         syncBridgeVolume: (v: number) => { _lastVolume = v; },
         trigger: (event: string, target: any, gen?: number) => {
             if (event !== "mediacurrenttime") {
-                sendIpc("player.dbg", "trigger", event, target, "listeners=" + (activeEmitter?.listeners?.[event]?.length ?? 0), "playerCalls=" + playerCallCount);
+                sendIpc("player.dbg", "trigger", event, target, "listeners=" + (activeEmitter?.listeners?.get(event)?.size ?? 0), "playerCalls=" + playerCallCount);
             }
             if (gen !== undefined) {
                 if (gen < activeGen) return;
