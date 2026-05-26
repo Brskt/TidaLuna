@@ -56,6 +56,11 @@ pub(super) struct PlayerThread<F> {
     is_cached: bool,
     is_playing: bool,
     has_track: bool,
+    // A play that arrived before the track finished loading, tagged with the
+    // LOAD_SEQ generation it was meant for. Applied once that load reaches the
+    // ready state so a play racing ahead of the async load isn't dropped, and
+    // never applied to a track the user has since skipped past.
+    pending_play: Option<u32>,
     current_duration: f64,
     current_seq: u32,
     // Position tracking
@@ -134,6 +139,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             is_cached: false,
             is_playing: false,
             has_track: false,
+            pending_play: None,
             current_duration: 0.0,
             current_seq: 0,
             decoded_samples: Arc::new(AtomicU64::new(0)),

@@ -167,6 +167,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // WASAPI exclusive path
         #[cfg(target_os = "windows")]
         if self.start_exclusive_playback(buffer.clone()) {
+            // Exclusive mode auto-starts playback (is_playing=true), which
+            // satisfies any deferred play; clear it so it can't dangle.
+            self.pending_play = None;
             crate::vprintln!(
                 "[WASAPI] Progressive decode started ({:.0}ms setup)",
                 decode_start.elapsed().as_secs_f64() * 1000.0
@@ -345,15 +348,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlaybackState::Ready,
             self.current_seq,
         ));
+
+        // Honor a play that raced ahead of this load. Tagged by load_gen so a
+        // play meant for a track the user has since skipped past is not applied
+        // here (that intent's generation won't match this one).
+        if self.pending_play == Some(load_gen) {
+            self.pending_play = None;
+            crate::vprintln!("[PLAY]   applying deferred play for load #{load_gen}");
+            self.handle_play();
+        }
     }
 
     pub(super) fn handle_play(&mut self) {
         self.allow_startup_auto_resume = false;
 
         if !self.has_track {
-            crate::vprintln!("[PLAY]   ignored - no track loaded (has_track=false)");
+            // The track is still loading: `player.load` spawns async pre-buffering
+            // and only sends the Load command once it completes, so a `player.play`
+            // can reach the player thread first. Defer it for the in-flight load
+            // generation; handle_load applies it once the track is ready.
+            let pending_gen = LOAD_SEQ.load(Relaxed);
+            self.pending_play = Some(pending_gen);
+            crate::vprintln!("[PLAY]   deferred until load #{pending_gen} is ready (no track yet)");
             return;
         }
+        self.pending_play = None;
 
         #[cfg(target_os = "windows")]
         {
@@ -422,6 +441,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     pub(super) fn handle_pause(&mut self) {
+        // A pause cancels any play deferred while the track was still loading;
+        // otherwise handle_load would auto-play it against this pause intent.
+        self.pending_play = None;
         #[cfg(target_os = "windows")]
         {
             if self.is_exclusive_mode {
@@ -486,6 +508,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 ));
                 self.is_playing = false;
                 self.has_track = false;
+                self.pending_play = None;
                 self.current_duration = 0.0;
                 self.current_track_id = None;
                 self.pending_resume_seek = None;
@@ -502,6 +525,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         ));
         self.is_playing = false;
         self.has_track = false;
+        self.pending_play = None;
         self.current_duration = 0.0;
         self.current_track_id = None;
         self.pending_resume_seek = None;
