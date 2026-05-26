@@ -31,6 +31,12 @@ pub(crate) static ENGINE_GEN: AtomicU64 = AtomicU64::new(0);
 /// reads an atomic.
 static BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Whether a Connect controller is currently connected. While false the
+/// bridge is idle: local player events are not forwarded to the receiver at
+/// all, so the whole notify/broadcast chain stays dormant until someone
+/// connects. Toggled by the routing loop on the 0<->1 client edge.
+static BRIDGE_HAS_CLIENT: AtomicBool = AtomicBool::new(false);
+
 /// Sender for Connect bridge events. `Some` iff the receiver is active.
 static BRIDGE_TX: Mutex<Option<mpsc::Sender<BridgeEvent>>> = Mutex::new(None);
 
@@ -40,12 +46,26 @@ pub(crate) fn set_active(tx: Option<mpsc::Sender<BridgeEvent>>) {
     let active = tx.is_some();
     *BRIDGE_TX.lock().unwrap() = tx;
     BRIDGE_ACTIVE.store(active, Ordering::Release);
+    // BRIDGE_HAS_CLIENT is owned solely by the receiver routing loop, which resets
+    // it on start and toggles it on client connect/disconnect. set_active must not
+    // write it, or it could clobber a connect that races receiver startup. When
+    // inactive, forward() short-circuits on BRIDGE_ACTIVE regardless.
+}
+
+/// Toggle whether a Connect controller is connected. While no client is
+/// connected `forward` short-circuits, leaving the receiver fully idle so
+/// local playback never drives its notify/broadcast chain.
+pub(crate) fn set_client_connected(connected: bool) {
+    BRIDGE_HAS_CLIENT.store(connected, Ordering::Release);
 }
 
 /// Forward a player event to the receiver, if active. Called from
 /// `ui::flush`'s per-event hook on the player event loop.
 pub(crate) fn forward(event: &PlayerEvent) {
-    if !BRIDGE_ACTIVE.load(Ordering::Acquire) {
+    // Idle unless the receiver is running AND a controller is connected: with
+    // nobody to notify, forwarding/notify/broadcast is wasted work. Resumes
+    // the instant a client connects.
+    if !BRIDGE_ACTIVE.load(Ordering::Acquire) || !BRIDGE_HAS_CLIENT.load(Ordering::Acquire) {
         return;
     }
     if matches!(event, PlayerEvent::TimeUpdate(..)) {

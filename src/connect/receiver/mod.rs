@@ -150,12 +150,30 @@ async fn routing_loop(
 ) {
     crate::vprintln!("[connect::receiver] Routing loop started");
 
+    // Open WS client sockets. The empty<->non-empty edge toggles the bridge idle
+    // state (bridge::set_client_connected): while empty, local player events are
+    // not forwarded to the receiver at all, so the connect notify/broadcast chain
+    // stays dormant. Tracking socket ids (not a bare counter) keeps the state
+    // correct if a disconnect ever arrives without a matching connect. The server
+    // keeps listening and stays discoverable regardless. Reset the flag here so a
+    // stale value from a previous receiver session can't leak in.
+    let mut connected_sockets: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    crate::connect::bridge::set_client_connected(false);
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
 
             // Arm 1: Incoming WS messages from mobile clients
             Some(incoming) = incoming_rx.recv() => {
+                // The first message from a socket can arrive before its
+                // ClientConnected event (separate channels, no select ordering;
+                // the WS read loop is spawned before the event is sent). Arm the
+                // bridge here so a controller's initial load isn't dropped by
+                // forward() while the client still looks disconnected.
+                if connected_sockets.insert(incoming.socket_id) {
+                    crate::connect::bridge::set_client_connected(true);
+                }
                 let command = incoming.message.get("command")
                     .and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let request_id = incoming.message.get("requestId").and_then(|v| v.as_u64());
@@ -191,9 +209,13 @@ async fn routing_loop(
             Some(event) = server_event_rx.recv() => {
                 match event {
                     ServerEvent::ClientConnected(socket_id) => {
+                        connected_sockets.insert(socket_id);
+                        crate::connect::bridge::set_client_connected(true);
                         crate::vprintln!("[connect::receiver] Client {} connected", socket_id);
                     }
                     ServerEvent::ClientDisconnected(socket_id) => {
+                        connected_sockets.remove(&socket_id);
+                        crate::connect::bridge::set_client_connected(!connected_sockets.is_empty());
                         session_mgr.handle_disconnect(socket_id).await;
                     }
                 }
@@ -293,7 +315,9 @@ async fn routing_loop(
                         playback_ctrl.on_status_updated(*state, engine_gen).await;
                     }
                     BridgeEvent::ProgressUpdated { progress_ms, duration_ms, engine_gen } => {
-                        // Don't log every progress (too noisy) - logged once via flush.rs
+                        // Don't log every progress (too noisy) - logged once via flush.rs.
+                        // When idle, bridge::forward short-circuits at the source, so
+                        // no bridge events reach this loop at all.
                         playback_ctrl.on_progress_updated(progress_ms, duration_ms, engine_gen).await;
                     }
                     BridgeEvent::PlaybackCompleted { has_next_media, engine_gen } => {
