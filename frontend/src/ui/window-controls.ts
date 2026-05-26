@@ -9,11 +9,21 @@ export const initWindowControls = () => {
     const TIDALUNAR_TITLE = "TidaLunar - A TIDAL client";
     const titleEl = document.querySelector("title");
     if (titleEl) {
-        new MutationObserver(() => {
+        // subtree is required for characterData to reach the title's child text
+        // node: TIDAL (React) often updates the title by mutating that text node
+        // in place rather than replacing it, which is not a childList change.
+        const opts: MutationObserverInit = { childList: true, characterData: true, subtree: true };
+        const titleObserver = new MutationObserver(() => {
             if (document.title !== TIDALUNAR_TITLE) {
+                // Disconnect while writing so our own mutation does not re-fire
+                // the observer, then reconnect.
+                titleObserver.disconnect();
                 document.title = TIDALUNAR_TITLE;
+                titleObserver.observe(titleEl, opts);
             }
-        }).observe(titleEl, { childList: true, characterData: true, subtree: true });
+        });
+        titleObserver.observe(titleEl, opts);
+        window.addEventListener("pagehide", () => titleObserver.disconnect(), { once: true });
     }
 
     // F12 devtools fallback (in case CEF captures the key before the page).
