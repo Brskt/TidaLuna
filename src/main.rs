@@ -4,8 +4,10 @@ mod audio;
 mod bridge;
 mod connect;
 mod db;
+mod debug;
 mod ipc;
 mod logging;
+mod memory_pressure;
 mod native_runtime;
 mod platform;
 mod player;
@@ -349,6 +351,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1,
         "CEF initialization failed"
     );
+
+    debug::perf_monitor::start();
 
     run_message_loop();
 

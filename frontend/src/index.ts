@@ -14,6 +14,7 @@ import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, isSelfLoad } from "./audio-proxy";
 import { initWindowControls } from "./ui/window-controls";
 import { invokeIpc, sendIpc, isLoginCallback, onIpcEvent } from "./ipc";
+import { initPerfOverlay } from "./debug/perf-overlay";
 
 // @luna/core and @luna/lib - safe to import after bootstrap
 import { initCore, modules, LunaPlugin } from "../render/src";
@@ -56,6 +57,11 @@ try {
     setupConnectEventListeners(store);
 } catch {
     // Store not yet available - listeners will be set up when Redux initializes
+}
+
+// Live perf overlay (debug tool) - active only when Rust set the flag (env TIDALUNAR_PERF).
+if ((window as { __TIDALUNAR_PERF__?: boolean }).__TIDALUNAR_PERF__) {
+    initPerfOverlay();
 }
 
 // Bridge event types that map 1:1 (event.t === trigger name, no seq).
