@@ -2,6 +2,7 @@
 
 use crate::app_state::{IpcMessage, with_state};
 use crate::connect::ConnectManager;
+use crate::connect::receiver::SHUTDOWN_DEADLINE;
 use crate::connect::types::ReceiverConfig;
 
 /// Serializes receiver start/stop. Without it, two concurrent lifecycle calls
@@ -50,7 +51,7 @@ pub(crate) async fn start_receiver_task(config: ReceiverConfig) {
             .flatten();
             if let Some(mut receiver) = orphan {
                 crate::vprintln!("[connect::ipc] No manager to install receiver; shutting it down");
-                receiver.shutdown().await;
+                receiver.shutdown(SHUTDOWN_DEADLINE).await;
             }
         }
         Err(e) => crate::vprintln!("[connect::ipc] Receiver start failed: {e}"),
@@ -71,7 +72,7 @@ pub(super) fn stop() {
         })
         .flatten();
         if let Some(mut receiver) = receiver {
-            receiver.shutdown().await;
+            receiver.shutdown(SHUTDOWN_DEADLINE).await;
         }
     });
 }

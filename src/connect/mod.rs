@@ -24,7 +24,9 @@ use receiver::speaker_bridge::BridgeEvent;
 use runtime::TaskGroup;
 use types::ReceiverConfig;
 
-const CONTROLLER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
+/// Graceful budget for tearing Connect down on process exit: just enough to
+/// unregister mDNS and send WS close frames before aborting (the OS reclaims the rest).
+pub(crate) const EXIT_SHUTDOWN_BUDGET: Duration = Duration::from_millis(250);
 
 pub(crate) struct ConnectManager {
     controller: Option<Arc<Mutex<TidalConnectController>>>,
@@ -161,14 +163,12 @@ impl ConnectManager {
         snapshot
     }
 
-    pub(crate) async fn shutdown(&mut self) {
+    /// Tear down receiver + controller within `deadline` total graceful budget.
+    pub(crate) async fn shutdown(&mut self, deadline: Duration) {
         if let Some(mut receiver) = self.take_receiver() {
-            receiver.shutdown().await;
+            receiver.shutdown(deadline).await;
         }
-        let report = self
-            .controller_tasks
-            .shutdown(CONTROLLER_SHUTDOWN_DEADLINE)
-            .await;
+        let report = self.controller_tasks.shutdown(deadline).await;
         if !report.panicked.is_empty() {
             crate::vprintln!(
                 "[connect] Controller task panics on shutdown: {:?}",

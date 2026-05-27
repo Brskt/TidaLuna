@@ -22,9 +22,9 @@ use queue::{QueueManager, QueueNotifyEvent};
 use session::{ReceiverSession, SessionInternalEvent, SessionNotifyEvent};
 use speaker_bridge::{BridgeEvent, SpeakerBridge};
 
-/// Deadline for the receiver's graceful shutdown. After this window the
-/// TaskGroup aborts stragglers and reports them in the `ShutdownReport`.
-const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+/// In-session graceful-shutdown budget (receiver toggled off, or orphan cleanup).
+/// The exit path passes a shorter budget instead.
+pub(crate) const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
 
 pub(crate) struct ConnectReceiver {
     tasks: Arc<TaskGroup>,
@@ -105,7 +105,9 @@ impl ConnectReceiver {
         ))
     }
 
-    pub async fn shutdown(&mut self) {
+    /// Tear down WS server, mDNS advertiser and routing task within `deadline`
+    /// (mDNS gets a fifth of it, the TaskGroup the rest).
+    pub async fn shutdown(&mut self, deadline: Duration) {
         // Stop advertising (unregister + goodbye packet) and then drive a
         // bounded shutdown of the mDNS daemon thread via `MdnsBackend`.
         // The backend is idempotent: if the daemon is already stopped,
@@ -114,7 +116,7 @@ impl ConnectReceiver {
         if let Some(ref mut adv) = self.advertiser.take() {
             adv.stop();
             let backend = crate::connect::mdns::backend::ProdMdnsBackend::new(adv.daemon());
-            let outcome = backend.shutdown(Duration::from_millis(500)).await;
+            let outcome = backend.shutdown(deadline / 5).await;
             crate::vprintln!("[connect::receiver] mdns shutdown: {:?}", outcome);
         }
 
@@ -122,7 +124,7 @@ impl ConnectReceiver {
         // cooperating tasks, aborts stragglers, and returns a classified
         // report. Panics are visible here because the project forces
         // `panic = "unwind"` (see runtime.rs const_assert).
-        let report = self.tasks.shutdown(SHUTDOWN_DEADLINE).await;
+        let report = self.tasks.shutdown(deadline).await;
         crate::vprintln!(
             "[connect::receiver] Shutdown report: graceful={:?} aborted={:?} panicked={:?}",
             report.graceful_completed,

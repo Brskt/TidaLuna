@@ -351,15 +351,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     run_message_loop();
 
-    // Shutdown Connect before CEF shutdown
-    app_state::with_state(|state| {
-        if let Some(ref mut cm) = state.connect
-            && let Some(rt) = crate::state::RT_HANDLE.get()
-        {
-            rt.block_on(cm.shutdown());
-        }
-        state.connect = None;
-    });
+    // Stop audio, then tear Connect down on the short exit budget (the window is
+    // already gone; a session-grade drain here would just look like a hang).
+    let cm = app_state::with_state(|state| {
+        let _ = state.player.stop();
+        state.connect.take()
+    })
+    .flatten();
+    if let Some(mut cm) = cm
+        && let Some(rt) = crate::state::RT_HANDLE.get()
+    {
+        rt.block_on(cm.shutdown(crate::connect::EXIT_SHUTDOWN_BUDGET));
+    }
     crate::connect::bridge::set_active(None);
 
     shutdown();

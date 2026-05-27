@@ -266,6 +266,11 @@ wrap_window_delegate! {
                 }
             }
 
+            // Quit path: stop audio now instead of waiting for process teardown.
+            with_state(|state| {
+                let _ = state.player.stop();
+            });
+
             let pending_ws = with_state(|state| state.pending_window_save.take()).flatten();
             if let Some(ws) = pending_ws {
                 crate::state::db().call_settings(move |sc| {
