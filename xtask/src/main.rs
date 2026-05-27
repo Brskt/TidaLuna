@@ -1597,12 +1597,13 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
     )
     .map_err(|e| format!("copy desktop: {e}"))?;
 
-    // 4. /usr/share/icons/hicolor/{size}/apps/tidalunar.png via convert.
-    let icon_src = project_root.join("tidaluna.png");
-    if !icon_src.is_file() {
-        return Err("tidaluna.png missing at project root".into());
-    }
-    for size in [16u32, 32, 64, 128, 256, 512] {
+    // 4. /usr/share/icons/hicolor/{size}/apps/tidalunar.png - pre-rendered assets.
+    for size in [16u32, 32, 64, 128, 256] {
+        let rel = format!("icons/hicolor/{size}x{size}/apps/tidalunar.png");
+        let icon_src = installer_deb.join(&rel);
+        if !icon_src.is_file() {
+            return Err(format!("missing icon asset: {}", icon_src.display()));
+        }
         let icon_dir = stage
             .join("usr")
             .join("share")
@@ -1611,16 +1612,8 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
             .join(format!("{size}x{size}"))
             .join("apps");
         fs::create_dir_all(&icon_dir).map_err(|e| e.to_string())?;
-        let dst = icon_dir.join("tidalunar.png");
-        let status = Command::new("convert")
-            .arg(&icon_src)
-            .args(["-resize", &format!("{size}x{size}")])
-            .arg(&dst)
-            .status()
-            .map_err(|e| format!("convert spawn: {e}"))?;
-        if !status.success() {
-            return Err(format!("convert failed for size {size}"));
-        }
+        fs::copy(&icon_src, icon_dir.join("tidalunar.png"))
+            .map_err(|e| format!("copy icon {size}: {e}"))?;
     }
 
     // 5. /etc/apparmor.d/tidalunar
