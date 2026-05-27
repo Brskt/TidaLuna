@@ -34,6 +34,9 @@ pub struct AudioCache {
     conn: Connection,
     audio_dir: PathBuf,
     max_bytes: u64,
+    /// Bumped on every `clear()`. A store thread that began its unlocked
+    /// `write_file` before a clear must not re-insert its row afterwards.
+    generation: u64,
 }
 
 impl AudioCache {
@@ -71,10 +74,14 @@ impl AudioCache {
             conn,
             audio_dir,
             max_bytes,
+            generation: 0,
         })
     }
 
-    fn file_path(&self, track_id: &str) -> PathBuf {
+    /// On-disk path for a track. Depends only on the (fixed) audio dir, so the
+    /// caller can compute it under a brief lock and then write the file without
+    /// holding the global cache lock.
+    pub(crate) fn file_path(&self, track_id: &str) -> PathBuf {
         let hash = track_hash(track_id);
         let shard = shard_prefix(&hash);
         self.audio_dir.join(shard).join(&hash)
@@ -115,33 +122,63 @@ impl AudioCache {
         );
     }
 
-    /// Store a fully-downloaded track in the cache.
-    /// Atomic: writes to a temp file then renames.
-    /// Evicts LRU entries if over capacity.
-    pub fn store(&mut self, track_id: &str, format: &str, data: &[u8]) -> anyhow::Result<()> {
-        let path = self.file_path(track_id);
+    /// Atomically write a fully-downloaded track to its cache path (temp file
+    /// in the same directory, then rename). Intentionally an associated
+    /// function with no `&self`: this is the multi-MB I/O and must run WITHOUT
+    /// holding the global cache lock, so a concurrent track-load lookup is not
+    /// stalled behind the write. Pair with [`record`](Self::record).
+    pub fn write_file(path: &Path, data: &[u8]) -> anyhow::Result<()> {
         let shard_dir = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("cache path has no parent: {}", path.display()))?;
         fs::create_dir_all(shard_dir)?;
 
-        // Atomic write via tempfile in same directory (same filesystem for rename)
         let tmp = tempfile::NamedTempFile::new_in(shard_dir)?;
         fs::write(tmp.path(), data)?;
-        tmp.persist(&path)?;
+        tmp.persist(path)?;
+        Ok(())
+    }
 
+    /// Record an already-written track in the index and evict LRU entries if
+    /// over capacity. Short critical section: index insert + eviction only, no
+    /// large I/O. Pair with [`write_file`](Self::write_file).
+    pub fn record(&mut self, track_id: &str, format: &str, file_size: u64) -> anyhow::Result<()> {
         let now = now_epoch();
-        let file_size = data.len() as i64;
-
         self.conn.execute(
             "INSERT OR REPLACE INTO audio_cache (track_id, format, file_size, created_at, last_access, access_count)
              VALUES (?1, ?2, ?3, ?4, ?4, 1)",
-            params![track_id, format, file_size, now],
+            params![track_id, format, file_size as i64, now],
         )?;
 
         self.evict_if_needed()?;
 
         Ok(())
+    }
+
+    /// Current clear-generation. Snapshot this before an unlocked
+    /// [`write_file`](Self::write_file) and pass it to
+    /// [`record_if_current`](Self::record_if_current).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Like [`record`](Self::record), but a no-op if the cache was cleared
+    /// (generation changed) since `expected_gen` was snapshotted. In that case
+    /// the just-written file is removed so a clear can't leave an orphan.
+    /// Returns `Ok(true)` if recorded, `Ok(false)` if skipped due to a clear.
+    pub fn record_if_current(
+        &mut self,
+        track_id: &str,
+        format: &str,
+        file_size: u64,
+        expected_gen: u64,
+    ) -> anyhow::Result<bool> {
+        if self.generation != expected_gen {
+            let _ = fs::remove_file(self.file_path(track_id));
+            return Ok(false);
+        }
+        self.record(track_id, format, file_size)?;
+        Ok(true)
     }
 
     pub fn clear(&mut self) -> anyhow::Result<()> {
@@ -157,6 +194,8 @@ impl AudioCache {
         }
 
         self.conn.execute("DELETE FROM audio_cache", [])?;
+        // Invalidate any store that began its unlocked write before this clear.
+        self.generation = self.generation.wrapping_add(1);
 
         crate::vprintln!(
             "[CACHE]  Cleared {} entries ({:.1} MB)",

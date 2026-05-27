@@ -173,22 +173,46 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             let track_id = self.current_track_id.clone();
                             let cache_format = self.current_format.clone();
                             std::thread::spawn(move || {
-                                if let Some(tid) = track_id {
-                                    let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
+                                let Some(tid) = track_id else { return };
+                                // Resolve the path under a brief lock, then write
+                                // the multi-MB file unlocked so a concurrent
+                                // track-load lookup isn't blocked behind it.
+                                let (path, store_gen) = {
+                                    let Ok(cache) = crate::state::AUDIO_CACHE.lock() else {
                                         crate::vprintln!("[CACHE]  Lock poisoned, skipping store");
                                         return;
                                     };
-                                    match cache.store(&tid, &cache_format, &data) {
-                                        Ok(()) => {
-                                            crate::vprintln!(
-                                                "[CACHE]  Stored: {} ({})",
-                                                tid,
-                                                crate::player::format_bytes(data.len() as u64)
-                                            );
-                                        }
-                                        Err(e) => {
-                                            crate::vprintln!("[CACHE]  Store failed: {e}");
-                                        }
+                                    (cache.file_path(&tid), cache.generation())
+                                };
+                                if let Err(e) =
+                                    crate::player::cache::AudioCache::write_file(&path, &data)
+                                {
+                                    crate::vprintln!("[CACHE]  Store failed (write): {e}");
+                                    return;
+                                }
+                                // Index insert + eviction under a short lock,
+                                // skipped (and the file removed) if a cache clear
+                                // raced this unlocked write.
+                                let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
+                                    crate::vprintln!("[CACHE]  Lock poisoned, skipping index");
+                                    return;
+                                };
+                                match cache.record_if_current(
+                                    &tid,
+                                    &cache_format,
+                                    data.len() as u64,
+                                    store_gen,
+                                ) {
+                                    Ok(true) => crate::vprintln!(
+                                        "[CACHE]  Stored: {} ({})",
+                                        tid,
+                                        crate::player::format_bytes(data.len() as u64)
+                                    ),
+                                    Ok(false) => crate::vprintln!(
+                                        "[CACHE]  Store discarded (cache cleared mid-write): {tid}"
+                                    ),
+                                    Err(e) => {
+                                        crate::vprintln!("[CACHE]  Store failed (index): {e}")
                                     }
                                 }
                             });
