@@ -68,12 +68,17 @@ fn reexec_for_x11_if_needed() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Only the browser process gets a console. CEF subprocesses re-exec this
-    // exe with a --type= switch; without this guard each would spawn its own.
+    // Reuse the launching terminal's console; AllocConsole only when there's no
+    // parent (Explorer). The --type= guard skips CEF subprocesses.
     #[cfg(target_os = "windows")]
     if logging::log_level() >= 1 && !std::env::args().any(|a| a.starts_with("--type=")) {
+        use windows_sys::Win32::System::Console::{
+            ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole,
+        };
         unsafe {
-            windows_sys::Win32::System::Console::AllocConsole();
+            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+                AllocConsole();
+            }
         }
     }
 
