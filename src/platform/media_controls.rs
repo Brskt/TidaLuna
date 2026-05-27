@@ -1,3 +1,4 @@
+use cef::*;
 use std::time::Duration;
 
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
@@ -100,34 +101,66 @@ impl OsMediaControls {
     }
 }
 
+/// The subset of media-key actions the app reacts to. Resolved from a
+/// `MediaControlEvent` on souvlaki's callback thread, then carried to the CEF
+/// UI thread where the work is actually performed.
+#[derive(Clone, Copy)]
+enum MediaAction {
+    PlayPause,
+    Next,
+    Prev,
+    Stop,
+}
+
 fn handle_media_event(event: MediaControlEvent) {
-    match event {
-        MediaControlEvent::Play => {
-            crate::vprintln!("[MEDIA]  Play");
+    // souvlaki invokes this on its own SMTC (Windows) / MPRIS (Linux) thread.
+    // `eval_js`/`with_state` clone and dereference the CEF `Browser`/`Frame`
+    // handles, which is only sound on the CEF UI thread - the exact invariant
+    // `unsafe impl Send for AppState` depends on. Resolve the action here, then
+    // marshal it to the UI thread before touching any of those handles.
+    let action = match event {
+        MediaControlEvent::Play | MediaControlEvent::Pause | MediaControlEvent::Toggle => {
+            MediaAction::PlayPause
+        }
+        MediaControlEvent::Next => MediaAction::Next,
+        MediaControlEvent::Previous => MediaAction::Prev,
+        MediaControlEvent::Stop => MediaAction::Stop,
+        _ => return,
+    };
+    let mut task = MediaEventTask::new(action);
+    post_task(ThreadId::UI, Some(&mut task));
+}
+
+wrap_task! {
+    struct MediaEventTask {
+        action: MediaAction,
+    }
+    impl Task {
+        fn execute(&self) {
+            dispatch_media_event(self.action);
+        }
+    }
+}
+
+fn dispatch_media_event(action: MediaAction) {
+    match action {
+        MediaAction::PlayPause => {
+            crate::vprintln!("[MEDIA]  Play/Pause");
             crate::app_state::eval_js(super::js_actions::PLAY_PAUSE);
         }
-        MediaControlEvent::Pause => {
-            crate::vprintln!("[MEDIA]  Pause");
-            crate::app_state::eval_js(super::js_actions::PLAY_PAUSE);
-        }
-        MediaControlEvent::Toggle => {
-            crate::vprintln!("[MEDIA]  Toggle");
-            crate::app_state::eval_js(super::js_actions::PLAY_PAUSE);
-        }
-        MediaControlEvent::Next => {
+        MediaAction::Next => {
             crate::vprintln!("[MEDIA]  Next");
             crate::app_state::eval_js(super::js_actions::PLAY_NEXT);
         }
-        MediaControlEvent::Previous => {
+        MediaAction::Prev => {
             crate::vprintln!("[MEDIA]  Previous");
             crate::app_state::eval_js(super::js_actions::PLAY_PREV);
         }
-        MediaControlEvent::Stop => {
+        MediaAction::Stop => {
             crate::vprintln!("[MEDIA]  Stop");
             crate::app_state::with_state(|state| {
                 let _ = state.player.stop();
             });
         }
-        _ => {}
     }
 }
