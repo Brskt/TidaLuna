@@ -157,7 +157,8 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
     let trust_grants: HashMap<String, bool> = {
         let decisions = crate::state::db().call_settings({
             let plugin = name.clone();
-            move |conn| crate::native_runtime::trust::load_trust(conn, &plugin)
+            let code_hash = code_hash.clone();
+            move |conn| crate::native_runtime::trust::load_trust(conn, &plugin, &code_hash)
         });
         decisions
             .into_iter()
