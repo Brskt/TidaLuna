@@ -1,7 +1,7 @@
 // @luna/core - TidaLunar entry point
 // Re-exports all upstream APIs. Initialization is deferred via initCore().
 
-export { tidalModules, initTidalInternals } from "./exposeTidalInternals";
+export { tidalModules, initTidalInternals, seedTidalConfig } from "./exposeTidalInternals";
 export { buildActions, interceptors } from "./exposeTidalInternals.patchAction";
 
 export * as ftch from "./helpers/fetch";
@@ -19,7 +19,7 @@ export * from "./SettingsTransfer";
 // Ensure window.luna is set up
 import "./window.core";
 
-import { initTidalInternals } from "./exposeTidalInternals";
+import { initTidalInternals, seedTidalConfig } from "./exposeTidalInternals";
 import { initModules } from "./modules";
 
 /**
@@ -28,5 +28,6 @@ import { initModules } from "./modules";
  */
 export async function initCore(): Promise<void> {
 	const { reduxStore } = await initTidalInternals();
+	await seedTidalConfig();
 	initModules(reduxStore);
 }

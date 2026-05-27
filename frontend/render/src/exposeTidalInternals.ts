@@ -107,6 +107,39 @@ function patchDispatch(store: any): void {
 	};
 }
 
+// TIDAL config constants (API keys, URLs, feature values) are scope-hoisted bundle
+// literals that plugins read by name via findModuleProperty. Vite leaves them
+// unreachable as live objects, so harvest every backtick-string object property from
+// the loaded chunk text into tidalModules before plugins load.
+export async function seedTidalConfig(): Promise<void> {
+	const urls = new Set<string>();
+	for (const s of document.scripts) if (s.src) urls.add(s.src);
+	try {
+		for (const r of performance.getEntriesByType("resource")) if (/\/assets\/[^?]*\.m?js(\?|$)/i.test(r.name)) urls.add(r.name);
+	} catch {}
+
+	const constants: Record<string, string> = {};
+	await Promise.all(
+		[...urls].map(async (url) => {
+			try {
+				if (new URL(url, location.href).origin !== location.origin) return;
+				const text = await (await fetch(url)).text();
+				// `ident: `value`` object props with a plain (non-interpolated, non-escaped) value.
+				const re = /["']?([A-Za-z_$][\w$]*)["']?\s*:\s*`([^`$\\]{1,4096})`/g;
+				for (const [, key, value] of text.matchAll(re)) constants[key] = value;
+			} catch {}
+		}),
+	);
+
+	const count = Object.keys(constants).length;
+	if (count > 0) {
+		tidalModules.tidalBundleConstants = constants;
+		console.log(`[luna] Seeded ${count} TIDAL bundle constants`);
+	} else {
+		console.warn("[luna] No TIDAL bundle constants found - findModuleProperty lookups will miss");
+	}
+}
+
 export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 	const start = Date.now();
 	let reduxStore: any;
