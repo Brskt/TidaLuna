@@ -144,12 +144,29 @@ jobs:
         if: runner.os == 'Linux'
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
         with:
-          packages: build-essential pkg-config libasound2-dev libdbus-1-dev libx11-dev libglib2.0-dev libgdk-pixbuf-2.0-dev cmake ninja-build dpkg-dev imagemagick
+          packages: build-essential pkg-config libasound2-dev libdbus-1-dev libx11-dev libglib2.0-dev libgdk-pixbuf-2.0-dev cmake ninja-build dpkg-dev
           version: "1"
 
       - name: Install Ninja
         if: runner.os == 'Windows'
-        run: choco install ninja -y
+        shell: pwsh
+        run: |
+          # Pinned, sha256-checked Ninja binary; far faster than the choco engine.
+          $ver = '1.13.2'
+          if ($env:RUNNER_ARCH -eq 'ARM64') {
+            $asset = 'ninja-winarm64.zip'
+            $sha = 'e52f0bdef9dfb1003229dbd6508a508c4073fd017247002adc66e5e806cb0391'
+          } else {
+            $asset = 'ninja-win.zip'
+            $sha = '07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65'
+          }
+          $zip = Join-Path $env:RUNNER_TEMP 'ninja.zip'
+          Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v$ver/$asset" -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($actual -ne $sha) { throw "ninja $asset sha256 mismatch: got $actual" }
+          $dst = Join-Path $env:RUNNER_TEMP 'ninja'
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          $dst | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -214,7 +231,16 @@ jobs:
 
       - name: Install NSIS
         if: startsWith(matrix.target, 'windows-')
-        run: choco install nsis -y --no-progress
+        shell: pwsh
+        run: |
+          # Pinned, sha256-checked NSIS; far faster than choco, and WS2025 no longer preinstalls it.
+          $sha = 'c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1'
+          $zip = Join-Path $env:RUNNER_TEMP 'nsis.zip'
+          Invoke-WebRequest -Uri 'https://master.dl.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11.zip?viasf=1' -OutFile $zip
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($actual -ne $sha) { throw "nsis zip sha256 mismatch: got $actual" }
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP -Force
+          "$env:RUNNER_TEMP\nsis-3.11" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Fetch 7zr.exe extractor (sha256-pinned)
         if: startsWith(matrix.target, 'windows-')
