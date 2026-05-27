@@ -151,14 +151,25 @@ pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
     let target = target.as_ref();
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args([
-                std::ffi::OsStr::new("/C"),
-                std::ffi::OsStr::new("start"),
-                std::ffi::OsStr::new(""),
-                target,
-            ])
-            .spawn();
+        // ShellExecuteW, not `cmd /C start`: the latter treats `&` in a URL query
+        // string as a command separator, truncating links like `?a=1&token=2`.
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let file: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        // SAFETY: verb/file are null-terminated UTF-16; the unused pointers are null,
+        // which ShellExecuteW documents as "no parameters / default directory".
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
     }
     #[cfg(target_os = "linux")]
     {
