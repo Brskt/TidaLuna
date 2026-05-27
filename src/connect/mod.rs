@@ -80,26 +80,41 @@ impl ConnectManager {
         Ok(())
     }
 
-    /// Start the receiver (WS server + mDNS advertiser).
-    pub(crate) async fn start_receiver(&mut self, config: ReceiverConfig) -> anyhow::Result<()> {
-        if self.receiver.is_some() {
-            return Ok(());
-        }
-
+    /// Build a receiver (WS server + mDNS advertiser) without touching `self`.
+    ///
+    /// The async work borrows nothing from `AppState`, so the caller can run it
+    /// without holding any lock and then hand the result to [`install_receiver`]
+    /// in a synchronous step. This is what keeps the manager from being moved
+    /// out of `AppState` across an await (the old `take()`/restore left a window
+    /// where `connect` was `None` and concurrent calls could drop a manager).
+    ///
+    /// [`install_receiver`]: Self::install_receiver
+    pub(crate) async fn build_receiver(
+        config: ReceiverConfig,
+    ) -> anyhow::Result<(ConnectReceiver, mpsc::Sender<BridgeEvent>)> {
         let advertiser = MdnsAdvertiser::new().ok();
-        let (receiver, bridge_tx) = ConnectReceiver::start(config, advertiser).await?;
+        ConnectReceiver::start(config, advertiser).await
+    }
+
+    /// Install a freshly built receiver and route bridge events to it.
+    /// Synchronous: no await, so it runs entirely under the `AppState` lock.
+    pub(crate) fn install_receiver(
+        &mut self,
+        receiver: ConnectReceiver,
+        bridge_tx: mpsc::Sender<BridgeEvent>,
+    ) {
         self.receiver = Some(receiver);
         self.bridge_tx = Some(bridge_tx.clone());
         crate::connect::bridge::set_active(Some(bridge_tx));
-        Ok(())
     }
 
-    pub(crate) async fn stop_receiver(&mut self) {
+    /// Detach the active receiver (if any) and stop routing bridge events.
+    /// Synchronous: the returned receiver must be `shutdown().await`ed by the
+    /// caller outside the `AppState` lock.
+    pub(crate) fn take_receiver(&mut self) -> Option<ConnectReceiver> {
         crate::connect::bridge::set_active(None);
         self.bridge_tx = None;
-        if let Some(mut receiver) = self.receiver.take() {
-            receiver.shutdown().await;
-        }
+        self.receiver.take()
     }
 
     pub(crate) fn controller(&self) -> Option<&Arc<Mutex<TidalConnectController>>> {
@@ -147,7 +162,9 @@ impl ConnectManager {
     }
 
     pub(crate) async fn shutdown(&mut self) {
-        self.stop_receiver().await;
+        if let Some(mut receiver) = self.take_receiver() {
+            receiver.shutdown().await;
+        }
         let report = self
             .controller_tasks
             .shutdown(CONTROLLER_SHUTDOWN_DEADLINE)

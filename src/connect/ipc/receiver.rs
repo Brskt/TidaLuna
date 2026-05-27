@@ -1,24 +1,60 @@
 //! IPC handlers for receiver-side lifecycle: start and stop.
 
 use crate::app_state::{IpcMessage, with_state};
+use crate::connect::ConnectManager;
 use crate::connect::types::ReceiverConfig;
 
+/// Serializes receiver start/stop. Without it, two concurrent lifecycle calls
+/// (TIDAL issues `discover` + `receiver.start` close together on login) could
+/// both build a receiver - leaking one - or interleave a start with a stop.
+static RECEIVER_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub(super) fn start() {
-    let config = ReceiverConfig::default();
     let Some(rt) = crate::state::RT_HANDLE.get() else {
         return;
     };
-    rt.spawn(async move {
-        let mut cm = with_state(|state| state.connect.take()).flatten();
-        if let Some(ref mut cm) = cm
-            && let Err(e) = cm.start_receiver(config).await
-        {
-            crate::vprintln!("[connect::ipc] Receiver start failed: {}", e);
+    rt.spawn(start_receiver_task(ReceiverConfig::default()));
+}
+
+/// Start the receiver if it isn't already running. The `ConnectManager` is
+/// never moved out of `AppState`: the async build runs on owned data, then the
+/// result is installed in a synchronous step, so concurrent `connect.*` IPC
+/// keeps seeing a live manager throughout.
+pub(crate) async fn start_receiver_task(config: ReceiverConfig) {
+    let _guard = RECEIVER_LIFECYCLE.lock().await;
+
+    let active = with_state(|state| {
+        state
+            .connect
+            .as_ref()
+            .is_some_and(ConnectManager::is_receiver_active)
+    })
+    .unwrap_or(false);
+    if active {
+        return;
+    }
+
+    match ConnectManager::build_receiver(config).await {
+        Ok((receiver, bridge_tx)) => {
+            // Install under the lock. If the manager is gone (process shutting
+            // down between the active-check and here), hand the receiver back so
+            // it can be torn down gracefully rather than dropped - a bare drop
+            // would skip the WS/mDNS shutdown and leak the bound socket.
+            let orphan = with_state(|state| match state.connect.as_mut() {
+                Some(cm) => {
+                    cm.install_receiver(receiver, bridge_tx);
+                    None
+                }
+                None => Some(receiver),
+            })
+            .flatten();
+            if let Some(mut receiver) = orphan {
+                crate::vprintln!("[connect::ipc] No manager to install receiver; shutting it down");
+                receiver.shutdown().await;
+            }
         }
-        with_state(|state| {
-            state.connect = cm;
-        });
-    });
+        Err(e) => crate::vprintln!("[connect::ipc] Receiver start failed: {e}"),
+    }
 }
 
 pub(super) fn stop() {
@@ -26,13 +62,17 @@ pub(super) fn stop() {
         return;
     };
     rt.spawn(async {
-        let mut cm = with_state(|state| state.connect.take()).flatten();
-        if let Some(ref mut cm) = cm {
-            cm.stop_receiver().await;
+        let _guard = RECEIVER_LIFECYCLE.lock().await;
+        let receiver = with_state(|state| {
+            state
+                .connect
+                .as_mut()
+                .and_then(ConnectManager::take_receiver)
+        })
+        .flatten();
+        if let Some(mut receiver) = receiver {
+            receiver.shutdown().await;
         }
-        with_state(|state| {
-            state.connect = cm;
-        });
     });
 }
 

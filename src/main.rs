@@ -300,19 +300,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let receiver_always_on =
         crate::state::db().call_settings(crate::settings::load_receiver_always_on);
     if receiver_always_on && let Some(rt) = crate::state::RT_HANDLE.get() {
-        rt.spawn(async move {
-            let mut cm = app_state::with_state(|state| state.connect.take()).flatten();
-            if let Some(ref mut cm) = cm
-                && let Err(e) = cm
-                    .start_receiver(crate::connect::types::ReceiverConfig::default())
-                    .await
-            {
-                crate::vprintln!("[connect] Boot auto-start failed: {}", e);
-            }
-            app_state::with_state(|state| {
-                state.connect = cm;
-            });
-        });
+        rt.spawn(crate::connect::ipc::start_receiver_task(
+            crate::connect::types::ReceiverConfig::default(),
+        ));
     }
 
     let root_cache_cef = CefString::from(root_cache.to_string_lossy().as_ref());

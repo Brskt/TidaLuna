@@ -44,22 +44,10 @@ pub(super) fn discover() {
         }
     });
     // Also start receiver if not already running (TIDAL may not call
-    // remoteDesktop.initialize explicitly — ensure we're discoverable).
+    // remoteDesktop.initialize explicitly - ensure we're discoverable). The
+    // task is a no-op when the receiver is already active.
     if let Some(rt) = crate::state::RT_HANDLE.get() {
-        rt.spawn(async move {
-            let mut cm = with_state(|state| state.connect.take()).flatten();
-            if let Some(ref mut cm) = cm
-                && !cm.is_receiver_active()
-            {
-                let config = ReceiverConfig::default();
-                if let Err(e) = cm.start_receiver(config).await {
-                    crate::vprintln!("[connect::ipc] Receiver auto-start failed: {}", e);
-                }
-            }
-            with_state(|state| {
-                state.connect = cm;
-            });
-        });
+        rt.spawn(super::start_receiver_task(ReceiverConfig::default()));
     }
 }
 
