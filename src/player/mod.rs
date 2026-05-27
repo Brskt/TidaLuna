@@ -12,7 +12,7 @@ use crate::state::{
     AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, GOVERNOR, HTTP_CLIENT_PLAYBACK, TrackInfo,
 };
 use buffer::RamBuffer;
-use futures_util::future::join_all;
+use futures_util::stream::{self, StreamExt};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
 
@@ -642,40 +642,40 @@ impl Player {
                 load_start.elapsed().as_secs_f64() * 1000.0
             );
 
-            let segment_futures: Vec<_> = segment_urls
-                .iter()
-                .enumerate()
-                .map(|(i, url)| {
-                    let url = url.clone();
-                    async move {
-                        let resp = HTTP_CLIENT_PLAYBACK.get(&url).send().await;
-                        match resp {
-                            Ok(r) if r.status().is_success() => match r.bytes().await {
-                                Ok(b) => Ok(b),
-                                Err(e) => Err(format!("DASH segment {i} read: {e}")),
-                            },
-                            Ok(r) => Err(format!("DASH segment {i} HTTP {}", r.status())),
-                            Err(e) => Err(format!("DASH segment {i} request: {e}")),
-                        }
+            let segment_count = segment_urls.len();
+
+            // Fetch segments with bounded concurrency, appending each to the
+            // output buffer as it arrives and dropping it immediately. This caps
+            // both peak RAM (no transient second copy of the whole file) and the
+            // number of simultaneous CDN connections, unlike a join_all that
+            // fires every segment request at once. `buffered` preserves order.
+            const DASH_MAX_CONCURRENT: usize = 6;
+
+            let mut mp4_data = init_data;
+            let mut segments = stream::iter(segment_urls.into_iter().enumerate())
+                .map(|(i, url)| async move {
+                    match HTTP_CLIENT_PLAYBACK.get(&url).send().await {
+                        Ok(r) if r.status().is_success() => r
+                            .bytes()
+                            .await
+                            .map_err(|e| format!("DASH segment {i} read: {e}")),
+                        Ok(r) => Err(format!("DASH segment {i} HTTP {}", r.status())),
+                        Err(e) => Err(format!("DASH segment {i} request: {e}")),
                     }
                 })
-                .collect();
+                .buffered(DASH_MAX_CONCURRENT);
 
-            let results = join_all(segment_futures).await;
-
-            if is_stale() {
-                crate::vprintln!("[DASH-LOAD #{load_gen}] stale after parallel fetch, dropping");
-                return;
-            }
-
-            let mut total_seg_bytes = 0usize;
-            for result in &results {
+            while let Some(result) = segments.next().await {
+                if is_stale() {
+                    crate::vprintln!("[DASH-LOAD #{load_gen}] stale mid-fetch, dropping");
+                    return;
+                }
                 match result {
-                    Ok(data) => total_seg_bytes += data.len(),
+                    Ok(data) => mp4_data.extend_from_slice(&data),
                     Err(msg) => {
                         crate::vprintln!("[ERROR]  {msg}");
                         let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
-                            error: msg.clone(),
+                            error: msg,
                             code: "no_such_file",
                         });
                         return;
@@ -683,16 +683,10 @@ impl Player {
                 }
             }
 
-            let mut mp4_data = init_data;
-            mp4_data.reserve(total_seg_bytes);
-            for data in results.into_iter().flatten() {
-                mp4_data.extend_from_slice(&data);
-            }
-
             let total_ms = load_start.elapsed().as_secs_f64() * 1000.0;
             crate::vprintln!(
                 "[DASH-LOAD #{load_gen}] done: {} segments, {} total in {:.0}ms",
-                segment_urls.len(),
+                segment_count,
                 format_bytes(mp4_data.len() as u64),
                 total_ms
             );
