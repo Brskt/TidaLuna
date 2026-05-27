@@ -60,6 +60,19 @@ cargo xtask bundle --release
 
 The bundle is created in `dist/` with the executable, CEF files, and Bun runtime.
 
+### Faster rebuilds (optional)
+
+CEF's Rust bindings (`cef-dll-sys`) are large and recompile whenever the build
+fingerprint changes (switching between `bundle` and `clippy`, dev vs `--release`,
+or WSL vs Windows). [sccache](https://github.com/mozilla/sccache) caches the
+compiler output so they build once and are reused:
+
+```bash
+cargo install sccache
+export RUSTC_WRAPPER=sccache    # add to your shell profile to persist
+export CARGO_INCREMENTAL=0      # lets sccache cache the workspace crate too
+```
+
 ## Code quality
 
 ```bash
