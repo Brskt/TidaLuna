@@ -51,7 +51,6 @@ impl PluginManager {
         nonce: u64,
     ) -> anyhow::Result<String> {
         let js = transpile::transpile_ts(code, &format!("{plugin_id}.mts"))?;
-        let js = transpile::strip_esm_syntax(&js);
         Ok(wrapper::wrap_plugin_code(plugin_id, &js, load_id, nonce))
     }
 
