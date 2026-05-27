@@ -630,14 +630,36 @@ impl QueueManager {
                     "[connect::queue] First item keys: {:?}",
                     first.as_object().map(|o| o.keys().collect::<Vec<_>>())
                 );
-                if let Err(e) = serde_json::from_value::<QueueItem>(first.clone()) {
-                    crate::vprintln!("[connect::queue] First item parse FAILED: {}", e);
-                }
             }
-            self.queue_items = items
+            let raw = items.len();
+            let mut dropped = 0usize;
+            let parsed: Vec<QueueItem> = items
                 .iter()
-                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .filter_map(|v| match serde_json::from_value::<QueueItem>(v.clone()) {
+                    Ok(item) => Some(item),
+                    Err(e) => {
+                        dropped += 1;
+                        crate::vprintln!("[connect::queue] Dropped unparseable item: {e}");
+                        None
+                    }
+                })
                 .collect();
+            // A window where every item failed to parse would otherwise replace a
+            // good queue with an empty one and leave current_index dangling; keep
+            // the previous queue instead of advancing into nothing.
+            if parsed.is_empty() && raw > 0 {
+                crate::vprintln!(
+                    "[connect::queue] All {raw} items failed to parse; keeping previous queue"
+                );
+                return;
+            }
+            if dropped > 0 {
+                crate::vprintln!(
+                    "[connect::queue] Parsed {} of {raw} items ({dropped} dropped)",
+                    parsed.len()
+                );
+            }
+            self.queue_items = parsed;
         }
 
         // Resolve current_index: try response itemId, then hints.
