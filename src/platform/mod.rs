@@ -1,4 +1,5 @@
 pub(crate) mod auth;
+pub(crate) mod clipboard;
 #[cfg(target_os = "linux")]
 pub(crate) mod desktop_entry;
 pub(crate) mod js_actions;

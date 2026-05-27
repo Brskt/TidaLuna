@@ -60,6 +60,7 @@ strip = true
 aes = "0.9.0"
 aes-kw = "0.3.0"
 anyhow = { workspace = true }
+arboard = { version = "3.6.1", default-features = false }
 audioadapter-buffers = "3.0.0"
 base16ct = { workspace = true }
 base64 = { workspace = true }

@@ -21,6 +21,7 @@ import { initCore, modules, LunaPlugin } from "../render/src";
 import * as LunaCore from "../render/src";
 import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
+import * as LibNative from "../plugins/lib.native/src/index.native";
 
 // Synchronous initialization: expose nativeInterface immediately so Tidal
 // detects desktop mode before its own scripts run.
@@ -248,6 +249,16 @@ const init = async () => {
     modules["@luna/core"] = LunaCore;
     modules["@luna/lib"] = LunaLib;
     modules["@inrixia/helpers"] = InrixiaHelpers;
+    modules["@luna/lib.native"] = {
+        ...LibNative,
+        clipboardWriteText: (text: string) => invokeIpc("__Luna.clipboardWriteText", text),
+        openExternal: (url: string) => invokeIpc("__Luna.openExternal", url),
+        sendToRender: (channel: string, ...args: any[]) => invokeIpc("__Luna.sendToRender", channel, ...args),
+        showMessageBox: (options: any) => invokeIpc("__Luna.showMessageBox", options),
+        showErrorBox: (title: string, content: string) => invokeIpc("__Luna.showErrorBox", title, content),
+        showOpenDialog: (options: any) => invokeIpc("__Luna.showOpenDialog", options),
+        showSaveDialog: (options: any) => invokeIpc("__Luna.showSaveDialog", options),
+    };
 
     try {
         const { LUNA_UI_CODE } = await import("./plugins/luna-ui-inline");

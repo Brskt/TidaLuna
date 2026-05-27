@@ -1,4 +1,5 @@
 mod jsrt;
+mod lib_native;
 mod native;
 mod plugin_ipc;
 mod proxy;
@@ -70,6 +71,27 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
         }
         "__Luna.registerNative" => {
             native::handle_register_native(&msg, callback);
+        }
+        "__Luna.clipboardWriteText" => {
+            lib_native::handle_clipboard_write_text(&msg, callback);
+        }
+        "__Luna.openExternal" => {
+            lib_native::handle_open_external(&msg, callback);
+        }
+        "__Luna.sendToRender" => {
+            lib_native::handle_send_to_render(&msg, callback);
+        }
+        "__Luna.showMessageBox" => {
+            lib_native::handle_show_message_box(&msg, callback);
+        }
+        "__Luna.showErrorBox" => {
+            lib_native::handle_show_error_box(&msg, callback);
+        }
+        "__Luna.showOpenDialog" => {
+            lib_native::handle_show_open_dialog(&msg, callback);
+        }
+        "__Luna.showSaveDialog" => {
+            lib_native::handle_show_save_dialog(&msg, callback);
         }
         ch if ch.starts_with("__LunaNative.") => {
             native::handle_native_call(&msg, callback);

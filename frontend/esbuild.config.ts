@@ -22,6 +22,7 @@ const root = __dirname;
 // Read version from Cargo.toml (single source of truth)
 const cargoToml = readFileSync(resolve(root, "../Cargo.toml"), "utf-8");
 const appVersion = cargoToml.match(/^version\s*=\s*"(.+)"/m)?.[1] ?? "unknown";
+const versionDefine = { __TIDALUNAR_VERSION__: JSON.stringify(appVersion) };
 
 mkdirSync(resolve(root, "dist"), { recursive: true });
 mkdirSync(resolve(root, "plugins/ui/dist"), { recursive: true });
@@ -35,7 +36,7 @@ const inlinePluginDefaults: Partial<BuildOptions> = {
 	jsx: "automatic",
 	jsxImportSource: "react",
 	supported: { "top-level-await": true },
-	define: { __TIDALUNAR_VERSION__: JSON.stringify(appVersion) },
+	define: { ...versionDefine },
 };
 
 const uiOutfile = resolve(root, "plugins/ui/dist/luna-ui.mjs");
@@ -92,7 +93,10 @@ const mainBundle: BuildOptions = {
 	outfile: resolve(root, "dist/bundle.js"),
 	format: "iife",
 	platform: "browser",
-	define: { "process.env.NODE_ENV": '"production"' },
+	define: {
+		"process.env.NODE_ENV": '"production"',
+		...versionDefine,
+	},
 	alias: {
 		"@luna/core": resolve(root, "render/src/index.ts"),
 		"@luna/lib": resolve(root, "plugins/lib/src/index.ts"),

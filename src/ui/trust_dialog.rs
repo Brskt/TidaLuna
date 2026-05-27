@@ -30,7 +30,7 @@ pub(crate) fn show_trust_dialog(
     rx
 }
 
-fn escape_html(s: &str) -> String {
+pub(super) fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
