@@ -20,7 +20,7 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
                 plugin_id,
                 &url[..url.len().min(80)]
             );
-            ipc_callback_err(&callback, "plugin.fetch: request blocked");
+            ipc_callback_err(&callback, 403, "plugin.fetch: request blocked");
             return;
         }
     }
@@ -46,6 +46,7 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
     if !crate::plugins::fetch::is_tidal_api(&url) {
         ipc_callback_err(
             &callback,
+            403,
             &format!("tidal.fetch rejected: not a TIDAL API URL ({url})"),
         );
         return;
@@ -55,7 +56,7 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
     // requests that would 403 and get memoized as failures on the frontend.
     let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
     if token.is_empty() {
-        ipc_callback_err(&callback, "tidal.fetch: auth token not yet captured");
+        ipc_callback_err(&callback, 401, "tidal.fetch: auth token not yet captured");
         return;
     }
 
@@ -91,7 +92,7 @@ fn dispatch_authenticated_fetch(
         };
         match result {
             Ok(json) => ipc_callback_ok(&cb, &json),
-            Err(e) => ipc_callback_err(&cb, &e),
+            Err(e) => ipc_callback_err(&cb, 500, &e),
         }
     });
 }
@@ -102,7 +103,7 @@ pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallbac
         let client = &*crate::state::HTTP_CLIENT;
         match fetch_plugin_package(client, &url).await {
             Ok(manifest) => ipc_callback_ok(&callback, &manifest),
-            Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
+            Err(e) => ipc_callback_err(&callback, 500, &format!("{e:#}")),
         }
     });
 }
@@ -115,7 +116,7 @@ pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
                 let json = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
                 ipc_callback_ok(&callback, &json);
             }
-            Err(e) => ipc_callback_err(&callback, &e),
+            Err(e) => ipc_callback_err(&callback, 500, &e),
         }
     });
 }
@@ -127,7 +128,7 @@ pub(super) fn handle_plugin_enable(msg: &IpcMessage, callback: IpcCallback) {
     crate::state::rt_handle().spawn(async move {
         match do_plugin_enable(url).await {
             Ok(()) => ipc_callback_ok(&callback, "true"),
-            Err(e) => ipc_callback_err(&callback, &e),
+            Err(e) => ipc_callback_err(&callback, 500, &e),
         }
     });
 }
@@ -269,7 +270,7 @@ pub(super) fn handle_plugin_disable(msg: &IpcMessage, callback: IpcCallback) {
     crate::state::rt_handle().spawn(async move {
         match do_plugin_disable(url).await {
             Ok(()) => ipc_callback_ok(&callback, "true"),
-            Err(e) => ipc_callback_err(&callback, &e),
+            Err(e) => ipc_callback_err(&callback, 500, &e),
         }
     });
 }
@@ -358,11 +359,11 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, callback: IpcCallback) 
                         let json = format!(r#"{{"hash":"{hash}"}}"#);
                         ipc_callback_ok(&cb, &json);
                     }
-                    Err(e) => ipc_callback_err(&cb, &format!("{e}")),
+                    Err(e) => ipc_callback_err(&cb, 500, &format!("{e}")),
                 },
-                Err(e) => ipc_callback_err(&cb, &format!("{e}")),
+                Err(e) => ipc_callback_err(&cb, 500, &format!("{e}")),
             },
-            Err(e) => ipc_callback_err(&cb, &format!("{e}")),
+            Err(e) => ipc_callback_err(&cb, 500, &format!("{e}")),
         }
     });
 }
@@ -495,7 +496,7 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
 
     match result {
         Ok((json, _)) => ipc_callback_ok(&callback, &json),
-        Err(e) => ipc_callback_err(&callback, &e),
+        Err(e) => ipc_callback_err(&callback, 500, &e),
     }
 }
 

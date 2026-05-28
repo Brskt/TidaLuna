@@ -73,7 +73,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         .unwrap_or("")
         .to_string();
     if name.is_empty() || code.is_empty() {
-        ipc_callback_err(&callback, "registerNative: missing name or code");
+        ipc_callback_err(&callback, 400, "registerNative: missing name or code");
         return;
     }
 
@@ -102,6 +102,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         );
         ipc_callback_err(
             &callback,
+            500,
             &format!("registerNative: plugin '{}' is not active", plugin_prefix),
         );
         return;
@@ -116,7 +117,7 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
     let runtime = match ensure_native_runtime() {
         Ok(rt) => rt,
         Err(e) => {
-            ipc_callback_err(&callback, &e);
+            ipc_callback_err(&callback, 500, &e);
             return;
         }
     };
@@ -143,13 +144,13 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
 
     // Reject path traversal in plugin names (malicious manifest with "../" in name)
     if plugin_prefix.contains("..") {
-        ipc_callback_err(&callback, "registerNative: invalid plugin name");
+        ipc_callback_err(&callback, 400, "registerNative: invalid plugin name");
         return;
     }
     let native_base = crate::state::cache_data_dir().join("native");
     let data_dir_path = native_base.join(&plugin_prefix);
     if !data_dir_path.starts_with(&native_base) {
-        ipc_callback_err(&callback, "registerNative: invalid plugin name");
+        ipc_callback_err(&callback, 400, "registerNative: invalid plugin name");
         return;
     }
     let data_dir = data_dir_path.to_string_lossy().to_string();
@@ -204,7 +205,7 @@ fn do_register(
     let rx = match runtime.send_command(cmd) {
         Ok(rx) => rx,
         Err(e) => {
-            ipc_callback_err(&callback, &e);
+            ipc_callback_err(&callback, 500, &e);
             return;
         }
     };
@@ -244,6 +245,7 @@ fn do_register(
                         );
                         ipc_callback_err(
                             &callback,
+                            403,
                             &format!(
                                 "Plugin '{}' denied access to module '{}' (persisted)",
                                 name, module
@@ -353,6 +355,7 @@ fn do_register(
                         );
                         ipc_callback_err(
                             &callback,
+                            403,
                             &format!("Plugin '{}' denied access to module '{}'", name, module),
                         );
                         return;
@@ -380,10 +383,10 @@ fn do_register(
                 }
 
                 crate::vprintln!("[NATIVE] Register failed for '{}': {}", name, e);
-                ipc_callback_err(&callback, &e);
+                ipc_callback_err(&callback, 500, &e);
             }
             Err(_) => {
-                ipc_callback_err(&callback, "Bun response channel dropped");
+                ipc_callback_err(&callback, 500, "Bun response channel dropped");
             }
         }
     });
@@ -405,7 +408,7 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
     let call_args: Vec<serde_json::Value> = msg.args.iter().skip(1).cloned().collect();
 
     let Some(runtime) = NATIVE_RUNTIME.get() else {
-        ipc_callback_err(&callback, "Native runtime not initialized");
+        ipc_callback_err(&callback, 500, "Native runtime not initialized");
         return;
     };
 
@@ -418,7 +421,7 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
     let rx = match runtime.send_command(cmd) {
         Ok(rx) => rx,
         Err(e) => {
-            ipc_callback_err(&callback, &e);
+            ipc_callback_err(&callback, 500, &e);
             return;
         }
     };
@@ -431,8 +434,8 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
                     .unwrap_or(serde_json::Value::Null);
                 ipc_callback_ok(&callback, &val.to_string());
             }
-            Ok(Err(e)) => ipc_callback_err(&callback, &e),
-            Err(_) => ipc_callback_err(&callback, "Bun response channel dropped"),
+            Ok(Err(e)) => ipc_callback_err(&callback, 500, &e),
+            Err(_) => ipc_callback_err(&callback, 500, "Bun response channel dropped"),
         }
     });
 }

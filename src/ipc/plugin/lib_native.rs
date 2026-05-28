@@ -24,6 +24,7 @@ pub(super) fn handle_open_external(msg: &IpcMessage, callback: IpcCallback) {
     } else {
         ipc_callback_err(
             &callback,
+            400,
             "openExternal blocked: only https URLs are allowed",
         );
     }
@@ -34,7 +35,7 @@ pub(super) fn handle_open_external(msg: &IpcMessage, callback: IpcCallback) {
 pub(super) fn handle_send_to_render(msg: &IpcMessage, callback: IpcCallback) {
     let channel = msg.arg(0);
     if channel.is_empty() {
-        ipc_callback_err(&callback, "sendToRender requires a channel name");
+        ipc_callback_err(&callback, 400, "sendToRender requires a channel name");
         return;
     }
     let args_js = msg

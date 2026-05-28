@@ -102,7 +102,7 @@ fn reject_non_tidal(url: &str, channel: &str, callback: &IpcCallback) -> bool {
             channel,
             &url[..url.len().min(80)]
         );
-        ipc_callback_err(callback, &format!("{channel}: non-Tidal URL rejected"));
+        ipc_callback_err(callback, 403, &format!("{channel}: non-Tidal URL rejected"));
         return true;
     }
     false
@@ -174,7 +174,7 @@ async fn handle_proxy_head(id: String, url: String) {
             ipc_callback_ok(&callback, &json.to_string());
         }
         Err(e) => {
-            ipc_callback_err(&callback, &format!("proxy.head failed: {e}"));
+            ipc_callback_err(&callback, 500, &format!("proxy.head failed: {e}"));
         }
     }
 }
@@ -355,7 +355,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
             ipc_callback_ok(&callback, &json.to_string());
         }
         Err(e) => {
-            ipc_callback_err(&callback, &format!("proxy.fetch failed: {e}"));
+            ipc_callback_err(&callback, 500, &format!("proxy.fetch failed: {e}"));
         }
     }
 }

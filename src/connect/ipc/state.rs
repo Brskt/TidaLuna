@@ -7,8 +7,8 @@ pub(super) fn get_state(callback: IpcCallback) {
     let snapshot = with_state(|state| state.connect.as_ref().map(|cm| cm.get_state_snapshot()))
         .flatten()
         .unwrap_or(serde_json::json!({}));
-    callback.lock().unwrap().success_str(&format!(
-        "S:{}",
-        serde_json::to_string(&snapshot).unwrap_or_default()
-    ));
+    callback
+        .lock()
+        .unwrap()
+        .success_str(&serde_json::to_string(&snapshot).unwrap_or_default());
 }

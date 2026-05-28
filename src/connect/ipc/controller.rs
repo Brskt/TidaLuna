@@ -119,7 +119,7 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
                     guard.set_ws_and_start_session(ws, &device, cred.as_deref());
                     guard.start_session(&device, cred.as_deref());
                 }
-                callback.lock().unwrap().success_str("S:\"ok\"");
+                callback.lock().unwrap().success_str("\"ok\"");
 
                 // Spawn WS event loop.
                 let ctrl_clone = ctrl.clone();
@@ -158,5 +158,5 @@ pub(super) fn disconnect(msg: IpcMessage, callback: IpcCallback) {
             guard.disconnect(stop);
         }
     });
-    callback.lock().unwrap().success_str("S:\"ok\"");
+    callback.lock().unwrap().success_str("\"ok\"");
 }

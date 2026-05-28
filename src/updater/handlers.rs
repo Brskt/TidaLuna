@@ -29,7 +29,7 @@ pub(crate) fn handle_updater_download(
     let version = msg.arg(0).to_string();
 
     if version.is_empty() {
-        crate::ipc::plugin::ipc_callback_err(&callback, "missing version argument");
+        crate::ipc::plugin::ipc_callback_err(&callback, 400, "missing version argument");
         return;
     }
 
@@ -37,7 +37,7 @@ pub(crate) fn handle_updater_download(
         let mut state = UPDATER_STATE.lock().await;
         match &state.phase {
             UpdaterPhase::Downloading(_) => {
-                crate::ipc::plugin::ipc_callback_err(&callback, "download_in_progress");
+                crate::ipc::plugin::ipc_callback_err(&callback, 409, "download_in_progress");
                 return;
             }
             UpdaterPhase::Ready(v) if *v == version => {
@@ -45,7 +45,7 @@ pub(crate) fn handle_updater_download(
                 return;
             }
             UpdaterPhase::Applying(_) => {
-                crate::ipc::plugin::ipc_callback_err(&callback, "applying");
+                crate::ipc::plugin::ipc_callback_err(&callback, 409, "applying");
                 return;
             }
             _ => {}

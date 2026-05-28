@@ -89,7 +89,7 @@ pub(super) fn send_device_cmd(cmd: serde_json::Value, callback: IpcCallback) {
             match ws.send_command(cmd, CMD_TIMEOUT).await {
                 Ok(response) => {
                     let json = serde_json::to_string(&response).unwrap_or_default();
-                    callback.lock().unwrap().success_str(&format!("S:{json}"));
+                    callback.lock().unwrap().success_str(&json);
                 }
                 Err(e) => {
                     callback.lock().unwrap().failure(500, &e.to_string());

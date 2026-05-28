@@ -27,17 +27,14 @@ function invokeIpc(channel) {
         _cq({
             request: JSON.stringify({ channel: channel, args: args, id: id }),
             onSuccess: function(response) {
-                if (response.indexOf('E:') === 0) {
-                    reject(new Error(response.slice(2)));
-                } else if (response.indexOf('S:') === 0) {
-                    try { resolve(JSON.parse(response.slice(2))); }
-                    catch(e) { resolve(response.slice(2)); }
-                } else {
-                    resolve(response);
-                }
+                try { resolve(JSON.parse(response)); }
+                catch(e) { resolve(response); }
             },
             onFailure: function(code, msg) {
-                reject(new Error('[IPC] ' + channel + ': ' + msg + ' (' + code + ')'));
+                var err = new Error(msg);
+                err.code = code;
+                err.channel = channel;
+                reject(err);
             }
         });
     });

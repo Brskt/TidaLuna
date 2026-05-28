@@ -121,7 +121,11 @@ var fetch = function(input, init) {
                     });
                 } catch(e) { reject(e); }
             },
-            onFailure: function(code, msg) { reject(new Error('[plugin.fetch] ' + msg)); }
+            onFailure: function(code, msg) {
+                var err = new Error(msg);
+                err.code = code;
+                reject(err);
+            }
         });
     });
 };

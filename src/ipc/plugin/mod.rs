@@ -36,13 +36,13 @@ fn take_ipc_callback(id: &str) -> Option<IpcCallback> {
 pub(crate) fn ipc_callback_ok(cb: &IpcCallback, result: &str) {
     cb.lock()
         .expect("IPC callback lock poisoned")
-        .success_str(&format!("S:{result}"));
+        .success_str(result);
 }
 
-pub(crate) fn ipc_callback_err(cb: &IpcCallback, error: &str) {
+pub(crate) fn ipc_callback_err(cb: &IpcCallback, code: i32, msg: &str) {
     cb.lock()
         .expect("IPC callback lock poisoned")
-        .success_str(&format!("E:{error}"));
+        .failure(code, msg);
 }
 
 pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
@@ -60,7 +60,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
                     let json = serde_json::to_string(&manifest).unwrap_or_else(|_| "null".into());
                     ipc_callback_ok(&callback, &json);
                 }
-                Err(e) => ipc_callback_err(&callback, &format!("{e:#}")),
+                Err(e) => ipc_callback_err(&callback, 400, &format!("{e:#}")),
             }
         }
         "proxy.fetch" => {

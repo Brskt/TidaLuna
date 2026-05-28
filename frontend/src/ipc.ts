@@ -33,21 +33,14 @@ export const invokeIpc = (channel: string, ...args: any[]): Promise<any> => {
         window.cefQuery({
             request: JSON.stringify({ channel, args, id }),
             onSuccess: (response: string) => {
-                if (response.startsWith("E:")) {
-                    reject(new Error(response.slice(2)));
-                } else if (response.startsWith("S:")) {
-                    try {
-                        resolve(JSON.parse(response.slice(2)));
-                    } catch (e) {
-                        console.warn("[luna:ipc] Response parse error:", e);
-                        resolve(response.slice(2));
-                    }
-                } else {
+                try {
+                    resolve(JSON.parse(response));
+                } catch {
                     resolve(response);
                 }
             },
             onFailure: (code: number, msg: string) => {
-                reject(new Error(`[IPC] ${channel}: ${msg} (${code})`));
+                reject(Object.assign(new Error(msg), { code, channel }));
             },
         });
     });
