@@ -159,6 +159,21 @@ export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 	}
 
 	patchDispatch(reduxStore);
+	exposeStateSlicesToModules(reduxStore);
 
 	return { reduxStore };
+}
+
+// Expose top-level Redux state slices on tidalModules via live getters so
+// findModuleProperty / findModuleByProperty can resolve runtime state (e.g.
+// activePlayer.currentTime), not just the bundle string constants seedTidalConfig
+// harvests. State is immutable, so each getter pulls the current snapshot.
+function exposeStateSlicesToModules(reduxStore: any): void {
+	for (const slice of Object.keys(reduxStore.getState())) {
+		Object.defineProperty(tidalModules, slice, {
+			configurable: true,
+			enumerable: true,
+			get: () => reduxStore.getState()[slice],
+		});
+	}
 }
