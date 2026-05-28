@@ -1,7 +1,4 @@
-# TIDAL Connect — module invariants
-
-This is a short operator's reference for anyone touching `src/connect/`.
-It states the invariants the module relies on and where they live.
+# TIDAL Connect - module invariants
 
 ## Layout
 
@@ -9,7 +6,7 @@ It states the invariants the module relies on and where they live.
 src/connect/
 ├── mod.rs              # ConnectManager coordination
 ├── consts.rs           # constants (intervals, service types, timeouts)
-├── bridge.rs           # player → receiver event forwarding (statics)
+├── bridge.rs           # player -> receiver event forwarding (statics)
 ├── runtime.rs          # TaskGroup, TaskRecord, DeadlineAction
 ├── token_state.rs      # AuthStore, RefreshGuard, Generation
 ├── types/              # protocol DTOs split by domain
@@ -20,7 +17,7 @@ src/connect/
 │   ├── queue.rs        # QueueInfo, QueueItem, RepeatMode, QueueNotification
 │   ├── auth.rs         # ServerInfo, AuthInfo, OAuth* (wire format as received)
 │   └── mod.rs          # re-exports + ReceiverConfig
-├── ipc/                # frontend → Rust RPC, split by domain
+├── ipc/                # frontend -> Rust RPC, split by domain
 │   ├── mod.rs          # top-level dispatch
 │   ├── controller.rs   # discover/connect/disconnect/set_auth
 │   ├── playback.rs     # play/pause/seek/volume/mute/next/prev/repeat/shuffle
@@ -36,11 +33,11 @@ src/connect/
 │       ├── media.rs    # pure DASH/BTS resolution
 │       └── error.rs    # QueueError
 ├── ws/                 # WebSocket transport
-│   ├── client.rs       # TLS client (controller → device)
+│   ├── client.rs       # TLS client (controller -> device)
 │   ├── server.rs       # TLS server (accepts mobile clients)
 │   ├── heartbeat.rs    # shared ping/pong driver
 │   ├── tls.rs          # rustls config with TIDAL CA
-│   └── pending.rs      # requestId → oneshot tracker
+│   └── pending.rs      # requestId -> oneshot tracker
 └── mdns/               # service discovery
     ├── advertiser.rs   # _tidalconnect._tcp advertisement
     ├── browser.rs      # peer discovery
@@ -53,33 +50,29 @@ src/connect/
 
 `src/connect/receiver/queue/mod.rs` owns `enum QueueState`. Sub-modules
 (`http.rs`, `media.rs`) take references to the data they need and never
-touch state. All mutations go through `QueueManager` methods. Adding a new
-state transition or side effect means adding a method on the façade, not
-poking the enum from another file.
+touch state directly; mutations go through `QueueManager` methods.
 
-### `AuthStore` is the source of truth for tokens
+### `AuthStore` owns the tokens
 
-`token_state.rs::AuthStore` holds `Arc<ArcSwap<TokenState>>`. The
-wire-shaped `ServerInfo` copies inside `QueueManager` are a cache kept in
-sync after every successful refresh. Write path:
+`token_state.rs::AuthStore` holds `Arc<ArcSwap<TokenState>>`.
+`QueueManager`'s `ServerInfo` copies are a cache resynced after each
+refresh. Refresh path:
 
-1. `RefreshGuard::new(&store)` takes a snapshot.
-2. `http::refresh_token(&client, &oauth, &snapshot.refresh_token)` does the
-   POST. Returns `RefreshSuccess { access_token, refresh_token }`.
-3. Build `next: TokenState` with `token_version + 1`.
-4. `guard.try_apply(next)` CAS. On `VersionMismatch`, another writer won —
-   do not retry here; the caller handles it.
-5. `update_access_token(new_token)` syncs the cache into both
-   `content_server` and `queue_server` ServerInfos.
+1. `RefreshGuard::new(&store)` snapshots the current state.
+2. `http::refresh_token` POSTs with the snapshot's refresh token.
+3. Build `next` with `token_version + 1`.
+4. `guard.try_apply(next)` CAS. `VersionMismatch` means another writer
+   won; the caller handles retry, not us.
+5. `update_access_token` syncs the new token into `content_server` and
+   `queue_server`.
 
-The wire push path (`sync_auth_from_server_info`) uses `AuthStore::store`
-(unconditional replace) because relogin must be able to install fresh
-credentials even after `invalid_grant` marked the previous generation
-`Terminated`.
+`sync_auth_from_server_info` calls `AuthStore::store` directly (no CAS)
+so relogin can install fresh credentials after `invalid_grant` has
+marked the previous generation `Terminated`.
 
 ### Generation lifecycle
 
-Transitions declared by `GenerationStatus`:
+`GenerationStatus`:
 
 ```
          ┌────────────────────────────┐
@@ -113,19 +106,19 @@ Transitions declared by `GenerationStatus`:
 `Terminated(_)` refuses any further `compare_and_swap`; use `store` to
 install a new generation after relogin.
 
-### Exactly-once terminal notification
+### Terminal notification flag
 
 `QueueManager.terminal_notified: bool` gates the outbound
-`notifyQueueServerError` on `invalid_grant`. It is cleared by
-`sync_auth_from_server_info` whenever the wire installs a new generation,
-so a relogin re-arms the notification for the new generation.
+`notifyQueueServerError` on `invalid_grant`. `sync_auth_from_server_info`
+clears it whenever the wire installs a new generation, so a relogin
+re-arms the notification.
 
 ### Task ownership
 
-Long-lived tasks live in `TaskGroup` instances so shutdown is bounded and
-panics are classified. Per-connection tasks stay as raw `JoinHandle` +
-explicit `abort()` because `TaskGroup` requires unique `&'static str` task
-names and connection-scoped tasks need dynamic socket-id suffixes.
+Long-lived tasks go in a `TaskGroup` so shutdown has a deadline and
+panics surface. Per-connection tasks stay as raw `JoinHandle` + `abort()`
+because `TaskGroup` task names are `&'static str` and connection scopes
+need socket-id suffixes.
 
 | Task | Owner | Deadline |
 |------|-------|---|
@@ -139,65 +132,58 @@ names and connection-scoped tasks need dynamic socket-id suffixes.
 
 ### Shutdown
 
-`TaskGroup::shutdown(graceful_timeout)` runs in two phases:
+`TaskGroup::shutdown(graceful_timeout)` does two passes:
 
-1. Close the spawn gate, cancel the shared `CancellationToken`, wait up to
-   `graceful_timeout` for cooperating tasks to observe cancellation.
-2. Abort whatever is still running, drain `JoinHandle`s, classify each via
-   its shared `AtomicU8` state and the `JoinError` (`try_into_panic`).
+1. Close the spawn gate, cancel the `CancellationToken`, wait up to
+   `graceful_timeout`.
+2. Abort the survivors, drain handles, label each via the `AtomicU8` state
+   and `JoinError::try_into_panic`.
 
-`TaskRecord::state` transitions are enforced with
-`compare_exchange`; terminal states (`PanicObserved`, `GracefulCompleted`,
-`AbortObserved`) are sinks. Transitions are validated by
-`TaskState::can_transition`.
+`TaskRecord::state` uses `compare_exchange` with `TaskState::can_transition`
+gating moves. `PanicObserved`, `GracefulCompleted`, and `AbortObserved`
+are terminal.
 
-`MdnsBackend::shutdown(deadline)` is idempotent and bounded: it probes
-`status()` first (`AlreadyStopped` short-circuit), retries `Error::Again`
-with capped backoff, treats any other non-`Again` error as
-`AlreadyStopped` (the daemon's command channel is closed), and returns
-`Degraded { retry_count, last_status, last_error }` on deadline miss.
+`MdnsBackend::shutdown(deadline)` is safe to call twice. It probes
+`status()` first, retries `Error::Again` with capped backoff, treats any
+other error as already stopped (the daemon's command channel is closed),
+and returns `Degraded { retry_count, last_status, last_error }` on
+deadline miss.
 
 ### Panic reporting requires `panic = "unwind"`
 
-`src/connect/runtime.rs` has a compile-time assertion:
+`src/connect/runtime.rs`:
 
 ```rust
 const _: () = assert!(cfg!(panic = "unwind"));
 ```
 
-With `panic = "abort"`, `JoinError::try_into_panic` cannot report anything
-because the process is terminated before tokio classifies the join.
-`scripts/check-panic-profile.sh` guards `Cargo.toml` against a profile
-override at the repo level.
+`panic = "abort"` kills the process before tokio can join, so
+`JoinError::try_into_panic` returns nothing. `scripts/check-panic-profile.sh`
+guards `Cargo.toml` against a profile override.
 
 ### TLS hostname mismatch is expected
 
-`ws::tls::TidalCertVerifier` explicitly accepts certificates whose SAN
-does not match the hostname when the CA chain is TIDAL's. Devices are
-reached by IP address on the LAN; the CA chain is the real authenticator.
-Each acceptance is logged via `vprintln!` so a LAN MITM would be visible
-as an anomaly pattern in traces.
+`ws::tls::TidalCertVerifier` accepts certificates whose SAN does not
+match the hostname as long as the chain is TIDAL's. LAN devices are
+addressed by IP, so SAN matching is impossible; the CA chain is what we
+trust. Each acceptance is logged via `vprintln!` so a LAN MITM shows up
+in traces.
 
 ### IPC event forwarding goes through `bridge::forward`
 
-Player events flow out of `ui::flush` via `crate::connect::bridge::forward`.
-The bridge owns its own statics (`BRIDGE_TX`, `BRIDGE_ACTIVE`,
-`ENGINE_GEN`) and its own `PlayerEvent → BridgeEvent` mapping, so
-`ui::flush` never imports `BridgeEvent` or `ConnectPlayerState`.
+`ui::flush` calls `crate::connect::bridge::forward`. The bridge owns
+`BRIDGE_TX`, `BRIDGE_ACTIVE`, `ENGINE_GEN`, and the `PlayerEvent` ->
+`BridgeEvent` mapping; `ui::flush` never imports `BridgeEvent` or
+`ConnectPlayerState`.
 
-## Testing entry points
+## Tests
 
-- `cargo test --bin tidalunar connect::` — all unit tests.
-- `cargo test --bin tidalunar connect::token_state::` — auth lifecycle
-  and CAS adversarial tests.
-- `cargo test --bin tidalunar connect::runtime::` — `TaskGroup` tests
-  (graceful / aborted / panicked accounting).
-- `cargo test --bin tidalunar connect::mdns::backend::` — idempotent
-  shutdown behaviour.
+- `cargo test --bin tidalunar connect::` runs all.
+- `connect::token_state::` covers auth lifecycle + CAS races.
+- `connect::runtime::` covers `TaskGroup` graceful / aborted / panicked.
+- `connect::mdns::backend::` covers idempotent shutdown.
 
-Mock WSS helper: `src/connect/testing.rs` (`MockWsServer`).
+Mock WSS server: `src/connect/testing.rs::MockWsServer`.
 
-## Scripts
-
-- `scripts/check-panic-profile.sh` — parses `Cargo.toml` to verify
-  `panic = "unwind"` on `[profile.release]` and `[profile.dev]`.
+`scripts/check-panic-profile.sh` greps `Cargo.toml` for `panic = "unwind"`
+on `[profile.release]` and `[profile.dev]`.

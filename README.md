@@ -1,4 +1,4 @@
-# TidaLuna
+# TidaLunar
 
 A desktop TIDAL client written in Rust with CEF (Chromium Embedded Framework) and a native audio engine (symphonia, cpal, rubato).
 
@@ -32,10 +32,7 @@ sudo apt-get install -y \
   pkg-config \
   libasound2-dev \
   libdbus-1-dev \
-  libgtk-3-dev \
-  libglib2.0-dev \
-  libgdk-pixbuf-2.0-dev \
-  libappindicator3-dev \
+  libx11-dev \
   cmake \
   ninja-build
 ```
@@ -84,10 +81,10 @@ cargo xtask clippy
 
 Logs are controlled by `LOGS` (level 1 enabled by default in debug builds):
 
-- `LOGS=0` — No logs
-- `LOGS=1` — General logs (IPC, player, plugins, media controls)
-- `LOGS=2` — + Streaming details (governor state changes, range restarts, TTFB)
-- `LOGS=3` — + Streaming verbose (chunk progress, governor periodic stats)
+- `LOGS=0` - No logs
+- `LOGS=1` - General logs (IPC, player, plugins, media controls)
+- `LOGS=2` - + Streaming details (governor state changes, range restarts, TTFB)
+- `LOGS=3` - + Streaming verbose (chunk progress, governor periodic stats)
 
 Linux/macOS:
 
