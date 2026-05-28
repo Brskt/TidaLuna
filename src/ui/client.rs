@@ -566,6 +566,16 @@ wrap_request_handler! {
                 return 1;
             }
 
+            if kind == PageKind::External {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    crate::vprintln!("[NAV]    External -> OS browser: {}", &url[..url.len().min(120)]);
+                    open_in_os(&url);
+                } else {
+                    crate::vprintln!("[NAV]    Blocked external navigation: {}", &url[..url.len().min(120)]);
+                }
+                return 1;
+            }
+
             if policy.bypass_router {
                 crate::vprintln!("[AUTH]   Bypassing router for auth navigation");
                 return 0;
