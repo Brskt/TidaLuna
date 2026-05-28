@@ -16,6 +16,11 @@ export const createNativePlayerComponent = () => {
     let _time = 0;
     let _lastVolume = -1;
 
+    // Stable handle published on tidalModules so @luna/lib PlayState.currentTime resolves.
+    const playerHandle = {
+        get currentTime(): number { return seekTarget ?? _time; },
+    };
+
     // Before Player() is called, events are captured as a snapshot of the
     // latest values rather than queued individually.  This avoids unbounded
     // growth and makes replay order deterministic.
@@ -209,6 +214,7 @@ export const createNativePlayerComponent = () => {
 
     return {
         Player,
+        activePlayer: playerHandle,
         // Internal setter for playback controller - updates _time without
         // emitting events or triggering backend seeks.  The currentTime getter
         // (seekTarget ?? _time) ensures the correct value is always returned.

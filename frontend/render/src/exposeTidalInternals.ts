@@ -160,6 +160,7 @@ export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 
 	patchDispatch(reduxStore);
 	exposeStateSlicesToModules(reduxStore);
+	publishLunarPlayer();
 
 	return { reduxStore };
 }
@@ -176,4 +177,9 @@ function exposeStateSlicesToModules(reduxStore: any): void {
 			get: () => reduxStore.getState()[slice],
 		});
 	}
+}
+
+// Satisfy @luna/lib PlayState.currentTime selector (TIDAL's player SDK singleton has no analog here).
+function publishLunarPlayer(): void {
+	tidalModules.__lunarPlayer = { activePlayer: (window as any).NativePlayerComponent.activePlayer };
 }
