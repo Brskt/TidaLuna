@@ -612,6 +612,14 @@ wrap_request_handler! {
                     crate::ui::token_filter::userfree_to_string(&u)
                 })
                 .unwrap_or_default();
+
+            // Strip the CSP meta on the doc navigation (first load, no SW yet);
+            // the browser handler wins over the context one, so peel it off here.
+            // TokenResourceHandler is a no-op on the doc GET, so nothing is lost.
+            if crate::ui::csp_filter::is_document_url(&url) {
+                return Some(crate::ui::csp_filter::DocumentHandler::new());
+            }
+
             if crate::ui::token_filter::should_rewrite_token(&url)
                 || crate::ui::nav::is_token_endpoint(&url)
             {

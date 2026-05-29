@@ -372,6 +372,21 @@ document.title = "TidaLunar - A TIDAL client";
     }} else {{
         document.addEventListener('DOMContentLoaded', inject);
     }}
+}})();
+(function() {{
+    // If a SW-served page still carries the CSP meta, drop the SW + caches so it
+    // re-precaches the stripped shell. Skips network loads (no controller) and
+    // self-stops once the cached shell is clean.
+    function run() {{
+        try {{
+            if (!document.querySelector('meta[http-equiv="Content-Security-Policy" i]')) return;
+            if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller || !window.caches) return;
+            navigator.serviceWorker.getRegistrations().then(function(rs) {{ rs.forEach(function(r) {{ r.unregister(); }}); }});
+            caches.keys().then(function(ks) {{ ks.forEach(function(k) {{ caches.delete(k); }}); }});
+        }} catch (e) {{}}
+    }}
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+    else run();
 }})();"#,
                 ua_override = ua_override,
                 platform = platform,
@@ -415,12 +430,22 @@ document.title = "TidaLunar - A TIDAL client";
 
             let mut client_ref = self.default_client();
             let mut bv_delegate = TidalBrowserViewDelegate::new(0);
+            // Shared context keeps the global profile (cookies/auth) while attaching
+            // the handler that strips CSP from the SW's browser-less shell precache.
+            let mut doc_ctx_handler = crate::ui::csp_filter::DocumentContextHandler::new();
+            let mut request_context = cef::request_context_get_global_context()
+                .and_then(|mut global| {
+                    cef::request_context_cef_create_context_shared(
+                        Some(&mut global),
+                        Some(&mut doc_ctx_handler),
+                    )
+                });
             let browser_view = browser_view_create(
                 client_ref.as_mut(),
                 Some(&url),
                 Some(&settings),
                 None,
-                None,
+                request_context.as_mut(),
                 Some(&mut bv_delegate),
             );
 
