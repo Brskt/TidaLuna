@@ -85,6 +85,10 @@ impl AppWindow {
         self.cef.show();
     }
 
+    pub(crate) fn hide(&self) {
+        self.cef.hide();
+    }
+
     pub(crate) fn focus_foreground(&self) {
         #[cfg(target_os = "windows")]
         {

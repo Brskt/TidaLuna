@@ -1,8 +1,10 @@
 use crate::app_state::with_state;
 use crate::ipc::window::notify_window_state;
+use crate::ui::app_window::AppWindow;
 use crate::ui::flush::run_flush_batch;
 use cef::*;
 use std::cell::{OnceCell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // --- Win32 frameless subclass ---
 
@@ -230,7 +232,16 @@ wrap_window_delegate! {
                 return;
             };
             if window.is_minimized() == 1 {
+                WAS_MINIMIZED.store(true, Ordering::Relaxed);
                 return;
+            }
+            // A content change while minimized leaves the renderer's new
+            // compositor surface unembedded, so the window restores gray. A
+            // Views hide/show cycle re-runs WasShown -> EmbedSurface to re-embed
+            // it; posted (not inline) to avoid re-entering HWNDMessageHandler.
+            if WAS_MINIMIZED.swap(false, Ordering::Relaxed) {
+                let mut task = VisibilityReassertTask::new(0);
+                post_task(ThreadId::UI, Some(&mut task));
             }
             let maximized = window.is_maximized() == 1;
             let batch = with_state(|state| {
@@ -302,6 +313,26 @@ wrap_browser_view_delegate! {
     impl BrowserViewDelegate {
         fn browser_runtime_style(&self) -> RuntimeStyle {
             RuntimeStyle::ALLOY
+        }
+    }
+}
+
+// --- Visibility re-assert on restore ---
+
+static WAS_MINIMIZED: AtomicBool = AtomicBool::new(false);
+
+wrap_task! {
+    struct VisibilityReassertTask {
+        _p: u8,
+    }
+    impl Task {
+        fn execute(&self) {
+            // Drive the false->true visibility transition that makes Chromium
+            // re-run WasShown -> EmbedSurface.
+            if let Some(win) = AppWindow::current() {
+                win.hide();
+                win.show();
+            }
         }
     }
 }
