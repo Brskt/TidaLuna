@@ -1,5 +1,3 @@
-import { sendIpc } from "../ipc";
-
 export const initWindowControls = () => {
     // Branding: force document.title to "TidaLunar - A TIDAL client".
     // Tidal's SPA overwrites the title on navigation, so we use a MutationObserver
@@ -25,12 +23,6 @@ export const initWindowControls = () => {
         titleObserver.observe(titleEl, opts);
         window.addEventListener("pagehide", () => titleObserver.disconnect(), { once: true });
     }
-
-    // F12 devtools fallback (in case CEF captures the key before the page).
-    document.addEventListener("keydown", (e) => {
-        if (e.key === "F12") {
-            e.preventDefault();
-            sendIpc("window.devtools");
-        }
-    }, true);
+    // Window controls + F12 live in the early runtime (fallback_titlebar.js) so they
+    // also work on pages without the bundle, like the login.tidal.com auth page.
 };

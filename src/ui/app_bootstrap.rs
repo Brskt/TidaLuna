@@ -21,6 +21,7 @@ wrap_render_process_handler! {
             frame: Option<&mut Frame>,
             context: Option<&mut V8Context>,
         ) {
+            let is_popup = browser.as_ref().map(|b| b.is_popup() != 0).unwrap_or(false);
             let frame_for_inject = frame.as_ref().map(|f| (*f).clone());
             self.router
                 .on_context_created(browser.cloned(), frame.cloned(), context.cloned());
@@ -29,6 +30,13 @@ wrap_render_process_handler! {
                 let url_str = crate::ui::token_filter::userfree_to_string(&url);
                 use crate::ui::nav::{self, NavigationPolicy, PageKind};
                 if NavigationPolicy::for_page(PageKind::classify(&url_str)).inject_early_runtime {
+                    // Skip the fallback bar in auth popups: its window.* buttons hit the
+                    // main window (AppWindow::current), and the popup is OS-framed anyway.
+                    let titlebar = if is_popup {
+                        ""
+                    } else {
+                        include_str!("early_runtime/fallback_titlebar.js")
+                    };
                     let preload = format!(
                         "(function(){{\
                         if(self.__LUNAR_EARLY_RUNTIME__)return;\
@@ -49,6 +57,7 @@ wrap_render_process_handler! {
                         {open}\
                         {session}\
                         {exfil}\
+                        {titlebar}\
                         self.__LUNAR_EARLY_RUNTIME__=true;\
                         }})();",
                         desktop = nav::HOST_DESKTOP,
@@ -63,6 +72,7 @@ wrap_render_process_handler! {
                         open = include_str!("early_runtime/window_open.js"),
                         session = include_str!("early_runtime/session_stub.js"),
                         exfil = include_str!("early_runtime/exfil_guard.js"),
+                        titlebar = titlebar,
                     );
                     crate::app_state::exec_js_on_frame(frame, &preload);
                 }
@@ -331,6 +341,8 @@ wrap_browser_process_handler! {
             let ua_override = String::new();
 
             let perf = crate::debug::perf_monitor::enabled();
+            let window_maximized = crate::state::db()
+                .call_settings(|c| crate::settings::load_window_state(c).maximized);
             let init_script = format!(
                 r#"{ua_override}window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
@@ -339,7 +351,7 @@ window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
 window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
 window.__TIDALUNAR_PERF__ = {perf};
 window.__TIDALUNAR_WINDOW_STATE__ = {{
-    isMaximized: false,
+    isMaximized: {window_maximized},
     isFullscreen: false
 }};
 window.__TIDALUNAR_CREDENTIALS__ = {pkce_credentials_json};
