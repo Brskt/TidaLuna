@@ -42,6 +42,7 @@ wrap_render_process_handler! {
                             loginCallbackPath:\"/login/auth\",\
                             authHosts:[\"{login}\",\"{auth}\"]\
                         }};\
+                        {host_modules}\
                         {ipc}\
                         {token}\
                         {fetch}\
@@ -55,6 +56,7 @@ wrap_render_process_handler! {
                         auth = nav::HOST_AUTH,
                         api = nav::HOST_API,
                         redirect = nav::REDIRECT_URI,
+                        host_modules = include_str!("early_runtime/host_modules.js"),
                         ipc = include_str!("early_runtime/ipc.js"),
                         token = include_str!("early_runtime/token_capture.js"),
                         fetch = include_str!("early_runtime/fetch_proxy.js"),
@@ -374,17 +376,32 @@ document.title = "TidaLunar - A TIDAL client";
     }}
 }})();
 (function() {{
-    // If a SW-served page still carries the CSP meta, drop the SW + caches so it
-    // re-precaches the stripped shell. Skips network loads (no controller) and
-    // self-stops once the cached shell is clean.
-    function run() {{
+    // Drop the SW + caches so the shell/chunks re-precache. Both self-heals below
+    // self-stop once the cached resources are the rewritten ones.
+    function bust() {{
         try {{
-            if (!document.querySelector('meta[http-equiv="Content-Security-Policy" i]')) return;
             if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller || !window.caches) return;
             navigator.serviceWorker.getRegistrations().then(function(rs) {{ rs.forEach(function(r) {{ r.unregister(); }}); }});
             caches.keys().then(function(ks) {{ ks.forEach(function(k) {{ caches.delete(k); }}); }});
         }} catch (e) {{}}
     }}
+    // 1) Stale CSP meta on a SW-served shell -> re-precache the stripped shell.
+    function cspHeal() {{
+        if (document.querySelector('meta[http-equiv="Content-Security-Policy" i]')) bust();
+    }}
+    // 2) A cache predating module-capture serves un-rewritten React chunks, so the
+    //    host React never registers. Bust once per session (sessionStorage guard
+    //    prevents a loop if the chunk pattern ever stops matching) to re-precache.
+    function reactHeal() {{
+        try {{
+            if (sessionStorage.getItem('__luna_react_heal')) return;
+            if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return;
+            if (window.__lunaHostModules && window.__lunaHostModules.react) return;
+            sessionStorage.setItem('__luna_react_heal', '1');
+            bust();
+        }} catch (e) {{}}
+    }}
+    function run() {{ cspHeal(); setTimeout(reactHeal, 5000); }}
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
     else run();
 }})();"#,

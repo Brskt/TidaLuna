@@ -7,6 +7,7 @@ pub(crate) mod file_dialog;
 pub(crate) mod flush;
 pub(crate) mod menu;
 pub(crate) mod message_dialog;
+pub(crate) mod module_capture;
 pub(crate) mod nav;
 pub(crate) mod proactive_refresh;
 pub(crate) mod token_filter;

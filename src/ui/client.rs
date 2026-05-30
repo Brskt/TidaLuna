@@ -566,9 +566,19 @@ wrap_request_handler! {
                 return 1;
             }
 
-            if kind == PageKind::External {
+            // Only the DevTools window (frames at `devtools://`) sends external
+            // links to the OS browser; the app's own navigation never does.
+            let from_devtools = browser
+                .as_ref()
+                .and_then(|b| b.main_frame())
+                .map(|f| {
+                    let u = f.url();
+                    crate::ui::token_filter::userfree_to_string(&u).starts_with("devtools://")
+                })
+                .unwrap_or(false);
+            if kind == PageKind::External && from_devtools {
                 if url.starts_with("http://") || url.starts_with("https://") {
-                    crate::vprintln!("[NAV]    External -> OS browser: {}", &url[..url.len().min(120)]);
+                    crate::vprintln!("[NAV]    External (devtools) -> OS browser: {}", &url[..url.len().min(120)]);
                     open_in_os(&url);
                 } else {
                     crate::vprintln!("[NAV]    Blocked external navigation: {}", &url[..url.len().min(120)]);
@@ -618,6 +628,12 @@ wrap_request_handler! {
             // TokenResourceHandler is a no-op on the doc GET, so nothing is lost.
             if crate::ui::csp_filter::is_document_url(&url) {
                 return Some(crate::ui::csp_filter::DocumentHandler::new());
+            }
+
+            // Rewrite React-family chunks to capture TIDAL's real React exports
+            // so plugins share the host instance (hooks/context).
+            if crate::ui::module_capture::target_module_id(&url).is_some() {
+                return Some(crate::ui::module_capture::CaptureRequestHandler::new());
             }
 
             if crate::ui::token_filter::should_rewrite_token(&url)

@@ -209,7 +209,7 @@ fn build_exports_object(specifiers: &[ExportSpecifier]) -> String {
     format!("var __exports = {{ {} }};", entries.join(", "))
 }
 
-fn module_export_name(name: &ModuleExportName) -> String {
+pub(crate) fn module_export_name(name: &ModuleExportName) -> String {
     match name {
         ModuleExportName::IdentifierName(i) => i.name.to_string(),
         ModuleExportName::IdentifierReference(i) => i.name.to_string(),

@@ -37,10 +37,15 @@ wrap_request_context_handler! {
                 .as_ref()
                 .map(|r| userfree_to_string(&r.url()))
                 .unwrap_or_default();
-            if !is_document_url(&url) {
-                return None;
+            if is_document_url(&url) {
+                return Some(DocumentHandler::new());
             }
-            Some(DocumentHandler::new())
+            // SW precache of a React-family chunk: rewrite it (browser-less) so
+            // the cached chunk carries the capture call on warm loads too.
+            if crate::ui::module_capture::target_module_id(&url).is_some() {
+                return Some(crate::ui::module_capture::CaptureRequestHandler::new());
+            }
+            None
         }
     }
 }
