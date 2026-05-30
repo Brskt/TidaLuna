@@ -13,8 +13,18 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows_sys::Win32::UI::Shell::THUMBBUTTON;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, HICON, ICONINFO,
+    CreateIconIndirect, DestroyIcon, HICON, ICONINFO, RegisterWindowMessageW,
 };
+
+use core::cell::Cell;
+use std::sync::LazyLock;
+
+/// `TaskbarButtonCreated` - the taskbar sends this whenever it (re)creates the
+/// button, which resets the button's thumb toolbar. Cached (a runtime atom).
+pub(crate) static WM_TASKBAR_BUTTON_CREATED: LazyLock<u32> = LazyLock::new(|| {
+    let name: Vec<u16> = "TaskbarButtonCreated\0".encode_utf16().collect();
+    unsafe { RegisterWindowMessageW(name.as_ptr()) }
+});
 
 // ---- COM GUIDs ----
 
@@ -255,6 +265,7 @@ pub struct ThumbBar {
     vtbl: *const ITaskbarList3Vtbl,
     hwnd: HWND,
     icons: [HICON; 4], // prev, play, pause, next
+    playing: Cell<bool>,
 }
 
 impl ThumbBar {
@@ -298,20 +309,37 @@ impl ThumbBar {
                 vtbl,
                 hwnd,
                 icons: [icon_prev, icon_play, icon_pause, icon_next],
+                playing: Cell::new(false),
             })
         }
     }
 
-    pub fn set_playing(&self, playing: bool) {
-        let icon = if playing {
+    fn center_icon(&self) -> HICON {
+        if self.playing.get() {
             self.icons[2] // pause icon
         } else {
             self.icons[1] // play icon
-        };
+        }
+    }
 
-        let buttons = make_buttons(self.icons[0], icon, self.icons[3]);
+    pub fn set_playing(&self, playing: bool) {
+        self.playing.set(playing);
+        let buttons = make_buttons(self.icons[0], self.center_icon(), self.icons[3]);
         unsafe {
             ((*self.vtbl).thumb_bar_update_buttons)(self.taskbar, self.hwnd, 3, buttons.as_ptr());
+        }
+    }
+
+    /// (Re)attach the toolbar via `ThumbBarAddButtons`, not update: a recreated
+    /// taskbar button has no toolbar to update. Called on each `TaskbarButtonCreated`.
+    pub fn add_buttons(&self) {
+        let buttons = make_buttons(self.icons[0], self.center_icon(), self.icons[3]);
+        unsafe {
+            let hr =
+                ((*self.vtbl).thumb_bar_add_buttons)(self.taskbar, self.hwnd, 3, buttons.as_ptr());
+            if hr != S_OK {
+                crate::vprintln!("[THUMBBAR] re-add ThumbBarAddButtons failed: 0x{hr:08X}");
+            }
         }
     }
 }

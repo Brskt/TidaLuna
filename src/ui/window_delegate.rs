@@ -21,6 +21,16 @@ unsafe extern "system" fn frameless_subclass_proc(
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     unsafe {
+        // Our restore-from-minimize hide/show recreates the taskbar button, wiping
+        // its thumb toolbar; re-add the buttons when the taskbar signals recreation.
+        if msg == *crate::platform::thumbbar::WM_TASKBAR_BUTTON_CREATED {
+            with_state(|state| {
+                if let Some(ref tb) = state.thumbbar {
+                    tb.add_buttons();
+                }
+            });
+            return DefSubclassProc(hwnd, msg, wparam, lparam);
+        }
         match msg {
             WM_NCCALCSIZE if wparam != 0 => {
                 let params = &*(lparam as *const NCCALCSIZE_PARAMS);
