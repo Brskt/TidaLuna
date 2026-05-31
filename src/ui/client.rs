@@ -270,6 +270,16 @@ wrap_client! {
     }
 }
 
+/// Open an external http(s) URL in the OS browser; other schemes are dropped.
+fn open_external_in_os(url: &str) {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        crate::vprintln!("[NAV]    External -> OS browser: {}", &url[..url.len().min(120)]);
+        open_in_os(url);
+    } else {
+        crate::vprintln!("[NAV]    Blocked external navigation: {}", &url[..url.len().min(120)]);
+    }
+}
+
 // --- Life Span Handler ---
 
 wrap_life_span_handler! {
@@ -310,10 +320,8 @@ wrap_life_span_handler! {
                     }
                     return 0;
                 }
-                if (url_str.starts_with("http://") || url_str.starts_with("https://"))
-                    && kind == PageKind::External
-                {
-                    open_in_os(&url_str);
+                if kind == PageKind::External {
+                    open_external_in_os(&url_str);
                 }
             }
             1
@@ -566,26 +574,6 @@ wrap_request_handler! {
                 return 1;
             }
 
-            // Only the DevTools window (frames at `devtools://`) sends external
-            // links to the OS browser; the app's own navigation never does.
-            let from_devtools = browser
-                .as_ref()
-                .and_then(|b| b.main_frame())
-                .map(|f| {
-                    let u = f.url();
-                    crate::ui::token_filter::userfree_to_string(&u).starts_with("devtools://")
-                })
-                .unwrap_or(false);
-            if kind == PageKind::External && from_devtools {
-                if url.starts_with("http://") || url.starts_with("https://") {
-                    crate::vprintln!("[NAV]    External (devtools) -> OS browser: {}", &url[..url.len().min(120)]);
-                    open_in_os(&url);
-                } else {
-                    crate::vprintln!("[NAV]    Blocked external navigation: {}", &url[..url.len().min(120)]);
-                }
-                return 1;
-            }
-
             if policy.bypass_router {
                 crate::vprintln!("[AUTH]   Bypassing router for auth navigation");
                 return 0;
@@ -594,6 +582,20 @@ wrap_request_handler! {
             self.router
                 .on_before_browse(browser.cloned(), frame.cloned());
             0
+        }
+        fn on_open_urlfrom_tab(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            target_url: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            _user_gesture: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            // DevTools link clicks route here, not through on_before_browse; send
+            // them to the OS browser instead of navigating the inspected window.
+            let url = target_url.as_ref().map(|u| u.to_string()).unwrap_or_default();
+            open_external_in_os(&url);
+            1
         }
         fn on_certificate_error(
             &self,
