@@ -58,6 +58,17 @@ fn set(conn: &Connection, key: &str, value: &str) {
     }
 }
 
+fn get_bool(conn: &Connection, key: &str, default: bool) -> bool {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(default)
+}
+
 pub(crate) fn load_window_state(conn: &mut Connection) -> WindowState {
     let mut ws = WindowState::default();
     let mut stmt = match conn.prepare(
@@ -136,14 +147,7 @@ pub(crate) fn save_maximized(conn: &mut Connection, maximized: bool) {
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn load_volume_sync(conn: &mut Connection) -> bool {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = 'player.volume_sync'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(true)
+    get_bool(conn, "player.volume_sync", true)
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -152,14 +156,7 @@ pub(crate) fn save_volume_sync(conn: &mut Connection, enabled: bool) {
 }
 
 pub(crate) fn load_close_to_tray(conn: &mut Connection) -> bool {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = 'window.close_to_tray'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(false)
+    get_bool(conn, "window.close_to_tray", false)
 }
 
 pub(crate) fn save_close_to_tray(conn: &mut Connection, enabled: bool) {
@@ -167,14 +164,7 @@ pub(crate) fn save_close_to_tray(conn: &mut Connection, enabled: bool) {
 }
 
 pub(crate) fn load_update_auto_check(conn: &mut Connection) -> bool {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = 'updater.auto_check'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(true)
+    get_bool(conn, "updater.auto_check", true)
 }
 
 pub(crate) fn save_update_auto_check(conn: &mut Connection, enabled: bool) {
@@ -182,14 +172,7 @@ pub(crate) fn save_update_auto_check(conn: &mut Connection, enabled: bool) {
 }
 
 pub(crate) fn load_receiver_always_on(conn: &mut Connection) -> bool {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = 'connect.receiver_always_on'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(true)
+    get_bool(conn, "connect.receiver_always_on", true)
 }
 
 pub(crate) fn save_receiver_always_on(conn: &mut Connection, enabled: bool) {
@@ -207,14 +190,4 @@ pub(crate) fn load_update_skip_version(conn: &mut Connection) -> Option<String> 
 
 pub(crate) fn save_update_skip_version(conn: &mut Connection, version: &str) {
     set(conn, "updater.skip_version", version);
-}
-
-#[allow(dead_code)]
-pub(crate) fn clear_update_skip_version(conn: &mut Connection) {
-    if let Err(e) = conn.execute(
-        "DELETE FROM settings WHERE key = 'updater.skip_version'",
-        [],
-    ) {
-        crate::vprintln!("[SETTINGS] Failed to clear updater.skip_version: {e}");
-    }
 }

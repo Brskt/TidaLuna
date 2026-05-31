@@ -214,7 +214,7 @@ wrap_app! {
             command_line: Option<&mut CommandLine>,
         ) {
             let proc_type = _process_type
-                .map(|s| format!("{}", s))
+                .map(|s| s.to_string())
                 .unwrap_or_default();
             if !proc_type.is_empty() {
                 return;

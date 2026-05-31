@@ -17,3 +17,10 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
+
+/// First `n` characters of an id/url, for log lines. Char-bounded (never splits
+/// a multi-byte char) and allocates a fresh `String`, matching the call sites it
+/// replaces.
+pub fn short_id(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}

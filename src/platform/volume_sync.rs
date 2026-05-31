@@ -16,7 +16,7 @@ const PKEY_DEVICE_FRIENDLY_NAME: windows::Win32::Foundation::PROPERTYKEY =
 const TIDALUNAR_VOLUME_GUID: GUID = GUID::from_u128(0x5449_4441_4c55_4e41_5256_4f4c_5359_4e43);
 
 pub struct ComGuard {
-    _needs_uninit: bool,
+    needs_uninit: bool,
 }
 
 impl ComGuard {
@@ -25,12 +25,12 @@ impl ComGuard {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
             if hr.is_ok() {
                 Ok(Self {
-                    _needs_uninit: true,
+                    needs_uninit: true,
                 })
             } else if hr == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
                 crate::vprintln!("[COM]    RPC_E_CHANGED_MODE, using existing apartment model");
                 Ok(Self {
-                    _needs_uninit: false,
+                    needs_uninit: false,
                 })
             } else {
                 let e = Error::from(hr);
@@ -43,7 +43,7 @@ impl ComGuard {
 
 impl Drop for ComGuard {
     fn drop(&mut self) {
-        if self._needs_uninit {
+        if self.needs_uninit {
             unsafe {
                 CoUninitialize();
             }
@@ -180,13 +180,13 @@ unsafe fn find_device_by_name(enumerator: &IMMDeviceEnumerator, name: &str) -> R
 
     for i in 0..count {
         let device = unsafe { collection.Item(i)? };
-        if let Ok(friendly) = unsafe { get_device_friendly_name(&device) } {
-            if friendly == name {
-                if found.is_none() {
-                    found = Some(device);
-                } else {
-                    duplicates += 1;
-                }
+        if let Ok(friendly) = unsafe { get_device_friendly_name(&device) }
+            && friendly == name
+        {
+            if found.is_none() {
+                found = Some(device);
+            } else {
+                duplicates += 1;
             }
         }
     }
@@ -202,7 +202,7 @@ unsafe fn find_device_by_name(enumerator: &IMMDeviceEnumerator, name: &str) -> R
     found.ok_or_else(|| {
         windows::core::Error::new(
             windows::Win32::Foundation::E_FAIL,
-            &format!("No audio device found with name \"{}\"", name),
+            format!("No audio device found with name \"{}\"", name),
         )
     })
 }

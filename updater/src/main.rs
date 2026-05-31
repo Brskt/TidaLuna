@@ -415,7 +415,7 @@ fn run() -> Result<()> {
         let release = fetch_release(&client, &args.version)?;
 
         eprintln!("[updater] Downloading manifest...");
-        let (manifest, _manifest_bytes) = download_and_verify_manifest(&client, &release)?;
+        let manifest = download_and_verify_manifest(&client, &release)?;
 
         if manifest.target != TARGET {
             bail!(
@@ -692,12 +692,7 @@ pub(crate) fn is_safe_relative_path(rel: &str, app_dir: &Path) -> bool {
 
 fn probe_exclusive_access(app_dir: &Path) -> Result<()> {
     // Check the exe at root
-    let exe_name = if cfg!(target_os = "windows") {
-        "tidalunar.exe"
-    } else {
-        "tidalunar"
-    };
-    let mut paths_to_check: Vec<std::path::PathBuf> = vec![app_dir.join(exe_name)];
+    let mut paths_to_check: Vec<std::path::PathBuf> = vec![app_dir.join(EXE_NAME)];
 
     // Check CEF DLLs in both old (root) and new (bin/cef/) layouts
     let cef_libs: &[&str] = if cfg!(target_os = "windows") {
@@ -851,7 +846,7 @@ fn verify_manifest_signature(manifest_bytes: &[u8], sig_b64: &str) -> Result<()>
 fn download_and_verify_manifest(
     client: &reqwest::blocking::Client,
     release: &GhRelease,
-) -> Result<(Manifest, Vec<u8>)> {
+) -> Result<Manifest> {
     let manifest_name = format!("manifest-{TARGET}.json");
     let sig_name = format!("manifest-{TARGET}.json.sig");
 
@@ -894,7 +889,7 @@ fn download_and_verify_manifest(
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("invalid manifest JSON")?;
 
-    Ok((manifest, manifest_bytes))
+    Ok(manifest)
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,57 +1027,6 @@ fn write_journal(path: &Path, journal: &Journal) -> Result<()> {
     file.write_all(json.as_bytes())?;
     file.sync_all()?; // fsync
     Ok(())
-}
-
-/// Recover from an interrupted update.
-/// - "pending" journal → rollback: restore .bak files, delete staging + journal
-/// - "committed" journal → cleanup: delete .bak files, delete staging + journal
-#[allow(dead_code)]
-fn recover_journal(app_dir: &Path) -> Result<bool> {
-    let journal_path = app_dir.join(".update-journal.json");
-    if !journal_path.exists() {
-        return Ok(false);
-    }
-
-    let data = fs::read_to_string(&journal_path).context("read journal")?;
-    let journal: Journal = serde_json::from_str(&data).context("parse journal")?;
-
-    match journal.state {
-        JournalState::Pending => {
-            // Rollback: restore .bak → original, remove new files
-            eprintln!("[updater] Recovery: rolling back incomplete update");
-            for jf in &journal.files {
-                let original = app_dir.join(&jf.path);
-                let backup = app_dir.join(&jf.backup);
-                if jf.is_new {
-                    // No original existed - remove the newly installed file
-                    fs::remove_file(&original).ok();
-                } else if backup.exists() {
-                    if original.exists() {
-                        fs::remove_file(&original).ok();
-                    }
-                    fs::rename(&backup, &original).ok();
-                }
-            }
-        }
-        JournalState::Committed => {
-            // Cleanup: remove .bak files
-            eprintln!("[updater] Recovery: cleaning up completed update");
-            for jf in &journal.files {
-                let backup = app_dir.join(&jf.backup);
-                fs::remove_file(&backup).ok();
-            }
-        }
-    }
-
-    // Clean up staging and journal
-    let staging = app_dir.join(".update-staging");
-    if staging.exists() {
-        fs::remove_dir_all(&staging).ok();
-    }
-    fs::remove_file(&journal_path).ok();
-
-    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

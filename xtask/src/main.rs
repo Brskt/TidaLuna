@@ -958,11 +958,9 @@ fn strip_binaries(bundle_dir: &Path) -> Result<(), String> {
 }
 
 fn run_strip(path: &Path, strip_args: &[&str]) -> Result<bool, String> {
-    let path_str = path.to_string_lossy().to_string();
-    let mut args: Vec<&str> = strip_args.to_vec();
-    args.push(&path_str);
     let status = Command::new("strip")
-        .args(&args)
+        .args(strip_args)
+        .arg(path)
         .status()
         .map_err(|e| format!("strip failed for {}: {e}", path.display()))?;
     Ok(status.success())

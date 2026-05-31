@@ -195,7 +195,7 @@ pub struct Player {
     load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-pub(crate) use crate::util::fmt::{format_bytes, format_ms};
+pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
 
 fn http_version_str(v: reqwest::Version) -> &'static str {
     if v == reqwest::Version::HTTP_3 {
@@ -220,6 +220,7 @@ pub(crate) fn cdn_cache_status(resp: &reqwest::Response) -> &str {
 }
 
 pub(crate) fn log_response_headers(resp: &reqwest::Response, prefix: &str) {
+    use std::fmt::Write as _;
     let h = resp.headers();
     let ver = http_version_str(resp.version());
     let ct = h
@@ -236,7 +237,7 @@ pub(crate) fn log_response_headers(resp: &reqwest::Response, prefix: &str) {
         ("via", "via"),
     ] {
         if let Some(val) = h.get(header).and_then(|v| v.to_str().ok()) {
-            info.push_str(&format!(" | {label}={val}"));
+            let _ = write!(info, " | {label}={val}");
         }
     }
     crate::vprintln!("{prefix} {info}");
@@ -294,7 +295,7 @@ fn try_cache_hit(ctx: &LoadContext, track_id: &str) -> LoadStep {
         let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
         crate::vprintln!(
             "[CACHE]  Miss ({}) | lookup: {}",
-            track_id.chars().take(40).collect::<String>(),
+            short_id(track_id, 40),
             format_ms(cache_ms)
         );
         return LoadStep::Miss;
@@ -325,7 +326,7 @@ fn try_cache_hit(ctx: &LoadContext, track_id: &str) -> LoadStep {
     }
     crate::vprintln!(
         "[CACHE]  Hit: {} | {} | read: {} | total: {}",
-        track_id.chars().take(40).collect::<String>(),
+        short_id(track_id, 40),
         format_bytes(data.len() as u64),
         format_ms(cache_ms),
         format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)

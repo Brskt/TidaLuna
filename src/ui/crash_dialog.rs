@@ -5,6 +5,7 @@
 //! trust dialog. The buttons communicate back via crash:// URL navigation
 //! intercepted by this dialog's own RequestHandler.
 
+use super::trust_dialog::escape_html;
 use cef::*;
 use std::cell::RefCell;
 use std::sync::atomic::AtomicBool;
@@ -43,13 +44,6 @@ pub(crate) fn show_crash_dialog(
     let mut task = ShowCrashDialogTask::new(html, sender);
     post_task(ThreadId::UI, Some(&mut task));
     rx
-}
-
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn build_html(reason: &str, error_code: i32, log_path: Option<&std::path::Path>) -> String {

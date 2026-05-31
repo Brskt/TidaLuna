@@ -8,11 +8,6 @@ use tracing::debug;
 
 const MASTER_KEY: &str = "UIlTTEMmmLfGowo/UC60x2H45W6MdGgTRfo/umg4754=";
 
-struct DecryptedKey {
-    key: [u8; 16],
-    nonce: [u8; 8],
-}
-
 #[derive(Clone, Copy)]
 pub struct FlacDecryptor {
     key: [u8; 16],
@@ -20,7 +15,7 @@ pub struct FlacDecryptor {
 }
 
 impl FlacDecryptor {
-    fn decrypt_key_id(key_id_b64: &str) -> anyhow::Result<DecryptedKey> {
+    fn decrypt_key_id(key_id_b64: &str) -> anyhow::Result<Self> {
         let master_key = base64::engine::general_purpose::STANDARD
             .decode(MASTER_KEY)
             .map_err(|e| anyhow::anyhow!("Failed to decode master key: {}", e))?;
@@ -71,7 +66,7 @@ impl FlacDecryptor {
             nonce.len()
         );
 
-        Ok(DecryptedKey { key, nonce })
+        Ok(Self { key, nonce })
     }
 
     pub fn new(encryption_key_b64: &str) -> anyhow::Result<Self> {
@@ -80,12 +75,7 @@ impl FlacDecryptor {
         }
 
         debug!("Decrypting TIDAL key ID");
-        let decrypted = Self::decrypt_key_id(encryption_key_b64)?;
-
-        Ok(Self {
-            key: decrypted.key,
-            nonce: decrypted.nonce,
-        })
+        Self::decrypt_key_id(encryption_key_b64)
     }
 
     fn build_iv_for_offset(&self, byte_offset: u64) -> [u8; 16] {

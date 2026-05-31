@@ -6,7 +6,7 @@ use super::{DecodeCommand, PlayerThread};
 use crate::player::resume::RESUME_MIN_SECONDS;
 use crate::player::{
     DeviceErrorKind, LOAD_SEQ, LoadRequest, PlaybackState, PlayerCommand, PlayerEvent,
-    ResumePolicy, format_ms,
+    ResumePolicy, format_ms, short_id,
 };
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
@@ -147,7 +147,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         crate::vprintln!(
             "[LOAD #{load_gen}] handle_load enter | cached={} | track={}",
             cached,
-            track_id.chars().take(60).collect::<String>()
+            short_id(&track_id, 60)
         );
         let handle_start = std::time::Instant::now();
 
