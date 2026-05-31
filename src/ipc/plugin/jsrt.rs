@@ -29,6 +29,11 @@ fn handle_session_clear() {
     unload_all_user_plugins();
 
     with_state(|state| {
+        // Stop the native player; it runs independent of the renderer, so a
+        // session clear alone won't halt audio on logout.
+        let _ = state.player.stop();
+        state.pending_player_events.clear();
+        state.pending_time_update = None;
         state.captured_token.clear();
         state.token_state = None;
     });
