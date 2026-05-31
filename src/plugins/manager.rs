@@ -88,7 +88,7 @@ impl PluginManager {
 
     /// Generate the JS cleanup code for a plugin (static, no state mutation).
     pub fn generate_unload_js(plugin_id: &str) -> String {
-        let escaped = wrapper::escape_js_for_sq(plugin_id);
+        let escaped = wrapper::escape_js(plugin_id);
         format!(
             "if(window.__pluginUnloads&&window.__pluginUnloads['{escaped}']){{window.__pluginUnloads['{escaped}']()}}"
         )

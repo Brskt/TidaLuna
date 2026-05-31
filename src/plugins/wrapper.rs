@@ -35,11 +35,7 @@
 //!   4. `getCredentials()` / `getAuthHeaders()` removed from `@luna/lib` public API
 
 /// Escape a string for safe embedding in a JS single-quoted string literal.
-pub(super) fn escape_js_for_sq(s: &str) -> String {
-    escape_js(s)
-}
-
-fn escape_js(s: &str) -> String {
+pub(super) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\'', "\\'")
         .replace('\n', "\\n")

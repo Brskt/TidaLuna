@@ -29,8 +29,6 @@ struct SharedState {
     cvar: Condvar,
     /// Bytes written (absolute file offset = base_offset + data.len()).
     written: AtomicU64,
-    base_offset_atomic: AtomicU64,
-    finished_atomic: AtomicBool,
     cancelled_atomic: AtomicBool,
     /// Last cursor position after a successful read (for governor buffer tracking).
     read_cursor: AtomicU64,
@@ -76,8 +74,6 @@ impl RamBuffer {
             }),
             cvar: Condvar::new(),
             written: AtomicU64::new(0),
-            base_offset_atomic: AtomicU64::new(0),
-            finished_atomic: AtomicBool::new(false),
             cancelled_atomic: AtomicBool::new(false),
             read_cursor: AtomicU64::new(0),
             async_notify: tokio::sync::Notify::new(),
@@ -106,8 +102,6 @@ impl RamBuffer {
             }),
             cvar: Condvar::new(),
             written: AtomicU64::new(total_len),
-            base_offset_atomic: AtomicU64::new(0),
-            finished_atomic: AtomicBool::new(true),
             cancelled_atomic: AtomicBool::new(false),
             read_cursor: AtomicU64::new(0),
             async_notify: tokio::sync::Notify::new(),
@@ -218,7 +212,6 @@ impl Read for RamBuffer {
                     buf_start
                 );
                 inner.finished = false;
-                self.shared.finished_atomic.store(false, Relaxed);
             }
 
             // Data not available - determine action:
@@ -333,7 +326,6 @@ impl RamBufferWriter {
     pub fn finish(&self) {
         let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.finished = true;
-        self.shared.finished_atomic.store(true, Relaxed);
         self.shared.cvar.notify_all();
         self.shared.async_notify.notify_one();
     }
@@ -342,7 +334,6 @@ impl RamBufferWriter {
         let mut inner = self.shared.inner.lock().expect("RamBuffer lock poisoned");
         inner.error = Some(msg);
         inner.finished = true;
-        self.shared.finished_atomic.store(true, Relaxed);
         self.shared.cvar.notify_all();
         self.shared.async_notify.notify_one();
     }
@@ -365,9 +356,7 @@ impl RamBufferWriter {
         inner.base_offset = new_offset;
         inner.finished = false;
         inner.error = None;
-        self.shared.base_offset_atomic.store(new_offset, Relaxed);
         self.shared.written.store(new_offset, Relaxed);
-        self.shared.finished_atomic.store(false, Relaxed);
         self.shared.cvar.notify_all();
     }
 

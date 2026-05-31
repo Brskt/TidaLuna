@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cef::*;
-use tokio::sync::Mutex as TokioMutex;
 
 use crate::app_state::{IpcCallback, with_state};
 use crate::connect::controller::session::ControllerSessionEvent;
@@ -99,8 +98,6 @@ pub(super) fn send_device_cmd(cmd: serde_json::Value, callback: IpcCallback) {
     } else {
         callback.lock().unwrap().failure(500, "No runtime");
     }
-    // Silence unused warning when dependencies shift.
-    let _ = TokioMutex::<()>::new(());
 }
 
 // ── Event forwarding (controller → frontend) ─────────────────────────

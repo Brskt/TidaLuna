@@ -237,7 +237,6 @@ impl QueueManager {
             {
                 crate::vprintln!("[connect::queue] POST repeatmode failed: {e}");
             }
-            let _ = qs;
         }
 
         let notification = QueueNotification::NotifyQueueItemsChanged {
@@ -274,7 +273,6 @@ impl QueueManager {
             {
                 crate::vprintln!("[connect::queue] POST shuffle failed: {e}");
             }
-            let _ = qs;
         }
 
         let notification = QueueNotification::NotifyQueueItemsChanged {

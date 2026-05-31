@@ -66,7 +66,7 @@ impl ConnectReceiver {
 
         // Services
         let session_mgr = ReceiverSession::new(session_tx);
-        let bridge = SpeakerBridge::new(bridge_tx.clone());
+        let bridge = SpeakerBridge::new();
         let playback_ctrl = PlaybackController::new(bridge, playback_tx);
         let queue_mgr = QueueManager::new(reqwest::Client::new(), queue_tx);
         let client_comm = ClientCommunicator::new(server);

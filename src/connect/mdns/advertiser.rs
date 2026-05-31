@@ -31,18 +31,13 @@ pub(crate) struct MdnsAdvertiser {
 }
 
 impl MdnsAdvertiser {
-    /// Create with an externally-owned daemon (shared with browser).
-    pub fn with_daemon(daemon: Arc<ServiceDaemon>) -> Self {
-        Self {
-            daemon,
-            registered_fullname: None,
-        }
-    }
-
     /// Create with its own daemon.
     pub fn new() -> anyhow::Result<Self> {
         let daemon = ServiceDaemon::new()?;
-        Ok(Self::with_daemon(Arc::new(daemon)))
+        Ok(Self {
+            daemon: Arc::new(daemon),
+            registered_fullname: None,
+        })
     }
 
     /// Start advertising. If already active, stops first.

@@ -1,5 +1,3 @@
-use tokio::sync::mpsc;
-
 use crate::app_state::with_state;
 use crate::connect::types::{MediaInfo, PlayerState};
 
@@ -32,8 +30,14 @@ pub(crate) enum BridgeEvent {
 /// Translates Connect commands into Player API calls via `with_state`.
 pub(crate) struct SpeakerBridge;
 
+impl Default for SpeakerBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpeakerBridge {
-    pub fn new(_event_tx: mpsc::Sender<BridgeEvent>) -> Self {
+    pub fn new() -> Self {
         Self
     }
 
