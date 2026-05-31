@@ -273,10 +273,10 @@ wrap_client! {
 /// Open an external http(s) URL in the OS browser; other schemes are dropped.
 fn open_external_in_os(url: &str) {
     if url.starts_with("http://") || url.starts_with("https://") {
-        crate::vprintln!("[NAV]    External -> OS browser: {}", &url[..url.len().min(120)]);
+        crate::vprintln!("[NAV]    External -> OS browser: {}", crate::util::truncate_str(url, 120));
         open_in_os(url);
     } else {
-        crate::vprintln!("[NAV]    Blocked external navigation: {}", &url[..url.len().min(120)]);
+        crate::vprintln!("[NAV]    Blocked external navigation: {}", crate::util::truncate_str(url, 120));
     }
 }
 
@@ -304,11 +304,11 @@ wrap_life_span_handler! {
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
             let url_str = target_url.as_ref().map(|u| u.to_string()).unwrap_or_default();
-            crate::vprintln!("[POPUP]  on_before_popup: {}", &url_str[..url_str.len().min(120)]);
+            crate::vprintln!("[POPUP]  on_before_popup: {}", crate::util::truncate_str(&url_str, 120));
             if target_url.is_some() {
                 let kind = PageKind::classify(&url_str);
                 if kind == PageKind::AuthHost {
-                    crate::vprintln!("[AUTH]   Opening auth popup: {}", &url_str[..url_str.len().min(120)]);
+                    crate::vprintln!("[AUTH]   Opening auth popup: {}", crate::util::truncate_str(&url_str, 120));
                     if let Some(wi) = _window_info {
                         wi.window_name = CefString::from("TidaLunar - Login");
                         wi.bounds = cef::Rect { x: 100, y: 100, width: 500, height: 700 };
@@ -385,7 +385,7 @@ wrap_load_handler! {
                 let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
                 let policy = NavigationPolicy::for_page(PageKind::classify(&url));
                 if policy.inject_init_script {
-                    crate::vprintln!("[LOAD]   on_load_start init_script: {}", &url[..url.len().min(80)]);
+                    crate::vprintln!("[LOAD]   on_load_start init_script: {}", crate::util::truncate_str(&url, 80));
                     exec_js_on_frame(frame, &self.init_script);
                 }
             }
@@ -410,7 +410,7 @@ wrap_load_handler! {
                 let kind = PageKind::classify(&url);
                 let policy = NavigationPolicy::for_page(kind);
                 if kind == PageKind::AuthHost {
-                    crate::vprintln!("[LOAD]   Auth page loaded: {}", &url[..url.len().min(100)]);
+                    crate::vprintln!("[LOAD]   Auth page loaded: {}", crate::util::truncate_str(&url, 100));
                 }
                 if !policy.inject_bundle {
                     return;
@@ -546,7 +546,7 @@ wrap_request_handler! {
             crate::vprintln!(
                 "[NAV]    on_before_browse: is_redirect={} url={}",
                 _is_redirect,
-                &url[..url.len().min(200)]
+                crate::util::truncate_str(&url, 200)
             );
 
             if kind == PageKind::TidalCallback {
@@ -650,7 +650,7 @@ wrap_request_handler! {
                 {
                     crate::vprintln!(
                         "[EXFIL]  BLOCKED sendBeacon to {}",
-                        &url[..url.len().min(80)]
+                        crate::util::truncate_str(&url, 80)
                     );
                     return Some(crate::ui::token_filter::ExfilBlockHandler::new());
                 }

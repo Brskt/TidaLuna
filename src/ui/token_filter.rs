@@ -54,10 +54,15 @@ pub(crate) fn should_rewrite_token(url: &str) -> bool {
 }
 
 pub(crate) fn generate_opaque() -> String {
+    use std::fmt::Write;
     let mut buf = [0u8; 16];
     getrandom::fill(&mut buf).expect("getrandom failed");
-    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{OPAQUE_PREFIX}{hex}")
+    let mut out = String::with_capacity(OPAQUE_PREFIX.len() + buf.len() * 2);
+    out.push_str(OPAQUE_PREFIX);
+    for b in buf {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 pub(crate) fn is_opaque(value: &str) -> bool {
@@ -271,7 +276,7 @@ fn inject_refresh_token(req: &mut Request, url: &str) {
             && ts.previous_valid_until.is_none_or(|until| now <= until)
             && rt_value == prev.opaque_rt
         {
-            return Some(ts.current.refresh_token.clone());
+            return Some(prev.refresh_token.clone());
         }
         None
     })
@@ -525,7 +530,7 @@ fn process_token_response(body: &[u8]) -> ProcessResult {
 
     crate::ipc::plugin::scrub_pkce_verifier();
 
-    let masked = &at[..at.len().min(12)];
+    let masked = crate::util::truncate_str(at, 12);
     crate::vprintln!(
         "[AUTH]   ResponseFilter captured token ({}... {} chars)",
         masked,

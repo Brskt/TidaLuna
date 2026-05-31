@@ -145,7 +145,7 @@ impl NativeRuntime {
                     Err(_) => {
                         crate::vprintln!(
                             "[BUN]    Invalid JSON from stdout: {}",
-                            &line[..line.len().min(200)]
+                            crate::util::truncate_str(&line, 200)
                         );
                         continue;
                     }
@@ -222,7 +222,20 @@ impl NativeRuntime {
             Err(e) => return Err(format!("pending lock poisoned: {e}")),
         }
 
-        let line = serde_json::to_string(&cmd).unwrap_or_default();
+        let line = match serde_json::to_string(&cmd) {
+            Ok(line) => line,
+            Err(e) => {
+                match self.pending.lock() {
+                    Ok(mut map) => {
+                        map.remove(&id);
+                    }
+                    Err(e) => {
+                        crate::vprintln!("[NATIVE] pending lock poisoned during cleanup: {e}");
+                    }
+                }
+                return Err(format!("failed to serialize command: {e}"));
+            }
+        };
         if self.stdin_tx.send(line).is_err() {
             match self.pending.lock() {
                 Ok(mut map) => {

@@ -5,8 +5,7 @@ use cef::ImplCookieManager;
 fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
     // Format: "name=value; Path=/; Domain=.tidal.com; Secure; HttpOnly; ..."
     let mut parts = header.splitn(2, ';');
-    let name_value = parts.next()?;
-    let (name, value) = name_value.split_once('=')?;
+    let (name, value) = parts.next()?.split_once('=')?;
     let name = name.trim();
     let value = value.trim();
     if name.is_empty() {
@@ -15,24 +14,23 @@ fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
 
     let mut domain = String::new();
     let mut path = String::from("/");
-    let mut secure = 0;
-    let mut httponly = 0;
+    let mut secure = false;
+    let mut httponly = false;
 
     if let Some(attrs) = parts.next() {
         for attr in attrs.split(';') {
             let attr = attr.trim();
             if let Some((k, v)) = attr.split_once('=') {
-                match k.trim().to_lowercase().as_str() {
-                    "domain" => domain = v.trim().to_string(),
-                    "path" => path = v.trim().to_string(),
-                    _ => {}
+                let k = k.trim();
+                if k.eq_ignore_ascii_case("domain") {
+                    domain = v.trim().to_string();
+                } else if k.eq_ignore_ascii_case("path") {
+                    path = v.trim().to_string();
                 }
-            } else {
-                match attr.to_lowercase().as_str() {
-                    "secure" => secure = 1,
-                    "httponly" => httponly = 1,
-                    _ => {}
-                }
+            } else if attr.eq_ignore_ascii_case("secure") {
+                secure = true;
+            } else if attr.eq_ignore_ascii_case("httponly") {
+                httponly = true;
             }
         }
     }
@@ -43,8 +41,8 @@ fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
         value: cef::CefString::from(value),
         domain: cef::CefString::from(domain.as_str()),
         path: cef::CefString::from(path.as_str()),
-        secure,
-        httponly,
+        secure: secure.into(),
+        httponly: httponly.into(),
         creation: cef::Basetime { val: 0 },
         last_access: cef::Basetime { val: 0 },
         has_expires: 0,
@@ -100,7 +98,7 @@ fn reject_non_tidal(url: &str, channel: &str, callback: &IpcCallback) -> bool {
         crate::vprintln!(
             "[PROXY]  REJECTED {} to non-Tidal URL: {}",
             channel,
-            &url[..url.len().min(80)]
+            crate::util::truncate_str(url, 80)
         );
         ipc_callback_err(callback, 403, &format!("{channel}: non-Tidal URL rejected"));
         return true;
@@ -200,11 +198,12 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
     };
 
     let rewrite_auth = crate::ui::token_filter::should_rewrite_token(&url);
-    if let Some(headers_str) = opts.get("headers").and_then(|v| v.as_str())
-        && let Ok(headers) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_str)
-    {
-        for (key, value) in &headers {
+    let headers_map: Option<serde_json::Map<String, serde_json::Value>> = opts
+        .get("headers")
+        .and_then(|v| v.as_str())
+        .and_then(|h| serde_json::from_str(h).ok());
+    if let Some(headers) = &headers_map {
+        for (key, value) in headers {
             if rewrite_auth
                 && key.eq_ignore_ascii_case("authorization")
                 && value
@@ -238,34 +237,25 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
         req = req.body(body);
     }
 
-    let has_auth = opts
-        .get("headers")
-        .and_then(|v| v.as_str())
-        .and_then(|h| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(h).ok())
-        .map(|map| map.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
-        .unwrap_or(false);
+    let has_auth = headers_map
+        .as_ref()
+        .is_some_and(|map| map.keys().any(|k| k.eq_ignore_ascii_case("authorization")));
     if !has_auth && crate::ui::token_filter::needs_auto_injection(&url) {
         let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
         if !token.is_empty() {
             req = req.header("Authorization", format!("Bearer {token}"));
             crate::vprintln!(
                 "[PROXY]  Injected captured token for {}",
-                &url[..url.len().min(80)]
+                crate::util::truncate_str(&url, 80)
             );
         }
     } else if has_auth
-        && crate::ui::token_filter::should_rewrite_token(&url)
-        && let Some(auth_val) = opts
-            .get("headers")
-            .and_then(|v| v.as_str())
-            .and_then(|h| {
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(h).ok()
-            })
-            .and_then(|map| {
-                map.iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-                    .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
-            })
+        && rewrite_auth
+        && let Some(auth_val) = headers_map.as_ref().and_then(|map| {
+            map.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                .and_then(|(_, v)| v.as_str())
+        })
         && let Some(opaque) = auth_val.strip_prefix("Bearer ")
         && crate::ui::token_filter::is_opaque(opaque)
     {
@@ -319,7 +309,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                 crate::vprintln!(
                     "[PROXY]  Mirroring {} Set-Cookie header(s) for {}",
                     set_cookies.len(),
-                    &url[..url.len().min(80)]
+                    crate::util::truncate_str(&url, 80)
                 );
                 if let Some(cm) = cef::cookie_manager_get_global_manager(None) {
                     let cef_url = cef::CefString::from(url.as_str());
@@ -337,9 +327,9 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                 crate::vprintln!(
                     "[PROXY]  {} {} auth={} body={}",
                     status,
-                    &url[..url.len().min(200)],
+                    crate::util::truncate_str(&url, 200),
                     has_auth,
-                    &body[..body.len().min(400)]
+                    crate::util::truncate_str(&body, 400)
                 );
             }
             let body = if is_token_endpoint {
@@ -395,7 +385,7 @@ fn proxy_rewrite_refresh_body(body: &str) -> String {
             && ts.previous_valid_until.is_none_or(|until| now <= until)
             && rt_value == prev.opaque_rt
         {
-            return Some(ts.current.refresh_token.clone());
+            return Some(prev.refresh_token.clone());
         }
         None
     })

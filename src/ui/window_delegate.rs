@@ -304,8 +304,10 @@ wrap_window_delegate! {
             }
             let bv = self.browser_view.borrow();
             let Some(bv) = bv.as_ref() else { return 1; };
-            if let Some(browser) = bv.browser() {
-                browser.host().unwrap().try_close_browser()
+            if let Some(browser) = bv.browser()
+                && let Some(host) = browser.host()
+            {
+                host.try_close_browser()
             } else {
                 1
             }

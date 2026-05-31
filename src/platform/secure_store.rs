@@ -33,7 +33,7 @@ pub(crate) enum StoreError {
 }
 
 pub(crate) fn save(data_dir: &Path, state: &StoredTokenState) -> Result<(), StoreError> {
-    let json = serde_json::to_vec(state).map_err(|_| StoreError::Backend)?;
+    let json = serde_json::to_vec(state).map_err(|_| StoreError::Corrupt)?;
     save_platform(data_dir, &json)
 }
 

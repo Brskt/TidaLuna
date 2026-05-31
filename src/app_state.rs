@@ -23,7 +23,7 @@ impl std::fmt::Display for IpcMessage {
             }
             let s = arg.to_string();
             if s.len() > 200 {
-                write!(f, "{}...({} chars)", &s[..200], s.len())?;
+                write!(f, "{}...({} chars)", crate::util::truncate_str(&s, 200), s.len())?;
             } else {
                 write!(f, "{s}")?;
             }
@@ -105,11 +105,11 @@ pub(crate) fn eval_js(js: &str) -> bool {
     }
 }
 
+const IPC_EMIT_PREFIX: &str =
+    "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__(";
+
 pub(crate) fn emit_ipc_event(channel: &str) {
-    let js = format!(
-        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}');",
-        channel.replace('\'', "\\'")
-    );
+    let js = format!("{IPC_EMIT_PREFIX}'{}');", channel.replace('\'', "\\'"));
     let _ = eval_js(&js);
 }
 
@@ -119,11 +119,7 @@ pub(crate) fn emit_ipc_event_with_args(channel: &str, args: &[&str]) {
         .iter()
         .map(|a| format!("'{}'", a.replace('\'', "\\'")))
         .collect();
-    let js = format!(
-        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}',{});",
-        escaped_channel,
-        args_js.join(",")
-    );
+    let js = format!("{IPC_EMIT_PREFIX}'{}',{});", escaped_channel, args_js.join(","));
     let _ = eval_js(&js);
 }
 
@@ -132,10 +128,7 @@ pub(crate) fn emit_ipc_event_with_data(channel: &str, data: &impl serde::Seriali
         Ok(j) => j,
         Err(_) => return,
     };
-    let js = format!(
-        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}',{json});",
-        channel.replace('\'', "\\'")
-    );
+    let js = format!("{IPC_EMIT_PREFIX}'{}',{json});", channel.replace('\'', "\\'"));
     let _ = eval_js(&js);
 }
 

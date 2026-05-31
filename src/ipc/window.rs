@@ -119,7 +119,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 let allowed = crate::app_state::is_safe_open_url(url)
                     && matches!(kind, crate::ui::nav::PageKind::AuthHost);
                 if allowed {
-                    crate::vprintln!("[AUTH]   navigate_self → {}", &url[..url.len().min(120)]);
+                    crate::vprintln!("[AUTH]   navigate_self → {}", crate::util::truncate_str(url, 120));
                     let browser = with_state(|state| state.browser.clone());
                     if let Some(Some(browser)) = browser
                         && let Some(frame) = browser.main_frame()

@@ -81,7 +81,7 @@ async fn do_refresh(refresh_token: String, client_id: String) {
         crate::vprintln!(
             "[AUTH]   Proactive refresh: {} {}",
             status,
-            &resp_body[..resp_body.len().min(200)]
+            crate::util::truncate_str(&resp_body, 200)
         );
         return;
     }
@@ -199,7 +199,7 @@ async fn do_refresh(refresh_token: String, client_id: String) {
     );
     crate::app_state::eval_js(&js);
 
-    let masked = &at[..at.len().min(12)];
+    let masked = crate::util::truncate_str(&at, 12);
     crate::vprintln!(
         "[AUTH]   Proactive refresh complete ({}... {} chars) - opaques pushed to SDK",
         masked,

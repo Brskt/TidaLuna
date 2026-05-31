@@ -18,7 +18,7 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
             crate::vprintln!(
                 "[PLUGIN:FETCH] BLOCKED token exfiltration from '{}' to {}",
                 plugin_id,
-                &url[..url.len().min(80)]
+                crate::util::truncate_str(&url, 80)
             );
             ipc_callback_err(&callback, 403, "plugin.fetch: request blocked");
             return;

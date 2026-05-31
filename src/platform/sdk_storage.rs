@@ -156,19 +156,21 @@ pub(crate) fn read_sdk_credentials(leveldb_path: &Path) -> ReadSdkResult {
         return ReadSdkResult::Corrupt;
     }
 
-    let mut iter = keys.into_iter().map(|r| match r {
-        ReadKeyResult::Ok(bytes) => bytes,
-        _ => unreachable!(),
-    });
-    let salt_bytes = iter.next().unwrap();
-    let counter_bytes = iter.next().unwrap();
-    let wrapped_bytes = iter.next().unwrap();
-    let data_bytes = iter.next().unwrap();
-
-    let Some(salt) = try_into_array::<SALT_LEN>(&salt_bytes) else {
+    let [salt_key, counter_key, wrapped_key, data_key] = keys;
+    let (
+        ReadKeyResult::Ok(salt_bytes),
+        ReadKeyResult::Ok(counter_bytes),
+        ReadKeyResult::Ok(wrapped_bytes),
+        ReadKeyResult::Ok(data_bytes),
+    ) = (salt_key, counter_key, wrapped_key, data_key)
+    else {
         return ReadSdkResult::Corrupt;
     };
-    let Some(counter) = try_into_array::<COUNTER_LEN>(&counter_bytes) else {
+
+    let Ok(salt) = <[u8; SALT_LEN]>::try_from(salt_bytes.as_slice()) else {
+        return ReadSdkResult::Corrupt;
+    };
+    let Ok(counter) = <[u8; COUNTER_LEN]>::try_from(counter_bytes.as_slice()) else {
         return ReadSdkResult::Corrupt;
     };
 
@@ -257,10 +259,6 @@ pub(crate) fn rewrite_sdk_credentials(
     )?;
 
     Some(())
-}
-
-fn try_into_array<const N: usize>(slice: &[u8]) -> Option<[u8; N]> {
-    slice.try_into().ok()
 }
 
 enum OpenResult {

@@ -1,15 +1,12 @@
 use std::sync::LazyLock;
 use time::OffsetDateTime;
 
-static LOG_LEVEL: LazyLock<u8> = LazyLock::new(|| match std::env::var("LOGS") {
-    Ok(v) => match v.as_str() {
-        "3" => 3,
-        "2" => 2,
-        "1" => 1,
-        "0" => 0,
-        _ => 0,
-    },
-    Err(_) => 0,
+static LOG_LEVEL: LazyLock<u8> = LazyLock::new(|| {
+    std::env::var("LOGS")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|&level| level <= 3)
+        .unwrap_or(0)
 });
 
 #[inline]
