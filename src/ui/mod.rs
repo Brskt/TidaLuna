@@ -1,5 +1,6 @@
 mod app_bootstrap;
 pub(crate) mod app_window;
+pub(crate) mod buffering_filter;
 mod client;
 pub(crate) mod crash_dialog;
 pub(crate) mod csp_filter;

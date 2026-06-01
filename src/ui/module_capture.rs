@@ -7,13 +7,14 @@
 //! no blob eval, no double-run; any parse/validation miss falls back to bundled
 //! React. Mirrors the buffering/dual-handler shape of `csp_filter`.
 
-use std::cell::RefCell;
 use std::path::Path;
+use std::sync::Arc;
 
 use cef::*;
 use oxc::ast::ast::*;
 
 use crate::plugins::transpile::module_export_name;
+use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
 use crate::ui::token_filter::userfree_to_string;
 
 /// Map a TIDAL asset URL to the module id plugins import, or `None` if the chunk
@@ -133,116 +134,6 @@ fn export_default_name(kind: &ExportDefaultDeclarationKind) -> Option<String> {
     }
 }
 
-// --- Response filter (buffers the chunk, appends the capture call at EOF) ---
-
-#[derive(Clone)]
-enum FilterState {
-    Accumulating(Vec<u8>),
-    Emitting { data: Vec<u8>, offset: usize },
-    Done,
-}
-
-wrap_response_filter! {
-    pub(super) struct CaptureFilter {
-        module_id: String,
-        state: RefCell<FilterState>,
-    }
-
-    impl ResponseFilter {
-        fn init_filter(&self) -> ::std::os::raw::c_int {
-            1
-        }
-
-        fn filter(
-            &self,
-            data_in: Option<&mut Vec<u8>>,
-            data_in_read: Option<&mut usize>,
-            data_out: Option<&mut Vec<u8>>,
-            data_out_written: Option<&mut usize>,
-        ) -> ResponseFilterStatus {
-            let mut state = self.state.borrow_mut();
-            let out_written = match data_out_written {
-                Some(w) => w,
-                None => return ResponseFilterStatus::ERROR,
-            };
-            *out_written = 0;
-
-            match &mut *state {
-                FilterState::Accumulating(buf) => {
-                    if let Some(input) = data_in {
-                        if let Some(read) = data_in_read {
-                            *read = input.len();
-                        }
-                        buf.extend_from_slice(input);
-                        ResponseFilterStatus::NEED_MORE_DATA
-                    } else {
-                        let accumulated = std::mem::take(buf);
-                        // oxc needs &str, but a non-UTF-8 body (a CDN/SW serving
-                        // compressed bytes despite the identity header) must pass
-                        // through byte-identical, not get lossy-mangled into a
-                        // corrupt chunk. Strict-decode; emit the original on miss.
-                        let modified = match std::str::from_utf8(&accumulated) {
-                            Ok(js) => append_capture(js, &self.module_id).into_bytes(),
-                            Err(_) => accumulated,
-                        };
-                        *state = FilterState::Emitting {
-                            data: modified,
-                            offset: 0,
-                        };
-                        drop(state);
-                        self.emit(data_out, out_written)
-                    }
-                }
-                FilterState::Emitting { .. } => {
-                    if let Some(input) = data_in
-                        && let Some(read) = data_in_read
-                    {
-                        *read = input.len();
-                    }
-                    drop(state);
-                    self.emit(data_out, out_written)
-                }
-                FilterState::Done => ResponseFilterStatus::DONE,
-            }
-        }
-    }
-}
-
-impl CaptureFilter {
-    fn emit(
-        &self,
-        data_out: Option<&mut Vec<u8>>,
-        out_written: &mut usize,
-    ) -> ResponseFilterStatus {
-        let mut state = self.state.borrow_mut();
-        let (data, offset) = match &mut *state {
-            FilterState::Emitting { data, offset } => (data, offset),
-            _ => return ResponseFilterStatus::ERROR,
-        };
-
-        let remaining = &data[*offset..];
-        if remaining.is_empty() {
-            *state = FilterState::Done;
-            return ResponseFilterStatus::DONE;
-        }
-
-        let Some(out_buf) = data_out else {
-            return ResponseFilterStatus::NEED_MORE_DATA;
-        };
-        let to_write = remaining.len().min(out_buf.len());
-        out_buf[..to_write].copy_from_slice(&remaining[..to_write]);
-        *out_written = to_write;
-        *offset += to_write;
-
-        if *offset >= data.len() {
-            *state = FilterState::Done;
-            ResponseFilterStatus::DONE
-        } else {
-            ResponseFilterStatus::NEED_MORE_DATA
-        }
-    }
-}
-
 // --- Request handler that attaches the capture filter to React chunks ---
 
 wrap_resource_request_handler! {
@@ -287,10 +178,15 @@ wrap_resource_request_handler! {
                 .as_ref()
                 .map(|r| userfree_to_string(&r.url()))
                 .unwrap_or_default();
-            let module_id = target_module_id(&url)?;
-            Some(CaptureFilter::new(
-                module_id.to_string(),
-                RefCell::new(FilterState::Accumulating(Vec::with_capacity(128 * 1024))),
+            let module_id = target_module_id(&url)?.to_string();
+            Some(new_buffering_filter(
+                128 * 1024,
+                Arc::new(move |body| {
+                    FilterOutcome::Emit(match std::str::from_utf8(&body) {
+                        Ok(js) => append_capture(js, &module_id).into_bytes(),
+                        Err(_) => body,
+                    })
+                }),
             ))
         }
     }

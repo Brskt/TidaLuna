@@ -1,5 +1,7 @@
 use cef::*;
-use std::cell::RefCell;
+use std::sync::Arc;
+
+use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
 
 /// Convert a CefStringUserfree to String without the crate's eprintln on null.
 pub(crate) fn userfree_to_string(userfree: &CefStringUserfreeUtf16) -> String {
@@ -130,9 +132,14 @@ wrap_resource_request_handler! {
             let url_cef = request?.url();
             let url = userfree_to_string(&url_cef);
             if crate::ui::nav::is_token_endpoint(&url) {
-                Some(TokenResponseFilter::new(RefCell::new(
-                    FilterState::Accumulating(Vec::new()),
-                )))
+                Some(new_buffering_filter(
+                    0,
+                    Arc::new(|body| match process_token_response(&body) {
+                        ProcessResult::Modified(v) => FilterOutcome::Emit(v),
+                        ProcessResult::Passthrough => FilterOutcome::Emit(body),
+                        ProcessResult::Error => FilterOutcome::Drop,
+                    }),
+                ))
             } else {
                 None
             }
@@ -311,123 +318,6 @@ fn inject_refresh_token(req: &mut Request, url: &str) {
         el.set_to_bytes(bytes.len(), bytes.as_ptr());
         new_pd.add_element(Some(&mut el));
         req.set_post_data(Some(&mut new_pd));
-    }
-}
-
-#[derive(Clone)]
-enum FilterState {
-    Accumulating(Vec<u8>),
-    Emitting { data: Vec<u8>, offset: usize },
-    Done,
-    Error,
-}
-
-wrap_response_filter! {
-    pub(super) struct TokenResponseFilter {
-        state: RefCell<FilterState>,
-    }
-
-    impl ResponseFilter {
-        fn init_filter(&self) -> ::std::os::raw::c_int {
-            1
-        }
-
-        fn filter(
-            &self,
-            data_in: Option<&mut Vec<u8>>,
-            data_in_read: Option<&mut usize>,
-            data_out: Option<&mut Vec<u8>>,
-            data_out_written: Option<&mut usize>,
-        ) -> ResponseFilterStatus {
-            let mut state = self.state.borrow_mut();
-            let out_written = match data_out_written {
-                Some(w) => w,
-                None => return ResponseFilterStatus::ERROR,
-            };
-            *out_written = 0;
-
-            match &mut *state {
-                FilterState::Accumulating(buf) => {
-                    if let Some(input) = data_in {
-                        if let Some(read) = data_in_read {
-                            *read = input.len();
-                        }
-                        buf.extend_from_slice(input);
-                        ResponseFilterStatus::NEED_MORE_DATA
-                    } else {
-                        let accumulated = std::mem::take(buf);
-                        match process_token_response(&accumulated) {
-                            ProcessResult::Modified(modified) => {
-                                *state = FilterState::Emitting {
-                                    data: modified,
-                                    offset: 0,
-                                };
-                                drop(state);
-                                self.emit(data_out, out_written)
-                            }
-                            ProcessResult::Passthrough => {
-                                *state = FilterState::Emitting {
-                                    data: accumulated,
-                                    offset: 0,
-                                };
-                                drop(state);
-                                self.emit(data_out, out_written)
-                            }
-                            ProcessResult::Error => {
-                                *state = FilterState::Error;
-                                ResponseFilterStatus::ERROR
-                            }
-                        }
-                    }
-                }
-                FilterState::Emitting { .. } => {
-                    if let Some(input) = data_in
-                        && let Some(read) = data_in_read
-                    {
-                        *read = input.len();
-                    }
-                    drop(state);
-                    self.emit(data_out, out_written)
-                }
-                FilterState::Done => ResponseFilterStatus::DONE,
-                FilterState::Error => ResponseFilterStatus::ERROR,
-            }
-        }
-    }
-}
-
-impl TokenResponseFilter {
-    fn emit(
-        &self,
-        data_out: Option<&mut Vec<u8>>,
-        out_written: &mut usize,
-    ) -> ResponseFilterStatus {
-        let mut state = self.state.borrow_mut();
-        let (data, offset) = match &mut *state {
-            FilterState::Emitting { data, offset } => (data, offset),
-            _ => return ResponseFilterStatus::ERROR,
-        };
-
-        let remaining = &data[*offset..];
-        if remaining.is_empty() {
-            *state = FilterState::Done;
-            return ResponseFilterStatus::DONE;
-        }
-
-        let Some(out_buf) = data_out else {
-            return ResponseFilterStatus::NEED_MORE_DATA;
-        };
-        let to_write = remaining.len().min(out_buf.len());
-        out_buf[..to_write].copy_from_slice(&remaining[..to_write]);
-        *out_written = to_write;
-        *offset += to_write;
-
-        if *offset >= data.len() {
-            *state = FilterState::Done;
-            ResponseFilterStatus::DONE
-        } else {
-            ResponseFilterStatus::NEED_MORE_DATA
-        }
     }
 }
 

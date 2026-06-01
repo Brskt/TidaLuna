@@ -1,19 +1,13 @@
 use cef::*;
-use std::cell::RefCell;
+use std::sync::Arc;
 
+use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
 use crate::ui::token_filter::userfree_to_string;
 
 // TIDAL delivers its CSP as a <meta http-equiv> tag, not a header. Renaming the
 // attribute makes Chromium stop enforcing it, unblocking plugin font/image loads.
 const CSP_NEEDLE: &[u8] = b"<meta http-equiv=\"Content-Security-Policy\"";
 const CSP_REPLACEMENT: &[u8] = b"<meta name=\"LunaWuzHere\"";
-
-#[derive(Clone)]
-enum FilterState {
-    Accumulating(Vec<u8>),
-    Emitting { data: Vec<u8>, offset: usize },
-    Done,
-}
 
 // Catches the browser-less service-worker precache fetch of the shell, which the
 // browser-level handler never sees. Browser-associated doc loads are handled there.
@@ -88,102 +82,10 @@ wrap_resource_request_handler! {
             if !mime.starts_with("text/html") {
                 return None;
             }
-            Some(CspStripFilter::new(RefCell::new(
-                FilterState::Accumulating(Vec::with_capacity(32 * 1024)),
-            )))
-        }
-    }
-}
-
-wrap_response_filter! {
-    pub(super) struct CspStripFilter {
-        state: RefCell<FilterState>,
-    }
-
-    impl ResponseFilter {
-        fn init_filter(&self) -> ::std::os::raw::c_int {
-            1
-        }
-
-        fn filter(
-            &self,
-            data_in: Option<&mut Vec<u8>>,
-            data_in_read: Option<&mut usize>,
-            data_out: Option<&mut Vec<u8>>,
-            data_out_written: Option<&mut usize>,
-        ) -> ResponseFilterStatus {
-            let mut state = self.state.borrow_mut();
-            let out_written = match data_out_written {
-                Some(w) => w,
-                None => return ResponseFilterStatus::ERROR,
-            };
-            *out_written = 0;
-
-            match &mut *state {
-                FilterState::Accumulating(buf) => {
-                    if let Some(input) = data_in {
-                        if let Some(read) = data_in_read {
-                            *read = input.len();
-                        }
-                        buf.extend_from_slice(input);
-                        ResponseFilterStatus::NEED_MORE_DATA
-                    } else {
-                        let accumulated = std::mem::take(buf);
-                        let modified = strip_csp_meta(&accumulated);
-                        *state = FilterState::Emitting {
-                            data: modified,
-                            offset: 0,
-                        };
-                        drop(state);
-                        self.emit(data_out, out_written)
-                    }
-                }
-                FilterState::Emitting { .. } => {
-                    if let Some(input) = data_in
-                        && let Some(read) = data_in_read
-                    {
-                        *read = input.len();
-                    }
-                    drop(state);
-                    self.emit(data_out, out_written)
-                }
-                FilterState::Done => ResponseFilterStatus::DONE,
-            }
-        }
-    }
-}
-
-impl CspStripFilter {
-    fn emit(
-        &self,
-        data_out: Option<&mut Vec<u8>>,
-        out_written: &mut usize,
-    ) -> ResponseFilterStatus {
-        let mut state = self.state.borrow_mut();
-        let (data, offset) = match &mut *state {
-            FilterState::Emitting { data, offset } => (data, offset),
-            _ => return ResponseFilterStatus::ERROR,
-        };
-
-        let remaining = &data[*offset..];
-        if remaining.is_empty() {
-            *state = FilterState::Done;
-            return ResponseFilterStatus::DONE;
-        }
-
-        let Some(out_buf) = data_out else {
-            return ResponseFilterStatus::NEED_MORE_DATA;
-        };
-        let to_write = remaining.len().min(out_buf.len());
-        out_buf[..to_write].copy_from_slice(&remaining[..to_write]);
-        *out_written = to_write;
-        *offset += to_write;
-
-        if *offset >= data.len() {
-            *state = FilterState::Done;
-            ResponseFilterStatus::DONE
-        } else {
-            ResponseFilterStatus::NEED_MORE_DATA
+            Some(new_buffering_filter(
+                32 * 1024,
+                Arc::new(|body| FilterOutcome::Emit(strip_csp_meta(&body))),
+            ))
         }
     }
 }
