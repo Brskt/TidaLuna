@@ -200,7 +200,7 @@ pub(crate) fn find_dependants(
     conn: &mut Connection,
     plugin_name: &str,
 ) -> Result<Vec<String>, String> {
-    find_dependants_inner(conn, plugin_name, "installed = 1")
+    find_dependants_inner(conn, plugin_name, false)
 }
 
 /// Return names of installed AND enabled plugins that depend on `plugin_name`.
@@ -209,17 +209,21 @@ pub(crate) fn find_enabled_dependants(
     conn: &mut Connection,
     plugin_name: &str,
 ) -> Result<Vec<String>, String> {
-    find_dependants_inner(conn, plugin_name, "installed = 1 AND enabled = 1")
+    find_dependants_inner(conn, plugin_name, true)
 }
 
 fn find_dependants_inner(
     conn: &mut Connection,
     plugin_name: &str,
-    where_clause: &str,
+    enabled_only: bool,
 ) -> Result<Vec<String>, String> {
-    let sql = format!("SELECT name, manifest FROM plugins WHERE {where_clause}");
+    let sql = if enabled_only {
+        "SELECT name, manifest FROM plugins WHERE installed = 1 AND enabled = 1"
+    } else {
+        "SELECT name, manifest FROM plugins WHERE installed = 1"
+    };
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare(sql)
         .map_err(|e| format!("Failed to query plugins: {e}"))?;
     let rows: Vec<(String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
