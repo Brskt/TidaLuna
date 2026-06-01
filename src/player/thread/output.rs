@@ -231,6 +231,59 @@ fn preferred_buffer_size(_device: &cpal::Device, _rate: u32) -> cpal::BufferSize
 
 // --- open_output_stream ---
 
+/// Build a cpal output stream for one `StreamConfig` and wire it to a fresh ring
+/// buffer. The 5 control atomics are taken by `&Arc` and cloned in (a cpal
+/// callback owns what it captures, so each call needs its own consumer/callback);
+/// `rate`/`channels` are read back off `config`. Returns the build error so the
+/// caller can choose to ignore it (fall through to a fallback config) or log it.
+fn open_with_config(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    volume: &Arc<AtomicU32>,
+    seek_gen: &Arc<AtomicU32>,
+    muted: &Arc<AtomicBool>,
+    mute_ack: &Arc<AtomicBool>,
+    stream_error: &Arc<AtomicU8>,
+    played_samples: &Arc<AtomicU64>,
+) -> Result<OpenedStream, cpal::BuildStreamError> {
+    let ring_size = config.sample_rate as usize * config.channels as usize * 2;
+    let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
+
+    let cb = build_cpal_callback(
+        consumer,
+        volume.clone(),
+        seek_gen.clone(),
+        muted.clone(),
+        mute_ack.clone(),
+        played_samples.clone(),
+    );
+    let err_flag = stream_error.clone();
+    let stream = device.build_output_stream(
+        config,
+        cb,
+        move |err| {
+            eprintln!("[CPAL]   Stream error: {err}");
+            let code = match err {
+                cpal::StreamError::DeviceNotAvailable => 1,
+                _ => 2,
+            };
+            err_flag.store(code, Relaxed);
+        },
+        None,
+    )?;
+    Ok(OpenedStream {
+        stream,
+        producer,
+        rate: config.sample_rate,
+        channels: config.channels,
+        seek_gen: seek_gen.clone(),
+        muted: muted.clone(),
+        mute_ack: mute_ack.clone(),
+        stream_error: stream_error.clone(),
+        played_samples: played_samples.clone(),
+    })
+}
+
 pub(super) fn open_output_stream(
     device: &cpal::Device,
     source_rate: u32,
@@ -250,54 +303,27 @@ pub(super) fn open_output_stream(
     crate::vprintln!("[CPAL]   Device: {}", dev_name);
 
     // Attempt 1: source rate (no software resampling needed)
-    {
-        let config = cpal::StreamConfig {
-            channels: source_channels,
-            sample_rate: source_rate,
-            buffer_size: preferred_buffer_size(device, source_rate),
-        };
-        let ring_size = source_rate as usize * source_channels as usize * 2;
-        let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
-
-        let cb = build_cpal_callback(
-            consumer,
-            volume.clone(),
-            seek_gen.clone(),
-            muted.clone(),
-            mute_ack.clone(),
-            played_samples.clone(),
+    let config = cpal::StreamConfig {
+        channels: source_channels,
+        sample_rate: source_rate,
+        buffer_size: preferred_buffer_size(device, source_rate),
+    };
+    if let Ok(opened) = open_with_config(
+        device,
+        &config,
+        volume,
+        &seek_gen,
+        &muted,
+        &mute_ack,
+        &stream_error,
+        &played_samples,
+    ) {
+        crate::vprintln!(
+            "[CPAL]   Opened at source rate: {}Hz/{}ch",
+            source_rate,
+            source_channels
         );
-        let err_flag = stream_error.clone();
-        if let Ok(stream) = device.build_output_stream(
-            &config,
-            cb,
-            move |err| {
-                eprintln!("[CPAL]   Stream error: {err}");
-                let code = match err {
-                    cpal::StreamError::DeviceNotAvailable => 1,
-                    _ => 2,
-                };
-                err_flag.store(code, Relaxed);
-            },
-            None,
-        ) {
-            crate::vprintln!(
-                "[CPAL]   Opened at source rate: {}Hz/{}ch",
-                source_rate,
-                source_channels
-            );
-            return Some(OpenedStream {
-                stream,
-                producer,
-                rate: source_rate,
-                channels: source_channels,
-                seek_gen,
-                muted,
-                mute_ack,
-                stream_error,
-                played_samples,
-            });
-        }
+        return Some(opened);
     }
 
     // Attempt 2: device default (will need rubato resampling)
@@ -317,42 +343,17 @@ pub(super) fn open_output_stream(
         ac
     );
 
-    let ring_size = ar as usize * ac as usize * 2;
-    let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
-
-    let cb = build_cpal_callback(
-        consumer,
-        volume.clone(),
-        seek_gen.clone(),
-        muted.clone(),
-        mute_ack.clone(),
-        played_samples.clone(),
-    );
-    let err_flag = stream_error.clone();
-    match device.build_output_stream(
+    match open_with_config(
+        device,
         &cfg,
-        cb,
-        move |err| {
-            eprintln!("[CPAL]   Stream error: {err}");
-            let code = match err {
-                cpal::StreamError::DeviceNotAvailable => 1,
-                _ => 2,
-            };
-            err_flag.store(code, Relaxed);
-        },
-        None,
+        volume,
+        &seek_gen,
+        &muted,
+        &mute_ack,
+        &stream_error,
+        &played_samples,
     ) {
-        Ok(stream) => Some(OpenedStream {
-            stream,
-            producer,
-            rate: ar,
-            channels: ac,
-            seek_gen,
-            muted,
-            mute_ack,
-            stream_error,
-            played_samples,
-        }),
+        Ok(opened) => Some(opened),
         Err(e) => {
             eprintln!("[ERROR]  Failed to open cpal stream: {e}");
             None
