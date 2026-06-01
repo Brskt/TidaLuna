@@ -37,6 +37,8 @@ fn handle_session_clear() {
         state.captured_token.clear();
         state.token_state = None;
     });
+    // Allow the next login to trigger its one-shot cold-boot reload.
+    crate::ui::POST_LOGIN_RELOADED.store(false, std::sync::atomic::Ordering::SeqCst);
     let data_dir = crate::state::cache_data_dir();
     if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
         crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");

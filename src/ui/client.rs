@@ -367,6 +367,12 @@ pub(super) enum PageState {
     Login,
 }
 
+/// One-shot guard for the post-login cold-boot reload (see on_loading_state_change).
+/// Reset on session_clear so each login triggers exactly one reload, and a bounce
+/// back to the login page can't turn it into a loop.
+pub(crate) static POST_LOGIN_RELOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 wrap_load_handler! {
     pub(super) struct TidalLoadHandler {
         init_script: String,
@@ -420,13 +426,27 @@ wrap_load_handler! {
                     matches!(kind, PageKind::LoginPage | PageKind::LoginCallback);
                 let prev = self.page_state.get();
 
-                // Transitioning from login to app - stop the player but don't reload.
+                // Transitioning from login to app. TIDAL registers its player SDK
+                // only during the cold bootstrap on the app route; the SPA
+                // login->app transition reaches the app without re-running it, so
+                // the play saga throws "No active player" (the redux activePlayer
+                // slice is rehydrated and is not what the saga checks). Reload the
+                // app root once to reproduce the known-good cold launch.
                 if prev == PageState::Login && !is_login {
                     with_state(|state| {
                         let _ = state.player.stop();
                         state.pending_player_events.clear();
                         state.pending_time_update = None;
                     });
+                    if !crate::ui::client::POST_LOGIN_RELOADED
+                        .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        crate::vprintln!("[LOAD]   Post-login reload to re-register the player");
+                        self.page_state.set(PageState::App);
+                        let cef_url = CefString::from(format!("https://{}/", nav::HOST_DESKTOP).as_str());
+                        frame.load_url(Some(&cef_url));
+                        return;
+                    }
                     crate::vprintln!("[LOAD]   Post-login transition to app");
                 }
 

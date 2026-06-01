@@ -15,3 +15,4 @@ pub(crate) mod trust_dialog;
 mod window_delegate;
 
 pub(crate) use app_bootstrap::TidalApp;
+pub(crate) use client::POST_LOGIN_RELOADED;
