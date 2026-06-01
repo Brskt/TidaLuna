@@ -120,13 +120,16 @@ pub(crate) enum ReadSdkResult {
         plaintext: Vec<u8>,
     },
     Corrupt,
+    /// Could not open the LevelDB (e.g. locked by another process); contents
+    /// unknown, so callers must not purge - it may hold valid credentials.
+    Unreadable,
 }
 
 pub(crate) fn read_sdk_credentials(leveldb_path: &Path) -> ReadSdkResult {
     let mut db = match open_leveldb(leveldb_path) {
         OpenResult::Missing => return ReadSdkResult::Missing,
         OpenResult::Ok(db) => *db,
-        OpenResult::Error => return ReadSdkResult::Corrupt,
+        OpenResult::Error => return ReadSdkResult::Unreadable,
     };
 
     let keys = [

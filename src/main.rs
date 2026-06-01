@@ -221,6 +221,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(ret);
     }
 
+    // Single-instance guard, before any DB/SDK/Connect/CEF work: a duplicate would
+    // otherwise race (and could purge) the running instance's SDK store. It signals
+    // the running window to focus, then exits.
+    let _app_lock = match platform::app_lock::acquire_or_signal() {
+        Some(lock) => lock,
+        None => return Ok(()),
+    };
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -336,16 +344,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    assert_eq!(
-        initialize(
-            Some(args.as_main_args()),
-            Some(&settings),
-            Some(&mut app),
-            std::ptr::null_mut(),
-        ),
-        1,
-        "CEF initialization failed"
-    );
+    // initialize() returns 0 both for a process-singleton relaunch (exit cleanly)
+    // and for a genuine init failure; the exit code tells them apart.
+    if initialize(
+        Some(args.as_main_args()),
+        Some(&settings),
+        Some(&mut app),
+        std::ptr::null_mut(),
+    ) != 1
+    {
+        let code = get_exit_code();
+        let relaunch =
+            cef::sys::cef_resultcode_t::from(Resultcode::NORMAL_EXIT_PROCESS_NOTIFIED) as i32;
+        if code == relaunch {
+            crate::vprintln!("[CEF]    Another instance owns the session; exiting");
+            return Ok(());
+        }
+        return Err(format!("CEF initialization failed (exit code {code})").into());
+    }
 
     debug::perf_monitor::start();
 
@@ -424,6 +440,11 @@ fn reconcile_boot_tokens(
         ReadSdkResult::Corrupt => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
             vprintln!("[AUTH]   SDK storage corrupt - purged");
+            return None;
+        }
+        ReadSdkResult::Unreadable => {
+            // Likely locked, not corrupt: leave the blob intact, don't purge.
+            vprintln!("[AUTH]   SDK storage unreadable (locked?) - left intact");
             return None;
         }
         ReadSdkResult::Parsed {

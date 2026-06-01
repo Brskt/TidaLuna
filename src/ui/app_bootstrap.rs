@@ -269,6 +269,9 @@ wrap_browser_process_handler! {
     }
     impl BrowserProcessHandler {
         fn on_context_initialized(&self) {
+            // CEF is up: the single-instance focus listener may now post UI tasks.
+            crate::platform::app_lock::mark_context_ready();
+
             if let Some(ctx) = cef::request_context_get_global_context() {
                 let prefs = [
                     "credentials_enable_service",
@@ -485,6 +488,21 @@ document.title = "TidaLunar - A TIDAL client";
 
         fn default_client(&self) -> Option<Client> {
             self.client.borrow().clone()
+        }
+
+        // A duplicate launch handed to us by the process singleton: focus the
+        // existing window and return 1 to suppress the default blank relaunch window.
+        fn on_already_running_app_relaunch(
+            &self,
+            _command_line: Option<&mut CommandLine>,
+            _current_directory: Option<&CefString>,
+        ) -> i32 {
+            if let Some(window) = crate::ui::app_window::AppWindow::current() {
+                window.restore();
+                window.show();
+                window.focus_foreground();
+            }
+            1
         }
     }
 }

@@ -1,3 +1,4 @@
+pub(crate) mod app_lock;
 pub(crate) mod auth;
 pub(crate) mod clipboard;
 #[cfg(target_os = "linux")]
