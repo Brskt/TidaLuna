@@ -4,6 +4,7 @@ pub(crate) mod buffering_filter;
 mod client;
 pub(crate) mod crash_dialog;
 pub(crate) mod csp_filter;
+pub(crate) mod dialog;
 pub(crate) mod file_dialog;
 pub(crate) mod flush;
 pub(crate) mod menu;
