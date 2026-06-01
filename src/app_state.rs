@@ -108,18 +108,24 @@ pub(crate) fn eval_js(js: &str) -> bool {
 const IPC_EMIT_PREFIX: &str =
     "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__(";
 
+// JSON-encode as a JS string literal so quotes, backslashes, and newlines in a
+// plugin-controlled channel or arg can't break or inject into the emitted call.
+fn js_string_literal(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 pub(crate) fn emit_ipc_event(channel: &str) {
-    let js = format!("{IPC_EMIT_PREFIX}'{}');", channel.replace('\'', "\\'"));
+    let js = format!("{IPC_EMIT_PREFIX}{});", js_string_literal(channel));
     let _ = eval_js(&js);
 }
 
 pub(crate) fn emit_ipc_event_with_args(channel: &str, args: &[&str]) {
-    let escaped_channel = channel.replace('\'', "\\'");
-    let args_js: Vec<String> = args
-        .iter()
-        .map(|a| format!("'{}'", a.replace('\'', "\\'")))
-        .collect();
-    let js = format!("{IPC_EMIT_PREFIX}'{}',{});", escaped_channel, args_js.join(","));
+    let args_js: Vec<String> = args.iter().copied().map(js_string_literal).collect();
+    let js = format!(
+        "{IPC_EMIT_PREFIX}{},{});",
+        js_string_literal(channel),
+        args_js.join(",")
+    );
     let _ = eval_js(&js);
 }
 
@@ -128,7 +134,7 @@ pub(crate) fn emit_ipc_event_with_data(channel: &str, data: &impl serde::Seriali
         Ok(j) => j,
         Err(_) => return,
     };
-    let js = format!("{IPC_EMIT_PREFIX}'{}',{json});", channel.replace('\'', "\\'"));
+    let js = format!("{IPC_EMIT_PREFIX}{},{json});", js_string_literal(channel));
     let _ = eval_js(&js);
 }
 
