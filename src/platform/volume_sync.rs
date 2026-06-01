@@ -24,9 +24,7 @@ impl ComGuard {
         unsafe {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
             if hr.is_ok() {
-                Ok(Self {
-                    needs_uninit: true,
-                })
+                Ok(Self { needs_uninit: true })
             } else if hr == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
                 crate::vprintln!("[COM]    RPC_E_CHANGED_MODE, using existing apartment model");
                 Ok(Self {

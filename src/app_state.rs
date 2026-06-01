@@ -23,7 +23,12 @@ impl std::fmt::Display for IpcMessage {
             }
             let s = arg.to_string();
             if s.len() > 200 {
-                write!(f, "{}...({} chars)", crate::util::truncate_str(&s, 200), s.len())?;
+                write!(
+                    f,
+                    "{}...({} chars)",
+                    crate::util::truncate_str(&s, 200),
+                    s.len()
+                )?;
             } else {
                 write!(f, "{s}")?;
             }

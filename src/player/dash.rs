@@ -85,7 +85,10 @@ pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
         }
     }
 
-    crate::vprintln!("[DASH]   init_url={}", crate::util::truncate_str(&init_url, 80));
+    crate::vprintln!(
+        "[DASH]   init_url={}",
+        crate::util::truncate_str(&init_url, 80)
+    );
     crate::vprintln!(
         "[DASH]   {} segment URLs, codec={}, sampleRate={:?}",
         segment_urls.len(),

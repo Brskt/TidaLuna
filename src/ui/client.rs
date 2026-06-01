@@ -273,10 +273,16 @@ wrap_client! {
 /// Open an external http(s) URL in the OS browser; other schemes are dropped.
 fn open_external_in_os(url: &str) {
     if url.starts_with("http://") || url.starts_with("https://") {
-        crate::vprintln!("[NAV]    External -> OS browser: {}", crate::util::truncate_str(url, 120));
+        crate::vprintln!(
+            "[NAV]    External -> OS browser: {}",
+            crate::util::truncate_str(url, 120)
+        );
         open_in_os(url);
     } else {
-        crate::vprintln!("[NAV]    Blocked external navigation: {}", crate::util::truncate_str(url, 120));
+        crate::vprintln!(
+            "[NAV]    Blocked external navigation: {}",
+            crate::util::truncate_str(url, 120)
+        );
     }
 }
 
