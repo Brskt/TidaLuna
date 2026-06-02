@@ -66,7 +66,9 @@ base16ct = { workspace = true }
 base64 = { workspace = true }
 cbc = "0.2.1"
 cef = { version = "148.3.0", features = ["build-util"] }
-cpal = "0.17.3"
+# Pinned to the PR #1183 merge (WASAPI/CoreAudio auto-reroute on default-device
+# change + unified Error/ErrorKind). Drop back to a crates.io release once cpal 0.18 ships.
+cpal = { git = "https://github.com/RustAudio/cpal", rev = "c6aa4592ef07968ab6b431e62acab79c72869716", version = "0.18.0" }
 ctr = "0.10.1"
 dash-mpd = { version = "0.20.3", default-features = false }
 fnv = "1.0.7"

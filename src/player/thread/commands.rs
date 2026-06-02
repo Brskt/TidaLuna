@@ -409,7 +409,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         } else {
             crate::vprintln!("[PLAY]   start from beginning");
         }
-        self.start_playback();
+        // A prior device-loss recovery may have torn down the stream (e.g. the device
+        // was held exclusively by a fullscreen game). Resuming is a natural retry point:
+        // rebuild on the current default device, which is usually free again by now.
+        if self.cpal_stream.is_none() {
+            self.recover_audio_device();
+        } else {
+            self.start_playback();
+        }
     }
 
     pub(super) fn start_playback(&mut self) {

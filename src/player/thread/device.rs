@@ -34,6 +34,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             if exclusive {
                 self.stop_decode();
                 self.cpal_stream = None;
+                // Drop the shared-stream error flag too: a stale device-loss signal must not
+                // trigger a shared-cpal rebuild while we are in exclusive mode.
+                self.cpal_stream_error = None;
                 self.volume_sync = None;
                 self.volume_rx = None;
 
@@ -85,21 +88,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         self.current_device_id = Some(id.clone());
-
-        if self.has_track {
-            let was_playing = self.is_playing;
-            let position = self.current_position_secs();
-
-            self.stop_decode();
-            self.cpal_stream = None;
-
-            if let Some(ref buffer) = self.current_buffer {
-                let buffer_clone = buffer.clone();
-                self.rebuild_pipeline_on_device(buffer_clone, was_playing, position);
-            }
-        }
-
+        self.rebuild_pipeline_at(self.current_position_secs());
         crate::vprintln!("[AUDIO] Switched to device: {}", id);
+    }
+
+    /// Tear down the cpal stream and rebuild the pipeline on the resolved device at
+    /// `position`, preserving play state. No-op when no track is loaded. Shared by
+    /// manual device switching and device-loss recovery.
+    fn rebuild_pipeline_at(&mut self, position: f64) {
+        if !self.has_track {
+            return;
+        }
+        let was_playing = self.is_playing;
+        self.stop_decode();
+        self.cpal_stream = None;
+        if let Some(ref buffer) = self.current_buffer {
+            let buffer = buffer.clone();
+            self.rebuild_pipeline_on_device(buffer, was_playing, position);
+        }
+    }
+
+    /// Recovery path for device loss/invalidation (cpal `DeviceNotAvailable`/
+    /// `StreamInvalidated`): rebuild on the current default device at the last-heard
+    /// position. cpal only auto-reroutes on a default-device *change*, not on loss.
+    pub(super) fn recover_audio_device(&mut self) {
+        self.rebuild_pipeline_at(self.played_position_secs());
     }
 
     pub(super) fn rebuild_pipeline_on_device(

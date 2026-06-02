@@ -5,6 +5,12 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Re
 
 use crate::player::AudioDevice;
 
+/// `cpal_stream_error` signal codes: the cpal error callback (audio thread) stores one,
+/// `poll_playback` (player thread) reads it. `DEVICE_LOST` triggers a pipeline rebuild.
+pub(super) const STREAM_ERR_NONE: u8 = 0;
+pub(super) const STREAM_ERR_DEVICE_LOST: u8 = 1;
+pub(super) const STREAM_ERR_UNKNOWN: u8 = 2;
+
 // --- Helpers ---
 
 pub(super) fn format_sample_rate(rate: u32) -> String {
@@ -245,7 +251,7 @@ fn open_with_config(
     mute_ack: &Arc<AtomicBool>,
     stream_error: &Arc<AtomicU8>,
     played_samples: &Arc<AtomicU64>,
-) -> Result<OpenedStream, cpal::BuildStreamError> {
+) -> Result<OpenedStream, cpal::Error> {
     let ring_size = config.sample_rate as usize * config.channels as usize * 2;
     let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
 
@@ -259,15 +265,23 @@ fn open_with_config(
     );
     let err_flag = stream_error.clone();
     let stream = device.build_output_stream(
-        config,
+        *config,
         cb,
-        move |err| {
-            eprintln!("[CPAL]   Stream error: {err}");
-            let code = match err {
-                cpal::StreamError::DeviceNotAvailable => 1,
-                _ => 2,
-            };
-            err_flag.store(code, Relaxed);
+        move |err: cpal::Error| match err.kind() {
+            // Default device changed: cpal auto-rerouted the live stream. Informational only;
+            // must NOT write the flag, or it could clear a device-loss signal set moments earlier.
+            cpal::ErrorKind::DeviceChanged => {
+                crate::vprintln!("[CPAL]   Auto-rerouted to new default device");
+            }
+            // Device lost / stream invalidated: rebuild on the current default device.
+            cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
+                eprintln!("[CPAL]   Stream error (device lost): {err}");
+                err_flag.store(STREAM_ERR_DEVICE_LOST, Relaxed);
+            }
+            _ => {
+                eprintln!("[CPAL]   Stream error: {err}");
+                err_flag.store(STREAM_ERR_UNKNOWN, Relaxed);
+            }
         },
         None,
     )?;

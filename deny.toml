@@ -11,3 +11,5 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# cpal pinned to the PR #1183 merge for native default-device auto-rerouting (pre-0.18).
+allow-git = ["https://github.com/RustAudio/cpal"]

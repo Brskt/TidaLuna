@@ -1,3 +1,4 @@
+use super::output::{STREAM_ERR_DEVICE_LOST, STREAM_ERR_NONE, STREAM_ERR_UNKNOWN};
 use super::{DecodeEvent, PlayerThread};
 use crate::player::{DeviceErrorKind, PlaybackState, PlayerEvent, format_ms};
 use std::sync::atomic::Ordering::Relaxed;
@@ -112,14 +113,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             bp.read_pos.store(buf.read_cursor(), Relaxed);
         }
 
-        // Detect cpal stream errors
-        if let Some(ref flag) = self.cpal_stream_error {
-            let code = flag.swap(0, Relaxed);
-            if code == 1 {
-                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Disconnected));
-            } else if code == 2 {
-                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
-            }
+        // Detect cpal stream errors and recover from device loss.
+        let stream_err_code = self
+            .cpal_stream_error
+            .as_ref()
+            .map_or(STREAM_ERR_NONE, |flag| flag.swap(STREAM_ERR_NONE, Relaxed));
+        if stream_err_code == STREAM_ERR_DEVICE_LOST {
+            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Disconnected));
+            // Device lost / invalidated: rebuild on the current default device.
+            self.recover_audio_device();
+        } else if stream_err_code == STREAM_ERR_UNKNOWN {
+            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
         }
 
         if !should_poll || !self.has_track || !self.is_playing {
