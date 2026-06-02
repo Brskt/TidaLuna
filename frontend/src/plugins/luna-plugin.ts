@@ -461,7 +461,7 @@ export class LunaPlugin {
             enabled: !!info.enabled,
             installed: !!info.installed,
             liveReload: false,
-            hideSettings: false,
+            hideSettings: true,
         };
 
         const plugin = new LunaPlugin(store);
@@ -561,7 +561,7 @@ export class LunaPlugin {
             enabled: false,
             installed: false,
             liveReload: false,
-            hideSettings: false,
+            hideSettings: true,
         };
 
         const plugin = new LunaPlugin(store);
