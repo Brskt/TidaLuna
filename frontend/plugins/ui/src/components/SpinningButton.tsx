@@ -25,11 +25,12 @@ export const SpinningButton = ({ spin, ...props }: SpinningButtonProps) => {
 		return () => clearTimeout(timeoutId);
 	}, [spin, isSpinning]);
 
+	// Unique name: a bare "spin" collides with another global @keyframes spin (a translate(-50%,-50%) spinner) and drifts the icon
 	const animationSx = {
 		...props.sx,
 		color: props.disabled ? undefined : props.sxColor,
-		animation: isSpinning ? "spin 0.5s linear infinite" : "none",
-		"@keyframes spin": {
+		animation: isSpinning ? "luna-spin 0.5s linear infinite" : "none",
+		"@keyframes luna-spin": {
 			"0%": { transform: "rotate(0deg)" },
 			"100%": { transform: "rotate(360deg)" },
 		},

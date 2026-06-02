@@ -144,7 +144,6 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 						<LiveReloadToggle plugin={plugin} disabled={disabled} sx={{ marginLeft: 1 }} />
 						<SpinningButton
 							title={hideSettings ? "Show settings" : "Hide settings"}
-							spin={loading}
 							disabled={!enabled || !hasSettings}
 							onClick={() => setHideSettings((prev) => (plugin.store.hideSettings = !prev))}
 							icon={SettingsIcon}
