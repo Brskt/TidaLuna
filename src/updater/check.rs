@@ -71,6 +71,24 @@ pub(crate) async fn check_for_update() -> Option<UpdateInfo> {
         return None;
     }
 
+    // Advisory only - the authoritative gates run post-signature in download.rs;
+    // these just avoid offering an update that would be rejected.
+    if !super::util::meets_min_version(current_version, &manifest.min_version) {
+        crate::vprintln!(
+            "[UPDATER] v{remote_version} requires installed >= v{} (have v{current_version}); not offering",
+            manifest.min_version
+        );
+        return None;
+    }
+    let mark = super::highwater::load(&crate::state::cache_data_dir());
+    if !is_newer(&manifest.version, &mark) {
+        crate::vprintln!(
+            "[UPDATER] v{} not newer than highest installed v{mark}; not offering (anti-rollback)",
+            manifest.version
+        );
+        return None;
+    }
+
     // Linux-only: advisory check that the system bootstrap supports the
     // manifest's required sandbox-helper protocol. Catches the "user has not
     // run apt upgrade yet" case early so we don't waste bandwidth on a

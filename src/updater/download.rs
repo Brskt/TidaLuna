@@ -60,11 +60,30 @@ async fn download_update_inner(
     manifest.verify_target()?;
     #[cfg(target_os = "linux")]
     super::util::enforce_sandbox_protocol_gate(&manifest)?;
+
+    // Skip-migration floor; the signature is verified above, so min_version is trusted.
+    let current = env!("CARGO_PKG_VERSION");
+    if !super::util::meets_min_version(current, &manifest.min_version) {
+        anyhow::bail!(
+            "update v{} requires installed version >= v{}, but have v{}",
+            manifest.version,
+            manifest.min_version,
+            current
+        );
+    }
+    // Anti-rollback: reject any target not newer than the high-water mark.
+    let mark = super::highwater::load(&crate::state::cache_data_dir());
+    if !super::util::is_newer(&manifest.version, &mark) {
+        anyhow::bail!(
+            "update v{} is not newer than the highest installed version v{} (anti-rollback)",
+            manifest.version,
+            mark
+        );
+    }
     check_cancel!(cancel);
 
     let staging = prepare_staging_dir(&app_dir)?;
 
-    let current = env!("CARGO_PKG_VERSION");
     let use_delta = manifest.delta_from.as_deref() == Some(current);
     let (archive_name, archive_asset) = {
         let delta_name = super::delta_archive_name(version);

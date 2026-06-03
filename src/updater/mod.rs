@@ -1,6 +1,7 @@
 mod check;
 mod download;
 mod handlers;
+mod highwater;
 mod recovery;
 mod types;
 mod util;
@@ -12,6 +13,12 @@ pub(crate) use handlers::{
     handle_updater_download, handle_updater_status,
 };
 pub(crate) use recovery::recover_interrupted_update;
+
+/// Record the running build's version as the anti-rollback high-water mark.
+/// Call once at startup after a successful boot.
+pub(crate) fn record_launch_version() {
+    highwater::record(&crate::state::cache_data_dir(), env!("CARGO_PKG_VERSION"));
+}
 
 const GITHUB_OWNER: &str = "Brskt";
 const GITHUB_REPO: &str = "TidaLuna";

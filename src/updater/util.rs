@@ -98,19 +98,33 @@ pub(super) fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
     Ok(base16ct::lower::encode_string(&hasher.finalize()))
 }
 
-/// Simple semver comparison: returns true if `remote` > `current`.
-/// Strips pre-release suffixes (e.g. "-alpha") before comparing numeric parts.
+/// True if `remote` is a strictly newer SemVer version than `current`.
+///
+/// Fail-safe: if either string is not valid SemVer, returns `false` (treated
+/// as "not newer", so we never offer or advance to an unparseable version).
 pub(super) fn is_newer(remote: &str, current: &str) -> bool {
-    let parse = |s: &str| -> (u32, u32, u32) {
-        // Strip pre-release suffix: "0.0.2-alpha" → "0.0.2"
-        let numeric = s.split('-').next().unwrap_or(s);
-        let mut parts = numeric.split('.');
-        let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        (major, minor, patch)
-    };
-    parse(remote) > parse(current)
+    match (
+        semver::Version::parse(remote),
+        semver::Version::parse(current),
+    ) {
+        (Ok(remote), Ok(current)) => remote > current,
+        _ => false,
+    }
+}
+
+/// True if `installed` satisfies the manifest's minimum-version floor
+/// (`installed >= min_version`), the skip-migration gate.
+///
+/// Fail-closed: an unparseable floor or installed version blocks the update.
+/// A no-op floor is encoded as `"0.0.0"` (every valid version satisfies it).
+pub(super) fn meets_min_version(installed: &str, min_version: &str) -> bool {
+    match (
+        semver::Version::parse(installed),
+        semver::Version::parse(min_version),
+    ) {
+        (Ok(installed), Ok(floor)) => installed >= floor,
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,5 +262,59 @@ mod sandbox_protocol_gate_tests {
         let manifest = fixture_manifest(Some(2));
         let result = check_sandbox_protocol(&manifest, None);
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::{is_newer, meets_min_version};
+
+    #[test]
+    fn is_newer_orders_patch_numerically() {
+        assert!(is_newer("0.0.10-alpha", "0.0.9-alpha"));
+        assert!(!is_newer("0.0.9-alpha", "0.0.10-alpha"));
+    }
+
+    #[test]
+    fn is_newer_release_beats_its_prerelease() {
+        // SemVer 2.0: 0.0.9 > 0.0.9-alpha
+        assert!(is_newer("0.0.9", "0.0.9-alpha"));
+        assert!(!is_newer("0.0.9-alpha", "0.0.9"));
+    }
+
+    #[test]
+    fn is_newer_orders_prerelease_identifiers() {
+        // -alpha.10 > -alpha.2 (numeric identifier compare, not string)
+        assert!(is_newer("0.0.9-alpha.10", "0.0.9-alpha.2"));
+        assert!(!is_newer("0.0.9-alpha.2", "0.0.9-alpha.10"));
+    }
+
+    #[test]
+    fn is_newer_equal_is_not_newer() {
+        assert!(!is_newer("0.0.9-alpha", "0.0.9-alpha"));
+    }
+
+    #[test]
+    fn is_newer_unparseable_is_failsafe_false() {
+        assert!(!is_newer("garbage", "0.0.9-alpha"));
+        assert!(!is_newer("0.0.9-alpha", "not-a-version"));
+    }
+
+    #[test]
+    fn meets_min_version_floor_satisfied() {
+        assert!(meets_min_version("0.0.9-alpha", "0.0.0")); // no-op floor
+        assert!(meets_min_version("0.0.9-alpha", "0.0.8-alpha"));
+        assert!(meets_min_version("0.0.8-alpha", "0.0.8-alpha")); // equal meets floor
+    }
+
+    #[test]
+    fn meets_min_version_below_floor_blocked() {
+        assert!(!meets_min_version("0.0.7-alpha", "0.0.8-alpha"));
+    }
+
+    #[test]
+    fn meets_min_version_unparseable_is_failclosed() {
+        assert!(!meets_min_version("0.0.9-alpha", "")); // empty floor → block
+        assert!(!meets_min_version("0.0.9-alpha", "garbage"));
     }
 }

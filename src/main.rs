@@ -363,6 +363,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("CEF initialization failed (exit code {code})").into());
     }
 
+    // Record this build's version as the anti-rollback high-water mark now that
+    // the app has booted successfully (AVB-style: bump the floor on good boot).
+    crate::updater::record_launch_version();
+
     debug::perf_monitor::start();
 
     run_message_loop();
