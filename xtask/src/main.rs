@@ -366,8 +366,10 @@ fn read_workspace_version() -> Result<String, String> {
 fn generate_manifest(bundle_dir: &Path) -> Result<(), String> {
     let version = read_workspace_version()?;
 
-    // min_version defaults to same as version for now - adjust per release
-    let min_version = version.clone();
+    // Upgrade floor: minimum installed version allowed to apply this update,
+    // enforced in-app. "0.0.0" = no floor; keep it a concrete string so older
+    // clients can still parse the field.
+    let min_version = "0.0.0".to_string();
 
     let target = target_triple();
 
