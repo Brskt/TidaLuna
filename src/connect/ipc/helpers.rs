@@ -155,12 +155,20 @@ pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent) {
 // the CEF UI thread. Since connect events originate in tokio tasks, we
 // serialise the JS string and post it via `wrap_task!`/`post_task`.
 
+fn build_emit_js(channel: &str, data_json: Option<&str>) -> String {
+    let chan = crate::app_state::js_string_literal(channel);
+    match data_json {
+        Some(json) => format!(
+            "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__({chan},{json});"
+        ),
+        None => format!(
+            "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__({chan});"
+        ),
+    }
+}
+
 pub(crate) fn post_emit(channel: &str) {
-    let js = format!(
-        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}');",
-        channel.replace('\'', "\\'")
-    );
-    post_js_to_ui(js);
+    post_js_to_ui(build_emit_js(channel, None));
 }
 
 pub(crate) fn post_emit_with_data(channel: &str, data: &impl serde::Serialize) {
@@ -168,11 +176,7 @@ pub(crate) fn post_emit_with_data(channel: &str, data: &impl serde::Serialize) {
         Ok(j) => j,
         Err(_) => return,
     };
-    let js = format!(
-        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__('{}',{json});",
-        channel.replace('\'', "\\'")
-    );
-    post_js_to_ui(js);
+    post_js_to_ui(build_emit_js(channel, Some(&json)));
 }
 
 pub(crate) fn post_js_to_ui(js: String) {
@@ -188,5 +192,27 @@ wrap_task! {
         fn execute(&self) {
             crate::app_state::eval_js(&self.js);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_emit_js;
+
+    #[test]
+    fn build_emit_js_keeps_channel_in_one_string_literal() {
+        // A backslash before a quote defeats a single-quote-only escape; the
+        // channel must stay one inert JS string literal that round-trips.
+        let evil = "x\\';alert(1)//";
+        let js = build_emit_js(evil, None);
+        let inner = js
+            .strip_prefix(
+                "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__(",
+            )
+            .and_then(|s| s.strip_suffix(");"))
+            .expect("emit structure intact");
+        let decoded: String =
+            serde_json::from_str(inner).expect("channel is a valid JSON string literal");
+        assert_eq!(decoded, evil);
     }
 }
