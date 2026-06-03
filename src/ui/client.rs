@@ -26,11 +26,11 @@ fn frame_is_trusted(frame: &Option<Frame>) -> bool {
     !matches!(PageKind::classify(&url), PageKind::External)
 }
 
-/// Channels that mutate auth/session/plugin/updater/settings state and therefore
-/// must never run from an untrusted ingress. Single source of truth for both
-/// the fire-and-forget `cefQuery` path and the frame-less `__IPC__` console
-/// bridge - benign page-chrome channels (`player.*`, `window.*` controls,
-/// `menu.*`, `web.*`) are intentionally absent so TIDAL's own UI keeps working.
+/// Channels that mutate auth/session/plugin/updater/settings state, so they must
+/// never run from an untrusted ingress. Single source of truth for both the
+/// `cefQuery` path and the frame-less `__IPC__` console bridge. Benign page-chrome
+/// (`player.*`, `window.*`, `menu.*`, `web.*`) is absent so TIDAL's UI keeps working;
+/// `player.parse_dash` is the exception (plugin-IPC, frame-gated), so the bridge drops it.
 fn is_privileged_channel(channel: &str) -> bool {
     channel.starts_with("jsrt.")
         || channel.starts_with("connect.")
@@ -41,6 +41,7 @@ fn is_privileged_channel(channel: &str) -> bool {
         || channel.starts_with("tidal.")
         || channel.starts_with("__Luna.")
         || channel.starts_with("__LunaNative.")
+        || channel == "player.parse_dash"
         || channel == "window.navigate_self"
 }
 
@@ -793,5 +794,32 @@ wrap_display_handler! {
             }
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_privileged_channel;
+
+    #[test]
+    fn parse_dash_is_privileged() {
+        // Dispatched by the plugin-IPC handler and frame-gated in cefQuery, so
+        // the frame-less console bridge must drop it too.
+        assert!(is_privileged_channel("player.parse_dash"));
+    }
+
+    #[test]
+    fn benign_player_controls_stay_open() {
+        // Playback controls are fire-and-forget on the console bridge; only
+        // parse_dash is gated, not the whole `player.*` namespace.
+        assert!(!is_privileged_channel("player.play"));
+        assert!(!is_privileged_channel("player.load_dash"));
+    }
+
+    #[test]
+    fn auth_and_window_self_are_privileged() {
+        assert!(is_privileged_channel("jsrt.set_token"));
+        assert!(is_privileged_channel("window.navigate_self"));
+        assert!(!is_privileged_channel("window.minimize"));
     }
 }
