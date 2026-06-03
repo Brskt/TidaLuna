@@ -71,7 +71,7 @@ impl BrowserSideHandler for IpcQueryHandler {
             if !frame_is_trusted(&frame) {
                 callback
                     .lock()
-                    .expect("IPC callback lock poisoned")
+                    .unwrap_or_else(|e| e.into_inner())
                     .failure(403, "IPC restricted to TIDAL frames");
                 return true;
             }
@@ -81,7 +81,7 @@ impl BrowserSideHandler for IpcQueryHandler {
                 {
                     callback
                         .lock()
-                        .expect("IPC callback lock poisoned")
+                        .unwrap_or_else(|e| e.into_inner())
                         .failure(403, "Connect IPC restricted to main frame");
                     return true;
                 }
@@ -109,7 +109,7 @@ impl BrowserSideHandler for IpcQueryHandler {
             );
             callback
                 .lock()
-                .expect("IPC callback lock poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .success_str("ok");
             return true;
         }
@@ -117,7 +117,7 @@ impl BrowserSideHandler for IpcQueryHandler {
         handle_ipc_message(request);
         callback
             .lock()
-            .expect("IPC callback lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .success_str("ok");
         true
     }

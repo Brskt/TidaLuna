@@ -35,13 +35,13 @@ fn take_ipc_callback(id: &str) -> Option<IpcCallback> {
 
 pub(crate) fn ipc_callback_ok(cb: &IpcCallback, result: &str) {
     cb.lock()
-        .expect("IPC callback lock poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .success_str(result);
 }
 
 pub(crate) fn ipc_callback_err(cb: &IpcCallback, code: i32, msg: &str) {
     cb.lock()
-        .expect("IPC callback lock poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .failure(code, msg);
 }
 
