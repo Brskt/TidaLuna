@@ -55,6 +55,8 @@ async fn download_update_inner(
 
     let (manifest_bytes, sig_bytes, manifest): (Bytes, Bytes, Manifest) =
         download_manifest_and_sig(client, &release).await?;
+    super::verify::verify_manifest_signature(&manifest_bytes, &sig_bytes)
+        .context("manifest signature invalid")?;
     manifest.verify_target()?;
     #[cfg(target_os = "linux")]
     super::util::enforce_sandbox_protocol_gate(&manifest)?;

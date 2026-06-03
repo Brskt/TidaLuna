@@ -4,6 +4,7 @@ mod handlers;
 mod recovery;
 mod types;
 mod util;
+mod verify;
 
 pub(crate) use check::trigger_update_check;
 pub(crate) use handlers::{

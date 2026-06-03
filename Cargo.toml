@@ -71,6 +71,7 @@ cef = { version = "148.3.0", features = ["build-util"] }
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "c6aa4592ef07968ab6b431e62acab79c72869716", version = "0.18.0" }
 ctr = "0.10.1"
 dash-mpd = { version = "0.20.3", default-features = false }
+ed25519-dalek = { workspace = true }
 fnv = "1.0.7"
 futures-util = "0.3.32"
 getrandom = { workspace = true }
