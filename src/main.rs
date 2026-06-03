@@ -405,9 +405,10 @@ fn reconcile_boot_tokens(
             vprintln!("[AUTH]   Secure store corrupt - purged SDK blob");
             return None;
         }
-        Err(_) => {
-            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   Secure store error - purged SDK blob");
+        Err(platform::secure_store::StoreError::Backend) => {
+            // Transient (I/O/lock/permission), not corrupt: keep the SDK blob; it
+            // re-seeds from the stored token next launch.
+            vprintln!("[AUTH]   Secure store backend error (transient) - left intact");
             return None;
         }
     };
