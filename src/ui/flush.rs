@@ -1,4 +1,4 @@
-use crate::app_state::{AppState, exec_js_on_frame, with_state};
+use crate::app_state::{AppState, exec_js_on_frame, js_ipc_response, with_state};
 use crate::bridge::PlayerBridgeEvent;
 use crate::player::{PlaybackState, PlayerEvent};
 use cef::*;
@@ -191,11 +191,9 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             PlayerEvent::AudioDevices(devices, req_id) => {
                 if let Ok(json_devices) = serde_json::to_string(&devices) {
                     if let Some(id) = req_id {
-                        let js = format!(
-                            "window.__TIDAL_IPC_RESPONSE__('{}', null, {})",
-                            id, json_devices
-                        );
-                        state.pending_misc_js.push(js);
+                        state
+                            .pending_misc_js
+                            .push(js_ipc_response(&id, &json_devices));
                     } else {
                         state
                             .pending_player_events
