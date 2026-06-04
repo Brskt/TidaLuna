@@ -15,6 +15,20 @@ fn now_epoch() -> i64 {
         .as_secs() as i64
 }
 
+/// Monotonic stamp for the `last_access` LRU sort key: strictly greater than any
+/// existing value, so a backward wall-clock step can't make a fresh entry sort
+/// older than the entries it was accessed after.
+fn next_access_stamp(conn: &Connection, now: i64) -> i64 {
+    let max_seen: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(last_access), 0) FROM audio_cache",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    now.max(max_seen + 1)
+}
+
 /// Hash a track_id to a hex string for filesystem storage.
 fn track_hash(track_id: &str) -> String {
     // Simple FNV-1a hash for fast, well-distributed sharding
@@ -115,10 +129,10 @@ impl AudioCache {
 
     /// Update access metadata after a successful cache read.
     pub fn touch(&self, track_id: &str) {
-        let now = now_epoch();
+        let stamp = next_access_stamp(&self.conn, now_epoch());
         let _ = self.conn.execute(
             "UPDATE audio_cache SET last_access = ?1, access_count = access_count + 1 WHERE track_id = ?2",
-            params![now, track_id],
+            params![stamp, track_id],
         );
     }
 
@@ -144,10 +158,11 @@ impl AudioCache {
     /// large I/O. Pair with [`write_file`](Self::write_file).
     pub fn record(&mut self, track_id: &str, format: &str, file_size: u64) -> anyhow::Result<()> {
         let now = now_epoch();
+        let stamp = next_access_stamp(&self.conn, now);
         self.conn.execute(
             "INSERT OR REPLACE INTO audio_cache (track_id, format, file_size, created_at, last_access, access_count)
-             VALUES (?1, ?2, ?3, ?4, ?4, 1)",
-            params![track_id, format, file_size as i64, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![track_id, format, file_size as i64, now, stamp],
         )?;
 
         self.evict_if_needed()?;
@@ -253,5 +268,48 @@ impl AudioCache {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audio_cache (
+                track_id     TEXT PRIMARY KEY,
+                format       TEXT NOT NULL,
+                file_size    INTEGER NOT NULL,
+                created_at   INTEGER NOT NULL,
+                last_access  INTEGER NOT NULL,
+                access_count INTEGER DEFAULT 1
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn access_stamp_is_monotonic_across_clock_skew() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO audio_cache (track_id, format, file_size, created_at, last_access, access_count)
+             VALUES ('a', 'flac', 1, 1000, 1000, 1)",
+            [],
+        )
+        .unwrap();
+        // Clock rewound to 50: the stamp must still exceed the existing max so a
+        // fresh entry can't sort older than entries it was accessed after.
+        assert_eq!(next_access_stamp(&conn, 50), 1001);
+        // A normal forward clock is honored as-is.
+        assert_eq!(next_access_stamp(&conn, 5000), 5000);
+    }
+
+    #[test]
+    fn access_stamp_on_empty_table_uses_now() {
+        let conn = test_conn();
+        assert_eq!(next_access_stamp(&conn, 100), 100);
     }
 }
