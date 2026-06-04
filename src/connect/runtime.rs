@@ -200,7 +200,7 @@ impl TaskGroup {
             state,
         };
 
-        let mut records = self.records.lock().unwrap();
+        let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
         if records.contains_key(name) {
             // Abort the already-spawned task to avoid orphans.
             record.abort.abort();
@@ -225,7 +225,7 @@ impl TaskGroup {
         let mut report = ShutdownReport::default();
 
         let records: Vec<(&'static str, TaskRecord)> = {
-            let mut map = self.records.lock().unwrap();
+            let mut map = self.records.lock().unwrap_or_else(|e| e.into_inner());
             map.drain().collect()
         };
 

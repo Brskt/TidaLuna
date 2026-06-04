@@ -21,7 +21,10 @@ pub(super) fn load_queue(msg: &IpcMessage, callback: IpcCallback) {
         .and_then(|v| v.as_str())
         .unwrap_or("HIGH");
     let Some((content_si, queue_si)) = get_server_infos(quality) else {
-        callback.lock().unwrap().failure(500, "No controller");
+        callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure(500, "No controller");
         return;
     };
 
@@ -59,7 +62,10 @@ pub(super) fn update_quality(msg: &IpcMessage, callback: IpcCallback) {
         .unwrap_or("HIGH")
         .to_string();
     let Some((content_si, queue_si)) = get_server_infos(&quality) else {
-        callback.lock().unwrap().failure(500, "No controller");
+        callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure(500, "No controller");
         return;
     };
 

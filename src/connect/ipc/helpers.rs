@@ -37,7 +37,7 @@ pub(super) fn get_last_player_state() -> PlayerState {
     with_state(|state| {
         state.connect.as_ref().and_then(|cm| {
             let ctrl = cm.controller()?;
-            let guard = ctrl.lock().ok()?;
+            let guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
             Some(guard.last_player_state())
         })
     })
@@ -49,7 +49,7 @@ pub(super) fn get_session_ws() -> Option<Arc<WsClient>> {
     with_state(|state| {
         state.connect.as_ref().and_then(|cm| {
             let ctrl = cm.controller()?;
-            let guard = ctrl.lock().ok()?;
+            let guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
             guard.ws_client()
         })
     })
@@ -62,7 +62,7 @@ pub(super) fn get_server_infos(quality: &str) -> Option<(ServerInfo, ServerInfo)
     with_state(|state| {
         state.connect.as_ref().and_then(|cm| {
             let ctrl = cm.controller()?;
-            let guard = ctrl.lock().ok()?;
+            let guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
             Some((
                 guard.build_content_server_info(quality),
                 guard.build_server_info("queue"),
@@ -82,21 +82,33 @@ pub(super) fn send_device_cmd(cmd: serde_json::Value, callback: IpcCallback) {
     if let Some(rt) = crate::state::RT_HANDLE.get() {
         rt.spawn(async move {
             let Some(ws) = get_session_ws() else {
-                callback.lock().unwrap().failure(500, "Not connected");
+                callback
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .failure(500, "Not connected");
                 return;
             };
             match ws.send_command(cmd, CMD_TIMEOUT).await {
                 Ok(response) => {
                     let json = serde_json::to_string(&response).unwrap_or_default();
-                    callback.lock().unwrap().success_str(&json);
+                    callback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .success_str(&json);
                 }
                 Err(e) => {
-                    callback.lock().unwrap().failure(500, &e.to_string());
+                    callback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .failure(500, &e.to_string());
                 }
             }
         });
     } else {
-        callback.lock().unwrap().failure(500, "No runtime");
+        callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure(500, "No runtime");
     }
 }
 

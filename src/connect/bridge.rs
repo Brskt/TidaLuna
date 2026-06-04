@@ -44,7 +44,7 @@ static BRIDGE_TX: Mutex<Option<mpsc::Sender<BridgeEvent>>> = Mutex::new(None);
 /// starts or stops the receiver, and by `main` during app shutdown.
 pub(crate) fn set_active(tx: Option<mpsc::Sender<BridgeEvent>>) {
     let active = tx.is_some();
-    *BRIDGE_TX.lock().unwrap() = tx;
+    *BRIDGE_TX.lock().unwrap_or_else(|e| e.into_inner()) = tx;
     BRIDGE_ACTIVE.store(active, Ordering::Release);
     // BRIDGE_HAS_CLIENT is owned solely by the receiver routing loop, which resets
     // it on start and toggles it on client connect/disconnect. set_active must not

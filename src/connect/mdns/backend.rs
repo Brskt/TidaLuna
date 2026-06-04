@@ -199,7 +199,11 @@ impl FakeMdnsBackend {
 #[async_trait]
 impl MdnsBackend for FakeMdnsBackend {
     async fn shutdown(&self, _deadline: Duration) -> ShutdownOutcome {
-        let next = self.script.lock().unwrap().pop_front();
+        let next = self
+            .script
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front();
         match next {
             Some(FakeResponse::Clean) => ShutdownOutcome::Clean,
             Some(FakeResponse::AlreadyStopped) => ShutdownOutcome::AlreadyStopped,

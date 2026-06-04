@@ -23,7 +23,7 @@ pub(super) fn initialize(msg: &IpcMessage) {
                 crate::vprintln!("[connect::ipc] Controller init failed: {}", e);
             }
             if let Some(ctrl) = cm.controller() {
-                let mut guard = ctrl.lock().unwrap();
+                let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
                 guard.set_server_urls(&queue_url, &content_url, &auth_url);
             }
         }
@@ -38,7 +38,7 @@ pub(super) fn discover() {
                 let _ = cm.init_controller();
             }
             if let Some(ctrl) = cm.controller() {
-                let mut guard = ctrl.lock().unwrap();
+                let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = guard.start_discovery();
             }
         }
@@ -58,7 +58,7 @@ pub(super) fn refresh() {
                 let _ = cm.init_controller();
             }
             if let Some(ctrl) = cm.controller() {
-                let mut guard = ctrl.lock().unwrap();
+                let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = guard.refresh_devices();
             }
         }
@@ -73,7 +73,7 @@ pub(super) fn set_auth(msg: &IpcMessage) {
         if let Some(ref cm) = state.connect
             && let Some(ctrl) = cm.controller()
         {
-            let mut guard = ctrl.lock().unwrap();
+            let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
             guard.set_auth(&credential, &token, &refresh_tok);
         }
     });
@@ -83,20 +83,29 @@ pub(super) fn set_auth(msg: &IpcMessage) {
 pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
     let device_json = msg.args.first().cloned().unwrap_or_default();
     let Some(rt) = crate::state::RT_HANDLE.get() else {
-        callback.lock().unwrap().failure(500, "No runtime");
+        callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure(500, "No runtime");
         return;
     };
     rt.spawn(async move {
         let ctrl_arc = get_controller_arc();
         let Some(ctrl) = ctrl_arc else {
-            callback.lock().unwrap().failure(500, "No controller");
+            callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .failure(500, "No controller");
             return;
         };
 
         let device: MdnsDevice = match serde_json::from_value(device_json) {
             Ok(d) => d,
             Err(e) => {
-                callback.lock().unwrap().failure(400, &e.to_string());
+                callback
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .failure(400, &e.to_string());
                 return;
             }
         };
@@ -114,12 +123,15 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
             Ok(ws) => {
                 let ws = Arc::new(ws);
                 {
-                    let mut guard = ctrl.lock().unwrap();
+                    let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
                     let cred = guard.session_credential().map(|s| s.to_string());
                     guard.set_ws_and_start_session(ws, &device, cred.as_deref());
                     guard.start_session(&device, cred.as_deref());
                 }
-                callback.lock().unwrap().success_str("\"ok\"");
+                callback
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .success_str("\"ok\"");
 
                 // Spawn WS event loop.
                 let ctrl_clone = ctrl.clone();
@@ -129,7 +141,7 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
                             forward_controller_notification(json);
                         }
                         let session_event = {
-                            let mut guard = ctrl_clone.lock().unwrap();
+                            let mut guard = ctrl_clone.lock().unwrap_or_else(|e| e.into_inner());
                             guard.handle_ws_event(&event)
                         };
                         if let Some(se) = session_event {
@@ -142,7 +154,10 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
                 });
             }
             Err(e) => {
-                callback.lock().unwrap().failure(500, &e.to_string());
+                callback
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .failure(500, &e.to_string());
             }
         }
     });
@@ -154,9 +169,12 @@ pub(super) fn disconnect(msg: IpcMessage, callback: IpcCallback) {
         if let Some(ref cm) = state.connect
             && let Some(ctrl) = cm.controller()
         {
-            let mut guard = ctrl.lock().unwrap();
+            let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
             guard.disconnect(stop);
         }
     });
-    callback.lock().unwrap().success_str("\"ok\"");
+    callback
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .success_str("\"ok\"");
 }

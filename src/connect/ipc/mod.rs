@@ -68,7 +68,10 @@ pub(crate) fn handle_connect_invoke(msg: IpcMessage, callback: IpcCallback) {
         _ => {
             // Fallback: try fire-and-forget path.
             handle_connect_ipc(&msg);
-            callback.lock().unwrap().success_str("ok");
+            callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .success_str("ok");
         }
     }
 }

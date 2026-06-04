@@ -69,7 +69,7 @@ impl ConnectManager {
             .spawn("controller-browser-loop", async move {
                 while let Some(event) = event_rx.recv().await {
                     let devices = {
-                        let mut guard = ctrl.lock().unwrap();
+                        let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
                         guard.handle_browser_event(event);
                         guard.discovered_devices().to_vec()
                     };
@@ -135,7 +135,7 @@ impl ConnectManager {
         });
 
         if let Some(ref ctrl) = self.controller {
-            let guard = ctrl.lock().unwrap();
+            let guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
             snapshot["devices"] =
                 serde_json::to_value(guard.discovered_devices()).unwrap_or_default();
             snapshot["isConnected"] = serde_json::Value::Bool(guard.is_connected());
@@ -175,10 +175,8 @@ impl ConnectManager {
                 report.panicked
             );
         }
-        if let Some(ctrl) = self.controller.take()
-            && let Ok(mut guard) = ctrl.lock()
-        {
-            guard.shutdown();
+        if let Some(ctrl) = self.controller.take() {
+            ctrl.lock().unwrap_or_else(|e| e.into_inner()).shutdown();
         }
         crate::vprintln!("[connect] Shutdown complete");
     }

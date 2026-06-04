@@ -35,7 +35,7 @@ impl PendingRequests {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         let now = Instant::now();
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         // Reclaim entries whose caller is gone or that have aged out before
         // inserting, so the map stays bounded by live in-flight requests.
         pending
@@ -45,7 +45,12 @@ impl PendingRequests {
     }
 
     pub fn resolve(&self, request_id: u32, response: serde_json::Value) -> bool {
-        if let Some((_, tx)) = self.pending.lock().unwrap().remove(&request_id) {
+        if let Some((_, tx)) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&request_id)
+        {
             tx.send(response).is_ok()
         } else {
             false
@@ -53,10 +58,16 @@ impl PendingRequests {
     }
 
     pub fn remove(&self, request_id: u32) {
-        self.pending.lock().unwrap().remove(&request_id);
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&request_id);
     }
 
     pub fn fail_all(&self) {
-        self.pending.lock().unwrap().clear();
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }

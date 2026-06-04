@@ -9,6 +9,6 @@ pub(super) fn get_state(callback: IpcCallback) {
         .unwrap_or(serde_json::json!({}));
     callback
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .success_str(&serde_json::to_string(&snapshot).unwrap_or_default());
 }
