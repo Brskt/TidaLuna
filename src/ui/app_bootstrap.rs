@@ -307,8 +307,7 @@ wrap_browser_process_handler! {
                 "win32"
             };
 
-            let mut close_to_tray = crate::state::db()
-                .call_settings(crate::settings::load_close_to_tray);
+            let mut close_to_tray = crate::state::boot_settings().close_to_tray;
             if close_to_tray && !crate::platform::tray::create_tray() {
                 close_to_tray = false;
             }
@@ -319,17 +318,11 @@ wrap_browser_process_handler! {
             }
             crate::platform::tray::start_event_polling();
 
-            let auto_check = crate::state::db()
-                .call_settings(crate::settings::load_update_auto_check);
+            let auto_check = crate::state::boot_settings().auto_check;
 
-            let receiver_always_on = crate::state::db()
-                .call_settings(crate::settings::load_receiver_always_on);
+            let receiver_always_on = crate::state::boot_settings().receiver_always_on;
 
-            #[cfg(target_os = "windows")]
-            let volume_sync = crate::state::db()
-                .call_settings(crate::settings::load_volume_sync);
-            #[cfg(not(target_os = "windows"))]
-            let volume_sync: bool = false;
+            let volume_sync = crate::state::boot_settings().volume_sync;
 
             // TIDAL's web frontend gates its native titlebar component on a
             // Windows platform token in navigator.userAgent. On Linux we keep the
@@ -344,8 +337,7 @@ wrap_browser_process_handler! {
             let ua_override = String::new();
 
             let perf = crate::debug::perf_monitor::enabled();
-            let window_maximized = crate::state::db()
-                .call_settings(|c| crate::settings::load_window_state(c).maximized);
+            let window_maximized = crate::state::boot_settings().window_maximized;
             let init_script = format!(
                 r#"{ua_override}window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};

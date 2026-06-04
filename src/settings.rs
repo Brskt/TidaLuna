@@ -179,6 +179,31 @@ pub(crate) fn save_receiver_always_on(conn: &mut Connection, enabled: bool) {
     set(conn, "connect.receiver_always_on", &enabled.to_string());
 }
 
+/// Settings the window bootstrap needs, batched into one db read so they load
+/// off the CEF UI thread in main() instead of blocking on_context_initialized.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BootSettings {
+    pub(crate) close_to_tray: bool,
+    pub(crate) auto_check: bool,
+    pub(crate) receiver_always_on: bool,
+    pub(crate) volume_sync: bool,
+    pub(crate) window_maximized: bool,
+}
+
+pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
+    BootSettings {
+        close_to_tray: load_close_to_tray(conn),
+        auto_check: load_update_auto_check(conn),
+        receiver_always_on: load_receiver_always_on(conn),
+        // volume_sync is a Windows-only feature; non-Windows keeps it off.
+        #[cfg(target_os = "windows")]
+        volume_sync: load_volume_sync(conn),
+        #[cfg(not(target_os = "windows"))]
+        volume_sync: false,
+        window_maximized: load_window_state(conn).maximized,
+    }
+}
+
 pub(crate) fn load_update_skip_version(conn: &mut Connection) -> Option<String> {
     conn.query_row(
         "SELECT value FROM settings WHERE key = 'updater.skip_version'",

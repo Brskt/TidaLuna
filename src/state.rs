@@ -139,6 +139,13 @@ pub(crate) fn db() -> &'static crate::db::DbActor {
     DB.get().expect("DB actor not initialized")
 }
 
+pub(crate) static BOOT_SETTINGS: std::sync::OnceLock<crate::settings::BootSettings> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn boot_settings() -> &'static crate::settings::BootSettings {
+    BOOT_SETTINGS.get().expect("BootSettings not initialized")
+}
+
 pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = LazyLock::new(|| {
     let dir = cache_data_dir();
     match crate::player::cache::AudioCache::open(&dir) {

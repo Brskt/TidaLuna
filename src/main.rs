@@ -315,9 +315,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let receiver_always_on =
-        crate::state::db().call_settings(crate::settings::load_receiver_always_on);
-    if receiver_always_on && let Some(rt) = crate::state::RT_HANDLE.get() {
+    // Preload the window-bootstrap settings in one db read here, off the CEF UI
+    // thread, so on_context_initialized doesn't block on per-setting round-trips.
+    let boot = crate::state::db().call_settings(crate::settings::load_boot_settings);
+    let _ = crate::state::BOOT_SETTINGS.set(boot);
+    if boot.receiver_always_on
+        && let Some(rt) = crate::state::RT_HANDLE.get()
+    {
         rt.spawn(crate::connect::ipc::start_receiver_task(
             crate::connect::types::ReceiverConfig::default(),
         ));
