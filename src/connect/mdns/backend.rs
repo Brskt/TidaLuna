@@ -279,10 +279,19 @@ mod tests {
     async fn prod_backend_already_stopped_short_circuits() {
         // Build a real daemon and shut it down to simulate already-stopped.
         let daemon = Arc::new(ServiceDaemon::new().expect("create daemon"));
-        // Trigger shutdown and drain the status so the daemon is definitely down.
-        let _ = daemon.shutdown();
-        // Allow the daemon a beat to transition.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Drive it all the way to Shutdown before probing: a fixed sleep races
+        // the daemon's own OS thread and flakes under parallel test load, so
+        // wait on the status channel until the daemon actually reports down.
+        let status = daemon.shutdown().expect("shutdown daemon");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(s) = status.recv_async().await {
+                if matches!(s, DaemonStatus::Shutdown) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("daemon did not report shutdown within 5s");
 
         let backend = ProdMdnsBackend::new(daemon);
         let outcome = backend.shutdown(Duration::from_millis(200)).await;
