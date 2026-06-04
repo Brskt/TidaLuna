@@ -536,5 +536,5 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
         obj.insert("refresh_token".to_string(), serde_json::Value::String(ort));
     }
 
-    serde_json::to_string(&json).unwrap_or_else(|_| body.to_string())
+    serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
 }
