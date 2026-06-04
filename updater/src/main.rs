@@ -896,15 +896,70 @@ fn download_and_verify_manifest(
 // Download + extract
 // ---------------------------------------------------------------------------
 
+/// Hard ceiling on an update archive download. Far above any real release;
+/// bounds memory and disk if a tampered or misbehaving server streams an
+/// oversized body before the post-extraction hash check can reject it.
+const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 fn download_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<()> {
     let resp = client.get(url).send().context("download failed")?;
     if !resp.status().is_success() {
         bail!("download returned {}", resp.status());
     }
+    stream_to_file(resp, dest, MAX_ARCHIVE_BYTES)
+}
 
-    let bytes = resp.bytes().context("read download body")?;
-    fs::write(dest, &bytes).with_context(|| format!("write to {}", dest.display()))?;
+/// Stream `reader` to `dest`, failing if more than `max` bytes arrive.
+fn stream_to_file(mut reader: impl Read, dest: &Path, max: u64) -> Result<()> {
+    let mut file = fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
+    // take(max + 1) so an over-cap body trips the check after writing at most
+    // one byte past the limit, never buffering or storing the whole stream.
+    let copied = std::io::copy(&mut reader.by_ref().take(max + 1), &mut file)
+        .with_context(|| format!("write to {}", dest.display()))?;
+    if copied > max {
+        drop(file);
+        fs::remove_file(dest).ok();
+        bail!("download exceeds the {max}-byte archive cap");
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod download_tests {
+    use std::io::Cursor;
+
+    use super::stream_to_file;
+
+    #[test]
+    fn stream_to_file_writes_body_under_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let body = vec![7u8; 100];
+        stream_to_file(Cursor::new(body.clone()), &dest, 1000).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
+
+    #[test]
+    fn stream_to_file_accepts_body_exactly_at_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let body = vec![1u8; 64];
+        stream_to_file(Cursor::new(body.clone()), &dest, 64).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
+
+    #[test]
+    fn stream_to_file_rejects_body_over_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let body = vec![0u8; 65];
+        let err = stream_to_file(Cursor::new(body), &dest, 64).unwrap_err();
+        assert!(err.to_string().contains("cap"), "got: {err}");
+        assert!(
+            !dest.exists(),
+            "partial file must be removed when the cap is exceeded"
+        );
+    }
 }
 
 fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
