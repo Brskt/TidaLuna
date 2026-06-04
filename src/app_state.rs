@@ -92,7 +92,10 @@ where
     F: FnOnce(&mut AppState) -> R,
 {
     APP_STATE.get().map(|s| {
-        let mut guard = s.lock().expect("AppState lock poisoned");
+        // Recover the guard on poison rather than cascading the panic: a panic
+        // under this lock would otherwise brick every later `with_state` call,
+        // many of which run inside CEF `extern "C"` callbacks (UB across FFI).
+        let mut guard = s.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
     })
 }

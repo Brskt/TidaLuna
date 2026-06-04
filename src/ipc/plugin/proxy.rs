@@ -410,6 +410,17 @@ fn proxy_rewrite_refresh_body(body: &str) -> String {
 }
 
 fn proxy_transform_token_body(body: &str, status: u16) -> String {
+    proxy_transform_token_body_with(body, status, crate::ui::token_filter::generate_opaque)
+}
+
+/// `opaque` is the opaque-nonce generator, injected for testing. When it fails
+/// (RNG unavailable) with a real token present, return an empty token body
+/// rather than the real token (the recipient is plugin JS).
+fn proxy_transform_token_body_with(
+    body: &str,
+    status: u16,
+    opaque: impl Fn() -> Option<String>,
+) -> String {
     let Ok(mut json) = serde_json::from_str::<serde_json::Value>(body) else {
         crate::vprintln!("[AUTH]   /oauth2/token → {} (non-JSON)", status);
         return body.to_string();
@@ -454,7 +465,20 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let opaque_at = crate::ui::token_filter::generate_opaque();
+    // A real token is present: if opaque generation fails, return an empty token
+    // body rather than the real token (the recipient is plugin JS).
+    let opaque_at = match opaque() {
+        Some(o) => o,
+        None => return "{}".to_string(),
+    };
+    let opaque_rt_new = if refresh_token.is_some() {
+        match opaque() {
+            Some(o) => Some(o),
+            None => return "{}".to_string(),
+        }
+    } else {
+        None
+    };
     let granted_scopes: Vec<String> = scope
         .as_deref()
         .map(|s| s.split(' ').map(|s| s.to_string()).collect())
@@ -467,7 +491,7 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
             .unwrap_or(0);
 
         let (real_rt, ort) = if let Some(ref rt) = refresh_token {
-            (rt.clone(), crate::ui::token_filter::generate_opaque())
+            (rt.clone(), opaque_rt_new.clone().unwrap_or_default())
         } else if let Some(ref ts) = state.token_state {
             (
                 ts.current.refresh_token.clone(),
@@ -537,4 +561,19 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
     }
 
     serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_body_empties_on_entropy_failure_never_leaks() {
+        // A real-token response with opaque generation failing must return an
+        // empty JSON body, never the real token, to plugin JS.
+        let body = r#"{"access_token":"real-secret","refresh_token":"real-rt"}"#;
+        let out = proxy_transform_token_body_with(body, 200, || None);
+        assert_eq!(out, "{}");
+        assert!(!out.contains("real-secret"));
+    }
 }

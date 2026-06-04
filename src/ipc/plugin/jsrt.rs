@@ -182,9 +182,16 @@ pub(super) fn do_load_plugins_inline() {
                     let deps_satisfied = deps.iter().all(|d| loaded_names.contains(&d.name));
 
                     if deps_satisfied {
-                        let (load_id, nonce) =
-                            with_state(|state| state.plugin_manager.mark_loading(&p.url, &p.name))
-                                .unwrap_or((0, 0));
+                        let Some(nonce) = crate::plugins::manager::random_nonce() else {
+                            crate::vprintln!("[PLUGIN] RNG unavailable, skipping '{}'", p.name);
+                            with_state(|state| state.plugin_manager.mark_unloaded(&p.url));
+                            failed_urls.push(p.url);
+                            continue;
+                        };
+                        let load_id = with_state(|state| {
+                            state.plugin_manager.mark_loading(&p.url, &p.name, nonce)
+                        })
+                        .unwrap_or(0);
                         match crate::plugins::PluginManager::transpile_and_wrap(
                             &p.url, &p.code, load_id, nonce,
                         ) {
@@ -450,9 +457,18 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
                 return;
             }
             if let Some(code) = code {
-                let (load_id, nonce) =
-                    with_state(|state| state.plugin_manager.mark_loading(url, &plugin_name))
-                        .unwrap_or((0, 0));
+                let Some(nonce) = crate::plugins::manager::random_nonce() else {
+                    crate::vprintln!("[PLUGIN] RNG unavailable, skipping '{}'", url);
+                    with_state(|state| state.plugin_manager.mark_unloaded(url));
+                    let url_dis = url.to_owned();
+                    crate::state::db().call_plugins(move |pc| {
+                        let _ = crate::plugins::store::disable(pc, &url_dis);
+                    });
+                    return;
+                };
+                let load_id =
+                    with_state(|state| state.plugin_manager.mark_loading(url, &plugin_name, nonce))
+                        .unwrap_or(0);
                 match crate::plugins::PluginManager::transpile_and_wrap(url, &code, load_id, nonce)
                 {
                     Ok(js) => {

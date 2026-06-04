@@ -185,9 +185,14 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         .await;
     }
 
-    // 2. Mark loading (generates load_id for wrapper correlation)
-    let (load_id, nonce) =
-        with_state(|state| state.plugin_manager.mark_loading(&url, &plugin_name)).unwrap_or((0, 0));
+    // 2. Mark loading. The ack nonce is generated off the AppState lock so an
+    // entropy failure fails the load instead of panicking under the guard.
+    let Some(nonce) = crate::plugins::manager::random_nonce() else {
+        revert_enable(&url).await;
+        return Err("RNG unavailable".to_string());
+    };
+    let load_id = with_state(|state| state.plugin_manager.mark_loading(&url, &plugin_name, nonce))
+        .unwrap_or(0);
 
     // 3. Transpile + wrap (load_id + nonce injected into wrapper for ack)
     let js = match crate::plugins::PluginManager::transpile_and_wrap(&url, &code, load_id, nonce) {

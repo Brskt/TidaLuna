@@ -119,7 +119,20 @@ async fn do_refresh(refresh_token: String, client_id: String) {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let opaque_at = crate::ui::token_filter::generate_opaque();
+    let opaque_at = match crate::ui::token_filter::generate_opaque() {
+        Some(o) => o,
+        None => return,
+    };
+    // Opaque for the refresh token, generated off the AppState lock (only when a
+    // new refresh token is present). Skip this refresh cycle on RNG failure.
+    let opaque_rt_new = if new_rt.is_some() {
+        match crate::ui::token_filter::generate_opaque() {
+            Some(o) => Some(o),
+            None => return,
+        }
+    } else {
+        None
+    };
     let granted_scopes: Vec<String> = scope
         .as_deref()
         .map(|s| s.split(' ').map(|s| s.to_string()).collect())
@@ -137,7 +150,7 @@ async fn do_refresh(refresh_token: String, client_id: String) {
             .unwrap_or(0);
 
         let (real_rt, ort) = if let Some(ref rt) = new_rt {
-            (rt.clone(), crate::ui::token_filter::generate_opaque())
+            (rt.clone(), opaque_rt_new.clone().unwrap_or_default())
         } else if let Some(ref ts) = state.token_state {
             (
                 ts.current.refresh_token.clone(),

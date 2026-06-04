@@ -55,16 +55,31 @@ pub(crate) fn should_rewrite_token(url: &str) -> bool {
         || (host.starts_with("event-collector.") && host.ends_with(".tidalhi.fi"))
 }
 
-pub(crate) fn generate_opaque() -> String {
+/// Opaque `luna_*` token nonce, or `None` if the system RNG is unavailable.
+/// Callers generate this off the AppState lock and fail closed on `None`.
+pub(crate) fn generate_opaque() -> Option<String> {
+    generate_opaque_with(|buf| match getrandom::fill(buf) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::vprintln!("[token_filter] opaque entropy failure: {e}");
+            false
+        }
+    })
+}
+
+/// `fill` returns true on success; entropy source is injected for testing.
+fn generate_opaque_with(fill: impl FnOnce(&mut [u8]) -> bool) -> Option<String> {
     use std::fmt::Write;
     let mut buf = [0u8; 16];
-    getrandom::fill(&mut buf).expect("getrandom failed");
+    if !fill(&mut buf) {
+        return None;
+    }
     let mut out = String::with_capacity(OPAQUE_PREFIX.len() + buf.len() * 2);
     out.push_str(OPAQUE_PREFIX);
     for b in buf {
         let _ = write!(out, "{b:02x}");
     }
-    out
+    Some(out)
 }
 
 pub(crate) fn is_opaque(value: &str) -> bool {
@@ -328,6 +343,13 @@ enum ProcessResult {
 }
 
 fn process_token_response(body: &[u8]) -> ProcessResult {
+    process_token_response_with(body, generate_opaque)
+}
+
+/// `opaque` is the opaque-nonce generator, injected for testing. When it fails
+/// (RNG unavailable) with a real token present, we drop the response rather than
+/// emit the real token.
+fn process_token_response_with(body: &[u8], opaque: impl Fn() -> Option<String>) -> ProcessResult {
     let Ok(json_str) = std::str::from_utf8(body) else {
         return ProcessResult::Passthrough;
     };
@@ -361,7 +383,20 @@ fn process_token_response(body: &[u8]) -> ProcessResult {
         _ => return ProcessResult::Passthrough,
     };
 
-    let opaque_at = generate_opaque();
+    // A real token is present: if opaque generation fails, drop the response
+    // (Error -> FilterOutcome::Drop) instead of emitting the real token.
+    let opaque_at = match opaque() {
+        Some(o) => o,
+        None => return ProcessResult::Error,
+    };
+    let opaque_rt_new = if refresh_token.is_some() {
+        match opaque() {
+            Some(o) => Some(o),
+            None => return ProcessResult::Error,
+        }
+    } else {
+        None
+    };
 
     let granted_scopes: Vec<String> = scope
         .as_deref()
@@ -372,7 +407,7 @@ fn process_token_response(body: &[u8]) -> ProcessResult {
         let now_secs = now_unix_secs();
 
         let (real_rt, ort) = if let Some(ref rt) = refresh_token {
-            (rt.clone(), generate_opaque())
+            (rt.clone(), opaque_rt_new.clone().unwrap_or_default())
         } else if let Some(ref ts) = state.token_state {
             (
                 ts.current.refresh_token.clone(),
@@ -446,5 +481,39 @@ fn process_token_response(body: &[u8]) -> ProcessResult {
     match serde_json::to_vec(&json) {
         Ok(v) => ProcessResult::Modified(v),
         Err(_) => ProcessResult::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_is_none_on_entropy_failure() {
+        assert_eq!(generate_opaque_with(|_| false), None);
+    }
+
+    #[test]
+    fn opaque_has_prefix_and_hex_bytes() {
+        let o = generate_opaque_with(|buf| {
+            buf.fill(0xab);
+            true
+        })
+        .expect("RNG ok");
+        assert!(o.starts_with(OPAQUE_PREFIX));
+        let hex = &o[OPAQUE_PREFIX.len()..];
+        assert_eq!(hex.len(), 32);
+        assert_eq!(hex, "ab".repeat(16));
+    }
+
+    #[test]
+    fn token_response_drops_on_entropy_failure_never_passthrough() {
+        // A real-token response with opaque generation failing must DROP
+        // (Error), never Passthrough, or the real token reaches the renderer.
+        let body = br#"{"access_token":"real-secret","refresh_token":"real-rt"}"#;
+        assert!(matches!(
+            process_token_response_with(body, || None),
+            ProcessResult::Error
+        ));
     }
 }

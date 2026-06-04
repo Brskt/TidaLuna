@@ -114,7 +114,14 @@ impl ReceiverSession {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let session_id = generate_session_id();
+        let session_id = match generate_session_id() {
+            Some(id) => id,
+            None => {
+                self.send_session_error(socket_id, "startSession", "RNG unavailable")
+                    .await;
+                return;
+            }
+        };
 
         let mut sockets = HashSet::new();
         sockets.insert(socket_id);
@@ -331,11 +338,24 @@ impl ReceiverSession {
     }
 }
 
-/// Generate a UUID v4 session ID.
-fn generate_session_id() -> String {
+/// Generate a UUID v4 session ID, or `None` if the system RNG is unavailable.
+fn generate_session_id() -> Option<String> {
+    generate_session_id_with(|buf| match getrandom::fill(buf) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::vprintln!("[connect::session] session-id entropy failure: {e}");
+            false
+        }
+    })
+}
+
+/// `fill` returns true on success; entropy source is injected for testing.
+fn generate_session_id_with(fill: impl FnOnce(&mut [u8]) -> bool) -> Option<String> {
     let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).expect("RNG failed");
-    format!(
+    if !fill(&mut bytes) {
+        return None;
+    }
+    Some(format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
         u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
         u16::from_be_bytes([bytes[4], bytes[5]]),
@@ -344,5 +364,34 @@ fn generate_session_id() -> String {
         u64::from_be_bytes([
             0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
         ]),
-    )
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_id_is_none_on_entropy_failure() {
+        assert_eq!(generate_session_id_with(|_| false), None);
+    }
+
+    #[test]
+    fn session_id_is_uuid_v4_shaped() {
+        let id = generate_session_id_with(|buf| {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = i as u8;
+            }
+            true
+        })
+        .expect("RNG ok");
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(id.len(), 36);
+        assert_eq!(parts.len(), 5);
+        assert!(parts[2].starts_with('4'), "version nibble must be 4");
+        assert!(
+            matches!(parts[3].chars().next(), Some('8'..='b')),
+            "variant nibble must be 8..b"
+        );
+    }
 }
