@@ -843,6 +843,25 @@ fn verify_manifest_signature(manifest_bytes: &[u8], sig_b64: &str) -> Result<()>
     Ok(())
 }
 
+/// Cap on the metadata downloads (manifest JSON + detached signature). Small
+/// first-party files; the bound stops an oversized body from being buffered
+/// before the signature can be verified.
+const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a response body into memory, failing if it exceeds `max` bytes.
+fn read_capped(mut reader: impl Read, max: u64) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    reader
+        .by_ref()
+        .take(max + 1)
+        .read_to_end(&mut buf)
+        .context("read response body")?;
+    if buf.len() as u64 > max {
+        bail!("download exceeds the {max}-byte cap");
+    }
+    Ok(buf)
+}
+
 fn download_and_verify_manifest(
     client: &reqwest::blocking::Client,
     release: &GhRelease,
@@ -866,22 +885,17 @@ fn download_and_verify_manifest(
         .browser_download_url
         .clone();
 
-    // Download manifest
-    let manifest_bytes = client
+    let manifest_resp = client
         .get(&manifest_url)
         .send()
-        .context("download manifest")?
-        .bytes()
-        .context("read manifest bytes")?
-        .to_vec();
+        .context("download manifest")?;
+    let manifest_bytes =
+        read_capped(manifest_resp, MAX_MANIFEST_BYTES).context("read manifest bytes")?;
 
-    // Download signature
-    let sig_b64 = client
-        .get(&sig_url)
-        .send()
-        .context("download signature")?
-        .text()
-        .context("read signature")?;
+    let sig_resp = client.get(&sig_url).send().context("download signature")?;
+    let sig_b64 =
+        String::from_utf8(read_capped(sig_resp, MAX_MANIFEST_BYTES).context("read signature")?)
+            .context("signature not utf8")?;
 
     verify_manifest_signature(&manifest_bytes, &sig_b64)?;
 
@@ -928,7 +942,25 @@ fn stream_to_file(mut reader: impl Read, dest: &Path, max: u64) -> Result<()> {
 mod download_tests {
     use std::io::Cursor;
 
-    use super::stream_to_file;
+    use super::{read_capped, stream_to_file};
+
+    #[test]
+    fn read_capped_returns_body_under_cap() {
+        let body = vec![3u8; 100];
+        assert_eq!(read_capped(Cursor::new(body.clone()), 1000).unwrap(), body);
+    }
+
+    #[test]
+    fn read_capped_allows_exactly_at_cap() {
+        let body = vec![5u8; 64];
+        assert_eq!(read_capped(Cursor::new(body.clone()), 64).unwrap(), body);
+    }
+
+    #[test]
+    fn read_capped_rejects_over_cap() {
+        let err = read_capped(Cursor::new(vec![0u8; 65]), 64).unwrap_err();
+        assert!(err.to_string().contains("cap"), "got: {err}");
+    }
 
     #[test]
     fn stream_to_file_writes_body_under_cap() {

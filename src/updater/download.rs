@@ -142,6 +142,45 @@ async fn download_update_inner(
     Ok(())
 }
 
+/// Cap on the metadata downloads (manifest JSON + detached signature). Small
+/// first-party files; the bound stops an oversized body from being buffered in
+/// the live app process before the signature can be verified.
+const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Add `add` to the running byte total, failing if it would exceed `max`.
+fn bump_capped(running: u64, add: usize, max: u64) -> Result<u64, anyhow::Error> {
+    let next = running.saturating_add(add as u64);
+    if next > max {
+        bail!("download exceeds the {max}-byte cap");
+    }
+    Ok(next)
+}
+
+/// Fetch `url` into memory, failing if the body exceeds `max` bytes. The cap is
+/// the only pre-verification defense, since the signature can only be checked
+/// once the bytes are received.
+async fn fetch_capped(
+    client: &reqwest::Client,
+    url: &str,
+    max: u64,
+    what: &str,
+) -> Result<Bytes, anyhow::Error> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("download {what}"))?;
+    let mut buf = Vec::new();
+    let mut total = 0u64;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("read {what} bytes"))?;
+        total = bump_capped(total, chunk.len(), max)?;
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(buf))
+}
+
 async fn download_manifest_and_sig(
     client: &reqwest::Client,
     release: &GhRelease,
@@ -162,26 +201,18 @@ async fn download_manifest_and_sig(
 
     crate::vprintln!("[UPDATER] Downloading manifest + signature...");
     let (manifest_bytes, sig_bytes) = tokio::try_join!(
-        async {
-            client
-                .get(&manifest_asset.browser_download_url)
-                .send()
-                .await
-                .context("download manifest")?
-                .bytes()
-                .await
-                .context("read manifest bytes")
-        },
-        async {
-            client
-                .get(&sig_asset.browser_download_url)
-                .send()
-                .await
-                .context("download signature")?
-                .bytes()
-                .await
-                .context("read signature bytes")
-        },
+        fetch_capped(
+            client,
+            &manifest_asset.browser_download_url,
+            MAX_MANIFEST_BYTES,
+            "manifest",
+        ),
+        fetch_capped(
+            client,
+            &sig_asset.browser_download_url,
+            MAX_MANIFEST_BYTES,
+            "signature",
+        ),
     )?;
 
     let manifest: Manifest =
@@ -353,5 +384,27 @@ pub(super) fn cleanup_staging() {
         if staging.exists() {
             fs::remove_dir_all(&staging).ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::bump_capped;
+
+    #[test]
+    fn bump_capped_accumulates_under_cap() {
+        assert_eq!(bump_capped(0, 100, 1000).unwrap(), 100);
+        assert_eq!(bump_capped(100, 50, 1000).unwrap(), 150);
+    }
+
+    #[test]
+    fn bump_capped_allows_exactly_at_cap() {
+        assert_eq!(bump_capped(60, 4, 64).unwrap(), 64);
+    }
+
+    #[test]
+    fn bump_capped_rejects_over_cap() {
+        let err = bump_capped(60, 5, 64).unwrap_err();
+        assert!(err.to_string().contains("cap"), "got: {err}");
     }
 }
