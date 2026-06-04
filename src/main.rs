@@ -286,6 +286,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         force_quit: false,
         needs_proactive_refresh: false,
         needs_blob_purge: false,
+        // Gate open by default; cold boot closes it below when a refresh is due.
+        proactive_refresh_done: true,
+        plugin_load_waiters: Vec::new(),
         last_client_id: String::new(),
         connect: Some(crate::connect::ConnectManager::new()),
     })));
@@ -307,6 +310,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.token_state = Some(restored);
             state.needs_proactive_refresh = needs_refresh;
             state.needs_blob_purge = needs_refresh;
+            // Close the plugin-load gate only when a proactive refresh will run.
+            state.proactive_refresh_done = !needs_refresh;
         });
     }
 

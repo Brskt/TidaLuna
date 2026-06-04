@@ -37,6 +37,9 @@ pub(crate) fn trigger_if_needed() {
     crate::vprintln!("[AUTH]   Proactive refresh: starting");
     crate::state::rt_handle().spawn(async move {
         do_refresh(refresh_token, client_id).await;
+        // Open the gate on every exit path; safe even on refresh failure (the
+        // token stays live, but the egress filter blocks exfil).
+        crate::ipc::plugin::open_plugin_gate();
     });
 }
 

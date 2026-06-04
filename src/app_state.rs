@@ -68,6 +68,12 @@ pub(crate) struct AppState {
     pub(crate) force_quit: bool,
     pub(crate) needs_proactive_refresh: bool,
     pub(crate) needs_blob_purge: bool,
+    // Gate: plugin JS must not load until the cold-boot real OAuth token has been
+    // rotated to opaque nonces in TIDAL's SDK. Default true (warm boot / no
+    // session); a cold boot with a pending refresh closes it.
+    pub(crate) proactive_refresh_done: bool,
+    // Plugin-load requests parked while the gate is closed; replied on drain.
+    pub(crate) plugin_load_waiters: Vec<IpcCallback>,
     pub(crate) last_client_id: String,
     pub(crate) connect: Option<crate::connect::ConnectManager>,
 }

@@ -5,6 +5,7 @@ mod plugin_ipc;
 mod proxy;
 
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
+pub(crate) use jsrt::open_plugin_gate;
 
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use std::sync::atomic::{AtomicBool, Ordering};

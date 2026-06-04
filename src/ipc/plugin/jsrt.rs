@@ -28,7 +28,7 @@ fn handle_session_clear() {
     // Unload all user plugins before clearing the session
     unload_all_user_plugins();
 
-    with_state(|state| {
+    let parked = with_state(|state| {
         // Stop the native player; it runs independent of the renderer, so a
         // session clear alone won't halt audio on logout.
         let _ = state.player.stop();
@@ -36,7 +36,16 @@ fn handle_session_clear() {
         state.pending_time_update = None;
         state.captured_token.clear();
         state.token_state = None;
-    });
+        // Re-open the plugin-load gate; the prior cold-boot refresh is moot now.
+        state.proactive_refresh_done = true;
+        std::mem::take(&mut state.plugin_load_waiters)
+    })
+    .unwrap_or_default();
+    // Settle any parked cold-boot load requests so the renderer's invokeIpc
+    // resolves instead of hanging across the logout/login transition.
+    for cb in &parked {
+        super::ipc_callback_ok(cb, "true");
+    }
     // Allow the next login to trigger its one-shot cold-boot reload.
     crate::ui::POST_LOGIN_RELOADED.store(false, std::sync::atomic::Ordering::SeqCst);
     let data_dir = crate::state::cache_data_dir();
@@ -298,6 +307,62 @@ pub(super) fn do_load_plugins_inline() {
     }
 }
 
+/// Open the gate and drain parked load requests. Posts to the CEF UI thread
+/// because the drain touches CEF handles that are only sound there.
+pub(crate) fn open_plugin_gate() {
+    let mut task = GateDrainTask::new(0);
+    post_task(ThreadId::UI, Some(&mut task));
+}
+
+/// One-shot latch: only the first parked request arms the safety timer.
+static GATE_TIMEOUT_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Force the gate open after 5s if the refresh never signals, so plugin load
+/// can't hang forever. Safe: the egress filter still blocks any leaked token.
+pub(super) fn arm_gate_timeout() {
+    if GATE_TIMEOUT_ARMED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    crate::state::rt_handle().spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let still_closed = with_state(|state| !state.proactive_refresh_done).unwrap_or(false);
+        if still_closed {
+            crate::vprintln!("[PLUGIN] Gate timeout: refresh never signalled, loading anyway");
+            open_plugin_gate();
+        }
+    });
+}
+
+wrap_task! {
+    struct GateDrainTask {
+        _p: u8,
+    }
+    impl Task {
+        fn execute(&self) {
+            // Open the gate + take parked waiters under the lock, then DROP it
+            // before loading: do_load_plugins_inline re-locks AppState repeatedly.
+            let waiters = with_state(|state| {
+                state.proactive_refresh_done = true;
+                std::mem::take(&mut state.plugin_load_waiters)
+            })
+            .unwrap_or_default();
+            if waiters.is_empty() {
+                return;
+            }
+            crate::vprintln!(
+                "[PLUGIN] Gate open: draining {} parked load request(s)",
+                waiters.len()
+            );
+            purge_sdk_auth_blob_if_needed();
+            do_load_plugins_inline();
+            for cb in &waiters {
+                super::ipc_callback_ok(cb, "true");
+            }
+        }
+    }
+}
+
 pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
     match msg.channel.as_str() {
         "jsrt.set_token" => {
@@ -453,11 +518,6 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
             } else {
                 crate::vprintln!("[PLUGIN] No cleanup needed for '{}' (not loaded)", url);
             }
-        }
-        "jsrt.load_plugins" => {
-            // When called via sendIpc (fire-and-forget, no callback), run inline.
-            // When called via invokeIpc (with callback), routed to handle_plugin_ipc instead.
-            do_load_plugins_inline();
         }
         _ => {
             crate::vprintln!("[JSRT] Unknown fire-and-forget channel: {}", msg.channel);

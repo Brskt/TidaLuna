@@ -329,6 +329,24 @@ pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
         return;
     }
 
+    // Gate: on a cold boot the real OAuth token still lives in TIDAL's SDK until
+    // the proactive refresh rotates it to opaque nonces. Park the reply until the
+    // gate opens (refresh done or 5s safety timeout) so plugins can't read it.
+    let parked = with_state(|state| {
+        if state.proactive_refresh_done {
+            return false;
+        }
+        state.plugin_load_waiters.push(callback.clone());
+        true
+    })
+    .unwrap_or(false);
+
+    if parked {
+        crate::vprintln!("[PLUGIN] Deferring plugin load until proactive refresh completes");
+        super::jsrt::arm_gate_timeout();
+        return;
+    }
+
     super::jsrt::purge_sdk_auth_blob_if_needed();
     super::jsrt::do_load_plugins_inline();
     ipc_callback_ok(&callback, "true");
