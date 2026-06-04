@@ -221,6 +221,11 @@ async fn download_manifest_and_sig(
     Ok((manifest_bytes, sig_bytes, manifest))
 }
 
+/// Hard ceiling on the archive download. Far above any real release; bounds disk
+/// and memory if an oversized body is streamed before the staged-file hash check
+/// can reject it.
+const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 async fn stream_to_file(
     client: &reqwest::Client,
     url: &str,
@@ -241,9 +246,11 @@ async fn stream_to_file(
 
     let mut file = fs::File::create(dest).context("create archive file")?;
     let mut stream = resp.bytes_stream();
+    let mut total = 0u64;
     while let Some(chunk) = stream.next().await {
         check_cancel!(cancel);
         let chunk = chunk.context("read archive chunk")?;
+        total = bump_capped(total, chunk.len(), MAX_ARCHIVE_BYTES)?;
         std::io::Write::write_all(&mut file, &chunk).context("write archive chunk")?;
     }
 
