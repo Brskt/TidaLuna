@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::connect::token_state::{
-    AuthStore, GenerationStatus, RefreshGuard, TerminationReason, TokenState,
+    AuthStore, CASError, GenerationStatus, RefreshGuard, TerminationReason, TokenState,
 };
 use crate::connect::types::{
     MediaInfo, QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode, ServerInfo,
@@ -529,26 +529,38 @@ impl QueueManager {
         next.expires_at = Instant::now() + Duration::from_secs(3600);
         next.status = GenerationStatus::Active;
 
-        guard.try_apply(next).map_err(|cas| match cas {
-            crate::connect::token_state::CASError::VersionMismatch => {
-                QueueError::InvalidResponse("refresh CAS version mismatch".to_string())
+        // A lost CAS is a benign race, not an error: a concurrent writer already
+        // advanced the store, so adopt its current token instead of replaying
+        // ours (rejected by the CAS, possibly orphaned under refresh-token
+        // rotation).
+        let cas_result = guard.try_apply(next);
+        let cas_won = cas_result.is_ok();
+        let current = store.load();
+        match reconcile_refresh(cas_result, &success.access_token, &current) {
+            RefreshOutcome::UseToken(token) => {
+                self.update_access_token(&token)?;
+                if cas_won {
+                    crate::vprintln!("[connect::queue] Token refreshed");
+                } else {
+                    crate::vprintln!(
+                        "[connect::queue] Refresh superseded by a concurrent update; adopted current token"
+                    );
+                }
+                Ok(())
             }
-            crate::connect::token_state::CASError::Terminated => {
-                QueueError::InvalidResponse("refresh against terminated generation".to_string())
+            RefreshOutcome::Terminal(provider_error) => {
+                crate::vprintln!(
+                    "[connect::queue] Refresh blocked: generation terminated ({provider_error})"
+                );
+                Err(QueueError::AuthTerminated { provider_error })
             }
-        })?;
-
-        self.update_access_token(&success.access_token)?;
-        crate::vprintln!("[connect::queue] Token refreshed");
-        Ok(())
+        }
     }
 
-    /// Transition the given generation snapshot to
-    /// `Terminated(InvalidGrant)`. Uses `AuthStore::store` (unconditional
-    /// write) so a terminal state cannot be erased by a later stale refresh
-    /// attempt. `suspect_replay` is left false: RFC 9700 says replay detection
-    /// is a server-side property that the client cannot determine reliably
-    /// from a single response, so the flag remains observational.
+    /// Mark the snapshot's generation `Terminated(InvalidGrant)`. Uses the
+    /// unconditional `store` so a later stale refresh can't erase the terminal
+    /// state. `suspect_replay` stays false: replay detection is server-side
+    /// (RFC 9700 §4.14.2); the client only sets the flag heuristically.
     fn mark_generation_terminated(&mut self, snapshot: &Arc<TokenState>, provider_error: &str) {
         let Some(store) = self.auth.as_ref() else {
             return;
@@ -561,11 +573,11 @@ impl QueueManager {
         store.store(terminated);
     }
 
-    /// Transition the current generation to `Terminated(Revoked)` without a
-    /// pre-captured snapshot: used when a request made with a freshly-minted
-    /// access token is rejected with 401, implying a server-side revocation
-    /// (RFC 7009). `store()` bypasses the CAS so a relogin from the wire can
-    /// still install fresh credentials afterwards.
+    /// Mark the current generation `Terminated(Revoked)` (no pre-captured
+    /// snapshot). Used when a freshly-minted token is still rejected with 401
+    /// (`invalid_token`, RFC 6750 §3.1), implying out-of-band revocation.
+    /// `store()` bypasses the CAS so a wire relogin can still install fresh
+    /// credentials.
     fn mark_generation_revoked(&mut self) {
         let Some(store) = self.auth.as_ref() else {
             return;
@@ -803,4 +815,121 @@ impl QueueManager {
 fn next_media_seq() -> u32 {
     static SEQ: AtomicU32 = AtomicU32::new(0);
     SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Outcome of a refresh attempt after reconciling the CAS result with the
+/// store's current state.
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshOutcome {
+    /// Install this access token into the wire `ServerInfo` (and let the
+    /// pending retry use it). Either our refresh won the CAS, or a concurrent
+    /// writer installed an equally-current `Active` token that we adopt.
+    UseToken(String),
+    /// The generation is terminated; the caller must relogin. Carries the
+    /// upstream provider error for the one-shot terminal notification.
+    Terminal(String),
+}
+
+/// Reconcile a refresh CAS result with the store's current state. Pure, so the
+/// audit-critical branch is unit-testable.
+///
+/// A lost CAS is not a failure: adopt the winner's current token rather than
+/// replay ours (rejected by the CAS, possibly orphaned under refresh-token
+/// rotation). A terminated store routes to relogin.
+fn reconcile_refresh(
+    cas_result: Result<(), CASError>,
+    our_token: &str,
+    current: &TokenState,
+) -> RefreshOutcome {
+    match cas_result {
+        Ok(()) => RefreshOutcome::UseToken(our_token.to_string()),
+        Err(_) => match &current.status {
+            GenerationStatus::Active => RefreshOutcome::UseToken(current.access_token.clone()),
+            GenerationStatus::Terminated(reason) => {
+                RefreshOutcome::Terminal(termination_provider_error(reason))
+            }
+        },
+    }
+}
+
+/// Upstream provider error carried by a terminal generation, for the one-shot
+/// relogin notification.
+fn termination_provider_error(reason: &TerminationReason) -> String {
+    match reason {
+        TerminationReason::InvalidGrant { provider_error, .. } => provider_error.clone(),
+        TerminationReason::Revoked => "revoked".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tok(access: &str, status: GenerationStatus) -> TokenState {
+        TokenState {
+            generation: 1,
+            token_version: 1,
+            access_token: access.to_string(),
+            refresh_token: Some("rt".to_string()),
+            scope: Some("read".to_string()),
+            expires_at: Instant::now() + Duration::from_secs(3600),
+            status,
+        }
+    }
+
+    #[test]
+    fn won_cas_uses_our_token() {
+        // We won the CAS: the store already holds our freshly-minted token.
+        let current = tok("at-new", GenerationStatus::Active);
+        let outcome = reconcile_refresh(Ok(()), "at-new", &current);
+        assert_eq!(outcome, RefreshOutcome::UseToken("at-new".to_string()));
+    }
+
+    #[test]
+    fn lost_cas_with_active_winner_adopts_winner_token() {
+        // The audit bug: a benign VersionMismatch must NOT surface as an error
+        // and must NOT replay our discarded token. A concurrent writer already
+        // installed a current Active token, so adopt the WINNER's token.
+        let current = tok("at-winner", GenerationStatus::Active);
+        let outcome = reconcile_refresh(Err(CASError::VersionMismatch), "at-ours", &current);
+        assert_eq!(outcome, RefreshOutcome::UseToken("at-winner".to_string()));
+    }
+
+    #[test]
+    fn lost_cas_with_terminated_winner_is_terminal() {
+        // VersionMismatch where the winner terminated the generation: relogin.
+        let current = tok(
+            "at-x",
+            GenerationStatus::Terminated(TerminationReason::InvalidGrant {
+                provider_error: "invalid_grant".to_string(),
+                suspect_replay: false,
+            }),
+        );
+        let outcome = reconcile_refresh(Err(CASError::VersionMismatch), "at-ours", &current);
+        assert_eq!(
+            outcome,
+            RefreshOutcome::Terminal("invalid_grant".to_string())
+        );
+    }
+
+    #[test]
+    fn terminated_snapshot_is_terminal() {
+        // Our snapshot's generation was already terminated at CAS time and the
+        // store is still terminated: route to relogin, never InvalidResponse.
+        let current = tok(
+            "at-x",
+            GenerationStatus::Terminated(TerminationReason::Revoked),
+        );
+        let outcome = reconcile_refresh(Err(CASError::Terminated), "at-ours", &current);
+        assert_eq!(outcome, RefreshOutcome::Terminal("revoked".to_string()));
+    }
+
+    #[test]
+    fn terminated_snapshot_but_relogin_landed_adopts_fresh() {
+        // Snapshot was terminated, but a wire relogin installed a fresh Active
+        // generation while we were refreshing: adopt the fresh token.
+        let current = tok("at-fresh", GenerationStatus::Active);
+        let outcome = reconcile_refresh(Err(CASError::Terminated), "at-ours", &current);
+        assert_eq!(outcome, RefreshOutcome::UseToken("at-fresh".to_string()));
+    }
 }
