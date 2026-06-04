@@ -53,10 +53,12 @@ pub(crate) async fn run<F, Fut>(
         if !alive.load(Ordering::Relaxed) {
             break;
         }
-        pong_received.store(false, Ordering::Relaxed);
         if write_tx.send(WsMessage::Ping(vec![].into())).await.is_err() {
             break;
         }
+        // Clear only after the Ping is enqueued, so a failed send exits above
+        // without arming the missed-Pong check.
+        pong_received.store(false, Ordering::Relaxed);
 
         ping_tick.tick().await;
         if !alive.load(Ordering::Relaxed) {
