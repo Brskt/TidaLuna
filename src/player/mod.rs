@@ -519,7 +519,12 @@ impl Player {
         crate::vprintln!("[LOAD #{load_gen}] start");
         print_track_banner(&format);
 
-        if let Some(prev) = self.load_handle.lock().unwrap().take() {
+        if let Some(prev) = self
+            .load_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             prev.abort();
         }
 
@@ -528,7 +533,7 @@ impl Player {
         GOVERNOR.reset_buffer_progress();
 
         {
-            let mut lock = CURRENT_TRACK.lock().unwrap();
+            let mut lock = CURRENT_TRACK.lock().unwrap_or_else(|e| e.into_inner());
             *lock = Some(TrackInfo {
                 url: url.clone(),
                 format: format.clone(),
@@ -563,7 +568,7 @@ impl Player {
             start_stream_load(&ctx, &url, &key, &track_id).await;
         });
 
-        *self.load_handle.lock().unwrap() = Some(handle);
+        *self.load_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 
         Ok(())
     }
@@ -591,7 +596,12 @@ impl Player {
         );
         print_track_banner(&format);
 
-        if let Some(prev) = self.load_handle.lock().unwrap().take() {
+        if let Some(prev) = self
+            .load_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             prev.abort();
         }
         GOVERNOR.reset_buffer_progress();
@@ -709,7 +719,7 @@ impl Player {
             });
         });
 
-        *self.load_handle.lock().unwrap() = Some(handle);
+        *self.load_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
         Ok(())
     }
 
@@ -748,7 +758,12 @@ impl Player {
             "[STOP]   (invalidated load seq: {})",
             LOAD_SEQ.load(Relaxed)
         );
-        if let Some(prev) = self.load_handle.lock().unwrap().take() {
+        if let Some(prev) = self
+            .load_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             prev.abort();
         }
         self.send_cmd(PlayerCommand::Stop(event_seq))
