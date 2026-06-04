@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{RwLock, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 
 use crate::connect::runtime::TaskGroup;
 
@@ -21,12 +22,13 @@ pub(crate) enum ServerEvent {
     ClientDisconnected(u32),
 }
 
-/// Per-client task handles. These stay outside the server's `TaskGroup`
-/// because the task names in `TaskGroup` must be unique `&'static str`s;
-/// per-client tasks have dynamic socket-id suffixes and are cancelled
-/// directly on disconnect or server shutdown.
+/// Per-client task state (kept out of `TaskGroup`, which needs static names).
+/// `cancel` is a child of the server token that stops the read/write loops
+/// cooperatively; `_read_task` is also aborted on shutdown as a backstop, since
+/// a read parked in a send never observes the token.
 struct ClientHandle {
     write_tx: mpsc::Sender<WsMessage>,
+    cancel: CancellationToken,
     _read_task: tokio::task::JoinHandle<()>,
     _heartbeat_task: tokio::task::JoinHandle<()>,
 }
@@ -35,7 +37,6 @@ struct ClientHandle {
 pub(crate) struct WsServer {
     tasks: Arc<TaskGroup>,
     clients: Arc<RwLock<HashMap<u32, ClientHandle>>>,
-    running: Arc<AtomicBool>,
 }
 
 const SERVER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
@@ -52,13 +53,12 @@ impl WsServer {
         let clients: Arc<RwLock<HashMap<u32, ClientHandle>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let next_socket_id = Arc::new(AtomicU32::new(1));
-        let running = Arc::new(AtomicBool::new(true));
 
         let tasks = Arc::new(TaskGroup::new());
+        let cancel = tasks.cancel_token();
         {
             let clients = clients.clone();
             let next_socket_id = next_socket_id.clone();
-            let running_for_task = running.clone();
             tasks.spawn(
                 "ws-server-listener",
                 accept_loop(
@@ -68,18 +68,14 @@ impl WsServer {
                     next_socket_id,
                     incoming_tx,
                     server_event_tx,
-                    running_for_task,
+                    cancel,
                 ),
             )?;
         }
 
         crate::vprintln!("[connect::ws::server] Listening on port {}", port);
 
-        Ok(Self {
-            tasks,
-            clients,
-            running,
-        })
+        Ok(Self { tasks, clients })
     }
 
     /// Send a message to a specific client (unicast).
@@ -113,10 +109,9 @@ impl WsServer {
 
     /// Shut down the server and all client connections.
     pub async fn shutdown(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-
-        // Cancel + await the listener via the TaskGroup; per-client tasks
-        // are untracked (dynamic names) and are aborted below.
+        // Cancelling the TaskGroup token stops the accept loop's select! and,
+        // as the parent of every per-client token, the read/write loops too,
+        // so they close their sinks gracefully before any abort.
         let report = self.tasks.shutdown(SERVER_SHUTDOWN_DEADLINE).await;
         if !report.panicked.is_empty() {
             crate::vprintln!(
@@ -127,11 +122,25 @@ impl WsServer {
 
         let mut clients = self.clients.write().await;
         for (_, client) in clients.drain() {
+            client.cancel.cancel();
             client._read_task.abort();
             client._heartbeat_task.abort();
         }
 
         crate::vprintln!("[connect::ws::server] Shut down");
+    }
+}
+
+/// Await the next inbound connection, returning `None` if `cancel` fires
+/// first so the accept loop breaks instead of blocking inside `accept()`.
+async fn accept_or_cancel(
+    listener: &TcpListener,
+    cancel: &CancellationToken,
+) -> Option<std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)>> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        res = listener.accept() => Some(res),
     }
 }
 
@@ -142,12 +151,13 @@ async fn accept_loop(
     next_socket_id: Arc<AtomicU32>,
     incoming_tx: mpsc::Sender<IncomingMessage>,
     server_event_tx: mpsc::Sender<ServerEvent>,
-    running: Arc<AtomicBool>,
+    cancel: CancellationToken,
 ) {
-    while running.load(Ordering::Relaxed) {
-        let (stream, addr) = match listener.accept().await {
-            Ok(s) => s,
-            Err(e) => {
+    loop {
+        let (stream, addr) = match accept_or_cancel(&listener, &cancel).await {
+            None => break,
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
                 crate::vprintln!("[connect::ws::server] Accept error: {}", e);
                 continue;
             }
@@ -186,21 +196,27 @@ async fn accept_loop(
 
         let (write, read) = ws_stream.split();
 
-        // Write task
+        // Per-client cooperative cancellation: a child of the server token, so
+        // server shutdown cancels it, and it can be cancelled directly on this
+        // client's disconnect to stop its read/write loops gracefully.
+        let client_cancel = cancel.child_token();
+
+        // Write task: forward mpsc -> WS sink, exit on cancel.
         let (write_tx, write_rx) = mpsc::channel::<WsMessage>(64);
-        let _write_task = tokio::spawn(client_write_loop(write, write_rx));
+        tokio::spawn(client_write_loop(write, write_rx, client_cancel.clone()));
 
         // Pong tracker
         let pong_received = Arc::new(AtomicBool::new(true));
         let client_alive = Arc::new(AtomicBool::new(true));
 
-        // Read task
+        // Read task: WS stream -> dispatch, exit on cancel.
         let _read_task = {
             let clients = clients.clone();
             let incoming_tx = incoming_tx.clone();
             let server_event_tx = server_event_tx.clone();
             let pong_received = pong_received.clone();
             let client_alive = client_alive.clone();
+            let cancel = client_cancel.clone();
             tokio::spawn(async move {
                 client_read_loop(
                     socket_id,
@@ -210,6 +226,7 @@ async fn accept_loop(
                     server_event_tx,
                     pong_received,
                     client_alive,
+                    cancel,
                 )
                 .await;
             })
@@ -235,6 +252,7 @@ async fn accept_loop(
             socket_id,
             ClientHandle {
                 write_tx,
+                cancel: client_cancel,
                 _read_task,
                 _heartbeat_task,
             },
@@ -252,10 +270,20 @@ async fn client_write_loop(
         WsMessage,
     >,
     mut rx: mpsc::Receiver<WsMessage>,
+    cancel: CancellationToken,
 ) {
-    while let Some(msg) = rx.recv().await {
-        if write.send(msg).await.is_err() {
-            break;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            msg = rx.recv() => match msg {
+                Some(m) => {
+                    if write.send(m).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
         }
     }
     let _ = write.close().await;
@@ -271,8 +299,17 @@ async fn client_read_loop(
     server_event_tx: mpsc::Sender<ServerEvent>,
     pong_received: Arc<AtomicBool>,
     client_alive: Arc<AtomicBool>,
+    cancel: CancellationToken,
 ) {
-    while let Some(result) = read.next().await {
+    loop {
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            r = read.next() => match r {
+                Some(r) => r,
+                None => break,
+            },
+        };
         match result {
             Ok(WsMessage::Text(text)) => {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -297,6 +334,7 @@ async fn client_read_loop(
     client_alive.store(false, Ordering::Relaxed);
     let mut clients_guard = clients.write().await;
     if let Some(client) = clients_guard.remove(&socket_id) {
+        client.cancel.cancel();
         client._heartbeat_task.abort();
     }
     drop(clients_guard);
@@ -326,4 +364,24 @@ fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
         .with_single_cert(certs, key)?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The accept must observe a cancelled token instead of blocking forever in
+    // accept() when no connection arrives. Driven at the helper so it needs no
+    // TLS/connection setup.
+    #[tokio::test]
+    async fn accept_or_cancel_yields_none_when_cancelled() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), accept_or_cancel(&listener, &cancel))
+                .await
+                .expect("accept_or_cancel did not observe cancellation");
+        assert!(result.is_none(), "cancelled accept must yield None");
+    }
 }
