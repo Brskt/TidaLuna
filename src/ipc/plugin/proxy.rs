@@ -460,7 +460,7 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
         .map(|s| s.split(' ').map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
-    with_state(|state| {
+    let stored_opaque_rt = with_state(|state| {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -481,7 +481,7 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
             access_token: at.clone(),
             refresh_token: real_rt,
             opaque_at: opaque_at.clone(),
-            opaque_rt: ort,
+            opaque_rt: ort.clone(),
             version: state
                 .token_state
                 .as_ref()
@@ -511,7 +511,12 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
         if let Some(ref ts) = state.token_state {
             let _ = crate::platform::secure_store::save(&data_dir, ts);
         }
-    });
+
+        // Carry opaque_rt out under this lock so it stays paired with opaque_at
+        // (a concurrent refresh can't swap token_state in the gap).
+        ort
+    })
+    .unwrap_or_default();
 
     crate::ipc::plugin::scrub_pkce_verifier();
     crate::vprintln!(
@@ -525,15 +530,10 @@ fn proxy_transform_token_body(body: &str, status: u16) -> String {
         serde_json::Value::String(opaque_at),
     );
     if refresh_token.is_some() {
-        let ort = with_state(|state| {
-            state
-                .token_state
-                .as_ref()
-                .map(|ts| ts.current.opaque_rt.clone())
-        })
-        .flatten()
-        .unwrap_or_default();
-        obj.insert("refresh_token".to_string(), serde_json::Value::String(ort));
+        obj.insert(
+            "refresh_token".to_string(),
+            serde_json::Value::String(stored_opaque_rt),
+        );
     }
 
     serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
