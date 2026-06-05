@@ -78,7 +78,7 @@ pub(crate) fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredential
     }
     match serde_json::to_vec_pretty(&generated) {
         Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
+            if let Err(e) = write_private(&path, &json) {
                 eprintln!("[PKCE]   Failed to persist credentials: {e}");
             } else {
                 crate::vprintln!("[PKCE]   Persisted credentials");
@@ -87,4 +87,43 @@ pub(crate) fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredential
         Err(e) => eprintln!("[PKCE]   Failed to serialize credentials: {e}"),
     }
     generated
+}
+
+/// Write `bytes` to `path` atomically, owner-only (0600) on Unix.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_forces_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pkce_credentials.json");
+        // A pre-existing world-readable file must be tightened to 0600.
+        std::fs::write(&path, b"old").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).expect("chmod");
+
+        write_private(&path, b"verifier").expect("write");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+        assert_eq!(std::fs::read(&path).expect("read"), b"verifier");
+    }
 }
