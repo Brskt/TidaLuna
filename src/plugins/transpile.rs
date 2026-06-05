@@ -53,8 +53,8 @@ pub fn transpile_ts(source: &str, filename: &str) -> anyhow::Result<String> {
 /// the rewritten source. See [`transpile_ts`] for the contract:
 ///   - `export { a as X }`            -> `var __exports = { X: a };`
 ///   - `export const|fn|class ...`      -> strip the `export` keyword
-///   - `export default <expr>`        -> `var __default = <expr>;`
-///   - `export default fn|class`      -> bare (named) declaration
+///   - `export default <expr>` / anon fn|class -> `var __default = <expr>;`
+///   - `export default fn|class` (named)        -> bare declaration
 ///   - `export ... from "m"` / `export *`-> dropped (re-exports, unused in IIFE)
 ///   - `import { a, b as c } from "m"` -> `const { a, b: c } = luna?.core?.modules?.["m"];`
 ///   - `import * as ns from "m"`       -> `const ns = luna?.core?.modules?.["m"];`
@@ -107,17 +107,21 @@ fn lower_es_modules(source: &str, filename: &str) -> anyhow::Result<String> {
             }
             Statement::ExportDefaultDeclaration(d) => {
                 let decl_start = d.declaration.span().start as usize;
-                let keep_declaration = matches!(
-                    d.declaration,
-                    ExportDefaultDeclarationKind::FunctionDeclaration(_)
-                        | ExportDefaultDeclarationKind::ClassDeclaration(_)
-                        | ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
-                );
+                let keep_declaration = match &d.declaration {
+                    // Keep only *named* fn/class as a bare declaration; an anonymous
+                    // one (no `id`) is a value, not a valid bare statement.
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => f.id.is_some(),
+                    ExportDefaultDeclarationKind::ClassDeclaration(c) => c.id.is_some(),
+                    // Type-only; erased by the TS transform. Must stay a bare strip -
+                    // `var __default = interface ...` would be invalid JS.
+                    ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => true,
+                    _ => false,
+                };
                 let replacement = if keep_declaration {
                     // Named fn/class: keep the declaration, drop `export default `.
                     String::new()
                 } else {
-                    // Expression default -> `var __default = <expr>;`
+                    // Expression default (incl. anonymous fn/class) -> `var __default = <expr>`.
                     "var __default = ".to_string()
                 };
                 edits.push((d.span.start as usize, decl_start, replacement));
@@ -270,6 +274,31 @@ mod tests {
     fn export_default_class_keeps_declaration() {
         let js = lower("export default class Foo {}");
         assert!(js.contains("class Foo"));
+        assert!(!js.contains("export"));
+    }
+
+    #[test]
+    fn export_default_anonymous_function_becomes_default_var() {
+        // Anon default must lower to `var __default = ...`, not a bare invalid decl.
+        let js = lower("export default function() { return 1; }");
+        assert!(js.contains("__default"));
+        assert!(js.contains("function"));
+        assert!(!js.contains("export"));
+    }
+
+    #[test]
+    fn export_default_anonymous_class_becomes_default_var() {
+        let js = lower("export default class { method() {} }");
+        assert!(js.contains("__default"));
+        assert!(js.contains("class"));
+        assert!(!js.contains("export"));
+    }
+
+    #[test]
+    fn export_default_named_function_keeps_declaration() {
+        // A named default fn stays a hoisted declaration (`id` is present).
+        let js = lower("export default function Foo() { return 1; }");
+        assert!(js.contains("function Foo"));
         assert!(!js.contains("export"));
     }
 
