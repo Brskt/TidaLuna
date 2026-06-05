@@ -16,34 +16,6 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Changes filter (skip the build matrix on docs-only pushes)
-  # ---------------------------------------------------------------------------
-
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Detect changed paths
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
-        id: filter
-        with:
-          filters: |
-            code:
-              - 'src/**'
-              - 'xtask/**'
-              - 'updater/**'
-              - 'frontend/**'
-              - 'plugins/**'
-              - 'installer/**'
-              - 'build.rs'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/**'
-
-  # ---------------------------------------------------------------------------
   # Lint
   # ---------------------------------------------------------------------------
 
@@ -109,8 +81,6 @@ jobs:
   # ---------------------------------------------------------------------------
 
   build:
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -355,8 +325,6 @@ jobs:
       - name: Require all jobs green
         uses: re-actors/alls-green@release/v1
         with:
-          # build is skipped on docs-only pushes; that must not fail the gate.
-          allowed-skips: build
           jobs: ${{ toJSON(needs) }}
 
   # ---------------------------------------------------------------------------
