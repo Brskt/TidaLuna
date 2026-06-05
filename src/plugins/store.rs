@@ -317,17 +317,94 @@ pub(crate) fn storage_get(conn: &mut Connection, namespace: &str, key: &str) -> 
     .ok()
 }
 
+/// Per-namespace storage quota limits. Passed as a parameter so the quota logic
+/// can be unit-tested against tiny limits without large allocations.
+struct StorageLimits {
+    max_value_bytes: usize,
+    max_key_bytes: usize,
+    max_namespace_keys: i64,
+    max_namespace_bytes: i64,
+}
+
+/// Production quota for `plugin.storage`. Generous for plugin settings; bounds a
+/// single plugin's unbounded growth of its own namespace.
+const STORAGE_LIMITS: StorageLimits = StorageLimits {
+    max_value_bytes: 1024 * 1024,
+    max_key_bytes: 1024,
+    max_namespace_keys: 1000,
+    max_namespace_bytes: 5 * 1024 * 1024,
+};
+
+/// Quota check before an INSERT OR REPLACE. Replace adds no key and shifts the
+/// byte total by the delta; counts use `CAST(value AS BLOB)` for bytes not chars.
+fn enforce_storage_quota(
+    conn: &mut Connection,
+    namespace: &str,
+    key: &str,
+    value: &str,
+    limits: &StorageLimits,
+) -> Result<(), String> {
+    if value.len() > limits.max_value_bytes {
+        return Err(format!(
+            "value exceeds the {}-byte per-value limit",
+            limits.max_value_bytes
+        ));
+    }
+    if key.len() > limits.max_key_bytes {
+        return Err(format!(
+            "key exceeds the {}-byte per-key limit",
+            limits.max_key_bytes
+        ));
+    }
+
+    let (key_count, total_bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0)
+             FROM plugin_storage WHERE namespace = ?1",
+            params![namespace],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    // Existing byte length of this key (None if the key is new).
+    let old_value_bytes: Option<i64> = conn
+        .query_row(
+            "SELECT LENGTH(CAST(value AS BLOB)) FROM plugin_storage WHERE namespace = ?1 AND key = ?2",
+            params![namespace, key],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if old_value_bytes.is_none() && key_count + 1 > limits.max_namespace_keys {
+        return Err(format!(
+            "namespace exceeds the {}-key limit",
+            limits.max_namespace_keys
+        ));
+    }
+
+    let new_total = total_bytes - old_value_bytes.unwrap_or(0) + value.len() as i64;
+    if new_total > limits.max_namespace_bytes {
+        return Err(format!(
+            "namespace exceeds the {}-byte limit",
+            limits.max_namespace_bytes
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn storage_set(
     conn: &mut Connection,
     namespace: &str,
     key: &str,
     value: &str,
-) -> rusqlite::Result<()> {
+) -> Result<(), String> {
+    enforce_storage_quota(conn, namespace, key, value, &STORAGE_LIMITS)?;
     conn.execute(
         "INSERT OR REPLACE INTO plugin_storage (namespace, key, value)
          VALUES (?1, ?2, ?3)",
         params![namespace, key, value],
-    )?;
+    )
+    .map_err(|e| format!("DB error: {e}"))?;
     Ok(())
 }
 
@@ -441,4 +518,66 @@ pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        init_schema(&mut conn).expect("init schema");
+        conn
+    }
+
+    const TINY: StorageLimits = StorageLimits {
+        max_value_bytes: 8,
+        max_key_bytes: 4,
+        max_namespace_keys: 2,
+        max_namespace_bytes: 10,
+    };
+
+    #[test]
+    fn quota_rejects_oversized_value() {
+        let mut conn = mem();
+        let err = enforce_storage_quota(&mut conn, "ns", "k", "123456789", &TINY).unwrap_err();
+        assert!(err.contains("per-value"), "got: {err}");
+    }
+
+    #[test]
+    fn quota_rejects_oversized_key() {
+        let mut conn = mem();
+        let err = enforce_storage_quota(&mut conn, "ns", "toolong", "v", &TINY).unwrap_err();
+        assert!(err.contains("per-key"), "got: {err}");
+    }
+
+    #[test]
+    fn quota_caps_namespace_key_count_but_allows_replace() {
+        let mut conn = mem();
+        storage_set(&mut conn, "ns", "a", "1").expect("seed a");
+        storage_set(&mut conn, "ns", "b", "2").expect("seed b");
+        // A new third key exceeds the 2-key limit...
+        let err = enforce_storage_quota(&mut conn, "ns", "c", "3", &TINY).unwrap_err();
+        assert!(err.contains("key limit"), "got: {err}");
+        // ...but replacing an existing key adds no key, so it is allowed.
+        enforce_storage_quota(&mut conn, "ns", "a", "9", &TINY).expect("replace allowed");
+    }
+
+    #[test]
+    fn quota_caps_namespace_byte_total() {
+        let mut conn = mem();
+        storage_set(&mut conn, "ns", "a", "12345").expect("seed"); // 5 bytes, cap 10
+        // A new key pushing the namespace total to 11 bytes is rejected...
+        let err = enforce_storage_quota(&mut conn, "ns", "b", "123456", &TINY).unwrap_err();
+        assert!(err.contains("byte limit"), "got: {err}");
+        // ...exactly at the cap (5 + 5 = 10) is allowed.
+        enforce_storage_quota(&mut conn, "ns", "b", "12345", &TINY).expect("at cap allowed");
+    }
+
+    #[test]
+    fn storage_set_roundtrips_under_quota() {
+        let mut conn = mem();
+        storage_set(&mut conn, "ns", "k", "hello").expect("set");
+        assert_eq!(storage_get(&mut conn, "ns", "k").as_deref(), Some("hello"));
+    }
 }
