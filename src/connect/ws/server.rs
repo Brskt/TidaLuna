@@ -41,6 +41,11 @@ pub(crate) struct WsServer {
 
 const SERVER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Cap on a single inbound WS message. Connect payloads are small (a queue
+/// window is clamped to a few hundred items); this bounds the per-message
+/// allocation far below tungstenite's 64 MiB default.
+const MAX_WS_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+
 impl WsServer {
     /// Start listening on the given port.
     pub async fn start(
@@ -175,17 +180,21 @@ async fn accept_loop(
             }
         };
 
-        let ws_stream = match tokio_tungstenite::accept_async(tls_stream).await {
-            Ok(s) => s,
-            Err(e) => {
-                crate::vprintln!(
-                    "[connect::ws::server] WS handshake failed from {}: {}",
-                    addr,
-                    e
-                );
-                continue;
-            }
-        };
+        let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_WS_MESSAGE_BYTES));
+        let ws_stream =
+            match tokio_tungstenite::accept_async_with_config(tls_stream, Some(ws_config)).await {
+                Ok(s) => s,
+                Err(e) => {
+                    crate::vprintln!(
+                        "[connect::ws::server] WS handshake failed from {}: {}",
+                        addr,
+                        e
+                    );
+                    continue;
+                }
+            };
 
         let socket_id = next_socket_id.fetch_add(1, Ordering::Relaxed);
         crate::vprintln!(
@@ -237,12 +246,17 @@ async fn accept_loop(
             let write_tx = write_tx.clone();
             let pong_received = pong_received.clone();
             let client_alive = client_alive.clone();
+            let timeout_cancel = client_cancel.clone();
             tokio::spawn(async move {
                 super::heartbeat::run(write_tx, pong_received, client_alive, move || async move {
                     crate::vprintln!(
                         "[connect::ws::server] Client {} ping timeout - disconnecting",
                         socket_id
                     );
+                    // Tear down the silent peer: cancel the read/write loops so its
+                    // tasks, socket, and map entry are reclaimed (the read-loop
+                    // cleanup removes the client). Previously the timeout only logged.
+                    timeout_cancel.cancel();
                 })
                 .await;
             })
@@ -258,9 +272,16 @@ async fn accept_loop(
             },
         );
 
-        let _ = server_event_tx
+        if server_event_tx
             .send(ServerEvent::ClientConnected(socket_id))
-            .await;
+            .await
+            .is_err()
+        {
+            crate::vprintln!(
+                "[connect::ws::server] Dropped ClientConnected({}) event",
+                socket_id
+            );
+        }
     }
 }
 
@@ -313,12 +334,18 @@ async fn client_read_loop(
         match result {
             Ok(WsMessage::Text(text)) => {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let _ = incoming_tx
+                    let dispatched = incoming_tx
                         .send(IncomingMessage {
                             socket_id,
                             message: json,
                         })
                         .await;
+                    if dispatched.is_err() {
+                        crate::vprintln!(
+                            "[connect::ws::server] Dropped inbound message from {} (routing loop gone)",
+                            socket_id
+                        );
+                    }
                 }
             }
             Ok(WsMessage::Pong(_)) => {
@@ -340,9 +367,16 @@ async fn client_read_loop(
     drop(clients_guard);
 
     crate::vprintln!("[connect::ws::server] Client {} disconnected", socket_id);
-    let _ = server_event_tx
+    if server_event_tx
         .send(ServerEvent::ClientDisconnected(socket_id))
-        .await;
+        .await
+        .is_err()
+    {
+        crate::vprintln!(
+            "[connect::ws::server] Dropped ClientDisconnected({}) event",
+            socket_id
+        );
+    }
 }
 
 /// Build a TLS acceptor using the embedded TIDAL Connect server cert+key.

@@ -15,7 +15,7 @@ use base64::Engine as _;
 use crate::connect::consts;
 use crate::connect::types::{MediaInfo, MediaMetadata, QueueItem, ServerInfo};
 
-use super::http::resolve_auth_header;
+use super::http::{is_trusted_server_url, resolve_auth_header};
 
 /// Build a `MediaInfo` payload from a cloud-queue item. Cloud-queue items
 /// often carry richer data in `display_info` than in `metadata`, so we
@@ -100,6 +100,14 @@ pub(super) async fn resolve_media_url(
         "{}/tracks/{}/playbackinfo?audioquality={}&playbackmode=STREAM&assetpresentation=FULL",
         cs.server_url, media.media_id, quality
     );
+
+    if !is_trusted_server_url(&url) {
+        crate::vprintln!(
+            "[connect::queue] Refusing untrusted content server: {}",
+            url
+        );
+        return;
+    }
 
     crate::vprintln!(
         "[connect::queue] Resolving media {} via {}",

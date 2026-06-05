@@ -104,6 +104,10 @@ impl MdnsBrowser {
     }
 }
 
+/// Cap on peer-supplied mDNS TXT fields (`fn`/`id`); a malicious advertiser
+/// fully controls these, so bound their length.
+const MAX_DEVICE_FIELD_BYTES: usize = 256;
+
 fn service_info_to_device(info: &mdns_sd::ResolvedService) -> Option<MdnsDevice> {
     let addresses: Vec<String> = info
         .get_addresses_v4()
@@ -115,14 +119,16 @@ fn service_info_to_device(info: &mdns_sd::ResolvedService) -> Option<MdnsDevice>
         return None;
     }
 
-    let friendly_name = info
-        .get_property_val_str("fn")
-        .unwrap_or("Unknown")
-        .to_string();
-    let id = info
-        .get_property_val_str("id")
-        .unwrap_or_default()
-        .to_string();
+    let friendly_name = crate::util::truncate_str(
+        info.get_property_val_str("fn").unwrap_or("Unknown"),
+        MAX_DEVICE_FIELD_BYTES,
+    )
+    .to_string();
+    let id = crate::util::truncate_str(
+        info.get_property_val_str("id").unwrap_or_default(),
+        MAX_DEVICE_FIELD_BYTES,
+    )
+    .to_string();
 
     Some(MdnsDevice {
         addresses,

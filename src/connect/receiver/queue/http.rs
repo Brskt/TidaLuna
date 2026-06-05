@@ -74,12 +74,32 @@ fn parse_oauth_error_code(body: &[u8]) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// True if `url` is an https URL on a TIDAL-owned API host (`*.tidal.com` or
+/// `*.tidalhifi.com`). Connect server URLs are peer-supplied, so the receiver
+/// must never attach its token to a host it does not control.
+pub(super) fn is_trusted_server_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let host = parsed.host_str().unwrap_or("");
+    host == "tidal.com"
+        || host.ends_with(".tidal.com")
+        || host == "tidalhifi.com"
+        || host.ends_with(".tidalhifi.com")
+}
+
 /// GET a JSON resource on the queue server, using the server's auth header.
 pub(super) async fn get_with_auth(
     http: &reqwest::Client,
     queue_server: Option<&ServerInfo>,
     url: &str,
 ) -> Result<serde_json::Value, QueueError> {
+    if !is_trusted_server_url(url) {
+        return Err(QueueError::UntrustedServer);
+    }
     let server = queue_server.ok_or(QueueError::NoServer)?;
     let auth_header = resolve_auth_header(server);
 
@@ -113,6 +133,9 @@ pub(super) async fn post_with_auth(
     url: &str,
     body: &serde_json::Value,
 ) -> Result<(), QueueError> {
+    if !is_trusted_server_url(url) {
+        return Err(QueueError::UntrustedServer);
+    }
     let server = queue_server.ok_or(QueueError::NoServer)?;
     let auth_header = resolve_auth_header(server);
 
@@ -149,6 +172,9 @@ pub(super) async fn refresh_token(
     oauth: &OAuthServerInfo,
     current_refresh_token: &str,
 ) -> Result<RefreshSuccess, QueueError> {
+    if !is_trusted_server_url(&oauth.server_url) {
+        return Err(QueueError::UntrustedServer);
+    }
     let auth_header = oauth
         .auth_info
         .header_auth
@@ -372,5 +398,31 @@ mod tests {
     fn parse_oauth_error_code_returns_none_on_malformed_json() {
         assert!(parse_oauth_error_code(b"not json").is_none());
         assert!(parse_oauth_error_code(b"").is_none());
+    }
+
+    // ── is_trusted_server_url ────────────────────────────────────────
+
+    #[test]
+    fn trusted_server_url_requires_https_and_tidal_host() {
+        assert!(is_trusted_server_url("https://api.tidal.com/x"));
+        assert!(is_trusted_server_url("https://desktop.tidal.com"));
+        assert!(is_trusted_server_url("https://auth.tidal.com/oauth"));
+        assert!(is_trusted_server_url("https://tidal.com"));
+        // tidalhifi.com is a TIDAL-owned API family the rest of the app trusts
+        assert!(is_trusted_server_url("https://api.tidalhifi.com/x"));
+        assert!(is_trusted_server_url("https://tidalhifi.com"));
+        // scheme must be https
+        assert!(!is_trusted_server_url("http://api.tidal.com"));
+        // non-tidal host
+        assert!(!is_trusted_server_url("https://evil.com"));
+        // suffix / look-alike tricks
+        assert!(!is_trusted_server_url("https://api.tidal.com.evil.com"));
+        assert!(!is_trusted_server_url("https://eviltidal.com"));
+        assert!(!is_trusted_server_url("https://api.tidalhifi.com.evil.com"));
+        assert!(!is_trusted_server_url("https://xtidalhifi.com"));
+        // userinfo trick: the real host is evil.com
+        assert!(!is_trusted_server_url("https://api.tidal.com@evil.com"));
+        // not an absolute URL
+        assert!(!is_trusted_server_url("/relative/path"));
     }
 }

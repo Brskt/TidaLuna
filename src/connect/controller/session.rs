@@ -123,10 +123,12 @@ impl ControllerSession {
                     return None;
                 }
 
-                let device = self
-                    .pending_device
-                    .take()
-                    .expect("pending_device must be set when pending_start_nonce is set");
+                let Some(device) = self.pending_device.take() else {
+                    crate::vprintln!(
+                        "[connect::controller::session] notifySessionStarted without a pending device"
+                    );
+                    return None;
+                };
 
                 self.current = Some(ActiveSession {
                     session_id: session_id.clone(),

@@ -12,6 +12,23 @@ use crate::connect::ws::client::{WsClient, WsClientEvent};
 
 use session::{ControllerSession, ControllerSessionEvent};
 
+/// Cap on tracked discovered devices; a malicious LAN advertiser could otherwise
+/// grow the list without bound by announcing many instances.
+const MAX_DISCOVERED_DEVICES: usize = 256;
+
+/// Insert `device` into `devices` deduped by `fullname`, refusing to grow past
+/// `max` entries.
+fn insert_device_capped(devices: &mut Vec<MdnsDevice>, device: MdnsDevice, max: usize) {
+    if devices.iter().any(|d| d.fullname == device.fullname) {
+        return;
+    }
+    if devices.len() >= max {
+        crate::vprintln!("[connect::controller] Discovery list full; ignoring new device");
+        return;
+    }
+    devices.push(device);
+}
+
 /// Controller orchestrator: discovers devices, connects via WSS, manages session.
 pub(crate) struct TidalConnectController {
     cancel: CancellationToken,
@@ -182,14 +199,7 @@ impl TidalConnectController {
     pub fn handle_browser_event(&mut self, event: BrowserEvent) {
         match event {
             BrowserEvent::DeviceFound(device) => {
-                // Deduplicate by fullname
-                if !self
-                    .discovered_devices
-                    .iter()
-                    .any(|d| d.fullname == device.fullname)
-                {
-                    self.discovered_devices.push(device);
-                }
+                insert_device_capped(&mut self.discovered_devices, device, MAX_DISCOVERED_DEVICES);
                 // Sort alphabetically by friendly_name (case-insensitive)
                 self.discovered_devices.sort_by(|a, b| {
                     a.friendly_name
@@ -311,5 +321,36 @@ impl TidalConnectController {
             task.abort();
         }
         crate::vprintln!("[connect::controller] Shut down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connect::types::DeviceType;
+
+    fn dev(fullname: &str) -> MdnsDevice {
+        MdnsDevice {
+            addresses: vec!["127.0.0.1".into()],
+            friendly_name: "n".into(),
+            fullname: fullname.into(),
+            id: "id".into(),
+            port: 1,
+            device_type: DeviceType::TidalConnect,
+        }
+    }
+
+    #[test]
+    fn insert_device_capped_dedups_and_bounds() {
+        let mut devices = Vec::new();
+        insert_device_capped(&mut devices, dev("a"), 2);
+        insert_device_capped(&mut devices, dev("b"), 2);
+        // Dedup by fullname: re-seeing a known device does not grow the list.
+        insert_device_capped(&mut devices, dev("a"), 2);
+        assert_eq!(devices.len(), 2);
+        // At the cap, a new distinct device is refused.
+        insert_device_capped(&mut devices, dev("c"), 2);
+        assert_eq!(devices.len(), 2);
+        assert!(devices.iter().all(|d| d.fullname != "c"));
     }
 }

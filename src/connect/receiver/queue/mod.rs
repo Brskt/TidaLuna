@@ -376,12 +376,18 @@ impl QueueManager {
 
     // ── HTTP ─────────────────────────────────────────────────────────
 
+    /// Clamp a peer-requested queue-window size; a malicious controller could
+    /// otherwise request an enormous window.
+    const MAX_QUEUE_WINDOW: u32 = 500;
+
     async fn load_queue_window(
         &mut self,
         item_id: Option<&str>,
         before_size: u32,
         after_size: u32,
     ) {
+        let before_size = before_size.min(Self::MAX_QUEUE_WINDOW);
+        let after_size = after_size.min(Self::MAX_QUEUE_WINDOW);
         let qs = match &self.queue_server {
             Some(qs) => qs.clone(),
             None => {
