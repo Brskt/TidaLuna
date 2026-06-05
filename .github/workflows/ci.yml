@@ -24,8 +24,10 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Detect changed paths
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
           filters: |
@@ -47,13 +49,9 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    # CARGO_INCREMENTAL=0 is required for sccache caching.
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
@@ -61,18 +59,18 @@ jobs:
           packages: build-essential pkg-config libasound2-dev libdbus-1-dev libx11-dev libglib2.0-dev libgdk-pixbuf-2.0-dev cmake ninja-build
           version: "1"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
 
-      - uses: taiki-e/install-action@v2
+      - name: Install lint tools
+        uses: taiki-e/install-action@v2
         with:
           tool: taplo-cli,cargo-deny,typos-cli
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Write TIDAL Connect private key
         env:
@@ -86,7 +84,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
 
       - name: Cache Bun + frontend deps
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .cache/bun
@@ -133,12 +131,9 @@ jobs:
       # see the value (GitHub's documented secret-gating pattern).
       WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
       WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
-      # CARGO_INCREMENTAL=0 is required for sccache caching.
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Install system dependencies
         if: runner.os == 'Linux'
@@ -168,12 +163,11 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $dst -Force
           $dst | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Write TIDAL Connect private key
         env:
@@ -188,7 +182,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
 
       - name: Cache Bun + frontend deps
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .cache/bun
@@ -358,7 +352,8 @@ jobs:
       - build
     runs-on: ubuntu-latest
     steps:
-      - uses: re-actors/alls-green@release/v1
+      - name: Require all jobs green
+        uses: re-actors/alls-green@release/v1
         with:
           # build is skipped on docs-only pushes; that must not fail the gate.
           allowed-skips: build
@@ -377,7 +372,8 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.name }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -406,7 +402,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
