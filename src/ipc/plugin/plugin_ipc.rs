@@ -102,7 +102,8 @@ pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallbac
     crate::state::rt_handle().spawn(async move {
         let client = &*crate::state::HTTP_CLIENT;
         match fetch_plugin_package(client, &url).await {
-            Ok(manifest) => ipc_callback_ok(&callback, &manifest),
+            Ok(Some(manifest)) => ipc_callback_ok(&callback, &manifest),
+            Ok(None) => ipc_callback_err(&callback, 500, "plugin manifest not found"),
             Err(e) => ipc_callback_err(&callback, 500, &format!("{e:#}")),
         }
     });
@@ -121,8 +122,9 @@ pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
     });
 }
 
-/// Atomic enable: check deps → DB enable → transpile → eval_js → mark_loaded.
-/// DB-first: if transpile/inject fails, reverts enabled to 0.
+/// Enable: deps → DB enable → transpile → eval_js → persist `ever_dispatched`.
+/// Not one transaction (DB write + renderer eval can't be); a crash mid-sequence
+/// self-heals on the next load via `do_load_plugins_inline` (re-inject/auto-disable).
 pub(super) fn handle_plugin_enable(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
@@ -374,19 +376,13 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, callback: IpcCallback) 
             return;
         };
 
-        match client.get(&code_url).send().await {
-            Ok(resp) => match resp.error_for_status() {
-                Ok(resp) => match resp.text().await {
-                    Ok(code) => {
-                        let hash = fnv_hash_str(&code);
-                        let json = format!(r#"{{"hash":"{hash}"}}"#);
-                        ipc_callback_ok(&cb, &json);
-                    }
-                    Err(e) => ipc_callback_err(&cb, 500, &format!("{e}")),
-                },
-                Err(e) => ipc_callback_err(&cb, 500, &format!("{e}")),
-            },
-            Err(e) => ipc_callback_err(&cb, 500, &format!("{e}")),
+        match fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await {
+            Ok(code) => {
+                let hash = fnv_hash_str(&code);
+                let json = format!(r#"{{"hash":"{hash}"}}"#);
+                ipc_callback_ok(&cb, &json);
+            }
+            Err(e) => ipc_callback_err(&cb, 500, &format!("{e:#}")),
         }
     });
 }
@@ -536,21 +532,61 @@ fn sanitize_plugin_url(url: &str) -> &str {
         .trim_end_matches(".json")
 }
 
+/// Cap on a fetched plugin manifest (`.json`). Manifests are small; the bound
+/// stops an oversized or hostile body from being buffered in the app process.
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+
+/// Cap on fetched plugin code (`.mjs`). Generous for a bundled plugin; bounds
+/// memory if a plugin host returns an arbitrarily large body.
+const MAX_CODE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Stream `resp`'s body as text, failing if it exceeds `max` (rejected without
+/// buffering the whole body); mirrors the updater's capped download.
+async fn read_body_capped(
+    resp: reqwest::Response,
+    max: usize,
+    what: &str,
+) -> anyhow::Result<String> {
+    use futures_util::StreamExt as _;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut total = 0usize;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        total = bump_capped(total, chunk.len(), max)?;
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|e| anyhow::anyhow!("{what} is not valid UTF-8: {e}"))
+}
+
+/// GET `url` as text under the `max` cap; any non-2xx is an error.
+async fn fetch_text_capped(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+    what: &str,
+) -> anyhow::Result<String> {
+    let resp = client.get(url).send().await?.error_for_status()?;
+    read_body_capped(resp, max, what).await
+}
+
+/// Fetch a plugin's `.json` manifest. `Ok(None)` = genuinely absent (404, a
+/// classic .mjs-only plugin); `Err` = a hard failure (oversized/cap, bad JSON,
+/// transport, other non-2xx) that callers must surface, not fall back on.
 pub(super) async fn fetch_plugin_package(
     client: &reqwest::Client,
     url: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Option<String>> {
     let base = sanitize_plugin_url(url);
     let json_url = format!("{base}.json");
-    let manifest_str = client
-        .get(&json_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let resp = client.get(&json_url).send().await?;
+    if manifest_absent(resp.status()) {
+        return Ok(None);
+    }
+    let resp = resp.error_for_status()?;
+    let manifest_str = read_body_capped(resp, MAX_MANIFEST_BYTES, "plugin manifest").await?;
     let _: serde_json::Value = serde_json::from_str(&manifest_str)?;
-    Ok(manifest_str)
+    Ok(Some(manifest_str))
 }
 
 async fn fetch_plugin_data(
@@ -559,18 +595,14 @@ async fn fetch_plugin_data(
 ) -> anyhow::Result<(String, String, String, String)> {
     let base = sanitize_plugin_url(url);
 
-    if let Ok(manifest_str) = fetch_plugin_package(client, base).await {
+    // `?` propagates a hard manifest failure (cap/JSON/transport); only a
+    // genuinely-absent manifest (`None`) falls back to the legacy .mjs path.
+    if let Some(manifest_str) = fetch_plugin_package(client, base).await? {
         let manifest: serde_json::Value = serde_json::from_str(&manifest_str)?;
         let name = manifest["name"].as_str().unwrap_or("unknown").to_string();
 
         let code_url = format!("{base}.mjs");
-        let code = client
-            .get(&code_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let code = fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await?;
         let hash = fnv_hash_str(&code);
 
         Ok((name, manifest_str, code, hash))
@@ -583,13 +615,7 @@ async fn fetch_plugin_data(
             url.to_string()
         };
 
-        let code = client
-            .get(&fetch_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let code = fetch_text_capped(client, &fetch_url, MAX_CODE_BYTES, "plugin code").await?;
 
         let name = base
             .rsplit_once('/')
@@ -603,6 +629,9 @@ async fn fetch_plugin_data(
     }
 }
 
+/// Install from `url` (`.json` manifest + `.mjs` code). Host is intentionally
+/// unrestricted (public stores + localhost dev both legit); SSRF to internal
+/// hosts is an accepted risk for this privileged, user-initiated install.
 async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, String> {
     let client = &*crate::state::HTTP_CLIENT;
     let (name, manifest, code, hash) = fetch_plugin_data(client, &url)
@@ -652,4 +681,59 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
     });
 
     Ok(info)
+}
+
+/// Running byte-total guard; `saturating_add` so a huge chunk can't overflow into
+/// a pass. Mirrors the updater's download cap.
+fn bump_capped(running: usize, add: usize, max: usize) -> anyhow::Result<usize> {
+    let next = running.saturating_add(add);
+    if next > max {
+        anyhow::bail!("response exceeds the {max}-byte cap");
+    }
+    Ok(next)
+}
+
+/// A missing `.json` manifest (classic .mjs-only plugin) is a 404; other non-2xx
+/// are real failures the caller must surface, not silently fall back on.
+fn manifest_absent(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bump_capped, manifest_absent};
+
+    #[test]
+    fn bump_capped_accumulates_under_cap() {
+        assert_eq!(bump_capped(0, 100, 1000).unwrap(), 100);
+        assert_eq!(bump_capped(100, 50, 1000).unwrap(), 150);
+    }
+
+    #[test]
+    fn bump_capped_allows_exactly_at_cap() {
+        assert_eq!(bump_capped(60, 4, 64).unwrap(), 64);
+    }
+
+    #[test]
+    fn bump_capped_rejects_over_cap() {
+        let err = bump_capped(60, 5, 64).unwrap_err();
+        assert!(err.to_string().contains("cap"), "got: {err}");
+    }
+
+    #[test]
+    fn bump_capped_saturates_on_huge_add() {
+        // A pathological chunk length must not overflow the running total into a pass.
+        let err = bump_capped(usize::MAX - 1, usize::MAX, 1024).unwrap_err();
+        assert!(err.to_string().contains("cap"), "got: {err}");
+    }
+
+    #[test]
+    fn manifest_absent_only_for_404() {
+        use reqwest::StatusCode;
+        assert!(manifest_absent(StatusCode::NOT_FOUND));
+        assert!(!manifest_absent(StatusCode::OK));
+        // A server error is a real failure, not an absent manifest - must NOT fall back.
+        assert!(!manifest_absent(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!manifest_absent(StatusCode::FORBIDDEN));
+    }
 }
