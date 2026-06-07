@@ -12,6 +12,12 @@ use super::util::exe_dir;
 /// Handle `updater.check` - manual check triggered by UI.
 /// Returns JSON UpdateInfo or null.
 pub(crate) fn handle_updater_check(callback: crate::app_state::IpcCallback) {
+    // Managed installs are upgraded by the package manager; report "no update".
+    if crate::util::is_managed_install() {
+        crate::ipc::plugin::ipc_callback_ok(&callback, "null");
+        return;
+    }
+
     crate::state::rt_handle().spawn(async move {
         let result = match check_for_update().await {
             Some(info) => serde_json::to_string(&info).unwrap_or_else(|_| "null".into()),

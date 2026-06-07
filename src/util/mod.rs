@@ -24,6 +24,16 @@ pub(crate) fn redact_url_query(url: &str) -> String {
     }
 }
 
+/// True for a package-manager install (sets `TIDALUNAR_MANAGED_INSTALL`): read-only
+/// and self-managed, so skip the desktop self-install and the in-app updater.
+pub(crate) fn is_managed_install() -> bool {
+    managed_install_from(std::env::var("TIDALUNAR_MANAGED_INSTALL").ok().as_deref())
+}
+
+fn managed_install_from(value: Option<&str>) -> bool {
+    matches!(value, Some(v) if !v.is_empty() && v != "0")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +60,18 @@ mod tests {
             redact_url_query("https://desktop.tidal.com/browse"),
             "https://desktop.tidal.com/browse"
         );
+    }
+
+    #[test]
+    fn managed_install_detects_truthy_values() {
+        assert!(managed_install_from(Some("1")));
+        assert!(managed_install_from(Some("true")));
+    }
+
+    #[test]
+    fn managed_install_rejects_unset_and_falsy() {
+        assert!(!managed_install_from(None));
+        assert!(!managed_install_from(Some("")));
+        assert!(!managed_install_from(Some("0")));
     }
 }

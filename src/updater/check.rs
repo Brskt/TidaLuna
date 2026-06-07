@@ -122,6 +122,13 @@ pub(crate) async fn check_for_update() -> Option<UpdateInfo> {
 /// Trigger the update check and notify the frontend if an update is available.
 /// Called after login on the tokio runtime.
 pub(crate) fn trigger_update_check() {
+    // Managed installs (Nix, etc.) are upgraded by the package manager and the
+    // updater can't write to the read-only prefix; skip so no toast appears.
+    if crate::util::is_managed_install() {
+        crate::vprintln!("[UPDATER] Managed install; in-app updater disabled");
+        return;
+    }
+
     // Check settings
     let (auto_check, skip_version) = crate::state::db().call_settings(|conn| {
         (

@@ -16,6 +16,13 @@ const ICON_DATA: &[u8] = include_bytes!("../../tidaluna.png");
 pub(crate) const WM_CLASS: &str = "tidalunar";
 
 pub(crate) fn install() {
+    // A managed install (Nix, etc.) ships its own entry; a user-level one would
+    // shadow it, bypass the launch wrapper, and go stale after an upgrade.
+    if crate::util::is_managed_install() {
+        remove_stale_user_entry();
+        return;
+    }
+
     // If we're running from a packaged install (.deb), the system already
     // ships /usr/share/applications/tidalunar.desktop pointing at
     // /usr/bin/tidalunar (the launcher). Writing a user-level entry here
@@ -25,13 +32,7 @@ pub(crate) fn install() {
     if Path::new("/usr/bin/tidalunar").exists()
         && Path::new("/usr/share/applications/tidalunar.desktop").exists()
     {
-        // Clean up any stale user-level entry left from a prior unpackaged run.
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            let stale = home
-                .join(".local/share/applications")
-                .join(format!("{WM_CLASS}.desktop"));
-            let _ = fs::remove_file(&stale);
-        }
+        remove_stale_user_entry();
         return;
     }
 
@@ -46,6 +47,16 @@ pub(crate) fn install() {
         install_icon(&home, size);
     }
     install_desktop_entry(&home, &exe);
+}
+
+/// Remove a user-level `.desktop` entry left by a prior unpackaged run.
+fn remove_stale_user_entry() {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let stale = home
+            .join(".local/share/applications")
+            .join(format!("{WM_CLASS}.desktop"));
+        let _ = fs::remove_file(&stale);
+    }
 }
 
 fn parse_png_size(data: &[u8]) -> Option<u32> {
