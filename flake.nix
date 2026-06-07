@@ -1,26 +1,46 @@
 {
-  description = "Tidal Rust Client";
+  description = "TidaLunar - A TIDAL client";
 
-  inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-  };
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
 
   outputs =
     { self, nixpkgs }:
     let
-      forAllSystems =
-        function:
-        nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed (
-          system: function nixpkgs.legacyPackages.${system}
-        );
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSystems = nixpkgs.lib.genAttrs systems;
+      pkgsFor = system: nixpkgs.legacyPackages.${system};
     in
     {
-      packages = forAllSystems (pkgs: {
-        default = pkgs.callPackage ./default.nix { };
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          default = pkgs.callPackage ./nix/package.nix { };
+        }
+      );
+
+      apps = forAllSystems (system: {
+        default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/tidalunar";
+        };
       });
 
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.callPackage ./shell.nix { };
-      });
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          default = pkgs.callPackage ./nix/devshell.nix { };
+        }
+      );
+
+      formatter = forAllSystems (system: (pkgsFor system).nixfmt);
     };
 }

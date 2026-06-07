@@ -2,6 +2,10 @@
 /dist
 /.cache
 
+# Nix build output symlinks
+/result
+/result-*
+
 # Auto-generated frontend inline bundles
 frontend/src/plugins/luna-ui-inline.ts
 frontend/src/plugins/luna-dev-inline.ts

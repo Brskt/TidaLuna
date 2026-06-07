@@ -14,6 +14,14 @@ A desktop TIDAL client written in Rust with CEF (Chromium Embedded Framework) an
 - Plugin system: hybrid Rust + CEF execution with per-plugin sandboxing.
 - Native plugin modules via Bun child process.
 
+## Install
+
+### NixOS
+
+```bash
+nix profile install github:Brskt/TidaLuna   # or: nix run github:Brskt/TidaLuna
+```
+
 ## Requirements
 
 ### All platforms

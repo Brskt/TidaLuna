@@ -312,6 +312,25 @@ jobs:
             target/installer/tidalunar_*_linux_*.tar.gz
 
   # ---------------------------------------------------------------------------
+  # Nix flake
+  # ---------------------------------------------------------------------------
+
+  nix-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      # Validates the flake (eval all outputs, build the currently-pinned
+      # release package + devShell). Guards against nixpkgs drift / flake typos;
+      # it checks the last released version, not the one being released.
+      - name: Flake check
+        run: nix flake check -L
+
+  # ---------------------------------------------------------------------------
   # Check
   # ---------------------------------------------------------------------------
 
@@ -320,6 +339,7 @@ jobs:
     needs:
       - lint
       - build
+      - nix-check
     runs-on: ubuntu-latest
     steps:
       - name: Require all jobs green
