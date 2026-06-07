@@ -121,7 +121,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 if allowed {
                     crate::vprintln!(
                         "[AUTH]   navigate_self → {}",
-                        crate::util::truncate_str(url, 120)
+                        crate::util::truncate_str(&crate::util::redact_url_query(url), 120)
                     );
                     let browser = with_state(|state| state.browser.clone());
                     if let Some(Some(browser)) = browser
@@ -198,6 +198,34 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 crate::settings::save_update_auto_check(conn, enabled);
             });
             crate::vprintln!("[UPDATER] Auto-check set to {enabled}");
+        }
+        "settings.set_log_level" => {
+            let level = msg
+                .args
+                .first()
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .min(crate::logging::MAX_LOG_LEVEL as u64) as u8;
+            crate::state::db().call_settings(move |conn| {
+                crate::settings::save_log_level(conn, level);
+            });
+            crate::logging::set_log_level(level);
+            crate::vprintln!("[LOGGING] Log level set to {level}");
+        }
+        "settings.set_console" => {
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
+            crate::state::db().call_settings(move |conn| {
+                crate::settings::save_console(conn, enabled);
+            });
+            crate::vprintln!("[LOGGING] Console window set to {enabled} (applies on restart)");
+        }
+        "settings.open_logs_dir" => {
+            let dir = crate::state::cache_data_dir().join("logs");
+            let _ = std::fs::create_dir_all(&dir);
+            open_in_os(dir);
+        }
+        "settings.open_log_file" => {
+            open_in_os(crate::state::cache_data_dir().join("console.log"));
         }
         _ => {}
     }

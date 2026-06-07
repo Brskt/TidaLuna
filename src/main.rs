@@ -67,19 +67,27 @@ fn reexec_for_x11_if_needed() {
     std::process::exit(1);
 }
 
+#[cfg(target_os = "windows")]
+fn attach_or_alloc_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole};
+    unsafe {
+        // Reuse the launching terminal; AllocConsole only when there's no parent.
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            AllocConsole();
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Seed the live log level from the LOGS env var before anything can log.
+    logging::init_env_floor();
+
     // Reuse the launching terminal's console; AllocConsole only when there's no
-    // parent (Explorer). The --type= guard skips CEF subprocesses.
+    // parent (Explorer). The --type= guard skips CEF subprocesses. This early
+    // block is driven by the LOGS env var only (DB isn't open yet).
     #[cfg(target_os = "windows")]
     if logging::log_level() >= 1 && !std::env::args().any(|a| a.starts_with("--type=")) {
-        use windows_sys::Win32::System::Console::{
-            ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole,
-        };
-        unsafe {
-            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
-                AllocConsole();
-            }
-        }
+        attach_or_alloc_console();
     }
 
     #[cfg(target_os = "windows")]
@@ -229,6 +237,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => return Ok(()),
     };
 
+    // Open the sink early (and rotate last session's log) so early lines are
+    // captured; safe before DB init since cache_data_dir() is env-only.
+    crate::logging::rotate_console_log(&crate::state::cache_data_dir());
+    if crate::logging::log_level() >= 1 {
+        crate::logging::ensure_file_sink();
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -250,6 +265,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let db_actor = db::DbActor::open(&data_dir).expect("Failed to open databases");
     let _ = state::DB.set(db_actor);
+
+    // Load the bootstrap settings snapshot once, off the CEF UI thread, as the
+    // single source of truth: used here for the early log level + Windows console
+    // decision, and later for the init-script globals. Browser-only here, so no
+    // --type= guard; the env path opens the console first, so only attach when it
+    // didn't (no double-alloc).
+    let boot = crate::state::db().call_settings(crate::settings::load_boot_settings);
+    let _ = crate::state::BOOT_SETTINGS.set(boot);
+    crate::logging::set_log_level(boot.log_level);
+    #[cfg(target_os = "windows")]
+    if boot.console && crate::logging::log_level() >= 1 && crate::logging::env_log_level() < 1 {
+        attach_or_alloc_console();
+    }
 
     // Recover from any interrupted update before continuing startup
     updater::recover_interrupted_update();
@@ -315,10 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Preload the window-bootstrap settings in one db read here, off the CEF UI
-    // thread, so on_context_initialized doesn't block on per-setting round-trips.
-    let boot = crate::state::db().call_settings(crate::settings::load_boot_settings);
-    let _ = crate::state::BOOT_SETTINGS.set(boot);
+    // Spawn the always-on Connect receiver after token reconciliation.
     if boot.receiver_always_on
         && let Some(rt) = crate::state::RT_HANDLE.get()
     {

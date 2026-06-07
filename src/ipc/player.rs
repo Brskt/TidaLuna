@@ -26,9 +26,23 @@ pub(crate) fn handle_ipc_message(request: &str) {
         return;
     }
 
-    if msg.channel == "jsrt.set_token" {
+    // Channels whose args carry secrets (OAuth tokens, signed stream/auth URLs, AES
+    // keys). Log only the channel name — the args must never reach the persistent
+    // console.log sink, and per-arg truncation is not redaction.
+    let redacted_args = matches!(
+        msg.channel.as_str(),
+        "jsrt.set_token"
+            | "connect.controller.set_auth"
+            | "player.load"
+            | "player.recover"
+            | "player.preload"
+            | "player.load_dash"
+            | "window.navigate_self"
+    );
+    if redacted_args {
         crate::vprintln!(
-            "IPC Message: IpcMessage {{ channel: \"jsrt.set_token\", args: [<redacted>] }}"
+            "IPC Message: IpcMessage {{ channel: {:?}, args: [<redacted>] }}",
+            msg.channel
         );
     } else {
         crate::vprintln!("IPC Message: {}", msg);

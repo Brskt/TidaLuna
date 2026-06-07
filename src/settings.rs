@@ -58,7 +58,9 @@ fn set(conn: &Connection, key: &str, value: &str) {
     }
 }
 
-fn get_bool(conn: &Connection, key: &str, default: bool) -> bool {
+/// Read a settings value parsed as `T`, falling back to `default` when the key is
+/// absent or unparseable.
+fn get_parsed<T: std::str::FromStr>(conn: &Connection, key: &str, default: T) -> T {
     conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
         params![key],
@@ -67,6 +69,14 @@ fn get_bool(conn: &Connection, key: &str, default: bool) -> bool {
     .ok()
     .and_then(|s| s.parse().ok())
     .unwrap_or(default)
+}
+
+fn get_bool(conn: &Connection, key: &str, default: bool) -> bool {
+    get_parsed(conn, key, default)
+}
+
+fn get_u8(conn: &Connection, key: &str, default: u8) -> u8 {
+    get_parsed(conn, key, default)
 }
 
 pub(crate) fn load_window_state(conn: &mut Connection) -> WindowState {
@@ -179,6 +189,26 @@ pub(crate) fn save_receiver_always_on(conn: &mut Connection, enabled: bool) {
     set(conn, "connect.receiver_always_on", &enabled.to_string());
 }
 
+pub(crate) fn load_log_level(conn: &mut Connection) -> u8 {
+    get_u8(conn, "logging.level", 0).min(crate::logging::MAX_LOG_LEVEL)
+}
+
+pub(crate) fn save_log_level(conn: &mut Connection, level: u8) {
+    set(
+        conn,
+        "logging.level",
+        &level.min(crate::logging::MAX_LOG_LEVEL).to_string(),
+    );
+}
+
+pub(crate) fn load_console(conn: &mut Connection) -> bool {
+    get_bool(conn, "logging.console", false)
+}
+
+pub(crate) fn save_console(conn: &mut Connection, enabled: bool) {
+    set(conn, "logging.console", &enabled.to_string());
+}
+
 /// Settings the window bootstrap needs, batched into one db read so they load
 /// off the CEF UI thread in main() instead of blocking on_context_initialized.
 #[derive(Debug, Clone, Copy)]
@@ -188,6 +218,8 @@ pub(crate) struct BootSettings {
     pub(crate) receiver_always_on: bool,
     pub(crate) volume_sync: bool,
     pub(crate) window_maximized: bool,
+    pub(crate) log_level: u8,
+    pub(crate) console: bool,
 }
 
 pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
@@ -201,6 +233,8 @@ pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
         #[cfg(not(target_os = "windows"))]
         volume_sync: false,
         window_maximized: load_window_state(conn).maximized,
+        log_level: load_log_level(conn),
+        console: load_console(conn),
     }
 }
 
@@ -215,4 +249,59 @@ pub(crate) fn load_update_skip_version(conn: &mut Connection) -> Option<String> 
 
 pub(crate) fn save_update_skip_version(conn: &mut Connection, version: &str) {
     set(conn, "updater.skip_version", version);
+}
+
+#[cfg(test)]
+mod logging_settings_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn mem_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&mut conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn get_u8_returns_default_when_absent() {
+        let conn = mem_conn();
+        assert_eq!(get_u8(&conn, "logging.level", 0), 0);
+        assert_eq!(get_u8(&conn, "logging.level", 2), 2);
+    }
+
+    #[test]
+    fn get_u8_parses_stored_value() {
+        let conn = mem_conn();
+        set(&conn, "logging.level", "2");
+        assert_eq!(get_u8(&conn, "logging.level", 0), 2);
+    }
+
+    #[test]
+    fn get_u8_falls_back_on_unparseable() {
+        let conn = mem_conn();
+        set(&conn, "logging.level", "not-a-number");
+        assert_eq!(get_u8(&conn, "logging.level", 1), 1);
+    }
+
+    #[test]
+    fn load_log_level_clamps_to_three() {
+        let mut conn = mem_conn();
+        set(&conn, "logging.level", "99");
+        assert_eq!(load_log_level(&mut conn), 3);
+    }
+
+    #[test]
+    fn save_then_load_log_level_roundtrips() {
+        let mut conn = mem_conn();
+        save_log_level(&mut conn, 2);
+        assert_eq!(load_log_level(&mut conn), 2);
+    }
+
+    #[test]
+    fn save_then_load_console_roundtrips() {
+        let mut conn = mem_conn();
+        assert!(!load_console(&mut conn)); // default false
+        save_console(&mut conn, true);
+        assert!(load_console(&mut conn));
+    }
 }

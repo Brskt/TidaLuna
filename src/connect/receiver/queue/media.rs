@@ -228,7 +228,10 @@ fn apply_bts_manifest(manifest_bytes: &[u8], media: &mut MediaInfo) {
         && let Some(stream_url) = urls.first().and_then(|v| v.as_str())
     {
         media.src_url = Some(stream_url.to_string());
-        crate::vprintln!("[connect::queue] Resolved: {}", stream_url);
+        crate::vprintln!(
+            "[connect::queue] Resolved: {}",
+            crate::util::redact_url_query(stream_url)
+        );
     }
     if let Some(codecs) = manifest.get("codecs").and_then(|v| v.as_str()) {
         let base_codec = codecs.split('.').next().unwrap_or(codecs);

@@ -311,11 +311,17 @@ wrap_life_span_handler! {
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
             let url_str = target_url.as_ref().map(|u| u.to_string()).unwrap_or_default();
-            crate::vprintln!("[POPUP]  on_before_popup: {}", crate::util::truncate_str(&url_str, 120));
+            crate::vprintln!(
+                "[POPUP]  on_before_popup: {}",
+                crate::util::truncate_str(&crate::util::redact_url_query(&url_str), 120)
+            );
             if target_url.is_some() {
                 let kind = PageKind::classify(&url_str);
                 if kind == PageKind::AuthHost {
-                    crate::vprintln!("[AUTH]   Opening auth popup: {}", crate::util::truncate_str(&url_str, 120));
+                    crate::vprintln!(
+                        "[AUTH]   Opening auth popup: {}",
+                        crate::util::truncate_str(&crate::util::redact_url_query(&url_str), 120)
+                    );
                     if let Some(wi) = _window_info {
                         wi.window_name = CefString::from("TidaLunar - Login");
                         wi.bounds = cef::Rect { x: 100, y: 100, width: 500, height: 700 };
@@ -398,7 +404,10 @@ wrap_load_handler! {
                 let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
                 let policy = NavigationPolicy::for_page(PageKind::classify(&url));
                 if policy.inject_init_script {
-                    crate::vprintln!("[LOAD]   on_load_start init_script: {}", crate::util::truncate_str(&url, 80));
+                    crate::vprintln!(
+                        "[LOAD]   on_load_start init_script: {}",
+                        crate::util::truncate_str(&crate::util::redact_url_query(&url), 80)
+                    );
                     exec_js_on_frame(frame, &self.init_script);
                 }
             }
@@ -423,7 +432,10 @@ wrap_load_handler! {
                 let kind = PageKind::classify(&url);
                 let policy = NavigationPolicy::for_page(kind);
                 if kind == PageKind::AuthHost {
-                    crate::vprintln!("[LOAD]   Auth page loaded: {}", crate::util::truncate_str(&url, 100));
+                    crate::vprintln!(
+                        "[LOAD]   Auth page loaded: {}",
+                        crate::util::truncate_str(&crate::util::redact_url_query(&url), 100)
+                    );
                 }
                 if !policy.inject_bundle {
                     return;
@@ -499,7 +511,12 @@ wrap_load_handler! {
         ) {
             let url = failed_url.map(|u| u.to_string()).unwrap_or_default();
             let text = error_text.map(|t| t.to_string()).unwrap_or_default();
-            crate::vprintln!("[LOAD]   on_load_error: url={} code={:?} text={}", url, error_code, text);
+            crate::vprintln!(
+                "[LOAD]   on_load_error: url={} code={:?} text={}",
+                crate::util::redact_url_query(&url),
+                error_code,
+                text
+            );
             let is_main = _frame.as_ref().map(|f| f.is_main() != 0).unwrap_or(false);
             crate::vprintln!("[LOAD]   on_load_error: is_main_frame={}", is_main);
         }
@@ -570,15 +587,19 @@ wrap_request_handler! {
             let kind = PageKind::classify(&url);
             let policy = NavigationPolicy::for_page(kind);
 
+            let safe_url = crate::util::redact_url_query(&url);
             crate::vprintln!(
                 "[NAV]    on_before_browse: is_redirect={} url={}",
                 _is_redirect,
-                crate::util::truncate_str(&url, 200)
+                crate::util::truncate_str(&safe_url, 200)
             );
 
             if kind == PageKind::TidalCallback {
                 let web_url = url.replacen("tidal://", &format!("https://{}/", nav::HOST_DESKTOP), 1);
-                crate::vprintln!("[AUTH]   Intercepted tidal:// redirect → {}", web_url);
+                crate::vprintln!(
+                    "[AUTH]   Intercepted tidal:// redirect → {}",
+                    crate::util::redact_url_query(&web_url)
+                );
                 with_state(|state| {
                     if let Some(ref browser) = state.browser
                         && let Some(main_frame) = browser.main_frame()
