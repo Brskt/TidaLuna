@@ -88,6 +88,11 @@ reqwest = { workspace = true, features = [
   "cookies",
   "json",
   "form",
+  # Auto-decompress responses (and strip content-encoding) so a manually-built
+  # JS Response in a native plugin never sees compressed bytes.
+  "gzip",
+  "brotli",
+  "deflate",
 ] }
 rtrb = "0.3.4"
 rubato = "3.0.0"

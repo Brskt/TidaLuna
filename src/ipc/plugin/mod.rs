@@ -6,6 +6,8 @@ mod proxy;
 
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
 pub(crate) use jsrt::open_plugin_gate;
+// Token-scrub for plugin-facing response bodies; reused by the native egress path.
+pub(crate) use proxy::scrub_real_tokens;
 
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -121,6 +121,11 @@ var _JSONStringify = JSON.stringify;
 var _JSONParse = JSON.parse;
 var _RealRequest = typeof Request !== "undefined" ? Request : undefined;
 var _RealURL = typeof URL !== "undefined" ? URL : undefined;
+var _RealResponse = typeof Response !== "undefined" ? Response : undefined;
+var _RealTypeError = TypeError;
+var _Buffer = require("buffer").Buffer;
+var _setTimeout = setTimeout;
+var _clearTimeout = clearTimeout;
 // Prototype methods - immune to prototype pollution
 var _ArrayPrototypeJoin = Array.prototype.join;
 var _ArrayPrototypeForEach = Array.prototype.forEach;
@@ -129,6 +134,21 @@ var _FunctionPrototypeBind = Function.prototype.bind;
 var _RealFunction = Function;
 var _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 var _SetPrototypeHas = Set.prototype.has;
+var _ArrayIsArray = Array.isArray;
+// Web types used to faithfully encode request bodies / rebuild responses.
+var _RealHeaders = typeof Headers !== "undefined" ? Headers : undefined;
+var _RealFormData = typeof FormData !== "undefined" ? FormData : undefined;
+var _RealBlob = typeof Blob !== "undefined" ? Blob : undefined;
+var _RealURLSearchParams = typeof URLSearchParams !== "undefined" ? URLSearchParams : undefined;
+var _RealArrayBuffer = ArrayBuffer;
+var _RealArrayBufferIsView = ArrayBuffer.isView;
+var _RealUint8Array = Uint8Array;
+var _RealDOMException = typeof DOMException !== "undefined" ? DOMException : undefined;
+var _StringPrototypeStartsWith = String.prototype.startsWith;
+var _StringPrototypeToLowerCase = String.prototype.toLowerCase;
+// Real network fetch, captured before hardening neuters globalThis.fetch. Used
+// ONLY for local data:/blob: URLs - network egress always takes the IPC path below.
+var _RealFetch = typeof fetch === "function" ? fetch : undefined;
 
 // ── worker_threads shim (fail-closed allowlist, no Worker) ────────────
 // Exposes only communication/utility APIs. Worker constructor is blocked
@@ -333,8 +353,10 @@ function containsDynamicImport(code) {
         return RealFunction.apply(this, arguments);
     };
     SafeFunction.prototype = RealFunction.prototype;
+    // Keep writable: bundled strict-mode libs do `fn.constructor = fn` (UTIF in node-vibrant),
+    // and a non-writable inherited slot throws on that. Value stays SafeFunction, so it's still scanned.
     _ObjectDefineProperty(RealFunction.prototype, "constructor", {
-        value: SafeFunction, writable: false, configurable: false,
+        value: SafeFunction, writable: true, configurable: false,
     });
     _ObjectDefineProperty(globalThis, "Function", {
         value: SafeFunction, writable: false, configurable: false,
@@ -342,9 +364,10 @@ function containsDynamicImport(code) {
 })();
 
 // ── Harden globalThis.Bun - neuter dangerous methods in-place ─────────
-// globalThis.Bun is non-configurable in Bun 1.3.x (ReadOnly|DontDelete),
-// so we cannot replace it. But properties ON the Bun object (spawn, file,
-// write, etc.) are writable - we neuter them individually.
+// Bun is non-configurable so we can't replace it; its writable methods
+// (spawn/file/write/...) ARE neutered below. Bun.fetch/Bun.env are
+// writable:false (can't neuter) - but env is scrubbed at spawn and fetch
+// egress is the IPC path's job; closing Bun.fetch direct = OS-level (backlog).
 ;(function hardenBun() {
     var realBun = globalThis.Bun;
     if (!realBun) return;
@@ -358,7 +381,11 @@ function containsDynamicImport(code) {
         "plugin", "build",
         "$",
         "mmap", "allocUnsafe", "sql", "redis", "s3",
+        "udpSocket", "which", // raw UDP egress + PATH binary enum
         "env", "embeddedFiles",
+        "FFI", "secrets", // native dlopen (escape) + OS keychain
+        "SQL", "RedisClient", "S3Client", "postgres", // DB/S3 network clients
+        "Glob", "FileSystemRouter", "Archive", "generateHeapSnapshot", "unsafe", // fs enum / memory outside sandbox
     ];
     _ArrayPrototypeForEach.call(DANGEROUS, function(key) {
         if (key in realBun) {
@@ -455,6 +482,256 @@ function containsDynamicImport(code) {
     freezeSet(BLOCKED_MODULES);
 })();
 
+// ── IPC fetch (sanctioned egress: child -> Rust -> network) ───────────
+// Network-trusted plugins get this as their `fetch` shadow: emits net.fetch,
+// resolves a real Response from Rust's reply. Does NOT close Bun.fetch (OS-level).
+var pendingFetches = new Map();
+var nextFetchId = 1;
+var FETCH_GUARD_MS = 60000;
+
+function normalizeHeaders(h) {
+    // Ordered [name, value] pairs: preserves duplicate header names and avoids the
+    // __proto__ hazard of a plain object. Headers tested first (a Map's forEach differs).
+    var out = [];
+    if (!h) return out;
+    if (_RealHeaders && h instanceof _RealHeaders) {
+        h.forEach(function(v, k) { _ArrayPrototypePush.call(out, [k, String(v)]); });
+    } else if (_ArrayIsArray(h)) {
+        for (var i = 0; i < h.length; i++) {
+            if (h[i]) _ArrayPrototypePush.call(out, [String(h[i][0]), String(h[i][1])]);
+        }
+    } else if (typeof h === "object") {
+        var keys = _ObjectKeys(h);
+        for (var j = 0; j < keys.length; j++) {
+            _ArrayPrototypePush.call(out, [keys[j], String(h[keys[j]])]);
+        }
+    }
+    return out;
+}
+
+function headersHave(pairs, lowerName) {
+    for (var i = 0; i < pairs.length; i++) {
+        if (_StringPrototypeToLowerCase.call(pairs[i][0]) === lowerName) return true;
+    }
+    return false;
+}
+
+// Serialize a FormData to a multipart/form-data Buffer with the given boundary.
+async function formDataToBuffer(fd, boundary) {
+    var entries = [];
+    fd.forEach(function(value, key) { _ArrayPrototypePush.call(entries, [key, value]); });
+    var chunks = [];
+    for (var i = 0; i < entries.length; i++) {
+        var key = entries[i][0], value = entries[i][1];
+        var head = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + key + "\"";
+        if (_RealBlob && value instanceof _RealBlob) {
+            head += "; filename=\"" + (value.name || "blob") + "\"\r\nContent-Type: "
+                + (value.type || "application/octet-stream") + "\r\n\r\n";
+            _ArrayPrototypePush.call(chunks, _Buffer.from(head, "utf8"));
+            var ab = await value.arrayBuffer();
+            _ArrayPrototypePush.call(chunks, _Buffer.from(new _RealUint8Array(ab)));
+            _ArrayPrototypePush.call(chunks, _Buffer.from("\r\n", "utf8"));
+        } else {
+            head += "\r\n\r\n" + String(value) + "\r\n";
+            _ArrayPrototypePush.call(chunks, _Buffer.from(head, "utf8"));
+        }
+    }
+    _ArrayPrototypePush.call(chunks, _Buffer.from("--" + boundary + "--\r\n", "utf8"));
+    return _Buffer.concat(chunks);
+}
+
+// Encode a request body to base64, returning an implied content-type when the
+// body type sets one (URLSearchParams, FormData, Blob).
+async function encodeBody(body) {
+    if (body == null) return { b64: null, contentType: null };
+    if (typeof body === "string") {
+        return { b64: _Buffer.from(body, "utf8").toString("base64"), contentType: null };
+    }
+    if (_RealArrayBufferIsView(body)) {
+        // Any typed-array view or DataView: take the underlying bytes verbatim.
+        return {
+            b64: _Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString("base64"),
+            contentType: null,
+        };
+    }
+    if (body instanceof _RealArrayBuffer) {
+        return { b64: _Buffer.from(new _RealUint8Array(body)).toString("base64"), contentType: null };
+    }
+    if (_RealBlob && body instanceof _RealBlob) {
+        var ab = await body.arrayBuffer();
+        return {
+            b64: _Buffer.from(new _RealUint8Array(ab)).toString("base64"),
+            contentType: body.type || null,
+        };
+    }
+    if (_RealURLSearchParams && body instanceof _RealURLSearchParams) {
+        return {
+            b64: _Buffer.from(body.toString(), "utf8").toString("base64"),
+            contentType: "application/x-www-form-urlencoded;charset=UTF-8",
+        };
+    }
+    if (_RealFormData && body instanceof _RealFormData) {
+        var boundary = "----TidaLunarBoundary" + (nextFetchId++).toString(36);
+        var buf = await formDataToBuffer(body, boundary);
+        return { b64: buf.toString("base64"), contentType: "multipart/form-data; boundary=" + boundary };
+    }
+    // Unknown body type: coerce to string (fetch's last-resort behavior).
+    return { b64: _Buffer.from(String(body), "utf8").toString("base64"), contentType: null };
+}
+
+function makeAbortError() {
+    if (_RealDOMException) return new _RealDOMException("The operation was aborted.", "AbortError");
+    var err = new _RealTypeError("The operation was aborted.");
+    err.name = "AbortError";
+    return err;
+}
+
+// Remove a pending fetch and tear down its timer + abort listener (one place,
+// so every settle path - timeout, transport-fail, abort, result - is symmetric).
+function settle(reqId) {
+    var entry = pendingFetches.get(reqId);
+    if (!entry) return null;
+    pendingFetches.delete(reqId);
+    _clearTimeout(entry.timer);
+    if (entry.signal && entry.onAbort) {
+        try { entry.signal.removeEventListener("abort", entry.onAbort); } catch (_) {}
+    }
+    return entry;
+}
+
+// Tell Rust to drop an in-flight net.fetch (the child gave up - abort or timeout)
+// so it stops doing network work nobody awaits.
+function sendCancel(reqId) {
+    try {
+        hostStdout.write(_JSONStringify({ type: "net.fetch.cancel", reqId: reqId }) + "\n");
+    } catch (_) {}
+}
+
+function makeIpcFetch(pluginName) {
+    return async function ipcFetch(input, init) {
+        var url, method = "GET", headers = [], body, redirect, signal;
+        if (_RealRequest && input instanceof _RealRequest) {
+            url = input.url;
+            method = input.method;
+            headers = normalizeHeaders(input.headers);
+            redirect = input.redirect;
+            signal = input.signal;
+            // The Request carries the body unless init overrides it; clone so the
+            // caller's Request isn't consumed.
+            if (!(init && init.body != null) && input.body != null) {
+                try { body = await input.clone().arrayBuffer(); } catch (_) {}
+            }
+        } else if (input && typeof input === "object" && typeof input.url === "string") {
+            url = input.url;
+            if (input.method) method = input.method;
+            if (input.headers) headers = normalizeHeaders(input.headers);
+        } else {
+            url = String(input);
+        }
+        if (init) {
+            if (init.method) method = init.method;
+            if (init.headers) headers = normalizeHeaders(init.headers);
+            if (init.body != null) body = init.body;
+            if (init.redirect) redirect = init.redirect;
+            if (init.signal !== undefined) signal = init.signal;
+        }
+
+        // Local schemes resolve in-process (no egress, no IPC, no trust concern).
+        if (_RealFetch
+            && (_StringPrototypeStartsWith.call(url, "data:")
+                || _StringPrototypeStartsWith.call(url, "blob:"))) {
+            return _RealFetch(input, init);
+        }
+
+        if (signal && signal.aborted) throw makeAbortError();
+
+        var enc = await encodeBody(body);
+        if (enc.contentType && !headersHave(headers, "content-type")) {
+            _ArrayPrototypePush.call(headers, ["content-type", enc.contentType]);
+        }
+
+        return await new Promise(function(resolve, reject) {
+            var reqId = nextFetchId++;
+            var timer = _setTimeout(function() {
+                var e = settle(reqId);
+                if (e) {
+                    sendCancel(reqId);
+                    e.reject(new _RealTypeError("[sandbox] fetch timed out"));
+                }
+            }, FETCH_GUARD_MS);
+            var onAbort = null;
+            if (signal) {
+                onAbort = function() {
+                    var e = settle(reqId);
+                    if (!e) return;
+                    sendCancel(reqId);
+                    e.reject(makeAbortError());
+                };
+                try { signal.addEventListener("abort", onAbort); } catch (_) {}
+            }
+            pendingFetches.set(reqId, {
+                resolve: resolve, reject: reject, timer: timer, signal: signal, onAbort: onAbort,
+            });
+            try {
+                hostStdout.write(_JSONStringify({
+                    type: "net.fetch", reqId: reqId, plugin: pluginName,
+                    url: url, method: method, headers: headers, body: enc.b64,
+                    redirect: redirect || "follow",
+                }) + "\n");
+            } catch (e) {
+                var en = settle(reqId);
+                if (en) en.reject(new _RealTypeError("[sandbox] fetch transport failed"));
+            }
+        });
+    };
+}
+
+function handleFetchResult(cmd) {
+    var entry = settle(cmd.reqId);
+    if (!entry) return;
+    if (!cmd.ok) {
+        entry.reject(new _RealTypeError(cmd.error || "fetch failed"));
+        return;
+    }
+    try {
+        var hasBody = typeof cmd.body === "string" && cmd.body.length > 0;
+        var bodyArg = hasBody ? _Buffer.from(cmd.body, "base64") : null;
+        // Rebuild Headers via append so duplicate names (Set-Cookie/Link) survive.
+        var headers = _RealHeaders ? new _RealHeaders() : {};
+        if (_ArrayIsArray(cmd.headers)) {
+            for (var i = 0; i < cmd.headers.length; i++) {
+                var pair = cmd.headers[i];
+                if (!pair) continue;
+                if (_RealHeaders) headers.append(pair[0], pair[1]);
+                else headers[pair[0]] = pair[1];
+            }
+        }
+        // The Response ctor rejects a status outside 200-599; build with a safe
+        // status, then restore the real one (1xx/999/...) on the instance so the
+        // plugin sees the true status without a thrown error.
+        var realStatus = typeof cmd.status === "number" ? cmd.status : 200;
+        var ctorStatus = realStatus >= 200 && realStatus <= 599 ? realStatus : 200;
+        var res = new _RealResponse(bodyArg, {
+            status: ctorStatus,
+            statusText: cmd.statusText || "",
+            headers: headers,
+        });
+        try {
+            if (ctorStatus !== realStatus) {
+                _ObjectDefineProperty(res, "status", { value: realStatus, configurable: true });
+                _ObjectDefineProperty(res, "ok", {
+                    value: realStatus >= 200 && realStatus < 300, configurable: true,
+                });
+            }
+            _ObjectDefineProperty(res, "url", { value: cmd.url || "", configurable: true });
+            _ObjectDefineProperty(res, "redirected", { value: !!cmd.redirected, configurable: true });
+        } catch (_) {}
+        entry.resolve(res);
+    } catch (e) {
+        entry.reject(new _RealTypeError("[sandbox] bad fetch response: " + (e && e.message)));
+    }
+}
+
 // ── Eval wrapper ────────────────────────────────────────────────────────
 // Shadows dangerous globals as parameters set to undefined.
 // Parameter shadows are defense-in-depth - globalThis is hardened above.
@@ -466,6 +743,7 @@ const SHADOW_PARAMS = [
     "Bun",
     "Worker", "ShadowRealm",
     "process",
+    "fetch",
 ];
 const SHADOW_PARAMS_STR = SHADOW_PARAMS.join(",");
 
@@ -475,7 +753,7 @@ const SHADOW_PARAMS_STR = SHADOW_PARAMS.join(",");
 var _protoTracked = [
     [Object.prototype,   ["hasOwnProperty","toString","valueOf","constructor","isPrototypeOf","propertyIsEnumerable"]],
     [Array.prototype,    ["push","pop","shift","unshift","splice","slice","join","forEach","map","filter","reduce","find","findIndex","indexOf","includes","sort","flat","flatMap","concat","keys","values","entries"]],
-    [Function.prototype, ["call","apply","bind","toString"]],
+    [Function.prototype, ["call","apply","bind","toString","constructor"]],
     [String.prototype,   ["split","replace","indexOf","includes","startsWith","endsWith","trim","slice","substring","match","search"]],
     [Promise.prototype,  ["then","catch","finally"]],
     [Error.prototype,    ["toString","message","name"]],
@@ -492,18 +770,16 @@ var _protoSnapshot = (function() {
     return snap;
 })();
 function restorePrototypes() {
-    // Restore modified/deleted descriptors to their startup state.
-    // Added properties are NOT deleted - plugins may install polyfills at
-    // registration time that their exported functions need during later calls.
-    // The snapshot covers all security-critical built-in methods; a plugin
-    // cannot shadow e.g. Array.prototype.push via an addition - it would
-    // need to modify the existing descriptor, which IS caught here.
+    // Restore modified descriptors to startup state. Added props survive
+    // (plugins' register-time polyfills need them later); safe because a
+    // plugin can't shadow a security-critical method by addition - only by
+    // modifying the existing descriptor, which IS caught here.
     for (var i = 0; i < _protoSnapshot.length; i++) {
         try { _ObjectDefineProperty(_protoSnapshot[i][0], _protoSnapshot[i][1], _protoSnapshot[i][2]); } catch(_) {}
     }
 }
 
-function evalPlugin(code, proxiedRequire) {
+function evalPlugin(code, proxiedRequire, pluginFetch) {
     var m = { exports: {} };
     // eslint-disable-next-line no-new-func -- intentional: plugin code loading
     var fn = new _RealFunction(SHADOW_PARAMS_STR, code); // NOSONAR
@@ -512,7 +788,8 @@ function evalPlugin(code, proxiedRequire) {
             m, m.exports, proxiedRequire,
             undefined,
             undefined, undefined,
-            mockedProcess
+            mockedProcess,
+            pluginFetch
         );
     } finally {
         restorePrototypes();
@@ -695,6 +972,7 @@ rl.on("line", async (line) => {
 
     var id = cmd.id;
     var type = cmd.type;
+    if (type === "net.fetch.result") { handleFetchResult(cmd); return; }
     if (!id) return;
 
     try {
@@ -726,7 +1004,14 @@ rl.on("line", async (line) => {
             }
 
             var proxiedRequire = makeRequireProxy(trustedModules, sandboxedFs, dataDir);
-            var m = evalPlugin(code, proxiedRequire);
+            // fetch gated on network trust (require('http')/'https' group), baked per-plugin
+            // into the eval env - no shared mutable state to race across concurrent calls.
+            var hasNetworkTrust = _SetPrototypeHas.call(trustedModules, "http")
+                || _SetPrototypeHas.call(trustedModules, "https");
+            var pluginFetch = hasNetworkTrust
+                ? makeIpcFetch(name)
+                : function() { throw new Error("[sandbox] fetch requires network trust - grant http/https"); };
+            var m = evalPlugin(code, proxiedRequire, pluginFetch);
             modules[name] = m.exports;
             respond(id, { ok: true, exports: _ObjectKeys(m.exports), hash: hashCode(code) });
 

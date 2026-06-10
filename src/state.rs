@@ -51,11 +51,12 @@ pub static CURRENT_METADATA: LazyLock<Arc<Mutex<Option<TrackMetadata>>>> =
 pub static CURRENT_TRACK: LazyLock<Arc<Mutex<Option<TrackInfo>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
-fn build_http_client() -> reqwest::Client {
+/// Shared client tuning (UA, timeouts, pooling, HTTP/2, TLS) minus the cookie
+/// configuration, which the global and per-plugin clients set differently.
+fn base_client_builder() -> reqwest::ClientBuilder {
     // Keep streaming requests unconstrained (no global request timeout),
     // but tune connection setup and pooling for lower latency variance.
     reqwest::Client::builder()
-        .cookie_store(true)
         .user_agent(USER_AGENT.as_str())
         .connect_timeout(Duration::from_secs(8))
         .pool_idle_timeout(Duration::from_secs(90))
@@ -69,8 +70,26 @@ fn build_http_client() -> reqwest::Client {
         .http2_keep_alive_while_idle(true)
         // TLS: accept 1.2 and 1.3
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
+}
+
+fn build_http_client() -> reqwest::Client {
+    base_client_builder()
+        .cookie_store(true)
         .build()
         .expect("failed to build HTTP client")
+}
+
+/// Build a native-plugin egress client with a caller-owned cookie jar (for
+/// per-plugin isolation) and a redirect policy (follow vs manual/error).
+pub(crate) fn build_native_client(
+    jar: Arc<reqwest::cookie::Jar>,
+    redirect: reqwest::redirect::Policy,
+) -> reqwest::Client {
+    base_client_builder()
+        .cookie_provider(jar)
+        .redirect(redirect)
+        .build()
+        .expect("failed to build native HTTP client")
 }
 
 pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);

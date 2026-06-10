@@ -11,6 +11,7 @@
 //!   4. App exit → tokio runtime dropped → stdin/stdout tasks cancelled →
 //!      pipes closed → native-host.cjs readline emits 'close' → process.exit(0)
 
+mod net_fetch;
 pub(crate) mod trust;
 
 use std::collections::HashMap;
@@ -136,6 +137,7 @@ impl NativeRuntime {
 
         // Task: read responses from stdout
         let pending_clone = pending.clone();
+        let stdin_tx_reader = stdin_tx.clone();
         rt.spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
@@ -150,6 +152,21 @@ impl NativeRuntime {
                         continue;
                     }
                 };
+
+                // Child-initiated egress request: dispatch off the read loop so the
+                // HTTP round-trip never blocks other responses.
+                match parsed.get("type").and_then(|t| t.as_str()) {
+                    Some("net.fetch") => {
+                        net_fetch::dispatch(parsed, stdin_tx_reader.clone());
+                        continue;
+                    }
+                    // The child aborted (AbortSignal) - cancel the in-flight fetch.
+                    Some("net.fetch.cancel") => {
+                        net_fetch::cancel(&parsed);
+                        continue;
+                    }
+                    _ => {}
+                }
 
                 let id = parsed
                     .get("id")
