@@ -29,9 +29,60 @@ async fn fetch_and_decrypt_inner(
     let mut offset = 0u64;
     let mut decrypt_buf = Vec::new();
     let mut buffer = Vec::new();
+    let mut reconnect_attempts: u32 = 0;
+    const MAX_PRELOAD_RECONNECTS: u32 = 8;
 
-    while let Some(item) = stream.next().await {
-        let chunk = item?;
+    'download: loop {
+        let item = match stream.next().await {
+            Some(item) => item,
+            None => break 'download,
+        };
+        let chunk = match item {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                // Idle connection died on a long pause: reconnect at `offset` and keep
+                // appending - the decrypt offset stays aligned so resumed bytes decrypt
+                // correctly. A 416 means `offset` is at/past EOF (all bytes buffered): finish.
+                crate::vprintln!("[PRELOAD] Stream error at byte {offset}: {e}");
+                stream = 'reconnect: loop {
+                    reconnect_attempts += 1;
+                    if reconnect_attempts > MAX_PRELOAD_RECONNECTS {
+                        anyhow::bail!(
+                            "network error after {MAX_PRELOAD_RECONNECTS} reconnects: {e}"
+                        );
+                    }
+                    let backoff = std::time::Duration::from_millis(250 * reconnect_attempts as u64);
+                    tokio::time::sleep(backoff).await;
+                    let range_header = format!("bytes={offset}-");
+                    match HTTP_CLIENT
+                        .get(url)
+                        .header("Range", &range_header)
+                        .send()
+                        .await
+                    {
+                        Ok(r) if r.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
+                            crate::vprintln!(
+                                "[PRELOAD] Reconnected at byte {offset} (attempt {reconnect_attempts})"
+                            );
+                            break 'reconnect r.bytes_stream();
+                        }
+                        Ok(r) if r.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
+                            break 'download;
+                        }
+                        Ok(r) => anyhow::bail!("reconnect status: {}", r.status()),
+                        Err(send_err) => {
+                            crate::vprintln!(
+                                "[PRELOAD] reconnect attempt {reconnect_attempts} failed: {send_err}"
+                            );
+                            continue 'reconnect;
+                        }
+                    }
+                };
+                continue 'download; // new stream, buffer + offset intact
+            }
+        };
+
+        reconnect_attempts = 0; // received data; reset the retry budget
 
         GOVERNOR
             .acquire(TrafficClass::Preload, chunk.len() as u32)
@@ -167,6 +218,10 @@ pub fn start_download(
         let mut current_resp = Some(resp);
         let mut range_restarts: u32 = 0;
         let mut http_requests: u32 = 1; // initial GET counts as 1
+        // Consecutive reconnect attempts after a mid-stream transport error,
+        // reset on the next successful chunk. Bounds a truly-dead network.
+        let mut reconnect_attempts: u32 = 0;
+        const MAX_RECONNECTS: u32 = 8;
 
         'outer: loop {
             let (stream_resp, stream_offset) = if let Some(r) = current_resp.take() {
@@ -178,6 +233,9 @@ pub fn start_download(
                     Some(t) => t,
                     None => break,
                 };
+                // A seek restart starts a fresh stream, so clear the reconnect
+                // budget - a `continue 'outer` from the reconnect loop lands here.
+                reconnect_attempts = 0;
 
                 // Brief debounce to coalesce rapid seeks
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
@@ -297,6 +355,7 @@ pub fn start_download(
                         {
                             Ok(()) => {
                                 offset += chunk.len() as u64;
+                                reconnect_attempts = 0; // progress made; reset the reconnect budget
                                 let written = writer.write_counted(&decrypt_buf);
                                 chunk_count += 1;
                                 bytes_since_restart += chunk.len() as u64;
@@ -332,8 +391,86 @@ pub fn start_download(
                         }
                     }
                     Some(Err(e)) => {
-                        writer.finish_with_error(format!("network error: {e}"));
-                        return;
+                        // Transient transport error (idle connection died on a long
+                        // pause, or a blip): reconnect at `offset` and keep appending -
+                        // [base..offset] stays valid so the decode blocks at the frontier
+                        // rather than ending the track. Terminal/exhausted retries end it.
+                        if writer.is_cancelled() {
+                            return;
+                        }
+                        crate::vprintln!("[STREAM] Stream error at byte {offset}: {e}");
+                        stream = 'reconnect: loop {
+                            if writer.has_restart_pending() {
+                                continue 'outer; // a seek supersedes the reconnect
+                            }
+                            reconnect_attempts += 1;
+                            if reconnect_attempts > MAX_RECONNECTS {
+                                writer.finish_with_error(format!(
+                                    "network error after {MAX_RECONNECTS} reconnects: {e}"
+                                ));
+                                return;
+                            }
+                            let backoff =
+                                std::time::Duration::from_millis(250 * reconnect_attempts as u64);
+                            tokio::select! {
+                                biased;
+                                _ = writer.wait_for_restart_or_cancel() => {
+                                    if writer.is_cancelled() {
+                                        return;
+                                    }
+                                    continue 'outer; // seek/cancel during backoff
+                                }
+                                _ = tokio::time::sleep(backoff) => {}
+                            }
+                            let range_header = format!("bytes={offset}-");
+                            let send_fut = crate::state::HTTP_CLIENT_PLAYBACK
+                                .get(&url)
+                                .header("Range", &range_header)
+                                .send();
+                            // The playback client has no request timeout, so race the
+                            // send against restart/cancel: a stalled server must not pin
+                            // this task past a seek/stop/new-track.
+                            let reconnect_resp = tokio::select! {
+                                biased;
+                                _ = writer.wait_for_restart_or_cancel() => {
+                                    if writer.is_cancelled() {
+                                        return;
+                                    }
+                                    continue 'outer; // seek supersedes the reconnect
+                                }
+                                result = send_fut => result,
+                            };
+                            match reconnect_resp {
+                                Ok(r) if r.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
+                                    http_requests += 1;
+                                    crate::vprintln!(
+                                        "[STREAM] Reconnected at byte {offset} (attempt {reconnect_attempts})"
+                                    );
+                                    break 'reconnect r.bytes_stream();
+                                }
+                                Ok(r)
+                                    if r.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE =>
+                                {
+                                    // offset is at/past EOF: all bytes are already buffered.
+                                    writer.finish();
+                                    return;
+                                }
+                                Ok(r) => {
+                                    writer.finish_with_error(format!(
+                                        "reconnect status: {}",
+                                        r.status()
+                                    ));
+                                    return;
+                                }
+                                Err(send_err) => {
+                                    crate::vprintln!(
+                                        "[STREAM] reconnect attempt {reconnect_attempts} failed: {send_err}"
+                                    );
+                                    continue 'reconnect;
+                                }
+                            }
+                        };
+                        continue; // inner loop: new stream, buffer + offset intact
                     }
                     None => {
                         break;
