@@ -24,6 +24,48 @@ use std::thread;
 #[cfg(target_os = "windows")]
 use wasapi::ExclusiveCommand;
 
+/// The defined outcomes of a `player.play`, given the player's current state.
+/// Pure so it can be unit-tested without the audio pipeline.
+#[derive(Debug, PartialEq)]
+pub(super) enum PlayAction {
+    /// A live pipeline exists - resume it.
+    Resume,
+    /// A load for this generation is genuinely in flight - wait for it.
+    DeferTo(u32),
+    /// No load is coming, but a previously-loaded source is retained - reload it.
+    ReArm,
+    /// Nothing is loaded and nothing to re-arm (cold/empty) - do nothing.
+    Ignore,
+}
+
+/// Decide what a `player.play` does. Deferring is legitimate ONLY while a load
+/// is in flight; otherwise a no-track play re-arms the retained source.
+pub(super) fn decide_play(
+    has_track: bool,
+    loading_gen: Option<u32>,
+    has_retained_source: bool,
+) -> PlayAction {
+    match (has_track, loading_gen, has_retained_source) {
+        (true, _, _) => PlayAction::Resume,
+        (false, Some(generation), _) => PlayAction::DeferTo(generation),
+        (false, None, true) => PlayAction::ReArm,
+        (false, None, false) => PlayAction::Ignore,
+    }
+}
+
+/// Apply a `LoadSettled` for `generation`: clear `loading_gen` and any play
+/// deferred on it. Gen-matched, so a stale settle can't clear a newer load.
+pub(super) fn settle_load(
+    loading_gen: Option<u32>,
+    pending_play: Option<u32>,
+    generation: u32,
+) -> (Option<u32>, Option<u32>) {
+    (
+        loading_gen.filter(|&g| g != generation),
+        pending_play.filter(|&g| g != generation),
+    )
+}
+
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn resolve_resume_policy(
         &self,
@@ -113,7 +155,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
-    pub(super) fn handle_load(&mut self, req: LoadRequest) {
+    pub(super) fn handle_load(&mut self, req: LoadRequest) -> bool {
         let LoadRequest {
             buffer,
             load_gen,
@@ -126,7 +168,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         } = req;
         if load_gen != LOAD_SEQ.load(Relaxed) {
             crate::vprintln!("[LOAD #{load_gen}] stale Load, ignoring");
-            return;
+            return false;
         }
 
         if let Some(ref prev) = self.current_track_id
@@ -174,7 +216,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 "[WASAPI] Progressive decode started ({:.0}ms setup)",
                 decode_start.elapsed().as_secs_f64() * 1000.0
             );
-            return;
+            return true;
         }
 
         // Shared mode: symphonia + cpal
@@ -188,7 +230,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     error: e,
                     code: "mediaerror",
                 });
-                return;
+                return false;
             }
         };
         let probe_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
@@ -221,7 +263,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Open cpal stream
         let device = match self.resolve_output_device() {
             Some(d) => d,
-            None => return,
+            None => return false,
         };
 
         let cpal_start = std::time::Instant::now();
@@ -232,7 +274,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     (self.callback)(PlayerEvent::DeviceError(
                         DeviceErrorKind::FormatNotSupported,
                     ));
-                    return;
+                    return false;
                 }
             };
         let cpal_ms = cpal_start.elapsed().as_secs_f64() * 1000.0;
@@ -357,20 +399,65 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!("[PLAY]   applying deferred play for load #{load_gen}");
             self.handle_play();
         }
+        true
+    }
+
+    pub(super) fn handle_load_started(&mut self, generation: u32) {
+        // Accept only the current generation: a stale LoadStarted (a tokio load
+        // racing an IPC load) must not regress loading_gen past a newer load/stop.
+        if generation == LOAD_SEQ.load(Relaxed) {
+            self.loading_gen = Some(generation);
+        }
+    }
+
+    pub(super) fn handle_load_settled(&mut self, generation: u32) {
+        let (loading_gen, pending_play) =
+            settle_load(self.loading_gen, self.pending_play, generation);
+        self.loading_gen = loading_gen;
+        self.pending_play = pending_play;
     }
 
     pub(super) fn handle_play(&mut self) {
         self.allow_startup_auto_resume = false;
 
-        if !self.has_track {
-            // The track is still loading: `player.load` spawns async pre-buffering
-            // and only sends the Load command once it completes, so a `player.play`
-            // can reach the player thread first. Defer it for the in-flight load
-            // generation; handle_load applies it once the track is ready.
-            let pending_gen = LOAD_SEQ.load(Relaxed);
-            self.pending_play = Some(pending_gen);
-            crate::vprintln!("[PLAY]   deferred until load #{pending_gen} is ready (no track yet)");
-            return;
+        // Capture the retained source only when no track and no load in flight;
+        // the short-circuit skips the CURRENT_TRACK lock on the resume path.
+        let retained = if !self.has_track && self.loading_gen.is_none() {
+            crate::state::CURRENT_TRACK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        } else {
+            None
+        };
+        match decide_play(self.has_track, self.loading_gen, retained.is_some()) {
+            PlayAction::DeferTo(generation) => {
+                // A load is genuinely in flight: handle_load applies this play
+                // when it delivers for the matching generation.
+                self.pending_play = Some(generation);
+                crate::vprintln!(
+                    "[PLAY]   deferred until load #{generation} is ready (load in flight)"
+                );
+                return;
+            }
+            PlayAction::ReArm => {
+                // No load coming but a source is retained: hand the captured
+                // track to flush.rs (avoids a second CURRENT_TRACK lock).
+                crate::vprintln!("[PLAY]   no live pipeline; re-arming retained source");
+                if let Some(track) = retained {
+                    (self.callback)(PlayerEvent::ReplayRequest {
+                        track,
+                        expected_gen: LOAD_SEQ.load(Relaxed),
+                    });
+                }
+                return;
+            }
+            PlayAction::Ignore => {
+                crate::vprintln!("[PLAY]   play with no track and no retained source; ignoring");
+                return;
+            }
+            // Fall through to the live-pipeline resume below.
+            PlayAction::Resume => {}
         }
         self.pending_play = None;
 
@@ -516,6 +603,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.is_playing = false;
                 self.has_track = false;
                 self.pending_play = None;
+                self.loading_gen = None;
                 self.current_duration = 0.0;
                 self.current_track_id = None;
                 self.pending_resume_seek = None;
@@ -533,6 +621,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.is_playing = false;
         self.has_track = false;
         self.pending_play = None;
+        self.loading_gen = None;
         self.current_duration = 0.0;
         self.current_track_id = None;
         self.pending_resume_seek = None;
@@ -744,5 +833,56 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_get_audio_devices(&self, req_id: Option<String>) {
         let devices = super::output::enumerate_audio_devices();
         (self.callback)(PlayerEvent::AudioDevices(devices, req_id));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlayAction, decide_play, settle_load};
+
+    #[test]
+    fn play_with_live_track_resumes() {
+        assert_eq!(decide_play(true, None, false), PlayAction::Resume);
+        assert_eq!(decide_play(true, Some(7), true), PlayAction::Resume);
+    }
+
+    #[test]
+    fn play_while_loading_defers_to_that_generation() {
+        assert_eq!(decide_play(false, Some(7), true), PlayAction::DeferTo(7));
+        // a load in flight wins even when a retained source also exists
+        assert_eq!(decide_play(false, Some(3), false), PlayAction::DeferTo(3));
+    }
+
+    #[test]
+    fn play_with_no_load_but_retained_source_rearms() {
+        assert_eq!(decide_play(false, None, true), PlayAction::ReArm);
+    }
+
+    #[test]
+    fn play_cold_empty_is_ignored() {
+        assert_eq!(decide_play(false, None, false), PlayAction::Ignore);
+    }
+
+    #[test]
+    fn settle_clears_loading_for_matching_gen() {
+        assert_eq!(settle_load(Some(5), None, 5), (None, None));
+    }
+
+    #[test]
+    fn settle_ignores_a_mismatched_gen() {
+        // a stale settle for an old gen must not clear a newer in-flight load
+        assert_eq!(settle_load(Some(6), None, 5), (Some(6), None));
+    }
+
+    #[test]
+    fn settle_clears_a_deferred_play_waiting_on_a_failed_load() {
+        // the load failed (no handle_load delivered), so the deferred play
+        // tagged with that gen must not dangle
+        assert_eq!(settle_load(Some(5), Some(5), 5), (None, None));
+    }
+
+    #[test]
+    fn settle_leaves_a_deferred_play_for_a_different_gen() {
+        assert_eq!(settle_load(None, Some(9), 5), (None, Some(9)));
     }
 }

@@ -61,6 +61,10 @@ pub(super) struct PlayerThread<F> {
     // ready state so a play racing ahead of the async load isn't dropped, and
     // never applied to a track the user has since skipped past.
     pending_play: Option<u32>,
+    // Generation of the in-flight load (set by LoadStarted, cleared by
+    // LoadSettled/handle_stop). The signal that a no-track play should defer
+    // (a load is coming) rather than re-arm the retained source.
+    loading_gen: Option<u32>,
     current_duration: f64,
     current_seq: u32,
     // Position tracking
@@ -140,6 +144,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             is_playing: false,
             has_track: false,
             pending_play: None,
+            loading_gen: None,
             current_duration: 0.0,
             current_seq: 0,
             decoded_samples: Arc::new(AtomicU64::new(0)),
@@ -262,12 +267,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     fn handle_command(&mut self, cmd: PlayerCommand) {
         match cmd {
             PlayerCommand::Load { request, auto_play } => {
-                self.handle_load(request);
-                if auto_play {
+                // Auto-play only if the load delivered a live track: a stale load
+                // that handle_load rejects must not reach handle_play (it would
+                // re-arm and replay after a Stop).
+                let loaded = self.handle_load(request);
+                if auto_play && loaded {
                     crate::vprintln!("[AUTO]   Auto-play after load");
                     self.handle_play();
                 }
             }
+            PlayerCommand::LoadStarted { generation } => self.handle_load_started(generation),
+            PlayerCommand::LoadSettled { generation } => self.handle_load_settled(generation),
             PlayerCommand::Play => self.handle_play(),
             PlayerCommand::Pause => self.handle_pause(),
             PlayerCommand::Stop(event_seq) => self.handle_stop(event_seq),

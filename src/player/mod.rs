@@ -100,6 +100,13 @@ pub enum PlayerEvent {
         code: &'static str,
     },
     MaxConnectionsReached,
+    /// Play arrived with no pipeline and no load in flight, but a source is
+    /// retained: carries it plus the generation at decision time, so flush.rs
+    /// reloads it, skipping if a newer load/stop superseded it. Internal event.
+    ReplayRequest {
+        track: TrackInfo,
+        expected_gen: u32,
+    },
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     VolumeSync(f64),
 }
@@ -165,10 +172,36 @@ impl LoadContext {
     }
 }
 
+/// Sends `LoadSettled{generation}` on Drop, so the thread's in-flight marker is
+/// cleared on every task exit (completion, return, panic, cancellation) - a
+/// panicked/aborted load can't leave a play deferring forever. Gen-matched on
+/// the thread side, so a stale settle is a no-op.
+struct LoadSettleGuard {
+    cmd_tx: mpsc::Sender<PlayerCommand>,
+    generation: u32,
+}
+
+impl Drop for LoadSettleGuard {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.send(PlayerCommand::LoadSettled {
+            generation: self.generation,
+        });
+    }
+}
+
 enum PlayerCommand {
     Load {
         request: LoadRequest,
         auto_play: bool,
+    },
+    /// A load for `generation` has begun; the thread marks it in-flight.
+    LoadStarted {
+        generation: u32,
+    },
+    /// A load for `generation` ended (delivered/failed/dropped); the thread
+    /// clears its in-flight marker and any play deferred on it.
+    LoadSettled {
+        generation: u32,
     },
     Play,
     Pause,
@@ -515,6 +548,9 @@ impl Player {
         auto_play: bool,
     ) -> anyhow::Result<()> {
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
+        let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
+            generation: load_gen,
+        });
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         crate::vprintln!("[LOAD #{load_gen}] start");
         print_track_banner(&format);
@@ -552,6 +588,10 @@ impl Player {
         };
 
         let handle = self.rt_handle.spawn(async move {
+            let _settle = LoadSettleGuard {
+                cmd_tx: ctx.cmd_tx.clone(),
+                generation: ctx.load_gen,
+            };
             let track = TrackInfo {
                 url: url.clone(),
                 format: format.clone(),
@@ -589,6 +629,9 @@ impl Player {
         format: String,
     ) -> anyhow::Result<()> {
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
+        let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
+            generation: load_gen,
+        });
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         crate::vprintln!(
             "[DASH-LOAD #{load_gen}] start - {} segments",
@@ -606,8 +649,16 @@ impl Player {
         }
         GOVERNOR.reset_buffer_progress();
 
+        // DASH isn't replayable via load_and_play (segmented), so clear the
+        // retained source: a post-DASH play re-arms nothing, not a stale track.
+        *CURRENT_TRACK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
         let cmd_tx = self.cmd_tx.clone();
         let handle = self.rt_handle.spawn(async move {
+            let _settle = LoadSettleGuard {
+                cmd_tx: cmd_tx.clone(),
+                generation: load_gen,
+            };
             let load_start = std::time::Instant::now();
             let is_stale = || LOAD_SEQ.load(Relaxed) != load_gen;
 

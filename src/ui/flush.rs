@@ -256,6 +256,29 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::volume(v));
             }
+            PlayerEvent::ReplayRequest {
+                track,
+                expected_gen,
+            } => {
+                // Reload+play the source captured at decision time. Re-check the
+                // generation: if a newer load/stop bumped LOAD_SEQ since, skip -
+                // re-arming would abort that newer load.
+                let player = state.player.clone();
+                crate::state::rt_handle().spawn(async move {
+                    if crate::player::LOAD_SEQ.load(std::sync::atomic::Ordering::Relaxed)
+                        != expected_gen
+                    {
+                        crate::vprintln!(
+                            "[REPLAY] re-arm skipped: superseded by a newer load/stop"
+                        );
+                        return;
+                    }
+                    crate::vprintln!("[REPLAY] re-arming retained source");
+                    if let Err(e) = player.load_and_play(track.url, track.format, track.key) {
+                        crate::vprintln!("[REPLAY] re-arm failed: {e}");
+                    }
+                });
+            }
         }
 
         let batch = if should_flush {
