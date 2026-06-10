@@ -514,4 +514,5 @@ jobs:
           gh release create "$TAG_NAME" \
             --title "$TAG_NAME" \
             --generate-notes \
+            --draft \
             release-assets/*
