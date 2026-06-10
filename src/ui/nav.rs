@@ -109,3 +109,16 @@ pub(crate) fn is_token_endpoint(url: &str) -> bool {
     let host = parsed.host_str().unwrap_or("");
     (host == HOST_AUTH || host == HOST_LOGIN) && parsed.path().contains(PATH_OAUTH_TOKEN)
 }
+
+/// TIDAL API hosts that receive the injected OAuth bearer. Single source of truth for
+/// `is_tidal_api`, `needs_auto_injection`, `should_rewrite_token` so the lists can't drift.
+pub(crate) fn is_tidal_api_host(host: &str) -> bool {
+    matches!(
+        host,
+        "api.tidal.com"
+            | "api.tidalhifi.com"
+            | "listen.tidal.com"
+            | "desktop.tidal.com"
+            | "openapi.tidal.com"
+    )
+}

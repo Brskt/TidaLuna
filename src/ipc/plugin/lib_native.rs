@@ -38,25 +38,29 @@ pub(super) fn handle_send_to_render(msg: &IpcMessage, callback: IpcCallback) {
         ipc_callback_err(&callback, 400, "sendToRender requires a channel name");
         return;
     }
-    let args_js = msg
-        .args
-        .iter()
-        .skip(1)
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let channel_js = serde_json::to_string(channel).unwrap_or_else(|_| "\"\"".into());
-    let js = if args_js.is_empty() {
-        format!(
-            "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__({channel_js});"
-        )
-    } else {
-        format!(
-            "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__({channel_js},{args_js});"
-        )
-    };
+    let js = build_send_to_render_js(channel, msg.args.get(1..).unwrap_or(&[]));
     eval_js(&js);
     ipc_callback_ok(&callback, "null");
+}
+
+/// Build the `__LUNAR_IPC_EMIT__(channel, ...args)` call. Channel and args are
+/// JSON-encoded with U+2028/U+2029 escaped so a value can't break out of its literal.
+fn build_send_to_render_js(channel: &str, args: &[Value]) -> String {
+    let args_js = args
+        .iter()
+        .map(js_value_literal)
+        .collect::<Vec<_>>()
+        .join(",");
+    let channel_js = crate::app_state::js_string_literal(channel);
+    let sep = if args_js.is_empty() { "" } else { "," };
+    format!(
+        "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__({channel_js}{sep}{args_js});"
+    )
+}
+
+/// Serialize a JSON value as a JS expression, escaping U+2028/U+2029.
+fn js_value_literal(v: &Value) -> String {
+    crate::app_state::escape_js_line_terminators(v.to_string())
 }
 
 /// `showMessageBox(options) -> Promise<{ response, checkboxChecked }>`
@@ -201,4 +205,27 @@ fn parse_filters(opts: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_send_to_render_js;
+    use serde_json::json;
+
+    #[test]
+    fn send_to_render_escapes_separators_and_encodes_channel() {
+        // A string arg containing U+2028 (a JS line terminator) must be escaped so
+        // it can't terminate the emit statement and inject the following code.
+        let js = build_send_to_render_js("ch", &[json!("a\u{2028}b")]);
+        assert!(js.contains("\\u2028"), "U+2028 must be escaped: {js}");
+        assert!(!js.contains('\u{2028}'), "raw U+2028 must not remain: {js}");
+        // The channel is a JSON string literal that can't break out.
+        assert!(js.contains("__LUNAR_IPC_EMIT__(\"ch\","));
+    }
+
+    #[test]
+    fn send_to_render_no_args_omits_trailing_comma() {
+        let js = build_send_to_render_js("ch", &[]);
+        assert!(js.ends_with("__LUNAR_IPC_EMIT__(\"ch\");"), "{js}");
+    }
 }

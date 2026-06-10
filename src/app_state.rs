@@ -78,11 +78,8 @@ pub(crate) struct AppState {
     pub(crate) connect: Option<crate::connect::ConnectManager>,
 }
 
-// SAFETY: AppState contains non-Send CEF/OS handles and thread-sensitive fields
-// (Browser, OsMediaControls, ThumbBar). The code maintains the invariant that
-// these fields are only accessed from the CEF UI thread. The Mutex serializes
-// access to shared data, but soundness of Send relies on the human-enforced
-// guarantee that thread-sensitive fields are never touched from non-UI threads.
+// SAFETY: holds non-Send CEF/OS handles (Browser, OsMediaControls, ThumbBar);
+// Send is sound only because these are touched solely on the CEF UI thread.
 unsafe impl Send for AppState {}
 
 pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
@@ -92,9 +89,8 @@ where
     F: FnOnce(&mut AppState) -> R,
 {
     APP_STATE.get().map(|s| {
-        // Recover the guard on poison rather than cascading the panic: a panic
-        // under this lock would otherwise brick every later `with_state` call,
-        // many of which run inside CEF `extern "C"` callbacks (UB across FFI).
+        // Recover on poison instead of panicking: this lock is taken inside CEF
+        // `extern "C"` callbacks, where a panic would be UB across the FFI boundary.
         let mut guard = s.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
     })
@@ -106,7 +102,9 @@ pub(crate) fn exec_js_on_frame(frame: &Frame, js: &str) {
     frame.execute_java_script(Some(&code), Some(&url), 0);
 }
 
-/// Dispatch JS to the renderer. Returns true if a frame was found and the JS was posted.
+/// Dispatch JS to the renderer's main frame; false if no frame. Targeting the main
+/// frame regardless of origin is safe: payloads are injection-safe and secret-free,
+/// and subframe-drivable channels are gated upstream.
 pub(crate) fn eval_js(js: &str) -> bool {
     let browser = with_state(|state| state.browser.clone());
     if let Some(Some(browser)) = browser
@@ -122,13 +120,21 @@ pub(crate) fn eval_js(js: &str) -> bool {
 const IPC_EMIT_PREFIX: &str =
     "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__(";
 
-// JSON-encode as a JS string literal so a controlled value can't break out and
-// inject; also escape U+2028/U+2029, the JS line terminators serde leaves raw.
-pub(crate) fn js_string_literal(s: &str) -> String {
-    serde_json::to_string(s)
-        .unwrap_or_else(|_| "\"\"".to_string())
-        .replace('\u{2028}', "\\u2028")
+// Escape U+2028/U+2029 (JS line terminators serde leaves raw inside string
+// literals) so an embedded value can't terminate the statement.
+pub(crate) fn escape_js_line_terminators(s: String) -> String {
+    // Fast path: U+2028/U+2029 are vanishingly rare, so avoid two full-string
+    // scans + an allocation when neither is present (the normal case).
+    if !s.contains(['\u{2028}', '\u{2029}']) {
+        return s;
+    }
+    s.replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
+}
+
+// JSON-encode as a JS string literal so a controlled value can't break out and inject.
+pub(crate) fn js_string_literal(s: &str) -> String {
+    escape_js_line_terminators(serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()))
 }
 
 /// Build a `__TIDAL_IPC_RESPONSE__(id, null, result)` reply with the
@@ -159,7 +165,7 @@ pub(crate) fn emit_ipc_event_with_args(channel: &str, args: &[&str]) {
 
 pub(crate) fn emit_ipc_event_with_data(channel: &str, data: &impl serde::Serialize) {
     let json = match serde_json::to_string(data) {
-        Ok(j) => j,
+        Ok(j) => escape_js_line_terminators(j),
         Err(_) => return,
     };
     let js = format!("{IPC_EMIT_PREFIX}{},{json});", js_string_literal(channel));

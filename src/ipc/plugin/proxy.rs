@@ -1,5 +1,5 @@
 use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
-use crate::app_state::{IpcCallback, IpcMessage, with_state};
+use crate::app_state::{AppState, IpcCallback, IpcMessage, with_state};
 use cef::ImplCookieManager;
 
 fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
@@ -52,41 +52,51 @@ fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
     })
 }
 
-/// Check if text contains any real OAuth token (access or refresh, current or previous).
-/// Defence-in-depth against naive exfiltration of tokens obtained via localStorage.
+/// Replacement for a real token with no opaque mapping (a captured token seen before
+/// token_state exists). Must not start with `luna_` so `is_opaque()` won't accept it.
+const REDACTED_MARKER: &str = "[redacted-token]";
+
+/// Real OAuth tokens in play paired with the opaque they map to. Single source for
+/// `scrub_real_tokens` (uses both halves) and `leaks_real_token` (uses the real).
+fn real_token_pairs(state: &AppState) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    if let Some(ref ts) = state.token_state {
+        pairs.push((
+            ts.current.access_token.clone(),
+            ts.current.opaque_at.clone(),
+        ));
+        pairs.push((
+            ts.current.refresh_token.clone(),
+            ts.current.opaque_rt.clone(),
+        ));
+        if let Some(ref prev) = ts.previous {
+            pairs.push((prev.access_token.clone(), prev.opaque_at.clone()));
+            pairs.push((prev.refresh_token.clone(), prev.opaque_rt.clone()));
+        }
+    }
+    // captured_token can precede token_state; add it only if it isn't already the
+    // current access token (dedup), with no opaque to map to.
+    let cap = &state.captured_token;
+    if !cap.is_empty()
+        && state
+            .token_state
+            .as_ref()
+            .is_none_or(|ts| ts.current.access_token != *cap)
+    {
+        pairs.push((cap.clone(), REDACTED_MARKER.to_string()));
+    }
+    pairs
+}
+
+/// True if `url`/`payload` contains any real OAuth token. Defence-in-depth against
+/// naive exfiltration of tokens obtained via localStorage.
 pub(super) fn leaks_real_token(url: &str, payload: Option<&str>) -> bool {
     with_state(|state| {
-        let mut tokens: Vec<&str> = Vec::new();
-
-        // captured_token may be set before token_state (window between jsrt.set_token
-        // and the first /oauth2/token response).
-        if !state.captured_token.is_empty() {
-            tokens.push(state.captured_token.as_str());
-        }
-
-        if let Some(ref ts) = state.token_state {
-            tokens.push(ts.current.access_token.as_str());
-            tokens.push(ts.current.refresh_token.as_str());
-            if let Some(ref prev) = ts.previous {
-                tokens.push(prev.access_token.as_str());
-                tokens.push(prev.refresh_token.as_str());
-            }
-        }
-
-        for tok in &tokens {
-            if tok.is_empty() {
-                continue;
-            }
-            if url.contains(tok) {
-                return true;
-            }
-            if let Some(p) = payload
-                && p.contains(tok)
-            {
-                return true;
-            }
-        }
-        false
+        real_token_pairs(state).iter().any(|(real, _)| {
+            !real.is_empty()
+                && (url.contains(real.as_str())
+                    || payload.is_some_and(|p| p.contains(real.as_str())))
+        })
     })
     .unwrap_or(false)
 }
@@ -98,7 +108,7 @@ fn reject_non_tidal(url: &str, channel: &str, callback: &IpcCallback) -> bool {
         crate::vprintln!(
             "[PROXY]  REJECTED {} to non-Tidal URL: {}",
             channel,
-            crate::util::truncate_str(url, 80)
+            crate::util::truncate_str(&crate::util::redact_url_query(url), 80)
         );
         ipc_callback_err(callback, 403, &format!("{channel}: non-Tidal URL rejected"));
         return true;
@@ -246,7 +256,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
             req = req.header("Authorization", format!("Bearer {token}"));
             crate::vprintln!(
                 "[PROXY]  Injected captured token for {}",
-                crate::util::truncate_str(&url, 80)
+                crate::util::truncate_str(&crate::util::redact_url_query(&url), 80)
             );
         }
     } else if has_auth
@@ -327,7 +337,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                 crate::vprintln!(
                     "[PROXY]  {} {} auth={} body={}",
                     status,
-                    crate::util::truncate_str(&url, 200),
+                    crate::util::truncate_str(&crate::util::redact_url_query(&url), 200),
                     has_auth,
                     crate::util::truncate_str(&body, 400)
                 );
@@ -342,7 +352,8 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                 "body": body,
                 "headers": headers_map,
             });
-            ipc_callback_ok(&callback, &json.to_string());
+            // Defence-in-depth: scrub a leaked real token, as on the plugin.fetch path.
+            ipc_callback_ok(&callback, &scrub_real_tokens(json.to_string()));
         }
         Err(e) => {
             ipc_callback_err(&callback, 500, &format!("proxy.fetch failed: {e}"));
@@ -563,9 +574,71 @@ fn proxy_transform_token_body_with(
     serde_json::to_string(&json).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Replace any real OAuth token present in `text` with its opaque counterpart.
+/// `pairs` is (real_token, replacement), gathered from the token state.
+fn scrub_real_tokens_with(text: String, pairs: &[(String, String)]) -> String {
+    let mut out = text;
+    for (real, replacement) in pairs {
+        // Never substring-match a trivially short value (avoids corrupting a body
+        // that merely happens to contain a few common characters).
+        if real.len() < 8 {
+            continue;
+        }
+        if out.contains(real.as_str()) {
+            crate::vprintln!("[PLUGIN:FETCH] scrubbed a real token from a plugin-facing response");
+            out = out.replace(real.as_str(), replacement);
+        }
+    }
+    out
+}
+
+/// Defence-in-depth: replace any real OAuth token that leaked into a plugin-facing
+/// response with its opaque nonce. TIDAL APIs don't echo the bearer, so normally a no-op.
+pub(crate) fn scrub_real_tokens(text: String) -> String {
+    let pairs = with_state(|state| real_token_pairs(state)).unwrap_or_default();
+    scrub_real_tokens_with(text, &pairs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_replaces_real_token_with_opaque() {
+        let pairs = vec![(
+            "real-access-token-1234".to_string(),
+            "luna_aaaa".to_string(),
+        )];
+        let body = r#"{"leaked":"real-access-token-1234"}"#.to_string();
+        let out = scrub_real_tokens_with(body, &pairs);
+        assert!(!out.contains("real-access-token-1234"), "{out}");
+        assert!(out.contains("luna_aaaa"), "{out}");
+    }
+
+    #[test]
+    fn scrub_leaves_clean_body_untouched() {
+        let pairs = vec![(
+            "real-access-token-1234".to_string(),
+            "luna_aaaa".to_string(),
+        )];
+        let body = r#"{"tracks":[1,2,3]}"#.to_string();
+        assert_eq!(scrub_real_tokens_with(body.clone(), &pairs), body);
+    }
+
+    #[test]
+    fn scrub_ignores_short_tokens() {
+        // A short value must not substring-match and corrupt the body.
+        let pairs = vec![("abc".to_string(), "X".to_string())];
+        let body = "abcdef".to_string();
+        assert_eq!(scrub_real_tokens_with(body.clone(), &pairs), body);
+    }
+
+    #[test]
+    fn redacted_marker_is_not_an_opaque_nonce() {
+        // The no-opaque fallback must not pass is_opaque(): if it were echoed back
+        // as a Bearer, rewrite_authorization_header would treat it as a real nonce.
+        assert!(!crate::ui::token_filter::is_opaque(REDACTED_MARKER));
+    }
 
     #[test]
     fn token_body_empties_on_entropy_failure_never_leaks() {

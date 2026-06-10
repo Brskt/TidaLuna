@@ -5,6 +5,16 @@ use crate::player::ipc::{PlayerIpc, parse_player_ipc};
 use crate::state::TrackInfo;
 use crate::ui::flush::{FlushBatch, run_flush_batch, take_flush_batch};
 
+/// Channels whose args may carry secrets - logged by name only. Default-redacts every
+/// privileged channel (so a new one can't leak by omission) plus signed media-load URLs.
+fn should_redact_args(channel: &str) -> bool {
+    crate::ui::is_privileged_channel(channel)
+        || matches!(
+            channel,
+            "player.load" | "player.load_dash" | "player.recover" | "player.preload"
+        )
+}
+
 pub(crate) fn handle_ipc_message(request: &str) {
     let msg: IpcMessage = match serde_json::from_str(request) {
         Ok(m) => m,
@@ -26,19 +36,9 @@ pub(crate) fn handle_ipc_message(request: &str) {
         return;
     }
 
-    // Channels whose args carry secrets (OAuth tokens, signed stream/auth URLs, AES
-    // keys). Log only the channel name — the args must never reach the persistent
-    // console.log sink, and per-arg truncation is not redaction.
-    let redacted_args = matches!(
-        msg.channel.as_str(),
-        "jsrt.set_token"
-            | "connect.controller.set_auth"
-            | "player.load"
-            | "player.recover"
-            | "player.preload"
-            | "player.load_dash"
-            | "window.navigate_self"
-    );
+    // Args may carry secrets (tokens, signed URLs, AES keys): log the channel name
+    // only - they must never hit the persistent sink, and truncation isn't redaction.
+    let redacted_args = should_redact_args(&msg.channel);
     if redacted_args {
         crate::vprintln!(
             "IPC Message: IpcMessage {{ channel: {:?}, args: [<redacted>] }}",
@@ -188,5 +188,34 @@ fn handle_player_ipc(msg: &IpcMessage) {
         if let Some(batch) = effects.batch {
             run_flush_batch(batch);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_redact_args;
+
+    #[test]
+    fn redacts_known_secret_channels() {
+        assert!(should_redact_args("jsrt.set_token"));
+        assert!(should_redact_args("connect.controller.set_auth"));
+        assert!(should_redact_args("player.load"));
+        assert!(should_redact_args("player.load_dash"));
+    }
+
+    #[test]
+    fn redacts_privileged_channels_by_default() {
+        // A privileged channel not in any explicit list must still be redacted, so
+        // a secret-bearing one added later can't leak its args by omission.
+        assert!(should_redact_args("jsrt.session_clear"));
+        assert!(should_redact_args("settings.set_log_level"));
+        assert!(should_redact_args("updater.apply"));
+    }
+
+    #[test]
+    fn keeps_benign_channels_visible() {
+        assert!(!should_redact_args("player.play"));
+        assert!(!should_redact_args("web.loaded"));
+        assert!(!should_redact_args("menu.clicked"));
     }
 }

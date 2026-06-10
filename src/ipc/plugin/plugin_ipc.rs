@@ -18,7 +18,7 @@ pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
             crate::vprintln!(
                 "[PLUGIN:FETCH] BLOCKED token exfiltration from '{}' to {}",
                 plugin_id,
-                crate::util::truncate_str(&url, 80)
+                crate::util::truncate_str(&crate::util::redact_url_query(&url), 80)
             );
             ipc_callback_err(&callback, 403, "plugin.fetch: request blocked");
             return;
@@ -91,7 +91,8 @@ fn dispatch_authenticated_fetch(
             return;
         };
         match result {
-            Ok(json) => ipc_callback_ok(&cb, &json),
+            // Defence-in-depth: scrub any leaked real token before plugin JS sees it.
+            Ok(json) => ipc_callback_ok(&cb, &super::proxy::scrub_real_tokens(json)),
             Err(e) => ipc_callback_err(&cb, 500, &e),
         }
     });

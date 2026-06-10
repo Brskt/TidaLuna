@@ -11,13 +11,8 @@ use std::sync::{Arc, Mutex};
 
 // --- IPC Query Handler (JS -> Rust via cefQuery) ---
 
-/// Privileged IPC channels inject the real session token or mutate auth/session
-/// state, so they must only be honored from a TIDAL-owned or auth frame. The
-/// `cefQuery` function is exposed to every frame in the renderer (including
-/// cross-origin subframes), so the trust boundary is enforced here in Rust
-/// rather than relying on the soft JS-side wrapper isolation. Any frame that
-/// classifies as `External` (a malicious iframe, or the main frame redirected
-/// off-origin) is rejected.
+/// True unless the frame is `External` (untrusted origin). `cefQuery` reaches every
+/// frame, so privileged channels are gated here in Rust, not by JS wrapper isolation.
 fn frame_is_trusted(frame: &Option<Frame>) -> bool {
     let Some(frame) = frame else {
         return false;
@@ -26,12 +21,10 @@ fn frame_is_trusted(frame: &Option<Frame>) -> bool {
     !matches!(PageKind::classify(&url), PageKind::External)
 }
 
-/// Channels that mutate auth/session/plugin/updater/settings state, so they must
-/// never run from an untrusted ingress. Single source of truth for both the
-/// `cefQuery` path and the frame-less `__IPC__` console bridge. Benign page-chrome
-/// (`player.*`, `window.*`, `menu.*`, `web.*`) is absent so TIDAL's UI keeps working;
-/// `player.parse_dash` is the exception (plugin-IPC, frame-gated), so the bridge drops it.
-fn is_privileged_channel(channel: &str) -> bool {
+/// Channels that mutate auth/session/plugin state or expose a host capability -
+/// refused from untrusted ingresses. Single source of truth for the `cefQuery` path,
+/// the `__IPC__` console bridge, and `ipc::player` log-redaction; page-chrome stays open.
+pub(crate) fn is_privileged_channel(channel: &str) -> bool {
     channel.starts_with("jsrt.")
         || channel.starts_with("connect.")
         || channel.starts_with("updater.")
@@ -41,8 +34,32 @@ fn is_privileged_channel(channel: &str) -> bool {
         || channel.starts_with("tidal.")
         || channel.starts_with("__Luna.")
         || channel.starts_with("__LunaNative.")
+        || channel.starts_with("player.devices.")
         || channel == "player.parse_dash"
         || channel == "window.navigate_self"
+        || channel == "window.open_url"
+}
+
+/// Privileged-frame gate decision: an untrusted frame's privileged channel is refused
+/// (403 if a reply is awaited, else a silent ack). Applied uniformly so a channel
+/// can't slip the gate by being absent from the dispatch list.
+#[derive(Debug, PartialEq, Eq)]
+enum PrivilegedGate {
+    Allow,
+    Refuse403,
+    DropAck,
+}
+
+fn privileged_gate(privileged: bool, trusted: bool, has_id: bool) -> PrivilegedGate {
+    if privileged && !trusted {
+        if has_id {
+            PrivilegedGate::Refuse403
+        } else {
+            PrivilegedGate::DropAck
+        }
+    } else {
+        PrivilegedGate::Allow
+    }
 }
 
 pub(super) struct IpcQueryHandler;
@@ -57,62 +74,77 @@ impl BrowserSideHandler for IpcQueryHandler {
         _persistent: bool,
         callback: Arc<Mutex<dyn cef::wrapper::message_router::BrowserSideCallback>>,
     ) -> bool {
-        if let Ok(msg) = serde_json::from_str::<IpcMessage>(request)
-            && (msg.channel.starts_with("plugin.")
-                || msg.channel.starts_with("proxy.")
-                || msg.channel.starts_with("jsrt.")
-                || msg.channel.starts_with("tidal.")
-                || msg.channel.starts_with("__Luna.")
-                || msg.channel.starts_with("__LunaNative.")
-                || msg.channel.starts_with("updater.")
-                || msg.channel.starts_with("connect.")
-                || msg.channel == "player.parse_dash")
-            && msg.id.is_some()
-        {
-            if !frame_is_trusted(&frame) {
-                callback
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .failure(403, "IPC restricted to TIDAL frames");
-                return true;
+        if let Ok(msg) = serde_json::from_str::<IpcMessage>(request) {
+            // Privileged channels: trusted frame only. Refuse req-resp (403); drop
+            // fire-and-forget with an ack (no consumer, but the cefQuery must resolve).
+            match privileged_gate(
+                is_privileged_channel(&msg.channel),
+                frame_is_trusted(&frame),
+                msg.id.is_some(),
+            ) {
+                PrivilegedGate::Refuse403 => {
+                    callback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .failure(403, "IPC restricted to TIDAL frames");
+                    return true;
+                }
+                PrivilegedGate::DropAck => {
+                    crate::vprintln!(
+                        "[IPC]    Dropped privileged fire-and-forget from untrusted frame: {}",
+                        msg.channel
+                    );
+                    callback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .success_str("ok");
+                    return true;
+                }
+                PrivilegedGate::Allow => {}
             }
-            if msg.channel.starts_with("connect.") {
-                if let Some(ref f) = frame
-                    && f.is_main() == 0
-                {
+
+            // `connect.*` is main-frame-only: a subframe must not drive the controller.
+            // Req-resp gets 403; fire-and-forget is dropped with an ack.
+            if msg.channel.starts_with("connect.")
+                && frame.as_ref().map(|f| f.is_main() == 0).unwrap_or(true)
+            {
+                if msg.id.is_some() {
                     callback
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .failure(403, "Connect IPC restricted to main frame");
-                    return true;
+                } else {
+                    crate::vprintln!(
+                        "[IPC]    Dropped connect.* fire-and-forget from non-main frame: {}",
+                        msg.channel
+                    );
+                    callback
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .success_str("ok");
                 }
-                crate::connect::ipc::handle_connect_invoke(msg, callback);
                 return true;
             }
-            handle_plugin_ipc(msg, callback);
-            return true;
-        }
 
-        // Fire-and-forget (`sendIpc`, no `id`) skips the branch above. Privileged
-        // channels here still mutate auth/session/plugin/updater/settings state,
-        // so they must also be restricted to trusted frames. There is no JS-side
-        // callback consumer, so an untrusted call is silently dropped (the query
-        // is still consumed, return true). Benign page-chrome channels (player.*,
-        // window.* controls, menu.clicked, web.loaded) stay reachable from any
-        // frame, as TIDAL needs them.
-        if let Ok(msg) = serde_json::from_str::<IpcMessage>(request)
-            && is_privileged_channel(&msg.channel)
-            && !frame_is_trusted(&frame)
-        {
-            crate::vprintln!(
-                "[IPC]    Dropped privileged fire-and-forget from untrusted frame: {}",
-                msg.channel
-            );
-            callback
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .success_str("ok");
-            return true;
+            // Req-resp plugin/connect dispatch (trusted by the gate above).
+            if msg.id.is_some()
+                && (msg.channel.starts_with("plugin.")
+                    || msg.channel.starts_with("proxy.")
+                    || msg.channel.starts_with("jsrt.")
+                    || msg.channel.starts_with("tidal.")
+                    || msg.channel.starts_with("__Luna.")
+                    || msg.channel.starts_with("__LunaNative.")
+                    || msg.channel.starts_with("updater.")
+                    || msg.channel.starts_with("connect.")
+                    || msg.channel == "player.parse_dash")
+            {
+                if msg.channel.starts_with("connect.") {
+                    crate::connect::ipc::handle_connect_invoke(msg, callback);
+                } else {
+                    handle_plugin_ipc(msg, callback);
+                }
+                return true;
+            }
         }
 
         handle_ipc_message(request);
@@ -791,10 +823,8 @@ wrap_display_handler! {
             if let Some(msg) = message {
                 let s = msg.to_string();
                 if let Some(json) = s.strip_prefix("__IPC__:") {
-                    // The console bridge carries no frame, so origin trust cannot
-                    // be established here. Privileged channels are refused on this
-                    // path (they must use the origin-gated cefQuery router); only
-                    // benign page-chrome channels are dispatched.
+                    // Frame-less bridge: origin can't be established, so privileged
+                    // channels are refused here (they must use the cefQuery router).
                     if let Ok(parsed) = serde_json::from_str::<IpcMessage>(json)
                         && is_privileged_channel(&parsed.channel)
                     {
@@ -820,7 +850,35 @@ wrap_display_handler! {
 
 #[cfg(test)]
 mod tests {
-    use super::is_privileged_channel;
+    use super::{PrivilegedGate, is_privileged_channel, privileged_gate};
+
+    #[test]
+    fn privileged_untrusted_req_resp_is_refused() {
+        // A privileged channel called with an id (invoke) from an untrusted frame
+        // must get a 403, not a silent "ok" - regardless of the dispatch list.
+        assert_eq!(
+            privileged_gate(true, false, true),
+            PrivilegedGate::Refuse403
+        );
+    }
+
+    #[test]
+    fn privileged_untrusted_fire_and_forget_is_dropped() {
+        // No id = no JS consumer, so drop with an ack rather than a 403.
+        assert_eq!(privileged_gate(true, false, false), PrivilegedGate::DropAck);
+    }
+
+    #[test]
+    fn privileged_trusted_is_allowed() {
+        assert_eq!(privileged_gate(true, true, true), PrivilegedGate::Allow);
+        assert_eq!(privileged_gate(true, true, false), PrivilegedGate::Allow);
+    }
+
+    #[test]
+    fn benign_channel_is_always_allowed() {
+        assert_eq!(privileged_gate(false, false, true), PrivilegedGate::Allow);
+        assert_eq!(privileged_gate(false, false, false), PrivilegedGate::Allow);
+    }
 
     #[test]
     fn parse_dash_is_privileged() {
@@ -842,5 +900,18 @@ mod tests {
         assert!(is_privileged_channel("jsrt.set_token"));
         assert!(is_privileged_channel("window.navigate_self"));
         assert!(!is_privileged_channel("window.minimize"));
+    }
+
+    #[test]
+    fn open_url_and_device_control_are_privileged() {
+        // window.open_url pops an OS-browser URL; player.devices.* switches the OS
+        // audio output (set can request exclusive mode). Both must be refused from
+        // untrusted frames and dropped on the frame-less console bridge.
+        assert!(is_privileged_channel("window.open_url"));
+        assert!(is_privileged_channel("player.devices.get"));
+        assert!(is_privileged_channel("player.devices.set"));
+        // Benign page-chrome stays reachable.
+        assert!(!is_privileged_channel("window.minimize"));
+        assert!(!is_privileged_channel("player.play"));
     }
 }

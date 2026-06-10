@@ -185,7 +185,7 @@ pub(crate) fn post_emit(channel: &str) {
 
 pub(crate) fn post_emit_with_data(channel: &str, data: &impl serde::Serialize) {
     let json = match serde_json::to_string(data) {
-        Ok(j) => j,
+        Ok(j) => crate::app_state::escape_js_line_terminators(j),
         Err(_) => return,
     };
     post_js_to_ui(build_emit_js(channel, Some(&json)));

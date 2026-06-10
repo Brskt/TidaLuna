@@ -52,8 +52,9 @@ pub(crate) async fn plugin_fetch(
         }
     }
 
+    let is_tidal = is_tidal_api(url);
     // Inject OAuth token for Tidal API requests (plugin never sees the token)
-    if !token.is_empty() && is_tidal_api(url) {
+    if !token.is_empty() && is_tidal {
         // Only inject if plugin didn't already provide an Authorization header
         if !opts
             .headers
@@ -73,8 +74,8 @@ pub(crate) async fn plugin_fetch(
         "[PLUGIN:FETCH] {} {} {} ({})",
         plugin_id,
         opts.method,
-        url,
-        if is_tidal_api(url) {
+        crate::util::redact_url_query(url),
+        if is_tidal {
             "token injected"
         } else {
             "no token"
@@ -102,7 +103,10 @@ pub(crate) async fn plugin_fetch(
         }
     }
 
-    let body_text = resp.text().await.unwrap_or_default();
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| format!("plugin.fetch body read failed: {e}"))?;
 
     let result = serde_json::json!({
         "status": status,
@@ -121,12 +125,7 @@ pub(crate) fn is_tidal_api(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
-    let host = parsed.host_str().unwrap_or("");
-    host == "api.tidal.com"
-        || host == "api.tidalhifi.com"
-        || host == "listen.tidal.com"
-        || host == "desktop.tidal.com"
-        || host == "openapi.tidal.com"
+    crate::ui::nav::is_tidal_api_host(parsed.host_str().unwrap_or(""))
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 pub(crate) mod fmt;
 pub(crate) mod metadata;
 
@@ -17,10 +19,11 @@ pub(crate) fn truncate_str(s: &str, max_bytes: usize) -> &str {
 /// Replace a URL's query string and/or fragment with a redaction marker so
 /// secrets carried there (OAuth `code`/`state`, tokens in a fragment) never reach
 /// logs. The scheme/host/path are kept for debugging.
-pub(crate) fn redact_url_query(url: &str) -> String {
+pub(crate) fn redact_url_query(url: &str) -> Cow<'_, str> {
     match url.find(['?', '#']) {
-        Some(idx) => format!("{}?<redacted>", &url[..idx]),
-        None => url.to_string(),
+        Some(idx) => Cow::Owned(format!("{}?<redacted>", &url[..idx])),
+        // No query/fragment: borrow the input, no allocation (the common case).
+        None => Cow::Borrowed(url),
     }
 }
 

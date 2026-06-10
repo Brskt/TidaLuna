@@ -23,15 +23,8 @@ pub(crate) fn needs_auto_injection(url: &str) -> bool {
     if parsed.scheme() != "https" {
         return false;
     }
-    let host = parsed.host_str().unwrap_or("");
-    matches!(
-        host,
-        "api.tidal.com"
-            | "api.tidalhifi.com"
-            | "listen.tidal.com"
-            | "desktop.tidal.com"
-            | "openapi.tidal.com"
-    )
+
+    crate::ui::nav::is_tidal_api_host(parsed.host_str().unwrap_or(""))
 }
 
 pub(crate) fn should_rewrite_token(url: &str) -> bool {
@@ -42,16 +35,9 @@ pub(crate) fn should_rewrite_token(url: &str) -> bool {
         return false;
     }
     let host = parsed.host_str().unwrap_or("");
-    matches!(
-        host,
-        "api.tidal.com"
-            | "api.tidalhifi.com"
-            | "listen.tidal.com"
-            | "desktop.tidal.com"
-            | "openapi.tidal.com"
-            | "login.tidal.com"
-            | "auth.tidal.com"
-    ) || (host == "fp.fa.tidal.com" && parsed.path().starts_with("/license"))
+    crate::ui::nav::is_tidal_api_host(host)
+        || matches!(host, "login.tidal.com" | "auth.tidal.com")
+        || (host == "fp.fa.tidal.com" && parsed.path().starts_with("/license"))
         || (host.starts_with("event-collector.") && host.ends_with(".tidalhi.fi"))
 }
 
@@ -455,10 +441,8 @@ fn process_token_response_with(body: &[u8], opaque: impl Fn() -> Option<String>)
 
     crate::ipc::plugin::scrub_pkce_verifier();
 
-    let masked = crate::util::truncate_str(at, 12);
     crate::vprintln!(
-        "[AUTH]   ResponseFilter captured token ({}... {} chars)",
-        masked,
+        "[AUTH]   ResponseFilter captured token ({} chars)",
         at.len()
     );
 
@@ -504,6 +488,28 @@ mod tests {
         let hex = &o[OPAQUE_PREFIX.len()..];
         assert_eq!(hex.len(), 32);
         assert_eq!(hex, "ab".repeat(16));
+    }
+
+    #[test]
+    fn auto_injection_and_rewrite_share_the_api_host_set() {
+        // The 5 API hosts must be recognised by both predicates (they delegate to
+        // nav::is_tidal_api_host - pins the consolidation against drift).
+        for url in [
+            "https://api.tidal.com/v1/x",
+            "https://api.tidalhifi.com/v1/x",
+            "https://listen.tidal.com/x",
+            "https://desktop.tidal.com/x",
+            "https://openapi.tidal.com/x",
+        ] {
+            assert!(needs_auto_injection(url), "auto-inject: {url}");
+            assert!(should_rewrite_token(url), "rewrite: {url}");
+        }
+        // auth/login are rewrite-only (not auto-injected).
+        assert!(should_rewrite_token("https://auth.tidal.com/oauth2/token"));
+        assert!(!needs_auto_injection("https://auth.tidal.com/oauth2/token"));
+        // http scheme is rejected by both.
+        assert!(!needs_auto_injection("http://api.tidal.com/x"));
+        assert!(!should_rewrite_token("http://api.tidal.com/x"));
     }
 
     #[test]
