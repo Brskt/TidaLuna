@@ -4,29 +4,82 @@
 
 import { sendIpc } from "../ipc";
 
+// pointerdown covers mouse/touch/pen, keydown covers keyboard-only users.
+const GESTURE_EVENTS = ["pointerdown", "keydown", "touchstart"] as const;
+
 let ctx: AudioContext | null = null;
+let gestureArmed = false;
+// True while playback is active; gates the gesture fallback.
+let wantRunning = false;
+let onGesture: (() => void) | null = null;
+
+function disarmGestureResume() {
+    if (!gestureArmed) return;
+    gestureArmed = false;
+    if (onGesture) {
+        for (const ev of GESTURE_EVENTS) window.removeEventListener(ev, onGesture, true);
+        onGesture = null;
+    }
+}
+
+function createContext(): AudioContext | null {
+    try {
+        const c = new AudioContext();
+        const osc = c.createOscillator();
+        const gain = c.createGain();
+        gain.gain.value = 0;
+        osc.connect(gain);
+        gain.connect(c.destination);
+        osc.start();
+        // Closed is terminal (no resume, no new nodes): drop it so the next
+        // ensureAudioContext() rebuilds. resume()'s transition to "running" is
+        // async, so statechange is the reliable de-arm signal, not a sync read.
+        c.addEventListener("statechange", () => {
+            if (ctx !== c) return;
+            if (c.state === "closed") ctx = null;
+            else if (c.state === "running") disarmGestureResume();
+        });
+        sendIpc("player.dbg", "[MediaSession] AudioContext created, state=" + c.state);
+        return c;
+    } catch (e) {
+        sendIpc("player.dbg", "[MediaSession] AudioContext failed: " + e);
+        return null;
+    }
+}
+
+// resume() only takes effect under a user gesture; retry on the next
+// interaction (de-armed once the context reaches running).
+function armGestureResume() {
+    if (gestureArmed) return;
+    gestureArmed = true;
+    onGesture = () => {
+        // Never resume the silent context while playback is paused.
+        if (!wantRunning) return;
+        ctx?.resume().then(() => {
+            if (ctx?.state === "running") disarmGestureResume();
+        }).catch(() => {});
+    };
+    for (const ev of GESTURE_EVENTS) window.addEventListener(ev, onGesture, { capture: true });
+}
 
 function ensureAudioContext() {
-    if (!ctx) {
-        try {
-            ctx = new AudioContext();
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            gain.gain.value = 0;
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start();
-            sendIpc("player.dbg", "[MediaSession] AudioContext created, state=" + ctx.state);
-        } catch (e) {
-            sendIpc("player.dbg", "[MediaSession] AudioContext failed: " + e);
-            return;
-        }
+    // Recreate when missing or terminally closed.
+    if (!ctx || ctx.state === "closed") {
+        ctx = createContext();
+        if (!ctx) return;
     }
     if (ctx.state === "suspended") {
         ctx.resume().then(() => {
-            sendIpc("player.dbg", "[MediaSession] AudioContext resumed, state=" + ctx!.state);
+            // resume() resolves even when the autoplay policy keeps the context
+            // suspended, so check the real state instead of trusting the promise.
+            if (ctx?.state === "running") {
+                sendIpc("player.dbg", "[MediaSession] AudioContext running");
+            } else {
+                armGestureResume();
+            }
         }).catch((e) => {
             sendIpc("player.dbg", "[MediaSession] AudioContext resume failed: " + e);
+            armGestureResume();
         });
     }
 }
@@ -34,9 +87,13 @@ function ensureAudioContext() {
 export function updatePlaybackState(playing: boolean) {
     sendIpc("player.dbg", "[MediaSession] playbackState →", playing ? "playing" : "paused");
     if (playing) {
+        wantRunning = true;
         ensureAudioContext();
         navigator.mediaSession.playbackState = "playing";
     } else {
+        wantRunning = false;
+        // Pausing: drop the armed gesture fallback too.
+        disarmGestureResume();
         ctx?.suspend().catch((e) => console.warn("[luna:mediasession] AudioContext suspend failed:", e));
         navigator.mediaSession.playbackState = "paused";
     }
