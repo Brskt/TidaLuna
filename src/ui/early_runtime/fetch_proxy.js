@@ -65,6 +65,10 @@ var _lunaFetch = function(input, init) {
         return proxyFetch(url, init).then(function(resp) {
             if (resp.status >= 400) console.warn('[luna:proxy] ' + resp.status + ' ' + url.substring(0, 80));
             return resp;
+        }, function() {
+            // Proxy fallback failed too: keep the native TypeError (fetch's
+            // network-error contract), not the IPC's generic Error.
+            throw err;
         });
     });
 };
