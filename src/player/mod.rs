@@ -100,12 +100,15 @@ pub enum PlayerEvent {
         code: &'static str,
     },
     MaxConnectionsReached,
-    /// Play arrived with no pipeline and no load in flight, but a source is
-    /// retained: carries it plus the generation at decision time, so flush.rs
-    /// reloads it, skipping if a newer load/stop superseded it. Internal event.
+    /// Re-arm a retained source into the shared pipeline: flush.rs reloads `track`
+    /// at the generation snapshot (skipped if a newer load/stop superseded it),
+    /// seeks to `position` (None = start), and auto-plays per `play`. Emitted on a
+    /// no-pipeline play or when leaving exclusive mode.
     ReplayRequest {
         track: TrackInfo,
         expected_gen: u32,
+        position: Option<f64>,
+        play: bool,
     },
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     VolumeSync(f64),
@@ -276,7 +279,7 @@ pub(crate) fn log_response_headers(resp: &reqwest::Response, prefix: &str) {
     crate::vprintln!("{prefix} {info}");
 }
 
-fn canonical_track_id(url: &str) -> String {
+pub(crate) fn canonical_track_id(url: &str) -> String {
     url.split('?').next().unwrap_or(url).to_string()
 }
 
@@ -522,7 +525,7 @@ impl Player {
 
         #[cfg(target_os = "windows")]
         let volume_sync_enabled =
-            crate::state::db().call_settings(|conn| crate::settings::load_volume_sync(conn));
+            crate::state::db().call_settings(crate::settings::load_volume_sync);
         #[cfg(not(target_os = "windows"))]
         let volume_sync_enabled = true;
 
@@ -774,6 +777,15 @@ impl Player {
         Ok(())
     }
 
+    /// An explicit target seeks there (when past the resume floor); otherwise
+    /// fall back to the stored resume position for the track.
+    fn resume_policy_for(target_time: Option<f64>) -> ResumePolicy {
+        match target_time {
+            Some(t) if t.is_finite() && t > resume::RESUME_MIN_SECONDS => ResumePolicy::Explicit(t),
+            _ => ResumePolicy::Auto,
+        }
+    }
+
     pub fn recover(
         &self,
         url: String,
@@ -781,11 +793,35 @@ impl Player {
         key: String,
         target_time: Option<f64>,
     ) -> anyhow::Result<()> {
-        let policy = match target_time {
-            Some(t) if t.is_finite() && t > resume::RESUME_MIN_SECONDS => ResumePolicy::Explicit(t),
-            _ => ResumePolicy::Auto,
+        self.load_with_policy(
+            url,
+            format,
+            key,
+            Self::resume_policy_for(target_time),
+            false,
+        )
+    }
+
+    /// Re-arm the shared pipeline from a `ReplayRequest`: `Some(position)` seeks
+    /// there (past the resume floor; below it starts from the beginning), `None`
+    /// restarts; `play` auto-plays. Single entry point for the ReplayRequest
+    /// consumer, keeping the dispatch out of flush.rs.
+    pub fn rearm(
+        &self,
+        url: String,
+        format: String,
+        key: String,
+        position: Option<f64>,
+        play: bool,
+    ) -> anyhow::Result<()> {
+        // Honor the caller position directly (live re-arm target, not a
+        // resume-store candidate): resume_policy_for would floor sub-1s to Auto
+        // and seek a stale persisted offset. Explicit applies the floor itself.
+        let policy = match position {
+            Some(t) => ResumePolicy::Explicit(t),
+            None => ResumePolicy::Disabled,
         };
-        self.load_with_policy(url, format, key, policy, false)
+        self.load_with_policy(url, format, key, policy, play)
     }
 
     fn send_cmd(&self, cmd: PlayerCommand) -> anyhow::Result<()> {

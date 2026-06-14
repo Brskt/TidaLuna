@@ -45,6 +45,14 @@ pub(super) struct PlayerThread<F> {
     // Audio output
     cpal_stream: Option<cpal::Stream>,
     volume: Arc<AtomicU32>, // f32 bits stored as u32
+    // Last UI/session volume (f32 bits), always written by handle_set_volume
+    // (even on the session-sync path where self.volume is pinned to 1.0). The
+    // reliable seed for the exclusive gain when volume_sync.get() fails.
+    #[cfg(target_os = "windows")]
+    last_volume: Arc<AtomicU32>,
+    // Digital gain for the exclusive WASAPI render (it bypasses the OS mixer).
+    #[cfg(target_os = "windows")]
+    exclusive_gain: Arc<AtomicU32>,
     // Decode thread
     decode_cmd_tx: Option<mpsc::Sender<DecodeCommand>>,
     decode_event_rx: Option<mpsc::Receiver<DecodeEvent>>,
@@ -74,6 +82,10 @@ pub(super) struct PlayerThread<F> {
     // Resume
     resume_store: ResumeStore,
     pending_resume_seek: Option<f64>,
+    // A user seek that arrived before the exclusive stream was ready. Supersedes
+    // pending_resume_seek at exclusive start (explicit seek wins over auto-resume).
+    #[cfg(target_os = "windows")]
+    user_seek_override: Option<f64>,
     pre_seek_pos: Option<f64>,
     allow_startup_auto_resume: bool,
     // Device
@@ -85,6 +97,14 @@ pub(super) struct PlayerThread<F> {
     is_exclusive_mode: bool,
     #[cfg(target_os = "windows")]
     exclusive_stream_cancel: Option<Arc<AtomicBool>>,
+    // Sender to the live exclusive decoder for in-place seeks (no respawn).
+    #[cfg(target_os = "windows")]
+    exclusive_seek_tx: Option<mpsc::Sender<f64>>,
+    // Live exclusive position (floor-free, this session): restores the position
+    // on an exclusive->shared switch, where resume_store's 1s floor and
+    // cross-session persistence would lose it or return a stale offset.
+    #[cfg(target_os = "windows")]
+    last_exclusive_pos: Option<f64>,
     // Volume sync (Windows session volume)
     #[cfg(target_os = "windows")]
     _com_guard: Option<crate::platform::volume_sync::ComGuard>,
@@ -134,6 +154,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             callback,
             cpal_stream: None,
             volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            #[cfg(target_os = "windows")]
+            last_volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            #[cfg(target_os = "windows")]
+            exclusive_gain: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
             decode_cmd_tx: None,
             decode_event_rx: None,
             decode_handle: None,
@@ -152,6 +176,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             channels: 2,
             resume_store: ResumeStore::load(),
             pending_resume_seek: None,
+            #[cfg(target_os = "windows")]
+            user_seek_override: None,
             pre_seek_pos: None,
             allow_startup_auto_resume: true,
             current_device_id: None,
@@ -161,6 +187,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             is_exclusive_mode: false,
             #[cfg(target_os = "windows")]
             exclusive_stream_cancel: None,
+            #[cfg(target_os = "windows")]
+            exclusive_seek_tx: None,
+            #[cfg(target_os = "windows")]
+            last_exclusive_pos: None,
             #[cfg(target_os = "windows")]
             _com_guard: com_guard,
             #[cfg(target_os = "windows")]
@@ -234,16 +264,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
 
             #[cfg(target_os = "windows")]
-            if self.pending_unmute {
-                if let Some(ref ack) = self.cpal_mute_ack {
-                    if ack.load(Relaxed) {
-                        ack.store(false, Relaxed);
-                        if let Some(ref muted) = self.cpal_muted {
-                            muted.store(false, Relaxed);
-                        }
-                        self.pending_unmute = false;
-                    }
+            if self.pending_unmute
+                && let Some(ref ack) = self.cpal_mute_ack
+                && ack.load(Relaxed)
+            {
+                ack.store(false, Relaxed);
+                if let Some(ref muted) = self.cpal_muted {
+                    muted.store(false, Relaxed);
                 }
+                self.pending_unmute = false;
             }
 
             // Poll playback state
@@ -270,7 +299,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Auto-play only if the load delivered a live track: a stale load
                 // that handle_load rejects must not reach handle_play (it would
                 // re-arm and replay after a Stop).
-                let loaded = self.handle_load(request);
+                let loaded = self.handle_load(request, auto_play);
                 if auto_play && loaded {
                     crate::vprintln!("[AUTO]   Auto-play after load");
                     self.handle_play();

@@ -1,5 +1,5 @@
 use std::io::{Read, Seek};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -15,6 +15,10 @@ use wasapi::{
     AudioClient, AudioRenderClient, DeviceEnumerator, Direction, Handle, SampleType, StreamMode,
     WaveFormat, calculate_period_100ns,
 };
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Threading::{
+    AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -27,6 +31,8 @@ pub(super) enum ExclusiveCommand {
         channels: u32,
         bits_per_sample: u32,
         duration_secs: f64,
+        start_secs: f64,
+        start_paused: bool,
     },
     PushPcm {
         stream_id: u32,
@@ -35,10 +41,15 @@ pub(super) enum ExclusiveCommand {
     EndStream {
         stream_id: u32,
     },
+    /// In-place seek applied by the live decoder: flush buffered PCM and
+    /// re-base the reported position, without reopening the client.
+    ResetForSeek {
+        stream_id: u32,
+        start_secs: f64,
+    },
     Play,
     Pause,
     Stop,
-    Seek(f64),
     Shutdown,
 }
 
@@ -121,6 +132,9 @@ pub(super) fn stream_flac_reader_to_wasapi<R>(
     stream_id: u32,
     cmd_tx: mpsc::Sender<ExclusiveCommand>,
     cancel: Arc<AtomicBool>,
+    seek_to: Option<f64>,
+    start_paused: bool,
+    seek_rx: mpsc::Receiver<f64>,
 ) -> Result<(), String>
 where
     R: Read + Seek + Send + Sync + 'static,
@@ -131,6 +145,7 @@ where
     });
     let mss = MediaSourceStream::new(source, Default::default());
 
+    crate::vprintln!("[WASAPI-DBG] flac reader: starting probe (byte_len={byte_len})");
     let mut hint = Hint::new();
     hint.with_extension("flac");
 
@@ -176,6 +191,13 @@ where
         32
     };
 
+    crate::vprintln!(
+        "[WASAPI-DBG] flac reader: probe OK ({sample_rate}Hz {channels}ch {stored_bps}bit), sending StartStream"
+    );
+    // StartStream FIRST at offset 0 so the render adopts this stream_id and opens
+    // the client immediately, rather than staying silent while a forward seek into
+    // not-yet-downloaded data blocks below. The real landing position follows via
+    // ResetForSeek (which needs the stream_id this sets).
     cmd_tx
         .send(ExclusiveCommand::StartStream {
             stream_id,
@@ -183,18 +205,111 @@ where
             channels,
             bits_per_sample: stored_bps,
             duration_secs,
+            start_secs: 0.0,
+            start_paused,
         })
         .map_err(|_| "failed to send StartStream".to_string())?;
+
+    // Source seek AFTER StartStream so a forward seek past the buffered PCM moves
+    // (mirrors do_decode_seek). On success re-base the render via ResetForSeek; on
+    // failure (offset not yet downloaded) seed an initial seek the decode loop
+    // retries, rather than playing from 0.
+    let mut pending_initial_seek: Option<f64> = None;
+    let mut was_initial_seek = false;
+    if let Some(t) = seek_to
+        && t > 0.0
+    {
+        was_initial_seek = true;
+        if let Some(time_pos) = symphonia::core::units::Time::try_from_secs_f64(t) {
+            match format_reader.seek(
+                symphonia::core::formats::SeekMode::Coarse,
+                symphonia::core::formats::SeekTo::Time {
+                    time: time_pos,
+                    track_id: Some(track.id),
+                },
+            ) {
+                Ok(seeked) => {
+                    let actual = if sample_rate > 0 {
+                        seeked.actual_ts.get() as f64 / sample_rate as f64
+                    } else {
+                        t
+                    };
+                    crate::vprintln!("[WASAPI] decoder seek to {t:.1}s (actual {actual:.1}s)");
+                    if cmd_tx
+                        .send(ExclusiveCommand::ResetForSeek {
+                            stream_id,
+                            start_secs: actual,
+                        })
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    crate::vprintln!("[WASAPI] decoder seek to {t:.1}s failed, will retry: {e}");
+                    pending_initial_seek = Some(t);
+                }
+            }
+        }
+    }
 
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
         .map_err(|e| format!("decoder creation failed: {e}"))?;
 
     let mut sample_buf: Vec<i32> = Vec::new();
+    let mut diag_logged = false;
 
     loop {
         if cancel.load(Relaxed) {
             return Ok(());
+        }
+
+        // Apply the pending seek in place (no re-probe), mirroring do_decode_seek.
+        // Start from a seeded initial seek, then let a newer live seek win. On
+        // success the render flushes between old and new PCM (channel order is the
+        // epoch); a failed initial seek re-seeds for a later retry.
+        let mut pending_seek = pending_initial_seek.take();
+        while let Ok(t) = seek_rx.try_recv() {
+            pending_seek = Some(t);
+            was_initial_seek = false;
+        }
+        if let Some(t) = pending_seek
+            && let Some(time_pos) = symphonia::core::units::Time::try_from_secs_f64(t)
+        {
+            match format_reader.seek(
+                symphonia::core::formats::SeekMode::Coarse,
+                symphonia::core::formats::SeekTo::Time {
+                    time: time_pos,
+                    track_id: Some(track.id),
+                },
+            ) {
+                Ok(seeked) => {
+                    decoder.reset();
+                    was_initial_seek = false;
+                    let actual = if sample_rate > 0 {
+                        seeked.actual_ts.get() as f64 / sample_rate as f64
+                    } else {
+                        t
+                    };
+                    crate::vprintln!("[WASAPI] live seek to {t:.1}s (actual {actual:.1}s)");
+                    if cmd_tx
+                        .send(ExclusiveCommand::ResetForSeek {
+                            stream_id,
+                            start_secs: actual,
+                        })
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    crate::vprintln!("[WASAPI] live seek to {t:.1}s failed: {e}");
+                    if was_initial_seek {
+                        pending_initial_seek = Some(t);
+                    }
+                }
+            }
         }
 
         let packet = match format_reader.next_packet() {
@@ -219,6 +334,19 @@ where
 
         sample_buf.clear();
         decoded.copy_to_vec_interleaved::<i32>(&mut sample_buf);
+
+        if !diag_logged && !sample_buf.is_empty() {
+            diag_logged = true;
+            let mn = sample_buf.iter().copied().min().unwrap_or(0);
+            let mx = sample_buf.iter().copied().max().unwrap_or(0);
+            crate::vprintln3!(
+                "[WASAPI-DIAG] decode src_bps={bits_per_sample} i32 min={mn} max={mx} raw=[{:#010x} {:#010x} {:#010x} {:#010x}]",
+                sample_buf.first().copied().unwrap_or(0),
+                sample_buf.get(1).copied().unwrap_or(0),
+                sample_buf.get(2).copied().unwrap_or(0),
+                sample_buf.get(3).copied().unwrap_or(0),
+            );
+        }
 
         let mut chunk = Vec::new();
         append_interleaved_i32_as_pcm(&sample_buf, bits_per_sample, &mut chunk);
@@ -248,12 +376,12 @@ where
 impl ExclusiveHandle {
     /// Spawn the WASAPI render thread for the given device.
     /// `device_id` - wasapi device id string, or "default".
-    pub fn spawn(device_id: String) -> Self {
+    pub fn spawn(device_id: String, gain: Arc<AtomicU32>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ExclusiveCommand>();
         let (event_tx, event_rx) = mpsc::channel::<ExclusiveEvent>();
 
         let handle = thread::spawn(move || {
-            render_thread(device_id, cmd_rx, event_tx);
+            render_thread(device_id, cmd_rx, event_tx, gain);
         });
 
         Self {
@@ -351,8 +479,12 @@ fn negotiate_format(sample_rate: u32, channels: u32, source_bps: u32) -> Vec<(Wa
         channel_mask,
     ));
 
+    // 20ms exclusive period: the 10ms minimum leaves no scheduling slack (one
+    // late wake underruns), and music tolerates the extra latency. The
+    // BUFFER_SIZE_NOT_ALIGNED retry below realigns if the driver needs it.
+    const EXCLUSIVE_PERIOD_MS: i64 = 20;
     let period = calculate_period_100ns(
-        (sr as i64) / 100, // ~10ms buffer
+        sr as i64 * EXCLUSIVE_PERIOD_MS / 1000, // frames per period
         sr as i64,
     );
 
@@ -367,9 +499,24 @@ fn init_exclusive_client(device_id: &str) -> Result<(DeviceEnumerator, wasapi::D
             .get_default_device(&Direction::Render)
             .map_err(|e| format!("default device: {e}"))?
     } else {
-        enumerator
-            .get_device(device_id)
-            .map_err(|e| format!("device '{device_id}': {e}"))?
+        // `device_id` is cpal's DeviceDesc ("Speakers"), NOT the endpoint id nor
+        // the FriendlyName. Match get_description() (same property cpal stores) to
+        // line up with the shared path's find_output_device; fall back to
+        // FriendlyName for the rare driver where cpal itself did.
+        let collection = enumerator
+            .get_device_collection(&Direction::Render)
+            .map_err(|e| format!("device collection: {e}"))?;
+        let count = collection
+            .get_nbr_devices()
+            .map_err(|e| format!("device count: {e}"))?;
+        (0..count)
+            .find_map(|i| {
+                let dev = collection.get_device_at_index(i).ok()?;
+                let matches = dev.get_description().ok().as_deref() == Some(device_id)
+                    || dev.get_friendlyname().ok().as_deref() == Some(device_id);
+                matches.then_some(dev)
+            })
+            .ok_or_else(|| format!("device '{device_id}': not found"))?
     };
 
     Ok((enumerator, device))
@@ -470,6 +617,12 @@ fn open_exclusive_stream(
                         }
                     }
                 }
+                // Propagate a transient lock instead of the generic error, so
+                // try_open_stream emits DeviceLocked, not the permanent
+                // ExclusiveModeNotAllowed that demotes the saved mode.
+                if is_device_in_use_error(&err_str) {
+                    return Err(err_str);
+                }
                 crate::vprintln!("[WASAPI] Format rejected: {e}");
                 continue;
             }
@@ -499,6 +652,7 @@ fn convert_pcm_frame(
     _dst_valid_bits: u32,
     dst_sample_type: &SampleType,
     _channels: u32,
+    gain: f32,
 ) -> Vec<u8> {
     let src_bytes_per_sample = (src_bps / 8) as usize;
     let dst_bytes_per_sample = (dst_store_bits / 8) as usize;
@@ -533,6 +687,13 @@ fn convert_pcm_frame(
                 sample_bytes[3],
             ]),
             _ => 0,
+        };
+
+        // Digital gain (<1.0 attenuates; 1.0 leaves the sample untouched).
+        let sample_i32 = if gain < 1.0 {
+            ((sample_i32 as f32) * gain) as i32
+        } else {
+            sample_i32
         };
 
         match dst_sample_type {
@@ -590,27 +751,14 @@ enum RenderState {
     Paused,
 }
 
-/// Compute the write cursor and frames_played for a seek to `time` seconds.
-fn compute_seek_position(
-    time: f64,
-    sample_rate: u32,
-    channels: u32,
-    src_bps: u32,
-    pcm_len: usize,
-) -> (usize, u64) {
-    let src_bytes_per_sample = (src_bps / 8) as usize;
-    let src_bytes_per_frame = src_bytes_per_sample * channels as usize;
-    let target_frame = (time * sample_rate as f64) as u64;
-    let mut cursor = (target_frame as usize) * src_bytes_per_frame;
-    if cursor > pcm_len {
-        cursor = pcm_len;
-    }
-    let frames = if src_bytes_per_frame > 0 {
-        (cursor / src_bytes_per_frame) as u64
+/// Absolute frame index a seek/resume to `secs` corresponds to. Used as the
+/// `frames_played` baseline so position reporting stays correct after a seek.
+fn position_frames(secs: f64, sample_rate: u32) -> u64 {
+    if sample_rate > 0 && secs.is_finite() && secs > 0.0 {
+        (secs * sample_rate as f64) as u64
     } else {
         0
-    };
-    (cursor, frames)
+    }
 }
 
 /// Stop the current stream (if any), open a new exclusive stream, and dispatch
@@ -659,6 +807,13 @@ struct RenderContext {
     stream_ended: bool,
     last_time_report: Instant,
     state: RenderState,
+    // Playing but the audio client is not started yet: held until a PCM cushion
+    // is buffered so a seeked start does not underrun into silence (Playing loop).
+    pending_start: bool,
+    // Whether the WASAPI clock is running. Distinct from pending_start: a fresh
+    // start defers start_stream until a buffer of real PCM is pre-filled, and a
+    // mid-stream underrun re-arms pending_start with the clock still running.
+    client_started: bool,
 }
 
 impl RenderContext {
@@ -680,6 +835,8 @@ impl RenderContext {
             stream_ended: true,
             last_time_report: Instant::now(),
             state: RenderState::Idle,
+            pending_start: false,
+            client_started: false,
         }
     }
 
@@ -693,6 +850,7 @@ impl RenderContext {
     /// Postconditions on Ok: pcm_data cleared, cursors zeroed, stream_id set,
     /// audio resources replaced, state = Playing, Duration + Active events sent.
     /// On Err: an error event was sent and render_thread must exit.
+    #[allow(clippy::too_many_arguments)]
     fn handle_start_stream(
         &mut self,
         device: &wasapi::Device,
@@ -702,15 +860,44 @@ impl RenderContext {
         channels: u32,
         bits_per_sample: u32,
         duration_secs: f64,
+        start_secs: f64,
+        start_paused: bool,
     ) -> Result<(), ()> {
-        let (ac, rc, ev, wf, bs) = try_open_stream(
-            device,
-            sample_rate,
-            channels,
-            bits_per_sample,
-            &self.audio_client,
-            event_tx,
-        )?;
+        // Reuse the open client on an unchanged format (reopening pops the DAC).
+        // A format change needs a fresh one: an exclusive client owns the device,
+        // so release the old one first (else the new initialize fails with
+        // AUDCLNT_E_DEVICE_IN_USE, 0x8889000A).
+        let same_format = self.audio_client.is_some()
+            && self.pcm_sample_rate == sample_rate
+            && self.pcm_channels == channels
+            && self.pcm_src_bps == bits_per_sample;
+        if !same_format {
+            self.stop_audio_client();
+            self.render_client = None;
+            self.h_event = None;
+            self.audio_client = None;
+
+            let (ac, rc, ev, wf, bs) = try_open_stream(
+                device,
+                sample_rate,
+                channels,
+                bits_per_sample,
+                &self.audio_client,
+                event_tx,
+            )?;
+
+            self.audio_client = Some(ac);
+            self.render_client = Some(rc);
+            self.h_event = Some(ev);
+            self.wave_fmt = Some(wf);
+            self.buffer_size = bs;
+        } else if let Some(ref ac) = self.audio_client {
+            // Reusing the open client: stop + Reset() to flush stale frames from
+            // the endpoint. Reset needs the stream stopped; the start branch below
+            // restarts it.
+            let _ = ac.stop_stream();
+            let _ = ac.reset_stream();
+        }
 
         self.pcm_data.clear();
         self.pcm_sample_rate = sample_rate;
@@ -718,23 +905,28 @@ impl RenderContext {
         self.pcm_src_bps = bits_per_sample;
         self.pcm_duration = duration_secs;
         self.write_cursor = 0;
-        self.frames_played = 0;
+        self.frames_played = position_frames(start_secs, sample_rate);
         self.current_stream_id = Some(stream_id);
         self.stream_ended = false;
-        self.buffer_size = bs;
         self.last_time_report = Instant::now();
 
-        self.audio_client = Some(ac);
-        self.render_client = Some(rc);
-        self.h_event = Some(ev);
-        self.wave_fmt = Some(wf);
-
         let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
-        if let Some(ref ac) = self.audio_client {
-            let _ = ac.start_stream();
+        // Do NOT start the clock yet: per IAudioClient::Start the buffer must
+        // hold real PCM first, else the tiny exclusive buffer underruns at the
+        // silence->audio edge (saturation). The Playing loop pre-fills, then starts.
+        self.client_started = false;
+        if start_paused {
+            // A paused load has an empty endpoint, so arm the deferred start: Play
+            // pre-fills before starting, rather than start_stream() on empty.
+            self.pending_start = true;
+            self.stop_audio_client();
+            self.state = RenderState::Paused;
+            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
+        } else {
+            self.pending_start = true;
+            self.state = RenderState::Playing;
+            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
         }
-        self.state = RenderState::Playing;
-        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
         Ok(())
     }
 
@@ -743,6 +935,8 @@ impl RenderContext {
     /// stream_id = None, stream_ended = true, state = Idle, Stopped event sent.
     fn handle_stop(&mut self, event_tx: &mpsc::Sender<ExclusiveEvent>) {
         self.stop_audio_client();
+        self.client_started = false;
+        self.pending_start = false;
         self.pcm_data.clear();
         self.write_cursor = 0;
         self.frames_played = 0;
@@ -763,20 +957,74 @@ impl RenderContext {
             self.stream_ended = true;
         }
     }
+
+    fn handle_reset_for_seek(&mut self, stream_id: u32, start_secs: f64) {
+        if self.current_stream_id != Some(stream_id) {
+            return;
+        }
+        // Always stop+Reset() the endpoint (a no-op on a stopped/unstarted
+        // client) to drop queued pre-seek/pre-pause frames, then defer the
+        // restart so the loop pre-fills real PCM before starting -- an unfilled
+        // exclusive buffer here is what made seeks saturate.
+        if let Some(ref ac) = self.audio_client {
+            let _ = ac.stop_stream();
+            let _ = ac.reset_stream();
+        }
+        self.client_started = false;
+        self.pcm_data.clear();
+        self.write_cursor = 0;
+        self.frames_played = position_frames(start_secs, self.pcm_sample_rate);
+        self.stream_ended = false;
+        self.pending_start = true;
+        self.last_time_report = Instant::now();
+    }
+}
+
+/// RAII guard registering the render thread with the MMCSS "Pro Audio" task so it
+/// wakes on the ~10ms device cadence. The default ~15ms timer wakes too late and
+/// starves the endpoint, which glitches. Reverted on drop.
+struct ProAudioMmcss(HANDLE);
+
+impl ProAudioMmcss {
+    fn register() -> Option<Self> {
+        let mut task_index = 0u32;
+        // SAFETY: `task_index` is a valid out-pointer; the returned handle is
+        // owned by this guard and released in `Drop`.
+        match unsafe {
+            AvSetMmThreadCharacteristicsW(windows::core::w!("Pro Audio"), &mut task_index)
+        } {
+            Ok(handle) => Some(Self(handle)),
+            Err(e) => {
+                crate::vprintln!("[WASAPI] MMCSS 'Pro Audio' registration failed: {e}");
+                None
+            }
+        }
+    }
+}
+
+impl Drop for ProAudioMmcss {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a live handle returned by AvSetMmThreadCharacteristicsW.
+        unsafe {
+            let _ = AvRevertMmThreadCharacteristics(self.0);
+        }
+    }
 }
 
 fn render_thread(
     device_id: String,
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
+    gain: Arc<AtomicU32>,
 ) {
-    let _ = render_thread_inner(device_id, cmd_rx, event_tx);
+    let _ = render_thread_inner(device_id, cmd_rx, event_tx, gain);
 }
 
 fn render_thread_inner(
     device_id: String,
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
+    gain: Arc<AtomicU32>,
 ) -> Result<(), ()> {
     let hr = wasapi::initialize_mta();
     if hr.is_err() {
@@ -791,8 +1039,24 @@ fn render_thread_inner(
             return Err(());
         }
     };
+    crate::vprintln!("[WASAPI-DBG] render: device '{device_id}' resolved, awaiting StartStream");
+
+    // MMCSS "Pro Audio": wake on the device period, not the ~15ms timer. Held
+    // for the render loop (reverted on drop).
+    let _mmcss = ProAudioMmcss::register();
 
     let mut ctx = RenderContext::new();
+    let mut diag_logged = false;
+    // Startup render-loop diagnostic (LOGS=3): classify each of the first 150
+    // Playing iterations to confirm/refute a buffer underrun at startup. Cheap
+    // per-iteration counters, a single dump at the end (low observer effect).
+    let mut diag_it = 0u32;
+    let mut diag_done = false;
+    let mut diag_last = Instant::now();
+    let mut diag_max_gap = 0u128;
+    let mut diag_late = 0u32;
+    let (mut diag_s, mut diag_u, mut diag_p, mut diag_f) = (0u32, 0u32, 0u32, 0u32);
+    let mut diag_min_rem = usize::MAX;
 
     loop {
         match ctx.state {
@@ -804,7 +1068,12 @@ fn render_thread_inner(
                         channels,
                         bits_per_sample,
                         duration_secs,
+                        start_secs,
+                        start_paused,
                     }) => {
+                        crate::vprintln!(
+                            "[WASAPI-DBG] render: StartStream received, opening exclusive client"
+                        );
                         ctx.handle_start_stream(
                             &device,
                             &event_tx,
@@ -813,6 +1082,8 @@ fn render_thread_inner(
                             channels,
                             bits_per_sample,
                             duration_secs,
+                            start_secs,
+                            start_paused,
                         )?;
                     }
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => break,
@@ -825,32 +1096,20 @@ fn render_thread_inner(
                     match cmd {
                         ExclusiveCommand::Pause => {
                             ctx.stop_audio_client();
+                            ctx.client_started = false;
                             ctx.state = RenderState::Paused;
                             let _ = event_tx
                                 .send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
                         }
                         ExclusiveCommand::Stop => ctx.handle_stop(&event_tx),
-                        ExclusiveCommand::Seek(time) => {
-                            if ctx.wave_fmt.is_some() {
-                                ctx.stop_audio_client();
-                                (ctx.write_cursor, ctx.frames_played) = compute_seek_position(
-                                    time,
-                                    ctx.pcm_sample_rate,
-                                    ctx.pcm_channels,
-                                    ctx.pcm_src_bps,
-                                    ctx.pcm_data.len(),
-                                );
-                                if let Some(ref ac) = ctx.audio_client {
-                                    let _ = ac.start_stream();
-                                }
-                            }
-                        }
                         ExclusiveCommand::StartStream {
                             stream_id,
                             sample_rate,
                             channels,
                             bits_per_sample,
                             duration_secs,
+                            start_secs,
+                            start_paused,
                         } => {
                             ctx.handle_start_stream(
                                 &device,
@@ -860,6 +1119,8 @@ fn render_thread_inner(
                                 channels,
                                 bits_per_sample,
                                 duration_secs,
+                                start_secs,
+                                start_paused,
                             )?;
                         }
                         ExclusiveCommand::PushPcm {
@@ -869,6 +1130,10 @@ fn render_thread_inner(
                         ExclusiveCommand::EndStream { stream_id } => {
                             ctx.handle_end_stream(stream_id)
                         }
+                        ExclusiveCommand::ResetForSeek {
+                            stream_id,
+                            start_secs,
+                        } => ctx.handle_reset_for_seek(stream_id, start_secs),
                         ExclusiveCommand::Shutdown => {
                             ctx.stop_audio_client();
                             return Ok(());
@@ -881,10 +1146,14 @@ fn render_thread_inner(
                     continue;
                 }
 
+                // Before the clock starts the event never fires; poll briefly to
+                // build the cushion. Once running it fires each period (50ms cap).
                 if let Some(ref ev) = ctx.h_event {
-                    let _ = ev.wait_for_event(50);
+                    let timeout_ms = if ctx.client_started { 50 } else { 5 };
+                    let _ = ev.wait_for_event(timeout_ms);
                 }
 
+                let mut start_clock_now = false;
                 if let (Some(ac), Some(rc), Some(wf)) =
                     (&ctx.audio_client, &ctx.render_client, &ctx.wave_fmt)
                 {
@@ -903,17 +1172,79 @@ fn render_thread_inner(
                     let dst_bytes_per_frame = dst_bytes_per_sample * ctx.pcm_channels as usize;
 
                     let remaining_src_bytes = ctx.pcm_data.len().saturating_sub(ctx.write_cursor);
-                    let remaining_frames = if src_bytes_per_frame > 0 {
-                        remaining_src_bytes / src_bytes_per_frame
-                    } else {
-                        0
-                    };
+                    let remaining_frames = remaining_src_bytes
+                        .checked_div(src_bytes_per_frame)
+                        .unwrap_or(0);
 
-                    if remaining_frames == 0 {
+                    // Cushion: hold the deferred start until ~0.5s is buffered (or
+                    // the stream ends). A fresh start just accumulates; a mid-stream
+                    // underrun feeds the still-running client silence below.
+                    let buffering = ctx.pending_start
+                        && !ctx.stream_ended
+                        && remaining_frames < ctx.pcm_sample_rate as usize / 2;
+                    if ctx.pending_start && !buffering {
+                        ctx.pending_start = false;
+                    }
+
+                    if !diag_done && ctx.client_started {
+                        let gap = diag_last.elapsed().as_millis();
+                        diag_last = Instant::now();
+                        if diag_it > 0 {
+                            diag_max_gap = diag_max_gap.max(gap);
+                            // Late = >1.5x the ~20ms device period (a wake that
+                            // risks an endpoint underrun). Scale this with the
+                            // period in negotiate_format if it changes.
+                            if gap > 30 {
+                                diag_late += 1;
+                            }
+                        }
+                        if buffering {
+                            diag_s += 1;
+                        } else if remaining_frames == 0 {
+                            diag_u += 1;
+                        } else if remaining_frames < available {
+                            diag_p += 1;
+                            diag_min_rem = diag_min_rem.min(remaining_frames);
+                        } else {
+                            diag_f += 1;
+                            diag_min_rem = diag_min_rem.min(remaining_frames);
+                        }
+                        diag_it += 1;
+                        if diag_it >= 150 {
+                            diag_done = true;
+                            crate::vprintln3!(
+                                "[WASAPI-DIAG] startup {diag_it}it: silence={diag_s} underrun_empty={diag_u} underrun_partial={diag_p} full={diag_f} max_gap={diag_max_gap}ms late(>30ms)={diag_late} min_rem_frames={diag_min_rem}"
+                            );
+                        }
+                    }
+
+                    // Clock not running yet: accumulate the cushion without writing
+                    // to the endpoint; the real-write path below pre-fills + starts.
+                    if !ctx.client_started && (buffering || remaining_frames == 0) {
+                        if ctx.stream_ended && remaining_frames == 0 {
+                            // Stream ended before any audio decoded: complete now.
+                            let _ = event_tx.send(ExclusiveEvent::TimeUpdate(ctx.pcm_duration));
+                            let _ = event_tx
+                                .send(ExclusiveEvent::StateChange(super::PlaybackState::Completed));
+                            ctx.stop_audio_client();
+                            ctx.current_stream_id = None;
+                            ctx.stream_ended = true;
+                            ctx.state = RenderState::Idle;
+                        }
+                        continue;
+                    }
+
+                    if remaining_frames == 0 || buffering {
+                        // A mid-stream underrun (no PCM, stream not ended): re-arm
+                        // the start cushion so the next refill rebuilds a buffer
+                        // before resuming, preventing a repeated stutter.
+                        if remaining_frames == 0 && !ctx.stream_ended {
+                            ctx.pending_start = true;
+                        }
                         let silence = vec![0u8; available * dst_bytes_per_frame];
                         let _ = rc.write_to_device(available, &silence, None);
 
-                        if !ctx.stream_ended {
+                        if buffering || !ctx.stream_ended {
                             continue;
                         }
 
@@ -922,6 +1253,7 @@ fn render_thread_inner(
                             .send(ExclusiveEvent::StateChange(super::PlaybackState::Completed));
 
                         ctx.stop_audio_client();
+                        ctx.client_started = false;
                         ctx.current_stream_id = None;
                         ctx.stream_ended = true;
                         ctx.state = RenderState::Idle;
@@ -936,63 +1268,138 @@ fn render_thread_inner(
                     let dst_store = wf.get_bitspersample() as u32;
                     let dst_valid = wf.get_validbitspersample() as u32;
                     let dst_type = wf.get_subformat().unwrap_or(SampleType::Int);
+                    // Live digital gain (exclusive bypasses the OS mixer). At 1.0
+                    // the passthrough fast path stays bit-perfect.
+                    let g = f32::from_bits(gain.load(Relaxed));
 
-                    let write_data: std::borrow::Cow<'_, [u8]> =
-                        if ctx.pcm_src_bps == dst_store && matches!(dst_type, SampleType::Int) {
-                            std::borrow::Cow::Borrowed(src_chunk)
-                        } else {
-                            std::borrow::Cow::Owned(convert_pcm_frame(
-                                src_chunk,
-                                ctx.pcm_src_bps,
-                                dst_store,
-                                dst_valid,
-                                &dst_type,
-                                ctx.pcm_channels,
-                            ))
-                        };
+                    let write_data: std::borrow::Cow<'_, [u8]> = if ctx.pcm_src_bps == dst_store
+                        && matches!(dst_type, SampleType::Int)
+                        && g >= 1.0
+                    {
+                        std::borrow::Cow::Borrowed(src_chunk)
+                    } else {
+                        std::borrow::Cow::Owned(convert_pcm_frame(
+                            src_chunk,
+                            ctx.pcm_src_bps,
+                            dst_store,
+                            dst_valid,
+                            &dst_type,
+                            ctx.pcm_channels,
+                            g,
+                        ))
+                    };
 
-                    if let Err(e) = rc.write_to_device(frames_to_write, &write_data, None) {
+                    if !diag_logged {
+                        diag_logged = true;
+                        let (mut mn, mut mx) = (i16::MAX, i16::MIN);
+                        if dst_store == 16 {
+                            for s in write_data.chunks_exact(2) {
+                                let v = i16::from_le_bytes([s[0], s[1]]);
+                                mn = mn.min(v);
+                                mx = mx.max(v);
+                            }
+                        }
+                        let head: Vec<String> = write_data
+                            .iter()
+                            .take(8)
+                            .map(|b| format!("{b:02x}"))
+                            .collect();
+                        crate::vprintln3!(
+                            "[WASAPI-DIAG] write src_bps={} dst_store={} dst_valid={} int={} gain={:.3} i16[{mn} {mx}] bytes=[{}]",
+                            ctx.pcm_src_bps,
+                            dst_store,
+                            dst_valid,
+                            matches!(dst_type, SampleType::Int),
+                            g,
+                            head.join(" "),
+                        );
+                    }
+
+                    // Exclusive event mode requires full-buffer packets: pad a
+                    // short tail (track end) with silence, else the write returns
+                    // AUDCLNT_E_BUFFER_SIZE_ERROR and drops the last frames.
+                    let full_bytes = available * dst_bytes_per_frame;
+                    let write_buf: std::borrow::Cow<'_, [u8]> = if write_data.len() < full_bytes {
+                        let mut padded = vec![0u8; full_bytes];
+                        padded[..write_data.len()].copy_from_slice(&write_data);
+                        std::borrow::Cow::Owned(padded)
+                    } else {
+                        write_data
+                    };
+
+                    if let Err(e) = rc.write_to_device(available, &write_buf, None) {
                         crate::vprintln!("[WASAPI] write error: {e}");
                     }
 
+                    // Advance by the real frames only; the silence padding is not
+                    // part of the decoded stream or the playback position.
                     ctx.write_cursor += src_chunk_size;
                     ctx.frames_played += frames_to_write as u64;
 
+                    if !ctx.client_started {
+                        // First real buffer is now loaded -> start the clock once
+                        // the audio-client borrow is released (after this if-let).
+                        start_clock_now = true;
+                    }
+
                     if ctx.last_time_report.elapsed().as_millis() >= 200 {
-                        let pos = ctx.frames_played as f64 / ctx.pcm_sample_rate as f64;
+                        // Clamp to frames actually backed by buffered PCM so a
+                        // forward seek into a still-downloading region never reports
+                        // a position ahead of audible audio.
+                        let consumed_frames = ctx
+                            .write_cursor
+                            .checked_div(src_bytes_per_frame)
+                            .unwrap_or(0) as u64;
+                        let buffered_frames = ctx
+                            .pcm_data
+                            .len()
+                            .checked_div(src_bytes_per_frame)
+                            .unwrap_or(0) as u64;
+                        let baseline = ctx.frames_played.saturating_sub(consumed_frames);
+                        let pos = ctx.frames_played.min(baseline + buffered_frames) as f64
+                            / ctx.pcm_sample_rate as f64;
                         let _ = event_tx.send(ExclusiveEvent::TimeUpdate(pos));
                         ctx.last_time_report = Instant::now();
                     }
+                }
+
+                if start_clock_now {
+                    // The endpoint is pre-filled, so start the clock. Reset the diag
+                    // timer so the first gap reflects steady-state, not the cushion poll.
+                    if let Some(ref ac) = ctx.audio_client {
+                        let _ = ac.start_stream();
+                    }
+                    ctx.client_started = true;
+                    diag_last = Instant::now();
                 }
             }
 
             RenderState::Paused => match cmd_rx.recv() {
                 Ok(ExclusiveCommand::Play) => {
-                    if let Some(ref ac) = ctx.audio_client {
-                        let _ = ac.start_stream();
+                    // If pending_start is false the endpoint still holds the
+                    // pre-pause PCM, so start directly. If it's true the buffer is
+                    // unfilled (paused mid-cushion, or seeked while paused), so
+                    // defer to the loop's pre-fill before starting -- an empty
+                    // exclusive buffer would saturate.
+                    if !ctx.pending_start {
+                        if let Some(ref ac) = ctx.audio_client {
+                            let _ = ac.start_stream();
+                        }
+                        ctx.client_started = true;
                     }
                     ctx.state = RenderState::Playing;
                     let _ =
                         event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                 }
                 Ok(ExclusiveCommand::Stop) => ctx.handle_stop(&event_tx),
-                Ok(ExclusiveCommand::Seek(time)) => {
-                    if ctx.wave_fmt.is_some() {
-                        (ctx.write_cursor, ctx.frames_played) = compute_seek_position(
-                            time,
-                            ctx.pcm_sample_rate,
-                            ctx.pcm_channels,
-                            ctx.pcm_src_bps,
-                            ctx.pcm_data.len(),
-                        );
-                    }
-                }
                 Ok(ExclusiveCommand::StartStream {
                     stream_id,
                     sample_rate,
                     channels,
                     bits_per_sample,
                     duration_secs,
+                    start_secs,
+                    start_paused,
                 }) => {
                     ctx.handle_start_stream(
                         &device,
@@ -1002,6 +1409,8 @@ fn render_thread_inner(
                         channels,
                         bits_per_sample,
                         duration_secs,
+                        start_secs,
+                        start_paused,
                     )?;
                 }
                 Ok(ExclusiveCommand::PushPcm {
@@ -1009,6 +1418,10 @@ fn render_thread_inner(
                     pcm_data: data,
                 }) => ctx.handle_push_pcm(stream_id, data),
                 Ok(ExclusiveCommand::EndStream { stream_id }) => ctx.handle_end_stream(stream_id),
+                Ok(ExclusiveCommand::ResetForSeek {
+                    stream_id,
+                    start_secs,
+                }) => ctx.handle_reset_for_seek(stream_id, start_secs),
                 Ok(ExclusiveCommand::Shutdown) | Err(_) => {
                     ctx.stop_audio_client();
                     return Ok(());
@@ -1019,4 +1432,18 @@ fn render_thread_inner(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod position_frames_tests {
+    use super::position_frames;
+
+    #[test]
+    fn maps_seconds_to_frames() {
+        assert_eq!(position_frames(62.4, 44100), 2_751_840);
+        assert_eq!(position_frames(0.0, 44100), 0);
+        assert_eq!(position_frames(-1.0, 44100), 0);
+        assert_eq!(position_frames(10.0, 0), 0);
+        assert_eq!(position_frames(f64::NAN, 44100), 0);
+    }
 }

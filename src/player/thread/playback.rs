@@ -4,7 +4,7 @@ use crate::player::{DeviceErrorKind, PlaybackState, PlayerEvent, format_ms};
 use std::sync::atomic::Ordering::Relaxed;
 
 #[cfg(target_os = "windows")]
-use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
+use crate::player::wasapi::ExclusiveEvent;
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn samples_to_secs(&self, samples: u64) -> f64 {
@@ -32,6 +32,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 self.resume_store.set(track_id, t);
                                 self.resume_store.flush_if_due(false);
                             }
+                            // Floor-free live position for an exclusive->shared re-arm.
+                            self.last_exclusive_pos = Some(t);
                             (self.callback)(PlayerEvent::TimeUpdate(t, self.current_seq));
                         }
                         ExclusiveEvent::StateChange(s) => {
@@ -43,6 +45,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 self.has_track = false;
                                 self.is_playing = false;
                                 self.current_track_id = None;
+                                self.last_exclusive_pos = None;
+                                // Decoder exited (EndStream), its seek receiver
+                                // dropped: clear the dead sender so a later
+                                // seek/play respawns a decoder.
+                                self.exclusive_seek_tx = None;
                                 crate::state::GOVERNOR
                                     .buffer_progress()
                                     .set_playback_active(false);
@@ -52,13 +59,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         ExclusiveEvent::Duration(d) => {
                             self.current_duration = d;
                             (self.callback)(PlayerEvent::Duration(d, self.current_seq));
-                            if let Some(seek_time) = self.pending_resume_seek.take() {
-                                handle.send(ExclusiveCommand::Seek(seek_time));
-                                (self.callback)(PlayerEvent::TimeUpdate(
-                                    seek_time,
-                                    self.current_seq,
-                                ));
-                            }
                         }
                         ExclusiveEvent::InitFailed(e) => {
                             eprintln!("[WASAPI] Init failed, falling back to shared mode: {e}");
@@ -82,6 +82,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.has_track = false;
                             self.is_playing = false;
                             self.current_track_id = None;
+                            self.last_exclusive_pos = None;
                             crate::state::GOVERNOR
                                 .buffer_progress()
                                 .set_playback_active(false);

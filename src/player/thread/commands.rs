@@ -102,40 +102,77 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_event_rx = None;
     }
 
+    /// Spawn the exclusive decoder for `buffer`, seeking the source to `seek_to`.
+    /// A fresh `stream_id` makes the render drop the prior decoder's stale
+    /// PushPcm. No `Stop` (it emits `Stopped`, which clears the host-side track);
+    /// the new `StartStream` is the reset.
+    #[cfg(target_os = "windows")]
+    fn spawn_exclusive_decoder(
+        &mut self,
+        buffer: crate::player::buffer::RamBuffer,
+        seek_to: Option<f64>,
+        start_paused: bool,
+    ) {
+        let Some(cmd_tx) = self.exclusive_handle.as_ref().map(|h| h.command_sender()) else {
+            return;
+        };
+        if let Some(prev) = self.exclusive_stream_cancel.take() {
+            prev.store(true, Relaxed);
+            // Wake the retired reader so it sees the cancel and quiesces instead
+            // of parking up to the read timeout while the new stream contends for
+            // the same buffer (matches handle_set_audio_device).
+            if let Some(ref buf) = self.current_buffer {
+                buf.wake_readers();
+            }
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.exclusive_stream_cancel = Some(cancel.clone());
+
+        let (seek_tx, seek_rx) = mpsc::channel::<f64>();
+        self.exclusive_seek_tx = Some(seek_tx);
+
+        let reader = buffer.clone().with_reader_cancel(cancel.clone());
+        let total_len = buffer.total_len();
+        let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+        thread::spawn(move || {
+            if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
+                reader,
+                total_len,
+                stream_id,
+                cmd_tx,
+                cancel.clone(),
+                seek_to,
+                start_paused,
+                seek_rx,
+            ) && !cancel.load(Relaxed)
+            {
+                crate::vprintln!("[WASAPI] Stream decode failed: {e}");
+            }
+        });
+
+        self.current_buffer = Some(buffer);
+        self.has_track = true;
+        self.is_playing = !start_paused;
+    }
+
     #[cfg(target_os = "windows")]
     pub(super) fn start_exclusive_playback(
         &mut self,
         buffer: crate::player::buffer::RamBuffer,
+        start_paused: bool,
     ) -> bool {
         if !self.is_exclusive_mode {
             return false;
         }
-        if let Some(ref handle) = self.exclusive_handle {
-            handle.send(ExclusiveCommand::Stop);
-            let cancel = Arc::new(AtomicBool::new(false));
-            self.exclusive_stream_cancel = Some(cancel.clone());
-
-            let cmd_tx = handle.command_sender();
-            let reader = buffer.clone();
-            let total_len = buffer.total_len();
-            let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
-            thread::spawn(move || {
-                if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
-                    reader,
-                    total_len,
-                    stream_id,
-                    cmd_tx,
-                    cancel.clone(),
-                ) && !cancel.load(Relaxed)
-                {
-                    crate::vprintln!("[WASAPI] Stream decode failed: {e}");
-                }
-            });
-
-            self.current_buffer = Some(buffer);
-            self.has_track = true;
-            self.is_playing = true;
-        }
+        // No ExclusiveCommand::Stop: its host-visible Stopped, polled after the
+        // new StartStream, would null the just-loaded track on a playlist-advance.
+        // The new StartStream re-bases the render instead. A queued user seek wins
+        // over the load-time resume position.
+        let seek_to = self
+            .user_seek_override
+            .take()
+            .or_else(|| self.pending_resume_seek.take());
+        self.spawn_exclusive_decoder(buffer, seek_to, start_paused);
         true
     }
 
@@ -155,7 +192,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
-    pub(super) fn handle_load(&mut self, req: LoadRequest) -> bool {
+    pub(super) fn handle_load(
+        &mut self,
+        req: LoadRequest,
+        #[allow(unused_variables)] auto_play: bool,
+    ) -> bool {
         let LoadRequest {
             buffer,
             load_gen,
@@ -195,8 +236,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         // Cancel previous playback
         #[cfg(target_os = "windows")]
-        if let Some(cancel) = self.exclusive_stream_cancel.take() {
-            cancel.store(true, Relaxed);
+        {
+            if let Some(cancel) = self.exclusive_stream_cancel.take() {
+                cancel.store(true, Relaxed);
+            }
+            self.exclusive_seek_tx = None;
+            // A new track invalidates any retained exclusive position and any
+            // user seek that was queued before the prior stream was ready.
+            self.last_exclusive_pos = None;
+            self.user_seek_override = None;
         }
         if let Some(ref old_buf) = self.current_buffer {
             old_buf.cancel();
@@ -206,11 +254,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let teardown_ms = handle_start.elapsed().as_secs_f64() * 1000.0;
         let decode_start = std::time::Instant::now();
 
-        // WASAPI exclusive path
+        // Exclusive path. start_paused = !auto_play (a paused restore enters
+        // paused); start_exclusive_playback consumes the resume position.
         #[cfg(target_os = "windows")]
-        if self.start_exclusive_playback(buffer.clone()) {
-            // Exclusive mode auto-starts playback (is_playing=true), which
-            // satisfies any deferred play; clear it so it can't dangle.
+        if self.start_exclusive_playback(buffer.clone(), !auto_play) {
+            // When auto_play, exclusive auto-starts playback (is_playing=true),
+            // which satisfies any deferred play; clear it so it can't dangle.
             self.pending_play = None;
             crate::vprintln!(
                 "[WASAPI] Progressive decode started ({:.0}ms setup)",
@@ -448,6 +497,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     (self.callback)(PlayerEvent::ReplayRequest {
                         track,
                         expected_gen: LOAD_SEQ.load(Relaxed),
+                        position: None,
+                        play: true,
                     });
                 }
                 return;
@@ -464,13 +515,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(target_os = "windows")]
         {
             if self.is_exclusive_mode {
-                if let Some(seek_time) = self.pending_resume_seek.take()
-                    && let Some(ref handle) = self.exclusive_handle
+                if let Some(seek_time) = self
+                    .user_seek_override
+                    .take()
+                    .or_else(|| self.pending_resume_seek.take())
                 {
-                    handle.send(ExclusiveCommand::Seek(seek_time));
+                    // Seek queued before the stream was ready: send to the live
+                    // decoder, else spawn at the position. Record last_exclusive_pos
+                    // for a back-to-shared re-arm before the first TimeUpdate.
+                    self.last_exclusive_pos = Some(seek_time.max(0.0));
+                    if let Some(ref tx) = self.exclusive_seek_tx {
+                        let _ = tx.send(seek_time);
+                    } else if let Some(buffer) = self.current_buffer.clone() {
+                        self.spawn_exclusive_decoder(buffer, Some(seek_time), false);
+                    }
                     (self.callback)(PlayerEvent::TimeUpdate(seek_time, self.current_seq));
-                }
-                if let Some(ref handle) = self.exclusive_handle {
+                } else if let Some(ref handle) = self.exclusive_handle {
                     handle.send(ExclusiveCommand::Play);
                 }
                 self.is_playing = true;
@@ -579,8 +639,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         crate::state::GOVERNOR.reset_buffer_progress();
 
         #[cfg(target_os = "windows")]
-        if let Some(cancel) = self.exclusive_stream_cancel.take() {
-            cancel.store(true, Relaxed);
+        {
+            if let Some(cancel) = self.exclusive_stream_cancel.take() {
+                cancel.store(true, Relaxed);
+            }
+            self.exclusive_seek_tx = None;
+            self.last_exclusive_pos = None;
         }
 
         if let Some(ref old_buf) = self.current_buffer {
@@ -607,6 +671,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.current_duration = 0.0;
                 self.current_track_id = None;
                 self.pending_resume_seek = None;
+                self.user_seek_override = None;
                 self.pre_seek_pos = None;
                 self.resume_store.flush_if_due(true);
                 return;
@@ -653,15 +718,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             if self.is_exclusive_mode {
                 if self.has_track {
-                    if let Some(ref handle) = self.exclusive_handle {
-                        handle.send(ExclusiveCommand::Seek(latest_time));
+                    // Cover the window before the decoder's first post-seek
+                    // TimeUpdate (a back-to-shared re-arm may read this).
+                    self.last_exclusive_pos = Some(latest_time.max(0.0));
+                    // Seek the live decoder in place (no respawn / re-probe):
+                    // it format.seek()s and signals the render to flush.
+                    if let Some(ref tx) = self.exclusive_seek_tx {
+                        let _ = tx.send(latest_time);
                     }
                     (self.callback)(PlayerEvent::TimeUpdate(
                         latest_time.max(0.0),
                         self.current_seq,
                     ));
                 } else {
-                    self.pending_resume_seek = Some(latest_time);
+                    // No live decoder yet: queue as a user seek override so it
+                    // supersedes any auto-resume the upcoming load resolves.
+                    self.user_seek_override = Some(latest_time);
                 }
                 return;
             }
@@ -709,6 +781,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     pub(super) fn handle_set_volume(&mut self, vol: f64) {
         let vol_f32 = (vol / 100.0) as f32;
+        // Record the real UI level on every path (incl. the session-sync Ok path
+        // below, which pins self.volume to 1.0). The reliable seed for the
+        // exclusive digital gain when volume_sync.get() later fails on switch.
+        #[cfg(target_os = "windows")]
+        self.last_volume.store(f32::to_bits(vol_f32), Relaxed);
+        // Exclusive bypasses the OS session mixer; drive the render's digital gain.
+        #[cfg(target_os = "windows")]
+        if self.is_exclusive_mode {
+            self.exclusive_gain.store(f32::to_bits(vol_f32), Relaxed);
+        }
         #[cfg(target_os = "windows")]
         if let Some(ref vs) = self.volume_sync {
             match vs.set(vol_f32) {

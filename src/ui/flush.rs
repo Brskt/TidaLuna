@@ -259,10 +259,12 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             PlayerEvent::ReplayRequest {
                 track,
                 expected_gen,
+                position,
+                play,
             } => {
-                // Reload+play the source captured at decision time. Re-check the
-                // generation: if a newer load/stop bumped LOAD_SEQ since, skip -
-                // re-arming would abort that newer load.
+                // Reload the captured source at `position`, playing per `play`.
+                // Re-check the generation: skip if a newer load/stop bumped
+                // LOAD_SEQ since, else re-arming would abort that newer load.
                 let player = state.player.clone();
                 crate::state::rt_handle().spawn(async move {
                     if crate::player::LOAD_SEQ.load(std::sync::atomic::Ordering::Relaxed)
@@ -274,7 +276,8 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         return;
                     }
                     crate::vprintln!("[REPLAY] re-arming retained source");
-                    if let Err(e) = player.load_and_play(track.url, track.format, track.key) {
+                    if let Err(e) = player.rearm(track.url, track.format, track.key, position, play)
+                    {
                         crate::vprintln!("[REPLAY] re-arm failed: {e}");
                     }
                 });

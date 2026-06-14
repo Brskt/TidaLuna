@@ -53,6 +53,10 @@ struct SharedState {
 pub struct RamBuffer {
     shared: Arc<SharedState>,
     cursor: u64, // reader's current position (absolute file offset)
+    // Per-reader stop: `read` returns Interrupted without touching the shared
+    // `cancelled` (which retires every reader). Drops a stale exclusive reader on
+    // a mode switch so it stops fighting the new shared reader.
+    reader_cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Write-side handle for the async download task.
@@ -83,6 +87,7 @@ impl RamBuffer {
         let buffer = RamBuffer {
             shared: shared.clone(),
             cursor: 0,
+            reader_cancel: None,
         };
         let writer = RamBufferWriter { shared };
         (buffer, writer)
@@ -108,7 +113,25 @@ impl RamBuffer {
             stalled: AtomicBool::new(false),
         });
 
-        RamBuffer { shared, cursor: 0 }
+        RamBuffer {
+            shared,
+            cursor: 0,
+            reader_cancel: None,
+        }
+    }
+
+    /// Attach a per-reader stop signal: when set, this reader's `read` returns
+    /// Interrupted, leaving other readers untouched. Windows exclusive path only.
+    #[cfg(target_os = "windows")]
+    pub fn with_reader_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.reader_cancel = Some(cancel);
+        self
+    }
+
+    /// Wake any reader blocked in `read` so it can re-check its stop signal.
+    #[cfg(target_os = "windows")]
+    pub fn wake_readers(&self) {
+        self.shared.cvar.notify_all();
     }
 
     pub fn cancel(&self) {
@@ -176,6 +199,14 @@ impl Read for RamBuffer {
                     io::ErrorKind::Interrupted,
                     "streaming cancelled",
                 ));
+            }
+
+            // Retired reader (e.g. a stale exclusive stream after a mode switch):
+            // bail without disturbing the shared state the live reader depends on.
+            if let Some(ref c) = self.reader_cancel
+                && c.load(Relaxed)
+            {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "reader retired"));
             }
 
             if let Some(ref err) = inner.error {

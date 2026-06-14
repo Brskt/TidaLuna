@@ -6,22 +6,8 @@ use crate::player::{DeviceErrorKind, PlayerEvent};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
 
-use symphonia::core::codecs::CodecParameters;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::formats::probe::Hint;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-
 #[cfg(target_os = "windows")]
-use crate::player::{EXCLUSIVE_STREAM_SEQ, wasapi};
-#[cfg(target_os = "windows")]
-use std::sync::Arc;
-#[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicBool;
-#[cfg(target_os = "windows")]
-use std::thread;
-#[cfg(target_os = "windows")]
-use wasapi::{ExclusiveCommand, ExclusiveHandle};
+use crate::player::wasapi::ExclusiveHandle;
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_set_audio_device(&mut self, id: String, exclusive: bool) {
@@ -30,60 +16,155 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             if let Some(cancel) = self.exclusive_stream_cancel.take() {
                 cancel.store(true, Relaxed);
+                // Wake the retired exclusive reader so it sees the cancel and
+                // stops before the new stream contends for the same buffer.
+                if let Some(ref buf) = self.current_buffer {
+                    buf.wake_readers();
+                }
             }
             if exclusive {
+                // Position from resume_store, which is refreshed every ~200ms from
+                // the real played time. current_position_secs() won't do: it drops
+                // to near zero just after a switch/re-arm. Falls back to the live
+                // position only when nothing is stored yet. Carried on the
+                // ReplayRequest below, applied at the exclusive spawn.
+                let was_playing = self.is_playing;
+                let position = self
+                    .current_track_id
+                    .as_deref()
+                    .and_then(|tid| self.resume_store.get(tid))
+                    .or_else(|| {
+                        let p = self.current_position_secs();
+                        (p > 0.0).then_some(p)
+                    });
+
+                // Non-replayable source (DASH clears CURRENT_TRACK): the teardown
+                // re-arms via ReplayRequest, which needs a track, so no-op the
+                // switch instead of killing playback.
+                let replayable = crate::state::CURRENT_TRACK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+                if self.has_track && !replayable {
+                    crate::vprintln!(
+                        "[AUDIO] Exclusive switch skipped: non-replayable source active"
+                    );
+                    return;
+                }
+
                 self.stop_decode();
                 self.cpal_stream = None;
                 // Drop the shared-stream error flag too: a stale device-loss signal must not
                 // trigger a shared-cpal rebuild while we are in exclusive mode.
                 self.cpal_stream_error = None;
+
+                // Exclusive bypasses the OS mixer, so seed the render's digital
+                // gain with the effective volume (read BEFORE dropping volume_sync).
+                // On a vs.get() failure use last_volume, not self.volume -- the
+                // latter is pinned to 1.0 on the session-sync path and would seed
+                // full scale (saturation). Breaks bit-perfect <100%, an accepted
+                // tradeoff for a live slider.
+                let gain = self
+                    .volume_sync
+                    .as_ref()
+                    .and_then(|vs| vs.get().ok())
+                    .unwrap_or_else(|| f32::from_bits(self.last_volume.load(Relaxed)));
+                self.exclusive_gain.store(f32::to_bits(gain), Relaxed);
+                crate::vprintln!("[VOLUME] exclusive gain seeded: {gain:.3}");
+
                 self.volume_sync = None;
                 self.volume_rx = None;
 
                 if let Some(old) = self.exclusive_handle.take() {
                     old.shutdown();
                 }
-
-                let handle = ExclusiveHandle::spawn(id.clone());
+                let handle = ExclusiveHandle::spawn(id.clone(), self.exclusive_gain.clone());
                 self.is_exclusive_mode = true;
                 self.exclusive_handle = Some(handle);
-
-                if let Some(ref handle) = self.exclusive_handle
-                    && let Some(ref buf) = self.current_buffer
-                {
-                    handle.send(ExclusiveCommand::Stop);
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    self.exclusive_stream_cancel = Some(cancel.clone());
-
-                    let cmd_tx = handle.command_sender();
-                    let reader = buf.clone();
-                    let total_len = buf.total_len();
-                    let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
-                    thread::spawn(move || {
-                        if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
-                            reader,
-                            total_len,
-                            stream_id,
-                            cmd_tx,
-                            cancel.clone(),
-                        ) && !cancel.load(Relaxed)
-                        {
-                            crate::vprintln!("[WASAPI] Device switch stream decode failed: {e}");
-                        }
-                    });
-                    self.has_track = true;
-                    self.is_playing = true;
-                }
-
                 self.current_device_id = Some(id.clone());
+
+                // Re-arm with a FRESH load, not the live buffer: symphonia's probe
+                // races a mid-stream churned buffer and can hang, which means
+                // silence. A fresh load probes cleanly; handle_load now takes the
+                // exclusive branch since is_exclusive_mode is set.
+                self.has_track = false;
+                self.is_playing = false;
+                self.loading_gen = None;
+                self.pending_play = None;
+                self.seeking = false;
+                self.seek_target = None;
+                let track = crate::state::CURRENT_TRACK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
+                if let Some(track) = track {
+                    (self.callback)(PlayerEvent::ReplayRequest {
+                        track,
+                        expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                        position,
+                        play: was_playing,
+                    });
+                }
                 return;
             } else if self.is_exclusive_mode {
+                // Same non-replayable guard: with no CURRENT_TRACK there's nothing
+                // to re-arm, so no-op instead of killing playback.
+                let replayable = crate::state::CURRENT_TRACK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+                if self.has_track && !replayable {
+                    crate::vprintln!("[AUDIO] Shared switch skipped: non-replayable source active");
+                    return;
+                }
+
                 if let Some(old) = self.exclusive_handle.take() {
                     old.shutdown();
                 }
                 self.is_exclusive_mode = false;
+                self.current_device_id = Some(id);
+
+                // The exclusive reader parks the buffer mid-range; re-probing here
+                // would block the player loop. Re-arm a fresh shared load at the
+                // live position instead (current_position_secs() is stale in
+                // exclusive mode).
+                let was_playing = self.is_playing;
+                self.has_track = false;
+                self.is_playing = false;
+                self.loading_gen = None;
+                self.pending_play = None;
+                // A seek killed mid-flight by the exclusive entry (its SeekComplete
+                // never arrives) would otherwise survive into the fresh pipeline and
+                // pin the poll loop at 1ms reporting a ghost position.
+                self.seeking = false;
+                self.seek_target = None;
+
+                // Prefer the live exclusive position (floor-free); fall back to
+                // resume_store only if no TimeUpdate arrived (it floors sub-1s and
+                // can return a stale prior-session offset). Track from CURRENT_TRACK
+                // since a polled Stopped may have nulled current_track_id.
+                let track = crate::state::CURRENT_TRACK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let position = self.last_exclusive_pos.or_else(|| {
+                    track.as_ref().and_then(|t| {
+                        self.resume_store
+                            .get(&crate::player::canonical_track_id(&t.url))
+                    })
+                });
+
                 crate::vprintln!("[AUDIO] Switched back to shared mode");
+                if let Some(track) = track {
+                    (self.callback)(PlayerEvent::ReplayRequest {
+                        track,
+                        expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                        position,
+                        play: was_playing,
+                    });
+                }
+                return;
             }
         }
 
@@ -121,38 +202,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         was_playing: bool,
         seek_to: f64,
     ) {
-        let probe_reader = buffer.clone();
-        let mss = MediaSourceStream::new(Box::new(probe_reader), Default::default());
-        let hint = Hint::new();
-
-        let format = match symphonia::default::get_probe().probe(
-            &hint,
-            mss,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        ) {
-            Ok(f) => f,
-            Err(e) => {
-                crate::vprintln!("[ERROR]  Probe failed on device switch: {e}");
-                return;
-            }
-        };
-
-        let (sr, ch) = match format.tracks().iter().find_map(|t| match &t.codec_params {
-            Some(CodecParameters::Audio(p)) => Some(p),
-            _ => None,
-        }) {
-            Some(p) => (
-                p.sample_rate.unwrap_or(44100),
-                p.channels.as_ref().map(|c| c.count() as u16).unwrap_or(2),
-            ),
-            None => {
-                crate::vprintln!("[ERROR]  No audio track on device switch");
-                return;
-            }
-        };
-
-        drop(format);
+        // Track unchanged on a switch/recovery, so the format is known. Re-probing
+        // here would block the player thread on a mid-stream buffer, which means
+        // silence since the pipeline is already torn down. Reuse the format for the
+        // cpal open; the decode thread re-probes on its own thread.
+        let sr = self.sample_rate;
+        let ch = self.channels;
 
         let Some(device) = self.resolve_output_device() else {
             return;
