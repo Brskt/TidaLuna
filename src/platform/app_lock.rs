@@ -195,7 +195,7 @@ mod windows_impl {
         let focus_name = wide(&format!("{FOCUS_PREFIX}{sid}"));
 
         // SAFETY: lock_name is NUL-terminated UTF-16; returns an owned handle or null.
-        let mutex = unsafe { CreateMutexW(ptr::null(), FALSE as i32, lock_name.as_ptr()) };
+        let mutex = unsafe { CreateMutexW(ptr::null(), FALSE, lock_name.as_ptr()) };
         if mutex.is_null() {
             crate::vprintln!("[LOCK]   CreateMutexW failed: {}", unsafe {
                 GetLastError()
@@ -208,9 +208,7 @@ mod windows_impl {
         if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
             // First instance: own the lock and listen for focus signals.
             // SAFETY: focus_name is NUL-terminated UTF-16; auto-reset, owned handle.
-            let event = unsafe {
-                CreateEventW(ptr::null(), FALSE as i32, FALSE as i32, focus_name.as_ptr())
-            };
+            let event = unsafe { CreateEventW(ptr::null(), FALSE, FALSE, focus_name.as_ptr()) };
             if !event.is_null() {
                 spawn_focus_listener(event);
             }
@@ -222,7 +220,7 @@ mod windows_impl {
         // Another instance is running: signal it to focus, then exit.
         crate::vprintln!("[LOCK]   Another instance is running; focusing it");
         // SAFETY: focus_name is NUL-terminated UTF-16; null if no event exists yet.
-        let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, FALSE as i32, focus_name.as_ptr()) };
+        let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, FALSE, focus_name.as_ptr()) };
         if !event.is_null() {
             // SAFETY: event opened with EVENT_MODIFY_STATE; signalled then closed.
             unsafe {

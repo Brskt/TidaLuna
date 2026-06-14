@@ -59,7 +59,7 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
     };
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: plaintext.len() as u32,
         pbData: plaintext.as_ptr() as *mut u8,
     };
@@ -67,7 +67,7 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
 
     unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             None,
             None,
             None,
@@ -106,7 +106,7 @@ fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
         Err(_) => return Err(StoreError::Backend),
     };
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: encrypted.len() as u32,
         pbData: encrypted.as_ptr() as *mut u8,
     };
@@ -114,7 +114,7 @@ fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
 
     unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             None,
             None,
             None,

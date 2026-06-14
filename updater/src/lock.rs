@@ -113,7 +113,7 @@ pub fn try_acquire() -> Result<Option<InstallLock>> {
     wide.push(0);
 
     unsafe {
-        let h = CreateMutexW(ptr::null(), FALSE as i32, wide.as_ptr());
+        let h = CreateMutexW(ptr::null(), FALSE, wide.as_ptr());
         if h.is_null() {
             bail!("CreateMutexW failed: {}", GetLastError());
         }
