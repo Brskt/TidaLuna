@@ -174,6 +174,18 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             bridge.trigger(mapped, event.v, event.seq);
         } else if (PASSTHROUGH_EVENTS.has(type)) {
             bridge.trigger(type, event.v);
+            if (type === "deviceexclusivemodenotallowed") {
+                // Permanent: the device doesn't support exclusive mode. Neither
+                // the native player nor the SDK reverts the store's mode, so the
+                // toggle stays stuck on (Rust falls back to shared) -- re-select
+                // shared so activeDeviceMode resyncs. NOT for the transient
+                // 'devicelocked' case: flipping it there would never re-arm
+                // exclusive once the device frees.
+                try {
+                    const { store } = require("../plugins/lib/src/redux/store");
+                    store.dispatch({ type: "player/SET_DEVICE_MODE", payload: "shared" });
+                } catch (_) {}
+            }
         }
     }
 };
