@@ -9,7 +9,7 @@ import { grey } from "@mui/material/colors";
 
 export const LunaFeatureFlags = React.memo(() => {
 	const [featureFlags, setFeatureFlags] = React.useState(Tidal.featureFlags);
-	const [hide, setHidden] = React.useState(false);
+	const [hide, setHidden] = React.useState(true);
 
 	const setFlag = React.useCallback((flag: redux.FeatureFlag) => {
 		redux.actions["featureFlags/TOGGLE_USER_OVERRIDE"]({ ...flag, value: !flag.value });
