@@ -24,7 +24,19 @@ function disarmGestureResume() {
 
 function createContext(): AudioContext | null {
     try {
-        const c = new AudioContext();
+        // Route the silent context to a sink with no hardware device so it never
+        // contends with the native exclusive-WASAPI output (exclusive mode
+        // invalidates any shared client on it, which throws an AudioContext error).
+        // The graph still renders, so MediaSession stays active. Fall back if unsupported.
+        let c: AudioContext;
+        try {
+            const opts: AudioContextOptions & { sinkId?: { type: string } } = {
+                sinkId: { type: "none" },
+            };
+            c = new AudioContext(opts);
+        } catch {
+            c = new AudioContext();
+        }
         const osc = c.createOscillator();
         const gain = c.createGain();
         gain.gain.value = 0;
