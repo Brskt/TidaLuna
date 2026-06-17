@@ -161,8 +161,8 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         let _ = state.player.get_audio_devices(request_id);
                         PlayerIpcEffects::default()
                     }
-                    PlayerIpc::DevicesSet { id, exclusive } => {
-                        let _ = state.player.set_audio_device(id, exclusive);
+                    PlayerIpc::DevicesSet { id, mode } => {
+                        let _ = state.player.set_audio_device(id, mode);
                         PlayerIpcEffects::default()
                     }
                 },

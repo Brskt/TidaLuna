@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use super::OutputMode;
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum PlayerIpc {
     Load {
@@ -41,7 +43,7 @@ pub(crate) enum PlayerIpc {
     },
     DevicesSet {
         id: String,
-        exclusive: bool,
+        mode: OutputMode,
     },
 }
 
@@ -219,13 +221,14 @@ pub(crate) fn parse_player_ipc(
             .first()
             .and_then(|v| v.as_str())
             .map(|id| {
-                let exclusive = args
-                    .get(1)
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|mode| mode == "exclusive");
+                let mode = match args.get(1).and_then(|v| v.as_str()) {
+                    Some("exclusive") => OutputMode::Exclusive,
+                    Some("asio") => OutputMode::Asio,
+                    _ => OutputMode::Shared,
+                };
                 PlayerIpc::DevicesSet {
                     id: id.to_string(),
-                    exclusive,
+                    mode,
                 }
             })
             .ok_or(PlayerIpcParseError::InvalidArgs("player.devices.set")),
@@ -235,7 +238,7 @@ pub(crate) fn parse_player_ipc(
 
 #[cfg(test)]
 mod tests {
-    use super::{PlayerIpc, parse_player_ipc};
+    use super::{OutputMode, PlayerIpc, parse_player_ipc};
     use serde_json::json;
 
     #[test]
@@ -322,7 +325,7 @@ mod tests {
             .unwrap(),
             PlayerIpc::DevicesSet {
                 id: "id-1".to_string(),
-                exclusive: true,
+                mode: OutputMode::Exclusive,
             }
         );
     }
