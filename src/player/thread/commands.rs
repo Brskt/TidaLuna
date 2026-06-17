@@ -14,7 +14,9 @@ use std::sync::mpsc;
 use cpal::traits::{HostTrait, StreamTrait};
 
 #[cfg(target_os = "windows")]
-use crate::player::{EXCLUSIVE_STREAM_SEQ, wasapi};
+use crate::player::asio::host::AsioCommand;
+#[cfg(target_os = "windows")]
+use crate::player::{ASIO_STREAM_SEQ, EXCLUSIVE_STREAM_SEQ, wasapi};
 #[cfg(target_os = "windows")]
 use std::sync::Arc;
 #[cfg(target_os = "windows")]
@@ -176,6 +178,85 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         true
     }
 
+    /// Spawn the ASIO decoder for `buffer`, seeking the source to `seek_to`. Mirrors
+    /// `spawn_exclusive_decoder`: a fresh `stream_id` makes the control thread drop
+    /// the prior decoder's stale `PushPcm`; the new `StartStream` is the reset.
+    #[cfg(target_os = "windows")]
+    fn spawn_asio_decoder(
+        &mut self,
+        buffer: crate::player::buffer::RamBuffer,
+        seek_to: Option<f64>,
+        start_paused: bool,
+    ) {
+        let Some((cmd_tx, buffered)) = self
+            .asio_handle
+            .as_ref()
+            .map(|h| (h.command_sender(), h.buffered()))
+        else {
+            return;
+        };
+        if let Some(prev) = self.asio_stream_cancel.take() {
+            prev.store(true, Relaxed);
+            // Wake the retired reader so it quiesces instead of parking on the read
+            // timeout while the new stream contends for the same buffer.
+            if let Some(ref buf) = self.current_buffer {
+                buf.wake_readers();
+            }
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.asio_stream_cancel = Some(cancel.clone());
+
+        let (seek_tx, seek_rx) = mpsc::channel::<f64>();
+        self.asio_seek_tx = Some(seek_tx);
+
+        let reader = buffer.clone().with_reader_cancel(cancel.clone());
+        let stream_id = ASIO_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+        // Record the live stream_id so poll_asio_events can reject stale Stopped/Completed
+        // events from a superseded stream (otherwise they null a newer track -> double-load).
+        self.current_asio_stream_id = Some(stream_id);
+        // A fresh stream has no pending live seek; clear any stale seek-pin from a previous
+        // track so its target can't pin this track's progress bar.
+        self.seeking = false;
+        self.seek_target = None;
+        thread::spawn(move || {
+            if let Err(e) = crate::player::asio::host::stream_reader_to_asio(
+                reader,
+                stream_id,
+                cmd_tx,
+                cancel.clone(),
+                seek_to,
+                start_paused,
+                seek_rx,
+                buffered,
+            ) && !cancel.load(Relaxed)
+            {
+                crate::vprintln!("[ASIO] Stream decode failed: {e}");
+            }
+        });
+
+        self.current_buffer = Some(buffer);
+        self.has_track = true;
+        self.is_playing = !start_paused;
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn start_asio_playback(
+        &mut self,
+        buffer: crate::player::buffer::RamBuffer,
+        start_paused: bool,
+    ) -> bool {
+        if !self.is_asio_mode {
+            return false;
+        }
+        // A queued user seek wins over the load-time resume position.
+        let seek_to = self
+            .user_seek_override
+            .take()
+            .or_else(|| self.pending_resume_seek.take());
+        self.spawn_asio_decoder(buffer, seek_to, start_paused);
+        true
+    }
+
     pub(super) fn resolve_output_device(&self) -> Option<cpal::Device> {
         if let Some(ref id) = self.current_device_id {
             if let Some(d) = super::output::find_output_device(id) {
@@ -241,9 +322,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 cancel.store(true, Relaxed);
             }
             self.exclusive_seek_tx = None;
-            // A new track invalidates any retained exclusive position and any
+            if let Some(cancel) = self.asio_stream_cancel.take() {
+                cancel.store(true, Relaxed);
+            }
+            self.asio_seek_tx = None;
+            // A new track invalidates any retained exclusive/asio position and any
             // user seek that was queued before the prior stream was ready.
             self.last_exclusive_pos = None;
+            self.last_asio_pos = None;
             self.user_seek_override = None;
         }
         if let Some(ref old_buf) = self.current_buffer {
@@ -253,6 +339,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         let teardown_ms = handle_start.elapsed().as_secs_f64() * 1000.0;
         let decode_start = std::time::Instant::now();
+
+        // ASIO path (mutually exclusive with WASAPI-exclusive). Same start_paused
+        // contract; start_asio_playback consumes the resume position.
+        #[cfg(target_os = "windows")]
+        if self.start_asio_playback(buffer.clone(), !auto_play) {
+            self.pending_play = None;
+            crate::vprintln!(
+                "[ASIO] Progressive decode started ({:.0}ms setup)",
+                decode_start.elapsed().as_secs_f64() * 1000.0
+            );
+            return true;
+        }
 
         // Exclusive path. start_paused = !auto_play (a paused restore enters
         // paused); start_exclusive_playback consumes the resume position.
@@ -514,6 +612,32 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         #[cfg(target_os = "windows")]
         {
+            if self.is_asio_mode {
+                if let Some(seek_time) = self
+                    .user_seek_override
+                    .take()
+                    .or_else(|| self.pending_resume_seek.take())
+                {
+                    self.last_asio_pos = Some(seek_time.max(0.0));
+                    if let Some(ref tx) = self.asio_seek_tx {
+                        let _ = tx.send(seek_time);
+                    } else if let Some(buffer) = self.current_buffer.clone() {
+                        self.spawn_asio_decoder(buffer, Some(seek_time), false);
+                    }
+                    (self.callback)(PlayerEvent::TimeUpdate(seek_time, self.current_seq));
+                } else if let Some(ref handle) = self.asio_handle {
+                    handle.send(AsioCommand::Play);
+                }
+                self.is_playing = true;
+                crate::state::GOVERNOR
+                    .buffer_progress()
+                    .set_playback_active(true);
+                return;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
             if self.is_exclusive_mode {
                 if let Some(seek_time) = self
                     .user_seek_override
@@ -600,6 +724,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.pending_play = None;
         #[cfg(target_os = "windows")]
         {
+            if self.is_asio_mode {
+                if let Some(ref handle) = self.asio_handle {
+                    handle.send(AsioCommand::Pause);
+                }
+                self.is_playing = false;
+                crate::state::GOVERNOR
+                    .buffer_progress()
+                    .set_playback_active(false);
+                self.resume_store.flush_if_due(true);
+                return;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
             if self.is_exclusive_mode {
                 if let Some(ref handle) = self.exclusive_handle {
                     handle.send(ExclusiveCommand::Pause);
@@ -645,6 +784,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             self.exclusive_seek_tx = None;
             self.last_exclusive_pos = None;
+            if let Some(cancel) = self.asio_stream_cancel.take() {
+                cancel.store(true, Relaxed);
+            }
+            self.asio_seek_tx = None;
+            self.last_asio_pos = None;
         }
 
         if let Some(ref old_buf) = self.current_buffer {
@@ -652,6 +796,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
         self.stop_decode();
         self.current_buffer = None;
+
+        #[cfg(target_os = "windows")]
+        {
+            if self.is_asio_mode {
+                if let Some(ref handle) = self.asio_handle {
+                    handle.send(AsioCommand::Stop);
+                }
+                (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
+                (self.callback)(PlayerEvent::StateChange(
+                    PlaybackState::Stopped,
+                    self.current_seq,
+                ));
+                self.is_playing = false;
+                self.has_track = false;
+                self.pending_play = None;
+                self.loading_gen = None;
+                self.current_duration = 0.0;
+                self.current_track_id = None;
+                self.pending_resume_seek = None;
+                self.user_seek_override = None;
+                self.pre_seek_pos = None;
+                self.resume_store.flush_if_due(true);
+                return;
+            }
+        }
 
         #[cfg(target_os = "windows")]
         {
@@ -713,6 +882,32 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.resume_store.flush_if_due(false);
         }
         self.pending_resume_seek = None;
+
+        #[cfg(target_os = "windows")]
+        {
+            if self.is_asio_mode {
+                if self.has_track {
+                    self.last_asio_pos = Some(latest_time.max(0.0));
+                    // Pin the UI to the seek target until the decoder's ResetForSeek rebases
+                    // the position (the control thread reports stale until then). Cleared in
+                    // poll_asio_events on convergence.
+                    self.seeking = true;
+                    self.seek_target = Some(latest_time.max(0.0));
+                    // Seek the live decoder in place: it format.seek()s and signals
+                    // the control thread to flush the ring (ResetForSeek).
+                    if let Some(ref tx) = self.asio_seek_tx {
+                        let _ = tx.send(latest_time);
+                    }
+                    (self.callback)(PlayerEvent::TimeUpdate(
+                        latest_time.max(0.0),
+                        self.current_seq,
+                    ));
+                } else {
+                    self.user_seek_override = Some(latest_time);
+                }
+                return;
+            }
+        }
 
         #[cfg(target_os = "windows")]
         {
@@ -786,9 +981,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // exclusive digital gain when volume_sync.get() later fails on switch.
         #[cfg(target_os = "windows")]
         self.last_volume.store(f32::to_bits(vol_f32), Relaxed);
-        // Exclusive bypasses the OS session mixer; drive the render's digital gain.
+        // Exclusive and ASIO bypass the OS session mixer; drive the shared digital
+        // gain (the ASIO control thread reads the same cell as the WASAPI render).
         #[cfg(target_os = "windows")]
-        if self.is_exclusive_mode {
+        if self.is_exclusive_mode || self.is_asio_mode {
             self.exclusive_gain.store(f32::to_bits(vol_f32), Relaxed);
         }
         #[cfg(target_os = "windows")]

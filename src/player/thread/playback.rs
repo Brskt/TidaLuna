@@ -4,6 +4,8 @@ use crate::player::{DeviceErrorKind, PlaybackState, PlayerEvent, format_ms};
 use std::sync::atomic::Ordering::Relaxed;
 
 #[cfg(target_os = "windows")]
+use crate::player::asio::host::AsioEvent;
+#[cfg(target_os = "windows")]
 use crate::player::wasapi::ExclusiveEvent;
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
@@ -98,15 +100,183 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(super) fn poll_asio_events(&mut self) {
+        if !self.is_asio_mode {
+            return;
+        }
+        if let Some(ref handle) = self.asio_handle {
+            for ev in handle.poll_events() {
+                match ev {
+                    AsioEvent::TimeUpdate(t) => {
+                        // While a live seek is pending the control thread still reports the
+                        // stale position (not rebased until ResetForSeek lands); pin the UI to
+                        // the target until `t` converges so the bar doesn't flicker back.
+                        let report = match self.seek_target {
+                            Some(target) if self.seeking => {
+                                if (t - target).abs() <= 1.0 {
+                                    self.seeking = false;
+                                    self.seek_target = None;
+                                    t
+                                } else {
+                                    target
+                                }
+                            }
+                            _ => t,
+                        };
+                        if let Some(track_id) = self.current_track_id.as_ref() {
+                            self.resume_store.set(track_id, report);
+                            self.resume_store.flush_if_due(false);
+                        }
+                        // Floor-free live position for an asio->shared re-arm.
+                        self.last_asio_pos = Some(report);
+                        (self.callback)(PlayerEvent::TimeUpdate(report, self.current_seq));
+                    }
+                    AsioEvent::StateChange(s) => {
+                        (self.callback)(PlayerEvent::StateChange(s, self.current_seq));
+                    }
+                    AsioEvent::Completed(sid) => {
+                        // Ignore a completion from a superseded stream (a newer track
+                        // already loaded) -- only the current stream's completion clears
+                        // the track; a stale one would force a spurious re-arm/double-load.
+                        if self.current_asio_stream_id == Some(sid) {
+                            if let Some(track_id) = self.current_track_id.as_ref() {
+                                self.resume_store.clear(track_id);
+                                self.resume_store.flush_if_due(true);
+                            }
+                            self.has_track = false;
+                            self.is_playing = false;
+                            self.current_track_id = None;
+                            self.last_asio_pos = None;
+                            // Decoder exited (EndStream): clear the dead sender so a
+                            // later seek/play respawns a decoder.
+                            self.asio_seek_tx = None;
+                            crate::state::GOVERNOR
+                                .buffer_progress()
+                                .set_playback_active(false);
+                            (self.callback)(PlayerEvent::StateChange(
+                                PlaybackState::Completed,
+                                self.current_seq,
+                            ));
+                        }
+                    }
+                    AsioEvent::Duration(d) => {
+                        self.current_duration = d;
+                        (self.callback)(PlayerEvent::Duration(d, self.current_seq));
+                    }
+                    AsioEvent::DriverNotFound => {
+                        crate::vprintln!(
+                            "[ASIO] No ASIO driver found, falling back to shared mode"
+                        );
+                        if let Some(cancel) = self.asio_stream_cancel.take() {
+                            cancel.store(true, Relaxed);
+                        }
+                        self.is_asio_mode = false;
+                        (self.callback)(PlayerEvent::DeviceError(
+                            DeviceErrorKind::AsioDriverNotFound,
+                        ));
+                        self.rearm_shared_after_asio_failure();
+                    }
+                    AsioEvent::FormatUnsupported => {
+                        crate::vprintln!(
+                            "[ASIO] Driver rejects the track format, falling back to shared"
+                        );
+                        if let Some(cancel) = self.asio_stream_cancel.take() {
+                            cancel.store(true, Relaxed);
+                        }
+                        self.is_asio_mode = false;
+                        (self.callback)(PlayerEvent::DeviceError(
+                            DeviceErrorKind::AsioFormatUnsupported,
+                        ));
+                        self.rearm_shared_after_asio_failure();
+                    }
+                    AsioEvent::InitFailed(e) => {
+                        crate::vprintln!("[ASIO] Init failed, falling back to shared mode: {e}");
+                        if let Some(cancel) = self.asio_stream_cancel.take() {
+                            cancel.store(true, Relaxed);
+                        }
+                        self.is_asio_mode = false;
+                        (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioInitFailed));
+                        self.rearm_shared_after_asio_failure();
+                    }
+                    AsioEvent::Stopped(sid) => {
+                        // Ignore a Stopped from a superseded stream: the outgoing track's
+                        // stop must not null a newer track's has_track (which forced a
+                        // spurious re-arm/double-load when play arrived a loop-tick later).
+                        if self.current_asio_stream_id == Some(sid) {
+                            self.has_track = false;
+                            self.is_playing = false;
+                            self.current_track_id = None;
+                            self.last_asio_pos = None;
+                            crate::state::GOVERNOR
+                                .buffer_progress()
+                                .set_playback_active(false);
+                            self.resume_store.flush_if_due(true);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !self.is_asio_mode {
+            self.asio_handle = None;
+        }
+    }
+
+    /// ASIO failed: re-arm a fresh shared load at the live position so the current track
+    /// recovers immediately (the custom `deviceasio*` events aren't TIDAL-native, so the
+    /// frontend won't re-arm). Mirrors the device.rs asio->shared switch. No-op without a track.
+    #[cfg(target_os = "windows")]
+    fn rearm_shared_after_asio_failure(&mut self) {
+        let was_playing = self.is_playing;
+        self.has_track = false;
+        self.is_playing = false;
+        self.loading_gen = None;
+        self.pending_play = None;
+        self.seeking = false;
+        self.seek_target = None;
+        self.asio_seek_tx = None;
+
+        // Prefer the live ASIO position (floor-free); fall back to resume_store.
+        let track = crate::state::CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let position = self.last_asio_pos.or_else(|| {
+            track.as_ref().and_then(|t| {
+                self.resume_store
+                    .get(&crate::player::canonical_track_id(&t.url))
+            })
+        });
+        self.last_asio_pos = None;
+        if let Some(track) = track {
+            (self.callback)(PlayerEvent::ReplayRequest {
+                track,
+                expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                position,
+                play: was_playing,
+            });
+        } else {
+            // Non-replayable source (DASH): no track to re-arm, so playback stops (as in the
+            // device.rs switch paths). Logged so the silent stop is diagnosable.
+            crate::vprintln!(
+                "[ASIO] fallback: non-replayable source, playback stopped (cannot re-arm shared)"
+            );
+        }
+    }
+
     pub(super) fn poll_playback(&mut self) {
         #[cfg(target_os = "windows")]
-        let should_poll = !self.is_exclusive_mode;
+        let should_poll = !self.is_exclusive_mode && !self.is_asio_mode;
         #[cfg(not(target_os = "windows"))]
         let should_poll = true;
 
-        // Always update governor buffer progress when a track is loaded
-        if should_poll
-            && self.has_track
+        // Update governor buffer progress whenever a track is loaded, in EVERY output mode:
+        // the decode thread reads the RamBuffer in shared, exclusive, and ASIO alike, so the
+        // governor's read_pos must track it regardless of `should_poll`. Gating it off froze
+        // read_pos, so the governor saw an ever-growing `ahead`, paused the download, and never
+        // resumed -- starving the decoder into silence.
+        if self.has_track
             && let Some(ref buf) = self.current_buffer
         {
             let bp = crate::state::GOVERNOR.buffer_progress();

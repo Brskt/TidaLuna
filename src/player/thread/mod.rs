@@ -15,6 +15,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
+use super::asio::host::AsioHandle;
+#[cfg(target_os = "windows")]
 use super::wasapi;
 #[cfg(target_os = "windows")]
 use wasapi::ExclusiveHandle;
@@ -105,6 +107,24 @@ pub(super) struct PlayerThread<F> {
     // cross-session persistence would lose it or return a stale offset.
     #[cfg(target_os = "windows")]
     last_exclusive_pos: Option<f64>,
+    // ASIO output (parallel to the exclusive fields; mutually exclusive with it).
+    #[cfg(target_os = "windows")]
+    asio_handle: Option<AsioHandle>,
+    #[cfg(target_os = "windows")]
+    is_asio_mode: bool,
+    #[cfg(target_os = "windows")]
+    asio_stream_cancel: Option<Arc<AtomicBool>>,
+    // Sender to the live ASIO decoder for in-place seeks (no respawn).
+    #[cfg(target_os = "windows")]
+    asio_seek_tx: Option<mpsc::Sender<f64>>,
+    // The live ASIO decoder's stream_id; gates stale Stopped/Completed events (from a
+    // superseded stream) so they can't null a newer track's has_track.
+    #[cfg(target_os = "windows")]
+    current_asio_stream_id: Option<u32>,
+    // Live ASIO position (floor-free, this session): restores the position on an
+    // asio->shared switch (same rationale as last_exclusive_pos).
+    #[cfg(target_os = "windows")]
+    last_asio_pos: Option<f64>,
     // Volume sync (Windows session volume)
     #[cfg(target_os = "windows")]
     _com_guard: Option<crate::platform::volume_sync::ComGuard>,
@@ -192,6 +212,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             #[cfg(target_os = "windows")]
             last_exclusive_pos: None,
             #[cfg(target_os = "windows")]
+            asio_handle: None,
+            #[cfg(target_os = "windows")]
+            is_asio_mode: false,
+            #[cfg(target_os = "windows")]
+            asio_stream_cancel: None,
+            #[cfg(target_os = "windows")]
+            asio_seek_tx: None,
+            #[cfg(target_os = "windows")]
+            current_asio_stream_id: None,
+            #[cfg(target_os = "windows")]
+            last_asio_pos: None,
+            #[cfg(target_os = "windows")]
             _com_guard: com_guard,
             #[cfg(target_os = "windows")]
             volume_sync: None,
@@ -251,6 +283,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Poll exclusive WASAPI events
             #[cfg(target_os = "windows")]
             self.poll_exclusive_events();
+
+            // Poll ASIO events
+            #[cfg(target_os = "windows")]
+            self.poll_asio_events();
 
             #[cfg(target_os = "windows")]
             if let Some(ref rx) = self.volume_rx {
@@ -313,8 +349,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::Seek(time) => self.handle_seek(time),
             PlayerCommand::SetVolume(vol) => self.handle_set_volume(vol),
             PlayerCommand::GetAudioDevices(req_id) => self.handle_get_audio_devices(req_id),
-            PlayerCommand::SetAudioDevice { id, exclusive } => {
-                self.handle_set_audio_device(id, exclusive);
+            PlayerCommand::SetAudioDevice { id, mode } => {
+                self.handle_set_audio_device(id, mode);
             }
             PlayerCommand::EmitMediaError { error, code } => {
                 (self.callback)(PlayerEvent::MediaError { error, code });
