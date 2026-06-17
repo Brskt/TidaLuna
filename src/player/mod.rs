@@ -16,6 +16,7 @@ use buffer::RamBuffer;
 use futures_util::stream::{self, StreamExt};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -169,6 +170,8 @@ struct LoadContext {
     auto_play: bool,
     cmd_tx: mpsc::Sender<PlayerCommand>,
     format: String,
+    /// Cancelled when a newer load supersedes this one or on stop.
+    cancel_token: CancellationToken,
 }
 
 impl LoadContext {
@@ -253,6 +256,8 @@ pub struct Player {
     cmd_tx: mpsc::Sender<PlayerCommand>,
     rt_handle: tokio::runtime::Handle,
     load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Current download's cancellation token; cancelled on a new load or stop.
+    download_cancel: std::sync::Mutex<Option<CancellationToken>>,
 }
 
 pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
@@ -502,7 +507,13 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
 
     let (buffer, writer) = RamBuffer::new(total_len);
 
-    preload::start_download(resp, url.to_string(), key.to_string(), writer);
+    preload::start_download(
+        resp,
+        url.to_string(),
+        key.to_string(),
+        writer,
+        ctx.cancel_token.clone(),
+    );
 
     // Pre-buffer 64KB before handing to decoder
     const PRE_BUFFER_TARGET: u64 = 64 * 1024;
@@ -563,6 +574,7 @@ impl Player {
             cmd_tx,
             rt_handle,
             load_handle: std::sync::Mutex::new(None),
+            download_cancel: std::sync::Mutex::new(None),
         })
     }
 
@@ -591,6 +603,18 @@ impl Player {
             prev.abort();
         }
 
+        // Cancel the previous track's download so a skip doesn't leak it streaming a
+        // full file into RAM (start_download races this token).
+        let cancel_token = CancellationToken::new();
+        if let Some(prev) = self
+            .download_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(cancel_token.clone())
+        {
+            prev.cancel();
+        }
+
         // Reset governor buffer progress so the new download isn't throttled
         // by stale counters from the previous track.
         GOVERNOR.reset_buffer_progress();
@@ -612,6 +636,7 @@ impl Player {
             auto_play,
             cmd_tx: self.cmd_tx.clone(),
             format: format.clone(),
+            cancel_token,
         };
 
         let handle = self.rt_handle.spawn(async move {
@@ -876,6 +901,14 @@ impl Player {
             .take()
         {
             prev.abort();
+        }
+        if let Some(token) = self
+            .download_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            token.cancel();
         }
         self.send_cmd(PlayerCommand::Stop(event_seq))
     }

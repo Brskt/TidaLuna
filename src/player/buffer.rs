@@ -451,3 +451,18 @@ impl RamBufferWriter {
         inner.restart_target.is_some()
     }
 }
+
+impl Drop for RamBufferWriter {
+    fn drop(&mut self) {
+        // If the download ended without finishing (cancelled mid-stream, an error
+        // path that returned, or a panic), retire the buffer so a reader blocked at
+        // the frontier bails instead of hanging. No-op once finished.
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !inner.finished {
+            inner.cancelled = true;
+            self.shared.cancelled_atomic.store(true, Relaxed);
+            self.shared.cvar.notify_all();
+            self.shared.async_notify.notify_one();
+        }
+    }
+}

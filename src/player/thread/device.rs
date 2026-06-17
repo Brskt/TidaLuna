@@ -37,11 +37,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.current_device_id = Some(id);
                 return;
             }
-            // Same idempotent re-assert for exclusive WASAPI: a redundant same-device
-            // set tears down + respawns the exclusive handle and forces a reload.
+            // Exclusive omits has_track (unlike shared): a track-change set arrives
+            // after stop cleared it and re-arming would double-load. is_exclusive_mode
+            // implies a live handle, so a dead pipeline still re-arms.
             if mode == OutputMode::Exclusive
                 && self.is_exclusive_mode
-                && self.has_track
                 && self.current_device_id.as_deref() == Some(id.as_str())
             {
                 return;
