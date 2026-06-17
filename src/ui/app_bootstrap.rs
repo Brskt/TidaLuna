@@ -324,6 +324,8 @@ wrap_browser_process_handler! {
 
             let volume_sync = crate::state::boot_settings().volume_sync;
 
+            let asio = crate::state::boot_settings().asio;
+
             // TIDAL's web frontend gates its native titlebar component on a
             // Windows platform token in navigator.userAgent. On Linux we keep the
             // real Linux UA for network traffic (CefSettings.user_agent) but
@@ -346,6 +348,7 @@ window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
 window.__TIDALUNAR_AUTO_CHECK__ = {auto_check};
 window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
 window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
+window.__TIDALUNAR_ASIO__ = {asio};
 window.__TIDALUNAR_LOG_LEVEL__ = {log_level};
 window.__TIDALUNAR_CONSOLE__ = {console};
 window.__TIDALUNAR_PERF__ = {perf};

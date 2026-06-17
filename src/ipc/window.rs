@@ -183,6 +183,16 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             });
             crate::vprintln!("[PLAYER] Volume sync set to {enabled}");
         }
+        #[cfg(target_os = "windows")]
+        "settings.asio" => {
+            // Persist the ASIO toggle (the mode switch itself rides on `player.devices.set`;
+            // this only saves the preference, re-seeded into the frontend on next boot).
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
+            crate::state::db().call_settings(move |conn| {
+                crate::settings::save_asio(conn, enabled);
+            });
+            crate::vprintln!("[PLAYER] ASIO mode persisted: {enabled}");
+        }
         "updater.apply" => {
             crate::updater::handle_updater_apply(msg);
         }

@@ -165,6 +165,16 @@ pub(crate) fn save_volume_sync(conn: &mut Connection, enabled: bool) {
     set(conn, "player.volume_sync", &enabled.to_string());
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn load_asio(conn: &mut Connection) -> bool {
+    get_bool(conn, "player.asio", false)
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn save_asio(conn: &mut Connection, enabled: bool) {
+    set(conn, "player.asio", &enabled.to_string());
+}
+
 pub(crate) fn load_close_to_tray(conn: &mut Connection) -> bool {
     get_bool(conn, "window.close_to_tray", false)
 }
@@ -217,6 +227,7 @@ pub(crate) struct BootSettings {
     pub(crate) auto_check: bool,
     pub(crate) receiver_always_on: bool,
     pub(crate) volume_sync: bool,
+    pub(crate) asio: bool,
     pub(crate) window_maximized: bool,
     pub(crate) log_level: u8,
     pub(crate) console: bool,
@@ -232,6 +243,11 @@ pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
         volume_sync: load_volume_sync(conn),
         #[cfg(not(target_os = "windows"))]
         volume_sync: false,
+        // asio is a Windows-only output backend; non-Windows keeps it off.
+        #[cfg(target_os = "windows")]
+        asio: load_asio(conn),
+        #[cfg(not(target_os = "windows"))]
+        asio: false,
         window_maximized: load_window_state(conn).maximized,
         log_level: load_log_level(conn),
         console: load_console(conn),
