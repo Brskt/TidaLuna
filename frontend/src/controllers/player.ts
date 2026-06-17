@@ -169,10 +169,17 @@ export const createNativePlayerComponent = () => {
             },
             releaseDevice: () => {},
             selectDevice: (device: AudioDevice, mode: "shared" | "exclusive") => {
-                sendIpc("player.devices.set", device.id, mode);
+                // Keep ASIO sticky while the toggle is on: TIDAL re-asserts the device on
+                // track/queue changes, which would otherwise drop playback back to shared.
+                const effective = (window as any).__TIDALUNAR_ASIO__ === true ? "asio" : mode;
+                sendIpc("player.devices.set", device.id, effective);
             },
             selectSystemDevice: () => {
-                sendIpc("player.devices.set", 'auto');
+                if ((window as any).__TIDALUNAR_ASIO__ === true) {
+                    sendIpc("player.devices.set", "auto", "asio");
+                } else {
+                    sendIpc("player.devices.set", "auto");
+                }
             }
         };
         activePlayer = player;

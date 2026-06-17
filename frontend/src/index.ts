@@ -71,6 +71,8 @@ const PASSTHROUGH_EVENTS = new Set([
     "deviceformatnotsupported", "devicelocked", "devicenotfound",
     "deviceunknownerror", "mediaformat", "version", "mediaerror",
     "mediamaxconnectionsreached",
+    "deviceasiodrivernotfound", "deviceasioformatunsupported",
+    "deviceasioinitfailed",
 ]);
 let _lastTimeDispatch = 0;
 let _forceTimeDispatch = false;
@@ -185,6 +187,16 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                     const { store } = require("../plugins/lib/src/redux/store");
                     store.dispatch({ type: "player/SET_DEVICE_MODE", payload: "shared" });
                 } catch (_) {}
+            }
+            if (
+                type === "deviceasiodrivernotfound" ||
+                type === "deviceasioformatunsupported" ||
+                type === "deviceasioinitfailed"
+            ) {
+                // ASIO failed; Rust fell back to shared output. Clear the flag AND persist it
+                // so a restart doesn't re-seed ASIO and re-enter the failing path.
+                (window as any).__TIDALUNAR_ASIO__ = false;
+                sendIpc("settings.asio", false);
             }
         }
     }
