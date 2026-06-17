@@ -247,6 +247,12 @@ pub fn start_download(
 
                 let range_header = format!("bytes={target}-");
                 crate::vprintln2!("[STREAM] Range restart at byte {target}");
+                crate::vprintln3!(
+                    "[STREAM] Range restart #{} at byte {target} | http_reqs={} elapsed={}",
+                    range_restarts + 1,
+                    http_requests,
+                    format_ms(download_start.elapsed().as_secs_f64() * 1000.0),
+                );
 
                 let send_fut = crate::state::HTTP_CLIENT_PLAYBACK
                     .get(&url)
@@ -265,6 +271,9 @@ pub fn start_download(
                         match result {
                             Ok(r) => r,
                             Err(e) => {
+                                crate::vprintln3!(
+                                    "[STREAM] DOWNLOAD DIED: range request failed at byte {target} | restarts={range_restarts}: {e}"
+                                );
                                 writer.finish_with_error(format!("range request failed: {e}"));
                                 return;
                             }
@@ -299,6 +308,9 @@ pub fn start_download(
                     writer.reset_for_range(0);
                     (range_resp, 0u64)
                 } else {
+                    crate::vprintln3!(
+                        "[STREAM] DOWNLOAD DIED: range status {status} at byte {target} | restarts={range_restarts}"
+                    );
                     writer.finish_with_error(format!("range request status: {status}"));
                     return;
                 }
@@ -405,6 +417,9 @@ pub fn start_download(
                             }
                             reconnect_attempts += 1;
                             if reconnect_attempts > MAX_RECONNECTS {
+                                crate::vprintln3!(
+                                    "[STREAM] DOWNLOAD DIED: {MAX_RECONNECTS} reconnects exhausted at byte {offset} | restarts={range_restarts}"
+                                );
                                 writer.finish_with_error(format!(
                                     "network error after {MAX_RECONNECTS} reconnects: {e}"
                                 ));
@@ -456,6 +471,10 @@ pub fn start_download(
                                     return;
                                 }
                                 Ok(r) => {
+                                    crate::vprintln3!(
+                                        "[STREAM] DOWNLOAD DIED: reconnect status {} at byte {offset}",
+                                        r.status()
+                                    );
                                     writer.finish_with_error(format!(
                                         "reconnect status: {}",
                                         r.status()

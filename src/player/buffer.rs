@@ -257,6 +257,18 @@ impl Read for RamBuffer {
                     let is_forward = self.cursor > buf_end;
                     let restart_pos = self.cursor;
 
+                    // Fires on every read-miss -> reveals the Range-restart storm cadence.
+                    crate::vprintln3!(
+                        "[BUFFER] read-miss {} | cursor={} base={} buf_end={} data={}KB target={:?} new={}",
+                        if is_forward { "forward" } else { "backward" },
+                        self.cursor,
+                        buf_start,
+                        buf_end,
+                        inner.data.len() / 1024,
+                        inner.restart_target,
+                        inner.restart_target != Some(restart_pos),
+                    );
+
                     if inner.restart_target != Some(restart_pos) {
                         crate::vprintln!(
                             "[BUFFER] Restart: {} | cursor={} base={} buf_end={} gap={}KB",
@@ -280,12 +292,23 @@ impl Read for RamBuffer {
 
             // Wait for data or state change (5s timeout to avoid deadlock)
             self.shared.stalled.store(true, Relaxed);
-            let (guard, _) = self
+            let cursor_at_park = self.cursor;
+            let (guard, wait_res) = self
                 .shared
                 .cvar
                 .wait_timeout(inner, Duration::from_secs(5))
                 .unwrap_or_else(|e| e.into_inner());
             inner = guard;
+            if wait_res.timed_out() {
+                // Waited the full timeout with no progress: genuine starvation.
+                crate::vprintln3!(
+                    "[BUFFER] STARVED: 5s timeout at cursor={cursor_at_park} | base={} buf_end={} finished={} target={:?}",
+                    inner.base_offset,
+                    inner.base_offset + inner.data.len() as u64,
+                    inner.finished,
+                    inner.restart_target,
+                );
+            }
         }
     }
 }
@@ -318,8 +341,18 @@ impl Seek for RamBuffer {
             ));
         }
 
+        let old_cursor = self.cursor;
         self.cursor = new_pos;
         self.shared.read_cursor.store(new_pos, Relaxed);
+        {
+            let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            crate::vprintln3!(
+                "[BUFFER] Seek: cursor {old_cursor} -> {new_pos} | base={} buf_end={} total={}",
+                inner.base_offset,
+                inner.base_offset + inner.data.len() as u64,
+                total_len
+            );
+        }
         Ok(new_pos)
     }
 }
@@ -330,8 +363,10 @@ impl MediaSource for RamBuffer {
     }
 
     fn byte_len(&self) -> Option<u64> {
-        let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        Some(inner.total_len)
+        // None skips symphonia's `probe_trailing` (gated on `byte_len().is_some()`), whose
+        // EOF-then-0 seeks would discard the streaming pre-buffer and trigger wasted Range
+        // restarts. FLAC duration comes from STREAMINFO and seek(End) uses `total_len`.
+        None
     }
 }
 
@@ -383,6 +418,12 @@ impl RamBufferWriter {
     /// Reset the buffer for a new Range request starting at `new_offset`.
     pub fn reset_for_range(&self, new_offset: u64) {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        crate::vprintln3!(
+            "[BUFFER] reset_for_range: base {} -> {} | discarding {}KB",
+            inner.base_offset,
+            new_offset,
+            inner.data.len() / 1024,
+        );
         inner.data.clear();
         inner.base_offset = new_offset;
         inner.finished = false;
