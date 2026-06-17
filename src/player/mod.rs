@@ -1,3 +1,4 @@
+pub(crate) mod asio;
 pub(crate) mod buffer;
 pub(crate) mod cache;
 pub(crate) mod dash;
@@ -20,6 +21,8 @@ pub(crate) static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_os = "windows")]
 static EXCLUSIVE_STREAM_SEQ: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_os = "windows")]
+static ASIO_STREAM_SEQ: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct AudioDevice {
@@ -65,6 +68,9 @@ pub enum DeviceErrorKind {
     Locked,
     Disconnected,
     Unknown,
+    AsioDriverNotFound,
+    AsioFormatUnsupported,
+    AsioInitFailed,
 }
 
 impl DeviceErrorKind {
@@ -76,8 +82,26 @@ impl DeviceErrorKind {
             Self::Locked => "devicelocked",
             Self::Disconnected => "devicedisconnected",
             Self::Unknown => "deviceunknownerror",
+            Self::AsioDriverNotFound => "deviceasiodrivernotfound",
+            Self::AsioFormatUnsupported => "deviceasioformatunsupported",
+            Self::AsioInitFailed => "deviceasioinitfailed",
         }
     }
+}
+
+/// The audio output backend a `player.devices.set` selects. The three modes are
+/// mutually exclusive (a radio choice), so a single enum replaces the former
+/// `(exclusive, asio)` boolean pair, which could encode the invalid both-true
+/// state. `Exclusive`/`Asio` are Windows-only at runtime (the frontend toggles
+/// gating them are win32-only); other platforms only ever see `Shared`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    /// Shared output through the OS mixer (cpal).
+    Shared,
+    /// Exclusive WASAPI: bypasses the OS mixer.
+    Exclusive,
+    /// ASIO driver output: bypasses the OS mixer.
+    Asio,
 }
 
 #[derive(Debug, Clone)]
@@ -214,7 +238,7 @@ enum PlayerCommand {
     GetAudioDevices(Option<String>),
     SetAudioDevice {
         id: String,
-        exclusive: bool,
+        mode: OutputMode,
     },
     EmitMediaError {
         error: String,
@@ -873,10 +897,10 @@ impl Player {
         self.send_cmd(PlayerCommand::GetAudioDevices(req_id))
     }
 
-    pub fn set_audio_device(&self, device_id: String, exclusive: bool) -> anyhow::Result<()> {
+    pub fn set_audio_device(&self, device_id: String, mode: OutputMode) -> anyhow::Result<()> {
         self.send_cmd(PlayerCommand::SetAudioDevice {
             id: device_id,
-            exclusive,
+            mode,
         })
     }
 }

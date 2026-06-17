@@ -293,6 +293,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to initialize player"),
     );
 
+    #[cfg(target_os = "windows")]
+    crate::player::asio::driver::log_asio_drivers();
+
     let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
         player,
         pending_time_update: None,
