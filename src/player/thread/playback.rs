@@ -15,12 +15,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         frames as f64 / self.sample_rate.max(1) as f64
     }
 
+    // Decoder read-ahead position; only the Windows bypass-mode switch fallbacks use it.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(super) fn current_position_secs(&self) -> f64 {
         self.samples_to_secs(self.decoded_samples.load(Relaxed))
     }
 
     pub(super) fn played_position_secs(&self) -> f64 {
         self.samples_to_secs(self.played_samples.load(Relaxed))
+    }
+
+    /// Position to report or rebuild at: the pending seek target while a seek is in
+    /// flight (played_samples isn't rebased until SeekComplete), else the played position.
+    pub(super) fn effective_position(&self) -> f64 {
+        self.seek_target
+            .unwrap_or_else(|| self.played_position_secs())
     }
 
     #[cfg(target_os = "windows")]

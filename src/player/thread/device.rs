@@ -13,7 +13,21 @@ use crate::player::wasapi::ExclusiveHandle;
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_set_audio_device(&mut self, id: String, mode: OutputMode) {
-        let _ = &mode;
+        // TIDAL re-emits player.devices.set (same device) right before play; rebuilding
+        // here stops the decoder and reopens cpal, so the unpause reloads and reseeks.
+        // No-op only while the shared stream is live (a dead one must still retry).
+        #[cfg(target_os = "windows")]
+        let shared_reassert =
+            mode == OutputMode::Shared && !self.is_asio_mode && !self.is_exclusive_mode;
+        #[cfg(not(target_os = "windows"))]
+        let shared_reassert = mode == OutputMode::Shared;
+        if shared_reassert
+            && self.has_track
+            && self.cpal_stream.is_some()
+            && self.current_device_id.as_deref() == Some(id.as_str())
+        {
+            return;
+        }
         #[cfg(target_os = "windows")]
         {
             // Idempotent ASIO re-assert: TIDAL re-emits player.devices.set around play/track
@@ -21,6 +35,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // below would kill the live decoder with no respawn, leaving the ring silent.
             if mode == OutputMode::Asio && self.is_asio_mode {
                 self.current_device_id = Some(id);
+                return;
+            }
+            // Same idempotent re-assert for exclusive WASAPI: a redundant same-device
+            // set tears down + respawns the exclusive handle and forces a reload.
+            if mode == OutputMode::Exclusive
+                && self.is_exclusive_mode
+                && self.has_track
+                && self.current_device_id.as_deref() == Some(id.as_str())
+            {
                 return;
             }
             // Non-replayable source (DASH nulls CURRENT_TRACK): the bypass switches below can't
@@ -329,7 +352,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         self.current_device_id = Some(id.clone());
-        self.rebuild_pipeline_at(self.current_position_secs());
+        self.rebuild_pipeline_at(self.effective_position());
         crate::vprintln!("[AUDIO] Switched to device: {}", id);
     }
 
@@ -353,7 +376,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// `StreamInvalidated`): rebuild on the current default device at the last-heard
     /// position. cpal only auto-reroutes on a default-device *change*, not on loss.
     pub(super) fn recover_audio_device(&mut self) {
-        self.rebuild_pipeline_at(self.played_position_secs());
+        self.rebuild_pipeline_at(self.effective_position());
     }
 
     pub(super) fn rebuild_pipeline_on_device(

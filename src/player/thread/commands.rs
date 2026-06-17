@@ -759,7 +759,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             let _ = tx.send(DecodeCommand::Pause);
         }
 
-        let pos_secs = self.current_position_secs();
+        let pos_secs = self.effective_position();
         (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
 
         self.is_playing = false;
