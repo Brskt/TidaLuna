@@ -21,11 +21,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             mode == OutputMode::Shared && !self.is_asio_mode && !self.is_exclusive_mode;
         #[cfg(not(target_os = "windows"))]
         let shared_reassert = mode == OutputMode::Shared;
+        // No-op only if the request resolves to the open device and keeps the same
+        // follow-class (see output_is_default); a class flip on one device must
+        // rebuild. Fast-path id == the open name to skip the resolve.
+        let requested_is_default = id == "auto" || id == "default";
         if shared_reassert
             && self.has_track
             && self.cpal_stream.is_some()
-            && self.current_device_id.as_deref() == Some(id.as_str())
+            && self.current_output_name.is_some()
+            && requested_is_default == self.output_is_default
+            && (self.current_output_name.as_deref() == Some(id.as_str())
+                || super::output::resolved_device_name(&id).as_deref()
+                    == self.current_output_name.as_deref())
         {
+            // Persist on no-op too: the resolved compare can match a different
+            // requested id, and loads/recovery resolve from current_device_id.
+            self.current_device_id = Some(id);
             return;
         }
         #[cfg(target_os = "windows")]

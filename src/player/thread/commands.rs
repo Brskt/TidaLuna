@@ -11,7 +11,7 @@ use crate::player::{
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
 
-use cpal::traits::{HostTrait, StreamTrait};
+use cpal::traits::StreamTrait;
 
 #[cfg(target_os = "windows")]
 use crate::player::asio::host::AsioCommand;
@@ -257,15 +257,30 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         true
     }
 
-    pub(super) fn resolve_output_device(&self) -> Option<cpal::Device> {
-        if let Some(ref id) = self.current_device_id {
-            if let Some(d) = super::output::find_output_device(id) {
-                return Some(d);
+    /// Resolve the configured output device (falling back to the OS default) and
+    /// record its concrete name in `current_output_name`, which the shared
+    /// re-assert guard compares against. Every cpal-open path resolves through here.
+    pub(super) fn resolve_output_device(&mut self) -> Option<cpal::Device> {
+        match super::output::resolve_device(self.current_device_id.as_deref()) {
+            Some(d) => {
+                let name = super::output::output_device_name(&d);
+                if let Some(req) = self.current_device_id.as_deref()
+                    && req != "auto"
+                    && req != "default"
+                    && name.as_deref() != Some(req)
+                {
+                    crate::vprintln!(
+                        "[AUDIO] Device '{}' not found, falling back to default",
+                        req
+                    );
+                }
+                self.output_is_default = matches!(
+                    self.current_device_id.as_deref(),
+                    None | Some("auto") | Some("default")
+                );
+                self.current_output_name = name;
+                Some(d)
             }
-            crate::vprintln!("[AUDIO] Device '{}' not found, falling back to default", id);
-        }
-        match cpal::default_host().default_output_device() {
-            Some(d) => Some(d),
             None => {
                 (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
                 None

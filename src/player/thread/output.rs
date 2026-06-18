@@ -68,7 +68,9 @@ pub(super) fn enumerate_audio_devices() -> Vec<AudioDevice> {
 
 pub(super) fn find_output_device(device_id: &str) -> Option<cpal::Device> {
     let host = cpal::default_host();
-    if device_id == "default" {
+    // "default" (device-list entry) and "auto" (selectSystemDevice) both mean the
+    // OS default; map them without enumerating.
+    if device_id == "default" || device_id == "auto" {
         return host.default_output_device();
     }
 
@@ -78,6 +80,25 @@ pub(super) fn find_output_device(device_id: &str) -> Option<cpal::Device> {
             .map(|desc| desc.name() == device_id)
             .unwrap_or(false)
     })
+}
+
+pub(super) fn output_device_name(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_string())
+}
+
+// Resolve a requested id to a concrete device, falling back to the OS default
+// when the id is None or names a device that isn't present.
+pub(super) fn resolve_device(device_id: Option<&str>) -> Option<cpal::Device> {
+    match device_id {
+        Some(id) => find_output_device(id).or_else(|| cpal::default_host().default_output_device()),
+        None => cpal::default_host().default_output_device(),
+    }
+}
+
+// Concrete name a request id resolves to, so the guard compares physical
+// identity, not the raw (aliasable) request string.
+pub(super) fn resolved_device_name(device_id: &str) -> Option<String> {
+    output_device_name(&resolve_device(Some(device_id))?)
 }
 
 // --- OpenedStream ---
@@ -310,10 +331,7 @@ pub(super) fn open_output_stream(
     let stream_error = Arc::new(AtomicU8::new(0));
     let played_samples = Arc::new(AtomicU64::new(0));
 
-    let dev_name = device
-        .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "<unknown>".to_string());
+    let dev_name = output_device_name(device).unwrap_or_else(|| "<unknown>".to_string());
     crate::vprintln!("[CPAL]   Device: {}", dev_name);
 
     // Attempt 1: source rate (no software resampling needed)

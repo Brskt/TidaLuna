@@ -92,6 +92,12 @@ pub(super) struct PlayerThread<F> {
     allow_startup_auto_resume: bool,
     // Device
     current_device_id: Option<String>,
+    // Concrete name of the open cpal device, so the shared re-assert guard
+    // compares physical identity, not the raw id the load path never stores.
+    current_output_name: Option<String>,
+    // Did the open stream come from a default selector ("auto"/"default"/none)?
+    // On Windows it follows the OS default; a named stream is pinned.
+    output_is_default: bool,
     // WASAPI exclusive
     #[cfg(target_os = "windows")]
     exclusive_handle: Option<ExclusiveHandle>,
@@ -201,6 +207,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pre_seek_pos: None,
             allow_startup_auto_resume: true,
             current_device_id: None,
+            current_output_name: None,
+            output_is_default: false,
             #[cfg(target_os = "windows")]
             exclusive_handle: None,
             #[cfg(target_os = "windows")]
