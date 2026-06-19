@@ -66,11 +66,16 @@ pub(super) fn enumerate_audio_devices() -> Vec<AudioDevice> {
     devices
 }
 
+/// True when `id` selects the OS default device rather than a specific one:
+/// `"default"` (the device-list entry) and `"auto"` (selectSystemDevice) are aliases.
+pub(super) fn is_default_selector(id: &str) -> bool {
+    id == "default" || id == "auto"
+}
+
 pub(super) fn find_output_device(device_id: &str) -> Option<cpal::Device> {
     let host = cpal::default_host();
-    // "default" (device-list entry) and "auto" (selectSystemDevice) both mean the
-    // OS default; map them without enumerating.
-    if device_id == "default" || device_id == "auto" {
+    // A default selector maps to the OS default without enumerating.
+    if is_default_selector(device_id) {
         return host.default_output_device();
     }
 
@@ -89,10 +94,9 @@ pub(super) fn output_device_name(device: &cpal::Device) -> Option<String> {
 // Resolve a requested id to a concrete device, falling back to the OS default
 // when the id is None or names a device that isn't present.
 pub(super) fn resolve_device(device_id: Option<&str>) -> Option<cpal::Device> {
-    match device_id {
-        Some(id) => find_output_device(id).or_else(|| cpal::default_host().default_output_device()),
-        None => cpal::default_host().default_output_device(),
-    }
+    device_id
+        .and_then(find_output_device)
+        .or_else(|| cpal::default_host().default_output_device())
 }
 
 // Concrete name a request id resolves to, so the guard compares physical

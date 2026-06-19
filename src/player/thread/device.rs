@@ -24,7 +24,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // No-op only if the request resolves to the open device and keeps the same
         // follow-class (see output_is_default); a class flip on one device must
         // rebuild. Fast-path id == the open name to skip the resolve.
-        let requested_is_default = id == "auto" || id == "default";
+        let requested_is_default = super::output::is_default_selector(&id);
         if shared_reassert
             && self.has_track
             && self.cpal_stream.is_some()
