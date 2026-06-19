@@ -56,6 +56,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 self.has_track = false;
                                 self.is_playing = false;
                                 self.current_track_id = None;
+                                self.set_committed_track(None);
                                 self.last_exclusive_pos = None;
                                 // Decoder exited (EndStream), its seek receiver
                                 // dropped: clear the dead sender so a later
@@ -88,16 +89,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             }
                             self.is_exclusive_mode = false;
                             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Locked));
-                        }
-                        ExclusiveEvent::Stopped => {
-                            self.has_track = false;
-                            self.is_playing = false;
-                            self.current_track_id = None;
-                            self.last_exclusive_pos = None;
-                            crate::state::GOVERNOR
-                                .buffer_progress()
-                                .set_playback_active(false);
-                            self.resume_store.flush_if_due(true);
                         }
                     }
                 }
@@ -156,6 +147,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.has_track = false;
                             self.is_playing = false;
                             self.current_track_id = None;
+                            self.set_committed_track(None);
                             self.last_asio_pos = None;
                             // Decoder exited (EndStream): clear the dead sender so a
                             // later seek/play respawns a decoder.
@@ -207,21 +199,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         self.is_asio_mode = false;
                         (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioInitFailed));
                         self.rearm_shared_after_asio_failure();
-                    }
-                    AsioEvent::Stopped(sid) => {
-                        // Ignore a Stopped from a superseded stream: the outgoing track's
-                        // stop must not null a newer track's has_track (which forced a
-                        // spurious re-arm/double-load when play arrived a loop-tick later).
-                        if self.current_asio_stream_id == Some(sid) {
-                            self.has_track = false;
-                            self.is_playing = false;
-                            self.current_track_id = None;
-                            self.last_asio_pos = None;
-                            crate::state::GOVERNOR
-                                .buffer_progress()
-                                .set_playback_active(false);
-                            self.resume_store.flush_if_due(true);
-                        }
                     }
                 }
             }
@@ -403,6 +380,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         }
 
                         self.pending_complete = true;
+                        // Track ended: a re-load of the same URL must now rebuild
+                        // (replay), so drop the committed-track reconcile signal.
+                        self.set_committed_track(None);
                         self.last_played_snapshot =
                             self.played_samples.load(Relaxed).wrapping_sub(1);
                         crate::vprintln!(
@@ -447,6 +427,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             error: e,
                             code: "unreadable_file",
                         });
+                        // Init-time decode errors emit Error with no trailing Finished,
+                        // so nothing else clears committed_track. Drop it here so the SDK's
+                        // same-track recovery reload rebuilds instead of resuming a dead decoder.
+                        self.set_committed_track(None);
                     }
                 }
             }

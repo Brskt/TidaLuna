@@ -234,6 +234,10 @@ enum PlayerCommand {
         generation: u32,
     },
     Play,
+    /// A same-track re-assert from `Player::load`'s idempotent branch. Resumes
+    /// only if the track was playing when the pause-retain stop happened
+    /// (`resume_on_reassert`), so a user-paused track is not force-resumed.
+    ReassertResume,
     Pause,
     Stop(u32),
     Seek(f64),
@@ -258,6 +262,15 @@ pub struct Player {
     load_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Current download's cancellation token; cancelled on a new load or stop.
     download_cancel: std::sync::Mutex<Option<CancellationToken>>,
+    /// The track currently committed in the pipeline, as `(canonical_id, format)`,
+    /// or `None` when nothing is loaded. The player thread sets it in `handle_load`
+    /// (commit time, alongside `current_track_id`) and clears it on every track-end
+    /// path; `load` reads it on the IPC thread to resume a same-track re-assert
+    /// instead of rebuilding. It tracks the *committed* track, not the *requested*
+    /// one, so a duplicate load racing a still-in-flight load of a different track
+    /// can't falsely match and resume a stale pipeline. stop() is pause-retain, so
+    /// this survives a stop and the following play() resumes it in place.
+    committed_track: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
 }
 
 pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
@@ -310,6 +323,18 @@ pub(crate) fn log_response_headers(resp: &reqwest::Response, prefix: &str) {
 
 pub(crate) fn canonical_track_id(url: &str) -> String {
     url.split('?').next().unwrap_or(url).to_string()
+}
+
+/// True when a `load` targets the already-committed track: same canonical id
+/// (query stripped, since each load re-signs the CDN URL) and format. Re-loading
+/// would rebuild an identical pipeline, so the caller resumes instead. Both ids
+/// are canonical (caller strips the URL; `committed.0` is set at commit time).
+fn is_same_active_track(
+    committed: Option<&(String, String)>,
+    canonical_url_id: &str,
+    format: &str,
+) -> bool {
+    committed.is_some_and(|(id, fmt)| fmt == format && id == canonical_url_id)
 }
 
 fn print_track_banner(format: &str) {
@@ -564,8 +589,12 @@ impl Player {
         #[cfg(not(target_os = "windows"))]
         let volume_sync_enabled = true;
 
+        let committed_track = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
+        let thread_committed = committed_track.clone();
         std::thread::spawn(move || {
-            if let Some(mut pt) = thread::PlayerThread::new(cmd_rx, callback, volume_sync_enabled) {
+            if let Some(mut pt) =
+                thread::PlayerThread::new(cmd_rx, callback, volume_sync_enabled, thread_committed)
+            {
                 pt.run();
             }
         });
@@ -575,6 +604,7 @@ impl Player {
             rt_handle,
             load_handle: std::sync::Mutex::new(None),
             download_cancel: std::sync::Mutex::new(None),
+            committed_track,
         })
     }
 
@@ -666,6 +696,34 @@ impl Player {
     }
 
     pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
+        // Idempotent reconcile: skip rebuilding the pipeline when the SDK re-loads
+        // the track currently COMMITTED in the pipeline (e.g. RealMAX re-asserting
+        // the playing track). The comparison is against the committed track (set by
+        // the player thread in handle_load), never the requested track, so a
+        // duplicate load racing a still-in-flight load of a different track can't
+        // falsely match and resume a stale pipeline. stop() is pause-retain, so the
+        // committed track survives; the following play() resumes it. A genuine track
+        // change (different canonical id/format) falls through to a full load.
+        let canonical_url_id = canonical_track_id(&url);
+        {
+            let committed = self
+                .committed_track
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if is_same_active_track(committed.as_ref(), &canonical_url_id, &format) {
+                crate::vprintln!(
+                    "[LOAD]   idempotent reload skipped (same committed track): {}",
+                    short_id(&canonical_url_id, 60)
+                );
+                // A skipped load is part of a stop->load->play re-assert. State-
+                // preserving: ReassertResume resumes only if the track was PLAYING
+                // when the pause-retain stop happened (RealMAX's re-assert, which
+                // TIDAL may not follow with an explicit play). If the user had
+                // paused, the track stays paused instead of being force-resumed.
+                let _ = self.send_cmd(PlayerCommand::ReassertResume);
+                return Ok(());
+            }
+        }
         self.load_with_policy(url, format, key, ResumePolicy::Disabled, false)
     }
 
@@ -888,28 +946,15 @@ impl Player {
     }
 
     pub fn stop(&self) -> anyhow::Result<()> {
+        // Pause-retain, not teardown: the in-flight load task and its download are
+        // kept (the download rides its own download_cancel token, not LOAD_SEQ) so a
+        // same-track re-assert resumes in place. The LOAD_SEQ bump invalidates any
+        // still-pending auto-play Load/ReplayRequest (rejected by handle_load's
+        // stale-gate and the flush.rs guard) so playback can't start after the stop;
+        // it doesn't truncate the retained download, and a steady-state re-assert
+        // resumes via Player::load, which bypasses both gates.
         LOAD_SEQ.fetch_add(1, Relaxed);
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
-        crate::vprintln!(
-            "[STOP]   (invalidated load seq: {})",
-            LOAD_SEQ.load(Relaxed)
-        );
-        if let Some(prev) = self
-            .load_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            prev.abort();
-        }
-        if let Some(token) = self
-            .download_cancel
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            token.cancel();
-        }
         self.send_cmd(PlayerCommand::Stop(event_seq))
     }
 
@@ -935,5 +980,55 @@ impl Player {
             id: device_id,
             mode,
         })
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::is_same_active_track;
+
+    fn committed(canonical_id: &str, format: &str) -> (String, String) {
+        (canonical_id.to_string(), format.to_string())
+    }
+
+    #[test]
+    fn same_canonical_id_and_format_is_idempotent() {
+        // The caller strips the query before calling, so both ids are canonical.
+        // (Production passes canonical_track_id("…?sig=2") == "…/abc".)
+        let cur = committed("https://cdn/tracks/abc", "flac");
+        assert!(is_same_active_track(
+            Some(&cur),
+            "https://cdn/tracks/abc",
+            "flac"
+        ));
+    }
+
+    #[test]
+    fn different_format_rebuilds() {
+        let cur = committed("https://cdn/tracks/abc", "flac");
+        assert!(!is_same_active_track(
+            Some(&cur),
+            "https://cdn/tracks/abc",
+            "aac"
+        ));
+    }
+
+    #[test]
+    fn different_track_rebuilds() {
+        let cur = committed("https://cdn/tracks/abc", "flac");
+        assert!(!is_same_active_track(
+            Some(&cur),
+            "https://cdn/tracks/xyz",
+            "flac"
+        ));
+    }
+
+    #[test]
+    fn no_committed_track_rebuilds() {
+        assert!(!is_same_active_track(
+            None,
+            "https://cdn/tracks/abc",
+            "flac"
+        ));
     }
 }

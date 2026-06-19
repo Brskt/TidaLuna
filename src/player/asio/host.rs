@@ -930,7 +930,6 @@ pub(crate) enum AsioCommand {
     },
     Play,
     Pause,
-    Stop,
     Shutdown,
 }
 
@@ -946,8 +945,6 @@ pub(crate) enum AsioEvent {
     /// Track finished (EOF + drained). Carries the stream_id so a stale completion from a
     /// superseded stream can't clear a newer track (which would force a re-arm/double-load).
     Completed(u32),
-    /// Clock stopped. Carries the stream_id for the same stale-event guard.
-    Stopped(u32),
 }
 
 /// Absolute frame index for a position in seconds, the `played_frames` baseline so
@@ -1356,23 +1353,6 @@ impl ControlCtx {
         }
     }
 
-    fn handle_stop(&mut self, event_tx: &mpsc::Sender<AsioEvent>) {
-        // Keep the clock RUNNING (continuous device hold); just flush the ring + staging so
-        // the RT emits silence until the next StartStream. The device is released only on
-        // ASIO-off / shutdown (dispose_stream).
-        self.flush_gen.fetch_add(1, Ordering::Relaxed);
-        self.staging.clear();
-        self.paused.store(false, Ordering::Relaxed);
-        let stopped_id = self.stream_id.unwrap_or(0);
-        crate::vprintln3!("[ASIO-DIAG] handle_stop: clearing stream={stopped_id} -> Idle");
-        self.stream_id = None;
-        self.stream_ended = false;
-        self.pending_start = false;
-        self.drain_since = None;
-        self.state = AsioState::Idle;
-        let _ = event_tx.send(AsioEvent::Stopped(stopped_id));
-    }
-
     fn resume(&mut self, event_tx: &mpsc::Sender<AsioEvent>) {
         if !self.has_buffers {
             return;
@@ -1668,7 +1648,6 @@ impl ControlCtx {
                     let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Paused));
                 }
             }
-            AsioCommand::Stop => self.handle_stop(event_tx),
             AsioCommand::Shutdown => {
                 self.teardown();
                 return true;

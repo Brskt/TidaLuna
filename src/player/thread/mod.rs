@@ -66,6 +66,11 @@ pub(super) struct PlayerThread<F> {
     is_cached: bool,
     is_playing: bool,
     has_track: bool,
+    // Whether a same-track re-assert (ReassertResume) should resume: handle_stop
+    // sets it to the pre-stop is_playing, a user pause clears it (handle_pause).
+    // So a user-paused track stays paused on re-assert; RealMAX's stop->load->play
+    // (was playing) still resumes.
+    resume_on_reassert: bool,
     // A play that arrived before the track finished loading, tagged with the
     // LOAD_SEQ generation it was meant for. Applied once that load reaches the
     // ready state so a play racing ahead of the async load isn't dropped, and
@@ -153,6 +158,12 @@ pub(super) struct PlayerThread<F> {
     // Buffering state
     buffer_stalled: bool,
     pending_complete: bool,
+    // Shared with `Player` (IPC thread): the committed track as
+    // `(canonical_id, format)`, or `None` when nothing is loaded. Set in
+    // `handle_load`, cleared on every track-end path. Lets `Player::load` resume
+    // a same-track re-assert instead of rebuilding (the reconcile idempotency
+    // signal), keyed on the committed track rather than the requested one.
+    committed_track: Arc<std::sync::Mutex<Option<(String, String)>>>,
     last_played_snapshot: u64,
     version_emitted: bool,
     // Command coalescing
@@ -165,6 +176,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         cmd_rx: mpsc::Receiver<PlayerCommand>,
         callback: F,
         #[allow(unused_variables)] volume_sync_enabled: bool,
+        committed_track: Arc<std::sync::Mutex<Option<(String, String)>>>,
     ) -> Option<Self> {
         #[cfg(target_os = "windows")]
         let com_guard = match crate::platform::volume_sync::ComGuard::new() {
@@ -193,6 +205,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             is_cached: false,
             is_playing: false,
             has_track: false,
+            resume_on_reassert: false,
             pending_play: None,
             loading_gen: None,
             current_duration: 0.0,
@@ -250,11 +263,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             played_samples: Arc::new(AtomicU64::new(0)),
             buffer_stalled: false,
             pending_complete: false,
+            committed_track,
             last_played_snapshot: 0,
             version_emitted: false,
             pending_cmds: Vec::new(),
             coalesced_cmds: Vec::new(),
         })
+    }
+
+    /// Update the committed-track reconcile signal shared with the IPC thread:
+    /// `Some((canonical_id, format))` on commit, `None` on every track-end path.
+    pub(super) fn set_committed_track(&self, track: Option<(String, String)>) {
+        *self
+            .committed_track
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = track;
     }
 
     pub fn run(&mut self) {
@@ -352,6 +375,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::LoadStarted { generation } => self.handle_load_started(generation),
             PlayerCommand::LoadSettled { generation } => self.handle_load_settled(generation),
             PlayerCommand::Play => self.handle_play(),
+            PlayerCommand::ReassertResume => {
+                // Resume only if the track was playing pre-stop (see resume_on_reassert).
+                if self.resume_on_reassert {
+                    self.handle_play();
+                }
+            }
             PlayerCommand::Pause => self.handle_pause(),
             PlayerCommand::Stop(event_seq) => self.handle_stop(event_seq),
             PlayerCommand::Seek(time) => self.handle_seek(time),

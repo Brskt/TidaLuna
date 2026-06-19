@@ -49,7 +49,6 @@ pub(super) enum ExclusiveCommand {
     },
     Play,
     Pause,
-    Stop,
     Shutdown,
 }
 
@@ -59,7 +58,6 @@ pub(super) enum ExclusiveEvent {
     Duration(f64),
     InitFailed(String),
     DeviceLocked(String),
-    Stopped,
 }
 
 struct SizedMediaSource<R> {
@@ -930,22 +928,6 @@ impl RenderContext {
         Ok(())
     }
 
-    /// Stop playback and reset all track state.
-    /// Postconditions: audio stopped, pcm_data cleared, cursors zeroed,
-    /// stream_id = None, stream_ended = true, state = Idle, Stopped event sent.
-    fn handle_stop(&mut self, event_tx: &mpsc::Sender<ExclusiveEvent>) {
-        self.stop_audio_client();
-        self.client_started = false;
-        self.pending_start = false;
-        self.pcm_data.clear();
-        self.write_cursor = 0;
-        self.frames_played = 0;
-        self.current_stream_id = None;
-        self.stream_ended = true;
-        self.state = RenderState::Idle;
-        let _ = event_tx.send(ExclusiveEvent::Stopped);
-    }
-
     fn handle_push_pcm(&mut self, stream_id: u32, data: Vec<u8>) {
         if self.current_stream_id == Some(stream_id) {
             self.pcm_data.extend_from_slice(&data);
@@ -1101,7 +1083,6 @@ fn render_thread_inner(
                             let _ = event_tx
                                 .send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
                         }
-                        ExclusiveCommand::Stop => ctx.handle_stop(&event_tx),
                         ExclusiveCommand::StartStream {
                             stream_id,
                             sample_rate,
@@ -1391,7 +1372,6 @@ fn render_thread_inner(
                     let _ =
                         event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                 }
-                Ok(ExclusiveCommand::Stop) => ctx.handle_stop(&event_tx),
                 Ok(ExclusiveCommand::StartStream {
                     stream_id,
                     sample_rate,

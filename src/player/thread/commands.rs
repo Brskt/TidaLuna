@@ -166,9 +166,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if !self.is_exclusive_mode {
             return false;
         }
-        // No ExclusiveCommand::Stop: its host-visible Stopped, polled after the
-        // new StartStream, would null the just-loaded track on a playlist-advance.
-        // The new StartStream re-bases the render instead. A queued user seek wins
+        // The new StartStream re-bases the render in place (no teardown that would
+        // null the just-loaded track on a playlist-advance). A queued user seek wins
         // over the load-time resume position.
         let seek_to = self
             .user_seek_override
@@ -264,9 +263,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         match super::output::resolve_device(self.current_device_id.as_deref()) {
             Some(d) => {
                 let name = super::output::output_device_name(&d);
-                if let Some(req) = self.current_device_id.as_deref()
-                    && req != "auto"
-                    && req != "default"
+                self.output_is_default = self
+                    .current_device_id
+                    .as_deref()
+                    .is_none_or(super::output::is_default_selector);
+                // A named (non-default) request that didn't resolve to itself fell
+                // back to the OS default.
+                if !self.output_is_default
+                    && let Some(req) = self.current_device_id.as_deref()
                     && name.as_deref() != Some(req)
                 {
                     crate::vprintln!(
@@ -274,10 +278,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         req
                     );
                 }
-                self.output_is_default = matches!(
-                    self.current_device_id.as_deref(),
-                    None | Some("auto") | Some("default")
-                );
                 self.current_output_name = name;
                 Some(d)
             }
@@ -315,6 +315,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         self.current_track_id = Some(track_id.clone());
+        self.set_committed_track(Some((track_id.clone(), format.clone())));
         self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
         self.current_seq = event_seq;
         self.is_cached = cached;
@@ -392,6 +393,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     error: e,
                     code: "mediaerror",
                 });
+                // This load failed; drop the reconcile signal committed at entry
+                // or a same-track reload would resume a pipeline that never built.
+                self.set_committed_track(None);
                 return false;
             }
         };
@@ -425,7 +429,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Open cpal stream
         let device = match self.resolve_output_device() {
             Some(d) => d,
-            None => return false,
+            None => {
+                self.set_committed_track(None);
+                return false;
+            }
         };
 
         let cpal_start = std::time::Instant::now();
@@ -436,6 +443,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     (self.callback)(PlayerEvent::DeviceError(
                         DeviceErrorKind::FormatNotSupported,
                     ));
+                    self.set_committed_track(None);
                     return false;
                 }
             };
@@ -737,6 +745,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // A pause cancels any play deferred while the track was still loading;
         // otherwise handle_load would auto-play it against this pause intent.
         self.pending_play = None;
+        // User pause: a same-track re-assert must not auto-resume. Set above the
+        // windows early-returns so it covers every mode (see resume_on_reassert).
+        self.resume_on_reassert = false;
         #[cfg(target_os = "windows")]
         {
             if self.is_asio_mode {
@@ -789,95 +800,26 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     pub(super) fn handle_stop(&mut self, event_seq: u32) {
+        // Reconciliation: an SDK stop is treated as pause-retain, not teardown.
+        // The pipeline (buffer, has_track, current_track_id, CURRENT_TRACK, and
+        // committed_track) is kept so a same-track re-assert (RealMAX's
+        // cancel-redispatch) resumes in place instead of rebuilding. A genuine
+        // track change tears the previous track down when load() switches to a
+        // different track (load_with_policy aborts the task + cancels the
+        // download, and handle_load replaces the buffer). Position is preserved.
         self.current_seq = event_seq;
-        crate::state::GOVERNOR.reset_buffer_progress();
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(cancel) = self.exclusive_stream_cancel.take() {
-                cancel.store(true, Relaxed);
-            }
-            self.exclusive_seek_tx = None;
-            self.last_exclusive_pos = None;
-            if let Some(cancel) = self.asio_stream_cancel.take() {
-                cancel.store(true, Relaxed);
-            }
-            self.asio_seek_tx = None;
-            self.last_asio_pos = None;
-        }
-
-        if let Some(ref old_buf) = self.current_buffer {
-            old_buf.cancel();
-        }
-        self.stop_decode();
-        self.current_buffer = None;
-
-        #[cfg(target_os = "windows")]
-        {
-            if self.is_asio_mode {
-                if let Some(ref handle) = self.asio_handle {
-                    handle.send(AsioCommand::Stop);
-                }
-                (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-                (self.callback)(PlayerEvent::StateChange(
-                    PlaybackState::Stopped,
-                    self.current_seq,
-                ));
-                self.is_playing = false;
-                self.has_track = false;
-                self.pending_play = None;
-                self.loading_gen = None;
-                self.current_duration = 0.0;
-                self.current_track_id = None;
-                self.pending_resume_seek = None;
-                self.user_seek_override = None;
-                self.pre_seek_pos = None;
-                self.resume_store.flush_if_due(true);
-                return;
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if self.is_exclusive_mode {
-                if let Some(ref handle) = self.exclusive_handle {
-                    handle.send(ExclusiveCommand::Stop);
-                }
-                (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
-                (self.callback)(PlayerEvent::StateChange(
-                    PlaybackState::Stopped,
-                    self.current_seq,
-                ));
-                self.is_playing = false;
-                self.has_track = false;
-                self.pending_play = None;
-                self.loading_gen = None;
-                self.current_duration = 0.0;
-                self.current_track_id = None;
-                self.pending_resume_seek = None;
-                self.user_seek_override = None;
-                self.pre_seek_pos = None;
-                self.resume_store.flush_if_due(true);
-                return;
-            }
-        }
-
-        (self.callback)(PlayerEvent::TimeUpdate(0.0, self.current_seq));
+        // Capture is_playing before handle_pause clears it, then record it as the
+        // re-assert resume intent (a stop is a re-assert candidate).
+        let was_playing = self.is_playing;
+        self.handle_pause();
+        self.resume_on_reassert = was_playing;
+        // Surface the SDK/UI/Connect/SMTC-visible "stopped" state even though the
+        // pipeline is retained internally (handle_pause emits Paused first; the
+        // final state observers settle on is Stopped).
         (self.callback)(PlayerEvent::StateChange(
             PlaybackState::Stopped,
             self.current_seq,
         ));
-        self.is_playing = false;
-        self.has_track = false;
-        self.pending_play = None;
-        self.loading_gen = None;
-        self.current_duration = 0.0;
-        self.current_track_id = None;
-        self.pending_resume_seek = None;
-        self.pre_seek_pos = None;
-        self.is_cached = false;
-        self.buffer_stalled = false;
-        self.resume_store.flush_if_due(true);
     }
 
     pub(super) fn handle_seek(&mut self, time: f64) {
