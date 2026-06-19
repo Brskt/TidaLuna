@@ -279,6 +279,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         attach_or_alloc_console();
     }
 
+    // After set_log_level so it's captured whether logging came from the LOGS
+    // env or the in-app setting.
+    crate::vprintln!("[INIT]   TidaLunar v{}", env!("CARGO_PKG_VERSION"));
+
     // Recover from any interrupted update before continuing startup
     updater::recover_interrupted_update();
 
