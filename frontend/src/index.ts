@@ -187,6 +187,10 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                     const { store } = require("../plugins/lib/src/redux/store");
                     store.dispatch({ type: "player/SET_DEVICE_MODE", payload: "shared" });
                 } catch (_) {}
+                // Clear the persisted exclusive flag too, so a restart doesn't re-seed
+                // exclusive and re-enter the failing path (mirrors the ASIO failure clear).
+                (window as any).__TIDALUNAR_EXCLUSIVE__ = false;
+                sendIpc("settings.exclusive", false);
             }
             if (
                 type === "deviceasiodrivernotfound" ||

@@ -16,6 +16,8 @@ import { storeUrls } from "./SettingsPage/PluginStoreTab";
 import { fetchReleases } from "./SettingsPage/SettingsTab/LunaClientUpdate";
 import { UpdateToast } from "./components/UpdateToast";
 
+import { setupDeviceDialogToggles } from "./DeviceDialogToggles";
+
 import { pkg } from "plugins/lib.native/src/index.native";
 import { unloads } from "./index.safe";
 
@@ -81,3 +83,6 @@ toastReactRoot.render(
 		<UpdateToast unloads={unloads} />
 	</ThemeProvider>,
 );
+
+// Surface the Exclusive/ASIO output toggles in TIDAL's native device dialog.
+setupDeviceDialogToggles(unloads);
