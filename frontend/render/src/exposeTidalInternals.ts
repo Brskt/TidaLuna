@@ -85,8 +85,24 @@ function findStoreViaReactFiber(): any | null {
 
 // --- Dispatch interceptors ---
 
+// Queue navigation must never be frozen by an interceptor's cancel. A plugin like
+// RealMAX cancels MOVE_* to run an async max-quality lookup, which blocks the click
+// until the network round-trip finishes. For these types we still RUN the interceptor
+// (its async re-dispatch applies the quality swap afterward) but ignore the cancel, so
+// the original move proceeds immediately and the track plays at once. ADD_NOW is left
+// cancellable: it mutates the queue, so letting both the original and the re-dispatch
+// through would double-add.
+const NON_BLOCKING_NAV: ReadonlySet<string> = new Set([
+	"playQueue/MOVE_TO",
+	"playQueue/MOVE_NEXT",
+	"playQueue/MOVE_PREVIOUS",
+]);
+
 function patchDispatch(store: any): void {
 	const originalDispatch = store.dispatch.bind(store);
+	// Unintercepted re-dispatch channel for redux.actions[type], so a plugin's
+	// cancel-then-redispatch can't re-enter and loop; mirrors upstream's unwrapped creator.
+	store.__lunaRawDispatch = originalDispatch;
 	store.dispatch = (action: any) => {
 		if (action && action.type) {
 			const interceptorSet = interceptors[action.type];
@@ -95,7 +111,11 @@ function patchDispatch(store: any): void {
 				for (const interceptor of interceptorSet) {
 					try {
 						const result = (interceptor as Function)(payload, action.type);
-						if (result === true) return { type: "NOOP" };
+						// A cancel (true) drops the action, except queue nav, which stays
+						// instant (the interceptor re-dispatches the quality swap afterward).
+						if (result === true && !NON_BLOCKING_NAV.has(action.type)) {
+							return { type: "NOOP" };
+						}
 						if (result instanceof Promise) result.catch((err: unknown) => console.error(`[luna:redux] Interceptor error for ${action.type}:`, err));
 					} catch (e) {
 						console.error(`[luna:redux] Interceptor error for ${action.type}:`, e);
