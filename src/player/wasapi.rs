@@ -49,6 +49,9 @@ pub(super) enum ExclusiveCommand {
     },
     Play,
     Pause,
+    /// Drop the IAudioClient (free the endpoint for other apps) on a real stop,
+    /// while keeping the render thread alive. The next StartStream reopens it.
+    ReleaseDevice,
     Shutdown,
 }
 
@@ -492,7 +495,10 @@ fn negotiate_format(sample_rate: u32, channels: u32, source_bps: u32) -> Vec<(Wa
 fn init_exclusive_client(device_id: &str) -> Result<(DeviceEnumerator, wasapi::Device), String> {
     let enumerator = DeviceEnumerator::new().map_err(|e| format!("DeviceEnumerator: {e}"))?;
 
-    let device = if device_id == "default" {
+    // "auto"/"default"/empty are the default-device sentinels (TIDAL's selectSystemDevice
+    // and the sticky exclusive re-assert send "auto", matching the shared cpal path); resolve
+    // them to the OS default render endpoint instead of a literal device-name lookup.
+    let device = if device_id == "default" || device_id == "auto" || device_id.is_empty() {
         enumerator
             .get_default_device(&Direction::Render)
             .map_err(|e| format!("default device: {e}"))?
@@ -621,6 +627,16 @@ fn open_exclusive_stream(
                 if is_device_in_use_error(&err_str) {
                     return Err(err_str);
                 }
+                // Exclusive disabled for the device in Windows: every candidate
+                // returns the same error, so stop probing and propagate it (lands
+                // in InitFailed -> ExclusiveModeNotAllowed, the permanent class).
+                if is_exclusive_mode_disabled_error(&err_str) {
+                    crate::vprintln!(
+                        "[WASAPI] Exclusive mode disabled for this device in Windows \
+                         (Sound > device > Advanced > Allow exclusive control): {e}"
+                    );
+                    return Err(err_str);
+                }
                 crate::vprintln!("[WASAPI] Format rejected: {e}");
                 continue;
             }
@@ -635,6 +651,16 @@ fn is_device_in_use_error(err_str: &str) -> bool {
     err_str.contains("DEVICE_IN_USE")
         || err_str.contains("8889000a")
         || err_str.contains("8889000A")
+}
+
+/// Check if WASAPI reports exclusive mode disabled system-wide (the Windows
+/// "Allow applications to take exclusive control of this device" toggle is OFF).
+/// This is a session-level block (AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED,
+/// 0x8889000E), not a format-level rejection, so no other candidate can succeed.
+fn is_exclusive_mode_disabled_error(err_str: &str) -> bool {
+    err_str.contains("EXCLUSIVE_MODE_NOT_ALLOWED")
+        || err_str.contains("8889000e")
+        || err_str.contains("8889000E")
 }
 
 // ---------------------------------------------------------------------------
@@ -842,6 +868,24 @@ impl RenderContext {
         if let Some(ref ac) = self.audio_client {
             let _ = ac.stop_stream();
         }
+    }
+
+    /// Release the exclusive device on a real stop: drop the IAudioClient so other
+    /// apps regain the endpoint, then park in Idle. The next StartStream reopens it
+    /// (handle_start_stream sees `audio_client == None` and opens a fresh client).
+    fn release_device(&mut self) {
+        self.stop_audio_client();
+        self.render_client = None;
+        self.h_event = None;
+        self.audio_client = None;
+        self.pcm_data.clear();
+        self.write_cursor = 0;
+        self.frames_played = 0;
+        self.current_stream_id = None;
+        self.stream_ended = true;
+        self.client_started = false;
+        self.pending_start = false;
+        self.state = RenderState::Idle;
     }
 
     /// Open a new stream, reset all PCM/playback state, start playback.
@@ -1068,6 +1112,7 @@ fn render_thread_inner(
                             start_paused,
                         )?;
                     }
+                    Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => break,
                     _ => {} // Ignore other commands in idle
                 }
@@ -1077,8 +1122,17 @@ fn render_thread_inner(
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         ExclusiveCommand::Pause => {
-                            ctx.stop_audio_client();
+                            // Stop + Reset() flush the stale endpoint tail; pending_start
+                            // makes resume re-prime a full period before Start(). A bare
+                            // restart over the stale tail saturates (the exclusive buffer
+                            // must hold real PCM before Start). Like handle_reset_for_seek,
+                            // minus the PCM/cursor reset since resume continues in place.
+                            if let Some(ref ac) = ctx.audio_client {
+                                let _ = ac.stop_stream();
+                                let _ = ac.reset_stream();
+                            }
                             ctx.client_started = false;
+                            ctx.pending_start = true;
                             ctx.state = RenderState::Paused;
                             let _ = event_tx
                                 .send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
@@ -1115,6 +1169,7 @@ fn render_thread_inner(
                             stream_id,
                             start_secs,
                         } => ctx.handle_reset_for_seek(stream_id, start_secs),
+                        ExclusiveCommand::ReleaseDevice => ctx.release_device(),
                         ExclusiveCommand::Shutdown => {
                             ctx.stop_audio_client();
                             return Ok(());
@@ -1357,17 +1412,8 @@ fn render_thread_inner(
 
             RenderState::Paused => match cmd_rx.recv() {
                 Ok(ExclusiveCommand::Play) => {
-                    // If pending_start is false the endpoint still holds the
-                    // pre-pause PCM, so start directly. If it's true the buffer is
-                    // unfilled (paused mid-cushion, or seeked while paused), so
-                    // defer to the loop's pre-fill before starting -- an empty
-                    // exclusive buffer would saturate.
-                    if !ctx.pending_start {
-                        if let Some(ref ac) = ctx.audio_client {
-                            let _ = ac.start_stream();
-                        }
-                        ctx.client_started = true;
-                    }
+                    // Pause armed pending_start + Reset() the endpoint, so the Playing
+                    // loop re-primes a full period before Start() (first-start/seek path).
                     ctx.state = RenderState::Playing;
                     let _ =
                         event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
@@ -1402,6 +1448,7 @@ fn render_thread_inner(
                     stream_id,
                     start_secs,
                 }) => ctx.handle_reset_for_seek(stream_id, start_secs),
+                Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                 Ok(ExclusiveCommand::Shutdown) | Err(_) => {
                     ctx.stop_audio_client();
                     return Ok(());

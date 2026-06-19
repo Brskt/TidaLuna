@@ -25,6 +25,13 @@ use wasapi::ExclusiveHandle;
 /// target for the pre-seek to be considered "close enough" to skip.
 const PRE_SEEK_TOLERANCE: f64 = 2.0;
 
+/// How long exclusive output stays paused before the device is released back to
+/// other apps. A short pause/resume within this window keeps the device (instant
+/// resume, no DAC pop); a sustained pause frees it. TIDAL has no stop button, so
+/// pause is the "stopped listening" signal.
+#[cfg(target_os = "windows")]
+const EXCLUSIVE_PAUSE_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
+
 enum DecodeCommand {
     Seek(f64),
     Pause,
@@ -118,6 +125,12 @@ pub(super) struct PlayerThread<F> {
     // cross-session persistence would lose it or return a stale offset.
     #[cfg(target_os = "windows")]
     last_exclusive_pos: Option<f64>,
+    // Debounced device release: armed (now + EXCLUSIVE_PAUSE_RELEASE) when exclusive
+    // playback pauses; if it elapses still-paused, the IAudioClient is dropped so other
+    // apps regain the device. Cleared on resume/load/re-engage, so a short pause or a
+    // track-change stop->load within the window never releases.
+    #[cfg(target_os = "windows")]
+    exclusive_release_at: Option<std::time::Instant>,
     // ASIO output (parallel to the exclusive fields; mutually exclusive with it).
     #[cfg(target_os = "windows")]
     asio_handle: Option<AsioHandle>,
@@ -232,6 +245,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             exclusive_seek_tx: None,
             #[cfg(target_os = "windows")]
             last_exclusive_pos: None,
+            #[cfg(target_os = "windows")]
+            exclusive_release_at: None,
             #[cfg(target_os = "windows")]
             asio_handle: None,
             #[cfg(target_os = "windows")]

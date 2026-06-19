@@ -347,6 +347,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.last_exclusive_pos = None;
             self.last_asio_pos = None;
             self.user_seek_override = None;
+            // A new load means the prior stop was a track change, not a real stop:
+            // cancel any pending device release so the device is never freed mid-change.
+            self.exclusive_release_at = None;
         }
         if let Some(ref old_buf) = self.current_buffer {
             old_buf.cancel();
@@ -589,6 +592,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     pub(super) fn handle_play(&mut self) {
         self.allow_startup_auto_resume = false;
+        // Resuming cancels a pending real-stop device release (the user came back).
+        #[cfg(target_os = "windows")]
+        {
+            self.exclusive_release_at = None;
+        }
 
         // Capture the retained source only when no track and no load in flight;
         // the short-circuit skips the CURRENT_TRACK lock on the resume path.
@@ -615,10 +623,20 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // track to flush.rs (avoids a second CURRENT_TRACK lock).
                 crate::vprintln!("[PLAY]   no live pipeline; re-arming retained source");
                 if let Some(track) = retained {
+                    // Resume at the retained source's last position, not 0 (e.g. a >10s
+                    // exclusive pause released the device, re-arming here). resume_store
+                    // holds it but is cleared on track-end, so a post-Completed re-arm
+                    // gets None and starts at 0; last_exclusive_pos is the exclusive
+                    // fast-path.
+                    let position = self
+                        .resume_store
+                        .get(&crate::player::canonical_track_id(&track.url));
+                    #[cfg(target_os = "windows")]
+                    let position = self.last_exclusive_pos.or(position);
                     (self.callback)(PlayerEvent::ReplayRequest {
                         track,
                         expected_gen: LOAD_SEQ.load(Relaxed),
-                        position: None,
+                        position,
                         play: true,
                     });
                 }
@@ -766,10 +784,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(target_os = "windows")]
         {
             if self.is_exclusive_mode {
+                let was_playing = self.is_playing;
                 if let Some(ref handle) = self.exclusive_handle {
                     handle.send(ExclusiveCommand::Pause);
                 }
                 self.is_playing = false;
+                // Hold the device, then release it on a sustained pause so other apps
+                // regain the DAC (TIDAL has no stop button -> pause is the stop signal).
+                // A short pause/resume or a track-change stop->load cancels this in time
+                // (handle_play/handle_load), so only a real lingering pause fires.
+                if was_playing {
+                    self.exclusive_release_at =
+                        Some(std::time::Instant::now() + super::EXCLUSIVE_PAUSE_RELEASE);
+                }
                 crate::state::GOVERNOR
                     .buffer_progress()
                     .set_playback_active(false);

@@ -227,6 +227,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
                 let handle = ExclusiveHandle::spawn(id.clone(), self.exclusive_gain.clone());
                 self.is_exclusive_mode = true;
+                // Drop any stale release timer from a prior exclusive session so a fresh
+                // engagement can't fire it and release the device we just acquired.
+                self.exclusive_release_at = None;
                 self.exclusive_handle = Some(handle);
                 self.current_device_id = Some(id.clone());
 

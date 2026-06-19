@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 #[cfg(target_os = "windows")]
 use crate::player::asio::host::AsioEvent;
 #[cfg(target_os = "windows")]
-use crate::player::wasapi::ExclusiveEvent;
+use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn samples_to_secs(&self, samples: u64) -> f64 {
@@ -81,6 +81,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             (self.callback)(PlayerEvent::DeviceError(
                                 DeviceErrorKind::ExclusiveModeNotAllowed,
                             ));
+                            self.rearm_shared_after_exclusive_failure();
                         }
                         ExclusiveEvent::DeviceLocked(e) => {
                             eprintln!("[WASAPI] Device locked by another process: {e}");
@@ -89,6 +90,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             }
                             self.is_exclusive_mode = false;
                             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Locked));
+                            self.rearm_shared_after_exclusive_failure();
                         }
                     }
                 }
@@ -96,6 +98,27 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
             if !self.is_exclusive_mode {
                 self.exclusive_handle = None;
+            }
+
+            // Debounced release: once a pause has lingered past EXCLUSIVE_PAUSE_RELEASE
+            // without a resume or track change, hand the exclusive device back so other
+            // apps regain it. has_track=false + committed cleared makes the next play
+            // re-arm (decide_play ReArm) or a same-track reload reopen (no idempotent
+            // skip); both reopen the client.
+            if self.is_exclusive_mode
+                && !self.is_playing
+                && let Some(at) = self.exclusive_release_at
+                && std::time::Instant::now() >= at
+            {
+                self.exclusive_release_at = None;
+                if let Some(ref handle) = self.exclusive_handle {
+                    handle.send(ExclusiveCommand::ReleaseDevice);
+                }
+                self.has_track = false;
+                self.set_committed_track(None);
+                crate::vprintln!(
+                    "[WASAPI] Released exclusive device on stop (other apps can use it)"
+                );
             }
         }
     }
@@ -247,6 +270,46 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // device.rs switch paths). Logged so the silent stop is diagnosable.
             crate::vprintln!(
                 "[ASIO] fallback: non-replayable source, playback stopped (cannot re-arm shared)"
+            );
+        }
+    }
+
+    /// Exclusive WASAPI failed (OS denied exclusive, or the device is locked): re-arm a
+    /// fresh shared load at the live position so the current track keeps playing instead
+    /// of stopping. Mirrors `rearm_shared_after_asio_failure`. No-op without a track.
+    #[cfg(target_os = "windows")]
+    fn rearm_shared_after_exclusive_failure(&mut self) {
+        let was_playing = self.is_playing;
+        self.has_track = false;
+        self.is_playing = false;
+        self.loading_gen = None;
+        self.pending_play = None;
+        self.seeking = false;
+        self.seek_target = None;
+        self.exclusive_seek_tx = None;
+
+        // Prefer the live exclusive position (floor-free); fall back to resume_store.
+        let track = crate::state::CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let position = self.last_exclusive_pos.or_else(|| {
+            track.as_ref().and_then(|t| {
+                self.resume_store
+                    .get(&crate::player::canonical_track_id(&t.url))
+            })
+        });
+        self.last_exclusive_pos = None;
+        if let Some(track) = track {
+            (self.callback)(PlayerEvent::ReplayRequest {
+                track,
+                expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                position,
+                play: was_playing,
+            });
+        } else {
+            crate::vprintln!(
+                "[WASAPI] exclusive fallback: non-replayable source, playback stopped (cannot re-arm shared)"
             );
         }
     }
