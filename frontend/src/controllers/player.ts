@@ -1,5 +1,5 @@
 import { sendIpc } from "../ipc";
-import { setSelfLoad } from "../audio-proxy";
+import { setSelfLoad, isSelfLoad } from "../audio-proxy";
 import type { AudioDevice } from "../types";
 
 export const createNativePlayerComponent = () => {
@@ -15,6 +15,15 @@ export const createNativePlayerComponent = () => {
     let seekTarget: number | null = null;
     let _time = 0;
     let _lastVolume = -1;
+
+    // A max-quality queue swap (e.g. RealMAX) re-asserts the current product as a
+    // same-track stop/load/play burst. Defer the stop a microtask; a same-(url,fmt)
+    // load cancels it and skips the reload so playback is not torn down.
+    let loadedUrl: string | null = null;
+    let loadedFmt: string | null = null;
+    let pendingStop = false;
+    // A real command (play/pause/seek/recover) supersedes a deferred stop.
+    const cancelDeferredStop = () => { pendingStop = false; };
 
     // Stable handle published on tidalModules so @luna/lib PlayState.currentTime resolves.
     const playerHandle = {
@@ -119,6 +128,19 @@ export const createNativePlayerComponent = () => {
             },
             load: (url: string, streamFormat: string, encryptionKey: string = "") => {
                 sendIpc("player.dbg", "SDK→load", streamFormat);
+                // Echo of the current track: skip the reload. !isSelfLoad() because
+                // self-loads bypass this delegate, leaving loadedUrl/loadedFmt stale.
+                if (pendingStop && !isSelfLoad() && url === loadedUrl && streamFormat === loadedFmt) {
+                    pendingStop = false;
+                    return;
+                }
+                // Genuine load (different track/quality): flush the deferred stop first.
+                if (pendingStop) {
+                    pendingStop = false;
+                    sendIpc("player.stop");
+                }
+                loadedUrl = url;
+                loadedFmt = streamFormat;
                 setSelfLoad(false);
                 seekTarget = null;
                 // Soft-reset format data (don't drain resolvers - playback.ts already did)
@@ -127,16 +149,28 @@ export const createNativePlayerComponent = () => {
             },
             play: () => {
                 sendIpc("player.dbg", "SDK→play");
+                cancelDeferredStop();
                 sendIpc("player.play");
             },
             pause: () => {
+                cancelDeferredStop();
                 sendIpc("player.pause");
             },
             stop: () => {
-                sendIpc("player.stop");
+                // Deferred so the echo's synchronous load() can cancel it; a genuine stop
+                // flushes here and forgets the track so a later re-select reloads.
+                pendingStop = true;
+                queueMicrotask(() => {
+                    if (!pendingStop) return;
+                    pendingStop = false;
+                    loadedUrl = null;
+                    loadedFmt = null;
+                    sendIpc("player.stop");
+                });
             },
             seek: (time: number) => {
                 sendIpc("player.dbg", "SDK→seek", time);
+                cancelDeferredStop();
                 seekTarget = time;
                 _time = time;
                 // Emit mediacurrenttime synchronously so the SDK layer (which
@@ -165,6 +199,7 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.preload.cancel");
             },
             recover: (...args: any[]) => {
+                cancelDeferredStop();
                 sendIpc("player.recover", ...args);
             },
             releaseDevice: () => {},
