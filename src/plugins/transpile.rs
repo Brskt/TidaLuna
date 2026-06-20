@@ -30,8 +30,8 @@ pub fn transpile_ts(source: &str, filename: &str) -> anyhow::Result<String> {
     if parsed.panicked {
         anyhow::bail!("Parser panicked for {filename}");
     }
-    if !parsed.errors.is_empty() {
-        let errors: Vec<String> = parsed.errors.iter().map(|e| e.to_string()).collect();
+    if !parsed.diagnostics.is_empty() {
+        let errors: Vec<String> = parsed.diagnostics.iter().map(|e| e.to_string()).collect();
         anyhow::bail!("Parse errors in {filename}: {}", errors.join("; "));
     }
 
@@ -69,8 +69,8 @@ fn lower_es_modules(source: &str, filename: &str) -> anyhow::Result<String> {
     if parsed.panicked {
         anyhow::bail!("Parser panicked for {filename}");
     }
-    if !parsed.errors.is_empty() {
-        let errors: Vec<String> = parsed.errors.iter().map(|e| e.to_string()).collect();
+    if !parsed.diagnostics.is_empty() {
+        let errors: Vec<String> = parsed.diagnostics.iter().map(|e| e.to_string()).collect();
         anyhow::bail!("Parse errors in {filename}: {}", errors.join("; "));
     }
 

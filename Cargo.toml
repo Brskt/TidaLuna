@@ -6,7 +6,7 @@ anyhow = "1.0.102"
 base16ct = { version = "1.0.0", features = ["alloc"] }
 base64 = "0.22.1"
 ed25519-dalek = "2.2.0"
-getrandom = "0.4.2"
+getrandom = "0.4.3"
 reqwest = { version = "0.13.4", default-features = false }
 semver = "1.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -66,7 +66,7 @@ audioadapter-buffers = "3.0.0"
 base16ct = { workspace = true }
 base64 = { workspace = true }
 cbc = "0.2.1"
-cef = { version = "148.3.0", features = ["build-util"] }
+cef = { version = "149.0.0", features = ["build-util"] }
 # Pinned to the PR #1183 merge (WASAPI/CoreAudio auto-reroute on default-device
 # change + unified Error/ErrorKind). Drop back to a crates.io release once cpal 0.18 ships.
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "c6aa4592ef07968ab6b431e62acab79c72869716", version = "0.18.0" }
@@ -77,7 +77,7 @@ fnv = "1.0.7"
 futures-util = "0.3.32"
 getrandom = { workspace = true }
 oauth2 = { version = "5.0.0", default-features = false }
-oxc = { version = "0.133.0", features = ["semantic", "transformer", "codegen"] }
+oxc = { version = "0.137.0", features = ["semantic", "transformer", "codegen"] }
 pbkdf2 = "0.13.0"
 png = "0.18.1"
 reqwest = { workspace = true, features = [
@@ -96,7 +96,7 @@ reqwest = { workspace = true, features = [
 ] }
 rtrb = "0.3.4"
 rubato = "3.0.0"
-rusqlite = { version = "0.40.0", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 rusty-leveldb = "4.0.1"
 semver = { workspace = true }
@@ -109,7 +109,7 @@ sysinfo = { version = "0.39.3", default-features = false, features = [
   "system",
 ] }
 tempfile = "3.27.0"
-time = { version = "0.3.47", features = ["local-offset"] }
+time = { version = "0.3.49", features = ["local-offset"] }
 tokio = { version = "1.52.3", features = [
   "rt-multi-thread",
   "net",

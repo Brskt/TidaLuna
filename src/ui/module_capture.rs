@@ -50,7 +50,7 @@ pub(crate) fn append_capture(js: &str, module_id: &str) -> String {
         return js.to_string();
     };
     let parsed = oxc::parser::Parser::new(&allocator, js, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
         return js.to_string();
     }
 
