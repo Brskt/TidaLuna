@@ -20,8 +20,8 @@ wrap_request_context_handler! {
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
             request: Option<&mut Request>,
-            _is_navigation: ::std::os::raw::c_int,
-            _is_download: ::std::os::raw::c_int,
+            is_navigation: ::std::os::raw::c_int,
+            is_download: ::std::os::raw::c_int,
             _request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
@@ -38,6 +38,11 @@ wrap_request_context_handler! {
             // the cached chunk carries the capture call on warm loads too.
             if crate::ui::module_capture::target_module_id(&url).is_some() {
                 return Some(crate::ui::module_capture::CaptureRequestHandler::new());
+            }
+            // Store fetches routed through the service worker reach only this context
+            // handler; serve `store.json` via reqwest (Chromium rejects the CDN redirect).
+            if let Some(h) = crate::ui::store_proxy::intercept(&url, is_navigation, is_download) {
+                return Some(h);
             }
             None
         }

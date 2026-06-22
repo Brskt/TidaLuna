@@ -692,8 +692,8 @@ wrap_request_handler! {
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
             _request: Option<&mut Request>,
-            _is_navigation: ::std::os::raw::c_int,
-            _is_download: ::std::os::raw::c_int,
+            is_navigation: ::std::os::raw::c_int,
+            is_download: ::std::os::raw::c_int,
             _request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
@@ -716,6 +716,12 @@ wrap_request_handler! {
             // so plugins share the host instance (hooks/context).
             if crate::ui::module_capture::target_module_id(&url).is_some() {
                 return Some(crate::ui::module_capture::CaptureRequestHandler::new());
+            }
+
+            // GitHub plugin-store fetches: Chromium rejects the signed release-asset CDN
+            // redirect, so serve them via reqwest. Mirrored in the context handler (SW path).
+            if let Some(h) = crate::ui::store_proxy::intercept(&url, is_navigation, is_download) {
+                return Some(h);
             }
 
             if crate::ui::token_filter::should_rewrite_token(&url)
