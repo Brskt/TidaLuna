@@ -1041,6 +1041,10 @@ pub(crate) enum AsioEvent {
     Duration(f64),
     DriverNotFound,
     FormatUnsupported,
+    /// The device can't play this track's format in ASIO -- either the rate was rejected up front
+    /// (`can_sample_rate`/`set_sample_rate`) or the driver posted a reset it needs to clock it.
+    /// Per-track: route THIS track to shared but keep ASIO on for other rates.
+    RateUnsupported,
     InitFailed(String),
     /// Track finished (EOF + drained). Carries the stream_id so a stale completion from a
     /// superseded stream can't clear a newer track (which would force a re-arm/double-load).
@@ -1183,12 +1187,12 @@ impl ControlCtx {
         // and outlives the stream (dropped only with the handle).
         unsafe {
             if !asio_ok(driver.can_sample_rate(sample_rate as f64)) {
-                return Err(AsioEvent::FormatUnsupported);
+                return Err(AsioEvent::RateUnsupported);
             }
             // Some clock-locked interfaces accept can_sample_rate but reject the switch;
             // rendering at the old clock plays wrong-speed, so fall back to shared.
             if !asio_ok(driver.set_sample_rate(sample_rate as f64)) {
-                return Err(AsioEvent::FormatUnsupported);
+                return Err(AsioEvent::RateUnsupported);
             }
 
             let (mut num_in, mut num_out) = (0i32, 0i32);

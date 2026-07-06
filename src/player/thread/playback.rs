@@ -92,6 +92,23 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Locked));
                             self.rearm_shared_after_exclusive_failure();
                         }
+                        ExclusiveEvent::FormatUnsupported => {
+                            crate::vprintln!(
+                                "[WASAPI] device can't do this track's format in exclusive; this track plays shared (exclusive stays on for other rates)"
+                            );
+                            if let Some(cancel) = self.exclusive_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+                            // Per-track skip: remember this track so its shared re-arm doesn't
+                            // loop back into exclusive, but keep exclusive on globally
+                            // (ExclusiveFormatUnsupported is not in the frontend disable list).
+                            self.exclusive_skip_track = self.current_track_id.clone();
+                            self.is_exclusive_mode = false;
+                            (self.callback)(PlayerEvent::DeviceError(
+                                DeviceErrorKind::ExclusiveFormatUnsupported,
+                            ));
+                            self.rearm_shared_after_exclusive_failure();
+                        }
                     }
                 }
             }
@@ -211,6 +228,23 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         self.is_asio_mode = false;
                         (self.callback)(PlayerEvent::DeviceError(
                             DeviceErrorKind::AsioFormatUnsupported,
+                        ));
+                        self.rearm_shared_after_asio_failure();
+                    }
+                    AsioEvent::RateUnsupported => {
+                        crate::vprintln!(
+                            "[ASIO] device can't clock this track's rate; this track plays shared (ASIO stays on for other rates)"
+                        );
+                        if let Some(cancel) = self.asio_stream_cancel.take() {
+                            cancel.store(true, Relaxed);
+                        }
+                        // Per-track skip: remember this track so its shared re-arm does NOT
+                        // re-engage ASIO (loop), but keep ASIO on globally (no sticky clear --
+                        // `AsioRateUnsupported` is not in the frontend's disable list).
+                        self.asio_skip_track = self.current_track_id.clone();
+                        self.is_asio_mode = false;
+                        (self.callback)(PlayerEvent::DeviceError(
+                            DeviceErrorKind::AsioRateUnsupported,
                         ));
                         self.rearm_shared_after_asio_failure();
                     }

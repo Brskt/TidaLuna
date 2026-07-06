@@ -72,7 +72,8 @@ const PASSTHROUGH_EVENTS = new Set([
     "deviceunknownerror", "mediaformat", "version", "mediaerror",
     "mediamaxconnectionsreached",
     "deviceasiodrivernotfound", "deviceasioformatunsupported",
-    "deviceasioinitfailed",
+    "deviceasioinitfailed", "deviceasiorateunsupported",
+    "deviceexclusiveformatunsupported",
 ]);
 let _lastTimeDispatch = 0;
 let _forceTimeDispatch = false;

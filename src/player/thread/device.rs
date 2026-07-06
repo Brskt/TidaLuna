@@ -70,6 +70,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 crate::vprintln!("[AUDIO] Device switch skipped: non-replayable source active");
                 return;
             }
+            // Per-track mode skip: bail BEFORE retiring the live reader below. Toggling to
+            // a mode this track can't do (e.g. ASIO while it plays in exclusive due to
+            // asio_skip_track) must not kill the live decoder with nothing re-armed -- that
+            // leaves silence with stale is_playing/mode flags. Keep the current backend
+            // playing; the skip clears on the next different-track load.
+            if mode == OutputMode::Asio
+                && self.current_track_id.is_some()
+                && self.asio_skip_track.as_deref() == self.current_track_id.as_deref()
+            {
+                self.current_device_id = Some(id);
+                crate::vprintln!(
+                    "[ASIO] skip: device can't clock this track's rate; keeping the current output"
+                );
+                return;
+            }
+            if mode == OutputMode::Exclusive
+                && self.current_track_id.is_some()
+                && self.exclusive_skip_track.as_deref() == self.current_track_id.as_deref()
+            {
+                self.current_device_id = Some(id);
+                crate::vprintln!(
+                    "[WASAPI] skip: device can't do this track's format in exclusive; keeping the current output"
+                );
+                return;
+            }
             // Retire any live exclusive/asio reader before the new stream contends
             // for the same buffer.
             if let Some(cancel) = self.exclusive_stream_cancel.take() {

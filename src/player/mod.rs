@@ -67,12 +67,14 @@ pub enum DeviceErrorKind {
     NotFound,
     FormatNotSupported,
     ExclusiveModeNotAllowed,
+    ExclusiveFormatUnsupported,
     Locked,
     Disconnected,
     Unknown,
     AsioDriverNotFound,
     AsioFormatUnsupported,
     AsioInitFailed,
+    AsioRateUnsupported,
 }
 
 impl DeviceErrorKind {
@@ -81,12 +83,14 @@ impl DeviceErrorKind {
             Self::NotFound => "devicenotfound",
             Self::FormatNotSupported => "deviceformatnotsupported",
             Self::ExclusiveModeNotAllowed => "deviceexclusivemodenotallowed",
+            Self::ExclusiveFormatUnsupported => "deviceexclusiveformatunsupported",
             Self::Locked => "devicelocked",
             Self::Disconnected => "devicedisconnected",
             Self::Unknown => "deviceunknownerror",
             Self::AsioDriverNotFound => "deviceasiodrivernotfound",
             Self::AsioFormatUnsupported => "deviceasioformatunsupported",
             Self::AsioInitFailed => "deviceasioinitfailed",
+            Self::AsioRateUnsupported => "deviceasiorateunsupported",
         }
     }
 }

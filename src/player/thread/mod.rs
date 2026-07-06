@@ -149,6 +149,16 @@ pub(super) struct PlayerThread<F> {
     // asio->shared switch (same rationale as last_exclusive_pos).
     #[cfg(target_os = "windows")]
     last_asio_pos: Option<f64>,
+    // Per-track ASIO skip: the canonical id of a track whose sample rate the device can't clock
+    // (RateUnsupported). Its shared re-arm must NOT re-engage ASIO (loop); cleared when a
+    // different track loads, so other rates keep using ASIO. Does NOT disable ASIO globally.
+    #[cfg(target_os = "windows")]
+    asio_skip_track: Option<String>,
+    // Per-track exclusive skip: same idea for a track whose format the device can't do in
+    // exclusive (FormatUnsupported); its re-arm plays shared without re-engaging exclusive,
+    // while exclusive stays enabled for other rates. Does NOT disable exclusive globally.
+    #[cfg(target_os = "windows")]
+    exclusive_skip_track: Option<String>,
     // Volume sync (Windows session volume)
     #[cfg(target_os = "windows")]
     _com_guard: Option<crate::platform::volume_sync::ComGuard>,
@@ -259,6 +269,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_asio_stream_id: None,
             #[cfg(target_os = "windows")]
             last_asio_pos: None,
+            #[cfg(target_os = "windows")]
+            asio_skip_track: None,
+            #[cfg(target_os = "windows")]
+            exclusive_skip_track: None,
             #[cfg(target_os = "windows")]
             _com_guard: com_guard,
             #[cfg(target_os = "windows")]

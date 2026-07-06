@@ -346,6 +346,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // user seek that was queued before the prior stream was ready.
             self.last_exclusive_pos = None;
             self.last_asio_pos = None;
+            // The per-track ASIO/exclusive skips clear when a DIFFERENT track loads (a same-track
+            // re-arm keeps them, so the unsupported track stays shared instead of re-engaging).
+            if self
+                .asio_skip_track
+                .as_deref()
+                .is_some_and(|s| s != track_id.as_str())
+            {
+                self.asio_skip_track = None;
+            }
+            if self
+                .exclusive_skip_track
+                .as_deref()
+                .is_some_and(|s| s != track_id.as_str())
+            {
+                self.exclusive_skip_track = None;
+            }
             self.user_seek_override = None;
             // A new load means the prior stop was a track change, not a real stop:
             // cancel any pending device release so the device is never freed mid-change.
@@ -360,9 +376,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let decode_start = std::time::Instant::now();
 
         // ASIO path (mutually exclusive with WASAPI-exclusive). Same start_paused
-        // contract; start_asio_playback consumes the resume position.
+        // contract; start_asio_playback consumes the resume position. Skipped for a track the
+        // device can't clock in ASIO (RateUnsupported) so it plays shared without re-engaging.
         #[cfg(target_os = "windows")]
-        if self.start_asio_playback(buffer.clone(), !auto_play) {
+        if self.asio_skip_track.as_deref() != Some(track_id.as_str())
+            && self.start_asio_playback(buffer.clone(), !auto_play)
+        {
             self.pending_play = None;
             crate::vprintln!(
                 "[ASIO] Progressive decode started ({:.0}ms setup)",
@@ -371,10 +390,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return true;
         }
 
-        // Exclusive path. start_paused = !auto_play (a paused restore enters
-        // paused); start_exclusive_playback consumes the resume position.
+        // Exclusive path. start_paused = !auto_play (a paused restore enters paused);
+        // start_exclusive_playback consumes the resume position. Skipped for a track
+        // whose format the device can't do in exclusive (FormatUnsupported) so it
+        // plays shared without re-engaging exclusive.
         #[cfg(target_os = "windows")]
-        if self.start_exclusive_playback(buffer.clone(), !auto_play) {
+        if self.exclusive_skip_track.as_deref() != Some(track_id.as_str())
+            && self.start_exclusive_playback(buffer.clone(), !auto_play)
+        {
             // When auto_play, exclusive auto-starts playback (is_playing=true),
             // which satisfies any deferred play; clear it so it can't dangle.
             self.pending_play = None;

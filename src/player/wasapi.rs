@@ -63,6 +63,10 @@ pub(super) enum ExclusiveEvent {
     Duration(f64),
     InitFailed(String),
     DeviceLocked(String),
+    /// The device can't do THIS track's rate/bit-depth in exclusive (e.g. 88.2/176.4/192k on a
+    /// 96k-max DAC), but exclusive itself works for other rates. Per-track shared fallback,
+    /// keeping exclusive enabled -- mirrors `AsioEvent::RateUnsupported`.
+    FormatUnsupported,
 }
 
 struct SizedMediaSource<R> {
@@ -808,6 +812,11 @@ fn try_open_stream(
             eprintln!("[WASAPI] Failed to open stream: {e}");
             if is_device_in_use_error(&e) {
                 let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
+            } else if e.as_str() == "no compatible exclusive format found" {
+                // Per-track: this track's format isn't exclusive-compatible, but exclusive
+                // itself is fine for other rates. Play shared, keep exclusive on (do NOT treat
+                // it as a device-wide ExclusiveModeNotAllowed, which would disable exclusive).
+                let _ = event_tx.send(ExclusiveEvent::FormatUnsupported);
             } else {
                 let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
             }
