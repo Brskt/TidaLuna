@@ -15,12 +15,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         frames as f64 / self.sample_rate.max(1) as f64
     }
 
-    // Decoder read-ahead position; only the Windows bypass-mode switch fallbacks use it.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(super) fn current_position_secs(&self) -> f64 {
-        self.samples_to_secs(self.decoded_samples.load(Relaxed))
-    }
-
     pub(super) fn played_position_secs(&self) -> f64 {
         self.samples_to_secs(self.played_samples.load(Relaxed))
     }
@@ -624,7 +618,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 pos_secs
             };
             if pos_secs > 0.0 {
-                if let Some(track_id) = self.current_track_id.as_ref() {
+                // Don't re-write resume_store while the track is completing: after decode
+                // EOF (Finished already cleared it) the ring is still draining, and this tick
+                // would otherwise re-store a near-duration position. That stale entry then
+                // survives into a replay and seeks the next mode-switch straight to EOF
+                // (which auto-advances to the next track).
+                if !self.pending_complete
+                    && let Some(track_id) = self.current_track_id.as_ref()
+                {
                     self.resume_store.set(track_id, pos_secs);
                     self.resume_store.flush_if_due(false);
                 }

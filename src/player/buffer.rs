@@ -148,6 +148,19 @@ impl RamBuffer {
         inner.finished && inner.error.is_none() && inner.base_offset == 0
     }
 
+    /// Like `is_complete()` but also requires the data to still be in memory (not moved
+    /// out via `take_data()`). A reused decoder needs the bytes present -- a complete but
+    /// emptied buffer would read instant EOF (silence). This is `take_data()`'s own gate
+    /// without the take, so a `true` here guarantees a fresh decoder can read the track.
+    // Callers are all cfg(windows) (the buffer-reuse gates in thread/device.rs), so
+    // Linux clippy sees it as dead; keep it compiled/type-checked there anyway
+    // (same pattern as declick.rs / convert.rs).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn is_reusable(&self) -> bool {
+        let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.finished && inner.error.is_none() && inner.base_offset == 0 && !inner.data.is_empty()
+    }
+
     pub fn total_len(&self) -> u64 {
         let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.total_len

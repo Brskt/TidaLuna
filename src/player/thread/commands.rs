@@ -109,7 +109,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// PushPcm. No `Stop` (it emits `Stopped`, which clears the host-side track);
     /// the new `StartStream` is the reset.
     #[cfg(target_os = "windows")]
-    fn spawn_exclusive_decoder(
+    pub(super) fn spawn_exclusive_decoder(
         &mut self,
         buffer: crate::player::buffer::RamBuffer,
         seek_to: Option<f64>,
@@ -132,6 +132,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         let (seek_tx, seek_rx) = mpsc::channel::<f64>();
         self.exclusive_seek_tx = Some(seek_tx);
+        // Fresh stream: don't inherit a stale reverse-to-shared position from a prior
+        // exclusive session (the buffer-reuse mode switch bypasses handle_load's clear).
+        self.last_exclusive_pos = None;
 
         let reader = buffer.clone().with_reader_cancel(cancel.clone());
         let total_len = buffer.total_len();
@@ -181,7 +184,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// `spawn_exclusive_decoder`: a fresh `stream_id` makes the control thread drop
     /// the prior decoder's stale `PushPcm`; the new `StartStream` is the reset.
     #[cfg(target_os = "windows")]
-    fn spawn_asio_decoder(
+    pub(super) fn spawn_asio_decoder(
         &mut self,
         buffer: crate::player::buffer::RamBuffer,
         seek_to: Option<f64>,
@@ -217,6 +220,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // track so its target can't pin this track's progress bar.
         self.seeking = false;
         self.seek_target = None;
+        // The buffer-reuse mode switch spawns this directly, bypassing handle_load (which
+        // otherwise clears these): a fresh stream must not inherit a stale progress-watchdog
+        // timer (it would trip "no progress for 2s" instantly and force a shared fallback)
+        // or a stale reverse-to-shared position from a prior ASIO session.
+        self.asio_watchdog_at = None;
+        self.last_asio_pos = None;
         thread::spawn(move || {
             if let Err(e) = crate::player::asio::host::stream_reader_to_asio(
                 reader,

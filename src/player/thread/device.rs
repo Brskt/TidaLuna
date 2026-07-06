@@ -29,14 +29,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             && self.has_track
             && self.cpal_stream.is_some()
             && self.current_output_name.is_some()
-            && requested_is_default == self.output_is_default
             && (self.current_output_name.as_deref() == Some(id.as_str())
                 || super::output::resolved_device_name(&id).as_deref()
                     == self.current_output_name.as_deref())
         {
-            // Persist on no-op too: the resolved compare can match a different
-            // requested id, and loads/recovery resolve from current_device_id.
+            // Same physical device -- no rebuild, even across an id-class flip. Our own
+            // ASIO-off toggle sends "auto" while TIDAL re-asserts the concrete device id;
+            // gating on `requested_is_default == output_is_default` would force a rebuild
+            // that raced effective_position() to a stale zero and restarted the track. Adopt the new
+            // id AND its follow-class so a later default-device change is still handled.
             self.current_device_id = Some(id);
+            self.output_is_default = requested_is_default;
             return;
         }
         #[cfg(target_os = "windows")]
@@ -113,14 +116,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Switch TO ASIO (radio: mutually exclusive with shared / WASAPI-exclusive).
             if mode == OutputMode::Asio {
                 // Reaching here is a real shared/exclusive -> ASIO switch (the idempotent
-                // re-assert returned above).
+                // re-assert and the per-track skip both returned above, pre-cancel).
                 let was_playing = self.is_playing;
                 let position = self
                     .current_track_id
                     .as_deref()
                     .and_then(|tid| self.resume_store.get(tid))
                     .or_else(|| {
-                        let p = self.current_position_secs();
+                        let p = self.played_position_secs();
                         (p > 0.0).then_some(p)
                     });
 
@@ -163,8 +166,20 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.asio_handle = Some(handle);
                 self.current_device_id = Some(id.clone());
 
-                // Re-arm with a FRESH load (the live buffer would race the decoder
-                // probe); handle_load now takes the ASIO branch since is_asio_mode is set.
+                // Reuse the retained buffer when the track is fully in memory: spawn the
+                // ASIO decoder on it directly, no network re-download and no idle stall.
+                // Only a still-STREAMING buffer races the decoder probe (its base_offset
+                // churns mid-download); a complete one is probe-safe (the same invariant
+                // cache-hit loads rely on every day). No new load: clear the load bookkeeping.
+                if let Some(buffer) = self.current_buffer.clone().filter(RamBuffer::is_reusable) {
+                    self.loading_gen = None;
+                    self.pending_play = None;
+                    crate::vprintln!("[AUDIO] Switched to ASIO output (retained buffer)");
+                    self.spawn_asio_decoder(buffer, position, !was_playing);
+                    return;
+                }
+                // Still-streaming buffer: a fresh load re-probes cleanly (handle_load takes
+                // the ASIO branch since is_asio_mode is set).
                 self.has_track = false;
                 self.is_playing = false;
                 self.loading_gen = None;
@@ -188,18 +203,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
 
             if mode == OutputMode::Exclusive {
-                // Position from resume_store, which is refreshed every ~200ms from
-                // the real played time. current_position_secs() won't do: it drops
-                // to near zero just after a switch/re-arm. Falls back to the live
-                // position only when nothing is stored yet. Carried on the
-                // ReplayRequest below, applied at the exclusive spawn.
+                // (The per-track format skip returned above, before the cancel block.)
+                // Position from resume_store (refreshed every ~200ms from the played
+                // time); falls back to the live played position when nothing is stored
+                // yet. Carried on the ReplayRequest below (or the retained-buffer reuse),
+                // applied at the exclusive spawn.
                 let was_playing = self.is_playing;
                 let position = self
                     .current_track_id
                     .as_deref()
                     .and_then(|tid| self.resume_store.get(tid))
                     .or_else(|| {
-                        let p = self.current_position_secs();
+                        let p = self.played_position_secs();
                         (p > 0.0).then_some(p)
                     });
 
@@ -251,10 +266,25 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.exclusive_handle = Some(handle);
                 self.current_device_id = Some(id.clone());
 
-                // Re-arm with a FRESH load, not the live buffer: symphonia's probe
-                // races a mid-stream churned buffer and can hang, which means
-                // silence. A fresh load probes cleanly; handle_load now takes the
-                // exclusive branch since is_exclusive_mode is set.
+                // Reuse the retained buffer when the track is fully in memory: spawn the
+                // exclusive decoder on it directly, no network re-download and no idle stall.
+                // The probe race that motivated the fresh load only affects a still-STREAMING
+                // buffer (its base_offset churns mid-download); a complete one is probe-safe.
+                if let Some(buffer) = self.current_buffer.clone().filter(RamBuffer::is_reusable) {
+                    self.loading_gen = None;
+                    self.pending_play = None;
+                    self.seeking = false;
+                    self.seek_target = None;
+                    crate::vprintln!(
+                        "[AUDIO] Switched to exclusive WASAPI (retained buffer): {}",
+                        id
+                    );
+                    self.spawn_exclusive_decoder(buffer, position, !was_playing);
+                    return;
+                }
+                // Still-streaming buffer: symphonia's probe would race the mid-stream churn
+                // (silence), so re-arm a fresh load that probes cleanly; handle_load takes
+                // the exclusive branch since is_exclusive_mode is set.
                 self.has_track = false;
                 self.is_playing = false;
                 self.loading_gen = None;
@@ -293,21 +323,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.is_exclusive_mode = false;
                 self.current_device_id = Some(id);
 
-                // The exclusive reader parks the buffer mid-range; re-probing here
-                // would block the player loop. Re-arm a fresh shared load at the
-                // live position instead (current_position_secs() is stale in
-                // exclusive mode).
-                let was_playing = self.is_playing;
-                self.has_track = false;
-                self.is_playing = false;
-                self.loading_gen = None;
-                self.pending_play = None;
-                // A seek killed mid-flight by the exclusive entry (its SeekComplete
-                // never arrives) would otherwise survive into the fresh pipeline and
-                // pin the poll loop at 1ms reporting a ghost position.
-                self.seeking = false;
-                self.seek_target = None;
-
                 // Prefer the live exclusive position (floor-free); fall back to
                 // resume_store only if no TimeUpdate arrived (it floors sub-1s and
                 // can return a stale prior-session offset). Track from CURRENT_TRACK
@@ -323,6 +338,32 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     })
                 });
 
+                // Reuse the retained buffer when the track is fully in memory: rebuild the
+                // shared pipeline on it in place (the device-switch path), no network
+                // re-download and no idle stall. A seek killed mid-flight by the exclusive
+                // entry must not survive into the rebuilt pipeline (it would pin the poll
+                // loop at a ghost position), so clear it first.
+                if self
+                    .current_buffer
+                    .as_ref()
+                    .is_some_and(RamBuffer::is_reusable)
+                {
+                    self.seeking = false;
+                    self.seek_target = None;
+                    crate::vprintln!("[AUDIO] Switched back to shared mode (retained buffer)");
+                    self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                    return;
+                }
+
+                // Still-streaming buffer: the exclusive reader parks it mid-range, so a
+                // fresh shared load probes cleanly instead of blocking the player loop.
+                let was_playing = self.is_playing;
+                self.has_track = false;
+                self.is_playing = false;
+                self.loading_gen = None;
+                self.pending_play = None;
+                self.seeking = false;
+                self.seek_target = None;
                 crate::vprintln!("[AUDIO] Switched back to shared mode");
                 if let Some(track) = track {
                     (self.callback)(PlayerEvent::ReplayRequest {
@@ -350,14 +391,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.is_asio_mode = false;
                 self.current_device_id = Some(id);
 
-                let was_playing = self.is_playing;
-                self.has_track = false;
-                self.is_playing = false;
-                self.loading_gen = None;
-                self.pending_play = None;
-                self.seeking = false;
-                self.seek_target = None;
-
                 // Prefer the live ASIO position (floor-free); fall back to resume_store.
                 let track = crate::state::CURRENT_TRACK
                     .lock()
@@ -370,6 +403,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     })
                 });
 
+                // Reuse the retained buffer when the track is fully in memory: rebuild the
+                // shared pipeline on it in place (the device-switch path), no network
+                // re-download and no idle stall.
+                if self
+                    .current_buffer
+                    .as_ref()
+                    .is_some_and(RamBuffer::is_reusable)
+                {
+                    self.seeking = false;
+                    self.seek_target = None;
+                    crate::vprintln!(
+                        "[AUDIO] Switched back to shared mode (from ASIO, retained buffer)"
+                    );
+                    self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                    return;
+                }
+
+                // Still-streaming buffer: a fresh shared load probes cleanly.
+                let was_playing = self.is_playing;
+                self.has_track = false;
+                self.is_playing = false;
+                self.loading_gen = None;
+                self.pending_play = None;
+                self.seeking = false;
+                self.seek_target = None;
                 crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
                 if let Some(track) = track {
                     (self.callback)(PlayerEvent::ReplayRequest {
