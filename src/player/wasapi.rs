@@ -49,8 +49,15 @@ pub(super) enum ExclusiveCommand {
         stream_id: u32,
         start_secs: f64,
     },
-    Play,
-    Pause,
+    /// Stream-scoped like PushPcm/EndStream (mirrors ASIO's Play/Pause): un-scoped, a
+    /// premature Play (racing the decoder's probe) or a stale one from a superseded track
+    /// resumed the OLD armed track's PCM until the new StartStream landed.
+    Play {
+        stream_id: u32,
+    },
+    Pause {
+        stream_id: u32,
+    },
     /// Drop the IAudioClient (free the endpoint for other apps) on a real stop,
     /// while keeping the render thread alive. The next StartStream reopens it.
     ReleaseDevice,
@@ -839,6 +846,11 @@ struct RenderContext {
     write_cursor: usize,
     frames_played: u64,
     current_stream_id: Option<u32>,
+    // Pre-adoption transport intent (stream_id, play): a Play/Pause for a stream
+    // whose probe-delayed StartStream hasn't arrived yet (FIFO makes this
+    // deterministic). Every adoption consumes it: applied on id match, discarded
+    // otherwise (ids never repeat).
+    pending_transport: Option<(u32, bool)>,
     stream_ended: bool,
     last_time_report: Instant,
     state: RenderState,
@@ -870,6 +882,7 @@ impl RenderContext {
             write_cursor: 0,
             frames_played: 0,
             current_stream_id: None,
+            pending_transport: None,
             stream_ended: true,
             last_time_report: Instant::now(),
             state: RenderState::Idle,
@@ -897,6 +910,7 @@ impl RenderContext {
         self.write_cursor = 0;
         self.frames_played = 0;
         self.current_stream_id = None;
+        self.pending_transport = None;
         self.stream_ended = true;
         self.client_started = false;
         self.pending_start = false;
@@ -981,6 +995,13 @@ impl RenderContext {
         self.current_stream_id = Some(stream_id);
         self.stream_ended = false;
         self.last_time_report = Instant::now();
+        // Apply a transport command that raced ahead of this adoption (the player
+        // can send Play/Pause for this stream before its probe-delayed StartStream
+        // lands). Consumed on EVERY adoption: applied on id match, else discarded.
+        let start_paused = match self.pending_transport.take() {
+            Some((id, play)) if id == stream_id => !play,
+            _ => start_paused,
+        };
 
         let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
         // Do NOT start the clock yet: per IAudioClient::Start the buffer must
@@ -1151,7 +1172,22 @@ fn render_thread_inner(
             RenderState::Playing => {
                 while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
-                        ExclusiveCommand::Pause => {
+                        ExclusiveCommand::Play { stream_id } => {
+                            // Play for the live stream while already Playing is a no-op;
+                            // one for a not-yet-adopted stream is latched so its
+                            // probe-delayed StartStream applies it.
+                            if ctx.current_stream_id != Some(stream_id) {
+                                ctx.pending_transport = Some((stream_id, true));
+                            }
+                        }
+                        ExclusiveCommand::Pause { stream_id } => {
+                            // Stream-scoped: a stale pause from a superseded track must
+                            // not stop the live stream; one for a not-yet-adopted stream
+                            // is latched so its StartStream starts paused.
+                            if ctx.current_stream_id != Some(stream_id) {
+                                ctx.pending_transport = Some((stream_id, false));
+                                continue;
+                            }
                             // Stop + Reset() flush the stale endpoint tail; pending_start
                             // makes resume re-prime a full period before Start(). A bare
                             // restart over the stale tail saturates (the exclusive buffer
@@ -1204,7 +1240,6 @@ fn render_thread_inner(
                             ctx.stop_audio_client();
                             return Ok(());
                         }
-                        _ => {}
                     }
                 }
 
@@ -1460,12 +1495,27 @@ fn render_thread_inner(
             }
 
             RenderState::Paused => match cmd_rx.recv() {
-                Ok(ExclusiveCommand::Play) => {
+                Ok(ExclusiveCommand::Play { stream_id }) => {
+                    // Stream-scoped: a premature Play for a not-yet-adopted stream
+                    // (its StartStream lands only after the decoder's probe) or a
+                    // stale one for a superseded stream must not resume the OLD
+                    // armed context. Latch it: the adoption applies it on id match.
+                    if ctx.current_stream_id != Some(stream_id) {
+                        ctx.pending_transport = Some((stream_id, true));
+                        continue;
+                    }
                     // Pause armed pending_start + Reset() the endpoint, so the Playing
                     // loop re-primes a full period before Start() (first-start/seek path).
                     ctx.state = RenderState::Playing;
                     let _ =
                         event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+                }
+                Ok(ExclusiveCommand::Pause { stream_id }) => {
+                    // Already paused; only a pause for a not-yet-adopted stream
+                    // matters -- latch it so its StartStream starts paused.
+                    if ctx.current_stream_id != Some(stream_id) {
+                        ctx.pending_transport = Some((stream_id, false));
+                    }
                 }
                 Ok(ExclusiveCommand::StartStream {
                     stream_id,
@@ -1502,7 +1552,6 @@ fn render_thread_inner(
                     ctx.stop_audio_client();
                     return Ok(());
                 }
-                _ => {}
             },
         }
     }

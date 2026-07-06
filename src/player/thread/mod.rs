@@ -126,6 +126,11 @@ pub(super) struct PlayerThread<F> {
     // Sender to the live exclusive decoder for in-place seeks (no respawn).
     #[cfg(target_os = "windows")]
     exclusive_seek_tx: Option<mpsc::Sender<f64>>,
+    // Live exclusive stream id: scopes Play/Pause to the adopted stream (mirrors
+    // current_asio_stream_id), so a premature or stale command can't act on the
+    // old render context.
+    #[cfg(target_os = "windows")]
+    current_exclusive_stream_id: Option<u32>,
     // Live exclusive position (floor-free, this session): restores the position
     // on an exclusive->shared switch, where resume_store's 1s floor and
     // cross-session persistence would lose it or return a stale offset.
@@ -269,6 +274,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             exclusive_stream_cancel: None,
             #[cfg(target_os = "windows")]
             exclusive_seek_tx: None,
+            #[cfg(target_os = "windows")]
+            current_exclusive_stream_id: None,
             #[cfg(target_os = "windows")]
             last_exclusive_pos: None,
             #[cfg(target_os = "windows")]

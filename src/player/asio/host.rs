@@ -1057,8 +1057,12 @@ pub(crate) enum AsioCommand {
         stream_id: u32,
         start_secs: f64,
     },
-    Play,
-    Pause,
+    Play {
+        stream_id: u32,
+    },
+    Pause {
+        stream_id: u32,
+    },
     Shutdown,
 }
 
@@ -1135,6 +1139,11 @@ struct ControlCtx {
     /// driver's lifetime).
     callbacks: Box<AsioCallbacks>,
     stream_id: Option<u32>,
+    /// Pre-adoption transport intent `(stream_id, play)`: a Play/Pause for a
+    /// stream whose probe-delayed StartStream hasn't arrived yet (FIFO makes
+    /// this deterministic). Every adoption consumes it: applied on id match,
+    /// discarded otherwise (ids never repeat).
+    pending_transport: Option<(u32, bool)>,
     sample_rate: u32,
     channels: usize,
     frames: usize,
@@ -1184,6 +1193,7 @@ impl ControlCtx {
                 buffer_switch_time_info: tone_buffer_switch_time_info,
             }),
             stream_id: None,
+            pending_transport: None,
             sample_rate: 0,
             channels: 0,
             frames: 0,
@@ -1514,6 +1524,13 @@ impl ControlCtx {
         // Arm play/pause WITHOUT touching the clock (continuous hold): the RT emits silence
         // while paused and consumes once cleared. The cold-start flags are set only in the
         // rebuild branch above; on a REUSE track-change the clock is already running.
+        // Apply a transport command that raced ahead of this adoption (the player
+        // can send Play/Pause for this stream before its probe-delayed StartStream
+        // lands). Consumed on EVERY adoption: applied on id match, else discarded.
+        let start_paused = match self.pending_transport.take() {
+            Some((id, play)) if id == stream_id => !play,
+            _ => start_paused,
+        };
         self.paused.store(start_paused, Ordering::Relaxed);
 
         let _ = event_tx.send(AsioEvent::Duration(duration_secs));
@@ -1883,18 +1900,32 @@ impl ControlCtx {
                 stream_id,
                 start_secs,
             } => self.handle_reset_for_seek(stream_id, start_secs),
-            AsioCommand::Play => {
-                if matches!(self.state, AsioState::Paused) {
+            AsioCommand::Play { stream_id } => {
+                // Stream-scoped, like PushPcm/EndStream/Completed: a stale Play from a
+                // superseded track (the stop->load->play storm) must not resume the wrong
+                // stream over the live one.
+                if self.stream_id == Some(stream_id) && matches!(self.state, AsioState::Paused) {
                     self.resume(event_tx);
+                } else if self.stream_id != Some(stream_id) {
+                    // Pre-adoption: this stream's probe-delayed StartStream hasn't
+                    // landed yet -- latch the intent; its adoption applies it.
+                    self.pending_transport = Some((stream_id, true));
                 }
             }
-            AsioCommand::Pause => {
-                if matches!(self.state, AsioState::Playing) {
+            AsioCommand::Pause { stream_id } => {
+                // A stale Pause from the previous track's stop, landing AFTER this track's Play,
+                // would re-pause the running clock and wedge the RT in permanent silence
+                // (played=0, never underruns). Drop it unless it targets the live stream.
+                if self.stream_id == Some(stream_id) && matches!(self.state, AsioState::Playing) {
                     // Hold the clock (KS-exclusive device kept); the RT emits silence while
                     // `paused` is set instead of ASIOStop-ing (which would free the device).
                     self.paused.store(true, Ordering::Relaxed);
                     self.state = AsioState::Paused;
                     let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Paused));
+                } else if self.stream_id != Some(stream_id) {
+                    // Pre-adoption pause (e.g. clicked during an auto-play arm):
+                    // latch it so the adoption starts paused instead of dropping it.
+                    self.pending_transport = Some((stream_id, false));
                 }
             }
             AsioCommand::Shutdown => {

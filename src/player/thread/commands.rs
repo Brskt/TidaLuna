@@ -139,6 +139,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let reader = buffer.clone().with_reader_cancel(cancel.clone());
         let total_len = buffer.total_len();
         let stream_id = EXCLUSIVE_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
+        // Record the live stream_id so Play/Pause are stream-scoped -- a premature
+        // or stale command must not act on a superseded render context (mirrors
+        // current_asio_stream_id).
+        self.current_exclusive_stream_id = Some(stream_id);
         thread::spawn(move || {
             if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
                 reader,
@@ -702,7 +706,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                     (self.callback)(PlayerEvent::TimeUpdate(seek_time, self.current_seq));
                 } else if let Some(ref handle) = self.asio_handle {
-                    handle.send(AsioCommand::Play);
+                    // Only resume the live retained stream. A missing id means there
+                    // is no retained stream to resume; sending id 0 would be silently
+                    // dropped by the stream-scoped guard, so log it instead.
+                    match self.current_asio_stream_id {
+                        Some(stream_id) => {
+                            handle.send(AsioCommand::Play { stream_id });
+                        }
+                        None => {
+                            crate::vprintln!("[ASIO]   play: no live stream id; nothing to resume");
+                        }
+                    }
                 }
                 self.is_playing = true;
                 crate::state::GOVERNOR
@@ -731,7 +745,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                     (self.callback)(PlayerEvent::TimeUpdate(seek_time, self.current_seq));
                 } else if let Some(ref handle) = self.exclusive_handle {
-                    handle.send(ExclusiveCommand::Play);
+                    // Only resume the live adopted stream (mirrors the ASIO branch):
+                    // a missing id means there is no stream to resume yet.
+                    match self.current_exclusive_stream_id {
+                        Some(stream_id) => {
+                            handle.send(ExclusiveCommand::Play { stream_id });
+                        }
+                        None => {
+                            crate::vprintln!("[WASAPI] play: no live stream id; nothing to resume");
+                        }
+                    }
                 }
                 self.is_playing = true;
                 crate::state::GOVERNOR
@@ -805,7 +828,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             if self.is_asio_mode {
                 if let Some(ref handle) = self.asio_handle {
-                    handle.send(AsioCommand::Pause);
+                    match self.current_asio_stream_id {
+                        Some(stream_id) => {
+                            handle.send(AsioCommand::Pause { stream_id });
+                        }
+                        None => {
+                            crate::vprintln!("[ASIO]   pause: no live stream id; nothing to pause");
+                        }
+                    }
                 }
                 self.is_playing = false;
                 crate::state::GOVERNOR
@@ -821,7 +851,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             if self.is_exclusive_mode {
                 let was_playing = self.is_playing;
                 if let Some(ref handle) = self.exclusive_handle {
-                    handle.send(ExclusiveCommand::Pause);
+                    match self.current_exclusive_stream_id {
+                        Some(stream_id) => {
+                            handle.send(ExclusiveCommand::Pause { stream_id });
+                        }
+                        None => {
+                            crate::vprintln!("[WASAPI] pause: no live stream id; nothing to pause");
+                        }
+                    }
                 }
                 self.is_playing = false;
                 // Hold the device, then release it on a sustained pause so other apps
