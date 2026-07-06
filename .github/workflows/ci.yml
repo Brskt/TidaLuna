@@ -212,11 +212,12 @@ jobs:
         run: |
           # Official 7-Zip standalone extractor, embedded in the installer to
           # unpack the payload.7z that `cargo xtask package` builds. 7-Zip ships
-          # no Authenticode signature, so pin the SHA-256 of the official binary.
-          # Bump this when 7-Zip publishes a new 7zr.exe (the check fails closed).
+          # no Authenticode signature, so fetch a versioned release asset (the
+          # floating 7-zip.org/a/7zr.exe changes content on every 7-Zip release)
+          # and pin its SHA-256. Bump version and hash together, deliberately.
           $dst = Join-Path $env:RUNNER_TEMP '7zr.exe'
-          Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $dst
-          $expected = 'ABCF64AE1CBAFDDB5395E4CDD3BDC7E3E0561D54A0C6380E3DD43BDBFFE519A2'
+          Invoke-WebRequest -Uri 'https://github.com/ip7z/7zip/releases/download/26.02/7zr.exe' -OutFile $dst
+          $expected = '56B8CC9F4971CEF253644FAFE54063ED7FDCA551D4DEE0F8C6BAA81B855ACD72'
           $actual = (Get-FileHash $dst -Algorithm SHA256).Hash
           if ($actual -ne $expected) { throw "7zr.exe sha256 mismatch: got $actual" }
           "TIDALUNAR_7ZR_EXE=$dst" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
