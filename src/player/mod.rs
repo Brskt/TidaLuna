@@ -2,6 +2,7 @@ pub(crate) mod asio;
 pub(crate) mod buffer;
 pub(crate) mod cache;
 pub(crate) mod dash;
+mod declick;
 pub(crate) mod ipc;
 mod resume;
 mod thread;

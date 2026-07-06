@@ -20,6 +20,8 @@ use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
 };
 
+use crate::player::declick::{RESYNC_SILENCE_MS, silence_frames};
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -838,6 +840,9 @@ struct RenderContext {
     // start defers start_stream until a buffer of real PCM is pre-filled, and a
     // mid-stream underrun re-arms pending_start with the clock still running.
     client_started: bool,
+    // Frames of post-format-change resync silence the render loop still owes the
+    // endpoint before real PCM, to mask the DAC PLL relock at the new rate.
+    post_start_silence_remaining: u32,
 }
 
 impl RenderContext {
@@ -861,6 +866,7 @@ impl RenderContext {
             state: RenderState::Idle,
             pending_start: false,
             client_started: false,
+            post_start_silence_remaining: 0,
         }
     }
 
@@ -885,6 +891,7 @@ impl RenderContext {
         self.stream_ended = true;
         self.client_started = false;
         self.pending_start = false;
+        self.post_start_silence_remaining = 0;
         self.state = RenderState::Idle;
     }
 
@@ -914,6 +921,10 @@ impl RenderContext {
             && self.pcm_channels == channels
             && self.pcm_src_bps == bits_per_sample;
         if !same_format {
+            // A client was already playing iff this is an actual rate change (not the
+            // first open or a reopen after release): only then is there a DAC relock to
+            // mask with post-start silence.
+            let had_client = self.audio_client.is_some();
             self.stop_audio_client();
             self.render_client = None;
             self.h_event = None;
@@ -933,12 +944,22 @@ impl RenderContext {
             self.h_event = Some(ev);
             self.wave_fmt = Some(wf);
             self.buffer_size = bs;
+            // Mask the DAC PLL relock at the new rate with a resync silence (shared sizing
+            // with the ASIO backend).
+            self.post_start_silence_remaining = if had_client {
+                silence_frames(sample_rate, RESYNC_SILENCE_MS) as u32
+            } else {
+                0
+            };
         } else if let Some(ref ac) = self.audio_client {
             // Reusing the open client: stop + Reset() to flush stale frames from
             // the endpoint. Reset needs the stream stopped; the start branch below
             // restarts it.
             let _ = ac.stop_stream();
             let _ = ac.reset_stream();
+            // Same-format reuse: continuous endpoint, no relock -> no resync silence
+            // (clear any leftover from a just-prior rate change).
+            self.post_start_silence_remaining = 0;
         }
 
         self.pcm_data.clear();
@@ -1206,6 +1227,25 @@ fn render_thread_inner(
                     let src_bytes_per_frame = src_bytes_per_sample * ctx.pcm_channels as usize;
                     let dst_bytes_per_sample = wf.get_bitspersample() as usize / 8;
                     let dst_bytes_per_frame = dst_bytes_per_sample * ctx.pcm_channels as usize;
+
+                    // Post-format-change resync silence: hold the endpoint at zero while the
+                    // DAC PLL relocks at the new rate. Emits silence without consuming pcm_data,
+                    // so the track head is delayed, not dropped.
+                    if ctx.post_start_silence_remaining > 0 {
+                        let silence = vec![0u8; available * dst_bytes_per_frame];
+                        let _ = rc.write_to_device(available, &silence, None);
+                        ctx.post_start_silence_remaining = ctx
+                            .post_start_silence_remaining
+                            .saturating_sub(available as u32);
+                        if !ctx.client_started {
+                            // Pre-roll is in the endpoint; start the clock so it plays out and
+                            // frees space for the next silence buffer (exclusive event mode
+                            // needs a buffer written before Start()).
+                            let _ = ac.start_stream();
+                            ctx.client_started = true;
+                        }
+                        continue;
+                    }
 
                     let remaining_src_bytes = ctx.pcm_data.len().saturating_sub(ctx.write_cursor);
                     let remaining_frames = remaining_src_bytes

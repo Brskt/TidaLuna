@@ -8,7 +8,9 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::sync::Arc;
@@ -32,6 +34,10 @@ use super::iasio::{
 };
 use crate::player::PlaybackState;
 use crate::player::buffer::RamBuffer;
+use crate::player::declick::{
+    DECLICK_FADE_MS, FADE_OUT_WAIT_MAX_MS, FADE_OUT_WAIT_MS, RESYNC_SILENCE_MS, fade_in_env,
+    fade_out_env, fade_scale, silence_frames,
+};
 
 /// Stereo: TIDAL streams only stereo PCM, and ASIO4ALL exposes 2 output channels.
 const CHANNELS: usize = 2;
@@ -377,6 +383,25 @@ struct StreamCtx {
     /// Set on pause: the RT callback emits silence without consuming the ring or
     /// advancing position, so the driver clock stays running (device held).
     paused: Arc<AtomicBool>,
+    /// De-click envelope length in frames (~10 ms at this stream's rate); shared by the
+    /// teardown fade-out and the post-resync fade-in.
+    fade_len: usize,
+    /// Control thread sets this to request a fade-to-silence before a format-change
+    /// teardown; the RT ramps the output down then holds zero (avoids the pre-stop click).
+    fade_out: AtomicBool,
+    /// RT sets this once a fully-silent buffer has reached the *playing* half (one switch
+    /// after the ramp), so the control thread can `ASIOStop` without cutting a non-zero sample.
+    fade_out_done: AtomicBool,
+    /// RT-only: fully-silent buffers emitted since the ramp finished. `fade_out_done` is set
+    /// on the 2nd, when the 1st is guaranteed to be the audible half.
+    fade_out_silence: AtomicUsize,
+    /// RT-only: frames elapsed in the teardown fade-out.
+    fade_out_pos: AtomicUsize,
+    /// Post-start resync silence remaining (frames): the RT emits zeros without consuming
+    /// the ring so the DAC PLL relock at the new rate is inaudible.
+    intro_silence: AtomicUsize,
+    /// Frames of fade-in remaining after the resync silence (0 -> unity over `fade_len`).
+    intro_fade: AtomicUsize,
 }
 
 static STREAM_CTX: AtomicPtr<StreamCtx> = AtomicPtr::new(core::ptr::null_mut());
@@ -422,12 +447,62 @@ unsafe extern "system" fn stream_buffer_switch(
         ctx.local_flush_gen.store(cur_gen, Ordering::Relaxed);
     }
 
-    if ctx.paused.load(Ordering::Relaxed) {
+    // De-click for the rate-change pop. Priority:
+    //   fade_out (teardown ramp) > paused > intro_silence (resync) > normal (+ fade-in).
+    if ctx.fade_out.load(Ordering::Relaxed) {
+        // Format-change teardown requested: ramp the live output down to zero then hold
+        // silence, so the imminent ASIOStop never cuts a non-zero sample (pre-stop click).
+        let len = ctx.fade_len.max(1);
+        let pos = ctx.fade_out_pos.load(Ordering::Relaxed);
+        if pos < len {
+            let to_read = consumer.slots().min(n);
+            if to_read > 0
+                && let Ok(chunk) = consumer.read_chunk(to_read)
+            {
+                let (s1, s2) = chunk.as_slices();
+                scratch[..s1.len()].copy_from_slice(s1);
+                scratch[s1.len()..to_read].copy_from_slice(s2);
+                chunk.commit_all();
+            }
+            for s in &mut scratch[to_read..n] {
+                *s = 0;
+            }
+            for f in 0..frames {
+                let p = (pos + f).min(len);
+                let env = fade_out_env(p, len);
+                for ch in 0..channels {
+                    let i = f * channels + ch;
+                    scratch[i] = fade_scale(scratch[i], env);
+                }
+            }
+            ctx.fade_out_pos
+                .store((pos + frames).min(len), Ordering::Relaxed);
+        } else {
+            for s in &mut scratch[..n] {
+                *s = 0;
+            }
+            // ASIO plays one buffer ahead: signal done on the 2nd silent fill, when the 1st is
+            // the playing half, so ASIOStop truncates silence, not the last (non-zero) ramp.
+            if ctx.fade_out_silence.fetch_add(1, Ordering::Relaxed) >= 1 {
+                ctx.fade_out_done.store(true, Ordering::Relaxed);
+            }
+        }
+    } else if ctx.paused.load(Ordering::Relaxed) {
         // Paused: emit silence without consuming the ring (preserve it for instant
         // resume) or advancing position. The flush-gen drain above still ran.
         for s in &mut scratch[..n] {
             *s = 0;
         }
+    } else if ctx.intro_silence.load(Ordering::Relaxed) > 0 {
+        // Post-start resync silence: hold zero while the DAC PLL relocks at the new rate.
+        // Do NOT consume the ring or advance position -- the track head is delayed, not
+        // dropped; it plays out after the silence with a fade-in.
+        for s in &mut scratch[..n] {
+            *s = 0;
+        }
+        let rem = ctx.intro_silence.load(Ordering::Relaxed);
+        ctx.intro_silence
+            .store(rem.saturating_sub(frames), Ordering::Relaxed);
     } else {
         let to_read = consumer.slots().min(n);
         if to_read > 0
@@ -443,6 +518,22 @@ unsafe extern "system" fn stream_buffer_switch(
                 *s = 0; // underrun -> silence
             }
             STREAM_UNDERRUNS.fetch_add(1, Ordering::Relaxed);
+        }
+        // Fade in the new track's head after the resync silence.
+        let fin = ctx.intro_fade.load(Ordering::Relaxed);
+        if fin > 0 {
+            let len = ctx.fade_len.max(1);
+            let pos = len - fin.min(len);
+            for f in 0..frames {
+                let p = (pos + f).min(len);
+                let env = fade_in_env(p, len);
+                for ch in 0..channels {
+                    let i = f * channels + ch;
+                    scratch[i] = fade_scale(scratch[i], env);
+                }
+            }
+            ctx.intro_fade
+                .store(fin.saturating_sub(frames), Ordering::Relaxed);
         }
         // Count only the real frames consumed (not the underrun zero-fill), so the
         // control thread's position reporting tracks audible audio.
@@ -752,6 +843,15 @@ fn run_ring_to_asio(
             local_flush_gen: AtomicU32::new(0),
             played_frames: Arc::new(AtomicU64::new(0)),
             paused: Arc::new(AtomicBool::new(false)),
+            // De-click is inert on the smoke-test path (it never changes rate); the real
+            // resync/fade values are armed in build_stream + handle_start_stream.
+            fade_len: 0,
+            fade_out: AtomicBool::new(false),
+            fade_out_done: AtomicBool::new(false),
+            fade_out_silence: AtomicUsize::new(0),
+            fade_out_pos: AtomicUsize::new(0),
+            intro_silence: AtomicUsize::new(0),
+            intro_fade: AtomicUsize::new(0),
         };
         // Leak the context (smoke test runs once; the real AsioHandle owns teardown).
         STREAM_CTX.store(Box::into_raw(Box::new(ctx)), Ordering::Release);
@@ -1166,6 +1266,13 @@ impl ControlCtx {
                 local_flush_gen: AtomicU32::new(0),
                 played_frames: played_frames.clone(),
                 paused: paused.clone(),
+                fade_len: silence_frames(sample_rate, DECLICK_FADE_MS),
+                fade_out: AtomicBool::new(false),
+                fade_out_done: AtomicBool::new(false),
+                fade_out_silence: AtomicUsize::new(0),
+                fade_out_pos: AtomicUsize::new(0),
+                intro_silence: AtomicUsize::new(0),
+                intro_fade: AtomicUsize::new(0),
             };
             Ok(OpenedAsioStream {
                 ctx_ptr: Box::into_raw(Box::new(stream_ctx)),
@@ -1176,6 +1283,36 @@ impl ControlCtx {
                 played_frames,
                 paused,
             })
+        }
+    }
+
+    /// Ramp the live stream down to silence before a format-change teardown so `ASIOStop`
+    /// can't cut a non-zero sample (the pre-stop click on a manual skip to a new rate). The
+    /// RT drives the fade while this blocks; the wait is bounded so a stuck RT can't hang the
+    /// control thread. No-op if the clock is stopped or paused (output is already silent).
+    fn fade_out_current_stream(&self) {
+        if !self.has_buffers || !self.client_started || self.ctx_ptr.is_null() {
+            return;
+        }
+        // SAFETY: ctx_ptr is the live leaked StreamCtx; the clock is running so the RT reads
+        // these atomics, and a format change disposes it only after this returns.
+        let ctx = unsafe { &*self.ctx_ptr };
+        if ctx.paused.load(Ordering::Relaxed) {
+            return;
+        }
+        ctx.fade_out.store(true, Ordering::Relaxed);
+        // Scale the wait with the buffer period: fade_out_done lands two silent fills after
+        // the ramp (ASIO plays one buffer ahead), so the +3-period slack covers the ramp plus
+        // those two callbacks. frames/sample_rate are still the OLD (fading) stream here.
+        let period_ms = (self.frames as u64 * 1000)
+            .checked_div(self.sample_rate as u64)
+            .unwrap_or(FADE_OUT_WAIT_MS);
+        let fade_periods = ctx.fade_len.div_ceil(self.frames.max(1)).max(1) as u64;
+        let wait_ms =
+            ((fade_periods + 3) * period_ms).clamp(FADE_OUT_WAIT_MS, FADE_OUT_WAIT_MAX_MS);
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        while !ctx.fade_out_done.load(Ordering::Relaxed) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -1221,6 +1358,12 @@ impl ControlCtx {
             self.has_buffers && (self.sample_rate != sample_rate || self.channels != want_channels);
 
         if !self.has_buffers || format_changed {
+            // Rate change tears the stream down and re-creates buffers at the new rate (RME
+            // changes buffer size + channel count per rate, so reuse isn't possible). Fade the
+            // live output to silence first so ASIOStop doesn't cut a non-zero sample.
+            if format_changed {
+                self.fade_out_current_stream();
+            }
             // (Re)create buffers: stop + dispose the old stream, then open fresh.
             self.dispose_stream();
             match self.build_stream(sample_rate, want_channels) {
@@ -1241,6 +1384,20 @@ impl ControlCtx {
                     self.client_started = false;
                     self.pending_start = true;
                     self.pending_since = Some(Instant::now());
+                    // On an actual rate change, mask the DAC PLL relock with a resync silence +
+                    // fade-in on the new stream. Set before ASIOStart (maybe_start) so the RT
+                    // honours it from the first callback; a first-stream cold start (!has_buffers)
+                    // keeps its plain cushion start (nothing was playing to pop).
+                    if format_changed && !self.ctx_ptr.is_null() {
+                        let resync = silence_frames(sample_rate, RESYNC_SILENCE_MS);
+                        // SAFETY: ctx_ptr was just installed and the clock is not started yet
+                        // (pending_start), so no RT callback races these stores.
+                        unsafe {
+                            let c = &*self.ctx_ptr;
+                            c.intro_silence.store(resync, Ordering::Relaxed);
+                            c.intro_fade.store(c.fade_len, Ordering::Relaxed);
+                        }
+                    }
                 }
                 Err(ev) => {
                     let _ = event_tx.send(ev);
@@ -1254,6 +1411,17 @@ impl ControlCtx {
             // RT thread owns it while the clock runs); pump_ring is gated on the RT having
             // drained (local_flush_gen == flush_gen) so the new track's head isn't lost.
             self.flush_gen.fetch_add(1, Ordering::Relaxed);
+            // Same-format reuse keeps the clock; clear any unfinished resync silence / fade-in
+            // left from a just-prior rate change so it can't clip the head of this same-rate track.
+            if !self.ctx_ptr.is_null() {
+                // SAFETY: ctx_ptr is the live leaked StreamCtx; Relaxed stores of these
+                // standalone counters race-free with the RT's Relaxed reads.
+                unsafe {
+                    let c = &*self.ctx_ptr;
+                    c.intro_silence.store(0, Ordering::Relaxed);
+                    c.intro_fade.store(0, Ordering::Relaxed);
+                }
+            }
             // A Stop during cold-start pre-fill leaves reusable buffers but an idle driver.
             // Re-arm the deferred cold start, guarded on !client_started so the normal
             // reuse-while-running path can't double-start the live clock.
