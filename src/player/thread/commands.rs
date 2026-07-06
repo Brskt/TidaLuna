@@ -5,8 +5,8 @@ use super::output::{
 use super::{DecodeCommand, PlayerThread};
 use crate::player::resume::RESUME_MIN_SECONDS;
 use crate::player::{
-    DeviceErrorKind, LOAD_SEQ, LoadRequest, PlaybackState, PlayerCommand, PlayerEvent,
-    ResumePolicy, format_ms, short_id,
+    DeviceErrorKind, LOAD_SEQ, LoadRequest, MediaFormatSnapshot, PlaybackState, PlayerCommand,
+    PlayerEvent, ResumePolicy, format_ms, short_id,
 };
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
@@ -333,6 +333,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.current_seq = event_seq;
         self.is_cached = cached;
         self.current_format = format;
+        // Invalidated until this load's probe emits a fresh one (the ASIO/exclusive
+        // branches never do -> stays None, so a re-assert can't send a stale format).
+        self.last_media_format = None;
         self.buffer_stalled = false;
         self.pending_complete = false;
         self.last_played_snapshot = 0;
@@ -391,14 +394,29 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let teardown_ms = handle_start.elapsed().as_secs_f64() * 1000.0;
         let decode_start = std::time::Instant::now();
 
+        // A play that raced ahead of this load (tagged by load_gen) is FOLDED into the
+        // bypass stream's own start (start_paused=false) instead of a separate Play: the
+        // decoder sends StartStream only after probing, so a separate Play would race the
+        // adoption. Same intent-travels-with-the-command shape as want_play.
+        #[cfg(target_os = "windows")]
+        let deferred_play = self.pending_play == Some(load_gen);
+
         // ASIO path (mutually exclusive with WASAPI-exclusive). Same start_paused
         // contract; start_asio_playback consumes the resume position. Skipped for a track the
         // device can't clock in ASIO (RateUnsupported) so it plays shared without re-engaging.
         #[cfg(target_os = "windows")]
         if self.asio_skip_track.as_deref() != Some(track_id.as_str())
-            && self.start_asio_playback(buffer.clone(), !auto_play)
+            && self.start_asio_playback(buffer.clone(), !(auto_play || deferred_play))
         {
-            self.pending_play = None;
+            if deferred_play {
+                self.pending_play = None;
+                crate::state::GOVERNOR
+                    .buffer_progress()
+                    .set_playback_active(true);
+                crate::vprintln!(
+                    "[PLAY]   deferred play folded into ASIO start (load #{load_gen})"
+                );
+            }
             crate::vprintln!(
                 "[ASIO] Progressive decode started ({:.0}ms setup)",
                 decode_start.elapsed().as_secs_f64() * 1000.0
@@ -406,17 +424,23 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return true;
         }
 
-        // Exclusive path. start_paused = !auto_play (a paused restore enters paused);
-        // start_exclusive_playback consumes the resume position. Skipped for a track
-        // whose format the device can't do in exclusive (FormatUnsupported) so it
-        // plays shared without re-engaging exclusive.
+        // Exclusive path. start_paused mirrors ASIO (a paused restore enters paused,
+        // a deferred play folds into the start); start_exclusive_playback consumes the
+        // resume position. Skipped for a track whose format the device can't do in
+        // exclusive (FormatUnsupported) so it plays shared without re-engaging exclusive.
         #[cfg(target_os = "windows")]
         if self.exclusive_skip_track.as_deref() != Some(track_id.as_str())
-            && self.start_exclusive_playback(buffer.clone(), !auto_play)
+            && self.start_exclusive_playback(buffer.clone(), !(auto_play || deferred_play))
         {
-            // When auto_play, exclusive auto-starts playback (is_playing=true),
-            // which satisfies any deferred play; clear it so it can't dangle.
-            self.pending_play = None;
+            if deferred_play {
+                self.pending_play = None;
+                crate::state::GOVERNOR
+                    .buffer_progress()
+                    .set_playback_active(true);
+                crate::vprintln!(
+                    "[PLAY]   deferred play folded into exclusive start (load #{load_gen})"
+                );
+            }
             crate::vprintln!(
                 "[WASAPI] Progressive decode started ({:.0}ms setup)",
                 decode_start.elapsed().as_secs_f64() * 1000.0
@@ -460,13 +484,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             (self.callback)(PlayerEvent::Version(env!("CARGO_PKG_VERSION")));
         }
 
-        (self.callback)(PlayerEvent::MediaFormat {
+        let media_format = MediaFormatSnapshot {
             codec: source_codec,
             sample_rate: source_sample_rate,
             bit_depth: source_bit_depth,
             channels: source_channels,
             bytes: total_len,
-        });
+        };
+        self.last_media_format = Some(media_format);
+        (self.callback)(media_format.to_event());
 
         // Open cpal stream
         let device = match self.resolve_output_device() {
@@ -901,7 +927,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_stop(&mut self, event_seq: u32) {
         // Reconciliation: an SDK stop is treated as pause-retain, not teardown.
         // The pipeline (buffer, has_track, current_track_id, CURRENT_TRACK, and
-        // committed_track) is kept so a same-track re-assert (RealMAX's
+        // committed_track) is kept so a same-track re-assert (a quality-swap's
         // cancel-redispatch) resumes in place instead of rebuilding. A genuine
         // track change tears the previous track down when load() switches to a
         // different track (load_with_policy aborts the task + cancels the

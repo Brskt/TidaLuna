@@ -8,6 +8,8 @@ pub(crate) enum PlayerIpc {
         url: String,
         format: String,
         key: String,
+        restart: bool,
+        want_play: bool,
     },
     Recover {
         url: String,
@@ -146,6 +148,14 @@ pub(crate) fn parse_player_ipc(
                 url: url.to_string(),
                 format: format.to_string(),
                 key: key.to_string(),
+                // 4th arg (optional): the renderer sets it when TIDAL minted a new
+                // mediaProduct.referenceId for this play instance, so a same-track
+                // re-load must restart at 0 rather than resume in place.
+                restart: args.get(3).and_then(|v| v.as_bool()).unwrap_or(false),
+                // 5th arg (optional): a track/list SELECT wants the loaded track to
+                // auto-play; folded here instead of a separate player.play that would
+                // resume the old committed track. Applies only to a different-track load.
+                want_play: args.get(4).and_then(|v| v.as_bool()).unwrap_or(false),
             }),
             _ => Err(PlayerIpcParseError::InvalidArgs("player.load")),
         },
@@ -255,6 +265,54 @@ mod tests {
                 url: "https://a".to_string(),
                 format: "flac".to_string(),
                 key: "k".to_string(),
+                restart: false,
+                want_play: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_load_restart_flag() {
+        let parsed = parse_player_ipc(
+            "player.load",
+            &[json!("https://a"), json!("flac"), json!("k"), json!(true)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            PlayerIpc::Load {
+                url: "https://a".to_string(),
+                format: "flac".to_string(),
+                key: "k".to_string(),
+                restart: true,
+                want_play: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_load_want_play_flag() {
+        let parsed = parse_player_ipc(
+            "player.load",
+            &[
+                json!("https://a"),
+                json!("flac"),
+                json!("k"),
+                json!(false),
+                json!(true),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            PlayerIpc::Load {
+                url: "https://a".to_string(),
+                format: "flac".to_string(),
+                key: "k".to_string(),
+                restart: false,
+                want_play: true,
             }
         );
     }

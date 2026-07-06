@@ -15,15 +15,35 @@ export const createNativePlayerComponent = () => {
     let seekTarget: number | null = null;
     let _time = 0;
     let _lastVolume = -1;
+    // Last mediaProduct.referenceId seen at load time. TIDAL mints a new referenceId
+    // per play instance (spec: unique per MediaProduct instance), so a change marks a
+    // fresh play (restart at 0) vs a same-instance re-assert (keep position).
+    let lastReferenceId: string | null = null;
 
-    // A max-quality queue swap (e.g. RealMAX) re-asserts the current product as a
-    // same-track stop/load/play burst. Defer the stop a microtask; a same-(url,fmt)
+    // A quality-swap re-load re-asserts the current product as a same-track
+    // stop/load/play burst. Defer the stop a microtask; a same-(url,fmt)
     // load cancels it and skips the reload so playback is not torn down.
     let loadedUrl: string | null = null;
     let loadedFmt: string | null = null;
     let pendingStop = false;
     // A real command (play/pause/seek/recover) supersedes a deferred stop.
     const cancelDeferredStop = () => { pendingStop = false; };
+
+    // Desired playback intent, deduped, routed here from both the SDK delegate and the
+    // Redux PLAY/PAUSE actions -- TIDAL sometimes resumes a paused track via stop()+load(same)
+    // WITHOUT calling play(), so relying on the SDK delegate alone misses it. null = unknown
+    // (forces the next emit); a genuine load() resets it so a queue advance still re-emits.
+    let desiredPlaying: boolean | null = null;
+    const setDesired = (playing: boolean) => {
+        if (desiredPlaying === playing) return;
+        desiredPlaying = playing;
+        sendIpc(playing ? "player.play" : "player.pause");
+    };
+    // A track/list SELECT (ADD_TRACK_LIST) sets this; the load delegate folds it into
+    // player.load as the auto_play flag so the SELECTED track plays atomically with its
+    // load -- never a separate player.play that would resume the still-committed OLD paused
+    // track (the "bleed"). Set on select, consumed/cleared per load.
+    let wantPlayOnLoad = false;
 
     // Stable handle published on tidalModules so @luna/lib PlayState.currentTime resolves.
     const playerHandle = {
@@ -132,6 +152,7 @@ export const createNativePlayerComponent = () => {
                 // self-loads bypass this delegate, leaving loadedUrl/loadedFmt stale.
                 if (pendingStop && !isSelfLoad() && url === loadedUrl && streamFormat === loadedFmt) {
                     pendingStop = false;
+                    wantPlayOnLoad = false; // don't let a stray select-play intent survive to a later load
                     return;
                 }
                 // Genuine load (different track/quality): flush the deferred stop first.
@@ -143,18 +164,44 @@ export const createNativePlayerComponent = () => {
                 loadedFmt = streamFormat;
                 setSelfLoad(false);
                 seekTarget = null;
+                // Fresh play instance? A changed mediaProduct.referenceId means the user
+                // re-played this item; per the SDK load contract (native load = start at
+                // 0) Rust must restart the committed track instead of resuming it. A same
+                // referenceId (a quality-swap re-load) keeps its position.
+                let restart = false;
+                try {
+                    const { store } = require("../../plugins/lib/src/redux/store");
+                    const refId = store?.getState?.()?.playbackControls?.mediaProduct?.referenceId ?? null;
+                    // Only a CHANGE from a known previous id is a fresh play; the first
+                    // observation (lastReferenceId null) just records it, so the startup
+                    // re-assert isn't mistaken for a replay.
+                    restart = lastReferenceId !== null && refId !== null && refId !== lastReferenceId;
+                    if (refId !== null) lastReferenceId = refId;
+                } catch (_) {}
+                // On a restart, pin our reported head to 0 so it matches the position the
+                // SDK expects after a load, closing the mismatch that drives its seek loop.
+                if (restart) _time = 0;
+                // Fold the SELECT's play-intent into this load: the newly-selected track
+                // auto-plays atomically with its load (no separate player.play that would
+                // resume the still-committed OLD paused track). Consume-and-clear.
+                const wantPlay = wantPlayOnLoad;
+                wantPlayOnLoad = false;
+                // desiredPlaying reflects reality: a wantPlay load ends PLAYING (so a later
+                // redundant SDK play() dedups); a plain load stays null so a real later play
+                // still re-emits (queue advance).
+                desiredPlaying = wantPlay ? true : null;
                 // Soft-reset format data (don't drain resolvers - playback.ts already did)
                 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
-                sendIpc("player.load", url, streamFormat, encryptionKey);
+                sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay);
             },
             play: () => {
                 sendIpc("player.dbg", "SDK→play");
                 cancelDeferredStop();
-                sendIpc("player.play");
+                setDesired(true);
             },
             pause: () => {
                 cancelDeferredStop();
-                sendIpc("player.pause");
+                setDesired(false);
             },
             stop: () => {
                 // Deferred so the echo's synchronous load() can cancel it; a genuine stop
@@ -276,6 +323,13 @@ export const createNativePlayerComponent = () => {
         // (seekTarget ?? _time) ensures the correct value is always returned.
         _setTime: (t: number) => { _time = t; },
         syncBridgeVolume: (v: number) => { _lastVolume = v; },
+        // Deduped play/pause intent for SDK tracks, driven by the Redux
+        // playbackControls/PLAY|PAUSE interceptors (see index.ts).
+        setDesiredPlayback: (playing: boolean) => setDesired(playing),
+        // Set by a SELECT so the NEXT load auto-plays (see wantPlayOnLoad above);
+        // clearPlayOnLoad drops it on a self-load path, which bypasses this delegate.
+        requestPlayOnLoad: () => { wantPlayOnLoad = true; },
+        clearPlayOnLoad: () => { wantPlayOnLoad = false; },
         trigger: (event: string, target: any, gen?: number) => {
             if (event !== "mediacurrenttime") {
                 sendIpc("player.dbg", "trigger", event, target, "listeners=" + (activeEmitter?.listeners?.get(event)?.size ?? 0), "playerCalls=" + playerCallCount);

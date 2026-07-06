@@ -71,8 +71,14 @@ fn handle_player_ipc(msg: &IpcMessage) {
         with_state(
             |state| match parse_player_ipc(&msg.channel, &msg.args, msg.id.as_deref()) {
                 Ok(player_ipc) => match player_ipc {
-                    PlayerIpc::Load { url, format, key } => {
-                        if let Err(e) = state.player.load(url, format, key) {
+                    PlayerIpc::Load {
+                        url,
+                        format,
+                        key,
+                        restart,
+                        want_play,
+                    } => {
+                        if let Err(e) = state.player.load(url, format, key, restart, want_play) {
                             crate::vprintln!("[PLAYER] Failed to load track: {}", e);
                         }
                         crate::memory_pressure::purge_image_cache();

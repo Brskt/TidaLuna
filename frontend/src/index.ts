@@ -257,7 +257,27 @@ const init = async () => {
             interceptors[action].add(cb);
         };
         add("playbackControls/PLAY", () => {
+            // Self-load (DASH/AAC) keeps its direct path; SDK tracks go through the
+            // deduped desired-intent so a user PLAY reaches Rust even when TIDAL
+            // resumes via stop+load(same) without calling nativePlayer.play().
             if (isSelfLoad()) sendIpc("player.play");
+            else (window.NativePlayerComponent as any)?.setDesiredPlayback?.(true);
+        });
+        add("playbackControls/PAUSE", () => {
+            if (!isSelfLoad()) (window.NativePlayerComponent as any)?.setDesiredPlayback?.(false);
+        });
+        // TIDAL's "play this" signal fires BEFORE the selected track's load (async
+        // getPlaybackInfo gap) while the OLD track is still committed; resuming here audibly
+        // replays the OLD track (the "bleed"). Request auto-play on the SELECTED track's
+        // load instead of a separate play -- fixes the bleed and the startup first-play.
+        add("playQueue/ADD_TRACK_LIST_TO_PLAY_QUEUE", (p: { position?: number | string }) => {
+            // Only "now" carries play intent -- "next"/"last"/index are queue edits with no
+            // load following, and arming on them would force-resume a paused track later.
+            // Unknown payload shapes keep the arm (HW-verified row-click sends {position:"now"}).
+            const position = p?.position;
+            if (position === undefined || position === "now") {
+                (window.NativePlayerComponent as any)?.requestPlayOnLoad?.();
+            }
         });
         add("playbackControls/SEEK", (time: number) => {
             sendIpc("player.seek", time);

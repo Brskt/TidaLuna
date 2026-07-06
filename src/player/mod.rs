@@ -110,6 +110,30 @@ pub enum OutputMode {
     Asio,
 }
 
+/// Last `MediaFormat` emitted for the committed track (shared-path probe only;
+/// ASIO/exclusive loads don't emit one). Re-emitted on a same-track re-assert
+/// so the renderer's nulled per-load format snapshot isn't left empty.
+#[derive(Debug, Clone, Copy)]
+pub struct MediaFormatSnapshot {
+    pub codec: &'static str,
+    pub sample_rate: u32,
+    pub bit_depth: Option<u32>,
+    pub channels: u16,
+    pub bytes: u64,
+}
+
+impl MediaFormatSnapshot {
+    pub fn to_event(self) -> PlayerEvent {
+        PlayerEvent::MediaFormat {
+            codec: self.codec,
+            sample_rate: self.sample_rate,
+            bit_depth: self.bit_depth,
+            channels: self.channels,
+            bytes: self.bytes,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     TimeUpdate(f64, u32),
@@ -240,9 +264,12 @@ enum PlayerCommand {
     },
     Play,
     /// A same-track re-assert from `Player::load`'s idempotent branch. Resumes
-    /// only if the track was playing when the pause-retain stop happened
-    /// (`resume_on_reassert`), so a user-paused track is not force-resumed.
-    ReassertResume,
+    /// if the track was playing when the pause-retain stop happened
+    /// (`resume_on_reassert`) or if the load carried the user's play-intent
+    /// (`want_play`); a user-paused re-assert with no intent stays paused.
+    ReassertResume {
+        want_play: bool,
+    },
     Pause,
     Stop(u32),
     Seek(f64),
@@ -700,36 +727,60 @@ impl Player {
         Ok(())
     }
 
-    pub fn load(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
-        // Idempotent reconcile: skip rebuilding the pipeline when the SDK re-loads
-        // the track currently COMMITTED in the pipeline (e.g. RealMAX re-asserting
-        // the playing track). The comparison is against the committed track (set by
-        // the player thread in handle_load), never the requested track, so a
-        // duplicate load racing a still-in-flight load of a different track can't
-        // falsely match and resume a stale pipeline. stop() is pause-retain, so the
-        // committed track survives; the following play() resumes it. A genuine track
-        // change (different canonical id/format) falls through to a full load.
+    pub fn load(
+        &self,
+        url: String,
+        format: String,
+        key: String,
+        restart: bool,
+        want_play: bool,
+    ) -> anyhow::Result<()> {
+        // Idempotent reconcile: when the SDK re-loads the track currently COMMITTED in
+        // the pipeline, either restart it (a fresh play instance) or resume it in place
+        // (a keep-position re-assert), without a full rebuild. The comparison is against
+        // the committed track (set by the player thread in handle_load), never the
+        // requested track, so a duplicate load racing a still-in-flight load of a
+        // different track can't falsely match and touch a stale pipeline. stop() is
+        // pause-retain, so the committed track survives. A genuine track change
+        // (different canonical id/format) falls through to a full load.
         let canonical_url_id = canonical_track_id(&url);
-        {
+        let same_committed = {
             let committed = self
                 .committed_track
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if is_same_active_track(committed.as_ref(), &canonical_url_id, &format) {
+            is_same_active_track(committed.as_ref(), &canonical_url_id, &format)
+        };
+        if same_committed {
+            if restart {
+                // Fresh play instance (TIDAL minted a new referenceId, threaded here as
+                // `restart`): per the SDK's load contract (load = start at 0), restart from 0
+                // via a fresh cached load (cache hit, no re-download), auto-playing only if
+                // want_play. Reporting position 0 also stops Redux's position-reconcile seek
+                // burst that a kept position would otherwise provoke.
                 crate::vprintln!(
-                    "[LOAD]   idempotent reload skipped (same committed track): {}",
+                    "[LOAD]   same track, fresh play instance -> restart at 0 (want_play={}): {}",
+                    want_play,
                     short_id(&canonical_url_id, 60)
                 );
-                // A skipped load is part of a stop->load->play re-assert. State-
-                // preserving: ReassertResume resumes only if the track was PLAYING
-                // when the pause-retain stop happened (RealMAX's re-assert, which
-                // TIDAL may not follow with an explicit play). If the user had
-                // paused, the track stays paused instead of being force-resumed.
-                let _ = self.send_cmd(PlayerCommand::ReassertResume);
-                return Ok(());
+                return self.load_with_policy(url, format, key, ResumePolicy::Disabled, want_play);
             }
+            // Same-track re-assert keeping the play instance (a quality-swap re-load):
+            // resumes if PLAYING pre-stop (resume_on_reassert), or if want_play is set --
+            // click-to-play on a restored paused track is stop+load(same) with NO
+            // player.play (SDK-verified), so want_play is the only resume signal then.
+            crate::vprintln!(
+                "[LOAD]   idempotent reload skipped (same committed track, want_play={}): {}",
+                want_play,
+                short_id(&canonical_url_id, 60)
+            );
+            let _ = self.send_cmd(PlayerCommand::ReassertResume { want_play });
+            return Ok(());
         }
-        self.load_with_policy(url, format, key, ResumePolicy::Disabled, false)
+        // Different track (genuine select / queue advance): fresh load. `want_play` folds
+        // the SELECT's play-intent into the load so no separate player.play arrives while
+        // the OLD track is still committed (decide_play would Resume it -> audible bleed).
+        self.load_with_policy(url, format, key, ResumePolicy::Disabled, want_play)
     }
 
     pub fn load_and_play(&self, url: String, format: String, key: String) -> anyhow::Result<()> {

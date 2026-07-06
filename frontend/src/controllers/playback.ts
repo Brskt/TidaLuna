@@ -75,6 +75,9 @@ export const createPlaybackController = () => {
                                     if (manifest.initUrl && manifest.segmentUrls?.length > 0) {
                                         const codec = manifest.codec?.split(".")?.[0] ?? "aac";
                                         setSelfLoad(true);
+                                        // Self-load bypasses the SDK load delegate; drop any pending
+                                        // select-play intent so it can't leak into a later FLAC load.
+                                        (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
                                         sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec);
                                     }
                                 }
@@ -86,6 +89,9 @@ export const createPlaybackController = () => {
                                         const codec = manifest.codecs?.split(".")?.[0] ?? "aac";
                                         const encKey = manifest.keyId ?? "";
                                         setSelfLoad(true);
+                                        // Self-load bypasses the SDK load delegate; drop any pending
+                                        // select-play intent so it can't leak into a later FLAC load.
+                                        (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
                                         sendIpc("player.load", streamUrl, codec, encKey);
                                     }
                                 }

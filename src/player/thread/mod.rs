@@ -6,7 +6,7 @@ mod playback;
 
 use super::buffer::RamBuffer;
 use super::resume::ResumeStore;
-use super::{PlayerCommand, PlayerEvent};
+use super::{MediaFormatSnapshot, PlayerCommand, PlayerEvent};
 use std::sync::Arc;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::Ordering::Relaxed;
@@ -81,8 +81,9 @@ pub(super) struct PlayerThread<F> {
     has_track: bool,
     // Whether a same-track re-assert (ReassertResume) should resume: handle_stop
     // sets it to the pre-stop is_playing, a user pause clears it (handle_pause).
-    // So a user-paused track stays paused on re-assert; RealMAX's stop->load->play
-    // (was playing) still resumes.
+    // So a user-paused track stays paused on re-assert; a quality-swap's stop->load->play
+    // (was playing) still resumes. A re-assert whose load carries the user's
+    // play-intent resumes regardless (ReassertResume { want_play }).
     resume_on_reassert: bool,
     // A play that arrived before the track finished loading, tagged with the
     // LOAD_SEQ generation it was meant for. Applied once that load reaches the
@@ -94,6 +95,9 @@ pub(super) struct PlayerThread<F> {
     // (a load is coming) rather than re-arm the retained source.
     loading_gen: Option<u32>,
     current_duration: f64,
+    // Format of the committed track as last emitted (None for ASIO/exclusive
+    // loads, which skip the shared probe); re-sent on ReassertResume.
+    last_media_format: Option<MediaFormatSnapshot>,
     current_seq: u32,
     // Position tracking
     decoded_samples: Arc<AtomicU64>,
@@ -253,6 +257,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pending_play: None,
             loading_gen: None,
             current_duration: 0.0,
+            last_media_format: None,
             current_seq: 0,
             decoded_samples: Arc::new(AtomicU64::new(0)),
             sample_rate: 44100,
@@ -431,9 +436,28 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::LoadStarted { generation } => self.handle_load_started(generation),
             PlayerCommand::LoadSettled { generation } => self.handle_load_settled(generation),
             PlayerCommand::Play => self.handle_play(),
-            PlayerCommand::ReassertResume => {
-                // Resume only if the track was playing pre-stop (see resume_on_reassert).
-                if self.resume_on_reassert {
+            PlayerCommand::ReassertResume { want_play } => {
+                // Same-track re-assert (boombox does stop()+load(same)): its load() awaits
+                // `mediaduration` before the instance is seekable, but the idempotent skip
+                // never re-runs handle_load, so that event is never re-emitted and boombox's
+                // load() stalls, dropping later progress-bar seeks. Re-emit Duration (at the
+                // committed track's seq) so the re-load resolves and stays seekable.
+                if self.current_duration > 0.0 {
+                    (self.callback)(PlayerEvent::Duration(
+                        self.current_duration,
+                        self.current_seq,
+                    ));
+                }
+                // Same re-drive for the format snapshot the renderer nulls on every
+                // forwarded load (None on ASIO/exclusive-probed tracks -> no stale send).
+                if let Some(fmt) = self.last_media_format {
+                    (self.callback)(fmt.to_event());
+                }
+                // Resume if the track was playing pre-stop (resume_on_reassert) or the
+                // load carried the user's play-intent (want_play); the resume then drives
+                // StateChange(Active), resolving boombox's post-duration active await so
+                // it applies the assetPosition and completes.
+                if self.resume_on_reassert || want_play {
                     self.handle_play();
                 }
             }
