@@ -157,6 +157,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 if (t - target).abs() <= 1.0 {
                                     self.seeking = false;
                                     self.seek_target = None;
+                                    // Convergence IS progress: re-anchor the stall watchdog.
+                                    // A >=2s decoder-blocked seek that lands exactly on the
+                                    // pinned target would miss the 0.05 refresh below and
+                                    // trip a false RateUnsupported in this very poll.
+                                    self.asio_watchdog_pos = t;
+                                    self.asio_watchdog_at = Some(std::time::Instant::now());
                                     t
                                 } else {
                                     target
@@ -170,9 +176,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         }
                         // Floor-free live position for an asio->shared re-arm.
                         self.last_asio_pos = Some(report);
+                        // Watchdog: any position change (forward progress or a seek landing)
+                        // proves the clock ticks -> reset the stall anchor.
+                        if (report - self.asio_watchdog_pos).abs() > 0.05 {
+                            self.asio_watchdog_pos = report;
+                            self.asio_watchdog_at = Some(std::time::Instant::now());
+                        }
                         (self.callback)(PlayerEvent::TimeUpdate(report, self.current_seq));
                     }
                     AsioEvent::StateChange(s) => {
+                        // Arm the progress watchdog when the clock starts; disarm on pause/stop.
+                        if matches!(s, PlaybackState::Active) {
+                            self.asio_watchdog_pos = self.last_asio_pos.unwrap_or(0.0);
+                            self.asio_watchdog_at = Some(std::time::Instant::now());
+                        } else if matches!(s, PlaybackState::Paused | PlaybackState::Stopped) {
+                            self.asio_watchdog_at = None;
+                        }
                         (self.callback)(PlayerEvent::StateChange(s, self.current_seq));
                     }
                     AsioEvent::Completed(sid) => {
@@ -189,6 +208,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.current_track_id = None;
                             self.set_committed_track(None);
                             self.last_asio_pos = None;
+                            self.asio_watchdog_at = None;
                             // Decoder exited (EndStream): clear the dead sender so a
                             // later seek/play respawns a decoder.
                             self.asio_seek_tx = None;
@@ -259,6 +279,35 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                 }
             }
+        }
+
+        // Progress watchdog (a backstop): the clock reported Active but the position hasn't
+        // advanced within the timeout -> the driver can't clock this track. Route it to shared
+        // as a PER-TRACK skip (RateUnsupported), NOT a hard failure -- a single un-clockable
+        // track must never auto-disable ASIO for the whole session.
+        if self.is_asio_mode
+            && self.is_playing
+            && !self.seeking
+            && self
+                .asio_watchdog_at
+                .is_some_and(|a| a.elapsed() >= std::time::Duration::from_secs(2))
+        {
+            crate::vprintln!(
+                "[ASIO] watchdog: no playback progress for 2s; this track plays shared (ASIO stays on)"
+            );
+            if let Some(cancel) = self.asio_stream_cancel.take() {
+                cancel.store(true, Relaxed);
+            }
+            // Mirror the RateUnsupported exit: remember the track so its shared re-arm doesn't
+            // loop back into ASIO, and emit AsioRateUnsupported (not in the frontend's disable
+            // list) so ASIO stays enabled.
+            self.asio_skip_track = self.current_track_id.clone();
+            self.is_asio_mode = false;
+            self.asio_watchdog_at = None;
+            (self.callback)(PlayerEvent::DeviceError(
+                DeviceErrorKind::AsioRateUnsupported,
+            ));
+            self.rearm_shared_after_asio_failure();
         }
 
         if !self.is_asio_mode {

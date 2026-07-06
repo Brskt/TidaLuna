@@ -149,6 +149,14 @@ pub(super) struct PlayerThread<F> {
     // asio->shared switch (same rationale as last_exclusive_pos).
     #[cfg(target_os = "windows")]
     last_asio_pos: Option<f64>,
+    // ASIO progress watchdog: anchor reset on Active and on each forward TimeUpdate. If the
+    // clock is started+playing but the position never advances within the timeout, a genuine
+    // driver failure not recovered by the asio_message reset path -> fall back to shared so the
+    // track still plays (resampled).
+    #[cfg(target_os = "windows")]
+    asio_watchdog_at: Option<std::time::Instant>,
+    #[cfg(target_os = "windows")]
+    asio_watchdog_pos: f64,
     // Per-track ASIO skip: the canonical id of a track whose sample rate the device can't clock
     // (RateUnsupported). Its shared re-arm must NOT re-engage ASIO (loop); cleared when a
     // different track loads, so other rates keep using ASIO. Does NOT disable ASIO globally.
@@ -269,6 +277,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_asio_stream_id: None,
             #[cfg(target_os = "windows")]
             last_asio_pos: None,
+            #[cfg(target_os = "windows")]
+            asio_watchdog_at: None,
+            #[cfg(target_os = "windows")]
+            asio_watchdog_pos: 0.0,
             #[cfg(target_os = "windows")]
             asio_skip_track: None,
             #[cfg(target_os = "windows")]

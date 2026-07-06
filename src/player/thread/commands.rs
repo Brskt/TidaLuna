@@ -346,6 +346,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // user seek that was queued before the prior stream was ready.
             self.last_exclusive_pos = None;
             self.last_asio_pos = None;
+            // Re-anchor the ASIO progress watchdog: a stale timer from a prior stream (e.g. after
+            // a shared fallback) must not trip 2s into the fresh track before its clock re-arms it.
+            self.asio_watchdog_at = None;
             // The per-track ASIO/exclusive skips clear when a DIFFERENT track loads (a same-track
             // re-arm keeps them, so the unsupported track stays shared instead of re-engaging).
             if self
