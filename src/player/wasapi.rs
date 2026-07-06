@@ -328,7 +328,28 @@ where
 
         let packet = match format_reader.next_packet() {
             Ok(Some(p)) => p,
-            Ok(None) => break,
+            Ok(None) => {
+                // Real EOF: arm completion, then PARK on the seek channel instead of
+                // returning -- dropping seek_rx would kill live seeks for the rest of the
+                // track (a cached source decodes far ahead of playback). ResetForSeek
+                // un-ends the stream on a later seek, re-arming completion after it.
+                if cancel.load(Relaxed) {
+                    return Ok(());
+                }
+                crate::vprintln!("[WASAPI] decode: EOF (stream {stream_id}), parked for seeks");
+                let _ = cmd_tx.send(ExclusiveCommand::EndStream { stream_id });
+                // Disconnect is the ONLY exit while parked: every supersede path
+                // stores `cancel` then drops the sender, and natural completion
+                // just drops it -- either way nobody can seek this stream again.
+                match seek_rx.recv() {
+                    Ok(t) => {
+                        pending_initial_seek = Some(t);
+                        was_initial_seek = false;
+                        continue;
+                    }
+                    Err(_) => return Ok(()),
+                }
+            }
             Err(e) => {
                 if cancel.load(Relaxed) {
                     return Ok(());
@@ -376,11 +397,6 @@ where
             return Ok(());
         }
     }
-
-    if !cancel.load(Relaxed) {
-        let _ = cmd_tx.send(ExclusiveCommand::EndStream { stream_id });
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
