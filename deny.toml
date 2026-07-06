@@ -2,6 +2,9 @@
 version = 2
 unmaintained = "none"
 yanked = "warn"
+# quick-xml DoS advisories via dash-mpd, which does not allow the fixed 0.41
+# yet. Drop when dash-mpd bumps quick-xml.
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
 
 [bans]
 multiple-versions = "allow"
