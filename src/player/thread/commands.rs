@@ -1025,21 +1025,49 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let (tx, rx) = mpsc::channel();
         match crate::platform::volume_sync::VolumeSync::new(device_id, tx) {
             Ok(vs) => {
-                match vs.get() {
-                    Ok(initial) => {
-                        let level = (initial * 100.0) as f64;
-                        (self.callback)(PlayerEvent::VolumeSync(level));
-                        self.volume.store(f32::to_bits(1.0), Relaxed);
+                if self.volume_baseline_established {
+                    // Re-init (mode/device switch): assert our known level into the
+                    // (possibly fresh) session instead of adopting its GetMasterVolume --
+                    // a never-set session reports 1.0 by default (MS docs), which would
+                    // poison last_volume to full scale and blast the exclusive/ASIO gain.
+                    let app_vol = f32::from_bits(self.last_volume.load(Relaxed));
+                    if let Err(e) = vs.set(app_vol) {
+                        // Failed re-assert: do NOT trust the session (a never-set one
+                        // sits at 1.0) and do NOT commit sync. Fall back to software
+                        // gain at the app's level -- same policy as the re-enable path
+                        // in handle_set_volume_sync.
+                        self.volume.store(f32::to_bits(app_vol), Relaxed);
                         crate::vprintln!(
-                            "[VOLUME] Session sync active, initial level: {:.0}%",
-                            level
-                        );
-                    }
-                    Err(e) => {
-                        crate::vprintln!(
-                            "[VOLUME] Initial get failed: {e}, disabling OS volume sync"
+                            "[VOLUME] Session re-assert failed: {e}; using software gain"
                         );
                         return;
+                    }
+                    self.volume.store(f32::to_bits(1.0), Relaxed);
+                    crate::vprintln!(
+                        "[VOLUME] Session sync re-asserted at {:.0}%",
+                        app_vol * 100.0
+                    );
+                } else {
+                    // Cold start: adopt the persisted session volume as the baseline and
+                    // record it in last_volume directly (don't wait on the UI echo).
+                    match vs.get() {
+                        Ok(initial) => {
+                            self.last_volume.store(f32::to_bits(initial), Relaxed);
+                            self.volume_baseline_established = true;
+                            let level = (initial * 100.0) as f64;
+                            (self.callback)(PlayerEvent::VolumeSync(level));
+                            self.volume.store(f32::to_bits(1.0), Relaxed);
+                            crate::vprintln!(
+                                "[VOLUME] Session sync active, initial level: {:.0}%",
+                                level
+                            );
+                        }
+                        Err(e) => {
+                            crate::vprintln!(
+                                "[VOLUME] Initial get failed: {e}, disabling OS volume sync"
+                            );
+                            return;
+                        }
                     }
                 }
                 self.volume_sync = Some(vs);

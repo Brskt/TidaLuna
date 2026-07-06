@@ -54,14 +54,20 @@ pub(super) struct PlayerThread<F> {
     // Audio output
     cpal_stream: Option<cpal::Stream>,
     volume: Arc<AtomicU32>, // f32 bits stored as u32
-    // Last UI/session volume (f32 bits), always written by handle_set_volume
-    // (even on the session-sync path where self.volume is pinned to 1.0). The
-    // reliable seed for the exclusive gain when volume_sync.get() fails.
+    // The app's authoritative volume (f32 bits): written by handle_set_volume on
+    // every user/echoed change, adopted from the session only at cold start (see
+    // volume_baseline_established). The sole seed source for the exclusive/ASIO
+    // digital gain -- never a live GetMasterVolume() query, which can be a fresh 1.0.
     #[cfg(target_os = "windows")]
     last_volume: Arc<AtomicU32>,
     // Digital gain for the exclusive WASAPI render (it bypasses the OS mixer).
     #[cfg(target_os = "windows")]
     exclusive_gain: Arc<AtomicU32>,
+    // True once a session-volume baseline has been adopted (cold start). After that
+    // we own the volume: re-inits assert last_volume into the (possibly fresh)
+    // session via SetMasterVolume instead of adopting its default-1.0 GetMasterVolume.
+    #[cfg(target_os = "windows")]
+    volume_baseline_established: bool,
     // Decode thread
     decode_cmd_tx: Option<mpsc::Sender<DecodeCommand>>,
     decode_event_rx: Option<mpsc::Receiver<DecodeEvent>>,
@@ -227,6 +233,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             last_volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
             #[cfg(target_os = "windows")]
             exclusive_gain: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            #[cfg(target_os = "windows")]
+            volume_baseline_established: false,
             decode_cmd_tx: None,
             decode_event_rx: None,
             decode_handle: None,

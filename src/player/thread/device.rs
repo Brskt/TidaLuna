@@ -139,14 +139,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.cpal_stream = None;
                 self.cpal_stream_error = None;
 
-                // ASIO bypasses the OS mixer, so seed the shared digital gain with the
-                // effective volume (read BEFORE dropping volume_sync; same rationale
-                // and saturation tradeoff as the exclusive seed below).
-                let gain = self
-                    .volume_sync
-                    .as_ref()
-                    .and_then(|vs| vs.get().ok())
-                    .unwrap_or_else(|| f32::from_bits(self.last_volume.load(Relaxed)));
+                // ASIO bypasses the OS mixer, so seed the shared digital gain from the
+                // app's own volume state (last_volume), NOT a live GetMasterVolume()
+                // query: a fresh session reports 1.0 regardless of the real level (MS
+                // docs), which would blast full scale. Matches JUCE/foobar/JRiver --
+                // exclusive/ASIO gain comes from app state, never a session read.
+                let gain = f32::from_bits(self.last_volume.load(Relaxed));
                 self.exclusive_gain.store(f32::to_bits(gain), Relaxed);
                 crate::vprintln!("[VOLUME] asio gain seeded: {gain:.3}");
                 self.volume_sync = None;
@@ -225,17 +223,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // trigger a shared-cpal rebuild while we are in exclusive mode.
                 self.cpal_stream_error = None;
 
-                // Exclusive bypasses the OS mixer, so seed the render's digital
-                // gain with the effective volume (read BEFORE dropping volume_sync).
-                // On a vs.get() failure use last_volume, not self.volume -- the
-                // latter is pinned to 1.0 on the session-sync path and would seed
-                // full scale (saturation). Breaks bit-perfect <100%, an accepted
-                // tradeoff for a live slider.
-                let gain = self
-                    .volume_sync
-                    .as_ref()
-                    .and_then(|vs| vs.get().ok())
-                    .unwrap_or_else(|| f32::from_bits(self.last_volume.load(Relaxed)));
+                // Exclusive bypasses the OS mixer, so seed the render's digital gain
+                // from the app's own volume state (last_volume), NOT a live
+                // GetMasterVolume() query: a fresh session reports 1.0 regardless of
+                // the real level (MS docs), which would blast full scale. Breaks
+                // bit-perfect <100%, an accepted tradeoff for a live slider.
+                let gain = f32::from_bits(self.last_volume.load(Relaxed));
                 self.exclusive_gain.store(f32::to_bits(gain), Relaxed);
                 crate::vprintln!("[VOLUME] exclusive gain seeded: {gain:.3}");
 
