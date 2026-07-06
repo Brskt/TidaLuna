@@ -192,6 +192,9 @@ export const createNativePlayerComponent = () => {
                 desiredPlaying = wantPlay ? true : null;
                 // Soft-reset format data (don't drain resolvers - playback.ts already did)
                 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
+                // First fresh time report must not be held behind the 250ms throttle
+                // (armed against the OLD track's last dispatch) -- mirrors SEEK.
+                (window as any).__LUNAR_FORCE_TIME_DISPATCH__?.();
                 sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay);
             },
             play: () => {

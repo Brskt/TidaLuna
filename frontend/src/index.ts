@@ -77,6 +77,12 @@ const PASSTHROUGH_EVENTS = new Set([
 ]);
 let _lastTimeDispatch = 0;
 let _forceTimeDispatch = false;
+// Let the load delegate (player.ts) bypass the 250ms time throttle for the
+// first report of a fresh load, so the bar snaps to the new track's start
+// instead of holding the previous track's position (mirrors the SEEK arm).
+(window as any).__LUNAR_FORCE_TIME_DISPATCH__ = () => {
+    _forceTimeDispatch = true;
+};
 
 // Short aliases used by the Rust bridge → SDK event names (carry seq).
 const SEQ_EVENTS: Record<string, string> = {

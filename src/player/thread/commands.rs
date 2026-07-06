@@ -391,6 +391,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
         self.stop_decode();
 
+        // Eagerly report the load's resolved start position (0, or a restored resume
+        // position) so the bar snaps to it immediately rather than lingering on the
+        // previous track until the backend's first periodic report. Safe: same-track
+        // re-asserts never reach here, and mediacurrenttime is store-only, so this can't
+        // feed back as a seek.
+        (self.callback)(PlayerEvent::TimeUpdate(
+            self.pending_resume_seek.unwrap_or(0.0),
+            self.current_seq,
+        ));
+
         let teardown_ms = handle_start.elapsed().as_secs_f64() * 1000.0;
         let decode_start = std::time::Instant::now();
 
