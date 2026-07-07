@@ -631,6 +631,55 @@ jobs:
 
           ls -la release-assets/
 
+      # Default body: a download table over the assets actually produced, plus
+      # a compare link against the latest public release (what a stable user
+      # runs). Curated notes get added by hand on promotions (Update release).
+      - name: Write release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          PREV=$(gh api "repos/$REPO/releases/latest" --jq .tag_name || true)
+          export PREV
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          repo = os.environ["REPO"]
+          prev = os.environ.get("PREV", "")
+          download = f"https://github.com/{repo}/releases/download/{version}"
+          rows = [
+              ("Windows x64", f"tidalunar_{version}_x64.exe", f"tidalunar_{version}_win32_x64.zip"),
+              ("Windows arm64", f"tidalunar_{version}_arm64.exe", f"tidalunar_{version}_win32_arm64.zip"),
+              ("Linux amd64", f"tidalunar_{version}_amd64.deb", f"tidalunar_{version}_linux_amd64.tar.gz"),
+              ("Linux arm64", f"tidalunar_{version}_arm64.deb", f"tidalunar_{version}_linux_arm64.tar.gz"),
+              ("macOS arm64", None, "tidalunar-macos-arm64.zip"),
+          ]
+          assets = {p.name for p in Path("release-assets").iterdir()}
+          table, refs = [], []
+
+          def cell(name, ref):
+              if name is None or name not in assets:
+                  return ""
+              refs.append(f"[{ref}]: {download}/{name}")
+              return f"[{name}][{ref}]"
+
+          for i, (platform, installer, portable) in enumerate(rows):
+              a = cell(installer, f"i{i}")
+              b = cell(portable, f"p{i}")
+              if a or b:
+                  table.append(f"| {platform} | {a} | {b} |")
+
+          body = ["## Downloads", "", "| Platform | Installer | Portable |", "|:---|:---|:---|"]
+          body += table + [""] + refs
+          if prev:
+              body += ["", "## Changes", f"https://github.com/{repo}/compare/{prev}...{version}"]
+          Path("release-notes.md").write_text("\n".join(body) + "\n")
+          PY
+          cat release-notes.md
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -648,7 +697,7 @@ jobs:
           fi
           gh release create "$TAG_NAME" \
             --title "$TAG_NAME" \
-            --generate-notes \
+            --notes-file release-notes.md \
             --target "$target" \
             $flag \
             release-assets/*
