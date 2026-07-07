@@ -5,6 +5,15 @@ on:
     branches: [lunar-cef]
   pull_request:
     branches: [lunar-cef]
+  # Promotion: publish the latest dev prerelease as a public release. The
+  # version defaults to the dev's base (X.Y.Z-alpha.dev.N -> X.Y.Z-alpha);
+  # filling the input overrides it (phase jumps: -alpha to -beta to bare).
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (empty = base of the latest dev build)"
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,6 +24,117 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Version
+  # ---------------------------------------------------------------------------
+
+  # Resolves the version this run builds and publishes.
+  # - push: next dev build (latest public release, patch+1 keeping its phase
+  #   label, then the next free .dev.N counter). The workflow-level concurrency
+  #   group serializes pushes, so two runs can never mint the same N.
+  # - workflow_dispatch: the promoted version (input or the latest dev's base)
+  #   plus the commit of the latest dev prerelease as the build ref.
+  # - pull_request: no version, nothing publishes.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      kind: ${{ steps.resolve.outputs.kind }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Resolve version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "kind=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_public=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          echo "Latest public release: $latest_public"
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            latest_dev=$(gh api "repos/$REPO/releases?per_page=100" \
+              --jq '[.[] | select(.prerelease and (.draft | not))][0].tag_name // empty')
+            if [ -n "$INPUT_VERSION" ]; then
+              version="$INPUT_VERSION"
+            elif [ -n "$latest_dev" ]; then
+              # Strip the dev suffix in either separator form (labeled bases use
+              # .dev.N, bare bases use -dev.N to stay valid SemVer).
+              case "$latest_dev" in
+                *.dev.*) version="${latest_dev%.dev.*}" ;;
+                *-dev.*) version="${latest_dev%-dev.*}" ;;
+                *) version="$latest_dev" ;;
+              esac
+            else
+              echo "No dev prerelease to promote and no version given" >&2
+              exit 1
+            fi
+            # SemVer precedence, not sort -V: a bare release must beat its own
+            # prerelease (X.Y.Z > X.Y.Z-pre). Validates both args.
+            if ! python3 - "$latest_public" "$version" <<'PY'
+          import re, sys
+          SEMVER_RE = re.compile(
+              r'^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)'
+              r'(?:-(?P<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?'
+              r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+          )
+          def key(v):
+              m = SEMVER_RE.match(v)
+              if not m:
+                  sys.exit(f"invalid semver: {v}")
+              core = (int(m['major']), int(m['minor']), int(m['patch']))
+              if m['pre'] is None:
+                  return (core, (1,))
+              def ident(i):
+                  return (0, int(i)) if i.isdigit() else (1, i)
+              return (core, (0, tuple(ident(i) for i in m['pre'].split('.'))))
+          sys.exit(0 if key(sys.argv[2]) > key(sys.argv[1]) else 1)
+          PY
+            then
+              echo "Version $version is not newer than $latest_public" >&2
+              exit 1
+            fi
+            # Build the bits that were tested: the latest dev's commit.
+            ref=""
+            if [ -n "$latest_dev" ]; then
+              ref=$(gh api "repos/$REPO/git/ref/tags/$latest_dev" --jq .object.sha)
+            fi
+            {
+              echo "kind=promote"
+              echo "version=$version"
+              echo "ref=$ref"
+            } >> "$GITHUB_OUTPUT"
+            echo "Promoting to $version (ref: ${ref:-branch head})"
+            exit 0
+          fi
+
+          # push: next dev build toward the version after the latest public.
+          core=${latest_public%%-*}
+          label=${latest_public#"$core"}
+          patch=${core##*.}
+          base="${core%.*}.$((patch + 1))${label}"
+          # A labeled base extends its prerelease (X.Y.Z-alpha.dev.N); a bare
+          # base needs the hyphen to stay valid SemVer (X.Y.Z-dev.N).
+          if [ -n "$label" ]; then sep='.' sep_re='\.'; else sep='-' sep_re='-'; fi
+          esc=$(printf '%s' "$base" | sed 's/[.[\*^$]/\\&/g')
+          last_n=$(gh api "repos/$REPO/releases?per_page=100" --jq '.[].tag_name' \
+            | { grep -E "^${esc}${sep_re}dev\.[0-9]+$" || true; } \
+            | sed "s/^.*${sep_re}dev\.//" | sort -n | tail -1)
+          version="${base}${sep}dev.$(( ${last_n:-0} + 1 ))"
+          {
+            echo "kind=dev"
+            echo "version=$version"
+            echo "ref="
+          } >> "$GITHUB_OUTPUT"
+          echo "Next dev build: $version"
+
   # ---------------------------------------------------------------------------
   # Lint
   # ---------------------------------------------------------------------------
@@ -81,6 +201,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -104,6 +225,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Promotion builds the latest dev's commit; otherwise the event ref.
+          ref: ${{ needs.version.outputs.ref }}
+
+      - name: Stamp release version
+        if: needs.version.outputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Workspace-only stamp (never committed): binaries, manifests and the
+          # signed update metadata all self-identify as the published version.
+          # python3 because the runners split GNU/BSD sed; fails closed if the
+          # manifest ever grows a second top-level version line.
+          python3 - "$VERSION" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          path = pathlib.Path("Cargo.toml")
+          text = path.read_text()
+          pattern = re.compile(r'(?m)^version = ".*"')
+          if len(pattern.findall(text)) != 1:
+              sys.exit("expected exactly one top-level version line in Cargo.toml")
+          path.write_text(pattern.sub(f'version = "{version}"', text, count=1))
+          PY
+          grep -q "version = \"$VERSION\"" Cargo.toml
 
       - name: Install system dependencies
         if: runner.os == 'Linux'
@@ -349,44 +495,14 @@ jobs:
           jobs: ${{ toJSON(needs) }}
 
   # ---------------------------------------------------------------------------
-  # Auto-tag
-  # ---------------------------------------------------------------------------
-
-  auto-tag:
-    needs: check
-    if: github.ref == 'refs/heads/lunar-cef' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      tag: ${{ steps.tag.outputs.name }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Create tag if version changed
-        id: tag
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          TAG="$VERSION"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping"
-          else
-            git tag "$TAG"
-            git push origin "$TAG"
-            echo "name=$TAG" >> "$GITHUB_OUTPUT"
-            echo "Created tag $TAG"
-          fi
-
-  # ---------------------------------------------------------------------------
   # Release
   # ---------------------------------------------------------------------------
 
+  # Publishes every green push as a dev prerelease, and a workflow_dispatch as
+  # the promoted public release (see the version job for how each is resolved).
   release:
-    needs: auto-tag
-    if: needs.auto-tag.outputs.tag != ''
+    needs: [check, version]
+    if: needs.version.outputs.kind != 'none'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -394,7 +510,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          ref: ${{ needs.version.outputs.ref }}
 
       - name: Download artifacts
         env:
@@ -407,7 +523,8 @@ jobs:
       - name: Prepare and sign release assets
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-          VERSION: ${{ needs.auto-tag.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          KIND: ${{ needs.version.outputs.kind }}
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p release-assets
@@ -435,9 +552,16 @@ jobs:
               *)             dtarget="" ;;
             esac
             if [ -n "$dtarget" ] && [ -f "release-assets/manifest-${target}.json" ]; then
-              # Newest published (non-draft) release that isn't the current tag.
-              prev_tag=$(gh release list --limit 30 --json tagName,isDraft \
-                --jq '[.[] | select(.tagName != env.VERSION and .isDraft == false)] | .[0].tagName' 2>/dev/null || true)
+              # Delta base: dev builds chain onto the newest release of any
+              # kind (usually the previous dev); a promotion diffs against the
+              # newest public release, since that is what stable users run.
+              if [ "$KIND" = "promote" ]; then
+                prev_filter='select(.tagName != env.VERSION and .isDraft == false and .isPrerelease == false)'
+              else
+                prev_filter='select(.tagName != env.VERSION and .isDraft == false)'
+              fi
+              prev_tag=$(gh release list --limit 30 --json tagName,isDraft,isPrerelease \
+                --jq "[.[] | $prev_filter] | .[0].tagName" 2>/dev/null || true)
               prev_dir="/tmp/prev-${target}"
               if [ -n "$prev_tag" ] && \
                  gh release download "$prev_tag" --pattern "manifest-${target}.json" \
@@ -510,10 +634,44 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.auto-tag.outputs.tag }}
+          TAG_NAME: ${{ needs.version.outputs.version }}
+          KIND: ${{ needs.version.outputs.kind }}
+          BUILD_REF: ${{ needs.version.outputs.ref }}
         run: |
+          # Dev builds publish immediately as prereleases (only the dev update
+          # channel sees them); a promotion publishes a plain public release.
+          target=${BUILD_REF:-$GITHUB_SHA}
+          if [ "$KIND" = "promote" ]; then
+            flag=""
+          else
+            flag="--prerelease"
+          fi
           gh release create "$TAG_NAME" \
             --title "$TAG_NAME" \
             --generate-notes \
-            --draft \
+            --target "$target" \
+            $flag \
             release-assets/*
+
+      - name: Install cargo-edit
+        if: needs.version.outputs.kind == 'promote'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      # Keep the repo's version aligned with the latest public release so local
+      # builds self-identify correctly. cargo set-version updates Cargo.toml and
+      # the lockfile coherently; [skip ci] avoids a run whose only diff is the
+      # bump.
+      - name: Bump Cargo.toml to the released version
+        if: needs.version.outputs.kind == 'promote'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          git fetch origin lunar-cef
+          git checkout lunar-cef
+          cargo set-version --package tidalunar "$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Bump version to $VERSION [skip ci]"
+          git push origin lunar-cef
