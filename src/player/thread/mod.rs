@@ -31,6 +31,12 @@ const PRE_SEEK_TOLERANCE: f64 = 2.0;
 #[cfg(target_os = "windows")]
 const EXCLUSIVE_PAUSE_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a terminal SDK stop lingers before the ASIO driver is shut down so
+/// other apps regain the device. Armed on stop only (pause keeps the clock: no
+/// re-open cost, no pop); a track-change stop->load cancels it in time.
+#[cfg(target_os = "windows")]
+const ASIO_STOP_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
+
 enum DecodeCommand {
     Seek(f64),
     Pause,
@@ -148,6 +154,11 @@ pub(super) struct PlayerThread<F> {
     // ASIO output (parallel to the exclusive fields; mutually exclusive with it).
     #[cfg(target_os = "windows")]
     asio_handle: Option<AsioHandle>,
+    // Debounced driver release: armed by a terminal stop, consumed in
+    // poll_asio_events once it elapses with no load/play in between. The next
+    // ASIO load respawns the handle (start_asio_playback self-heal).
+    #[cfg(target_os = "windows")]
+    asio_release_at: Option<std::time::Instant>,
     #[cfg(target_os = "windows")]
     is_asio_mode: bool,
     #[cfg(target_os = "windows")]
@@ -286,6 +297,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             exclusive_release_at: None,
             #[cfg(target_os = "windows")]
             asio_handle: None,
+            #[cfg(target_os = "windows")]
+            asio_release_at: None,
             #[cfg(target_os = "windows")]
             is_asio_mode: false,
             #[cfg(target_os = "windows")]

@@ -163,6 +163,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
                 let handle = AsioHandle::spawn(self.exclusive_gain.clone());
                 self.is_asio_mode = true;
+                // Drop any stale release timer from a prior ASIO session so a fresh
+                // engagement can't fire it and shut down the handle we just spawned.
+                self.asio_release_at = None;
                 self.asio_handle = Some(handle);
                 self.current_device_id = Some(id.clone());
 

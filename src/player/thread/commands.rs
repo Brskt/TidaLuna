@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use cpal::traits::StreamTrait;
 
 #[cfg(target_os = "windows")]
-use crate::player::asio::host::AsioCommand;
+use crate::player::asio::host::{AsioCommand, AsioHandle};
 #[cfg(target_os = "windows")]
 use crate::player::{ASIO_STREAM_SEQ, EXCLUSIVE_STREAM_SEQ, wasapi};
 #[cfg(target_os = "windows")]
@@ -260,6 +260,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if !self.is_asio_mode {
             return false;
         }
+        // Self-heal after a terminal-stop release: still in ASIO mode but the
+        // handle was shut down; respawn it so this load rebuilds the pipeline
+        // instead of spawn_asio_decoder silently no-oping on a missing handle.
+        if self.asio_handle.is_none() {
+            self.asio_handle = Some(AsioHandle::spawn(self.exclusive_gain.clone()));
+        }
         // A queued user seek wins over the load-time resume position.
         let seek_to = self
             .user_seek_override
@@ -385,6 +391,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // A new load means the prior stop was a track change, not a real stop:
             // cancel any pending device release so the device is never freed mid-change.
             self.exclusive_release_at = None;
+            self.asio_release_at = None;
         }
         if let Some(ref old_buf) = self.current_buffer {
             old_buf.cancel();
@@ -674,6 +681,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(target_os = "windows")]
         {
             self.exclusive_release_at = None;
+            self.asio_release_at = None;
         }
 
         // Capture the retained source only when no track and no load in flight;
@@ -951,6 +959,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let was_playing = self.is_playing;
         self.handle_pause();
         self.resume_on_reassert = was_playing;
+        // ASIO pause holds the KS-exclusive device by design, so a terminal stop
+        // (the SDK's reset(); nothing has to follow) arms a debounced release or
+        // the device stays claimed forever. No was_playing gate: a stop on an
+        // already-paused session is just as terminal.
+        #[cfg(target_os = "windows")]
+        if self.is_asio_mode && self.asio_handle.is_some() {
+            self.asio_release_at = Some(std::time::Instant::now() + super::ASIO_STOP_RELEASE);
+        }
         // Surface the SDK/UI/Connect/SMTC-visible "stopped" state even though the
         // pipeline is retained internally (handle_pause emits Paused first; the
         // final state observers settle on is Stopped).

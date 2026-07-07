@@ -312,6 +312,36 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.rearm_shared_after_asio_failure();
         }
 
+        // Debounced terminal-stop release: free the ASIO driver so other apps
+        // regain the device. loading_gen blocks a slow in-flight stop->load
+        // (a failed load settles it via LoadSettleGuard and the release then
+        // proceeds). has_track=false + committed cleared route the next play/load
+        // through the full rebuild path, where start_asio_playback respawns the
+        // handle. The shutdown join blocks this thread; nothing is playing.
+        if self.is_asio_mode
+            && !self.is_playing
+            && self.loading_gen.is_none()
+            && let Some(at) = self.asio_release_at
+            && std::time::Instant::now() >= at
+        {
+            self.asio_release_at = None;
+            // Cancel the detached decoder first: its wait sites never observe the
+            // control thread dying, so it would leak (thread + full-track buffer).
+            if let Some(cancel) = self.asio_stream_cancel.take() {
+                cancel.store(true, Relaxed);
+                if let Some(ref buf) = self.current_buffer {
+                    buf.wake_readers();
+                }
+            }
+            self.asio_seek_tx = None;
+            if let Some(handle) = self.asio_handle.take() {
+                handle.shutdown();
+            }
+            self.has_track = false;
+            self.set_committed_track(None);
+            crate::vprintln!("[ASIO]   Released driver on stop (other apps can use it)");
+        }
+
         if !self.is_asio_mode {
             self.asio_handle = None;
         }
