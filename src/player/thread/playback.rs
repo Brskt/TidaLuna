@@ -8,6 +8,14 @@ use crate::player::asio::host::AsioEvent;
 #[cfg(target_os = "windows")]
 use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
 
+/// Whether a fatal `DecodeEvent::Error` must be settled in place: the drain path
+/// only takes over after a trailing `Finished` and with at least one sample
+/// played - otherwise nothing else ever emits a terminal state. Pure so it can
+/// be unit-tested without the audio pipeline.
+fn decode_failure_needs_settle(pending_complete: bool, played_samples: u64) -> bool {
+    !pending_complete || played_samples == 0
+}
+
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn samples_to_secs(&self, samples: u64) -> f64 {
         let channels = self.channels.max(1) as u64;
@@ -448,6 +456,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
         }
 
+        let mut fatal_decode = false;
         if let Some(ref rx) = self.decode_event_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -571,9 +580,38 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         // so nothing else clears committed_track. Drop it here so the SDK's
                         // same-track recovery reload rebuilds instead of resuming a dead decoder.
                         self.set_committed_track(None);
+                        // Settled below, outside the rx borrow.
+                        fatal_decode = true;
                     }
                 }
             }
+        }
+
+        // Without a settle the SDK stays stranded on its last reported state.
+        // Stopped maps to NOT_PLAYING (the SDK's failed-to-resume contract), and
+        // stop_decode() keeps a later seek from muting against a dead channel.
+        // Mid-stream errors with audio played keep the drain->Completed path.
+        if fatal_decode
+            && decode_failure_needs_settle(self.pending_complete, self.played_samples.load(Relaxed))
+        {
+            self.stop_decode();
+            self.pending_complete = false;
+            self.last_played_snapshot = 0;
+            self.seeking = false;
+            self.seek_target = None;
+            self.seek_wall_start = None;
+            self.has_track = false;
+            self.is_playing = false;
+            self.current_track_id = None;
+            self.current_duration = 0.0;
+            crate::state::GOVERNOR
+                .buffer_progress()
+                .set_playback_active(false);
+            (self.callback)(PlayerEvent::StateChange(
+                PlaybackState::Stopped,
+                self.current_seq,
+            ));
+            return;
         }
 
         // Check if the ring buffer has drained after decode finished
@@ -632,5 +670,30 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_failure_needs_settle;
+
+    #[test]
+    fn init_time_error_settles() {
+        // No trailing Finished: pending_complete stays false, nothing else emits
+        // a terminal state.
+        assert!(decode_failure_needs_settle(false, 0));
+        assert!(decode_failure_needs_settle(false, 4096));
+    }
+
+    #[test]
+    fn mid_stream_error_before_first_sample_settles() {
+        // Finished arrived but the drain gate (played > 0) can never pass.
+        assert!(decode_failure_needs_settle(true, 0));
+    }
+
+    #[test]
+    fn mid_stream_error_with_audio_drains_to_completed() {
+        // The existing drain path owns this case (Completed after ring drain).
+        assert!(!decode_failure_needs_settle(true, 4096));
     }
 }
