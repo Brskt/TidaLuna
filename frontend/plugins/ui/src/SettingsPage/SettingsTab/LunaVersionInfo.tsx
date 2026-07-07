@@ -21,7 +21,8 @@ export const LunaVersionInfo = React.memo(() => {
 						</div>
 					</div>
 				</div>
-				<LunaClientUpdate />
+				{/* Luna's own loader updater; hidden while TidaLunar ships through its own updater. */}
+				{/* <LunaClientUpdate /> */}
 				<div style={{ padding: 2 }}></div>
 			</LunaSettings>
 		</div>
