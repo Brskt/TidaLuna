@@ -244,7 +244,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             PlayerEvent::MediaError { error, code } => {
                 state
                     .pending_player_events
-                    .push(PlayerBridgeEvent::media_error(&error, code));
+                    .push(PlayerBridgeEvent::media_error(&error, code.as_str()));
             }
             PlayerEvent::MaxConnectionsReached => {
                 state

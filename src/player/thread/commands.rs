@@ -5,8 +5,8 @@ use super::output::{
 use super::{DecodeCommand, PlayerThread};
 use crate::player::resume::RESUME_MIN_SECONDS;
 use crate::player::{
-    DeviceErrorKind, LOAD_SEQ, LoadRequest, MediaFormatSnapshot, PlaybackState, PlayerCommand,
-    PlayerEvent, ResumePolicy, format_ms, short_id,
+    DeviceErrorKind, LOAD_SEQ, LoadRequest, MediaErrorCode, MediaFormatSnapshot, PlaybackState,
+    PlayerCommand, PlayerEvent, ResumePolicy, format_ms, short_id,
 };
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
@@ -467,8 +467,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 crate::vprintln!("[ERROR]  {e}");
                 (self.callback)(PlayerEvent::MediaError {
                     error: e,
-                    code: "mediaerror",
+                    code: MediaErrorCode::UnreadableFile,
                 });
+                // Settle the SDK's load() (its `mediaduration` await has no
+                // timeout); 0, not the previous track's stale current_duration.
+                (self.callback)(PlayerEvent::Duration(0.0, self.current_seq));
                 // This load failed; drop the reconcile signal committed at entry
                 // or a same-track reload would resume a pipeline that never built.
                 self.set_committed_track(None);

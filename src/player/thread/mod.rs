@@ -6,9 +6,8 @@ mod playback;
 
 use super::buffer::RamBuffer;
 use super::resume::ResumeStore;
-use super::{MediaFormatSnapshot, PlayerCommand, PlayerEvent};
+use super::{LOAD_SEQ, MediaFormatSnapshot, PlayerCommand, PlayerEvent};
 use std::sync::Arc;
-#[cfg(target_os = "windows")]
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
 use std::sync::mpsc;
@@ -469,8 +468,24 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::SetAudioDevice { id, mode } => {
                 self.handle_set_audio_device(id, mode);
             }
-            PlayerCommand::EmitMediaError { error, code } => {
+            PlayerCommand::LoadFailed {
+                error,
+                code,
+                seq,
+                load_gen,
+            } => {
+                // Superseded load (stop() keeps its task alive; abort is
+                // cooperative): checked at processing time, like handle_load's
+                // stale-Load gate, so it also covers send/process races.
+                if load_gen != LOAD_SEQ.load(Relaxed) {
+                    crate::vprintln!("[LOAD #{load_gen}] stale LoadFailed, ignoring");
+                    return;
+                }
+                // Error first (cause), then Duration(0) (effect): the SDK's load()
+                // awaits `mediaduration` with no timeout, and 0 is its own
+                // unknown-duration sentinel.
                 (self.callback)(PlayerEvent::MediaError { error, code });
+                (self.callback)(PlayerEvent::Duration(0.0, seq));
             }
             PlayerCommand::EmitMaxConnections => {
                 (self.callback)(PlayerEvent::MaxConnectionsReached);

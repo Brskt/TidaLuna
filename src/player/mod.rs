@@ -95,6 +95,26 @@ impl DeviceErrorKind {
     }
 }
 
+/// `mediaerror` codes the SDK recognizes (its `mediaErrorCodeMap`); any other
+/// string degrades to `errorCode: undefined` on the SDK side. Typed so a site
+/// can't invent an off-contract code. `file_checksum_mismatch` has no producer here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaErrorCode {
+    /// NPO01 - the source couldn't be fetched (HTTP failure, missing segment).
+    NoSuchFile,
+    /// NPO03 - the source was fetched but can't be read (probe/decode failure).
+    UnreadableFile,
+}
+
+impl MediaErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSuchFile => "no_such_file",
+            Self::UnreadableFile => "unreadable_file",
+        }
+    }
+}
+
 /// The audio output backend a `player.devices.set` selects. The three modes are
 /// mutually exclusive (a radio choice), so a single enum replaces the former
 /// `(exclusive, asio)` boolean pair, which could encode the invalid both-true
@@ -151,7 +171,7 @@ pub enum PlayerEvent {
     Version(&'static str),
     MediaError {
         error: String,
-        code: &'static str,
+        code: MediaErrorCode,
     },
     MaxConnectionsReached,
     /// Re-arm a retained source into the shared pipeline: flush.rs reloads `track`
@@ -224,10 +244,13 @@ impl LoadContext {
         });
     }
 
-    fn emit_media_error(&self, error: String, code: &'static str) {
-        let _ = self
-            .cmd_tx
-            .send(PlayerCommand::EmitMediaError { error, code });
+    fn fail_load(&self, error: String, code: MediaErrorCode) {
+        let _ = self.cmd_tx.send(PlayerCommand::LoadFailed {
+            error,
+            code,
+            seq: self.event_seq,
+            load_gen: self.load_gen,
+        });
     }
 }
 
@@ -279,9 +302,15 @@ enum PlayerCommand {
         id: String,
         mode: OutputMode,
     },
-    EmitMediaError {
+    /// A load failed before reaching the pipeline: report the error, then settle
+    /// the SDK's `load()` with `Duration(0.0, seq)` - its `mediaduration` await
+    /// has no timeout, so a mediaerror alone hangs it forever. Dropped when
+    /// `load_gen` is superseded (a stale failure must not settle a newer load).
+    LoadFailed {
         error: String,
-        code: &'static str,
+        code: MediaErrorCode,
+        seq: u32,
+        load_gen: u32,
     },
     EmitMaxConnections,
     #[cfg(target_os = "windows")]
@@ -502,7 +531,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
                 if status.as_u16() == 429 {
                     let _ = ctx.cmd_tx.send(PlayerCommand::EmitMaxConnections);
                 } else {
-                    ctx.emit_media_error(format!("HTTP {}", status), "no_such_file");
+                    ctx.fail_load(format!("HTTP {}", status), MediaErrorCode::NoSuchFile);
                 }
                 return;
             }
@@ -510,7 +539,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         }
         Err(e) => {
             crate::vprintln!("[ERROR]  Request failed: {}", e);
-            ctx.emit_media_error(format!("request failed: {e}"), "no_such_file");
+            ctx.fail_load(format!("request failed: {e}"), MediaErrorCode::NoSuchFile);
             return;
         }
     };
@@ -551,7 +580,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
             }
             Err(e) => {
                 crate::vprintln!("[ERROR]  Fetch failed: {}", e);
-                ctx.emit_media_error(format!("fetch failed: {e}"), "no_such_file");
+                ctx.fail_load(format!("fetch failed: {e}"), MediaErrorCode::NoSuchFile);
             }
         }
         return;
@@ -834,26 +863,32 @@ impl Player {
                     Ok(b) => b.to_vec(),
                     Err(e) => {
                         crate::vprintln!("[ERROR]  DASH init segment read failed: {e}");
-                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                        let _ = cmd_tx.send(PlayerCommand::LoadFailed {
                             error: format!("DASH init segment: {e}"),
-                            code: "no_such_file",
+                            code: MediaErrorCode::NoSuchFile,
+                            seq: event_seq,
+                            load_gen,
                         });
                         return;
                     }
                 },
                 Ok(r) => {
                     crate::vprintln!("[ERROR]  DASH init segment HTTP {}", r.status());
-                    let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                    let _ = cmd_tx.send(PlayerCommand::LoadFailed {
                         error: format!("DASH init HTTP {}", r.status()),
-                        code: "no_such_file",
+                        code: MediaErrorCode::NoSuchFile,
+                        seq: event_seq,
+                        load_gen,
                     });
                     return;
                 }
                 Err(e) => {
                     crate::vprintln!("[ERROR]  DASH init segment request failed: {e}");
-                    let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                    let _ = cmd_tx.send(PlayerCommand::LoadFailed {
                         error: format!("DASH init request: {e}"),
-                        code: "no_such_file",
+                        code: MediaErrorCode::NoSuchFile,
+                        seq: event_seq,
+                        load_gen,
                     });
                     return;
                 }
@@ -902,9 +937,11 @@ impl Player {
                     Ok(data) => mp4_data.extend_from_slice(&data),
                     Err(msg) => {
                         crate::vprintln!("[ERROR]  {msg}");
-                        let _ = cmd_tx.send(PlayerCommand::EmitMediaError {
+                        let _ = cmd_tx.send(PlayerCommand::LoadFailed {
                             error: msg,
-                            code: "no_such_file",
+                            code: MediaErrorCode::NoSuchFile,
+                            seq: event_seq,
+                            load_gen,
                         });
                         return;
                     }
@@ -1086,5 +1123,19 @@ mod reconcile_tests {
             "https://cdn/tracks/abc",
             "flac"
         ));
+    }
+}
+
+#[cfg(test)]
+mod media_error_code_tests {
+    use super::MediaErrorCode;
+
+    #[test]
+    fn codes_match_the_sdk_map() {
+        // Locked to nativePlayer.ts `mediaErrorCodeMap` (no_such_file -> NPO01,
+        // unreadable_file -> NPO03): any other wire string reaches the SDK as
+        // `errorCode: undefined`.
+        assert_eq!(MediaErrorCode::NoSuchFile.as_str(), "no_such_file");
+        assert_eq!(MediaErrorCode::UnreadableFile.as_str(), "unreadable_file");
     }
 }

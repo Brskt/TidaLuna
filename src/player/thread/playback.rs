@@ -1,6 +1,6 @@
 use super::output::{STREAM_ERR_DEVICE_LOST, STREAM_ERR_NONE, STREAM_ERR_UNKNOWN};
 use super::{DecodeEvent, PlayerThread};
-use crate::player::{DeviceErrorKind, PlaybackState, PlayerEvent, format_ms};
+use crate::player::{DeviceErrorKind, MediaErrorCode, PlaybackState, PlayerEvent, format_ms};
 use std::sync::atomic::Ordering::Relaxed;
 
 #[cfg(target_os = "windows")]
@@ -565,7 +565,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         crate::vprintln!("[DECODE] Error: {e}");
                         (self.callback)(PlayerEvent::MediaError {
                             error: e,
-                            code: "unreadable_file",
+                            code: MediaErrorCode::UnreadableFile,
                         });
                         // Init-time decode errors emit Error with no trailing Finished,
                         // so nothing else clears committed_track. Drop it here so the SDK's
