@@ -18,8 +18,10 @@ pub(crate) fn handle_updater_check(callback: crate::app_state::IpcCallback) {
         return;
     }
 
+    let channel = crate::state::db().call_settings(crate::settings::load_update_channel);
     crate::state::rt_handle().spawn(async move {
-        let result = match check_for_update().await {
+        let channel = super::UpdateChannel::from_setting(&channel);
+        let result = match check_for_update(channel).await {
             Some(info) => serde_json::to_string(&info).unwrap_or_else(|_| "null".into()),
             None => "null".into(),
         };

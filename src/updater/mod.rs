@@ -23,6 +23,21 @@ pub(crate) fn record_launch_version() {
 const GITHUB_OWNER: &str = "Brskt";
 const GITHUB_REPO: &str = "TidaLuna";
 
+/// Which releases the update check considers: `Stable` sees only published
+/// releases, `Dev` also sees the CI's per-push prereleases (`X.Y.Z-pre.dev.N`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateChannel {
+    Stable,
+    Dev,
+}
+
+impl UpdateChannel {
+    /// Setting-string mapping; anything but "dev" is the safe default.
+    pub(crate) fn from_setting(s: &str) -> Self {
+        if s == "dev" { Self::Dev } else { Self::Stable }
+    }
+}
+
 const TARGET: &str = {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {

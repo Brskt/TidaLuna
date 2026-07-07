@@ -1,23 +1,48 @@
+use super::UpdateChannel;
 use super::download::cleanup_staging;
 use super::types::{UPDATER_STATE, UpdateInfo, UpdaterPhase};
-use super::util::{detect_staged_update, fetch_gh_release, is_newer};
+use super::util::{detect_staged_update, dev_order_key, fetch_gh_releases, is_newer};
 
 /// Check for updates from GitHub Releases. Returns Some(UpdateInfo) if a newer
-/// version is available, None otherwise.
-pub(crate) async fn check_for_update() -> Option<UpdateInfo> {
+/// version is available on the given channel, None otherwise.
+pub(crate) async fn check_for_update(channel: UpdateChannel) -> Option<UpdateInfo> {
     let current_version = env!("CARGO_PKG_VERSION");
 
-    crate::vprintln!("[UPDATER] Checking for updates (current: v{current_version})...");
+    crate::vprintln!(
+        "[UPDATER] Checking for updates (current: v{current_version}, channel: {channel:?})..."
+    );
 
     let client = &*crate::state::HTTP_CLIENT;
 
-    // Fetch latest release (log errors explicitly, don't silently swallow them)
-    let release = match fetch_gh_release(client, "releases/latest").await {
+    // Enumerate releases instead of GitHub's `releases/latest`: the fork
+    // inherits upstream releases whose tags outrank ours on raw numbers, and
+    // only a release carrying this platform's manifest is installable, so the
+    // pick is "newest installable", not "newest published".
+    let releases = match fetch_gh_releases(client).await {
         Ok(r) => r,
         Err(e) => {
             crate::vprintln!("[UPDATER] Failed to fetch releases: {e}");
             return None;
         }
+    };
+
+    let manifest_name = super::manifest_name();
+    let release = releases
+        .into_iter()
+        .filter(|r| !r.draft && (channel == UpdateChannel::Dev || !r.prerelease))
+        .filter(|r| r.assets.iter().any(|a| a.name == manifest_name))
+        .filter_map(|r| {
+            let v = r.tag_name.strip_prefix('v').unwrap_or(&r.tag_name);
+            dev_order_key(v).map(|key| (key, r))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, r)| r);
+    let Some(release) = release else {
+        crate::vprintln!(
+            "[UPDATER] No installable release found for {}",
+            super::TARGET
+        );
+        return None;
     };
 
     // Extract version from tag (strip leading 'v')
@@ -130,16 +155,18 @@ pub(crate) fn trigger_update_check() {
     }
 
     // Check settings
-    let (auto_check, skip_version) = crate::state::db().call_settings(|conn| {
+    let (auto_check, skip_version, channel) = crate::state::db().call_settings(|conn| {
         (
             crate::settings::load_update_auto_check(conn),
             crate::settings::load_update_skip_version(conn),
+            crate::settings::load_update_channel(conn),
         )
     });
     if !auto_check {
         crate::vprintln!("[UPDATER] Auto-check disabled");
         return;
     }
+    let channel = UpdateChannel::from_setting(&channel);
 
     crate::state::rt_handle().spawn(async move {
         // Check if a previous session left a valid pre-downloaded staging
@@ -159,7 +186,7 @@ pub(crate) fn trigger_update_check() {
             }
         }
 
-        if let Some(info) = check_for_update().await {
+        if let Some(info) = check_for_update(channel).await {
             if let Some(ref skip) = skip_version
                 && *skip == info.version
             {

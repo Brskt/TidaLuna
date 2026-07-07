@@ -57,6 +57,10 @@ pub(super) struct JournalFile {
 pub(super) struct GhRelease {
     pub(super) tag_name: String,
     pub(super) assets: Vec<GhAsset>,
+    #[serde(default)]
+    pub(super) prerelease: bool,
+    #[serde(default)]
+    pub(super) draft: bool,
 }
 
 #[derive(Deserialize)]

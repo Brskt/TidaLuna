@@ -201,6 +201,28 @@ pub(crate) fn save_update_auto_check(conn: &mut Connection, enabled: bool) {
     set(conn, "updater.auto_check", &enabled.to_string());
 }
 
+/// Update channel: "stable" (published releases only) or "dev" (the CI's
+/// per-push prereleases too). Any other stored value reads as "stable".
+pub(crate) fn load_update_channel(conn: &mut Connection) -> String {
+    let value = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'updater.channel'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+    if value == "dev" {
+        value
+    } else {
+        "stable".to_string()
+    }
+}
+
+pub(crate) fn save_update_channel(conn: &mut Connection, channel: &str) {
+    let channel = if channel == "dev" { "dev" } else { "stable" };
+    set(conn, "updater.channel", channel);
+}
+
 pub(crate) fn load_receiver_always_on(conn: &mut Connection) -> bool {
     get_bool(conn, "connect.receiver_always_on", true)
 }
@@ -235,6 +257,8 @@ pub(crate) fn save_console(conn: &mut Connection, enabled: bool) {
 pub(crate) struct BootSettings {
     pub(crate) close_to_tray: bool,
     pub(crate) auto_check: bool,
+    // "dev" channel as a bool so BootSettings stays Copy.
+    pub(crate) update_dev_channel: bool,
     pub(crate) receiver_always_on: bool,
     pub(crate) volume_sync: bool,
     pub(crate) asio: bool,
@@ -248,6 +272,7 @@ pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
     BootSettings {
         close_to_tray: load_close_to_tray(conn),
         auto_check: load_update_auto_check(conn),
+        update_dev_channel: load_update_channel(conn) == "dev",
         receiver_always_on: load_receiver_always_on(conn),
         // volume_sync is a Windows-only feature; non-Windows keeps it off.
         #[cfg(target_os = "windows")]

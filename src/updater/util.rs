@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 
 use super::types::{GhRelease, Manifest};
 
-pub(super) async fn fetch_gh_release(
+async fn fetch_gh_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     endpoint: &str,
-) -> Result<GhRelease, anyhow::Error> {
+) -> Result<T, anyhow::Error> {
     use anyhow::Context;
 
     let current_version = env!("CARGO_PKG_VERSION");
@@ -33,8 +33,22 @@ pub(super) async fn fetch_gh_release(
     }
 
     let body = resp.text().await.context("read release body")?;
-    let release: GhRelease = serde_json::from_str(&body).context("parse release")?;
-    Ok(release)
+    serde_json::from_str(&body).context("parse release")
+}
+
+pub(super) async fn fetch_gh_release(
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<GhRelease, anyhow::Error> {
+    fetch_gh_json(client, endpoint).await
+}
+
+/// The repo's release list, newest first (one page; the fork's whole history
+/// fits well under the 100-item cap).
+pub(super) async fn fetch_gh_releases(
+    client: &reqwest::Client,
+) -> Result<Vec<GhRelease>, anyhow::Error> {
+    fetch_gh_json(client, "releases?per_page=100").await
 }
 
 /// Returns the staged version if a valid pre-downloaded update exists.
@@ -98,31 +112,47 @@ pub(super) fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
     Ok(base16ct::lower::encode_string(&hasher.finalize()))
 }
 
-/// True if `remote` is a strictly newer SemVer version than `current`.
+/// Ordering key for release versions with CI dev builds in the mix: SemVer
+/// ranks `X.Y.Z-alpha.dev.5` ABOVE `X.Y.Z-alpha` (a longer prerelease list
+/// wins on a shared prefix), but a promoted release must outrank the dev
+/// builds it was cut from.
+pub(super) fn dev_order_key(v: &str) -> Option<(semver::Version, bool, u64)> {
+    let parsed = semver::Version::parse(v).ok()?;
+    let ids: Vec<&str> = parsed.pre.split('.').collect();
+    let dev_n = match ids.as_slice() {
+        [.., "dev", n] => n.parse::<u64>().ok(),
+        _ => None,
+    };
+    let mut base = parsed.clone();
+    if dev_n.is_some() {
+        let base_pre = ids[..ids.len() - 2].join(".");
+        base.pre = semver::Prerelease::new(&base_pre).unwrap_or_default();
+    }
+    // Key: base version, then final-beats-dev (true > false), then the counter.
+    Some((base, dev_n.is_none(), dev_n.unwrap_or(0)))
+}
+
+/// True if `remote` is a strictly newer version than `current`, with dev
+/// builds (`X.Y.Z-pre.dev.N`) ranking below their promoted release.
 ///
 /// Fail-safe: if either string is not valid SemVer, returns `false` (treated
 /// as "not newer", so we never offer or advance to an unparseable version).
 pub(super) fn is_newer(remote: &str, current: &str) -> bool {
-    match (
-        semver::Version::parse(remote),
-        semver::Version::parse(current),
-    ) {
-        (Ok(remote), Ok(current)) => remote > current,
+    match (dev_order_key(remote), dev_order_key(current)) {
+        (Some(remote), Some(current)) => remote > current,
         _ => false,
     }
 }
 
 /// True if `installed` satisfies the manifest's minimum-version floor
-/// (`installed >= min_version`), the skip-migration gate.
+/// (`installed >= min_version`), the skip-migration gate. Same dev-aware
+/// ordering as `is_newer` so the two gates can never disagree.
 ///
 /// Fail-closed: an unparseable floor or installed version blocks the update.
 /// A no-op floor is encoded as `"0.0.0"` (every valid version satisfies it).
 pub(super) fn meets_min_version(installed: &str, min_version: &str) -> bool {
-    match (
-        semver::Version::parse(installed),
-        semver::Version::parse(min_version),
-    ) {
-        (Ok(installed), Ok(floor)) => installed >= floor,
+    match (dev_order_key(installed), dev_order_key(min_version)) {
+        (Some(installed), Some(floor)) => installed >= floor,
         _ => false,
     }
 }
@@ -316,5 +346,41 @@ mod version_tests {
     fn meets_min_version_unparseable_is_failclosed() {
         assert!(!meets_min_version("0.0.9-alpha", "")); // empty floor → block
         assert!(!meets_min_version("0.0.9-alpha", "garbage"));
+    }
+
+    #[test]
+    fn promoted_release_beats_its_dev_builds() {
+        // Raw SemVer says alpha.dev.5 > alpha; the dev-aware key inverts that.
+        assert!(is_newer("0.0.14-alpha", "0.0.14-alpha.dev.5"));
+        assert!(!is_newer("0.0.14-alpha.dev.5", "0.0.14-alpha"));
+        // Same rule in the bare-release phase.
+        assert!(is_newer("0.1.0", "0.1.0-dev.3"));
+        assert!(!is_newer("0.1.0-dev.3", "0.1.0"));
+    }
+
+    #[test]
+    fn dev_counters_compare_numerically() {
+        assert!(is_newer("0.0.14-alpha.dev.10", "0.0.14-alpha.dev.9"));
+        assert!(!is_newer("0.0.14-alpha.dev.9", "0.0.14-alpha.dev.10"));
+    }
+
+    #[test]
+    fn dev_builds_of_a_newer_base_beat_older_releases() {
+        assert!(is_newer("0.0.14-alpha.dev.1", "0.0.13-alpha"));
+        assert!(is_newer("0.0.20-beta", "0.0.20-alpha.dev.7")); // phase change wins
+        assert!(!is_newer("0.0.13-alpha", "0.0.14-alpha.dev.1"));
+    }
+
+    #[test]
+    fn non_dev_prerelease_lists_keep_semver_order() {
+        // A trailing identifier pair that is not `dev.N` stays raw SemVer.
+        assert!(is_newer("0.0.9-alpha.rc.2", "0.0.9-alpha"));
+    }
+
+    #[test]
+    fn meets_min_version_is_dev_aware() {
+        // A dev build sits below its promoted base, so it misses that floor.
+        assert!(!meets_min_version("0.0.14-alpha.dev.5", "0.0.14-alpha"));
+        assert!(meets_min_version("0.0.14-alpha", "0.0.14-alpha.dev.5"));
     }
 }
