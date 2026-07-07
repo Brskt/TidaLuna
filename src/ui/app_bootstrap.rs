@@ -320,6 +320,12 @@ wrap_browser_process_handler! {
 
             let auto_check = crate::state::boot_settings().auto_check;
 
+            let update_channel = if crate::state::boot_settings().update_dev_channel {
+                "dev"
+            } else {
+                "stable"
+            };
+
             let receiver_always_on = crate::state::boot_settings().receiver_always_on;
 
             let volume_sync = crate::state::boot_settings().volume_sync;
@@ -348,6 +354,7 @@ wrap_browser_process_handler! {
                 r#"{ua_override}window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
 window.__TIDALUNAR_AUTO_CHECK__ = {auto_check};
+window.__TIDALUNAR_UPDATE_CHANNEL__ = '{update_channel}';
 window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
 window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
 window.__TIDALUNAR_ASIO__ = {asio};

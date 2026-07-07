@@ -219,6 +219,14 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             });
             crate::vprintln!("[UPDATER] Auto-check set to {enabled}");
         }
+        "updater.set_channel" => {
+            // save_update_channel normalizes anything but "dev" to "stable".
+            let channel = msg.arg(0).to_string();
+            crate::state::db().call_settings(move |conn| {
+                crate::settings::save_update_channel(conn, &channel);
+            });
+            crate::vprintln!("[UPDATER] Channel set to {}", msg.arg(0));
+        }
         "settings.set_log_level" => {
             let level = msg
                 .args

@@ -5,7 +5,7 @@ import Typography from "@mui/material/Typography";
 
 import { ipcRenderer } from "@luna/lib";
 
-import { LunaButton, LunaSettings, LunaSwitchSetting } from "../../components";
+import { LunaButton, LunaSelectItem, LunaSelectSetting, LunaSettings, LunaSwitchSetting } from "../../components";
 import type { UpdateInfo, UpdaterPhase } from "../../types/updater";
 
 function formatSize(bytes: number): string {
@@ -20,6 +20,9 @@ export const LunaUpdateSettings = React.memo(() => {
 	const [result, setResult] = useState<UpdateInfo | null>(null);
 	const [errorMsg, setErrorMsg] = useState<string>("");
 	const [autoCheck, setAutoCheck] = useState(() => (window as any).__TIDALUNAR_AUTO_CHECK__ !== false);
+	const [channel, setChannel] = useState(() =>
+		(window as any).__TIDALUNAR_UPDATE_CHANNEL__ === "dev" ? "dev" : "stable",
+	);
 
 	useEffect(() => {
 		ipcRenderer.invoke("updater.status").then((status: any) => {
@@ -105,6 +108,13 @@ export const LunaUpdateSettings = React.memo(() => {
 		ipcRenderer.send("updater.set_auto_check", checked);
 	}, []);
 
+	const handleChannel = useCallback((value: string) => {
+		const channel = value === "dev" ? "dev" : "stable";
+		setChannel(channel);
+		(window as any).__TIDALUNAR_UPDATE_CHANNEL__ = channel;
+		ipcRenderer.send("updater.set_channel", channel);
+	}, []);
+
 	return (
 		<LunaSettings title="Updates">
 			<Stack direction="row" alignItems="center" spacing={2}>
@@ -188,6 +198,16 @@ export const LunaUpdateSettings = React.memo(() => {
 				checked={autoCheck}
 				onChange={handleAutoCheckToggle}
 			/>
+			<LunaSelectSetting
+				title="Update channel"
+				desc="Stable ships released versions only. Dev also includes pre-release builds that may be unstable or buggy."
+				value={channel}
+				onChange={(e) => handleChannel(String(e.target.value))}
+				sx={{ width: 160, flexGrow: 0 }}
+			>
+				<LunaSelectItem value="stable">Stable</LunaSelectItem>
+				<LunaSelectItem value="dev">Dev</LunaSelectItem>
+			</LunaSelectSetting>
 		</LunaSettings>
 	);
 });
