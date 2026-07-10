@@ -1,5 +1,5 @@
 //! Proactive token refresh: replaces real JWTs in JS memory with opaques
-//! seconds after boot instead of waiting for TIDAL's SDK refresh (~1h).
+//! seconds after boot instead of waiting for TIDAL's SDK refresh near token expiry.
 //!
 //! Called from on_after_created when needs_proactive_refresh is set.
 

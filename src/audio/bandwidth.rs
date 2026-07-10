@@ -182,7 +182,7 @@ impl PreloadGate {
                 PreloadGate::Paused if secs > 2.0 => PreloadGate::Active,
                 other => other,
             },
-            // Bitrate unknown - fallback byte-based (assume ~200 KB/s)
+            // Bitrate unknown - fall back to byte thresholds sized for a typical FLAC rate
             None => match self {
                 PreloadGate::Active if ahead < 200_000 => PreloadGate::Paused,
                 PreloadGate::Paused if ahead > 400_000 => PreloadGate::Active,
@@ -195,13 +195,13 @@ impl PreloadGate {
 const TICK_MS: u64 = 25;
 const PRELOAD_RATE: f64 = 500_000.0; // 500 KB/s
 const PRELOAD_BURST: f64 = 32_000.0; // 32 KB
-const METRICS_INTERVAL_TICKS: u32 = (5000 / TICK_MS) as u32; // ~5 seconds
+const METRICS_INTERVAL_TICKS: u32 = (5000 / TICK_MS) as u32; // five seconds, in ticks
 
 // Adaptive playback rate: multipliers relative to track bitrate (bytes/sec).
 // Fallback values used when bitrate is unknown (0).
 const PLAYBACK_MULT: f64 = 5.0; // download at 5× real-time
-const PLAYBACK_BURST_MULT: f64 = 0.3; // burst covers ~300ms of audio
-const FALLBACK_RATE: f64 = 1_500_000.0; // 1.5 MB/s (assumes ~300 KB/s track)
+const PLAYBACK_BURST_MULT: f64 = 0.3; // burst covers 0.3 s of audio
+const FALLBACK_RATE: f64 = 1_500_000.0; // 5x an assumed 300 KB/s track
 const FALLBACK_BURST: f64 = 48_000.0; // 48 KB
 
 // Buffer-aware playback throttle: avoid downloading the entire file upfront.
@@ -601,8 +601,8 @@ async fn governor_loop(mut rx: mpsc::Receiver<TokenRequest>, bp: Arc<BufferProgr
             req = rx.recv() => match req {
                 Some(r) => {
                     // Serve immediately on arrival instead of waiting for the next
-                    // tick. Without this, max throughput is ~640 KB/s (16KB / 25ms)
-                    // which is below the 5× target for high-bitrate tracks.
+                    // tick. Without this, throughput caps at one request per tick,
+                    // below the 5x target for high-bitrate tracks.
                     match r.class {
                         TrafficClass::Playback => {
                             state.playback_queue.push_back(r);

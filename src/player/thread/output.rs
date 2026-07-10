@@ -239,7 +239,7 @@ fn build_cpal_callback(
 ///
 /// On Linux (ALSA/PipeWire) the `Default` period can land around 10-20 ms,
 /// which underruns easily under VM scheduling jitter. We query the device's
-/// supported range and pick the power of two nearest to ~100 ms clamped into
+/// supported range and pick the power of two nearest to 100 ms, clamped into
 /// that range. On other platforms, or when the device does not advertise a
 /// range, we return `Default` unchanged.
 fn preferred_buffer_size(_device: &cpal::Device, _rate: u32) -> cpal::BufferSize {

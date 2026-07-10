@@ -271,7 +271,7 @@ impl PlaybackController {
         if duration_ms > 0 {
             self.current_duration_ms = duration_ms;
         }
-        // Throttle progress broadcasts to ~1/sec
+        // Throttle progress broadcasts to at most one per second
         if self.last_progress_broadcast.elapsed() >= std::time::Duration::from_secs(1) {
             self.last_progress_broadcast = std::time::Instant::now();
             self.notify_player_status().await;

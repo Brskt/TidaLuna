@@ -8,9 +8,9 @@ use symphonia::core::io::MediaSource;
 const INITIAL_BUFFER_CAP: usize = 2 * 1024 * 1024; // 2 MB
 
 /// When the read cursor is slightly ahead of buf_end, wait for the sequential
-/// download to catch up instead of triggering a new Range restart.
-/// At governed ~443 KB/s, 32 KB arrives in ~72 ms; a Range restart costs
-/// ~30 ms TTFB, so keep this small to avoid waiting longer than restarting.
+/// download to catch up instead of triggering a new Range restart. At the
+/// governed download rate this lookahead arrives in well under a restart's
+/// TTFB, so keep it small enough that waiting never loses to restarting.
 const SEEK_LOOKAHEAD: u64 = 32 * 1024; // 32 KB
 
 struct Inner {

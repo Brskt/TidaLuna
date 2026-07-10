@@ -193,7 +193,7 @@ fn local_offset() -> UtcOffset {
 }
 
 /// At startup, archive a leftover `console.log` into `<data_dir>/logs/` named by
-/// its last-modified time, then prune to the ~20 most recent. Unconditional:
+/// its last-modified time, then prune to the 20 most recent. Unconditional:
 /// runs even when this session keeps logging off, so a leftover is never lost.
 /// `console.log` always means "this session"; `logs/` holds past sessions.
 pub(crate) fn rotate_console_log(data_dir: &Path) {

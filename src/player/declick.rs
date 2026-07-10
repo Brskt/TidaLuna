@@ -4,15 +4,15 @@
 //! PLL relock. Platform-independent, so the envelope math is unit-tested on any host.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
-/// De-click fade length (~10 ms): teardown fade-out and post-resync fade-in. Short enough
+/// De-click fade length: teardown fade-out and post-resync fade-in. Short enough
 /// to be musically imperceptible, long enough to guarantee a clean zero crossing.
 pub(crate) const DECLICK_FADE_MS: f64 = 10.0;
-/// Silence held after the device restarts at the new rate (~200 ms) to mask the DAC PLL
-/// relock; covers RME's single-speed firmware mute window (~176 ms). The track head is
-/// delayed, not dropped (the backend does not consume PCM during it).
+/// Silence held after the device restarts at the new rate to mask the DAC PLL
+/// relock; sized to cover RME's single-speed firmware mute window. The track head
+/// is delayed, not dropped (the backend does not consume PCM during it).
 pub(crate) const RESYNC_SILENCE_MS: f64 = 200.0;
 /// Floor and cap for the control-thread wait on an RT fade-out before teardown (ASIO). The
-/// wait scales with the buffer period (`fade_out_done` lags ~1 period behind it).
+/// wait scales with the buffer period (`fade_out_done` lags up to one period behind it).
 pub(crate) const FADE_OUT_WAIT_MS: u64 = 80;
 pub(crate) const FADE_OUT_WAIT_MAX_MS: u64 = 500;
 
