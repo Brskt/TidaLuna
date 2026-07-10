@@ -13,6 +13,14 @@ use crate::player::wasapi::ExclusiveHandle;
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_set_audio_device(&mut self, id: String, mode: OutputMode) {
+        // An ASIO teardown is still draining driver-side: two driver instances
+        // must never coexist and the old one still holds its KS claim, so park
+        // the switch (latest wins); poll_asio_teardown re-dispatches it.
+        #[cfg(target_os = "windows")]
+        if self.asio_teardown.is_some() {
+            self.pending_device_switch = Some((id, mode));
+            return;
+        }
         // TIDAL re-emits player.devices.set (same device) right before play; rebuilding
         // here stops the decoder and reopens cpal, so the unpause reloads and reseeks.
         // No-op only while the shared stream is live (a dead one must still retry).
@@ -60,6 +68,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             {
                 return;
             }
+        }
+        self.apply_device_switch(id, mode);
+    }
+
+    /// The switch body past the idempotent no-op guards. The teardown poll
+    /// re-dispatches a parked switch here directly: is_asio_mode stays true
+    /// for the whole drain, so the guards above would no-op the replay (a
+    /// parked switch back to ASIO would never respawn the handle).
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    pub(super) fn apply_device_switch(&mut self, id: String, mode: OutputMode) {
+        #[cfg(target_os = "windows")]
+        {
             // Non-replayable source (DASH nulls CURRENT_TRACK): the bypass switches below can't
             // re-arm it. Bail BEFORE the decoder-cancel (cancelling a live bypass decoder then
             // returning would strand the mode with no producer); gated on a live bypass decoder.
@@ -159,7 +179,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
                 self.is_exclusive_mode = false;
                 if let Some(old) = self.asio_handle.take() {
-                    old.shutdown();
+                    // Driver-timed teardown: park the switch, the poll re-dispatches it.
+                    // The switch supersedes any pending idle release.
+                    self.asio_release_at = None;
+                    self.asio_teardown = old.shutdown();
+                    self.pending_device_switch = Some((id, mode));
+                    return;
                 }
                 let handle = AsioHandle::spawn(self.exclusive_gain.clone());
                 self.is_asio_mode = true;
@@ -207,7 +232,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
             if mode == OutputMode::Exclusive {
                 // (The per-track format skip returned above, before the cancel block.)
-                // Position from resume_store (refreshed every ~200ms from the played
+                // Position from resume_store (refreshed every 200ms from the played
                 // time); falls back to the live played position when nothing is stored
                 // yet. Carried on the ReplayRequest below (or the retained-buffer reuse),
                 // applied at the exclusive spawn.
@@ -253,9 +278,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.volume_sync = None;
                 self.volume_rx = None;
 
-                // Radio: tear down a live ASIO handle first.
+                // Radio: tear down a live ASIO handle first. Its teardown is
+                // driver-timed and holds the KS claim the exclusive open needs:
+                // park the switch, the poll re-dispatches it once drained.
                 if let Some(old) = self.asio_handle.take() {
-                    old.shutdown();
+                    // The switch supersedes any pending idle release.
+                    self.asio_release_at = None;
+                    self.asio_teardown = old.shutdown();
+                    self.pending_device_switch = Some((id, mode));
+                    return;
                 }
                 self.is_asio_mode = false;
                 if let Some(old) = self.exclusive_handle.take() {
@@ -389,7 +420,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
 
                 if let Some(old) = self.asio_handle.take() {
-                    old.shutdown();
+                    // Driver-timed teardown: park the switch, the poll re-dispatches it.
+                    // The switch supersedes any pending idle release.
+                    self.asio_release_at = None;
+                    self.asio_teardown = old.shutdown();
+                    self.pending_device_switch = Some((id, mode));
+                    return;
                 }
                 self.is_asio_mode = false;
                 self.current_device_id = Some(id);

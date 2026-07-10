@@ -84,7 +84,7 @@ static DBG_SAMPLE_MAX: AtomicI32 = AtomicI32::new(0);
 /// RT contract: no allocation, locking, blocking, or panics.
 fn fill_tone(scratch: &mut [i32], channels: usize, start_frame: u64, sample_rate: f64) {
     const FREQ: f64 = 440.0;
-    const AMP: f64 = 0.2 * i32::MAX as f64; // ~-14 dBFS, headphone-safe
+    const AMP: f64 = 0.2 * i32::MAX as f64; // A fifth of full scale, headphone-safe
     let frames = scratch.len() / channels;
     for f in 0..frames {
         let n = start_frame + f as u64;
@@ -358,7 +358,7 @@ pub(crate) fn run_tone_test(info: &AsioDriverInfo) {
         let switches = TONE_SWITCHES.load(Ordering::Relaxed);
         let expected = (rate * 3.0 / frames as f64) as u64;
         crate::vprintln!(
-            "[ASIO] tone: done - bufferSwitch fired {switches} times (expected ~{expected})"
+            "[ASIO] tone: done - bufferSwitch fired {switches} times (expected {expected})"
         );
         let null_bits = DBG_NULL_BUFFERS.load(Ordering::Relaxed);
         let smin = DBG_SAMPLE_MIN.load(Ordering::Relaxed);
@@ -403,7 +403,7 @@ struct StreamCtx {
     /// Set on pause: the RT callback emits silence without consuming the ring or
     /// advancing position, so the driver clock stays running (device held).
     paused: Arc<AtomicBool>,
-    /// De-click envelope length in frames (~10 ms at this stream's rate); shared by the
+    /// De-click envelope length in frames (DECLICK_FADE_MS at this stream's rate); shared by the
     /// teardown fade-out and the post-resync fade-in.
     fade_len: usize,
     /// Control thread sets this to request a fade-to-silence before a format-change
@@ -926,7 +926,7 @@ fn run_ring_to_asio(
 
 /// Decode a local audio file through the ring into ASIO. Gated `ASIO_FILE=<path>`.
 pub(crate) fn run_flac_test(info: &AsioDriverInfo, path: std::ffi::OsString) {
-    const MAX_RING: usize = 192_000 * 2 * 2; // ~2 s at 192 kHz stereo
+    const MAX_RING: usize = 192_000 * 2 * 2; // two seconds at 192 kHz stereo
     let (producer, consumer) = rtrb::RingBuffer::<i32>::new(MAX_RING);
     let cancel = Arc::new(AtomicBool::new(false));
     let (meta_tx, meta_rx) = mpsc::channel::<(u32, u32)>();
@@ -963,7 +963,7 @@ fn tone_to_ring(
     channels: usize,
 ) {
     const FREQ: f64 = 440.0;
-    const AMP: f64 = 0.2 * i32::MAX as f64; // ~-14 dBFS, headphone-safe
+    const AMP: f64 = 0.2 * i32::MAX as f64; // A fifth of full scale, headphone-safe
     const BLOCK: usize = 1024; // frames generated per chunk
     let mut frame: u64 = 0;
     let mut samples: Vec<i32> = Vec::with_capacity(BLOCK * channels);
@@ -1004,7 +1004,7 @@ fn tone_to_ring(
 /// Play a 440 Hz tone through the ring into ASIO (no input file needed). Gated
 /// `ASIO_RING`; validates the ring producer/consumer/back-pressure/underrun path.
 pub(crate) fn run_ring_tone_test(info: &AsioDriverInfo) {
-    const MAX_RING: usize = 48_000 * 2 * 2; // ~2 s at 48 kHz stereo
+    const MAX_RING: usize = 48_000 * 2 * 2; // two seconds at 48 kHz stereo
     let sample_rate = 44_100u32;
     let channels = CHANNELS;
     let (producer, consumer) = rtrb::RingBuffer::<i32>::new(MAX_RING);
@@ -1044,6 +1044,7 @@ pub(crate) enum AsioCommand {
         duration_secs: f64,
         start_secs: f64,
         start_paused: bool,
+        consumed: Arc<AtomicU64>,
     },
     PushPcm {
         stream_id: u32,
@@ -1118,10 +1119,11 @@ struct OpenedAsioStream {
 struct ControlCtx {
     /// Shared digital gain (f32 bits), cloned into each `StreamCtx`.
     gain: Arc<AtomicU32>,
-    /// Samples currently buffered (ring + staging), published for the decode thread
-    /// to back-pressure on - so it reads at ~real time instead of flooding a
-    /// streaming source far past its download window (which stalls the read).
-    buffered: Arc<AtomicU64>,
+    /// The adopted stream's consumed counter (minted per decoder spawn):
+    /// credited as samples leave staging or are discarded, so the decoder's
+    /// sent-minus-consumed throttle stays honest even while this thread is
+    /// stuck opening the driver.
+    consumed: Arc<AtomicU64>,
     driver: Option<AsioDriver>,
     /// The single ring writer (the RT callback holds the matching `Consumer`).
     producer: Option<rtrb::Producer<i32>>,
@@ -1176,10 +1178,10 @@ struct ControlCtx {
 }
 
 impl ControlCtx {
-    fn new(gain: Arc<AtomicU32>, buffered: Arc<AtomicU64>) -> Self {
+    fn new(gain: Arc<AtomicU32>) -> Self {
         Self {
             gain,
-            buffered,
+            consumed: Arc::new(AtomicU64::new(0)),
             driver: None,
             producer: None,
             ring_capacity: 0,
@@ -1315,7 +1317,7 @@ impl ControlCtx {
                 ];
             }
 
-            // ~2 s ring, at least 8 ASIO buffers so the pre-fill cushion always fits.
+            // Two-second ring, at least 8 ASIO buffers so the pre-fill cushion always fits.
             let ring_capacity = (sample_rate as usize * channels * 2).max(frames * channels * 8);
             let (producer, consumer) = rtrb::RingBuffer::<i32>::new(ring_capacity);
             let flush_gen = Arc::new(AtomicU32::new(0));
@@ -1396,6 +1398,7 @@ impl ControlCtx {
         duration_secs: f64,
         start_secs: f64,
         start_paused: bool,
+        consumed: Arc<AtomicU64>,
     ) -> Result<(), ()> {
         let want_channels = (channels as usize).clamp(1, CHANNELS);
 
@@ -1509,9 +1512,9 @@ impl ControlCtx {
         }
 
         self.staging.clear();
-        // Reset the throttle counter so a new stream's decoder doesn't inherit the prior
-        // track's `buffered` value and throttle-stall on its first packet.
-        self.buffered.store(0, Ordering::Relaxed);
+        // Adopt the new stream's consumed counter; the superseded stream's cell
+        // is abandoned (its decoder is cancelled at spawn time).
+        self.consumed = consumed;
         self.stream_id = Some(stream_id);
         self.reset_count = 0;
         self.sample_rate = sample_rate;
@@ -1567,6 +1570,10 @@ impl ControlCtx {
         // callback drains the ring on the flush_gen bump; while it is stopped (cold/paused) the
         // RT never ticks, so the ring is rebuilt below to evict any already-pumped pre-seek PCM.
         self.flush_gen.fetch_add(1, Ordering::Relaxed);
+        // Discarded staging counts as consumed, else the throttle would hold
+        // the never-played remainder against the decoder forever.
+        self.consumed
+            .fetch_add(self.staging.len() as u64, Ordering::Relaxed);
         self.staging.clear();
         self.baseline_frames = position_frames(start_secs, self.sample_rate);
         self.played_offset = self.played_frames.load(Ordering::Relaxed);
@@ -1667,6 +1674,9 @@ impl ControlCtx {
             };
             let written = chunk.fill_from_iter(self.staging.iter().copied().take(n));
             self.staging.drain(..written);
+            // Ring entries count as consumed for the throttle: the ring bounds
+            // itself by capacity, so only channel + staging need the credit.
+            self.consumed.fetch_add(written as u64, Ordering::Relaxed);
             if written == 0 {
                 break;
             }
@@ -1877,6 +1887,7 @@ impl ControlCtx {
                 duration_secs,
                 start_secs,
                 start_paused,
+                consumed,
             } => {
                 if self
                     .handle_start_stream(
@@ -1887,6 +1898,7 @@ impl ControlCtx {
                         duration_secs,
                         start_secs,
                         start_paused,
+                        consumed,
                     )
                     .is_err()
                 {
@@ -1966,7 +1978,6 @@ impl ControlCtx {
                     // Keep the ring topped while paused so resume is glitch-free.
                     self.handle_reset_request(&event_tx);
                     self.pump_ring();
-                    self.update_buffered();
                 }
                 AsioState::Playing => {
                     // Block briefly for a command, then drain any backlog.
@@ -1991,7 +2002,6 @@ impl ControlCtx {
                         continue;
                     }
                     self.pump_ring();
-                    self.update_buffered();
                     self.handle_reset_request(&event_tx);
                     self.maybe_start(&event_tx);
                     self.maybe_time_update(&event_tx);
@@ -2000,17 +2010,6 @@ impl ControlCtx {
                 }
             }
         }
-    }
-
-    /// Publish the current buffered-sample count (ring + staging) for the decode
-    /// thread's back-pressure.
-    fn update_buffered(&self) {
-        let ring_used = self
-            .producer
-            .as_ref()
-            .map_or(0, |p| self.ring_capacity.saturating_sub(p.slots()));
-        self.buffered
-            .store((ring_used + self.staging.len()) as u64, Ordering::Relaxed);
     }
 
     /// Honor a driver `kAsioResetRequest` (flagged by `asio_message`): ASIO4ALL posts one when
@@ -2127,20 +2126,16 @@ impl ControlCtx {
 
 fn control_thread(
     gain: Arc<AtomicU32>,
-    buffered: Arc<AtomicU64>,
     cmd_rx: mpsc::Receiver<AsioCommand>,
     event_tx: mpsc::Sender<AsioEvent>,
 ) {
-    ControlCtx::new(gain, buffered).run(cmd_rx, event_tx);
+    ControlCtx::new(gain).run(cmd_rx, event_tx);
 }
 
 /// Player-facing handle to the ASIO control thread. Mirrors `ExclusiveHandle`.
 pub(crate) struct AsioHandle {
     cmd_tx: mpsc::Sender<AsioCommand>,
     event_rx: mpsc::Receiver<AsioEvent>,
-    /// Shared buffered-sample count (ring + staging) the decode thread reads to
-    /// throttle itself; cloned to each decoder via [`AsioHandle::buffered`].
-    buffered: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -2150,13 +2145,10 @@ impl AsioHandle {
     pub(crate) fn spawn(gain: Arc<AtomicU32>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AsioCommand>();
         let (event_tx, event_rx) = mpsc::channel::<AsioEvent>();
-        let buffered = Arc::new(AtomicU64::new(0));
-        let buffered_ctl = buffered.clone();
-        let thread = thread::spawn(move || control_thread(gain, buffered_ctl, cmd_rx, event_tx));
+        let thread = thread::spawn(move || control_thread(gain, cmd_rx, event_tx));
         Self {
             cmd_tx,
             event_rx,
-            buffered,
             thread: Some(thread),
         }
     }
@@ -2169,11 +2161,6 @@ impl AsioHandle {
         self.cmd_tx.clone()
     }
 
-    /// The shared buffered-sample counter, for the decode thread's back-pressure.
-    pub(crate) fn buffered(&self) -> Arc<AtomicU64> {
-        self.buffered.clone()
-    }
-
     pub(crate) fn poll_events(&self) -> Vec<AsioEvent> {
         let mut events = Vec::new();
         while let Ok(ev) = self.event_rx.try_recv() {
@@ -2182,11 +2169,15 @@ impl AsioHandle {
         events
     }
 
-    pub(crate) fn shutdown(mut self) {
+    /// Send Shutdown and hand back the control thread's JoinHandle WITHOUT
+    /// joining: ASIOStop/dispose/Release take as long as the driver wants,
+    /// and joining here froze the player command thread. The caller parks the
+    /// handle and must see it finish before any ASIO respawn (ASIO loads one
+    /// driver at a time).
+    #[must_use]
+    pub(crate) fn shutdown(mut self) -> Option<JoinHandle<()>> {
         let _ = self.cmd_tx.send(AsioCommand::Shutdown);
-        if let Some(h) = self.thread.take() {
-            let _ = h.join();
-        }
+        self.thread.take()
     }
 }
 
@@ -2213,7 +2204,7 @@ pub(crate) fn stream_reader_to_asio(
     seek_to: Option<f64>,
     start_paused: bool,
     seek_rx: mpsc::Receiver<f64>,
-    buffered: Arc<AtomicU64>,
+    consumed: Arc<AtomicU64>,
 ) -> Result<(), String> {
     let mss = MediaSourceStream::new(Box::new(reader), Default::default());
 
@@ -2264,6 +2255,7 @@ pub(crate) fn stream_reader_to_asio(
             duration_secs,
             start_secs: 0.0,
             start_paused,
+            consumed: consumed.clone(),
         })
         .map_err(|_| "failed to send StartStream".to_string())?;
 
@@ -2315,6 +2307,8 @@ pub(crate) fn stream_reader_to_asio(
     // Back-pressure target in interleaved samples (matching the ring): decoding
     // further ahead races the streaming download window and stalls the read.
     let throttle_hi = sample_rate as u64 * channels as u64 * DECODE_AHEAD_SECS;
+    // Interleaved samples sent so far, throttled against `consumed`.
+    let mut sent: u64 = 0;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -2322,7 +2316,8 @@ pub(crate) fn stream_reader_to_asio(
         }
 
         if throttle_decode_ahead(
-            &buffered,
+            sent,
+            &consumed,
             throttle_hi,
             &cancel,
             &seek_rx,
@@ -2421,6 +2416,7 @@ pub(crate) fn stream_reader_to_asio(
         let mut samples: Vec<i32> = Vec::new();
         decoded.copy_to_vec_interleaved::<i32>(&mut samples);
 
+        let sample_count = samples.len() as u64;
         if !samples.is_empty()
             && cmd_tx
                 .send(AsioCommand::PushPcm { stream_id, samples })
@@ -2428,5 +2424,6 @@ pub(crate) fn stream_reader_to_asio(
         {
             return Ok(());
         }
+        sent += sample_count;
     }
 }

@@ -36,6 +36,7 @@ pub(super) enum ExclusiveCommand {
         duration_secs: f64,
         start_secs: f64,
         start_paused: bool,
+        consumed: Arc<AtomicU64>,
     },
     PushPcm {
         stream_id: u32,
@@ -107,7 +108,6 @@ impl<R: Read + Seek + Send + Sync> MediaSource for SizedMediaSource<R> {
 pub(super) struct ExclusiveHandle {
     cmd_tx: mpsc::Sender<ExclusiveCommand>,
     event_rx: mpsc::Receiver<ExclusiveEvent>,
-    buffered: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -152,7 +152,7 @@ pub(super) fn stream_flac_reader_to_wasapi<R>(
     seek_to: Option<f64>,
     start_paused: bool,
     seek_rx: mpsc::Receiver<f64>,
-    buffered: Arc<AtomicU64>,
+    consumed: Arc<AtomicU64>,
 ) -> Result<(), String>
 where
     R: Read + Seek + Send + Sync + 'static,
@@ -225,6 +225,7 @@ where
             duration_secs,
             start_secs: 0.0,
             start_paused,
+            consumed: consumed.clone(),
         })
         .map_err(|_| "failed to send StartStream".to_string())?;
 
@@ -278,9 +279,11 @@ where
         .map_err(|e| format!("decoder creation failed: {e}"))?;
 
     // Back-pressure target in unplayed PCM bytes (ASIO's is in samples):
-    // unthrottled, a cached source decodes the whole track (~880 MiB at 192kHz).
+    // unthrottled, a cached source decodes the whole track into RAM at once.
     let throttle_hi =
         sample_rate as u64 * channels as u64 * (stored_bps as u64 / 8) * DECODE_AHEAD_SECS;
+    // Source-packed bytes sent so far, throttled against `consumed`.
+    let mut sent: u64 = 0;
 
     let mut sample_buf: Vec<i32> = Vec::new();
     let mut diag_logged = false;
@@ -291,7 +294,8 @@ where
         }
 
         if throttle_decode_ahead(
-            &buffered,
+            sent,
+            &consumed,
             throttle_hi,
             &cancel,
             &seek_rx,
@@ -408,6 +412,7 @@ where
         let mut chunk = Vec::new();
         append_interleaved_i32_as_pcm(&sample_buf, bits_per_sample, &mut chunk);
 
+        let chunk_len = chunk.len() as u64;
         if !chunk.is_empty()
             && cmd_tx
                 .send(ExclusiveCommand::PushPcm {
@@ -418,6 +423,7 @@ where
         {
             return Ok(());
         }
+        sent += chunk_len;
     }
 }
 
@@ -431,17 +437,14 @@ impl ExclusiveHandle {
     pub fn spawn(device_id: String, gain: Arc<AtomicU32>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ExclusiveCommand>();
         let (event_tx, event_rx) = mpsc::channel::<ExclusiveEvent>();
-        let buffered = Arc::new(AtomicU64::new(0));
 
-        let render_buffered = buffered.clone();
         let handle = thread::spawn(move || {
-            render_thread(device_id, cmd_rx, event_tx, gain, render_buffered);
+            render_thread(device_id, cmd_rx, event_tx, gain);
         });
 
         Self {
             cmd_tx,
             event_rx,
-            buffered,
             thread: Some(handle),
         }
     }
@@ -452,11 +455,6 @@ impl ExclusiveHandle {
 
     pub fn command_sender(&self) -> mpsc::Sender<ExclusiveCommand> {
         self.cmd_tx.clone()
-    }
-
-    /// The shared unplayed-PCM byte counter, for the decode thread's back-pressure.
-    pub fn buffered(&self) -> Arc<AtomicU64> {
-        self.buffered.clone()
     }
 
     /// Drain all pending events (non-blocking).
@@ -891,9 +889,11 @@ struct RenderContext {
     pcm_duration: f64,
     write_cursor: usize,
     frames_played: u64,
-    // Unplayed bytes (pcm_data.len() - write_cursor); republished at every
-    // push/consume/clear for the decode thread's throttle.
-    buffered: Arc<AtomicU64>,
+    // The adopted stream's consumed counter (minted per decoder spawn):
+    // credited as bytes are written to the device or discarded, so the
+    // decoder's sent-minus-consumed throttle stays honest even while this
+    // thread is stuck opening the exclusive client.
+    consumed: Arc<AtomicU64>,
     current_stream_id: Option<u32>,
     // Pre-adoption transport intent (stream_id, play): a Play/Pause for a stream
     // whose probe-delayed StartStream hasn't arrived yet (FIFO makes this
@@ -916,7 +916,7 @@ struct RenderContext {
 }
 
 impl RenderContext {
-    fn new(buffered: Arc<AtomicU64>) -> Self {
+    fn new() -> Self {
         Self {
             audio_client: None,
             render_client: None,
@@ -930,7 +930,7 @@ impl RenderContext {
             pcm_duration: 0.0,
             write_cursor: 0,
             frames_played: 0,
-            buffered,
+            consumed: Arc::new(AtomicU64::new(0)),
             current_stream_id: None,
             pending_transport: None,
             stream_ended: true,
@@ -948,13 +948,6 @@ impl RenderContext {
         }
     }
 
-    fn publish_buffered(&self) {
-        self.buffered.store(
-            self.pcm_data.len().saturating_sub(self.write_cursor) as u64,
-            Relaxed,
-        );
-    }
-
     /// Release the exclusive device on a real stop: drop the IAudioClient so other
     /// apps regain the endpoint, then park in Idle. The next StartStream reopens it
     /// (handle_start_stream sees `audio_client == None` and opens a fresh client).
@@ -963,9 +956,13 @@ impl RenderContext {
         self.render_client = None;
         self.h_event = None;
         self.audio_client = None;
+        // Discarded unplayed audio counts as consumed for the decoder's throttle.
+        self.consumed.fetch_add(
+            self.pcm_data.len().saturating_sub(self.write_cursor) as u64,
+            Relaxed,
+        );
         self.pcm_data.clear();
         self.write_cursor = 0;
-        self.publish_buffered();
         self.frames_played = 0;
         self.current_stream_id = None;
         self.pending_transport = None;
@@ -992,6 +989,7 @@ impl RenderContext {
         duration_secs: f64,
         start_secs: f64,
         start_paused: bool,
+        consumed: Arc<AtomicU64>,
     ) -> Result<(), ()> {
         // Reuse the open client on an unchanged format (reopening pops the DAC).
         // A format change needs a fresh one: an exclusive client owns the device,
@@ -1049,7 +1047,9 @@ impl RenderContext {
         self.pcm_src_bps = bits_per_sample;
         self.pcm_duration = duration_secs;
         self.write_cursor = 0;
-        self.publish_buffered();
+        // Adopt the new stream's consumed counter; the superseded stream's cell
+        // is abandoned (its decoder is cancelled at spawn time).
+        self.consumed = consumed;
         self.frames_played = position_frames(start_secs, sample_rate);
         self.current_stream_id = Some(stream_id);
         self.stream_ended = false;
@@ -1085,13 +1085,12 @@ impl RenderContext {
     fn handle_push_pcm(&mut self, stream_id: u32, data: Vec<u8>) {
         if self.current_stream_id == Some(stream_id) {
             // Reclaim the played prefix before appending: with the decode
-            // throttle this bounds pcm_data to ~2s of unplayed PCM.
+            // throttle this bounds pcm_data to the decode-ahead target.
             if self.write_cursor > 0 {
                 self.pcm_data.drain(..self.write_cursor);
                 self.write_cursor = 0;
             }
             self.pcm_data.extend_from_slice(&data);
-            self.publish_buffered();
         }
     }
 
@@ -1114,9 +1113,13 @@ impl RenderContext {
             let _ = ac.reset_stream();
         }
         self.client_started = false;
+        // Discarded unplayed audio counts as consumed for the decoder's throttle.
+        self.consumed.fetch_add(
+            self.pcm_data.len().saturating_sub(self.write_cursor) as u64,
+            Relaxed,
+        );
         self.pcm_data.clear();
         self.write_cursor = 0;
-        self.publish_buffered();
         self.frames_played = position_frames(start_secs, self.pcm_sample_rate);
         self.stream_ended = false;
         self.pending_start = true;
@@ -1125,7 +1128,7 @@ impl RenderContext {
 }
 
 /// RAII guard registering the render thread with the MMCSS "Pro Audio" task so it
-/// wakes on the ~10ms device cadence. The default ~15ms timer wakes too late and
+/// wakes on the device period. The default timer granularity wakes too late and
 /// starves the endpoint, which glitches. Reverted on drop.
 struct ProAudioMmcss(HANDLE);
 
@@ -1160,9 +1163,8 @@ fn render_thread(
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
     gain: Arc<AtomicU32>,
-    buffered: Arc<AtomicU64>,
 ) {
-    let _ = render_thread_inner(device_id, cmd_rx, event_tx, gain, buffered);
+    let _ = render_thread_inner(device_id, cmd_rx, event_tx, gain);
 }
 
 fn render_thread_inner(
@@ -1170,7 +1172,6 @@ fn render_thread_inner(
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
     gain: Arc<AtomicU32>,
-    buffered: Arc<AtomicU64>,
 ) -> Result<(), ()> {
     let hr = wasapi::initialize_mta();
     if hr.is_err() {
@@ -1187,11 +1188,11 @@ fn render_thread_inner(
     };
     crate::vprintln!("[WASAPI-DBG] render: device '{device_id}' resolved, awaiting StartStream");
 
-    // MMCSS "Pro Audio": wake on the device period, not the ~15ms timer. Held
+    // MMCSS "Pro Audio": wake on the device period, not the coarse system timer. Held
     // for the render loop (reverted on drop).
     let _mmcss = ProAudioMmcss::register();
 
-    let mut ctx = RenderContext::new(buffered);
+    let mut ctx = RenderContext::new();
     let mut diag_logged = false;
     // Startup render-loop diagnostic (LOGS=3): classify each of the first 150
     // Playing iterations to confirm/refute a buffer underrun at startup. Cheap
@@ -1216,6 +1217,7 @@ fn render_thread_inner(
                         duration_secs,
                         start_secs,
                         start_paused,
+                        consumed,
                     }) => {
                         crate::vprintln!(
                             "[WASAPI-DBG] render: StartStream received, opening exclusive client"
@@ -1230,6 +1232,7 @@ fn render_thread_inner(
                             duration_secs,
                             start_secs,
                             start_paused,
+                            consumed,
                         )?;
                     }
                     Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
@@ -1280,6 +1283,7 @@ fn render_thread_inner(
                             duration_secs,
                             start_secs,
                             start_paused,
+                            consumed,
                         } => {
                             ctx.handle_start_stream(
                                 &device,
@@ -1291,6 +1295,7 @@ fn render_thread_inner(
                                 duration_secs,
                                 start_secs,
                                 start_paused,
+                                consumed,
                             )?;
                         }
                         ExclusiveCommand::PushPcm {
@@ -1365,7 +1370,7 @@ fn render_thread_inner(
                         .checked_div(src_bytes_per_frame)
                         .unwrap_or(0);
 
-                    // Cushion: hold the deferred start until ~0.5s is buffered (or
+                    // Cushion: hold the deferred start until half a second is buffered (or
                     // the stream ends). A fresh start just accumulates; a mid-stream
                     // underrun feeds the still-running client silence below.
                     let buffering = ctx.pending_start
@@ -1380,7 +1385,7 @@ fn render_thread_inner(
                         diag_last = Instant::now();
                         if diag_it > 0 {
                             diag_max_gap = diag_max_gap.max(gap);
-                            // Late = >1.5x the ~20ms device period (a wake that
+                            // Late = >1.5x the 20ms device period (a wake that
                             // risks an endpoint underrun). Scale this with the
                             // period in negotiate_format if it changes.
                             if gap > 30 {
@@ -1524,7 +1529,7 @@ fn render_thread_inner(
                     // part of the decoded stream or the playback position.
                     ctx.write_cursor += src_chunk_size;
                     ctx.frames_played += frames_to_write as u64;
-                    ctx.publish_buffered();
+                    ctx.consumed.fetch_add(src_chunk_size as u64, Relaxed);
 
                     if !ctx.client_started {
                         // First real buffer is now loaded -> start the clock once
@@ -1595,6 +1600,7 @@ fn render_thread_inner(
                     duration_secs,
                     start_secs,
                     start_paused,
+                    consumed,
                 }) => {
                     ctx.handle_start_stream(
                         &device,
@@ -1606,6 +1612,7 @@ fn render_thread_inner(
                         duration_secs,
                         start_secs,
                         start_paused,
+                        consumed,
                     )?;
                 }
                 Ok(ExclusiveCommand::PushPcm {
@@ -1648,14 +1655,12 @@ mod pcm_compaction_tests {
     use super::*;
 
     #[test]
-    fn push_reclaims_played_prefix_and_publishes_unplayed() {
-        let buffered = Arc::new(AtomicU64::new(0));
-        let mut ctx = RenderContext::new(buffered.clone());
+    fn push_reclaims_played_prefix() {
+        let mut ctx = RenderContext::new();
         ctx.current_stream_id = Some(7);
 
         ctx.handle_push_pcm(7, vec![1u8; 1000]);
         assert_eq!(ctx.pcm_data.len(), 1000);
-        assert_eq!(buffered.load(Relaxed), 1000);
 
         // Simulate the render loop consuming 600 bytes.
         ctx.write_cursor = 600;
@@ -1665,11 +1670,25 @@ mod pcm_compaction_tests {
         assert_eq!(ctx.pcm_data.len(), 900);
         assert_eq!(ctx.pcm_data[0], 1);
         assert_eq!(ctx.pcm_data[400], 2);
-        assert_eq!(buffered.load(Relaxed), 900);
 
-        // A stale stream's push is dropped and publishes nothing.
+        // A stale stream's push is dropped.
         ctx.handle_push_pcm(8, vec![3u8; 100]);
         assert_eq!(ctx.pcm_data.len(), 900);
-        assert_eq!(buffered.load(Relaxed), 900);
+    }
+
+    #[test]
+    fn reset_for_seek_credits_discarded_audio_as_consumed() {
+        let mut ctx = RenderContext::new();
+        ctx.current_stream_id = Some(7);
+        ctx.pcm_sample_rate = 44100;
+
+        ctx.handle_push_pcm(7, vec![1u8; 1000]);
+        ctx.write_cursor = 600;
+        ctx.handle_reset_for_seek(7, 0.0);
+
+        // The 400 unplayed bytes were discarded: credited to the throttle.
+        assert_eq!(ctx.consumed.load(Relaxed), 400);
+        assert_eq!(ctx.pcm_data.len(), 0);
+        assert_eq!(ctx.write_cursor, 0);
     }
 }

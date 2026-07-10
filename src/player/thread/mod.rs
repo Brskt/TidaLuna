@@ -31,11 +31,12 @@ const PRE_SEEK_TOLERANCE: f64 = 2.0;
 #[cfg(target_os = "windows")]
 const EXCLUSIVE_PAUSE_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How long a terminal SDK stop lingers before the ASIO driver is shut down so
-/// other apps regain the device. Armed on stop only (pause keeps the clock: no
-/// re-open cost, no pop); a track-change stop->load cancels it in time.
+/// How long ASIO stays idle (paused or terminally stopped) before the driver is
+/// shut down so other apps regain the device. A short pause/resume within the
+/// window keeps the driver (instant resume, no pop); a resume after the release
+/// respawns it.
 #[cfg(target_os = "windows")]
-const ASIO_STOP_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
+const ASIO_IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
 
 enum DecodeCommand {
     Seek(f64),
@@ -154,11 +155,20 @@ pub(super) struct PlayerThread<F> {
     // ASIO output (parallel to the exclusive fields; mutually exclusive with it).
     #[cfg(target_os = "windows")]
     asio_handle: Option<AsioHandle>,
-    // Debounced driver release: armed by a terminal stop, consumed in
-    // poll_asio_events once it elapses with no load/play in between. The next
-    // ASIO load respawns the handle (start_asio_playback self-heal).
+    // Debounced driver release: armed by a sustained pause or a terminal stop,
+    // consumed in poll_asio_events once it elapses with no load/play in between.
+    // The next ASIO load respawns the handle (start_asio_playback self-heal).
     #[cfg(target_os = "windows")]
     asio_release_at: Option<std::time::Instant>,
+    // Parked ASIO teardown: the control thread drains ASIOStop/Release
+    // driver-side; joining froze the command thread. Polled by
+    // poll_asio_teardown; gates any ASIO respawn (one driver instance at a time).
+    #[cfg(target_os = "windows")]
+    asio_teardown: Option<std::thread::JoinHandle<()>>,
+    // Device switch parked behind asio_teardown (latest wins), re-dispatched
+    // once the teardown drains.
+    #[cfg(target_os = "windows")]
+    pending_device_switch: Option<(String, super::OutputMode)>,
     #[cfg(target_os = "windows")]
     is_asio_mode: bool,
     #[cfg(target_os = "windows")]
@@ -300,6 +310,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             #[cfg(target_os = "windows")]
             asio_release_at: None,
             #[cfg(target_os = "windows")]
+            asio_teardown: None,
+            #[cfg(target_os = "windows")]
+            pending_device_switch: None,
+            #[cfg(target_os = "windows")]
             is_asio_mode: false,
             #[cfg(target_os = "windows")]
             asio_stream_cancel: None,
@@ -391,6 +405,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Poll ASIO events
             #[cfg(target_os = "windows")]
             self.poll_asio_events();
+
+            // Reap a drained ASIO teardown and run any parked device switch
+            #[cfg(target_os = "windows")]
+            self.poll_asio_teardown();
 
             #[cfg(target_os = "windows")]
             if let Some(ref rx) = self.volume_rx {

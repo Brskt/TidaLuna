@@ -312,15 +312,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.rearm_shared_after_asio_failure();
         }
 
-        // Debounced terminal-stop release: free the ASIO driver so other apps
-        // regain the device. loading_gen blocks a slow in-flight stop->load
-        // (a failed load settles it via LoadSettleGuard and the release then
-        // proceeds). has_track=false + committed cleared route the next play/load
-        // through the full rebuild path, where start_asio_playback respawns the
-        // handle. The shutdown join blocks this thread; nothing is playing.
+        // Debounced idle release (sustained pause or terminal stop): free the
+        // ASIO driver so other apps regain the device. loading_gen blocks a slow
+        // in-flight stop->load (a failed load settles it via LoadSettleGuard and
+        // the release then proceeds). has_track=false + committed cleared route
+        // the next play/load through the full rebuild path (start_asio_playback
+        // respawns the handle). Gated on a live handle: a stale timer surviving
+        // a parked mode switch must not clobber the retained-track state.
         if self.is_asio_mode
             && !self.is_playing
             && self.loading_gen.is_none()
+            && self.asio_handle.is_some()
             && let Some(at) = self.asio_release_at
             && std::time::Instant::now() >= at
         {
@@ -335,16 +337,54 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             self.asio_seek_tx = None;
             if let Some(handle) = self.asio_handle.take() {
-                handle.shutdown();
+                self.asio_teardown = handle.shutdown();
             }
             self.has_track = false;
             self.set_committed_track(None);
-            crate::vprintln!("[ASIO]   Released driver on stop (other apps can use it)");
+            crate::vprintln!("[ASIO]   Released idle driver (other apps can use it)");
         }
 
         if !self.is_asio_mode {
             self.asio_handle = None;
         }
+    }
+
+    /// Reap a drained ASIO teardown and run the device switch parked behind
+    /// it. The switch fires whenever the teardown slot is empty, no matter
+    /// who reaped it (a load's bounded reap must not strand it), and bypasses
+    /// the idempotent guards: is_asio_mode stays true for the whole drain.
+    #[cfg(target_os = "windows")]
+    pub(super) fn poll_asio_teardown(&mut self) {
+        if self.asio_teardown.as_ref().is_some_and(|h| h.is_finished())
+            && let Some(handle) = self.asio_teardown.take()
+        {
+            let _ = handle.join();
+        }
+        if self.asio_teardown.is_none()
+            && let Some((id, mode)) = self.pending_device_switch.take()
+        {
+            self.apply_device_switch(id, mode);
+        }
+    }
+
+    /// Bounded wait for a parked teardown, for paths that must respawn the
+    /// driver NOW (self-heal load). False on timeout: the driver is wedged,
+    /// do not double-open it.
+    #[cfg(target_os = "windows")]
+    pub(super) fn reap_asio_teardown_within(&mut self, timeout: std::time::Duration) -> bool {
+        let Some(handle) = self.asio_teardown.take() else {
+            return true;
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        while !handle.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                self.asio_teardown = Some(handle);
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = handle.join();
+        true
     }
 
     /// ASIO failed: re-arm a fresh shared load at the live position so the current track

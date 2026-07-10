@@ -20,7 +20,7 @@ use crate::player::{ASIO_STREAM_SEQ, EXCLUSIVE_STREAM_SEQ, wasapi};
 #[cfg(target_os = "windows")]
 use std::sync::Arc;
 #[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 #[cfg(target_os = "windows")]
 use std::thread;
 #[cfg(target_os = "windows")]
@@ -115,11 +115,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         seek_to: Option<f64>,
         start_paused: bool,
     ) {
-        let Some((cmd_tx, buffered)) = self
-            .exclusive_handle
-            .as_ref()
-            .map(|h| (h.command_sender(), h.buffered()))
-        else {
+        let Some(cmd_tx) = self.exclusive_handle.as_ref().map(|h| h.command_sender()) else {
             return;
         };
         if let Some(prev) = self.exclusive_stream_cancel.take() {
@@ -136,6 +132,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         let (seek_tx, seek_rx) = mpsc::channel::<f64>();
         self.exclusive_seek_tx = Some(seek_tx);
+        // Per-stream consumed counter for the decoder's sent-minus-consumed throttle.
+        let consumed = Arc::new(AtomicU64::new(0));
         // Fresh stream: don't inherit a stale reverse-to-shared position from a prior
         // exclusive session (the buffer-reuse mode switch bypasses handle_load's clear).
         self.last_exclusive_pos = None;
@@ -157,7 +155,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 seek_to,
                 start_paused,
                 seek_rx,
-                buffered,
+                consumed,
             ) && !cancel.load(Relaxed)
             {
                 crate::vprintln!("[WASAPI] Stream decode failed: {e}");
@@ -199,11 +197,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         seek_to: Option<f64>,
         start_paused: bool,
     ) {
-        let Some((cmd_tx, buffered)) = self
-            .asio_handle
-            .as_ref()
-            .map(|h| (h.command_sender(), h.buffered()))
-        else {
+        let Some(cmd_tx) = self.asio_handle.as_ref().map(|h| h.command_sender()) else {
             return;
         };
         if let Some(prev) = self.asio_stream_cancel.take() {
@@ -219,6 +213,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         let (seek_tx, seek_rx) = mpsc::channel::<f64>();
         self.asio_seek_tx = Some(seek_tx);
+        // Per-stream consumed counter for the decoder's sent-minus-consumed throttle.
+        let consumed = Arc::new(AtomicU64::new(0));
 
         let reader = buffer.clone().with_reader_cancel(cancel.clone());
         let stream_id = ASIO_STREAM_SEQ.fetch_add(1, Relaxed) + 1;
@@ -244,7 +240,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 seek_to,
                 start_paused,
                 seek_rx,
-                buffered,
+                consumed,
             ) && !cancel.load(Relaxed)
             {
                 crate::vprintln!("[ASIO] Stream decode failed: {e}");
@@ -268,7 +264,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Self-heal after a terminal-stop release: still in ASIO mode but the
         // handle was shut down; respawn it so this load rebuilds the pipeline
         // instead of spawn_asio_decoder silently no-oping on a missing handle.
+        // A parked teardown must drain first (one driver instance at a time).
         if self.asio_handle.is_none() {
+            if !self.reap_asio_teardown_within(std::time::Duration::from_secs(2)) {
+                // Leave ASIO mode so the shared pipeline this load falls back to
+                // is actually played and polled; the next devices.set re-assert
+                // re-engages ASIO (parked behind the teardown if still draining).
+                self.is_asio_mode = false;
+                crate::vprintln!("[ASIO] teardown still draining; this load plays shared");
+                return false;
+            }
             self.asio_handle = Some(AsioHandle::spawn(self.exclusive_gain.clone()));
         }
         // A queued user seek wins over the load-time resume position.
@@ -715,15 +720,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 crate::vprintln!("[PLAY]   no live pipeline; re-arming retained source");
                 if let Some(track) = retained {
                     // Resume at the retained source's last position, not 0 (e.g. a >10s
-                    // exclusive pause released the device, re-arming here). resume_store
-                    // holds it but is cleared on track-end, so a post-Completed re-arm
-                    // gets None and starts at 0; last_exclusive_pos is the exclusive
+                    // pause released the device, re-arming here). resume_store holds it
+                    // but is cleared on track-end, so a post-Completed re-arm gets None
+                    // and starts at 0; the mode's own live position is the floor-free
                     // fast-path.
                     let position = self
                         .resume_store
                         .get(&crate::player::canonical_track_id(&track.url));
                     #[cfg(target_os = "windows")]
-                    let position = self.last_exclusive_pos.or(position);
+                    let position = if self.is_asio_mode {
+                        self.last_asio_pos.or(position)
+                    } else {
+                        self.last_exclusive_pos.or(position)
+                    };
                     (self.callback)(PlayerEvent::ReplayRequest {
                         track,
                         expected_gen: LOAD_SEQ.load(Relaxed),
@@ -879,6 +888,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(target_os = "windows")]
         {
             if self.is_asio_mode {
+                let was_playing = self.is_playing;
                 if let Some(ref handle) = self.asio_handle {
                     match self.current_asio_stream_id {
                         Some(stream_id) => {
@@ -890,6 +900,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                 }
                 self.is_playing = false;
+                // ASIO pause keeps the driver clock, but its exclusive claim blocks
+                // other apps: release it on a sustained pause. A short pause/resume
+                // or a stop->load cancels this in time (handle_play/handle_load);
+                // resume after a release respawns the driver (self-heal).
+                if was_playing && self.asio_handle.is_some() {
+                    self.asio_release_at =
+                        Some(std::time::Instant::now() + super::ASIO_IDLE_RELEASE);
+                }
                 crate::state::GOVERNOR
                     .buffer_progress()
                     .set_playback_active(false);
@@ -964,13 +982,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let was_playing = self.is_playing;
         self.handle_pause();
         self.resume_on_reassert = was_playing;
-        // ASIO pause holds the KS-exclusive device by design, so a terminal stop
-        // (the SDK's reset(); nothing has to follow) arms a debounced release or
-        // the device stays claimed forever. No was_playing gate: a stop on an
-        // already-paused session is just as terminal.
+        // handle_pause above arms the release only when something was playing; a
+        // terminal stop (the SDK's reset(); nothing has to follow) must release
+        // even from an already-paused session, so re-arm without a was_playing gate.
         #[cfg(target_os = "windows")]
         if self.is_asio_mode && self.asio_handle.is_some() {
-            self.asio_release_at = Some(std::time::Instant::now() + super::ASIO_STOP_RELEASE);
+            self.asio_release_at = Some(std::time::Instant::now() + super::ASIO_IDLE_RELEASE);
         }
         // Surface the SDK/UI/Connect/SMTC-visible "stopped" state even though the
         // pipeline is retained internally (handle_pause emits Paused first; the
