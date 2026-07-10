@@ -1,5 +1,5 @@
 use std::io::{Read, Seek};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -21,6 +21,7 @@ use windows::Win32::System::Threading::{
 };
 
 use crate::player::declick::{RESYNC_SILENCE_MS, silence_frames};
+use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -106,6 +107,7 @@ impl<R: Read + Seek + Send + Sync> MediaSource for SizedMediaSource<R> {
 pub(super) struct ExclusiveHandle {
     cmd_tx: mpsc::Sender<ExclusiveCommand>,
     event_rx: mpsc::Receiver<ExclusiveEvent>,
+    buffered: Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -140,6 +142,7 @@ fn append_interleaved_i32_as_pcm(samples: &[i32], bits_per_sample: u32, out: &mu
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn stream_flac_reader_to_wasapi<R>(
     reader: R,
     byte_len: u64,
@@ -149,6 +152,7 @@ pub(super) fn stream_flac_reader_to_wasapi<R>(
     seek_to: Option<f64>,
     start_paused: bool,
     seek_rx: mpsc::Receiver<f64>,
+    buffered: Arc<AtomicU64>,
 ) -> Result<(), String>
 where
     R: Read + Seek + Send + Sync + 'static,
@@ -243,6 +247,8 @@ where
                 },
             ) {
                 Ok(seeked) => {
+                    // Settled: a later live-seek failure must not re-arm an initial retry.
+                    was_initial_seek = false;
                     let actual = if sample_rate > 0 {
                         seeked.actual_ts.get() as f64 / sample_rate as f64
                     } else {
@@ -271,11 +277,27 @@ where
         .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
         .map_err(|e| format!("decoder creation failed: {e}"))?;
 
+    // Back-pressure target in unplayed PCM bytes (ASIO's is in samples):
+    // unthrottled, a cached source decodes the whole track (~880 MiB at 192kHz).
+    let throttle_hi =
+        sample_rate as u64 * channels as u64 * (stored_bps as u64 / 8) * DECODE_AHEAD_SECS;
+
     let mut sample_buf: Vec<i32> = Vec::new();
     let mut diag_logged = false;
 
     loop {
         if cancel.load(Relaxed) {
+            return Ok(());
+        }
+
+        if throttle_decode_ahead(
+            &buffered,
+            throttle_hi,
+            &cancel,
+            &seek_rx,
+            &mut pending_initial_seek,
+            &mut was_initial_seek,
+        ) {
             return Ok(());
         }
 
@@ -409,14 +431,17 @@ impl ExclusiveHandle {
     pub fn spawn(device_id: String, gain: Arc<AtomicU32>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ExclusiveCommand>();
         let (event_tx, event_rx) = mpsc::channel::<ExclusiveEvent>();
+        let buffered = Arc::new(AtomicU64::new(0));
 
+        let render_buffered = buffered.clone();
         let handle = thread::spawn(move || {
-            render_thread(device_id, cmd_rx, event_tx, gain);
+            render_thread(device_id, cmd_rx, event_tx, gain, render_buffered);
         });
 
         Self {
             cmd_tx,
             event_rx,
+            buffered,
             thread: Some(handle),
         }
     }
@@ -427,6 +452,11 @@ impl ExclusiveHandle {
 
     pub fn command_sender(&self) -> mpsc::Sender<ExclusiveCommand> {
         self.cmd_tx.clone()
+    }
+
+    /// The shared unplayed-PCM byte counter, for the decode thread's back-pressure.
+    pub fn buffered(&self) -> Arc<AtomicU64> {
+        self.buffered.clone()
     }
 
     /// Drain all pending events (non-blocking).
@@ -861,6 +891,9 @@ struct RenderContext {
     pcm_duration: f64,
     write_cursor: usize,
     frames_played: u64,
+    // Unplayed bytes (pcm_data.len() - write_cursor); republished at every
+    // push/consume/clear for the decode thread's throttle.
+    buffered: Arc<AtomicU64>,
     current_stream_id: Option<u32>,
     // Pre-adoption transport intent (stream_id, play): a Play/Pause for a stream
     // whose probe-delayed StartStream hasn't arrived yet (FIFO makes this
@@ -883,7 +916,7 @@ struct RenderContext {
 }
 
 impl RenderContext {
-    fn new() -> Self {
+    fn new(buffered: Arc<AtomicU64>) -> Self {
         Self {
             audio_client: None,
             render_client: None,
@@ -897,6 +930,7 @@ impl RenderContext {
             pcm_duration: 0.0,
             write_cursor: 0,
             frames_played: 0,
+            buffered,
             current_stream_id: None,
             pending_transport: None,
             stream_ended: true,
@@ -914,6 +948,13 @@ impl RenderContext {
         }
     }
 
+    fn publish_buffered(&self) {
+        self.buffered.store(
+            self.pcm_data.len().saturating_sub(self.write_cursor) as u64,
+            Relaxed,
+        );
+    }
+
     /// Release the exclusive device on a real stop: drop the IAudioClient so other
     /// apps regain the endpoint, then park in Idle. The next StartStream reopens it
     /// (handle_start_stream sees `audio_client == None` and opens a fresh client).
@@ -924,6 +965,7 @@ impl RenderContext {
         self.audio_client = None;
         self.pcm_data.clear();
         self.write_cursor = 0;
+        self.publish_buffered();
         self.frames_played = 0;
         self.current_stream_id = None;
         self.pending_transport = None;
@@ -1007,6 +1049,7 @@ impl RenderContext {
         self.pcm_src_bps = bits_per_sample;
         self.pcm_duration = duration_secs;
         self.write_cursor = 0;
+        self.publish_buffered();
         self.frames_played = position_frames(start_secs, sample_rate);
         self.current_stream_id = Some(stream_id);
         self.stream_ended = false;
@@ -1041,7 +1084,14 @@ impl RenderContext {
 
     fn handle_push_pcm(&mut self, stream_id: u32, data: Vec<u8>) {
         if self.current_stream_id == Some(stream_id) {
+            // Reclaim the played prefix before appending: with the decode
+            // throttle this bounds pcm_data to ~2s of unplayed PCM.
+            if self.write_cursor > 0 {
+                self.pcm_data.drain(..self.write_cursor);
+                self.write_cursor = 0;
+            }
             self.pcm_data.extend_from_slice(&data);
+            self.publish_buffered();
         }
     }
 
@@ -1066,6 +1116,7 @@ impl RenderContext {
         self.client_started = false;
         self.pcm_data.clear();
         self.write_cursor = 0;
+        self.publish_buffered();
         self.frames_played = position_frames(start_secs, self.pcm_sample_rate);
         self.stream_ended = false;
         self.pending_start = true;
@@ -1109,8 +1160,9 @@ fn render_thread(
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
     gain: Arc<AtomicU32>,
+    buffered: Arc<AtomicU64>,
 ) {
-    let _ = render_thread_inner(device_id, cmd_rx, event_tx, gain);
+    let _ = render_thread_inner(device_id, cmd_rx, event_tx, gain, buffered);
 }
 
 fn render_thread_inner(
@@ -1118,6 +1170,7 @@ fn render_thread_inner(
     cmd_rx: mpsc::Receiver<ExclusiveCommand>,
     event_tx: mpsc::Sender<ExclusiveEvent>,
     gain: Arc<AtomicU32>,
+    buffered: Arc<AtomicU64>,
 ) -> Result<(), ()> {
     let hr = wasapi::initialize_mta();
     if hr.is_err() {
@@ -1138,7 +1191,7 @@ fn render_thread_inner(
     // for the render loop (reverted on drop).
     let _mmcss = ProAudioMmcss::register();
 
-    let mut ctx = RenderContext::new();
+    let mut ctx = RenderContext::new(buffered);
     let mut diag_logged = false;
     // Startup render-loop diagnostic (LOGS=3): classify each of the first 150
     // Playing iterations to confirm/refute a buffer underrun at startup. Cheap
@@ -1471,6 +1524,7 @@ fn render_thread_inner(
                     // part of the decoded stream or the playback position.
                     ctx.write_cursor += src_chunk_size;
                     ctx.frames_played += frames_to_write as u64;
+                    ctx.publish_buffered();
 
                     if !ctx.client_started {
                         // First real buffer is now loaded -> start the clock once
@@ -1586,5 +1640,36 @@ mod position_frames_tests {
         assert_eq!(position_frames(-1.0, 44100), 0);
         assert_eq!(position_frames(10.0, 0), 0);
         assert_eq!(position_frames(f64::NAN, 44100), 0);
+    }
+}
+
+#[cfg(test)]
+mod pcm_compaction_tests {
+    use super::*;
+
+    #[test]
+    fn push_reclaims_played_prefix_and_publishes_unplayed() {
+        let buffered = Arc::new(AtomicU64::new(0));
+        let mut ctx = RenderContext::new(buffered.clone());
+        ctx.current_stream_id = Some(7);
+
+        ctx.handle_push_pcm(7, vec![1u8; 1000]);
+        assert_eq!(ctx.pcm_data.len(), 1000);
+        assert_eq!(buffered.load(Relaxed), 1000);
+
+        // Simulate the render loop consuming 600 bytes.
+        ctx.write_cursor = 600;
+        ctx.handle_push_pcm(7, vec![2u8; 500]);
+        // Played prefix reclaimed: only the 400 unplayed + 500 new bytes remain.
+        assert_eq!(ctx.write_cursor, 0);
+        assert_eq!(ctx.pcm_data.len(), 900);
+        assert_eq!(ctx.pcm_data[0], 1);
+        assert_eq!(ctx.pcm_data[400], 2);
+        assert_eq!(buffered.load(Relaxed), 900);
+
+        // A stale stream's push is dropped and publishes nothing.
+        ctx.handle_push_pcm(8, vec![3u8; 100]);
+        assert_eq!(ctx.pcm_data.len(), 900);
+        assert_eq!(buffered.load(Relaxed), 900);
     }
 }

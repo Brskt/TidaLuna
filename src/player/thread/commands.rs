@@ -115,7 +115,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         seek_to: Option<f64>,
         start_paused: bool,
     ) {
-        let Some(cmd_tx) = self.exclusive_handle.as_ref().map(|h| h.command_sender()) else {
+        let Some((cmd_tx, buffered)) = self
+            .exclusive_handle
+            .as_ref()
+            .map(|h| (h.command_sender(), h.buffered()))
+        else {
             return;
         };
         if let Some(prev) = self.exclusive_stream_cancel.take() {
@@ -153,6 +157,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 seek_to,
                 start_paused,
                 seek_rx,
+                buffered,
             ) && !cancel.load(Relaxed)
             {
                 crate::vprintln!("[WASAPI] Stream decode failed: {e}");

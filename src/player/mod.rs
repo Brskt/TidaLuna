@@ -7,6 +7,8 @@ pub(crate) mod ipc;
 mod resume;
 mod thread;
 #[cfg(target_os = "windows")]
+mod throttle;
+#[cfg(target_os = "windows")]
 pub(crate) mod wasapi;
 
 use crate::audio::preload;

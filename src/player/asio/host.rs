@@ -38,6 +38,7 @@ use crate::player::declick::{
     DECLICK_FADE_MS, FADE_OUT_WAIT_MAX_MS, FADE_OUT_WAIT_MS, RESYNC_SILENCE_MS, fade_in_env,
     fade_out_env, fade_scale, silence_frames,
 };
+use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
 /// Stereo: TIDAL streams only stereo PCM, and ASIO4ALL exposes 2 output channels.
 const CHANNELS: usize = 2;
@@ -2281,6 +2282,8 @@ pub(crate) fn stream_reader_to_asio(
                 },
             ) {
                 Ok(seeked) => {
+                    // Settled: a later live-seek failure must not re-arm an initial retry.
+                    was_initial_seek = false;
                     let actual = if sample_rate > 0 {
                         seeked.actual_ts.get() as f64 / sample_rate as f64
                     } else {
@@ -2309,31 +2312,23 @@ pub(crate) fn stream_reader_to_asio(
         .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
         .map_err(|e| format!("decoder creation failed: {e}"))?;
 
-    // Back-pressure target (~2 s of samples, matching the ring): decoding further ahead
-    // races the streaming download window and stalls the read.
-    let throttle_hi = sample_rate as u64 * channels as u64 * 2;
+    // Back-pressure target in interleaved samples (matching the ring): decoding
+    // further ahead races the streaming download window and stalls the read.
+    let throttle_hi = sample_rate as u64 * channels as u64 * DECODE_AHEAD_SECS;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
 
-        // Throttle to ~real time: if the buffer already holds the target, wait rather
-        // than decode further ahead of the download.
-        if buffered.load(Ordering::Relaxed) > throttle_hi {
-            while !cancel.load(Ordering::Relaxed) && buffered.load(Ordering::Relaxed) > throttle_hi
-            {
-                // A seek can arrive while paused-and-full (the RT holds the ring, so `buffered`
-                // stays above the throttle); break to the seek handler below instead of spinning
-                // until resume, which would play stale pre-seek audio.
-                if let Ok(t) = seek_rx.try_recv() {
-                    pending_initial_seek = Some(t);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-        if cancel.load(Ordering::Relaxed) {
+        if throttle_decode_ahead(
+            &buffered,
+            throttle_hi,
+            &cancel,
+            &seek_rx,
+            &mut pending_initial_seek,
+            &mut was_initial_seek,
+        ) {
             return Ok(());
         }
 
