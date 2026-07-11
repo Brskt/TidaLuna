@@ -4,6 +4,7 @@ mod native;
 mod plugin_ipc;
 mod proxy;
 
+pub(crate) use jsrt::JS_PURGE_SDK_BLOB;
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
 pub(crate) use jsrt::open_plugin_gate;
 // Token-scrub for plugin-facing response bodies; reused by the native egress path.

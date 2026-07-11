@@ -350,6 +350,13 @@ wrap_browser_process_handler! {
             let window_maximized = crate::state::boot_settings().window_maximized;
             let log_level = crate::state::boot_settings().log_level;
             let console = crate::state::boot_settings().console;
+
+            // Join the boot-token reconcile: the restored session must be in
+            // AppState before the page can consume it. An unusable blob arms a
+            // one-shot renderer purge (NEEDS_BOOT_BLOB_PURGE), not an init-script
+            // prefix that would replay on every reload.
+            crate::finish_boot_tokens();
+
             let init_script = format!(
                 r#"{ua_override}window.__TIDALUNAR_PLATFORM__ = '{platform}';
 window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};

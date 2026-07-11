@@ -1,7 +1,7 @@
 use crate::app_state::{IpcMessage, eval_js, with_state};
 use cef::*;
 
-const JS_PURGE_SDK_BLOB: &str = "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}";
+pub(crate) const JS_PURGE_SDK_BLOB: &str = "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}";
 
 /// Purge real tokens from SDK localStorage blob before plugin code runs.
 /// TIDAL SDK already holds tokens in memory (credentialsProvider) - the blob

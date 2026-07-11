@@ -332,25 +332,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile_cache = root_cache.join("Default");
     std::fs::create_dir_all(&profile_cache).ok();
 
-    if let Some((restored, needs_refresh)) = reconcile_boot_tokens(&data_dir, &profile_cache) {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let token_valid = restored.current.access_expires > now_secs;
-        app_state::with_state(|state| {
-            if token_valid {
-                state.captured_token = restored.current.access_token.clone();
-            }
-            state.token_state = Some(restored);
-            state.needs_proactive_refresh = needs_refresh;
-            state.needs_blob_purge = needs_refresh;
-            // Close the plugin-load gate only when a proactive refresh will run.
-            state.proactive_refresh_done = !needs_refresh;
-        });
-    }
+    // Token reconciliation, phase 1: secure-store load + raw SDK-blob read.
+    // All LevelDB I/O happens here, while our process is still its only
+    // possible opener. The crypto - dominated by a 100k-iteration PBKDF2 -
+    // runs on its own thread while CEF initializes; on_context_initialized
+    // joins it (finish_boot_tokens) before the first browser exists.
+    start_boot_token_reconcile(&data_dir, &profile_cache);
 
-    // Spawn the always-on Connect receiver after token reconciliation.
+    // Spawn the always-on Connect receiver; it doesn't read the boot tokens
+    // still reconciling (a casting device brings its own).
     if boot.receiver_always_on
         && let Some(rt) = crate::state::RT_HANDLE.get()
     {
@@ -430,12 +420,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// needs_proactive_refresh is true when the SDK blob was seeded with real tokens
-/// (TIDAL will have real JWTs in memory until we push opaques).
-fn reconcile_boot_tokens(
-    data_dir: &std::path::Path,
-    cef_profile: &std::path::Path,
-) -> Option<(platform::secure_store::StoredTokenState, bool)> {
+/// Boot-token reconcile parked on its own thread while CEF initializes; the
+/// join point is on_context_initialized, before the first browser exists.
+static BOOT_TOKEN_TASK: Mutex<Option<std::thread::JoinHandle<BootTokenOutcome>>> = Mutex::new(None);
+
+/// Reconcile decision computed off-thread. It never carries disk writes: once
+/// initialize() runs, Chromium owns the blob's LevelDB (verified: a join-time
+/// write fails on its lock), so the only mutation left - purging an unusable
+/// blob - is done by the renderer itself.
+enum BootTokenOutcome {
+    /// Blob unusable or unrecognized; the renderer purges it before TIDAL's
+    /// JS runs (init-script prefix).
+    Abandon,
+    /// Blob coherent with a stored generation; restore the session.
+    /// needs_refresh is true when the blob holds real or previous-generation
+    /// tokens: the proactive refresh then mints a fresh generation and
+    /// TIDAL's SDK re-persists the blob itself, converging it without a
+    /// disk write.
+    Restore {
+        tokens: Box<platform::secure_store::StoredTokenState>,
+        needs_refresh: bool,
+    },
+}
+
+/// Restore the reconciled session into AppState. Runs before the first
+/// browser exists, so nothing can observe a half-populated state.
+fn restore_session(restored: platform::secure_store::StoredTokenState, needs_refresh: bool) {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let token_valid = restored.current.access_expires > now_secs;
+    app_state::with_state(|state| {
+        if token_valid {
+            state.captured_token = restored.current.access_token.clone();
+        }
+        state.token_state = Some(restored);
+        state.needs_proactive_refresh = needs_refresh;
+        state.needs_blob_purge = needs_refresh;
+        // Close the plugin-load gate only when a proactive refresh will run.
+        state.proactive_refresh_done = !needs_refresh;
+    });
+}
+
+/// Token reconciliation phase 1, before CEF init: load the secure store, read
+/// the raw SDK blob, and run every path that must write the LevelDB (purges,
+/// seeding) - our process is still its only possible opener here. Only the
+/// read-path crypto goes to the boot-tokens thread.
+fn start_boot_token_reconcile(data_dir: &std::path::Path, cef_profile: &std::path::Path) {
     let leveldb_path = cef_profile.join("Local Storage").join("leveldb");
 
     let stored = match platform::secure_store::load(data_dir) {
@@ -443,108 +475,125 @@ fn reconcile_boot_tokens(
         Ok(None) | Err(platform::secure_store::StoreError::Unavailable) => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
             vprintln!("[AUTH]   No secure store - purged SDK blob");
-            return None;
+            return;
         }
         Err(platform::secure_store::StoreError::Corrupt) => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
             vprintln!("[AUTH]   Secure store corrupt - purged SDK blob");
-            return None;
+            return;
         }
         Err(platform::secure_store::StoreError::Backend) => {
             // Transient (I/O/lock/permission), not corrupt: keep the SDK blob; it
             // re-seeds from the stored token next launch.
             vprintln!("[AUTH]   Secure store backend error (transient) - left intact");
-            return None;
+            return;
         }
     };
 
-    use platform::sdk_storage::{ReadSdkResult, read_sdk_credentials};
-    let sdk_result = read_sdk_credentials(&leveldb_path);
-    let (sdk_at, sdk_rt, sdk_crypto, sdk_plaintext) = match sdk_result {
-        ReadSdkResult::Missing => {
+    use platform::sdk_storage::ReadRawResult;
+    let raw = match platform::sdk_storage::read_raw_blob(&leveldb_path) {
+        ReadRawResult::Missing => {
             // TIDAL's SDK validates JWT format - opaque tokens fail validation
             // and trigger session_clear. Seed with REAL tokens instead.
             // The blob is AES-256 encrypted and plugins can't access localStorage.
+            // Synchronous - PBKDF2 included - because this write must land
+            // before initialize().
             vprintln!("[AUTH]   No SDK storage - seeding from secure store");
             let cur = &stored.current;
-            if platform::sdk_storage::create_sdk_credentials(
-                &leveldb_path,
+            let seeded = platform::sdk_storage::build_seed_entries(
                 &cur.access_token,
                 &cur.refresh_token,
                 cur.access_expires,
                 cur.user_id.as_deref(),
                 &cur.granted_scopes,
             )
-            .is_some()
-            {
+            .and_then(|entries| platform::sdk_storage::write_entries(&leveldb_path, &entries))
+            .is_some();
+            if seeded {
                 vprintln!("[AUTH]   SDK blob seeded successfully");
-                return Some((stored, true));
+                restore_session(stored, true);
+            } else {
+                vprintln!("[AUTH]   SDK blob seeding failed");
             }
-            vprintln!("[AUTH]   SDK blob seeding failed");
-            return None;
+            return;
         }
-        ReadSdkResult::Corrupt => {
+        ReadRawResult::Raw(raw) => raw,
+        ReadRawResult::Corrupt => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
             vprintln!("[AUTH]   SDK storage corrupt - purged");
-            return None;
+            return;
         }
-        ReadSdkResult::Unreadable => {
+        ReadRawResult::Unreadable => {
             // Likely locked, not corrupt: leave the blob intact, don't purge.
             vprintln!("[AUTH]   SDK storage unreadable (locked?) - left intact");
-            return None;
-        }
-        ReadSdkResult::Parsed {
-            credentials,
-            crypto,
-            plaintext,
-        } => {
-            let at = credentials
-                .access_token
-                .as_ref()
-                .and_then(|a| a.token.as_deref())
-                .unwrap_or("")
-                .to_string();
-            let rt = credentials.refresh_token.unwrap_or_default();
-            (at, rt, crypto, plaintext)
+            return;
         }
     };
+
+    match std::thread::Builder::new()
+        .name("boot-tokens".into())
+        .spawn(move || reconcile_sdk_blob(raw, stored))
+    {
+        Ok(handle) => {
+            *BOOT_TOKEN_TASK.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        }
+        Err(e) => {
+            // Same degradation as a transient backend error: nothing purged,
+            // the next launch reconciles.
+            vprintln!("[AUTH]   Boot token thread spawn failed ({e}) - left intact");
+        }
+    }
+}
+
+/// Token reconciliation phase 2, on the boot-tokens thread: the read-path
+/// crypto (the 100k-iteration PBKDF2, AES) plus the match against the stored
+/// generations. Pure CPU - no I/O of any kind.
+fn reconcile_sdk_blob(
+    raw: Box<platform::sdk_storage::RawSdkBlob>,
+    stored: platform::secure_store::StoredTokenState,
+) -> BootTokenOutcome {
+    let Some(credentials) = platform::sdk_storage::decrypt_raw_blob(&raw) else {
+        vprintln!("[AUTH]   SDK storage corrupt - purging in renderer");
+        return BootTokenOutcome::Abandon;
+    };
+    let sdk_at = credentials
+        .access_token
+        .as_ref()
+        .and_then(|a| a.token.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let sdk_rt = credentials.refresh_token.unwrap_or_default();
 
     // Match against opaque tokens (normal flow)
     if sdk_at == stored.current.opaque_at && sdk_rt == stored.current.opaque_rt {
         vprintln!("[AUTH]   Boot reconciliation: current match (opaque)");
-        return Some((stored, false));
+        return BootTokenOutcome::Restore {
+            tokens: Box::new(stored),
+            needs_refresh: false,
+        };
     }
 
     // Match against real tokens (seeded blob - TIDAL re-persisted them)
     if sdk_at == stored.current.access_token && sdk_rt == stored.current.refresh_token {
         vprintln!("[AUTH]   Boot reconciliation: current match (real)");
-        return Some((stored, true));
+        return BootTokenOutcome::Restore {
+            tokens: Box::new(stored),
+            needs_refresh: true,
+        };
     }
 
+    // One opaque generation behind: restore on the previous mapping and let
+    // the proactive refresh mint a fresh generation; TIDAL's SDK re-persists
+    // the blob itself (an in-place disk rewrite would race Chromium here).
     if let Some(ref prev) = stored.previous
         && sdk_at == prev.opaque_at
         && sdk_rt == prev.opaque_rt
     {
-        vprintln!("[AUTH]   Boot reconciliation: previous match, rewriting SDK blob");
-        if platform::sdk_storage::rewrite_sdk_credentials(
-            &leveldb_path,
-            &sdk_plaintext,
-            &platform::sdk_storage::RewriteFields {
-                opaque_at: &stored.current.opaque_at,
-                opaque_rt: Some(&stored.current.opaque_rt),
-                expires: Some(stored.current.access_expires),
-                user_id: stored.current.user_id.as_deref(),
-                granted_scopes: Some(&stored.current.granted_scopes),
-            },
-            &sdk_crypto,
-        )
-        .is_some()
-        {
-            return Some((stored, false));
-        }
-        vprintln!("[AUTH]   SDK rewrite failed - purging");
-        platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-        return None;
+        vprintln!("[AUTH]   Boot reconciliation: previous match (opaque) - refreshing to converge");
+        return BootTokenOutcome::Restore {
+            tokens: Box::new(stored),
+            needs_refresh: true,
+        };
     }
 
     // Match previous generation against real tokens too
@@ -553,10 +602,184 @@ fn reconcile_boot_tokens(
         && sdk_rt == prev.refresh_token
     {
         vprintln!("[AUTH]   Boot reconciliation: previous match (real)");
-        return Some((stored, true));
+        return BootTokenOutcome::Restore {
+            tokens: Box::new(stored),
+            needs_refresh: true,
+        };
     }
 
-    vprintln!("[AUTH]   Boot reconciliation: no match - purging");
-    platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-    None
+    vprintln!("[AUTH]   Boot reconciliation: no match - purging in renderer");
+    BootTokenOutcome::Abandon
+}
+
+/// Token reconciliation phase 3: join the boot-tokens thread and apply its
+/// decision. Called from on_context_initialized before the init script is
+/// built: a restored session must be in AppState before the page can consume
+/// it. On an unusable blob it arms a one-shot renderer purge
+/// (`NEEDS_BOOT_BLOB_PURGE`), consumed on the first navigation, so TIDAL's JS
+/// starts from a clean localStorage.
+pub(crate) fn finish_boot_tokens() {
+    let task = BOOT_TOKEN_TASK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let Some(handle) = task else { return };
+    let Ok(outcome) = handle.join() else {
+        // A panic in the reconcile thread degrades like a transient backend
+        // error: nothing purged, the next launch reconciles.
+        vprintln!("[AUTH]   Boot token reconcile panicked - left intact");
+        return;
+    };
+    match outcome {
+        BootTokenOutcome::Abandon => {
+            crate::ui::NEEDS_BOOT_BLOB_PURGE.store(true, std::sync::atomic::Ordering::Release);
+        }
+        BootTokenOutcome::Restore {
+            tokens,
+            needs_refresh,
+        } => restore_session(*tokens, needs_refresh),
+    }
+}
+
+#[cfg(test)]
+mod boot_token_tests {
+    use super::*;
+    use platform::sdk_storage::{self, RawSdkBlob};
+    use platform::secure_store::{StoredTokenState, TokenGeneration};
+
+    fn generation(tag: &str) -> TokenGeneration {
+        TokenGeneration {
+            access_token: format!("real_at_{tag}"),
+            refresh_token: format!("real_rt_{tag}"),
+            opaque_at: format!("luna_at_{tag}"),
+            opaque_rt: format!("luna_rt_{tag}"),
+            version: 1,
+            access_expires: u64::MAX,
+            user_id: Some("42".into()),
+            granted_scopes: vec!["r_usr".into()],
+            client_id: "cid".into(),
+        }
+    }
+
+    fn stored(current: TokenGeneration, previous: Option<TokenGeneration>) -> StoredTokenState {
+        StoredTokenState {
+            current,
+            previous,
+            previous_valid_until: None,
+        }
+    }
+
+    /// Rebuild the RawSdkBlob a LevelDB read would produce from seed entries.
+    fn raw_from_entries(entries: sdk_storage::SdkEntries) -> Box<RawSdkBlob> {
+        let mut salt = None;
+        let mut counter = None;
+        let mut wrapped_key = None;
+        let mut data = None;
+        for (key, value) in entries {
+            match key {
+                "AuthDB/tidalSalt" => salt = Some(value),
+                "AuthDB/tidalCounter" => counter = Some(value),
+                "AuthDB/tidalKey" => wrapped_key = Some(value),
+                "AuthDB/tidalData" => data = Some(value),
+                other => panic!("unexpected entry {other}"),
+            }
+        }
+        Box::new(RawSdkBlob {
+            salt: salt.unwrap().try_into().unwrap(),
+            counter: counter.unwrap().try_into().unwrap(),
+            wrapped_key: wrapped_key.unwrap(),
+            data: data.unwrap(),
+        })
+    }
+
+    /// A blob holding `at`/`rt`, built through the same path the seed uses.
+    fn blob_with(at: &str, rt: &str) -> Box<RawSdkBlob> {
+        let entries =
+            sdk_storage::build_seed_entries(at, rt, u64::MAX, Some("42"), &["r_usr".to_string()])
+                .expect("seed entries");
+        raw_from_entries(entries)
+    }
+
+    fn blob_tokens(raw: &RawSdkBlob) -> (String, String) {
+        let credentials = sdk_storage::decrypt_raw_blob(raw).expect("blob decrypts");
+        let at = credentials
+            .access_token
+            .and_then(|a| a.token)
+            .unwrap_or_default();
+        let rt = credentials.refresh_token.unwrap_or_default();
+        (at, rt)
+    }
+
+    #[test]
+    fn seed_entries_roundtrip_through_decrypt() {
+        let raw = blob_with("at_value", "rt_value");
+        let (at, rt) = blob_tokens(&raw);
+        assert_eq!(at, "at_value");
+        assert_eq!(rt, "rt_value");
+    }
+
+    #[test]
+    fn current_opaque_match_restores_without_refresh() {
+        let cur = generation("cur");
+        let raw = blob_with(&cur.opaque_at, &cur.opaque_rt);
+        let BootTokenOutcome::Restore { needs_refresh, .. } =
+            reconcile_sdk_blob(raw, stored(cur, None))
+        else {
+            panic!("expected Restore");
+        };
+        assert!(!needs_refresh);
+    }
+
+    #[test]
+    fn current_real_match_needs_refresh() {
+        let cur = generation("cur");
+        let raw = blob_with(&cur.access_token, &cur.refresh_token);
+        let BootTokenOutcome::Restore { needs_refresh, .. } =
+            reconcile_sdk_blob(raw, stored(cur, None))
+        else {
+            panic!("expected Restore");
+        };
+        assert!(needs_refresh);
+    }
+
+    #[test]
+    fn previous_opaque_match_restores_with_refresh() {
+        let prev = generation("old");
+        let cur = generation("new");
+        let raw = blob_with(&prev.opaque_at, &prev.opaque_rt);
+        let BootTokenOutcome::Restore { needs_refresh, .. } =
+            reconcile_sdk_blob(raw, stored(cur, Some(prev)))
+        else {
+            panic!("expected Restore");
+        };
+        assert!(needs_refresh);
+    }
+
+    #[test]
+    fn previous_real_match_restores_with_refresh() {
+        let prev = generation("old");
+        let cur = generation("new");
+        let raw = blob_with(&prev.access_token, &prev.refresh_token);
+        let BootTokenOutcome::Restore { needs_refresh, .. } =
+            reconcile_sdk_blob(raw, stored(cur, Some(prev)))
+        else {
+            panic!("expected Restore");
+        };
+        assert!(needs_refresh);
+    }
+
+    #[test]
+    fn unknown_blob_abandons() {
+        let raw = blob_with("stranger_at", "stranger_rt");
+        let outcome = reconcile_sdk_blob(raw, stored(generation("cur"), Some(generation("old"))));
+        assert!(matches!(outcome, BootTokenOutcome::Abandon));
+    }
+
+    #[test]
+    fn corrupt_blob_abandons() {
+        let mut raw = blob_with("at", "rt");
+        raw.wrapped_key[0] ^= 0xFF;
+        let outcome = reconcile_sdk_blob(raw, stored(generation("cur"), None));
+        assert!(matches!(outcome, BootTokenOutcome::Abandon));
+    }
 }

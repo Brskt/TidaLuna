@@ -418,6 +418,14 @@ pub(super) enum PageState {
 pub(crate) static POST_LOGIN_RELOADED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// One-shot: armed at boot (finish_boot_tokens) when the SDK blob is unusable
+/// (corrupt or no token match). Consumed on the first navigation that injects
+/// the init script, so the renderer wipes the stale blob exactly once - never
+/// re-wiping a blob a later login writes to the same origin. Baking the purge
+/// into the reusable init_script instead would replay it on every reload.
+pub(crate) static NEEDS_BOOT_BLOB_PURGE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 wrap_load_handler! {
     pub(super) struct TidalLoadHandler {
         init_script: String,
@@ -436,6 +444,13 @@ wrap_load_handler! {
                 let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
                 let policy = NavigationPolicy::for_page(PageKind::classify(&url));
                 if policy.inject_init_script {
+                    // One-shot boot purge of an unusable SDK blob, before the
+                    // init script and before TIDAL's JS reads localStorage. The
+                    // first boot navigation is desktop.tidal.com (the blob's
+                    // origin), so it lands once, on the right page.
+                    if NEEDS_BOOT_BLOB_PURGE.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                        exec_js_on_frame(frame, crate::ipc::plugin::JS_PURGE_SDK_BLOB);
+                    }
                     crate::vprintln!(
                         "[LOAD]   on_load_start init_script: {}",
                         crate::util::truncate_str(&crate::util::redact_url_query(&url), 80)

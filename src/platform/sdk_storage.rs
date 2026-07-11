@@ -2,8 +2,14 @@
 // Revalidate on Chromium/CEF upgrades (LevelDB key/value format) and TIDAL SDK updates
 // (PBKDF2 params, AES-KW, AES-CTR counter_bits, localStorage key names).
 //
-// Fail-closed: read_sdk_credentials() returns Missing (no DB / no keys), Corrupt (present
-// but unreadable), or Parsed. Never panics, never returns partial results.
+// Fail-closed: read_raw_blob() returns Missing (no DB / no keys), Corrupt (present but
+// malformed), Unreadable, or Raw; decrypt_raw_blob() returns None on any crypto or
+// schema failure. Never panics, never returns partial results.
+//
+// I/O and crypto are split on purpose: the LevelDB halves (read_raw_blob,
+// write_entries, purge_sdk_credentials) must only run before CEF init - Chromium
+// locks that directory once it starts - while the pure halves (decrypt_raw_blob,
+// build_seed_entries) carry the 100k-iteration PBKDF2 and may run on any thread.
 
 use aes::Aes256;
 use aes::cipher::{KeyInit, KeyIvInit, StreamCipher};
@@ -95,10 +101,6 @@ fn encrypt_aes_ctr(
     decrypt_aes_ctr(data_key, counter, plaintext)
 }
 
-pub(crate) struct CryptoParams {
-    pub data_key: [u8; AES_KW_UNWRAPPED_LEN],
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SdkCredentials {
@@ -112,24 +114,30 @@ pub(crate) struct SdkAccessToken {
     pub token: Option<String>,
 }
 
-pub(crate) enum ReadSdkResult {
+/// The four AuthDB/tidal* values, read raw from LevelDB before any crypto.
+pub(crate) struct RawSdkBlob {
+    pub salt: [u8; SALT_LEN],
+    pub counter: [u8; COUNTER_LEN],
+    pub wrapped_key: Vec<u8>,
+    pub data: Vec<u8>,
+}
+
+pub(crate) enum ReadRawResult {
     Missing,
-    Parsed {
-        credentials: Box<SdkCredentials>,
-        crypto: Box<CryptoParams>,
-        plaintext: Vec<u8>,
-    },
+    Raw(Box<RawSdkBlob>),
     Corrupt,
     /// Could not open the LevelDB (e.g. locked by another process); contents
     /// unknown, so callers must not purge - it may hold valid credentials.
     Unreadable,
 }
 
-pub(crate) fn read_sdk_credentials(leveldb_path: &Path) -> ReadSdkResult {
+/// I/O half of the read path: fetch the four keys and validate their shape.
+/// No crypto happens here; the blob decrypts later via decrypt_raw_blob.
+pub(crate) fn read_raw_blob(leveldb_path: &Path) -> ReadRawResult {
     let mut db = match open_leveldb(leveldb_path) {
-        OpenResult::Missing => return ReadSdkResult::Missing,
+        OpenResult::Missing => return ReadRawResult::Missing,
         OpenResult::Ok(db) => *db,
-        OpenResult::Error => return ReadSdkResult::Unreadable,
+        OpenResult::Error => return ReadRawResult::Unreadable,
     };
 
     let keys = [
@@ -153,10 +161,10 @@ pub(crate) fn read_sdk_credentials(leveldb_path: &Path) -> ReadSdkResult {
     }
 
     if present == 0 {
-        return ReadSdkResult::Missing;
+        return ReadRawResult::Missing;
     }
     if present < 4 || has_invalid {
-        return ReadSdkResult::Corrupt;
+        return ReadRawResult::Corrupt;
     }
 
     let [salt_key, counter_key, wrapped_key, data_key] = keys;
@@ -167,101 +175,32 @@ pub(crate) fn read_sdk_credentials(leveldb_path: &Path) -> ReadSdkResult {
         ReadKeyResult::Ok(data_bytes),
     ) = (salt_key, counter_key, wrapped_key, data_key)
     else {
-        return ReadSdkResult::Corrupt;
+        return ReadRawResult::Corrupt;
     };
 
     let Ok(salt) = <[u8; SALT_LEN]>::try_from(salt_bytes.as_slice()) else {
-        return ReadSdkResult::Corrupt;
+        return ReadRawResult::Corrupt;
     };
     let Ok(counter) = <[u8; COUNTER_LEN]>::try_from(counter_bytes.as_slice()) else {
-        return ReadSdkResult::Corrupt;
+        return ReadRawResult::Corrupt;
     };
 
-    let wrapping_key = derive_wrapping_key(&salt);
-    let Some(data_key) = unwrap_data_key(&wrapping_key, &wrapped_bytes) else {
-        return ReadSdkResult::Corrupt;
-    };
-    let Some(plaintext) = decrypt_aes_ctr(&data_key, &counter, &data_bytes) else {
-        return ReadSdkResult::Corrupt;
-    };
-
-    let Ok(json_str) = std::str::from_utf8(&plaintext) else {
-        return ReadSdkResult::Corrupt;
-    };
-    let Ok(credentials) = serde_json::from_str::<SdkCredentials>(json_str) else {
-        return ReadSdkResult::Corrupt;
-    };
-
-    let crypto = CryptoParams { data_key };
-
-    ReadSdkResult::Parsed {
-        credentials: Box::new(credentials),
-        crypto: Box::new(crypto),
-        plaintext,
-    }
+    ReadRawResult::Raw(Box::new(RawSdkBlob {
+        salt,
+        counter,
+        wrapped_key: wrapped_bytes,
+        data: data_bytes,
+    }))
 }
 
-pub(crate) struct RewriteFields<'a> {
-    pub opaque_at: &'a str,
-    pub opaque_rt: Option<&'a str>,
-    pub expires: Option<u64>,
-    pub user_id: Option<&'a str>,
-    pub granted_scopes: Option<&'a [String]>,
-}
-
-pub(crate) fn rewrite_sdk_credentials(
-    leveldb_path: &Path,
-    original_plaintext: &[u8],
-    fields: &RewriteFields<'_>,
-    crypto: &CryptoParams,
-) -> Option<()> {
-    let mut json: serde_json::Value = serde_json::from_slice(original_plaintext).ok()?;
-
-    if let Some(at) = json.get_mut("accessToken").and_then(|v| v.as_object_mut()) {
-        at.insert(
-            "token".to_string(),
-            serde_json::Value::String(fields.opaque_at.to_string()),
-        );
-        if let Some(expires) = fields.expires {
-            at.insert("expires".to_string(), serde_json::json!(expires));
-        }
-        if let Some(user_id) = fields.user_id {
-            at.insert(
-                "userId".to_string(),
-                serde_json::Value::String(user_id.to_string()),
-            );
-        }
-        if let Some(scopes) = fields.granted_scopes {
-            at.insert("grantedScopes".to_string(), serde_json::json!(scopes));
-        }
-    }
-    if let Some(rt) = fields.opaque_rt {
-        json.as_object_mut()?.insert(
-            "refreshToken".to_string(),
-            serde_json::Value::String(rt.to_string()),
-        );
-    }
-
-    let new_plaintext = serde_json::to_vec(&json).ok()?;
-
-    let mut new_counter = [0u8; COUNTER_LEN];
-    getrandom::fill(&mut new_counter).ok()?;
-
-    let ciphertext = encrypt_aes_ctr(&crypto.data_key, &new_counter, &new_plaintext)?;
-
-    let OpenResult::Ok(db) = open_leveldb(leveldb_path) else {
-        return None;
-    };
-    let mut db = *db;
-    write_ls_keys(
-        &mut db,
-        &[
-            ("AuthDB/tidalData", &ciphertext),
-            ("AuthDB/tidalCounter", &new_counter),
-        ],
-    )?;
-
-    Some(())
+/// Crypto half of the read path: PBKDF2, AES-KW unwrap, AES-CTR decrypt, JSON
+/// parse. Pure CPU, no I/O. None on any failure (the blob is corrupt).
+pub(crate) fn decrypt_raw_blob(raw: &RawSdkBlob) -> Option<SdkCredentials> {
+    let wrapping_key = derive_wrapping_key(&raw.salt);
+    let data_key = unwrap_data_key(&wrapping_key, &raw.wrapped_key)?;
+    let plaintext = decrypt_aes_ctr(&data_key, &raw.counter, &raw.data)?;
+    let json_str = std::str::from_utf8(&plaintext).ok()?;
+    serde_json::from_str::<SdkCredentials>(json_str).ok()
 }
 
 enum OpenResult {
@@ -322,17 +261,18 @@ fn write_ls_keys(db: &mut rusty_leveldb::DB, entries: &[(&str, &[u8])]) -> Optio
     Some(())
 }
 
-/// Create a fresh SDK credential blob in LevelDB from opaque tokens.
+/// Encrypted write entries for a fresh credential blob: new salt, data key and
+/// counter, including the full PBKDF2 derivation. Pure CPU, no I/O.
 /// Used when the secure store has tokens but the SDK storage is missing
-/// (TIDAL's SDK may refuse to persist non-JWT opaque tokens).
-pub(crate) fn create_sdk_credentials(
-    leveldb_path: &Path,
-    opaque_at: &str,
-    opaque_rt: &str,
+/// (TIDAL's SDK may refuse to persist non-JWT opaque tokens, so it is seeded
+/// with the real ones).
+pub(crate) fn build_seed_entries(
+    access_token: &str,
+    refresh_token: &str,
     expires: u64,
     user_id: Option<&str>,
     granted_scopes: &[String],
-) -> Option<()> {
+) -> Option<SdkEntries> {
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).ok()?;
 
@@ -344,12 +284,12 @@ pub(crate) fn create_sdk_credentials(
 
     let credentials_json = serde_json::json!({
         "accessToken": {
-            "token": opaque_at,
+            "token": access_token,
             "expires": expires,
             "userId": user_id.unwrap_or(""),
             "grantedScopes": granted_scopes,
         },
-        "refreshToken": opaque_rt,
+        "refreshToken": refresh_token,
     });
     let plaintext = serde_json::to_vec(&credentials_json).ok()?;
 
@@ -360,23 +300,28 @@ pub(crate) fn create_sdk_credentials(
     let mut wrapped_key = [0u8; AES_KW_WRAPPED_LEN];
     kek.wrap_key(&data_key, &mut wrapped_key).ok()?;
 
+    Some(vec![
+        ("AuthDB/tidalSalt", salt.to_vec()),
+        ("AuthDB/tidalCounter", counter.to_vec()),
+        ("AuthDB/tidalKey", wrapped_key.to_vec()),
+        ("AuthDB/tidalData", ciphertext),
+    ])
+}
+
+/// Pre-encrypted LevelDB write entries: (localStorage key, raw value bytes).
+pub(crate) type SdkEntries = Vec<(&'static str, Vec<u8>)>;
+
+/// Write pre-built entries to the blob, creating the LevelDB if absent (the
+/// seed path can run on a fresh profile). Must run before CEF init.
+pub(crate) fn write_entries(leveldb_path: &Path, entries: &SdkEntries) -> Option<()> {
     let opts = rusty_leveldb::Options {
         create_if_missing: true,
         compressor: 1,
         ..rusty_leveldb::Options::default()
     };
     let mut db = rusty_leveldb::DB::open(leveldb_path, opts).ok()?;
-    write_ls_keys(
-        &mut db,
-        &[
-            ("AuthDB/tidalSalt", &salt),
-            ("AuthDB/tidalCounter", &counter),
-            ("AuthDB/tidalKey", &wrapped_key),
-            ("AuthDB/tidalData", &ciphertext),
-        ],
-    )?;
-
-    Some(())
+    let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(k, v)| (*k, v.as_slice())).collect();
+    write_ls_keys(&mut db, &entry_refs)
 }
 
 pub(crate) fn purge_sdk_credentials(leveldb_path: &Path) {
