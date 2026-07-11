@@ -742,7 +742,9 @@ wrap_request_handler! {
             if crate::ui::token_filter::should_rewrite_token(&url)
                 || crate::ui::nav::is_token_endpoint(&url)
             {
-                Some(crate::ui::token_filter::TokenResourceHandler::new())
+                Some(crate::ui::token_filter::TokenResourceHandler::new(
+                    std::sync::Arc::new(std::sync::Mutex::new(None)),
+                ))
             } else if !crate::ui::nav::is_tidal_origin(&url) {
                 // Exfiltration guard: block sendBeacon to non-Tidal domains.
                 // TIDAL doesn't use sendBeacon - safe to block unconditionally.

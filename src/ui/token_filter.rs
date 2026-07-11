@@ -1,5 +1,5 @@
 use cef::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
 
@@ -91,7 +91,14 @@ wrap_resource_request_handler! {
 }
 
 wrap_resource_request_handler! {
-    pub(super) struct TokenResourceHandler;
+    pub(super) struct TokenResourceHandler {
+        // Per-request slot: the client_id from this exchange's POST body, set in
+        // on_before_resource_load and read at response time, so the persisted
+        // client_id is bound to the same exchange that minted the refresh_token
+        // (the SDK binds each token to its context's client_id). Arc so the
+        // macro's per-field Clone shares one slot across both callbacks.
+        exchange_client_id: Arc<Mutex<Option<String>>>,
+    }
 
     impl ResourceRequestHandler {
         fn on_before_resource_load(
@@ -112,7 +119,7 @@ wrap_resource_request_handler! {
                     let accept_name = CefString::from("Accept-Encoding");
                     let accept_val = CefString::from("identity");
                     req.set_header_by_name(Some(&accept_name), Some(&accept_val), 1);
-                    capture_client_id(req);
+                    capture_client_id(req, &self.exchange_client_id);
                     inject_refresh_token(req, &url);
                 }
 
@@ -133,12 +140,19 @@ wrap_resource_request_handler! {
             let url_cef = request?.url();
             let url = userfree_to_string(&url_cef);
             if crate::ui::nav::is_token_endpoint(&url) {
+                let exchange_cid = self
+                    .exchange_client_id
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 Some(new_buffering_filter(
                     0,
-                    Arc::new(|body| match process_token_response(&body) {
-                        ProcessResult::Modified(v) => FilterOutcome::Emit(v),
-                        ProcessResult::Passthrough => FilterOutcome::Emit(body),
-                        ProcessResult::Error => FilterOutcome::Drop,
+                    Arc::new(move |body| {
+                        match process_token_response(&body, exchange_cid.as_deref()) {
+                            ProcessResult::Modified(v) => FilterOutcome::Emit(v),
+                            ProcessResult::Passthrough => FilterOutcome::Emit(body),
+                            ProcessResult::Error => FilterOutcome::Drop,
+                        }
                     }),
                 ))
             } else {
@@ -185,7 +199,7 @@ fn read_post_body(req: &mut Request) -> Option<Vec<u8>> {
     if body.is_empty() { None } else { Some(body) }
 }
 
-fn capture_client_id(req: &mut Request) {
+fn capture_client_id(req: &mut Request, exchange_slot: &Mutex<Option<String>>) {
     let Some(body_bytes) = read_post_body(req) else {
         return;
     };
@@ -194,12 +208,56 @@ fn capture_client_id(req: &mut Request) {
     };
     for (k, v) in url::form_urlencoded::parse(body_str.as_bytes()) {
         if k == "client_id" && !v.is_empty() {
+            let cid = v.into_owned();
+            // Bind this exchange's client_id to its own response (per-request
+            // slot). The global stays as a fallback for callers without that
+            // slot: the proactive-refresh and proxy paths.
+            *exchange_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid.clone());
             crate::app_state::with_state(|state| {
-                state.last_client_id = v.to_string();
+                state.last_client_id = cid;
             });
             return;
         }
     }
+}
+
+/// Resolve an opaque `luna_*` access nonce to the real access token for the
+/// wire. An in-window `previous` match returns that generation's token (the
+/// brief rotation overlap); ANY other `luna_*` falls back to `current` - a
+/// nonce only ever means "the current user's token", and letting the raw
+/// opaque leave would be rejected by TIDAL and leak the placeholder. The caller
+/// must have checked `is_opaque`; callers gate this on `token_state` = Some, so
+/// a stray opaque during a logged-out window resolves to nothing.
+pub(crate) fn resolve_opaque_access(
+    ts: &crate::platform::secure_store::StoredTokenState,
+    opaque: &str,
+    now: u64,
+) -> String {
+    if let Some(prev) = ts.previous.as_ref()
+        && opaque == prev.opaque_at
+        && ts.previous_valid_until.is_none_or(|until| now <= until)
+    {
+        return prev.access_token.clone();
+    }
+    ts.current.access_token.clone()
+}
+
+/// Refresh-token counterpart of [`resolve_opaque_access`]. Keeps the refresh
+/// side self-healing: a `luna_*` the SDK persisted past our two-entry window
+/// still maps to the current real refresh token instead of leaving raw - which
+/// is what let TIDAL reject the SDK's ~1h refresh and log the user out.
+pub(crate) fn resolve_opaque_refresh(
+    ts: &crate::platform::secure_store::StoredTokenState,
+    opaque: &str,
+    now: u64,
+) -> String {
+    if let Some(prev) = ts.previous.as_ref()
+        && opaque == prev.opaque_rt
+        && ts.previous_valid_until.is_none_or(|until| now <= until)
+    {
+        return prev.refresh_token.clone();
+    }
+    ts.current.refresh_token.clone()
 }
 
 fn rewrite_authorization_header(req: &mut Request) {
@@ -214,23 +272,13 @@ fn rewrite_authorization_header(req: &mut Request) {
         return;
     }
 
+    // None only when logged out (no token_state); otherwise every luna_*
+    // resolves to a real token, so nothing opaque reaches the wire.
     let real_token = crate::app_state::with_state(|state| {
-        let ts = state.token_state.as_ref()?;
-        if opaque == ts.current.opaque_at {
-            return Some(ts.current.access_token.clone());
-        }
-        if let Some(ref prev) = ts.previous {
-            let now = now_unix_secs();
-            if let Some(valid_until) = ts.previous_valid_until
-                && now > valid_until
-            {
-                return None;
-            }
-            if opaque == prev.opaque_at {
-                return Some(prev.access_token.clone());
-            }
-        }
-        None
+        state
+            .token_state
+            .as_ref()
+            .map(|ts| resolve_opaque_access(ts, opaque, now_unix_secs()))
     })
     .flatten();
 
@@ -273,20 +321,14 @@ fn inject_refresh_token(req: &mut Request, url: &str) {
         return;
     }
 
+    // None only when logged out (no token_state); otherwise every luna_*
+    // resolves to the current real refresh token, so the SDK's own refresh
+    // never leaves with a raw opaque (the ~1h logout).
     let real_rt = crate::app_state::with_state(|state| {
-        let ts = state.token_state.as_ref()?;
-        let now = now_unix_secs();
-
-        if rt_value == ts.current.opaque_rt {
-            return Some(ts.current.refresh_token.clone());
-        }
-        if let Some(ref prev) = ts.previous
-            && ts.previous_valid_until.is_none_or(|until| now <= until)
-            && rt_value == prev.opaque_rt
-        {
-            return Some(prev.refresh_token.clone());
-        }
-        None
+        state
+            .token_state
+            .as_ref()
+            .map(|ts| resolve_opaque_refresh(ts, rt_value, now_unix_secs()))
     })
     .flatten();
 
@@ -328,14 +370,43 @@ enum ProcessResult {
     Error,
 }
 
-fn process_token_response(body: &[u8]) -> ProcessResult {
-    process_token_response_with(body, generate_opaque)
+/// The client_id follows the refresh_token. A response carrying a NEW
+/// refresh_token is bound to the client_id of the exchange that minted it
+/// (`exchange_client_id`, this request's POST). A response with no new
+/// refresh_token reuses the prior one, so it keeps that generation's client_id
+/// (`prior_client_id`). This mirrors the SDK, which binds each token to its
+/// context's client_id and never refreshes across contexts - notably the
+/// app-level `client_credentials` token (no refresh_token) must not overwrite
+/// the user client_id.
+fn resolve_generation_client_id(
+    has_new_refresh_token: bool,
+    exchange_client_id: Option<&str>,
+    prior_client_id: Option<&str>,
+) -> String {
+    let exchange = exchange_client_id.filter(|s| !s.is_empty());
+    let prior = prior_client_id.filter(|s| !s.is_empty());
+    if has_new_refresh_token {
+        exchange.or(prior)
+    } else {
+        prior.or(exchange)
+    }
+    .unwrap_or("")
+    .to_string()
 }
 
-/// `opaque` is the opaque-nonce generator, injected for testing. When it fails
-/// (RNG unavailable) with a real token present, we drop the response rather than
-/// emit the real token.
-fn process_token_response_with(body: &[u8], opaque: impl Fn() -> Option<String>) -> ProcessResult {
+fn process_token_response(body: &[u8], exchange_client_id: Option<&str>) -> ProcessResult {
+    process_token_response_with(body, exchange_client_id, generate_opaque)
+}
+
+/// `exchange_client_id` is the client_id from the POST that produced this
+/// response (bound per request); `opaque` is the opaque-nonce generator,
+/// injected for testing. When it fails (RNG unavailable) with a real token
+/// present, we drop the response rather than emit the real token.
+fn process_token_response_with(
+    body: &[u8],
+    exchange_client_id: Option<&str>,
+    opaque: impl Fn() -> Option<String>,
+) -> ProcessResult {
     let Ok(json_str) = std::str::from_utf8(body) else {
         return ProcessResult::Passthrough;
     };
@@ -403,6 +474,16 @@ fn process_token_response_with(body: &[u8], opaque: impl Fn() -> Option<String>)
             (String::new(), String::new())
         };
 
+        let prior_client_id = state
+            .token_state
+            .as_ref()
+            .map(|ts| ts.current.client_id.clone());
+        let client_id = resolve_generation_client_id(
+            refresh_token.is_some(),
+            exchange_client_id,
+            prior_client_id.as_deref(),
+        );
+
         let new_gen = crate::platform::secure_store::TokenGeneration {
             access_token: at.to_string(),
             refresh_token: real_rt,
@@ -416,12 +497,7 @@ fn process_token_response_with(body: &[u8], opaque: impl Fn() -> Option<String>)
             access_expires: now_secs + expires_in.unwrap_or(3600),
             user_id: user_id.clone(),
             granted_scopes: granted_scopes.clone(),
-            client_id: state
-                .token_state
-                .as_ref()
-                .map(|ts| ts.current.client_id.clone())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| state.last_client_id.clone()),
+            client_id,
         };
 
         let previous = state.token_state.as_ref().map(|ts| ts.current.clone());
@@ -518,8 +594,145 @@ mod tests {
         // (Error), never Passthrough, or the real token reaches the renderer.
         let body = br#"{"access_token":"real-secret","refresh_token":"real-rt"}"#;
         assert!(matches!(
-            process_token_response_with(body, || None),
+            process_token_response_with(body, None, || None),
             ProcessResult::Error
         ));
+    }
+
+    #[test]
+    fn new_refresh_token_binds_this_exchange_client_id_not_prior() {
+        // The bug: authorization_code (new refresh_token, client_id "user")
+        // arriving after a client_credentials gen (client_id "app") must adopt
+        // "user", not stay stuck on the prior "app".
+        assert_eq!(
+            resolve_generation_client_id(true, Some("user"), Some("app")),
+            "user"
+        );
+    }
+
+    #[test]
+    fn no_new_refresh_token_keeps_prior_client_id() {
+        // client_credentials (no refresh_token) must not overwrite the user
+        // client_id already held.
+        assert_eq!(
+            resolve_generation_client_id(false, Some("app"), Some("user")),
+            "user"
+        );
+    }
+
+    #[test]
+    fn rotating_refresh_keeps_same_client_id() {
+        // A refresh that rotates the token stays on the same client.
+        assert_eq!(
+            resolve_generation_client_id(true, Some("user"), Some("user")),
+            "user"
+        );
+    }
+
+    #[test]
+    fn empty_exchange_falls_back_to_prior_on_new_refresh() {
+        // Defensive: a new refresh_token with no observed client_id keeps the
+        // prior rather than blanking it.
+        assert_eq!(
+            resolve_generation_client_id(true, None, Some("user")),
+            "user"
+        );
+        assert_eq!(
+            resolve_generation_client_id(true, Some(""), Some("user")),
+            "user"
+        );
+    }
+
+    #[test]
+    fn first_gen_with_no_prior_takes_exchange() {
+        // First persist after a session clear: no prior, take the exchange's.
+        assert_eq!(
+            resolve_generation_client_id(true, Some("user"), None),
+            "user"
+        );
+        assert_eq!(
+            resolve_generation_client_id(false, Some("app"), None),
+            "app"
+        );
+    }
+
+    fn generation(tag: &str) -> crate::platform::secure_store::TokenGeneration {
+        crate::platform::secure_store::TokenGeneration {
+            access_token: format!("real_at_{tag}"),
+            refresh_token: format!("real_rt_{tag}"),
+            opaque_at: format!("luna_at_{tag}"),
+            opaque_rt: format!("luna_rt_{tag}"),
+            version: 1,
+            access_expires: u64::MAX,
+            user_id: None,
+            granted_scopes: vec![],
+            client_id: "cid".into(),
+        }
+    }
+
+    fn stored(
+        current: crate::platform::secure_store::TokenGeneration,
+        previous: Option<crate::platform::secure_store::TokenGeneration>,
+        previous_valid_until: Option<u64>,
+    ) -> crate::platform::secure_store::StoredTokenState {
+        crate::platform::secure_store::StoredTokenState {
+            current,
+            previous,
+            previous_valid_until,
+        }
+    }
+
+    #[test]
+    fn resolve_access_current_and_previous_within_window() {
+        let ts = stored(generation("new"), Some(generation("old")), Some(100));
+        // current opaque -> current real
+        assert_eq!(resolve_opaque_access(&ts, "luna_at_new", 50), "real_at_new");
+        // previous opaque, still in window -> previous real
+        assert_eq!(resolve_opaque_access(&ts, "luna_at_old", 50), "real_at_old");
+    }
+
+    #[test]
+    fn resolve_access_out_of_window_previous_falls_back_to_current() {
+        let ts = stored(generation("new"), Some(generation("old")), Some(100));
+        // previous opaque, past the window -> current (not left raw)
+        assert_eq!(
+            resolve_opaque_access(&ts, "luna_at_old", 200),
+            "real_at_new"
+        );
+    }
+
+    #[test]
+    fn resolve_refresh_unknown_opaque_falls_back_to_current() {
+        // The ~1h bug: an opaque_rt the SDK held past our window must resolve to
+        // the current real refresh token, never leave raw.
+        let ts = stored(generation("new"), Some(generation("old")), Some(100));
+        assert_eq!(
+            resolve_opaque_refresh(&ts, "luna_rt_ancient", 50),
+            "real_rt_new"
+        );
+        // previous rt within window still maps to the matching real rt
+        assert_eq!(
+            resolve_opaque_refresh(&ts, "luna_rt_old", 50),
+            "real_rt_old"
+        );
+        // and to current once out of window
+        assert_eq!(
+            resolve_opaque_refresh(&ts, "luna_rt_old", 200),
+            "real_rt_new"
+        );
+    }
+
+    #[test]
+    fn resolve_no_previous_maps_everything_to_current() {
+        let ts = stored(generation("new"), None, None);
+        assert_eq!(resolve_opaque_access(&ts, "luna_at_new", 0), "real_at_new");
+        assert_eq!(
+            resolve_opaque_access(&ts, "luna_at_whatever", 0),
+            "real_at_new"
+        );
+        assert_eq!(
+            resolve_opaque_refresh(&ts, "luna_rt_whatever", 0),
+            "real_rt_new"
+        );
     }
 }

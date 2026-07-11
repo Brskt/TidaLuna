@@ -1,7 +1,7 @@
 //! Proactive token refresh: replaces real JWTs in JS memory with opaques
 //! seconds after boot instead of waiting for TIDAL's SDK refresh near token expiry.
 //!
-//! Called from on_after_created when needs_proactive_refresh is set.
+//! Called from the web.loaded IPC handler when needs_proactive_refresh is set.
 
 pub(crate) fn trigger_if_needed() {
     let needs = crate::app_state::with_state(|state| {
@@ -15,18 +15,22 @@ pub(crate) fn trigger_if_needed() {
         return;
     }
 
-    let (refresh_token, client_id) = match crate::app_state::with_state(|state| {
+    let (refresh_token, client_id, scope) = match crate::app_state::with_state(|state| {
         let ts = state.token_state.as_ref()?;
         let cid = if ts.current.client_id.is_empty() {
             state.last_client_id.clone()
         } else {
             ts.current.client_id.clone()
         };
-        Some((ts.current.refresh_token.clone(), cid))
+        Some((
+            ts.current.refresh_token.clone(),
+            cid,
+            ts.current.granted_scopes.join(" "),
+        ))
     })
     .flatten()
     {
-        Some(pair) => pair,
+        Some(triple) => triple,
         None => return,
     };
 
@@ -36,24 +40,33 @@ pub(crate) fn trigger_if_needed() {
 
     crate::vprintln!("[AUTH]   Proactive refresh: starting");
     crate::state::rt_handle().spawn(async move {
-        do_refresh(refresh_token, client_id).await;
+        do_refresh(refresh_token, client_id, scope).await;
         // Open the gate on every exit path; safe even on refresh failure (the
         // token stays live, but the egress filter blocks exfil).
         crate::ipc::plugin::open_plugin_gate();
     });
 }
 
-async fn do_refresh(refresh_token: String, client_id: String) {
+async fn do_refresh(refresh_token: String, client_id: String, req_scope: String) {
+    if client_id.is_empty() {
+        // The token endpoint rejects a refresh grant with no client_id (400,
+        // sub_status 1002), so a request here can only fail. Skip it; the token
+        // stays live and the SDK refreshes it near expiry.
+        crate::vprintln!("[AUTH]   Proactive refresh: no client_id - skipped");
+        return;
+    }
+
     let client = &*crate::state::HTTP_CLIENT;
 
     let mut body = format!(
-        "grant_type=refresh_token&refresh_token={}",
-        url::form_urlencoded::byte_serialize(refresh_token.as_bytes()).collect::<String>()
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        url::form_urlencoded::byte_serialize(refresh_token.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect::<String>(),
     );
-    if !client_id.is_empty() {
-        body.push_str("&client_id=");
+    if !req_scope.is_empty() {
+        body.push_str("&scope=");
         body.push_str(
-            &url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect::<String>(),
+            &url::form_urlencoded::byte_serialize(req_scope.as_bytes()).collect::<String>(),
         );
     }
 
@@ -173,11 +186,14 @@ async fn do_refresh(refresh_token: String, client_id: String) {
             access_expires: now_secs + expires_in.unwrap_or(3600),
             user_id: user_id.clone(),
             granted_scopes: granted_scopes.clone(),
+            // Backfill from the client_id this refresh used, so a blob that
+            // arrived without one self-heals instead of staying empty.
             client_id: state
                 .token_state
                 .as_ref()
                 .map(|ts| ts.current.client_id.clone())
-                .unwrap_or_default(),
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| client_id.clone()),
         };
 
         let previous = state.token_state.as_ref().map(|ts| ts.current.clone());

@@ -269,23 +269,15 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
         && let Some(opaque) = auth_val.strip_prefix("Bearer ")
         && crate::ui::token_filter::is_opaque(opaque)
     {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let real = with_state(|state| {
-            let ts = state.token_state.as_ref()?;
-            if opaque == ts.current.opaque_at {
-                return Some(ts.current.access_token.clone());
-            }
-            if let Some(ref prev) = ts.previous {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                if ts.previous_valid_until.is_none_or(|until| now <= until)
-                    && opaque == prev.opaque_at
-                {
-                    return Some(prev.access_token.clone());
-                }
-            }
-            None
+            state
+                .token_state
+                .as_ref()
+                .map(|ts| crate::ui::token_filter::resolve_opaque_access(ts, opaque, now))
         })
         .flatten();
         if let Some(real_token) = real {
@@ -383,22 +375,15 @@ fn proxy_rewrite_refresh_body(body: &str) -> String {
         return body.to_string();
     }
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let real_rt = with_state(|state| {
-        let ts = state.token_state.as_ref()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if rt_value == ts.current.opaque_rt {
-            return Some(ts.current.refresh_token.clone());
-        }
-        if let Some(ref prev) = ts.previous
-            && ts.previous_valid_until.is_none_or(|until| now <= until)
-            && rt_value == prev.opaque_rt
-        {
-            return Some(prev.refresh_token.clone());
-        }
-        None
+        state
+            .token_state
+            .as_ref()
+            .map(|ts| crate::ui::token_filter::resolve_opaque_refresh(ts, rt_value, now))
     })
     .flatten();
 

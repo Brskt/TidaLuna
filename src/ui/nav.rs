@@ -5,7 +5,10 @@ pub(crate) const HOST_LOGIN: &str = "login.tidal.com";
 pub(crate) const HOST_AUTH: &str = "auth.tidal.com";
 pub(crate) const HOST_API: &str = "api.tidal.com";
 pub(crate) const REDIRECT_URI: &str = "tidal://login/auth";
-pub(crate) const PATH_OAUTH_TOKEN: &str = "/oauth2/token";
+/// TIDAL's OAuth token endpoint, under the `/v1/` API prefix. The version-less
+/// `/oauth2/token` path answers 403 to a POST; only `/v1/oauth2/token` is the
+/// real grant endpoint (the SDK's own login/refresh use it too).
+pub(crate) const PATH_OAUTH_TOKEN: &str = "/v1/oauth2/token";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageKind {
@@ -107,7 +110,10 @@ pub(crate) fn is_token_endpoint(url: &str) -> bool {
         return false;
     };
     let host = parsed.host_str().unwrap_or("");
-    (host == HOST_AUTH || host == HOST_LOGIN) && parsed.path().contains(PATH_OAUTH_TOKEN)
+    // Broad substring, decoupled from PATH_OAUTH_TOKEN's exact value: this must
+    // catch whatever the SDK posts (any API-version prefix), while do_refresh
+    // posts to the precise PATH_OAUTH_TOKEN.
+    (host == HOST_AUTH || host == HOST_LOGIN) && parsed.path().contains("oauth2/token")
 }
 
 /// TIDAL API hosts that receive the injected OAuth bearer. Single source of truth for
