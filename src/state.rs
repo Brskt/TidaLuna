@@ -167,18 +167,22 @@ pub(crate) fn boot_settings() -> &'static crate::settings::BootSettings {
 
 pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = LazyLock::new(|| {
     let dir = cache_data_dir();
-    match crate::player::cache::AudioCache::open(&dir) {
+    let cache = match crate::player::cache::AudioCache::open(&dir) {
         Ok(cache) => {
             crate::vprintln!("[CACHE]  Opened ({})", dir.join("cache").display());
-            Mutex::new(cache)
+            cache
         }
         Err(e) => {
             eprintln!("[CACHE]  Failed to open: {e}");
-            // Fallback: in-memory-only cache (no persistence)
-            Mutex::new(
-                crate::player::cache::AudioCache::open(&std::env::temp_dir().join("tidalunar"))
-                    .expect("fallback cache init failed"),
-            )
+            // Fallback: a session cache in the OS temp dir.
+            let tmp = std::env::temp_dir().join("tidalunar");
+            crate::player::cache::AudioCache::open(&tmp).unwrap_or_else(|e| {
+                // Never panic here: a panicking init poisons the LazyLock for
+                // the process lifetime, so every later touch would panic too.
+                eprintln!("[CACHE]  Fallback failed, cache disabled: {e}");
+                crate::player::cache::AudioCache::disabled(&dir)
+            })
         }
-    }
+    };
+    Mutex::new(cache)
 });

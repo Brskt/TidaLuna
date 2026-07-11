@@ -255,8 +255,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let _guard = rt.enter();
+        // GOVERNOR's init calls tokio::spawn, which needs the runtime entered.
         let _ = &*crate::state::GOVERNOR;
-        let _ = &*crate::state::AUDIO_CACHE;
+    }
+
+    // Warm the audio cache in parallel with the rest of boot: eager init here
+    // delayed first paint, and fully lazy would bill the SQLite open to the
+    // first track load or menu open. A racing first use just blocks on the
+    // LazyLock until the open finishes.
+    if let Err(e) = std::thread::Builder::new()
+        .name("cache-warm".into())
+        .spawn(|| {
+            let _ = &*crate::state::AUDIO_CACHE;
+        })
+    {
+        crate::vprintln!("[CACHE]  Warm thread spawn failed ({e})");
     }
 
     let data_dir = state::cache_data_dir();

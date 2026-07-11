@@ -45,7 +45,9 @@ fn shard_prefix(hash: &str) -> &str {
 }
 
 pub struct AudioCache {
-    conn: Connection,
+    /// `None`: disabled mode (no openable index location); lookups miss and
+    /// stores are dropped.
+    conn: Option<Connection>,
     audio_dir: PathBuf,
     max_bytes: u64,
     /// Bumped on every `clear()`. A store thread that began its unlocked
@@ -85,11 +87,23 @@ impl AudioCache {
         )?;
 
         Ok(Self {
-            conn,
+            conn: Some(conn),
             audio_dir,
             max_bytes,
             generation: 0,
         })
+    }
+
+    /// A cache with no backing index, for when no location can host
+    /// `index.db`: every lookup misses and stores are dropped. Infallible so
+    /// the AUDIO_CACHE LazyLock init can never panic (and thus never poison).
+    pub fn disabled(data_dir: &Path) -> Self {
+        Self {
+            conn: None,
+            audio_dir: data_dir.join("cache").join("audio"),
+            max_bytes: DEFAULT_MAX_BYTES,
+            generation: 0,
+        }
     }
 
     /// On-disk path for a track. Depends only on the (fixed) audio dir, so the
@@ -104,8 +118,8 @@ impl AudioCache {
     /// Check if a track exists in the index and return its file path.
     /// Does NOT read from disk - suitable for use under a short lock.
     pub fn lookup_path(&self, track_id: &str) -> Option<PathBuf> {
-        let exists: bool = self
-            .conn
+        let conn = self.conn.as_ref()?;
+        let exists: bool = conn
             .query_row(
                 "SELECT 1 FROM audio_cache WHERE track_id = ?1",
                 params![track_id],
@@ -121,7 +135,8 @@ impl AudioCache {
 
     /// Remove an orphaned index entry (file missing from disk).
     pub fn remove_index_entry(&self, track_id: &str) {
-        let _ = self.conn.execute(
+        let Some(conn) = &self.conn else { return };
+        let _ = conn.execute(
             "DELETE FROM audio_cache WHERE track_id = ?1",
             params![track_id],
         );
@@ -129,8 +144,9 @@ impl AudioCache {
 
     /// Update access metadata after a successful cache read.
     pub fn touch(&self, track_id: &str) {
-        let stamp = next_access_stamp(&self.conn, now_epoch());
-        let _ = self.conn.execute(
+        let Some(conn) = &self.conn else { return };
+        let stamp = next_access_stamp(conn, now_epoch());
+        let _ = conn.execute(
             "UPDATE audio_cache SET last_access = ?1, access_count = access_count + 1 WHERE track_id = ?2",
             params![stamp, track_id],
         );
@@ -157,9 +173,12 @@ impl AudioCache {
     /// over capacity. Short critical section: index insert + eviction only, no
     /// large I/O. Pair with [`write_file`](Self::write_file).
     pub fn record(&mut self, track_id: &str, format: &str, file_size: u64) -> anyhow::Result<()> {
+        let Some(conn) = &self.conn else {
+            return Ok(());
+        };
         let now = now_epoch();
-        let stamp = next_access_stamp(&self.conn, now);
-        self.conn.execute(
+        let stamp = next_access_stamp(conn, now);
+        conn.execute(
             "INSERT OR REPLACE INTO audio_cache (track_id, format, file_size, created_at, last_access, access_count)
              VALUES (?1, ?2, ?3, ?4, ?5, 1)",
             params![track_id, format, file_size as i64, now, stamp],
@@ -180,7 +199,8 @@ impl AudioCache {
     /// Like [`record`](Self::record), but a no-op if the cache was cleared
     /// (generation changed) since `expected_gen` was snapshotted. In that case
     /// the just-written file is removed so a clear can't leave an orphan.
-    /// Returns `Ok(true)` if recorded, `Ok(false)` if skipped due to a clear.
+    /// Returns `Ok(true)` if recorded, `Ok(false)` if skipped due to a clear
+    /// or a disabled cache.
     pub fn record_if_current(
         &mut self,
         track_id: &str,
@@ -188,7 +208,7 @@ impl AudioCache {
         file_size: u64,
         expected_gen: u64,
     ) -> anyhow::Result<bool> {
-        if self.generation != expected_gen {
+        if self.conn.is_none() || self.generation != expected_gen {
             let _ = fs::remove_file(self.file_path(track_id));
             return Ok(false);
         }
@@ -197,18 +217,23 @@ impl AudioCache {
     }
 
     pub fn clear(&mut self) -> anyhow::Result<()> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM audio_cache", [], |row| row.get(0))
-            .unwrap_or(0);
-        let total = self.total_size();
+        let (count, total): (i64, u64) = match &self.conn {
+            Some(conn) => (
+                conn.query_row("SELECT COUNT(*) FROM audio_cache", [], |row| row.get(0))
+                    .unwrap_or(0),
+                self.total_size(),
+            ),
+            None => (0, 0),
+        };
 
         if self.audio_dir.exists() {
             fs::remove_dir_all(&self.audio_dir).ok();
             fs::create_dir_all(&self.audio_dir).ok();
         }
 
-        self.conn.execute("DELETE FROM audio_cache", [])?;
+        if let Some(conn) = &self.conn {
+            conn.execute("DELETE FROM audio_cache", [])?;
+        }
         // Invalidate any store that began its unlocked write before this clear.
         self.generation = self.generation.wrapping_add(1);
 
@@ -221,13 +246,13 @@ impl AudioCache {
     }
 
     pub fn total_size(&self) -> u64 {
-        self.conn
-            .query_row(
-                "SELECT COALESCE(SUM(file_size), 0) FROM audio_cache",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0) as u64
+        let Some(conn) = &self.conn else { return 0 };
+        conn.query_row(
+            "SELECT COALESCE(SUM(file_size), 0) FROM audio_cache",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as u64
     }
 
     /// Evict LRU entries until total_size < max_bytes * EVICTION_FACTOR.
@@ -240,9 +265,11 @@ impl AudioCache {
         let target = (self.max_bytes as f64 * EVICTION_FACTOR) as u64;
         let mut current = total;
 
-        let mut stmt = self
-            .conn
-            .prepare("SELECT track_id, file_size FROM audio_cache ORDER BY last_access ASC")?;
+        let Some(conn) = &self.conn else {
+            return Ok(());
+        };
+        let mut stmt =
+            conn.prepare("SELECT track_id, file_size FROM audio_cache ORDER BY last_access ASC")?;
 
         let entries: Vec<(String, i64)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -258,7 +285,7 @@ impl AudioCache {
             if let Err(e) = fs::remove_file(&path) {
                 crate::vprintln!("[CACHE]  Failed to evict {}: {e}", evict_id);
             }
-            self.conn.execute(
+            conn.execute(
                 "DELETE FROM audio_cache WHERE track_id = ?1",
                 params![evict_id],
             )?;
@@ -311,5 +338,34 @@ mod tests {
     fn access_stamp_on_empty_table_uses_now() {
         let conn = test_conn();
         assert_eq!(next_access_stamp(&conn, 100), 100);
+    }
+
+    #[test]
+    fn disabled_cache_misses_and_noops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = AudioCache::disabled(tmp.path());
+        assert_eq!(cache.lookup_path("track"), None);
+        assert_eq!(cache.total_size(), 0);
+        cache.touch("track");
+        cache.remove_index_entry("track");
+        assert!(cache.record("track", "flac", 10).is_ok());
+        assert_eq!(cache.lookup_path("track"), None);
+        assert!(cache.clear().is_ok());
+    }
+
+    #[test]
+    fn disabled_record_if_current_drops_the_written_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = AudioCache::disabled(tmp.path());
+        let path = cache.file_path("track");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"pcm").unwrap();
+        let cur_gen = cache.generation();
+        assert!(
+            !cache
+                .record_if_current("track", "flac", 3, cur_gen)
+                .unwrap()
+        );
+        assert!(!path.exists());
     }
 }
