@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 const ICON_DATA: &[u8] = include_bytes!("../../tidaluna.png");
 pub(crate) const WM_CLASS: &str = "tidalunar";
 
+/// Browser process only: CEF subprocesses re-enter `main()`.
 pub(crate) fn install() {
     // A managed install (Nix, etc.) ships its own entry; a user-level one would
     // shadow it, bypass the launch wrapper, and go stale after an upgrade.

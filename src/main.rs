@@ -149,7 +149,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         ensure_x11_env();
         reexec_for_x11_if_needed();
-        platform::desktop_entry::install();
     }
 
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
@@ -236,6 +235,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(lock) => lock,
         None => return Ok(()),
     };
+
+    // Past the subprocess early-exit and the instance lock: only the surviving
+    // browser process may touch the desktop entry.
+    #[cfg(target_os = "linux")]
+    platform::desktop_entry::install();
 
     // Open the sink early (and rotate last session's log) so early lines are
     // captured; safe before DB init since cache_data_dir() is env-only.
