@@ -717,8 +717,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         // Emit time update
         if let Some(target) = self.seek_target {
-            (self.callback)(PlayerEvent::TimeUpdate(target, self.current_seq));
+            // Re-entered every poll tick with a frozen target the flush dedupes.
+            if self.last_seek_emit != Some(target) {
+                self.last_seek_emit = Some(target);
+                (self.callback)(PlayerEvent::TimeUpdate(target, self.current_seq));
+            }
         } else {
+            self.last_seek_emit = None;
             let pos_secs = self.played_position_secs();
             let pos_secs = if self.current_duration > 0.0 {
                 pos_secs.min(self.current_duration)

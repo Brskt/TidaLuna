@@ -216,6 +216,7 @@ pub(super) struct PlayerThread<F> {
     // Seek state
     seeking: bool,
     seek_target: Option<f64>,
+    last_seek_emit: Option<f64>,
     seek_wall_start: Option<std::time::Instant>,
     cpal_muted: Option<Arc<AtomicBool>>,
     cpal_mute_ack: Option<Arc<AtomicBool>>,
@@ -343,6 +344,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pending_unmute: false,
             seeking: false,
             seek_target: None,
+            last_seek_emit: None,
             seek_wall_start: None,
             cpal_muted: None,
             cpal_mute_ack: None,
