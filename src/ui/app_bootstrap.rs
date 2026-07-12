@@ -252,6 +252,18 @@ wrap_app! {
                 cmd.append_switch_with_value(Some(&name), Some(&value));
             }
 
+            // Linux: force the X11 ozone backend (XWayland under Wayland): the
+            // WM decorates the window, which works on GNOME Mutter where
+            // Wayland server-side decorations do not.
+            #[cfg(target_os = "linux")]
+            {
+                let name = CefString::from("ozone-platform");
+                if cmd.has_switch(Some(&name)) != 1 {
+                    let value = CefString::from("x11");
+                    cmd.append_switch_with_value(Some(&name), Some(&value));
+                }
+            }
+
             crate::vprintln!("[CEF]    Command line switches applied");
         }
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {

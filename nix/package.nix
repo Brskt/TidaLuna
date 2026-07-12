@@ -112,7 +112,7 @@ stdenv.mkDerivation {
   dontBuild = true;
 
   # Keep `tidalunar` next to `bin/cef/` so its $ORIGIN/bin/cef RPATH resolves
-  # libcef.so, and so the current_exe() X11 re-exec lands beside the CEF runtime.
+  # libcef.so.
   installPhase = ''
     runHook preInstall
 

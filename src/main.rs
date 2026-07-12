@@ -40,33 +40,6 @@ fn ensure_x11_env() {
     }
 }
 
-/// Re-exec the browser with `--ozone-platform=x11` prepended so Chromium uses
-/// the X11 backend (served by XWayland on a Wayland session). Chromium reads
-/// this switch from argv very early, before `OnBeforeCommandLineProcessing`,
-/// so appending it there is ignored. The X11 window is decorated by the
-/// window manager, which works on GNOME Mutter where Wayland SSD does not.
-#[cfg(target_os = "linux")]
-fn reexec_for_x11_if_needed() {
-    if std::env::args().any(|a| a.starts_with("--ozone-platform")) {
-        return;
-    }
-    if std::env::args().any(|a| a.starts_with("--type=")) {
-        return;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("--ozone-platform=x11");
-    cmd.args(std::env::args_os().skip(1));
-    let err = std::os::unix::process::CommandExt::exec(&mut cmd);
-    eprintln!(
-        "Failed to re-exec {} with X11 ozone switch: {err}",
-        exe.display()
-    );
-    std::process::exit(1);
-}
-
 #[cfg(target_os = "windows")]
 fn attach_or_alloc_console() {
     use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole};
@@ -146,10 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(target_os = "linux")]
-    {
-        ensure_x11_env();
-        reexec_for_x11_if_needed();
-    }
+    ensure_x11_env();
 
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
