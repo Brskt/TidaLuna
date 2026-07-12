@@ -2,6 +2,7 @@ use cef::*;
 use std::sync::Arc;
 
 use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
+use crate::ui::nav::RequestUrl;
 use crate::ui::token_filter::userfree_to_string;
 
 // TIDAL delivers its CSP as a <meta http-equiv> tag, not a header. Renaming the
@@ -27,10 +28,12 @@ wrap_request_context_handler! {
         ) -> Option<ResourceRequestHandler> {
             // The SW precache fetch is browser-less (is_navigation=0) and reaches
             // only the context handler. Scope to HTML docs so assets keep gzip.
-            let url = request
-                .as_ref()
-                .map(|r| userfree_to_string(&r.url()))
-                .unwrap_or_default();
+            let url = RequestUrl::new(
+                request
+                    .as_ref()
+                    .map(|r| userfree_to_string(&r.url()))
+                    .unwrap_or_default(),
+            );
             if is_document_url(&url) {
                 return Some(DocumentHandler::new());
             }
@@ -41,7 +44,9 @@ wrap_request_context_handler! {
             }
             // Store fetches routed through the service worker reach only this context
             // handler; serve `store.json` via reqwest (Chromium rejects the CDN redirect).
-            if let Some(h) = crate::ui::store_proxy::intercept(&url, is_navigation, is_download) {
+            if let Some(h) =
+                crate::ui::store_proxy::intercept(url.as_str(), is_navigation, is_download)
+            {
                 return Some(h);
             }
             None
@@ -97,8 +102,8 @@ wrap_resource_request_handler! {
 
 // Only the shell HTML (root nav or *.html on the app host) is stripped; assets
 // stay untouched so they keep compression.
-pub(crate) fn is_document_url(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
+pub(crate) fn is_document_url(url: &RequestUrl) -> bool {
+    let Some(parsed) = url.parsed() else {
         return false;
     };
     if parsed.host_str() != Some(crate::ui::nav::HOST_DESKTOP) {
@@ -125,19 +130,22 @@ mod tests {
 
     #[test]
     fn document_url_matches_shell_only() {
-        assert!(is_document_url("https://desktop.tidal.com/"));
-        assert!(is_document_url("https://desktop.tidal.com/index.html"));
-        assert!(is_document_url(
+        let u = |s: &str| crate::ui::nav::RequestUrl::new(s.to_string());
+        assert!(is_document_url(&u("https://desktop.tidal.com/")));
+        assert!(is_document_url(&u("https://desktop.tidal.com/index.html")));
+        assert!(is_document_url(&u(
             "https://desktop.tidal.com/lastfmcallback.html"
-        ));
-        assert!(!is_document_url(
+        )));
+        assert!(!is_document_url(&u(
             "https://desktop.tidal.com/assets/index-abc.js"
-        ));
-        assert!(!is_document_url("https://desktop.tidal.com/assets/x.css"));
-        assert!(!is_document_url(
+        )));
+        assert!(!is_document_url(&u(
+            "https://desktop.tidal.com/assets/x.css"
+        )));
+        assert!(!is_document_url(&u(
             "https://resources.tidal.com/images/x/80x80.jpg"
-        ));
-        assert!(!is_document_url("https://api.tidal.com/v1/tracks/1"));
+        )));
+        assert!(!is_document_url(&u("https://api.tidal.com/v1/tracks/1")));
     }
 
     #[test]

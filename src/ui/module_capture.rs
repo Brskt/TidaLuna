@@ -15,12 +15,13 @@ use oxc::ast::ast::*;
 
 use crate::plugins::transpile::module_export_name;
 use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
+use crate::ui::nav::RequestUrl;
 use crate::ui::token_filter::userfree_to_string;
 
 /// Map a TIDAL asset URL to the module id plugins import, or `None` if the chunk
 /// is not one we capture. Order matters: `react-dom-` before bare `react-`.
-pub(crate) fn target_module_id(url: &str) -> Option<&'static str> {
-    let parsed = url::Url::parse(url).ok()?;
+pub(crate) fn target_module_id(url: &RequestUrl) -> Option<&'static str> {
+    let parsed = url.parsed()?;
     if parsed.host_str() != Some(crate::ui::nav::HOST_DESKTOP) {
         return None;
     }
@@ -174,10 +175,12 @@ wrap_resource_request_handler! {
             if !mime.contains("javascript") {
                 return None;
             }
-            let url = request
-                .as_ref()
-                .map(|r| userfree_to_string(&r.url()))
-                .unwrap_or_default();
+            let url = RequestUrl::new(
+                request
+                    .as_ref()
+                    .map(|r| userfree_to_string(&r.url()))
+                    .unwrap_or_default(),
+            );
             let module_id = target_module_id(&url)?.to_string();
             Some(new_buffering_filter(
                 128 * 1024,
@@ -198,29 +201,33 @@ mod tests {
 
     #[test]
     fn classifies_react_family_chunks() {
+        let u = |s: &str| RequestUrl::new(s.to_string());
         assert_eq!(
-            target_module_id("https://desktop.tidal.com/assets/react-Cif6l2Tn.js"),
+            target_module_id(&u("https://desktop.tidal.com/assets/react-Cif6l2Tn.js")),
             Some("react")
         );
         assert_eq!(
-            target_module_id("https://desktop.tidal.com/assets/jsx-runtime-abc123.js"),
+            target_module_id(&u("https://desktop.tidal.com/assets/jsx-runtime-abc123.js")),
             Some("react/jsx-runtime")
         );
         assert_eq!(
-            target_module_id("https://desktop.tidal.com/assets/react-dom-CARA-N2H.js"),
+            target_module_id(&u("https://desktop.tidal.com/assets/react-dom-CARA-N2H.js")),
             Some("react-dom/client")
         );
         assert_eq!(
-            target_module_id("https://desktop.tidal.com/assets/index-CvAR5jQO.js"),
+            target_module_id(&u("https://desktop.tidal.com/assets/index-CvAR5jQO.js")),
             None
         );
         assert_eq!(
-            target_module_id("https://desktop.tidal.com/assets/polyfills-x.js"),
+            target_module_id(&u("https://desktop.tidal.com/assets/polyfills-x.js")),
             None
         );
-        assert_eq!(target_module_id("https://resources.tidal.com/x.js"), None);
         assert_eq!(
-            target_module_id("https://desktop.tidal.com/assets/x.css"),
+            target_module_id(&u("https://resources.tidal.com/x.js")),
+            None
+        );
+        assert_eq!(
+            target_module_id(&u("https://desktop.tidal.com/assets/x.css")),
             None
         );
     }

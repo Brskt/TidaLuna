@@ -1,7 +1,9 @@
 use cef::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
+use crate::ui::nav::RequestUrl;
 
 /// Convert a CefStringUserfree to String without the crate's eprintln on null.
 pub(crate) fn userfree_to_string(userfree: &CefStringUserfreeUtf16) -> String {
@@ -16,8 +18,8 @@ const OPAQUE_PREFIX: &str = "luna_";
 
 /// Hosts where a missing Authorization header should be auto-filled with the bearer token.
 /// Subset of should_rewrite_token - excludes telemetry/DRM hosts that don't need OAuth.
-pub(crate) fn needs_auto_injection(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
+pub(crate) fn needs_auto_injection(url: &RequestUrl) -> bool {
+    let Some(parsed) = url.parsed() else {
         return false;
     };
     if parsed.scheme() != "https" {
@@ -27,8 +29,8 @@ pub(crate) fn needs_auto_injection(url: &str) -> bool {
     crate::ui::nav::is_tidal_api_host(parsed.host_str().unwrap_or(""))
 }
 
-pub(crate) fn should_rewrite_token(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
+pub(crate) fn should_rewrite_token(url: &RequestUrl) -> bool {
+    let Some(parsed) = url.parsed() else {
         return false;
     };
     if parsed.scheme() != "https" {
@@ -98,6 +100,9 @@ wrap_resource_request_handler! {
         // (the SDK binds each token to its context's client_id). Arc so the
         // macro's per-field Clone shares one slot across both callbacks.
         exchange_client_id: Arc<Mutex<Option<String>>>,
+        // Current hop targets the token endpoint; set per on_before_resource_load
+        // entry so a redirect hop re-evaluates it, read at response-filter time.
+        token_exchange: Arc<AtomicBool>,
     }
 
     impl ResourceRequestHandler {
@@ -110,12 +115,14 @@ wrap_resource_request_handler! {
         ) -> ReturnValue {
             if let Some(req) = request {
                 let url_cef = req.url();
-                let url = userfree_to_string(&url_cef);
+                let url = RequestUrl::new(userfree_to_string(&url_cef));
+                let token_endpoint = crate::ui::nav::is_token_endpoint(&url);
+                self.token_exchange.store(token_endpoint, Ordering::Release);
                 if url.is_empty() {
                     return ReturnValue::CONTINUE;
                 }
 
-                if crate::ui::nav::is_token_endpoint(&url) {
+                if token_endpoint {
                     let accept_name = CefString::from("Accept-Encoding");
                     let accept_val = CefString::from("identity");
                     req.set_header_by_name(Some(&accept_name), Some(&accept_val), 1);
@@ -134,12 +141,10 @@ wrap_resource_request_handler! {
             &self,
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
-            request: Option<&mut Request>,
+            _request: Option<&mut Request>,
             _response: Option<&mut Response>,
         ) -> Option<ResponseFilter> {
-            let url_cef = request?.url();
-            let url = userfree_to_string(&url_cef);
-            if crate::ui::nav::is_token_endpoint(&url) {
+            if self.token_exchange.load(Ordering::Acquire) {
                 let exchange_cid = self
                     .exchange_client_id
                     .lock()
@@ -288,7 +293,7 @@ fn rewrite_authorization_header(req: &mut Request) {
     }
 }
 
-fn inject_refresh_token(req: &mut Request, url: &str) {
+fn inject_refresh_token(req: &mut Request, url: &RequestUrl) {
     if !crate::ui::nav::is_token_endpoint(url) {
         return;
     }
@@ -568,6 +573,7 @@ mod tests {
 
     #[test]
     fn auto_injection_and_rewrite_share_the_api_host_set() {
+        let u = |s: &str| RequestUrl::new(s.to_string());
         // The 5 API hosts must be recognised by both predicates (they delegate to
         // nav::is_tidal_api_host - pins the consolidation against drift).
         for url in [
@@ -577,15 +583,19 @@ mod tests {
             "https://desktop.tidal.com/x",
             "https://openapi.tidal.com/x",
         ] {
-            assert!(needs_auto_injection(url), "auto-inject: {url}");
-            assert!(should_rewrite_token(url), "rewrite: {url}");
+            assert!(needs_auto_injection(&u(url)), "auto-inject: {url}");
+            assert!(should_rewrite_token(&u(url)), "rewrite: {url}");
         }
         // auth/login are rewrite-only (not auto-injected).
-        assert!(should_rewrite_token("https://auth.tidal.com/oauth2/token"));
-        assert!(!needs_auto_injection("https://auth.tidal.com/oauth2/token"));
+        assert!(should_rewrite_token(&u(
+            "https://auth.tidal.com/oauth2/token"
+        )));
+        assert!(!needs_auto_injection(&u(
+            "https://auth.tidal.com/oauth2/token"
+        )));
         // http scheme is rejected by both.
-        assert!(!needs_auto_injection("http://api.tidal.com/x"));
-        assert!(!should_rewrite_token("http://api.tidal.com/x"));
+        assert!(!needs_auto_injection(&u("http://api.tidal.com/x")));
+        assert!(!should_rewrite_token(&u("http://api.tidal.com/x")));
     }
 
     #[test]

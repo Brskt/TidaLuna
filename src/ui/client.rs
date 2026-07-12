@@ -712,13 +712,15 @@ wrap_request_handler! {
             _request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
-            let url = _request
-                .as_ref()
-                .map(|r| {
-                    let u = r.url();
-                    crate::ui::token_filter::userfree_to_string(&u)
-                })
-                .unwrap_or_default();
+            let url = crate::ui::nav::RequestUrl::new(
+                _request
+                    .as_ref()
+                    .map(|r| {
+                        let u = r.url();
+                        crate::ui::token_filter::userfree_to_string(&u)
+                    })
+                    .unwrap_or_default(),
+            );
 
             // Strip the CSP meta on the doc navigation (first load, no SW yet);
             // the browser handler wins over the context one, so peel it off here.
@@ -735,7 +737,9 @@ wrap_request_handler! {
 
             // GitHub plugin-store fetches: Chromium rejects the signed release-asset CDN
             // redirect, so serve them via reqwest. Mirrored in the context handler (SW path).
-            if let Some(h) = crate::ui::store_proxy::intercept(&url, is_navigation, is_download) {
+            if let Some(h) =
+                crate::ui::store_proxy::intercept(url.as_str(), is_navigation, is_download)
+            {
                 return Some(h);
             }
 
@@ -744,6 +748,7 @@ wrap_request_handler! {
             {
                 Some(crate::ui::token_filter::TokenResourceHandler::new(
                     std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 ))
             } else if !crate::ui::nav::is_tidal_origin(&url) {
                 // Exfiltration guard: block sendBeacon to non-Tidal domains.
@@ -753,7 +758,7 @@ wrap_request_handler! {
                 {
                     crate::vprintln!(
                         "[EXFIL]  BLOCKED sendBeacon to {}",
-                        crate::util::truncate_str(&url, 80)
+                        crate::util::truncate_str(url.as_str(), 80)
                     );
                     return Some(crate::ui::token_filter::ExfilBlockHandler::new());
                 }

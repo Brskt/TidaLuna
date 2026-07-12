@@ -103,12 +103,16 @@ pub(super) fn leaks_real_token(url: &str, payload: Option<&str>) -> bool {
 
 /// Restrict proxy channels to Tidal domains only.
 /// Returns true (and sends an IPC error) if the URL is rejected.
-fn reject_non_tidal(url: &str, channel: &str, callback: &IpcCallback) -> bool {
+fn reject_non_tidal(
+    url: &crate::ui::nav::RequestUrl,
+    channel: &str,
+    callback: &IpcCallback,
+) -> bool {
     if !crate::ui::nav::is_tidal_origin(url) && !crate::ui::nav::is_token_endpoint(url) {
         crate::vprintln!(
             "[PROXY]  REJECTED {} to non-Tidal URL: {}",
             channel,
-            crate::util::truncate_str(&crate::util::redact_url_query(url), 80)
+            crate::util::truncate_str(&crate::util::redact_url_query(url.as_str()), 80)
         );
         ipc_callback_err(callback, 403, &format!("{channel}: non-Tidal URL rejected"));
         return true;
@@ -117,12 +121,13 @@ fn reject_non_tidal(url: &str, channel: &str, callback: &IpcCallback) -> bool {
 }
 
 pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let url = crate::ui::nav::RequestUrl::new(
+        msg.args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    );
     let opts_json = msg
         .args
         .get(1)
@@ -144,12 +149,13 @@ pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallbac
 }
 
 pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, callback: IpcCallback) {
-    let url = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let url = crate::ui::nav::RequestUrl::new(
+        msg.args
+            .first()
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    );
     let id = msg.id.clone().unwrap_or_default();
 
     if reject_non_tidal(&url, "proxy.head", &callback) {
@@ -164,9 +170,9 @@ pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, callback: IpcCallback
     });
 }
 
-async fn handle_proxy_head(id: String, url: String) {
+async fn handle_proxy_head(id: String, url: crate::ui::nav::RequestUrl) {
     let client = &*crate::state::HTTP_CLIENT;
-    let result = client.head(&url).send().await;
+    let result = client.head(url.as_str()).send().await;
 
     let Some(callback) = take_ipc_callback(&id) else {
         return;
@@ -187,7 +193,7 @@ async fn handle_proxy_head(id: String, url: String) {
     }
 }
 
-async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
+async fn handle_proxy_fetch(id: String, url: crate::ui::nav::RequestUrl, opts_json: String) {
     let client = &*crate::state::HTTP_CLIENT;
 
     let opts: serde_json::Map<String, serde_json::Value> = if !opts_json.is_empty() {
@@ -199,12 +205,12 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
     let method = opts.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
 
     let mut req = match method {
-        "POST" => client.post(&url),
-        "PUT" => client.put(&url),
-        "PATCH" => client.patch(&url),
-        "DELETE" => client.delete(&url),
-        "HEAD" => client.head(&url),
-        _ => client.get(&url),
+        "POST" => client.post(url.as_str()),
+        "PUT" => client.put(url.as_str()),
+        "PATCH" => client.patch(url.as_str()),
+        "DELETE" => client.delete(url.as_str()),
+        "HEAD" => client.head(url.as_str()),
+        _ => client.get(url.as_str()),
     };
 
     let rewrite_auth = crate::ui::token_filter::should_rewrite_token(&url);
@@ -256,7 +262,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
             req = req.header("Authorization", format!("Bearer {token}"));
             crate::vprintln!(
                 "[PROXY]  Injected captured token for {}",
-                crate::util::truncate_str(&crate::util::redact_url_query(&url), 80)
+                crate::util::truncate_str(&crate::util::redact_url_query(url.as_str()), 80)
             );
         }
     } else if has_auth
@@ -311,7 +317,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                 crate::vprintln!(
                     "[PROXY]  Mirroring {} Set-Cookie header(s) for {}",
                     set_cookies.len(),
-                    crate::util::truncate_str(&url, 80)
+                    crate::util::truncate_str(url.as_str(), 80)
                 );
                 if let Some(cm) = cef::cookie_manager_get_global_manager(None) {
                     let cef_url = cef::CefString::from(url.as_str());
@@ -329,7 +335,7 @@ async fn handle_proxy_fetch(id: String, url: String, opts_json: String) {
                 crate::vprintln!(
                     "[PROXY]  {} {} auth={} body={}",
                     status,
-                    crate::util::truncate_str(&crate::util::redact_url_query(&url), 200),
+                    crate::util::truncate_str(&crate::util::redact_url_query(url.as_str()), 200),
                     has_auth,
                     crate::util::truncate_str(&body, 400)
                 );

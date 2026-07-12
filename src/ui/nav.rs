@@ -95,18 +95,46 @@ impl NavigationPolicy {
     }
 }
 
+/// A request URL materialized at a CEF or IPC boundary: parsed once, the raw
+/// string kept for the helpers whose contract survives an unparseable URL.
+pub(crate) struct RequestUrl {
+    raw: String,
+    parsed: Option<Url>,
+}
+
+impl RequestUrl {
+    pub(crate) fn new(raw: String) -> Self {
+        let parsed = Url::parse(&raw).ok();
+        Self { raw, parsed }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    pub(crate) fn parsed(&self) -> Option<&Url> {
+        self.parsed.as_ref()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+}
+
 /// Broad check: does the URL belong to a Tidal-owned domain?
 /// Used by the exfiltration guard to distinguish Tidal traffic from external.
-pub(crate) fn is_tidal_origin(url: &str) -> bool {
-    let Ok(parsed) = Url::parse(url) else {
-        return url.starts_with('/');
+pub(crate) fn is_tidal_origin(url: &RequestUrl) -> bool {
+    let Some(parsed) = url.parsed() else {
+        // Unparseable but relative stays same-origin: proxy.fetch callers pass
+        // bare paths. Anything else stays external.
+        return url.as_str().starts_with('/');
     };
     let host = parsed.host_str().unwrap_or("");
     host == "tidal.com" || host.ends_with(".tidal.com")
 }
 
-pub(crate) fn is_token_endpoint(url: &str) -> bool {
-    let Ok(parsed) = Url::parse(url) else {
+pub(crate) fn is_token_endpoint(url: &RequestUrl) -> bool {
+    let Some(parsed) = url.parsed() else {
         return false;
     };
     let host = parsed.host_str().unwrap_or("");
@@ -127,4 +155,42 @@ pub(crate) fn is_tidal_api_host(host: &str) -> bool {
             | "desktop.tidal.com"
             | "openapi.tidal.com"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn u(s: &str) -> RequestUrl {
+        RequestUrl::new(s.to_string())
+    }
+
+    #[test]
+    fn tidal_origin_matches_the_apex_and_subdomains() {
+        assert!(is_tidal_origin(&u("https://tidal.com/")));
+        assert!(is_tidal_origin(&u("https://listen.tidal.com/v1/x")));
+        assert!(!is_tidal_origin(&u("https://eviltidal.com/")));
+        assert!(!is_tidal_origin(&u("https://tidal.com.evil.io/")));
+    }
+
+    #[test]
+    fn tidal_origin_keeps_the_relative_path_fallback() {
+        assert!(is_tidal_origin(&u("/v1/tracks/1")));
+        assert!(!is_tidal_origin(&u("not a url")));
+    }
+
+    #[test]
+    fn token_endpoint_requires_auth_host_and_oauth_path() {
+        assert!(is_token_endpoint(&u(
+            "https://auth.tidal.com/v1/oauth2/token"
+        )));
+        assert!(is_token_endpoint(&u(
+            "https://login.tidal.com/oauth2/token"
+        )));
+        assert!(!is_token_endpoint(&u("https://auth.tidal.com/v1/other")));
+        assert!(!is_token_endpoint(&u(
+            "https://api.tidal.com/v1/oauth2/token"
+        )));
+        assert!(!is_token_endpoint(&u("not a url")));
+    }
 }
