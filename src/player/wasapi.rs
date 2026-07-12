@@ -734,11 +734,13 @@ fn convert_pcm_frame(
     dst_sample_type: &SampleType,
     _channels: u32,
     gain: f32,
-) -> Vec<u8> {
+    out: &mut Vec<u8>,
+) {
     let src_bytes_per_sample = (src_bps / 8) as usize;
     let dst_bytes_per_sample = (dst_store_bits / 8) as usize;
     let num_samples = src.len() / src_bytes_per_sample;
-    let mut out = Vec::with_capacity(num_samples * dst_bytes_per_sample);
+    out.clear();
+    out.reserve(num_samples * dst_bytes_per_sample);
 
     for i in 0..num_samples {
         let offset = i * src_bytes_per_sample;
@@ -818,8 +820,6 @@ fn convert_pcm_frame(
             },
         }
     }
-
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -913,6 +913,10 @@ struct RenderContext {
     // Frames of post-format-change resync silence the render loop still owes the
     // endpoint before real PCM, to mask the DAC PLL relock at the new rate.
     post_start_silence_remaining: u32,
+    // One period of zeros and a reused conversion/padding target, sized per
+    // format so the render loop never allocates.
+    silence_buf: Vec<u8>,
+    scratch: Vec<u8>,
 }
 
 impl RenderContext {
@@ -939,6 +943,8 @@ impl RenderContext {
             pending_start: false,
             client_started: false,
             post_start_silence_remaining: 0,
+            silence_buf: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 
@@ -1017,6 +1023,12 @@ impl RenderContext {
                 &self.audio_client,
                 event_tx,
             )?;
+
+            // Sized once per format so the per-period path never allocates.
+            let period_bytes =
+                bs as usize * (wf.get_bitspersample() as usize / 8) * channels as usize;
+            self.silence_buf = vec![0u8; period_bytes];
+            self.scratch = Vec::with_capacity(period_bytes);
 
             self.audio_client = Some(ac);
             self.render_client = Some(rc);
@@ -1350,8 +1362,11 @@ fn render_thread_inner(
                     // DAC PLL relocks at the new rate. Emits silence without consuming pcm_data,
                     // so the track head is delayed, not dropped.
                     if ctx.post_start_silence_remaining > 0 {
-                        let silence = vec![0u8; available * dst_bytes_per_frame];
-                        let _ = rc.write_to_device(available, &silence, None);
+                        let _ = rc.write_to_device(
+                            available,
+                            &ctx.silence_buf[..available * dst_bytes_per_frame],
+                            None,
+                        );
                         ctx.post_start_silence_remaining = ctx
                             .post_start_silence_remaining
                             .saturating_sub(available as u32);
@@ -1435,8 +1450,11 @@ fn render_thread_inner(
                         if remaining_frames == 0 && !ctx.stream_ended {
                             ctx.pending_start = true;
                         }
-                        let silence = vec![0u8; available * dst_bytes_per_frame];
-                        let _ = rc.write_to_device(available, &silence, None);
+                        let _ = rc.write_to_device(
+                            available,
+                            &ctx.silence_buf[..available * dst_bytes_per_frame],
+                            None,
+                        );
 
                         if buffering || !ctx.stream_ended {
                             continue;
@@ -1466,34 +1484,46 @@ fn render_thread_inner(
                     // the passthrough fast path stays bit-perfect.
                     let g = f32::from_bits(gain.load(Relaxed));
 
-                    let write_data: std::borrow::Cow<'_, [u8]> = if ctx.pcm_src_bps == dst_store
+                    let full_bytes = available * dst_bytes_per_frame;
+                    let passthrough = ctx.pcm_src_bps == dst_store
                         && matches!(dst_type, SampleType::Int)
-                        && g >= 1.0
-                    {
-                        std::borrow::Cow::Borrowed(src_chunk)
+                        && g >= 1.0;
+                    let write_slice: &[u8] = if passthrough && src_chunk.len() == full_bytes {
+                        src_chunk
                     } else {
-                        std::borrow::Cow::Owned(convert_pcm_frame(
-                            src_chunk,
-                            ctx.pcm_src_bps,
-                            dst_store,
-                            dst_valid,
-                            &dst_type,
-                            ctx.pcm_channels,
-                            g,
-                        ))
+                        if passthrough {
+                            ctx.scratch.clear();
+                            ctx.scratch.extend_from_slice(src_chunk);
+                        } else {
+                            convert_pcm_frame(
+                                src_chunk,
+                                ctx.pcm_src_bps,
+                                dst_store,
+                                dst_valid,
+                                &dst_type,
+                                ctx.pcm_channels,
+                                g,
+                                &mut ctx.scratch,
+                            );
+                        }
+                        // Exclusive event mode requires full-buffer packets: zero-pad
+                        // a short tail (track end) in place, else the write returns
+                        // AUDCLNT_E_BUFFER_SIZE_ERROR and drops the last frames.
+                        ctx.scratch.resize(full_bytes, 0);
+                        &ctx.scratch
                     };
 
                     if !diag_logged {
                         diag_logged = true;
                         let (mut mn, mut mx) = (i16::MAX, i16::MIN);
                         if dst_store == 16 {
-                            for s in write_data.chunks_exact(2) {
+                            for s in write_slice.chunks_exact(2) {
                                 let v = i16::from_le_bytes([s[0], s[1]]);
                                 mn = mn.min(v);
                                 mx = mx.max(v);
                             }
                         }
-                        let head: Vec<String> = write_data
+                        let head: Vec<String> = write_slice
                             .iter()
                             .take(8)
                             .map(|b| format!("{b:02x}"))
@@ -1509,19 +1539,7 @@ fn render_thread_inner(
                         );
                     }
 
-                    // Exclusive event mode requires full-buffer packets: pad a
-                    // short tail (track end) with silence, else the write returns
-                    // AUDCLNT_E_BUFFER_SIZE_ERROR and drops the last frames.
-                    let full_bytes = available * dst_bytes_per_frame;
-                    let write_buf: std::borrow::Cow<'_, [u8]> = if write_data.len() < full_bytes {
-                        let mut padded = vec![0u8; full_bytes];
-                        padded[..write_data.len()].copy_from_slice(&write_data);
-                        std::borrow::Cow::Owned(padded)
-                    } else {
-                        write_data
-                    };
-
-                    if let Err(e) = rc.write_to_device(available, &write_buf, None) {
+                    if let Err(e) = rc.write_to_device(available, write_slice, None) {
                         crate::vprintln!("[WASAPI] write error: {e}");
                     }
 
