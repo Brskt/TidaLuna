@@ -458,7 +458,7 @@ document.title = "TidaLunar - A TIDAL client";
 
             let config = MessageRouterConfig::default();
             let browser_router = BrowserSideRouter::new(config);
-            browser_router.add_handler(Arc::new(IpcQueryHandler), false);
+            browser_router.add_handler(Arc::new(IpcQueryHandler::default()), false);
 
             let life_span = TidalLifeSpanHandler::new(browser_router.clone());
             let load = TidalLoadHandler::new(init_script, bundle_script, Cell::new(PageState::Initial));

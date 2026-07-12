@@ -13,12 +13,25 @@ use std::sync::{Arc, Mutex};
 
 /// True unless the frame is `External` (untrusted origin). `cefQuery` reaches every
 /// frame, so privileged channels are gated here in Rust, not by JS wrapper isolation.
-fn frame_is_trusted(frame: &Option<Frame>) -> bool {
+fn frame_is_trusted(frame: &Option<Frame>, memo: &Mutex<Option<(String, bool)>>) -> bool {
     let Some(frame) = frame else {
         return false;
     };
     let url = crate::ui::token_filter::userfree_to_string(&frame.url());
-    !matches!(PageKind::classify(&url), PageKind::External)
+    trusted_via_memo(&mut memo.lock().unwrap_or_else(|e| e.into_inner()), url)
+}
+
+/// A hit requires the freshly fetched URL to match byte-for-byte, so
+/// interleaving frames can only thrash the memo, never get a stale verdict.
+fn trusted_via_memo(memo: &mut Option<(String, bool)>, url: String) -> bool {
+    if let Some((cached_url, verdict)) = memo.as_ref()
+        && *cached_url == url
+    {
+        return *verdict;
+    }
+    let verdict = !matches!(PageKind::classify(&url), PageKind::External);
+    *memo = Some((url, verdict));
+    verdict
 }
 
 /// Channels that mutate auth/session/plugin state or expose a host capability -
@@ -62,7 +75,12 @@ fn privileged_gate(privileged: bool, trusted: bool, has_id: bool) -> PrivilegedG
     }
 }
 
-pub(super) struct IpcQueryHandler;
+#[derive(Default)]
+pub(super) struct IpcQueryHandler {
+    // Mutex only because the shared handler's Sync bound demands it;
+    // on_query_str is UI-thread-only so the lock never contends.
+    frame_trust_memo: Mutex<Option<(String, bool)>>,
+}
 
 impl BrowserSideHandler for IpcQueryHandler {
     fn on_query_str(
@@ -79,7 +97,7 @@ impl BrowserSideHandler for IpcQueryHandler {
             // fire-and-forget with an ack (no consumer, but the cefQuery must resolve).
             match privileged_gate(
                 is_privileged_channel(&msg.channel),
-                frame_is_trusted(&frame),
+                frame_is_trusted(&frame, &self.frame_trust_memo),
                 msg.id.is_some(),
             ) {
                 PrivilegedGate::Refuse403 => {
@@ -878,7 +896,42 @@ wrap_display_handler! {
 
 #[cfg(test)]
 mod tests {
-    use super::{PrivilegedGate, is_privileged_channel, privileged_gate};
+    use super::{PrivilegedGate, is_privileged_channel, privileged_gate, trusted_via_memo};
+    use crate::ui::nav::PageKind;
+
+    #[test]
+    fn trust_memo_matches_direct_classification() {
+        let urls = [
+            "https://desktop.tidal.com/",
+            "https://desktop.tidal.com/login",
+            "https://desktop.tidal.com/login/auth",
+            "https://login.tidal.com/authorize",
+            "tidal://login/auth",
+            "https://evil.example.com/",
+            "not a url",
+        ];
+        let mut memo = None;
+        for url in urls {
+            let direct = !matches!(PageKind::classify(url), PageKind::External);
+            assert_eq!(
+                trusted_via_memo(&mut memo, url.to_string()),
+                direct,
+                "memoized verdict diverged for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_memo_hit_and_thrash_keep_the_verdict() {
+        let mut memo = None;
+        let trusted = "https://desktop.tidal.com/";
+        let external = "https://evil.example.com/";
+        assert!(trusted_via_memo(&mut memo, trusted.to_string()));
+        assert!(trusted_via_memo(&mut memo, trusted.to_string()));
+        assert!(!trusted_via_memo(&mut memo, external.to_string()));
+        assert!(trusted_via_memo(&mut memo, trusted.to_string()));
+        assert!(!trusted_via_memo(&mut memo, external.to_string()));
+    }
 
     #[test]
     fn privileged_untrusted_req_resp_is_refused() {
