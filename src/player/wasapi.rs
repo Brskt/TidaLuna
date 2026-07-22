@@ -487,54 +487,44 @@ impl Drop for ExclusiveHandle {
 // Format negotiation helpers
 // ---------------------------------------------------------------------------
 
-fn negotiate_format(sample_rate: u32, channels: u32, source_bps: u32) -> Vec<(WaveFormat, i64)> {
+fn negotiate_format(
+    sample_rate: u32,
+    channels: u32,
+    source_bps: u32,
+) -> Vec<(WaveFormat, i64, String)> {
     let sr = sample_rate as usize;
     let ch = channels as usize;
     let bps = source_bps as usize;
 
     let channel_mask = wasapi::make_channelmasks(ch).first().copied();
 
+    // Each candidate carries a "container/valid type" label so the negotiation
+    // logs identify exactly which shape a driver accepted or rejected.
     let mut candidates = Vec::new();
 
     // Priority 1: 32-bit container with source valid bits (integer)
-    candidates.push(WaveFormat::new(
-        32,
-        bps.min(32),
-        &SampleType::Int,
-        sr,
-        ch,
-        channel_mask,
+    candidates.push((
+        WaveFormat::new(32, bps.min(32), &SampleType::Int, sr, ch, channel_mask),
+        format!("32c/{}v Int", bps.min(32)),
     ));
     // Priority 2: 24-bit container with 24 valid bits
     if bps != 24 {
-        candidates.push(WaveFormat::new(
-            24,
-            24,
-            &SampleType::Int,
-            sr,
-            ch,
-            channel_mask,
+        candidates.push((
+            WaveFormat::new(24, 24, &SampleType::Int, sr, ch, channel_mask),
+            "24c/24v Int".to_string(),
         ));
     }
     // Priority 3: 16-bit container with 16 valid bits
     if bps != 16 {
-        candidates.push(WaveFormat::new(
-            16,
-            16,
-            &SampleType::Int,
-            sr,
-            ch,
-            channel_mask,
+        candidates.push((
+            WaveFormat::new(16, 16, &SampleType::Int, sr, ch, channel_mask),
+            "16c/16v Int".to_string(),
         ));
     }
     // Priority 4: 32-bit float
-    candidates.push(WaveFormat::new(
-        32,
-        32,
-        &SampleType::Float,
-        sr,
-        ch,
-        channel_mask,
+    candidates.push((
+        WaveFormat::new(32, 32, &SampleType::Float, sr, ch, channel_mask),
+        "32c/32v Float".to_string(),
     ));
 
     // 20ms exclusive period: the 10ms minimum leaves no scheduling slack (one
@@ -546,7 +536,10 @@ fn negotiate_format(sample_rate: u32, channels: u32, source_bps: u32) -> Vec<(Wa
         sr as i64,
     );
 
-    candidates.into_iter().map(|fmt| (fmt, period)).collect()
+    candidates
+        .into_iter()
+        .map(|(fmt, label)| (fmt, period, label))
+        .collect()
 }
 
 fn init_exclusive_client(device_id: &str) -> Result<(DeviceEnumerator, wasapi::Device), String> {
@@ -590,8 +583,15 @@ fn open_exclusive_stream(
     source_bps: u32,
 ) -> Result<(AudioClient, AudioRenderClient, Handle, WaveFormat, u32), String> {
     let candidates = negotiate_format(sample_rate, channels, source_bps);
+    crate::vprintln!(
+        "[WASAPI] Exclusive negotiate: {}Hz {}ch source {}bit, {} candidates",
+        sample_rate,
+        channels,
+        source_bps,
+        candidates.len()
+    );
 
-    for (wave_fmt, period) in &candidates {
+    for (wave_fmt, period, label) in &candidates {
         let mut audio_client = device
             .get_iaudioclient()
             .map_err(|e| format!("get_iaudioclient: {e}"))?;
@@ -613,7 +613,7 @@ fn open_exclusive_stream(
                     .map_err(|e| format!("render_client: {e}"))?;
 
                 crate::vprintln!(
-                    "[WASAPI] Exclusive stream opened: {}Hz {}ch {}bit, buffer={}frames",
+                    "[WASAPI] Exclusive stream opened ({label}): {}Hz {}ch {}bit, buffer={}frames",
                     sample_rate,
                     channels,
                     wave_fmt.get_validbitspersample(),
@@ -661,7 +661,7 @@ fn open_exclusive_stream(
                                 .map_err(|e| format!("render_client: {e}"))?;
 
                             crate::vprintln!(
-                                "[WASAPI] Exclusive stream opened (aligned): {}Hz {}ch {}bit, buffer={}frames",
+                                "[WASAPI] Exclusive stream opened (aligned, {label}): {}Hz {}ch {}bit, buffer={}frames",
                                 sample_rate,
                                 channels,
                                 wave_fmt.get_validbitspersample(),
@@ -694,7 +694,7 @@ fn open_exclusive_stream(
                     );
                     return Err(err_str);
                 }
-                crate::vprintln!("[WASAPI] Format rejected: {e}");
+                crate::vprintln!("[WASAPI] Format rejected ({label}): {e}");
                 continue;
             }
         }
