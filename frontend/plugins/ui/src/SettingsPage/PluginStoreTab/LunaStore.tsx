@@ -14,6 +14,44 @@ interface StorePackage extends PluginPackage {
 	plugins: string[];
 }
 
+// Cap the store fan-out: React mounts one self-fetching LunaStore per URL at once, so
+// without a cap every store fetches in one burst; 6 matches Chromium's per-host connection
+// cap (the default stores all share the github.com origin).
+const MAX_CONCURRENT_STORE_FETCHES = 6;
+
+// Frees a pool slot if a store stalls: kept under the proxy's own 15s budget so one slow
+// store never holds a slot long enough to stall the others queued behind the cap.
+const STORE_FETCH_TIMEOUT_MS = 10000;
+
+// Bounded async semaphore: hands a freed slot straight to the next waiter (FIFO) so
+// concurrent callers can never exceed `max`.
+const limitConcurrency = (max: number) => {
+	let active = 0;
+	const waiters: Array<() => void> = [];
+	const acquire = () => {
+		if (active < max) {
+			active++;
+			return Promise.resolve();
+		}
+		return new Promise<void>((resolve) => waiters.push(resolve));
+	};
+	const release = () => {
+		const next = waiters.shift();
+		if (next) next();
+		else active--;
+	};
+	return async <T,>(task: () => Promise<T>): Promise<T> => {
+		await acquire();
+		try {
+			return await task();
+		} finally {
+			release();
+		}
+	};
+};
+
+const runStoreFetch = limitConcurrency(MAX_CONCURRENT_STORE_FETCHES);
+
 export const LunaStore = React.memo(({ url, onRemove, searchQuery }: { url: string; onRemove: () => void; searchQuery: string }) => {
 	const [loading, setLoading] = React.useState(false);
 	const [loadError, setLoadError] = React.useState<string | undefined>(undefined);
@@ -25,9 +63,17 @@ export const LunaStore = React.memo(({ url, onRemove, searchQuery }: { url: stri
 		setLoading(true);
 		setLoadError(undefined);
 		try {
-			const response = await fetch(`${url}/store.json`);
-			if (!response.ok) throw new Error(`Failed to fetch package: ${response.statusText}`);
-			const data = await response.json();
+			const data = await runStoreFetch(async () => {
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), STORE_FETCH_TIMEOUT_MS);
+				try {
+					const response = await fetch(`${url}/store.json`, { signal: controller.signal });
+					if (!response.ok) throw new Error(`Failed to fetch package: ${response.statusText}`);
+					return await response.json();
+				} finally {
+					clearTimeout(timer);
+				}
+			});
 			setPackage(data);
 		} catch (error: any) {
 			console.error("Error fetching package:", error);
