@@ -460,7 +460,7 @@ fn try_cache_hit(ctx: &LoadContext, track_id: &str) -> LoadStep {
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
                 // File missing - clean orphaned index entry
-                if let Ok(cache) = AUDIO_CACHE.lock() {
+                if let Ok(mut cache) = AUDIO_CACHE.lock() {
                     cache.remove_index_entry(track_id);
                 }
             }

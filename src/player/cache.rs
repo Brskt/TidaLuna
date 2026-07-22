@@ -8,6 +8,10 @@ const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Eviction hysteresis: evict until total_size < max_bytes * 0.9.
 const EVICTION_FACTOR: f64 = 0.9;
 
+/// Victims fetched per eviction query, so a large overflow evicts in bounded
+/// batches instead of materializing the whole table.
+const EVICTION_BATCH: i64 = 64;
+
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -53,6 +57,10 @@ pub struct AudioCache {
     /// Bumped on every `clear()`. A store thread that began its unlocked
     /// `write_file` before a clear must not re-insert its row afterwards.
     generation: u64,
+    /// Running total of `file_size` across the index, maintained under the
+    /// cache lock so eviction never re-sums the table. Seeded from the DB at
+    /// open; a crash just re-seeds next boot.
+    current_size: u64,
 }
 
 impl AudioCache {
@@ -83,14 +91,26 @@ impl AudioCache {
                 created_at   INTEGER NOT NULL,
                 last_access  INTEGER NOT NULL,
                 access_count INTEGER DEFAULT 1
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS idx_audio_cache_last_access
+                ON audio_cache (last_access);",
         )?;
+
+        // Seed the running size once; every mutation keeps it current thereafter.
+        let current_size = conn
+            .query_row(
+                "SELECT COALESCE(SUM(file_size), 0) FROM audio_cache",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as u64;
 
         Ok(Self {
             conn: Some(conn),
             audio_dir,
             max_bytes,
             generation: 0,
+            current_size,
         })
     }
 
@@ -103,6 +123,7 @@ impl AudioCache {
             audio_dir: data_dir.join("cache").join("audio"),
             max_bytes: DEFAULT_MAX_BYTES,
             generation: 0,
+            current_size: 0,
         }
     }
 
@@ -134,12 +155,24 @@ impl AudioCache {
     }
 
     /// Remove an orphaned index entry (file missing from disk).
-    pub fn remove_index_entry(&self, track_id: &str) {
+    pub fn remove_index_entry(&mut self, track_id: &str) {
         let Some(conn) = &self.conn else { return };
-        let _ = conn.execute(
-            "DELETE FROM audio_cache WHERE track_id = ?1",
-            params![track_id],
-        );
+        let prev_size: i64 = conn
+            .query_row(
+                "SELECT file_size FROM audio_cache WHERE track_id = ?1",
+                params![track_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let deleted = conn
+            .execute(
+                "DELETE FROM audio_cache WHERE track_id = ?1",
+                params![track_id],
+            )
+            .unwrap_or(0);
+        if deleted > 0 {
+            self.current_size = self.current_size.saturating_sub(prev_size as u64);
+        }
     }
 
     /// Update access metadata after a successful cache read.
@@ -178,11 +211,21 @@ impl AudioCache {
         };
         let now = now_epoch();
         let stamp = next_access_stamp(conn, now);
+        // INSERT OR REPLACE overwrites an existing row, so the running total moves
+        // by the size delta, not the full new size.
+        let prev_size: i64 = conn
+            .query_row(
+                "SELECT file_size FROM audio_cache WHERE track_id = ?1",
+                params![track_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
         conn.execute(
             "INSERT OR REPLACE INTO audio_cache (track_id, format, file_size, created_at, last_access, access_count)
              VALUES (?1, ?2, ?3, ?4, ?5, 1)",
             params![track_id, format, file_size as i64, now, stamp],
         )?;
+        self.current_size = (self.current_size + file_size).saturating_sub(prev_size as u64);
 
         self.evict_if_needed()?;
 
@@ -236,6 +279,7 @@ impl AudioCache {
         }
         // Invalidate any store that began its unlocked write before this clear.
         self.generation = self.generation.wrapping_add(1);
+        self.current_size = 0;
 
         crate::vprintln!(
             "[CACHE]  Cleared {} entries ({:.1} MB)",
@@ -245,53 +289,53 @@ impl AudioCache {
         Ok(())
     }
 
+    /// The running total of cached bytes (maintained incrementally, not re-summed).
     pub fn total_size(&self) -> u64 {
-        let Some(conn) = &self.conn else { return 0 };
-        conn.query_row(
-            "SELECT COALESCE(SUM(file_size), 0) FROM audio_cache",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0) as u64
+        self.current_size
     }
 
-    /// Evict LRU entries until total_size < max_bytes * EVICTION_FACTOR.
+    /// Evict LRU entries until the running size is under `max_bytes * EVICTION_FACTOR`,
+    /// oldest first via the `last_access` index (no full sort), in bounded batches.
     fn evict_if_needed(&mut self) -> anyhow::Result<()> {
-        let total = self.total_size();
-        if total <= self.max_bytes {
+        if self.current_size <= self.max_bytes {
             return Ok(());
         }
-
         let target = (self.max_bytes as f64 * EVICTION_FACTOR) as u64;
-        let mut current = total;
 
-        let Some(conn) = &self.conn else {
-            return Ok(());
-        };
-        let mut stmt =
-            conn.prepare("SELECT track_id, file_size FROM audio_cache ORDER BY last_access ASC")?;
-
-        let entries: Vec<(String, i64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        for (evict_id, size) in entries {
-            if current <= target {
+        while self.current_size > target {
+            let batch: Vec<(String, i64)> = {
+                let Some(conn) = &self.conn else {
+                    return Ok(());
+                };
+                let mut stmt = conn.prepare(
+                    "SELECT track_id, file_size FROM audio_cache ORDER BY last_access ASC LIMIT ?1",
+                )?;
+                stmt.query_map(params![EVICTION_BATCH], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect()
+            };
+            if batch.is_empty() {
                 break;
             }
-
-            let path = self.file_path(&evict_id);
-            if let Err(e) = fs::remove_file(&path) {
-                crate::vprintln!("[CACHE]  Failed to evict {}: {e}", evict_id);
+            for (evict_id, size) in batch {
+                if self.current_size <= target {
+                    break;
+                }
+                let path = self.file_path(&evict_id);
+                if let Err(e) = fs::remove_file(&path) {
+                    crate::vprintln!("[CACHE]  Failed to evict {}: {e}", evict_id);
+                }
+                if let Some(conn) = &self.conn {
+                    conn.execute(
+                        "DELETE FROM audio_cache WHERE track_id = ?1",
+                        params![evict_id],
+                    )?;
+                }
+                self.current_size = self.current_size.saturating_sub(size as u64);
+                crate::vprintln!("[CACHE]  Evicted: {} (freed {} KB)", evict_id, size / 1024);
             }
-            conn.execute(
-                "DELETE FROM audio_cache WHERE track_id = ?1",
-                params![evict_id],
-            )?;
-            current = current.saturating_sub(size as u64);
-
-            crate::vprintln!("[CACHE]  Evicted: {} (freed {} KB)", evict_id, size / 1024);
         }
 
         Ok(())
@@ -312,7 +356,9 @@ mod tests {
                 created_at   INTEGER NOT NULL,
                 last_access  INTEGER NOT NULL,
                 access_count INTEGER DEFAULT 1
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS idx_audio_cache_last_access
+                ON audio_cache (last_access);",
         )
         .unwrap();
         conn
@@ -367,5 +413,29 @@ mod tests {
                 .unwrap()
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn running_size_tracks_inserts_evictions_and_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Small cap so a few inserts cross it and trigger eviction (target = 90).
+        let mut cache = AudioCache::open_with_capacity(tmp.path(), 100).unwrap();
+        assert_eq!(cache.total_size(), 0);
+
+        cache.record("a", "flac", 30).unwrap();
+        cache.record("b", "flac", 40).unwrap();
+        assert_eq!(cache.total_size(), 70);
+
+        // Re-recording an existing id replaces it: the total moves by the delta.
+        cache.record("a", "flac", 50).unwrap();
+        assert_eq!(cache.total_size(), 90);
+
+        // Crossing the cap evicts the oldest (b) down to the 90% target.
+        cache.record("c", "flac", 40).unwrap();
+        assert_eq!(cache.total_size(), 90);
+        assert!(cache.lookup_path("b").is_none());
+
+        cache.clear().unwrap();
+        assert_eq!(cache.total_size(), 0);
     }
 }
