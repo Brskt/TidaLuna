@@ -44,8 +44,8 @@ export const LiveReloadToggle = React.memo((props: LiveReloadToggleButtonProps) 
 				onClick={handleClick}
 				color={props.plugin.liveReload ? "success" : "error"}
 				sx={{
-					animation: animate ? "vibrate 0.25s linear infinite" : "none",
-					"@keyframes vibrate": {
+					animation: animate ? "luna-vibrate 0.25s linear infinite" : "none",
+					"@keyframes luna-vibrate": {
 						"0%": { transform: "rotate(0deg) scale(1)" },
 						"20%": { transform: "rotate(-4deg) scale(0.9)" },
 						"40%": { transform: "rotate(0deg) scale(1)" },
