@@ -11,8 +11,9 @@ pub(crate) const DECLICK_FADE_MS: f64 = 10.0;
 /// relock; sized to cover RME's single-speed firmware mute window. The track head
 /// is delayed, not dropped (the backend does not consume PCM during it).
 pub(crate) const RESYNC_SILENCE_MS: f64 = 200.0;
-/// Floor and cap for the control-thread wait on an RT fade-out before teardown (ASIO). The
-/// wait scales with the buffer period (`fade_out_done` lags up to one period behind it).
+/// Floor and cap for the fade-out deadline before a format-change teardown (ASIO): the
+/// control thread polls `fade_out_done` between commands and rebuilds when the RT signals
+/// it or this bound elapses (a stuck RT must not wedge the rebuild forever).
 pub(crate) const FADE_OUT_WAIT_MS: u64 = 80;
 pub(crate) const FADE_OUT_WAIT_MAX_MS: u64 = 500;
 
@@ -39,6 +40,20 @@ pub(crate) fn fade_out_env(pos: usize, len: usize) -> f32 {
 #[inline]
 pub(crate) fn fade_scale(sample: i32, env: f32) -> i32 {
     (sample as f32 * env) as i32
+}
+
+/// Milliseconds the control thread allows the RT fade-out before tearing the stream
+/// down anyway. `fade_out_done` lands two silent fills after the ramp (ASIO plays one
+/// buffer ahead), so cover the ramp's buffer periods plus 3 of slack, clamped to
+/// [`FADE_OUT_WAIT_MS`, `FADE_OUT_WAIT_MAX_MS`]. `frames`/`sample_rate` describe the
+/// OLD (fading) stream.
+#[inline]
+pub(crate) fn fade_out_wait_ms(frames: usize, sample_rate: u32, fade_len: usize) -> u64 {
+    let period_ms = (frames as u64 * 1000)
+        .checked_div(sample_rate as u64)
+        .unwrap_or(FADE_OUT_WAIT_MS);
+    let fade_periods = fade_len.div_ceil(frames.max(1)).max(1) as u64;
+    ((fade_periods + 3) * period_ms).clamp(FADE_OUT_WAIT_MS, FADE_OUT_WAIT_MAX_MS)
 }
 
 #[cfg(test)]
@@ -82,5 +97,33 @@ mod tests {
         assert_eq!(fade_scale(1000, 0.0), 0);
         assert_eq!(fade_scale(1000, 1.0), 1000);
         assert_eq!(fade_scale(1000, 0.5), 500);
+    }
+
+    #[test]
+    fn fade_out_wait_scales_with_buffer_period() {
+        let fade = silence_frames(44_100, DECLICK_FADE_MS); // 441 frames
+        // Small buffers: (1 ramp period + 3) * 11ms sits under the floor.
+        assert_eq!(fade_out_wait_ms(512, 44_100, fade), FADE_OUT_WAIT_MS);
+        // Mid-size buffers land between floor and cap: 4 * (2048000/44100)ms.
+        assert_eq!(fade_out_wait_ms(2048, 44_100, fade), 184);
+        assert_eq!(
+            fade_out_wait_ms(2048, 48_000, silence_frames(48_000, DECLICK_FADE_MS)),
+            168
+        );
+        assert_eq!(
+            fade_out_wait_ms(2048, 96_000, silence_frames(96_000, DECLICK_FADE_MS)),
+            84
+        );
+        // Huge buffers hit the cap.
+        assert_eq!(fade_out_wait_ms(8192, 44_100, fade), FADE_OUT_WAIT_MAX_MS);
+    }
+
+    #[test]
+    fn fade_out_wait_survives_degenerate_inputs() {
+        // Zero rate: the per-period estimate falls back to the floor constant.
+        assert_eq!(fade_out_wait_ms(512, 0, 441), 4 * FADE_OUT_WAIT_MS);
+        // Zero frames / zero fade never divide by zero and stay clamped in range.
+        let w = fade_out_wait_ms(0, 48_000, 0);
+        assert!((FADE_OUT_WAIT_MS..=FADE_OUT_WAIT_MAX_MS).contains(&w));
     }
 }

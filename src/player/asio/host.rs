@@ -35,8 +35,8 @@ use super::iasio::{
 use crate::player::PlaybackState;
 use crate::player::buffer::RamBuffer;
 use crate::player::declick::{
-    DECLICK_FADE_MS, FADE_OUT_WAIT_MAX_MS, FADE_OUT_WAIT_MS, RESYNC_SILENCE_MS, fade_in_env,
-    fade_out_env, fade_scale, silence_frames,
+    DECLICK_FADE_MS, RESYNC_SILENCE_MS, fade_in_env, fade_out_env, fade_out_wait_ms, fade_scale,
+    silence_frames,
 };
 use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
@@ -1096,10 +1096,20 @@ fn position_frames(secs: f64, sample_rate: u32) -> u64 {
     }
 }
 
+#[derive(Clone, Copy)]
 enum AsioState {
     Idle,
     Playing,
     Paused,
+    /// A format change is pending over a live clock: the RT is fading the old stream
+    /// to silence and the run loop polls `fade_out_done` between commands, running
+    /// `finish_rebuild` when it lands or `deadline` elapses. A dedicated state keeps
+    /// the loop on a bounded recv -- a pending rebuild can never starve behind the
+    /// Idle/Paused arms' blocking `recv()`.
+    Rebuilding {
+        deadline: Instant,
+        start_paused: bool,
+    },
 }
 
 /// Resources produced by `ControlCtx::build_stream` once the driver buffers are
@@ -1144,8 +1154,9 @@ struct ControlCtx {
     stream_id: Option<u32>,
     /// Pre-adoption transport intent `(stream_id, play)`: a Play/Pause for a
     /// stream whose probe-delayed StartStream hasn't arrived yet (FIFO makes
-    /// this deterministic). Every adoption consumes it: applied on id match,
-    /// discarded otherwise (ids never repeat).
+    /// this deterministic). Consumed only by the adoption of the matching id; an
+    /// intent for a different, not-yet-adopted stream is left in place (a deferred
+    /// rebuild's slow settle must not drain a later skip's intent).
     pending_transport: Option<(u32, bool)>,
     sample_rate: u32,
     channels: usize,
@@ -1346,6 +1357,10 @@ impl ControlCtx {
                 intro_silence: AtomicUsize::new(0),
                 intro_fade: AtomicUsize::new(0),
             };
+            crate::vprintln!(
+                "[ASIO] stream opened: {sample_rate} Hz / {channels}ch / {frames} frames / type {} / readback {actual:.0} Hz / buffers {min}-{max} (pref {pref}, gran {gran})",
+                ch_info.sample_type
+            );
             Ok(OpenedAsioStream {
                 ctx_ptr: Box::into_raw(Box::new(stream_ctx)),
                 producer,
@@ -1358,33 +1373,69 @@ impl ControlCtx {
         }
     }
 
-    /// Ramp the live stream down to silence before a format-change teardown so `ASIOStop`
-    /// can't cut a non-zero sample (the pre-stop click on a manual skip to a new rate). The
-    /// RT drives the fade while this blocks; the wait is bounded so a stuck RT can't hang the
-    /// control thread. No-op if the clock is stopped or paused (output is already silent).
-    fn fade_out_current_stream(&self) {
-        if !self.has_buffers || !self.client_started || self.ctx_ptr.is_null() {
-            return;
-        }
-        // SAFETY: ctx_ptr is the live leaked StreamCtx; the clock is running so the RT reads
-        // these atomics, and a format change disposes it only after this returns.
+    /// Arm the RT fade-to-silence, adopt the new stream's identity (so intervening
+    /// commands target it), and hand the device rebuild to the run-loop `Rebuilding`
+    /// poll -- not blocking the control thread for the whole fade window.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_deferred_rebuild(
+        &mut self,
+        event_tx: &mpsc::Sender<AsioEvent>,
+        stream_id: u32,
+        sample_rate: u32,
+        want_channels: usize,
+        duration_secs: f64,
+        start_secs: f64,
+        start_paused: bool,
+        consumed: Arc<AtomicU64>,
+    ) {
+        // SAFETY: the caller checked ctx_ptr is non-null; the leaked StreamCtx stays
+        // live until finish_rebuild's dispose_stream, and the RT only reads these atomics.
         let ctx = unsafe { &*self.ctx_ptr };
-        if ctx.paused.load(Ordering::Relaxed) {
-            return;
-        }
         ctx.fade_out.store(true, Ordering::Relaxed);
-        // Scale the wait with the buffer period: fade_out_done lands two silent fills after
-        // the ramp (ASIO plays one buffer ahead), so the +3-period slack covers the ramp plus
-        // those two callbacks. frames/sample_rate are still the OLD (fading) stream here.
-        let period_ms = (self.frames as u64 * 1000)
-            .checked_div(self.sample_rate as u64)
-            .unwrap_or(FADE_OUT_WAIT_MS);
-        let fade_periods = ctx.fade_len.div_ceil(self.frames.max(1)).max(1) as u64;
-        let wait_ms =
-            ((fade_periods + 3) * period_ms).clamp(FADE_OUT_WAIT_MS, FADE_OUT_WAIT_MAX_MS);
+        // Deadline from the OLD (fading) stream's buffer period, computed before the
+        // adoption below overwrites the format fields with the new stream's.
+        let wait_ms = fade_out_wait_ms(self.frames, self.sample_rate, ctx.fade_len);
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
-        while !ctx.fade_out_done.load(Ordering::Relaxed) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
+        crate::vprintln!(
+            "[ASIO] deferred rebuild armed: {}Hz -> {sample_rate}Hz (fade wait <= {wait_ms}ms, start_paused={start_paused})",
+            self.sample_rate
+        );
+        self.adopt_stream_identity(
+            event_tx,
+            stream_id,
+            sample_rate,
+            want_channels,
+            duration_secs,
+            start_secs,
+            consumed,
+        );
+        self.state = AsioState::Rebuilding {
+            deadline,
+            start_paused,
+        };
+    }
+
+    /// Finish a deferred format-change rebuild: tear the faded stream down and open the
+    /// new one. The logical identity was adopted at arm time; only the device resources
+    /// and the transport settle here. ASIOStop/createBuffers stay synchronous
+    /// driver-paced COM on this thread (STA affinity) -- the deferral removes the fade
+    /// wait, not the driver's own stop/rebuild cost.
+    fn finish_rebuild(&mut self, start_paused: bool, event_tx: &mpsc::Sender<AsioEvent>) {
+        self.dispose_stream();
+        // Drop a driver reset aimed at the stream just disposed; one posted for the new
+        // stream during/after build_stream below is preserved.
+        STREAM_RESET_REQUESTED.store(false, Ordering::Relaxed);
+        match self.build_stream(self.sample_rate, self.channels) {
+            Ok(opened) => {
+                self.install_stream(opened, true, self.sample_rate);
+                self.settle_transport(start_paused, event_tx);
+            }
+            Err(ev) => {
+                // The error event triggers the player's Shared fallback, which
+                // shuts this handle down; idle until then.
+                let _ = event_tx.send(ev);
+                self.state = AsioState::Idle;
+            }
         }
     }
 
@@ -1430,48 +1481,32 @@ impl ControlCtx {
         let format_changed =
             self.has_buffers && (self.sample_rate != sample_rate || self.channels != want_channels);
 
+        // Live clock: defer teardown to the Rebuilding poll so the fade doesn't stall queued
+        // commands/position; a stopped/paused clock is already silent, so the sync path is fine.
+        if format_changed
+            && self.client_started
+            && !self.ctx_ptr.is_null()
+            && !self.paused.load(Ordering::Relaxed)
+        {
+            self.begin_deferred_rebuild(
+                event_tx,
+                stream_id,
+                sample_rate,
+                want_channels,
+                duration_secs,
+                start_secs,
+                start_paused,
+                consumed,
+            );
+            return Ok(());
+        }
+
         if !self.has_buffers || format_changed {
             // Rate change tears the stream down and re-creates buffers at the new rate (RME
-            // changes buffer size + channel count per rate, so reuse isn't possible). Fade the
-            // live output to silence first so ASIOStop doesn't cut a non-zero sample.
-            if format_changed {
-                self.fade_out_current_stream();
-            }
-            // (Re)create buffers: stop + dispose the old stream, then open fresh.
+            // changes buffer size + channel count per rate, so reuse isn't possible).
             self.dispose_stream();
             match self.build_stream(sample_rate, want_channels) {
-                Ok(opened) => {
-                    STREAM_CTX.store(opened.ctx_ptr, Ordering::Release);
-                    self.ctx_ptr = opened.ctx_ptr;
-                    self.producer = Some(opened.producer);
-                    self.ring_capacity = opened.ring_capacity;
-                    self.frames = opened.frames;
-                    self.flush_gen = opened.flush_gen;
-                    self.played_frames = opened.played_frames;
-                    self.paused = opened.paused;
-                    self.has_buffers = true;
-                    // Fresh buffers: the clock is stopped (dispose_stream stopped it), so arm
-                    // the deferred cold start. On a REUSE track-change the clock keeps running
-                    // (continuous device hold), so these are NOT reset there -- doing so would
-                    // make maybe_start issue a second driver.start() on the live driver.
-                    self.client_started = false;
-                    self.pending_start = true;
-                    self.pending_since = Some(Instant::now());
-                    // On an actual rate change, mask the DAC PLL relock with a resync silence +
-                    // fade-in on the new stream. Set before ASIOStart (maybe_start) so the RT
-                    // honours it from the first callback; a first-stream cold start (!has_buffers)
-                    // keeps its plain cushion start (nothing was playing to pop).
-                    if format_changed && !self.ctx_ptr.is_null() {
-                        let resync = silence_frames(sample_rate, RESYNC_SILENCE_MS);
-                        // SAFETY: ctx_ptr was just installed and the clock is not started yet
-                        // (pending_start), so no RT callback races these stores.
-                        unsafe {
-                            let c = &*self.ctx_ptr;
-                            c.intro_silence.store(resync, Ordering::Relaxed);
-                            c.intro_fade.store(c.fade_len, Ordering::Relaxed);
-                        }
-                    }
-                }
+                Ok(opened) => self.install_stream(opened, format_changed, sample_rate),
                 Err(ev) => {
                     let _ = event_tx.send(ev);
                     return Err(());
@@ -1511,6 +1546,34 @@ impl ControlCtx {
             }
         }
 
+        self.adopt_stream_identity(
+            event_tx,
+            stream_id,
+            sample_rate,
+            want_channels,
+            duration_secs,
+            start_secs,
+            consumed,
+        );
+        self.settle_transport(start_paused, event_tx);
+        Ok(())
+    }
+
+    /// Adopt a stream's logical identity: ids, format, position baseline, per-stream
+    /// flags, and the decoder's throttle cell. Device resources are NOT touched, so a
+    /// deferred rebuild adopts these up front -- intervening commands then target the
+    /// new stream by id while the old device is still fading.
+    #[allow(clippy::too_many_arguments)]
+    fn adopt_stream_identity(
+        &mut self,
+        event_tx: &mpsc::Sender<AsioEvent>,
+        stream_id: u32,
+        sample_rate: u32,
+        want_channels: usize,
+        duration_secs: f64,
+        start_secs: f64,
+        consumed: Arc<AtomicU64>,
+    ) {
         self.staging.clear();
         // Adopt the new stream's consumed counter; the superseded stream's cell
         // is abandoned (its decoder is cancelled at spawn time).
@@ -1521,23 +1584,27 @@ impl ControlCtx {
         self.channels = want_channels;
         self.duration = duration_secs;
         self.baseline_frames = position_frames(start_secs, sample_rate);
-        self.played_offset = self.played_frames.load(Ordering::Relaxed);
         self.stream_ended = false;
         self.drain_since = None;
+        let _ = event_tx.send(AsioEvent::Duration(duration_secs));
+    }
+
+    /// Apply any latched `pending_transport` Play/Pause (see the field doc for the id-match
+    /// rule), re-base position on `played_frames`, and emit the resulting Play/Paused state.
+    fn settle_transport(&mut self, start_paused: bool, event_tx: &mpsc::Sender<AsioEvent>) {
+        self.played_offset = self.played_frames.load(Ordering::Relaxed);
         self.last_time_report = Instant::now();
-        // Arm play/pause WITHOUT touching the clock (continuous hold): the RT emits silence
-        // while paused and consumes once cleared. The cold-start flags are set only in the
-        // rebuild branch above; on a REUSE track-change the clock is already running.
-        // Apply a transport command that raced ahead of this adoption (the player
-        // can send Play/Pause for this stream before its probe-delayed StartStream
-        // lands). Consumed on EVERY adoption: applied on id match, else discarded.
-        let start_paused = match self.pending_transport.take() {
-            Some((id, play)) if id == stream_id => !play,
+        // Consume the latched intent only on id match; a mismatch targets a different,
+        // not-yet-adopted stream (a rapid second skip's StartStream can lag this settle),
+        // so leave it for that stream's own adoption instead of discarding it here.
+        let start_paused = match self.pending_transport {
+            Some((id, play)) if self.stream_id == Some(id) => {
+                self.pending_transport = None;
+                !play
+            }
             _ => start_paused,
         };
         self.paused.store(start_paused, Ordering::Relaxed);
-
-        let _ = event_tx.send(AsioEvent::Duration(duration_secs));
         if start_paused {
             self.state = AsioState::Paused;
             let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Paused));
@@ -1545,7 +1612,41 @@ impl ControlCtx {
             self.state = AsioState::Playing;
             let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Active));
         }
-        Ok(())
+    }
+
+    /// Adopt the resources of a freshly built stream and arm the deferred cold start.
+    /// `format_changed` arms the resync silence + fade-in masking the DAC PLL relock at
+    /// `sample_rate`; a first-stream cold start keeps its plain cushion start (nothing
+    /// was playing to pop).
+    fn install_stream(&mut self, opened: OpenedAsioStream, format_changed: bool, sample_rate: u32) {
+        STREAM_CTX.store(opened.ctx_ptr, Ordering::Release);
+        self.ctx_ptr = opened.ctx_ptr;
+        self.producer = Some(opened.producer);
+        self.ring_capacity = opened.ring_capacity;
+        self.frames = opened.frames;
+        self.flush_gen = opened.flush_gen;
+        self.played_frames = opened.played_frames;
+        self.paused = opened.paused;
+        self.has_buffers = true;
+        // Fresh buffers: the clock is stopped (dispose_stream stopped it), so arm
+        // the deferred cold start. On a REUSE track-change the clock keeps running
+        // (continuous device hold), so these are NOT reset there -- doing so would
+        // make maybe_start issue a second driver.start() on the live driver.
+        self.client_started = false;
+        self.pending_start = true;
+        self.pending_since = Some(Instant::now());
+        // Set the resync mask before ASIOStart (maybe_start) so the RT honours it from
+        // the first callback.
+        if format_changed && !self.ctx_ptr.is_null() {
+            let resync = silence_frames(sample_rate, RESYNC_SILENCE_MS);
+            // SAFETY: ctx_ptr was just installed and the clock is not started yet
+            // (pending_start), so no RT callback races these stores.
+            unsafe {
+                let c = &*self.ctx_ptr;
+                c.intro_silence.store(resync, Ordering::Relaxed);
+                c.intro_fade.store(c.fade_len, Ordering::Relaxed);
+            }
+        }
     }
 
     fn handle_push_pcm(&mut self, stream_id: u32, samples: Vec<i32>) {
@@ -1569,7 +1670,12 @@ impl ControlCtx {
         // Re-base the position and flush stale pre-seek audio. While the clock runs the RT
         // callback drains the ring on the flush_gen bump; while it is stopped (cold/paused) the
         // RT never ticks, so the ring is rebuilt below to evict any already-pumped pre-seek PCM.
-        self.flush_gen.fetch_add(1, Ordering::Relaxed);
+        // Mid-rebuild the old ring is left alone: it is mid-fade (a drain would cut the ramp
+        // straight to zero -- the exact click the fade prevents) and finish_rebuild disposes
+        // it wholesale anyway.
+        if !matches!(self.state, AsioState::Rebuilding { .. }) {
+            self.flush_gen.fetch_add(1, Ordering::Relaxed);
+        }
         // Discarded staging counts as consumed, else the throttle would hold
         // the never-played remainder against the decoder forever.
         self.consumed
@@ -1805,6 +1911,18 @@ impl ControlCtx {
     /// load-bearing: ASIOStop first (no callback can still be in flight), then null
     /// `STREAM_CTX`, then free the box - else a live callback would read freed memory.
     fn dispose_stream(&mut self) {
+        // A teardown mid-rebuild (shutdown/disconnect/racing switch) must wait the armed fade to
+        // silence before ASIOStop, else it cuts the ramp (the click). Bounded by the rebuild's own
+        // deadline -> no wait once it landed, no double wait on the stuck-RT/normal-finish paths.
+        if let AsioState::Rebuilding { deadline, .. } = self.state
+            && !self.ctx_ptr.is_null()
+        {
+            // SAFETY: ctx_ptr is the live leaked StreamCtx; the RT stores this atomic.
+            let ctx = unsafe { &*self.ctx_ptr };
+            while !ctx.fade_out_done.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         self.stop_driver_if_running();
         if self.has_buffers
             && let Some(ref driver) = self.driver
@@ -1889,7 +2007,26 @@ impl ControlCtx {
                 start_paused,
                 consumed,
             } => {
-                if self
+                if let AsioState::Rebuilding { deadline, .. } = self.state {
+                    // Latest-wins supersede: a rebuild is already pending on the fading
+                    // old stream, so re-target its adopted identity and keep the armed
+                    // fade + deadline; the single finish_rebuild then builds straight
+                    // at the newest format (no second fade, no second build).
+                    let want_channels = (channels as usize).clamp(1, CHANNELS);
+                    self.adopt_stream_identity(
+                        event_tx,
+                        stream_id,
+                        sample_rate,
+                        want_channels,
+                        duration_secs,
+                        start_secs,
+                        consumed,
+                    );
+                    self.state = AsioState::Rebuilding {
+                        deadline,
+                        start_paused,
+                    };
+                } else if self
                     .handle_start_stream(
                         event_tx,
                         stream_id,
@@ -1917,7 +2054,12 @@ impl ControlCtx {
                 // Stream-scoped, like PushPcm/EndStream/Completed: a stale Play from a
                 // superseded track (the stop->load->play storm) must not resume the wrong
                 // stream over the live one.
-                if self.stream_id == Some(stream_id) && matches!(self.state, AsioState::Paused) {
+                if matches!(self.state, AsioState::Rebuilding { .. }) {
+                    // Mid-rebuild: latch the intent; settle_transport applies it once this id adopts.
+                    self.pending_transport = Some((stream_id, true));
+                } else if self.stream_id == Some(stream_id)
+                    && matches!(self.state, AsioState::Paused)
+                {
                     self.resume(event_tx);
                 } else if self.stream_id != Some(stream_id) {
                     // Pre-adoption: this stream's probe-delayed StartStream hasn't
@@ -1929,7 +2071,12 @@ impl ControlCtx {
                 // A stale Pause from the previous track's stop, landing AFTER this track's Play,
                 // would re-pause the running clock and wedge the RT in permanent silence
                 // (played=0, never underruns). Drop it unless it targets the live stream.
-                if self.stream_id == Some(stream_id) && matches!(self.state, AsioState::Playing) {
+                if matches!(self.state, AsioState::Rebuilding { .. }) {
+                    // Mid-rebuild: latch the intent; settle_transport applies it once this id adopts.
+                    self.pending_transport = Some((stream_id, false));
+                } else if self.stream_id == Some(stream_id)
+                    && matches!(self.state, AsioState::Playing)
+                {
                     // Hold the clock (KS-exclusive device kept); the RT emits silence while
                     // `paused` is set instead of ASIOStop-ing (which would free the device).
                     self.paused.store(true, Ordering::Relaxed);
@@ -2007,6 +2154,55 @@ impl ControlCtx {
                     self.maybe_time_update(&event_tx);
                     self.maybe_complete(&event_tx);
                     self.log_status();
+                }
+                AsioState::Rebuilding { .. } => {
+                    // Same bounded cadence as Playing, so queued commands keep flowing
+                    // while the RT fades. The Playing helpers stay off: until
+                    // finish_rebuild, self.* mixes the adopted (new) identity with the
+                    // old fading device, and pump_ring would feed the new track's head
+                    // into the dying ring.
+                    match cmd_rx.recv_timeout(Duration::from_millis(4)) {
+                        Ok(cmd) => {
+                            if self.dispatch(cmd, &event_tx) {
+                                return;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            self.teardown();
+                            return;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        if self.dispatch(cmd, &event_tx) {
+                            return;
+                        }
+                    }
+                    // Re-read: a superseding StartStream may have replaced the variant's
+                    // fields (same deadline, newer start_paused).
+                    let AsioState::Rebuilding {
+                        deadline,
+                        start_paused,
+                    } = self.state
+                    else {
+                        continue;
+                    };
+                    let fade_done = self.ctx_ptr.is_null() || {
+                        // SAFETY: ctx_ptr is the live leaked StreamCtx (valid until
+                        // finish_rebuild's dispose_stream); the RT stores this atomic.
+                        unsafe { (*self.ctx_ptr).fade_out_done.load(Ordering::Relaxed) }
+                    };
+                    if fade_done || Instant::now() >= deadline {
+                        crate::vprintln!(
+                            "[ASIO] deferred rebuild: finishing ({})",
+                            if fade_done {
+                                "fade complete"
+                            } else {
+                                "deadline elapsed"
+                            }
+                        );
+                        self.finish_rebuild(start_paused, &event_tx);
+                    }
                 }
             }
         }
