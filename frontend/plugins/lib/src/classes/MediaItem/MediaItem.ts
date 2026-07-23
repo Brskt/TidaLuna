@@ -33,7 +33,7 @@ export class MediaItem extends ContentBase {
 	public static readonly trace: Tracer = libTrace.withSource(".MediaItem").trace;
 	public static readonly availableTags = availableTags;
 
-	private static cache = ReactiveStore.getStore("@luna/MediaItemCache");
+	private static cache = ReactiveStore.getStore("@luna/MediaItemCache", 512);
 
 	private static _supportsSpatialAudio: boolean | undefined;
 	public static get supportsSpatialAudio(): boolean | undefined {
@@ -70,12 +70,12 @@ export class MediaItem extends ContentBase {
 	// #region Static Construction
 	public static async fromId(itemId?: redux.ItemId, contentType: redux.ContentType = "track"): Promise<MediaItem | undefined> {
 		if (itemId === undefined) return;
-		// Prefetch mediaItemCache while constructing
-		const mediaItemCache = MediaItem.cache.getReactive<MediaItemCache>(String(itemId), { format: {} });
 		const item = await super.fromStore(itemId, "mediaItems", async (mediaItem) => {
 			mediaItem = mediaItem ??= await this.fetchMediaItem(itemId, contentType);
 			if (mediaItem === undefined) return;
-			const cache = await mediaItemCache;
+			// Create the reactive cache entry only once the item is known to exist, so unavailable
+			// ids never leak one; the reactive cache bounds and disposes it independently.
+			const cache = await MediaItem.cache.getReactive<MediaItemCache>(String(itemId), { format: {} });
 			return new MediaItem(itemId, mediaItem, contentType, cache);
 		});
 		// Fetch real quality for spatial tracks (only for tracks, not videos)
@@ -457,7 +457,21 @@ export class MediaItem extends ContentBase {
 	private readonly formatEmitters: { [K in redux.AudioQuality]?: [onEvent: AddReceiver<MediaFormat>, emitEvent: Emit<MediaFormat>] } = {};
 	public withFormat(unloads: LunaUnloads, audioQuality: redux.AudioQuality, listener: (format: MediaFormat) => void): LunaUnload {
 		const [onFormat] = (this.formatEmitters[audioQuality] ??= registerEmitter<MediaFormat>());
-		const unload = onFormat(unloads, listener);
+		// Pin this instance while a subscriber is attached so eviction can never orphan the emitter
+		// (a re-fetched instance would have empty formatEmitters). Unpinned exactly once, on the
+		// subscription's unload (manual call or plugin teardown via unloads).
+		MediaItem.pinInstance("mediaItems", this.id);
+		const inner = onFormat(unloads, listener);
+		let unpinned = false;
+		const unpin: LunaUnload = () => {
+			if (unpinned) return;
+			unpinned = true;
+			MediaItem.unpinInstance("mediaItems", this.id);
+			// Self-remove from the set (mirrors registerEmitter's own unload) so a manual unsubscribe
+			// before plugin teardown doesn't leave this instance-capturing closure retained in the set.
+			unloads.delete(unpin);
+		};
+		unloads.add(unpin);
 		// Use actualAudioQuality as fallback key for cache lookup (handles Atmos/Sony360 fallback quality)
 		const cacheKey = audioQuality ?? this.cache.actualAudioQuality;
 		const cachedFormat = cacheKey !== undefined ? this.cache.format?.[cacheKey] : undefined;
@@ -473,7 +487,10 @@ export class MediaItem extends ContentBase {
 			// No cached format - trigger updateFormat so the bridge fallback can populate it
 			this.updateFormat(audioQuality).catch(() => {});
 		}
-		return unload;
+		return () => {
+			inner();
+			unpin();
+		};
 	}
 	public updateFormat: (audioQuality?: redux.AudioQuality, force?: true) => Promise<MediaFormat | undefined> = asyncDebounce(async (audioQuality, force) => {
 		this.cache.format ??= {};

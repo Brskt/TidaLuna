@@ -1,6 +1,8 @@
 import type { MaybePromise } from "@inrixia/helpers";
 import type { IArtistCredit } from "musicbrainz-api";
 
+import { BoundedCache } from "@luna/core";
+
 import * as redux from "../redux";
 import type { Artist } from "./Artist";
 
@@ -18,7 +20,28 @@ export type TCoverOpts = {
 };
 
 export class ContentBase {
-	private static readonly _instances: Record<string, Record<redux.ItemId, ContentClass<ContentType>>> = {};
+	// Bounded LRU of content instances keyed by `${contentType}:${itemId}`. Eviction just drops the
+	// instance (its memoized state is GC'd); the reactive cache it reads is bounded and disposed
+	// separately in ReactiveStore, so eviction here never severs a still-referenced instance.
+	// Instances with live subscribers are pinned (see pinInstance) so they are never evicted.
+	private static readonly _instances = new BoundedCache<string, ContentBase>(512, (key) => {
+		// Gated on the mirrored Rust log level (>= 2, like sendDbgIpc): surfaces evictions in the
+		// [JS] logs so the 512 cap is observable, and stays silent (unemitted) in normal use.
+		if (Number((window as any).__TIDALUNAR_LOG_LEVEL__ ?? 0) >= 2)
+			console.log(`[@luna/lib.ContentBase] evicted "${key}" - _instances at cap ${ContentBase._instances.size}`);
+	});
+
+	private static instanceKey(contentType: ContentType, itemId: redux.ItemId): string {
+		return `${contentType}:${itemId}`;
+	}
+
+	/** Pin an instance so cap eviction skips it while a subscriber holds it. Refcounted. */
+	public static pinInstance(contentType: ContentType, itemId: redux.ItemId): void {
+		this._instances.pin(this.instanceKey(contentType, itemId));
+	}
+	public static unpinInstance(contentType: ContentType, itemId: redux.ItemId): void {
+		this._instances.unpin(this.instanceKey(contentType, itemId));
+	}
 
 	/**
 	 * Ensure instances of ContentClass's are properly cached and abstracts fetching from the store.
@@ -28,13 +51,20 @@ export class ContentBase {
 		contentType: K,
 		generator: (contentItem?: ContentItem<K>) => MaybePromise<I | undefined>,
 	): Promise<I | undefined> {
-		if (this._instances[contentType]?.[itemId] !== undefined) return this._instances[contentType][itemId] as I;
+		const key = this.instanceKey(contentType, itemId);
+		const existing = this._instances.get(key);
+		if (existing !== undefined) return existing as I;
 
 		const contentClass = await generator(this.getItemFromStore(contentType, itemId));
 		if (contentClass === undefined) return;
 
-		this._instances[contentType] ??= {};
-		return (this._instances[contentType][itemId] = contentClass);
+		// A concurrent fromStore for the same key may have cached an instance during the await;
+		// if so return that winner and drop ours (avoids overwriting/disposing a live instance).
+		const winner = this._instances.get(key);
+		if (winner !== undefined) return winner as I;
+
+		this._instances.set(key, contentClass as ContentBase);
+		return contentClass;
 	}
 
 	/**
