@@ -452,7 +452,12 @@ document.title = "TidaLunar - A TIDAL client";
                 pkce_credentials_json = pkce_credentials_json
             );
 
-            let bundle_script = include_str!(concat!(env!("OUT_DIR"), "/bundle.js")).to_string();
+            // Precompose the guard-wrapped injection once (this runs a single time at boot); the
+            // nav path then borrows it, instead of re-format!-copying the whole bundle per load.
+            let bundle_script = format!(
+                "if(!window.__TL_INJECTED__){{window.__TL_INJECTED__=true;{}}}",
+                include_str!(concat!(env!("OUT_DIR"), "/bundle.js"))
+            );
 
             let config = MessageRouterConfig::default();
             let browser_router = BrowserSideRouter::new(config);

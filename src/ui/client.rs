@@ -554,13 +554,7 @@ wrap_load_handler! {
                 } else {
                     PageState::App
                 });
-                exec_js_on_frame(
-                    &frame,
-                    &format!(
-                        "if(!window.__TL_INJECTED__){{window.__TL_INJECTED__=true;{}}}",
-                        self.bundle_script
-                    ),
-                );
+                exec_js_on_frame(&frame, &self.bundle_script);
 
                 // After post-login SPA navigation to app, signal JS to re-run init().
                 // Plugin loading is handled by init() → invokeIpc("jsrt.load_plugins").
