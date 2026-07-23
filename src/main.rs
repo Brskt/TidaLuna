@@ -325,6 +325,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // joins it (finish_boot_tokens) before the first browser exists.
     start_boot_token_reconcile(&data_dir, &profile_cache);
 
+    // Seed the gate mirror before any start path (IPC / SDK) can fire.
+    crate::connect::ipc::set_receiver_enabled(boot.receiver_always_on);
     // Spawn the always-on Connect receiver; it doesn't read the boot tokens
     // still reconciling (a casting device brings its own).
     if boot.receiver_always_on

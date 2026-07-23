@@ -1,5 +1,7 @@
 //! IPC handlers for receiver-side lifecycle: start and stop.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::app_state::{IpcMessage, with_state};
 use crate::connect::ConnectManager;
 use crate::connect::receiver::SHUTDOWN_DEADLINE;
@@ -9,6 +11,15 @@ use crate::connect::types::ReceiverConfig;
 /// (TIDAL issues `discover` + `receiver.start` close together on login) could
 /// both build a receiver - leaking one - or interleave a start with a stop.
 static RECEIVER_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// In-memory mirror of `connect.receiver_always_on` (seeded at boot, updated by
+/// `set_always_on`). The `start_receiver_task` gate reads it so every start path
+/// honors the toggle; an atomic, not a DB read, keeps that check race-free.
+static RECEIVER_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_receiver_enabled(enabled: bool) {
+    RECEIVER_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 pub(super) fn start() {
     let Some(rt) = crate::state::RT_HANDLE.get() else {
@@ -23,6 +34,12 @@ pub(super) fn start() {
 /// keeps seeing a live manager throughout.
 pub(crate) async fn start_receiver_task(config: ReceiverConfig) {
     let _guard = RECEIVER_LIFECYCLE.lock().await;
+
+    // Setting is authoritative on every path: a start while off is a no-op
+    // (this is what closes the SDK remoteDesktop bypass).
+    if !RECEIVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
 
     let active = with_state(|state| {
         state
@@ -79,6 +96,7 @@ pub(super) fn stop() {
 
 pub(super) fn set_always_on(msg: &IpcMessage) {
     let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
+    set_receiver_enabled(enabled);
     crate::state::db().call_settings(move |conn| {
         crate::settings::save_receiver_always_on(conn, enabled);
     });

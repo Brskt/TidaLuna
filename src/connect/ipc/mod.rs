@@ -13,7 +13,7 @@ mod receiver;
 mod state;
 
 pub(crate) use helpers::{post_emit, post_emit_with_data};
-pub(crate) use receiver::start_receiver_task;
+pub(crate) use receiver::{set_receiver_enabled, start_receiver_task};
 
 use crate::app_state::{IpcCallback, IpcMessage};
 
