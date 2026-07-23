@@ -33,7 +33,7 @@ unparseable = "unparseable" # valid variant used in updater docs
 
 [package]
 name = "tidalunar"
-version = "0.0.14-alpha"
+version = "0.0.15-alpha"
 edition = "2024"
 description = "A native TIDAL client"
 authors = ["Inrixia"]
