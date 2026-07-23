@@ -1,4 +1,4 @@
-import { sendIpc } from "../ipc";
+import { sendIpc, sendDbgIpc } from "../ipc";
 import { setSelfLoad } from "../audio-proxy";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 
@@ -14,10 +14,10 @@ export const createPlaybackController = () => {
                 (window as any).__TL_PLAYING__ ? d?.pause?.() : d?.resume?.();
             };
             setupActionHandlers();
-            sendIpc("player.dbg", "registerDelegate", Object.keys(d || {}).join(","));
+            sendDbgIpc("registerDelegate", Object.keys(d || {}).join(","));
         },
         sendPlayerCommand: (cmd: any) => {
-            sendIpc("player.dbg", "sendPlayerCommand", JSON.stringify(cmd));
+            sendDbgIpc("sendPlayerCommand", JSON.stringify(cmd));
             if (cmd && typeof cmd === "object") {
                 const type = cmd.type || cmd.command;
                 if (type === "play") sendIpc("player.play");
@@ -135,16 +135,17 @@ export const createPlaybackController = () => {
             }
         },
         setCurrentTime: (time: any) => {
-            sendIpc("player.dbg", "setCurrentTime", time);
+            // No dbg IPC here: setCurrentTime fires on every position tick and would flood
+            // even at debug level (mirrors the mediacurrenttime exclusion in player.ts).
             if (typeof time === 'number' && isFinite(time) && time >= 0) {
                 (window.NativePlayerComponent as any)?._setTime?.(time);
             }
         },
         setPlayQueueState: (state: any) => {
-            sendIpc("player.dbg", "setPlayQueueState", JSON.stringify(state));
+            sendDbgIpc("setPlayQueueState", JSON.stringify(state));
         },
         setPlayingStatus: (status: any) => {
-            sendIpc("player.dbg", "setPlayingStatus", JSON.stringify(status));
+            sendDbgIpc("setPlayingStatus", JSON.stringify(status));
             (window as any).__TL_PLAYING__ = !!status;
             updatePlaybackState(!!status);
         },

@@ -474,6 +474,16 @@ wrap_load_handler! {
                         crate::util::truncate_str(&crate::util::redact_url_query(&url), 80)
                     );
                     exec_js_on_frame(frame, &self.init_script);
+                    // Inject the log level live, not baked into the static init_script
+                    // (which a reload replays stale): the player.dbg gate must match
+                    // Rust's current effective level.
+                    exec_js_on_frame(
+                        frame,
+                        &format!(
+                            "window.__TIDALUNAR_LOG_LEVEL__ = {};",
+                            crate::logging::log_level()
+                        ),
+                    );
                 }
             }
         }

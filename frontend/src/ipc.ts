@@ -25,6 +25,13 @@ export const sendIpc = (channel: string, ...args: any[]) => {
     });
 };
 
+// Diagnostic `player.dbg` IPC, gated on the Rust log level mirrored into
+// `window.__TIDALUNAR_LOG_LEVEL__` (>= 2 matches vprintln2!). Below that the message
+// never crosses the renderer->browser boundary, instead of Rust discarding it after.
+export const sendDbgIpc = (...args: any[]) => {
+    if (Number((window as any).__TIDALUNAR_LOG_LEVEL__ ?? 0) >= 2) sendIpc("player.dbg", ...args);
+};
+
 let invokeCounter = 0;
 
 export const invokeIpc = (channel: string, ...args: any[]): Promise<any> => {

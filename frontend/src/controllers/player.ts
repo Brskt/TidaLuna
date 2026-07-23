@@ -1,4 +1,4 @@
-import { sendIpc } from "../ipc";
+import { sendIpc, sendDbgIpc } from "../ipc";
 import { setSelfLoad, isSelfLoad } from "../audio-proxy";
 import type { AudioDevice } from "../types";
 
@@ -85,7 +85,7 @@ export const createNativePlayerComponent = () => {
 
     const Player = () => {
         playerCallCount++;
-        sendIpc("player.dbg", "Player() called", "count=" + playerCallCount);
+        sendDbgIpc("Player() called", "count=" + playerCallCount);
 
         // Release the previous emitter's listeners before it is orphaned.  The
         // old player object returned to the SDK still closes over its emitter,
@@ -133,12 +133,12 @@ export const createNativePlayerComponent = () => {
             set currentTime(v: number) { _time = v; },
             duration: 0,
             addEventListener: (event: string, cb: any) => {
-                sendIpc("player.dbg", "addEventListener", event);
+                sendDbgIpc("addEventListener", event);
                 eventEmitter.addListener(event, cb);
             },
             removeEventListener: (event: string, cb: any) => eventEmitter.removeListener(event, cb),
             on: (event: string, cb: any) => {
-                sendIpc("player.dbg", "on", event);
+                sendDbgIpc("on", event);
                 eventEmitter.on(event, cb);
             },
             disableMQADecoder: () => {},
@@ -147,7 +147,7 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.devices.get");
             },
             load: (url: string, streamFormat: string, encryptionKey: string = "") => {
-                sendIpc("player.dbg", "SDK→load", streamFormat);
+                sendDbgIpc("SDK→load", streamFormat);
                 // Echo of the current track: skip the reload. !isSelfLoad() because
                 // self-loads bypass this delegate, leaving loadedUrl/loadedFmt stale.
                 if (pendingStop && !isSelfLoad() && url === loadedUrl && streamFormat === loadedFmt) {
@@ -198,7 +198,7 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay);
             },
             play: () => {
-                sendIpc("player.dbg", "SDK→play");
+                sendDbgIpc("SDK→play");
                 cancelDeferredStop();
                 setDesired(true);
             },
@@ -219,7 +219,7 @@ export const createNativePlayerComponent = () => {
                 });
             },
             seek: (time: number) => {
-                sendIpc("player.dbg", "SDK→seek", time);
+                sendDbgIpc("SDK→seek", time);
                 cancelDeferredStop();
                 seekTarget = time;
                 _time = time;
@@ -302,7 +302,7 @@ export const createNativePlayerComponent = () => {
             if (captured.time !== null) events.push(["mediacurrenttime", captured.time]);
 
             if (events.length > 0) {
-                sendIpc("player.dbg", "snapshot replay", events.length + " events");
+                sendDbgIpc("snapshot replay", events.length + " events");
                 let idx = 0;
                 const step = () => {
                     if (idx < events.length) {
@@ -335,7 +335,7 @@ export const createNativePlayerComponent = () => {
         clearPlayOnLoad: () => { wantPlayOnLoad = false; },
         trigger: (event: string, target: any, gen?: number) => {
             if (event !== "mediacurrenttime") {
-                sendIpc("player.dbg", "trigger", event, target, "listeners=" + (activeEmitter?.listeners?.get(event)?.size ?? 0), "playerCalls=" + playerCallCount);
+                sendDbgIpc("trigger", event, target, "listeners=" + (activeEmitter?.listeners?.get(event)?.size ?? 0), "playerCalls=" + playerCallCount);
             }
             if (gen !== undefined) {
                 if (gen < activeGen) return;

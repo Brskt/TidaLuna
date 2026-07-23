@@ -2,7 +2,7 @@
 // Windows) when web audio is playing.  Since our native player bypasses web
 // audio entirely, we run a silent AudioContext to activate the integration.
 
-import { sendIpc } from "../ipc";
+import { sendDbgIpc } from "../ipc";
 
 // pointerdown covers mouse/touch/pen, keydown covers keyboard-only users.
 const GESTURE_EVENTS = ["pointerdown", "keydown", "touchstart"] as const;
@@ -51,10 +51,10 @@ function createContext(): AudioContext | null {
             if (c.state === "closed") ctx = null;
             else if (c.state === "running") disarmGestureResume();
         });
-        sendIpc("player.dbg", "[MediaSession] AudioContext created, state=" + c.state);
+        sendDbgIpc("[MediaSession] AudioContext created, state=" + c.state);
         return c;
     } catch (e) {
-        sendIpc("player.dbg", "[MediaSession] AudioContext failed: " + e);
+        sendDbgIpc("[MediaSession] AudioContext failed: " + e);
         return null;
     }
 }
@@ -85,19 +85,19 @@ function ensureAudioContext() {
             // resume() resolves even when the autoplay policy keeps the context
             // suspended, so check the real state instead of trusting the promise.
             if (ctx?.state === "running") {
-                sendIpc("player.dbg", "[MediaSession] AudioContext running");
+                sendDbgIpc("[MediaSession] AudioContext running");
             } else {
                 armGestureResume();
             }
         }).catch((e) => {
-            sendIpc("player.dbg", "[MediaSession] AudioContext resume failed: " + e);
+            sendDbgIpc("[MediaSession] AudioContext resume failed: " + e);
             armGestureResume();
         });
     }
 }
 
 export function updatePlaybackState(playing: boolean) {
-    sendIpc("player.dbg", "[MediaSession] playbackState →", playing ? "playing" : "paused");
+    sendDbgIpc("[MediaSession] playbackState →", playing ? "playing" : "paused");
     if (playing) {
         wantRunning = true;
         ensureAudioContext();
@@ -123,9 +123,9 @@ export function updateMetadata(item: any) {
             album: item.album || "",
             artwork,
         });
-        sendIpc("player.dbg", "[MediaSession] metadata:", item.title, "-", item.artist);
+        sendDbgIpc("[MediaSession] metadata:", item.title, "-", item.artist);
     } catch (e) {
-        sendIpc("player.dbg", "[MediaSession] metadata failed: " + e);
+        sendDbgIpc("[MediaSession] metadata failed: " + e);
     }
 }
 
@@ -133,23 +133,23 @@ export function setupActionHandlers() {
     try {
         const ms = navigator.mediaSession;
         ms.setActionHandler("play", () => {
-            sendIpc("player.dbg", "[MediaSession] action: play");
+            sendDbgIpc("[MediaSession] action: play");
             (window as any).__TL_PLAY_PAUSE__?.();
         });
         ms.setActionHandler("pause", () => {
-            sendIpc("player.dbg", "[MediaSession] action: pause");
+            sendDbgIpc("[MediaSession] action: pause");
             (window as any).__TL_PLAY_PAUSE__?.();
         });
         ms.setActionHandler("previoustrack", () => {
-            sendIpc("player.dbg", "[MediaSession] action: previoustrack");
+            sendDbgIpc("[MediaSession] action: previoustrack");
             (window as any).__TIDAL_PLAYBACK_DELEGATE__?.playPrevious?.();
         });
         ms.setActionHandler("nexttrack", () => {
-            sendIpc("player.dbg", "[MediaSession] action: nexttrack");
+            sendDbgIpc("[MediaSession] action: nexttrack");
             (window as any).__TIDAL_PLAYBACK_DELEGATE__?.playNext?.();
         });
-        sendIpc("player.dbg", "[MediaSession] action handlers registered");
+        sendDbgIpc("[MediaSession] action handlers registered");
     } catch (e) {
-        sendIpc("player.dbg", "[MediaSession] setupActionHandlers failed: " + e);
+        sendDbgIpc("[MediaSession] setupActionHandlers failed: " + e);
     }
 }

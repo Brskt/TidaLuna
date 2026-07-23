@@ -360,7 +360,6 @@ wrap_browser_process_handler! {
 
             let perf = crate::debug::perf_monitor::enabled();
             let window_maximized = crate::state::boot_settings().window_maximized;
-            let log_level = crate::state::boot_settings().log_level;
             let console = crate::state::boot_settings().console;
 
             // Join the boot-token reconcile: the restored session must be in
@@ -378,7 +377,6 @@ window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
 window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
 window.__TIDALUNAR_ASIO__ = {asio};
 window.__TIDALUNAR_EXCLUSIVE__ = {exclusive};
-window.__TIDALUNAR_LOG_LEVEL__ = {log_level};
 window.__TIDALUNAR_CONSOLE__ = {console};
 window.__TIDALUNAR_PERF__ = {perf};
 window.__TIDALUNAR_WINDOW_STATE__ = {{

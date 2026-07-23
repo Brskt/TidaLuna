@@ -25,14 +25,8 @@ pub(crate) fn handle_ipc_message(request: &str) {
     };
 
     if msg.channel == "player.dbg" {
-        let dominated_by_time = msg
-            .args
-            .first()
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| s == "setCurrentTime");
-        if !dominated_by_time {
-            crate::vprintln2!("[JS-DBG] {:?}", msg.args);
-        }
+        // Diagnostic-only; JS gates emission on the log level before it reaches here.
+        crate::vprintln2!("[JS-DBG] {:?}", msg.args);
         return;
     }
 

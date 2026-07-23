@@ -16,7 +16,6 @@ export const LunaLoggingSettings = React.memo(() => {
 
 	const handleLevel = useCallback((value: number) => {
 		setLevel(value);
-		(window as any).__TIDALUNAR_LOG_LEVEL__ = value;
 		ipcRenderer.send("settings.set_log_level", value);
 	}, []);
 

@@ -238,6 +238,12 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 crate::settings::save_log_level(conn, level);
             });
             crate::logging::set_log_level(level);
+            // Push the effective (env-folded) level to the renderer so the player.dbg
+            // gate matches; the UI can't compute the env floor itself.
+            crate::app_state::eval_js(&format!(
+                "window.__TIDALUNAR_LOG_LEVEL__ = {};",
+                crate::logging::log_level()
+            ));
             crate::vprintln!("[LOGGING] Log level set to {level}");
         }
         "settings.set_console" => {
