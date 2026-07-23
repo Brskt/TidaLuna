@@ -7,7 +7,6 @@ mod db;
 mod debug;
 mod ipc;
 mod logging;
-mod memory_pressure;
 mod native_runtime;
 mod platform;
 mod player;
