@@ -48,8 +48,14 @@ fn main() {
     // Bake the plugin ES modules alongside the bundle so luna_modules.rs can include_bytes! them
     // and serve them via a ResourceHandler, instead of bundle.js carrying them as inline strings.
     for (src, name) in [
-        (frontend_dir.join("plugins/ui/dist/luna-ui.mjs"), "luna-ui.mjs"),
-        (frontend_dir.join("plugins/dev/dist/luna-dev.mjs"), "luna-dev.mjs"),
+        (
+            frontend_dir.join("plugins/ui/dist/luna-ui.mjs"),
+            "luna-ui.mjs",
+        ),
+        (
+            frontend_dir.join("plugins/dev/dist/luna-dev.mjs"),
+            "luna-dev.mjs",
+        ),
     ] {
         let dest = Path::new(&out_dir).join(name);
         std::fs::copy(&src, &dest)

@@ -14,7 +14,7 @@ static LUNA_DEV_MJS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/luna-dev.
 
 /// Map a synthetic `/__luna__/*.mjs` path to its baked bytes (any host; query/fragment ignored).
 fn resolve(url: &str) -> Option<&'static [u8]> {
-    let path = url.split(|c: char| c == '?' || c == '#').next().unwrap_or(url);
+    let path = url.split(['?', '#']).next().unwrap_or(url);
     if path.ends_with("/__luna__/ui.mjs") {
         Some(LUNA_UI_MJS)
     } else if path.ends_with("/__luna__/dev.mjs") {
@@ -32,10 +32,11 @@ pub(super) fn intercept(
     is_navigation: ::std::os::raw::c_int,
     is_download: ::std::os::raw::c_int,
 ) -> Option<ResourceRequestHandler> {
-    if is_navigation == 0 && is_download == 0 {
-        if let Some(bytes) = resolve(url) {
-            return Some(LunaModuleRequestHandler::new(bytes));
-        }
+    if is_navigation == 0
+        && is_download == 0
+        && let Some(bytes) = resolve(url)
+    {
+        return Some(LunaModuleRequestHandler::new(bytes));
     }
     None
 }
