@@ -315,12 +315,12 @@ const init = async () => {
         showSaveDialog: (options: any) => invokeIpc("__Luna.showSaveDialog", options),
     };
 
+    // Served from the Rust binary (luna_modules.rs) at /__luna__/*.mjs, not inlined. Absolute URL
+    // because the injected bundle's base is about:blank; in a var so esbuild leaves it a runtime
+    // import; loaded after the module registry above, which these resolve their deps through.
     try {
-        const { LUNA_UI_CODE } = await import("./plugins/luna-ui-inline");
-        const blob = new Blob([LUNA_UI_CODE], { type: "application/javascript" });
-        const blobUrl = URL.createObjectURL(blob);
-        const uiMod = await import(/* @vite-ignore */ blobUrl);
-        URL.revokeObjectURL(blobUrl);
+        const uiUrl = `${location.origin}/__luna__/ui.mjs`;
+        const uiMod = await import(/* @vite-ignore */ uiUrl);
         modules["@luna/ui"] = uiMod;
         LunaPlugin.corePlugins.add("@luna/ui");
         console.log("[luna] @luna/ui core plugin loaded");
@@ -329,11 +329,8 @@ const init = async () => {
     }
 
     try {
-        const { LUNA_DEV_CODE } = await import("./plugins/luna-dev-inline");
-        const blob = new Blob([LUNA_DEV_CODE], { type: "application/javascript" });
-        const blobUrl = URL.createObjectURL(blob);
-        const devMod = await import(/* @vite-ignore */ blobUrl);
-        URL.revokeObjectURL(blobUrl);
+        const devUrl = `${location.origin}/__luna__/dev.mjs`;
+        const devMod = await import(/* @vite-ignore */ devUrl);
         modules["@luna/dev"] = devMod;
         LunaPlugin.corePlugins.add("@luna/dev");
         console.log("[luna] @luna/dev core plugin loaded");

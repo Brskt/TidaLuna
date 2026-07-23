@@ -49,6 +49,13 @@ wrap_request_context_handler! {
             {
                 return Some(h);
             }
+            // Luna's plugin modules routed through the service worker reach only this context
+            // handler; serve them here too, mirroring store_proxy.
+            if let Some(h) =
+                crate::ui::luna_modules::intercept(url.as_str(), is_navigation, is_download)
+            {
+                return Some(h);
+            }
             None
         }
     }

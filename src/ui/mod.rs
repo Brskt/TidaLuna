@@ -7,6 +7,7 @@ pub(crate) mod csp_filter;
 pub(crate) mod dialog;
 pub(crate) mod file_dialog;
 pub(crate) mod flush;
+pub(crate) mod luna_modules;
 pub(crate) mod menu;
 pub(crate) mod message_dialog;
 pub(crate) mod module_capture;

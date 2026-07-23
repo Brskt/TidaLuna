@@ -14,7 +14,6 @@ import { build, defaultBuildOptions, RUNTIME_EXTERNALS, TYPE_ONLY_PACKAGES, getL
 import { dynamicExternalsPlugin } from "./build/plugins/dynamicExternals";
 import { typeOnlyPlugin } from "./build/plugins/typeOnly";
 import { coreSelfResolvePlugin } from "./build/plugins/coreSelfResolve";
-import { inlineBundlePlugin } from "./build/plugins/inlineBundle";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = __dirname;
@@ -59,11 +58,6 @@ const lunaUiInline: BuildOptions = {
 	plugins: [
 		dynamicExternalsPlugin(uiExternals),
 		typeOnlyPlugin(TYPE_ONLY_PACKAGES),
-		inlineBundlePlugin({
-			outfile: uiOutfile,
-			inlinePath: resolve(root, "src/plugins/luna-ui-inline.ts"),
-			exportName: "LUNA_UI_CODE",
-		}),
 	],
 	logLevel: "info",
 };
@@ -75,11 +69,6 @@ const lunaDevInline: BuildOptions = {
 	plugins: [
 		dynamicExternalsPlugin(devExternals),
 		typeOnlyPlugin(TYPE_ONLY_PACKAGES),
-		inlineBundlePlugin({
-			outfile: devOutfile,
-			inlinePath: resolve(root, "src/plugins/luna-dev-inline.ts"),
-			exportName: "LUNA_DEV_CODE",
-		}),
 	],
 	logLevel: "info",
 };

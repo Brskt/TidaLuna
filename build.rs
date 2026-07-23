@@ -45,6 +45,17 @@ fn main() {
 
     std::fs::copy(&bundle_path, &dest_path).expect("Failed to copy bundle.js to OUT_DIR");
 
+    // Bake the plugin ES modules alongside the bundle so luna_modules.rs can include_bytes! them
+    // and serve them via a ResourceHandler, instead of bundle.js carrying them as inline strings.
+    for (src, name) in [
+        (frontend_dir.join("plugins/ui/dist/luna-ui.mjs"), "luna-ui.mjs"),
+        (frontend_dir.join("plugins/dev/dist/luna-dev.mjs"), "luna-dev.mjs"),
+    ] {
+        let dest = Path::new(&out_dir).join(name);
+        std::fs::copy(&src, &dest)
+            .unwrap_or_else(|e| panic!("Failed to copy {} to OUT_DIR: {e}", src.display()));
+    }
+
     // Windows icon
     #[cfg(target_os = "windows")]
     {

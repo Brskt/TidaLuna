@@ -765,6 +765,14 @@ wrap_request_handler! {
                 return Some(h);
             }
 
+            // Luna's own plugin ES modules, baked into the binary and served on /__luna__/*.mjs
+            // (so bundle.js no longer carries them as inline strings).
+            if let Some(h) =
+                crate::ui::luna_modules::intercept(url.as_str(), is_navigation, is_download)
+            {
+                return Some(h);
+            }
+
             if crate::ui::token_filter::should_rewrite_token(&url)
                 || crate::ui::nav::is_token_endpoint(&url)
             {
