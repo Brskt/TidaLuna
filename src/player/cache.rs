@@ -154,9 +154,10 @@ impl AudioCache {
         }
     }
 
-    /// Remove an orphaned index entry (file missing from disk).
-    pub fn remove_index_entry(&mut self, track_id: &str) {
-        let Some(conn) = &self.conn else { return };
+    /// Remove an orphaned index entry (file missing from disk). Reports whether a row
+    /// went away, so a caller cannot mistake a silent no-op for a deletion.
+    pub fn remove_index_entry(&mut self, track_id: &str) -> bool {
+        let Some(conn) = &self.conn else { return false };
         let prev_size: i64 = conn
             .query_row(
                 "SELECT file_size FROM audio_cache WHERE track_id = ?1",
@@ -173,6 +174,25 @@ impl AudioCache {
         if deleted > 0 {
             self.current_size = self.current_size.saturating_sub(prev_size as u64);
         }
+        deleted > 0
+    }
+
+    /// Drop an entry, reporting whether it went away: file first, index row only once
+    /// the file is gone. A sharded file is reachable by accounting and eviction only
+    /// through its row, so losing the row while the file survives strands the bytes
+    /// outside `max_bytes`.
+    pub fn drop_entry(&mut self, track_id: &str) -> bool {
+        let path = self.file_path(track_id);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            // Already gone: the row is the orphan.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                crate::vprintln!("[CACHE]  Keeping the index row for {track_id}: {e}");
+                return false;
+            }
+        }
+        self.remove_index_entry(track_id)
     }
 
     /// Update access metadata after a successful cache read.
@@ -269,10 +289,14 @@ impl AudioCache {
             None => (0, 0),
         };
 
-        if self.audio_dir.exists() {
-            fs::remove_dir_all(&self.audio_dir).ok();
-            fs::create_dir_all(&self.audio_dir).ok();
+        // Fail closed: the rows are the only handle on these files, so dropping them
+        // after a failed wipe leaves the survivors outside the size cap for good.
+        if self.audio_dir.exists()
+            && let Err(e) = fs::remove_dir_all(&self.audio_dir)
+        {
+            anyhow::bail!("could not clear the audio cache directory: {e}");
         }
+        fs::create_dir_all(&self.audio_dir).ok();
 
         if let Some(conn) = &self.conn {
             conn.execute("DELETE FROM audio_cache", [])?;
@@ -319,22 +343,23 @@ impl AudioCache {
             if batch.is_empty() {
                 break;
             }
+            let mut evicted_any = false;
             for (evict_id, size) in batch {
                 if self.current_size <= target {
                     break;
                 }
-                let path = self.file_path(&evict_id);
-                if let Err(e) = fs::remove_file(&path) {
-                    crate::vprintln!("[CACHE]  Failed to evict {}: {e}", evict_id);
+                // Keeps the row when the file will not go, so the bytes stay accounted
+                // for instead of becoming an invisible orphan.
+                if !self.drop_entry(&evict_id) {
+                    continue;
                 }
-                if let Some(conn) = &self.conn {
-                    conn.execute(
-                        "DELETE FROM audio_cache WHERE track_id = ?1",
-                        params![evict_id],
-                    )?;
-                }
-                self.current_size = self.current_size.saturating_sub(size as u64);
+                evicted_any = true;
                 crate::vprintln!("[CACHE]  Evicted: {} (freed {} KB)", evict_id, size / 1024);
+            }
+            // The same LRU head comes back on every query, so stop rather than spin.
+            if !evicted_any {
+                crate::vprintln!("[CACHE]  Eviction stalled: no candidate could be removed");
+                break;
             }
         }
 
@@ -413,6 +438,34 @@ mod tests {
                 .unwrap()
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn dropping_an_entry_clears_the_file_the_row_and_the_accounting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+        let path = cache.file_path("track");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"ciphertext").unwrap();
+        cache.record("track", "flac", 10).unwrap();
+
+        assert!(cache.drop_entry("track"));
+        assert!(!path.exists());
+        assert_eq!(cache.lookup_path("track"), None);
+        assert_eq!(cache.total_size(), 0);
+    }
+
+    /// The row is itself the orphan here, so dropping has to succeed rather than
+    /// refuse for want of a file.
+    #[test]
+    fn dropping_an_entry_whose_file_already_vanished_still_clears_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+        cache.record("track", "flac", 10).unwrap();
+
+        assert!(cache.drop_entry("track"));
+        assert_eq!(cache.lookup_path("track"), None);
+        assert_eq!(cache.total_size(), 0);
     }
 
     #[test]
