@@ -544,11 +544,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.resume_store.flush_if_due(true);
                         }
 
-                        // Write to disk cache if complete and not already cached
+                        // Store the ciphertext the download staged. The decoded bytes stay
+                        // in the buffer: taking them would empty it and cost the track its
+                        // reusability (see RamBuffer::is_reusable).
                         if !self.is_cached
                             && let Some(ref buf) = self.current_buffer
                             && buf.is_complete()
-                            && let Some(data) = buf.take_data()
+                            && let Some((staged, len)) = buf.take_ciphertext()
                         {
                             let track_id = self.current_track_id.clone();
                             let cache_format = self.current_format.clone();
@@ -565,9 +567,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                     (cache.file_path(&tid), cache.generation())
                                 };
                                 if let Err(e) =
-                                    crate::player::cache::AudioCache::write_file(&path, &data)
+                                    crate::player::cache::AudioCache::persist_file(&path, staged)
                                 {
-                                    crate::vprintln!("[CACHE]  Store failed (write): {e}");
+                                    crate::vprintln!("[CACHE]  Store failed (persist): {e}");
                                     return;
                                 }
                                 // Index insert + eviction under a short lock,
@@ -577,16 +579,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                     crate::vprintln!("[CACHE]  Lock poisoned, skipping index");
                                     return;
                                 };
-                                match cache.record_if_current(
-                                    &tid,
-                                    &cache_format,
-                                    data.len() as u64,
-                                    store_gen,
-                                ) {
+                                match cache.record_if_current(&tid, &cache_format, len, store_gen) {
                                     Ok(true) => crate::vprintln!(
-                                        "[CACHE]  Stored: {} ({})",
+                                        "[CACHE]  Stored: {} ({}, encrypted)",
                                         tid,
-                                        crate::player::format_bytes(data.len() as u64)
+                                        crate::player::format_bytes(len)
                                     ),
                                     Ok(false) => crate::vprintln!(
                                         "[CACHE]  Store discarded (cache cleared mid-write): {tid}"
@@ -642,6 +639,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                     DecodeEvent::Error(e) => {
                         crate::vprintln!("[DECODE] Error: {e}");
+                        // Cached bytes that will not decode must not stay indexed: the load
+                        // path already refreshed their LRU position, so nothing else would
+                        // ever retire them and every later play would fail the same way.
+                        // Re-downloading one good track is the cheap side of that trade.
+                        if self.is_cached
+                            && let Some(tid) = self.current_track_id.clone()
+                            && let Ok(mut cache) = crate::state::AUDIO_CACHE.lock()
+                            && cache.drop_entry(&tid)
+                        {
+                            crate::vprintln!("[CACHE]  Dropped after a decode failure: {tid}");
+                        }
                         (self.callback)(PlayerEvent::MediaError {
                             error: e,
                             code: MediaErrorCode::UnreadableFile,

@@ -21,6 +21,10 @@ struct Inner {
     cancelled: bool,
     error: Option<String>,
     restart_target: Option<u64>,
+    /// Ciphertext staging file for the disk cache, with its byte count. The download
+    /// loop owns it while streaming and parks it here only at EOF, so no per-chunk
+    /// write ever takes this lock.
+    ciphertext: Option<(tempfile::NamedTempFile, u64)>,
 }
 
 /// Shared state between readers, writers, and the async download loop.
@@ -75,6 +79,7 @@ impl RamBuffer {
                 cancelled: false,
                 error: None,
                 restart_target: None,
+                ciphertext: None,
             }),
             cvar: Condvar::new(),
             written: AtomicU64::new(0),
@@ -94,6 +99,15 @@ impl RamBuffer {
     }
 
     pub fn from_complete(data: Vec<u8>) -> Self {
+        Self::from_complete_with_ciphertext(data, None)
+    }
+
+    /// A complete buffer that also carries the ciphertext for the disk cache, so
+    /// a preload hit or a no-Content-Length download can still be stored.
+    pub fn from_complete_with_ciphertext(
+        data: Vec<u8>,
+        ciphertext: Option<(tempfile::NamedTempFile, u64)>,
+    ) -> Self {
         let total_len = data.len() as u64;
         let shared = Arc::new(SharedState {
             inner: Mutex::new(Inner {
@@ -104,6 +118,7 @@ impl RamBuffer {
                 cancelled: false,
                 error: None,
                 restart_target: None,
+                ciphertext,
             }),
             cvar: Condvar::new(),
             written: AtomicU64::new(total_len),
@@ -148,10 +163,10 @@ impl RamBuffer {
         inner.finished && inner.error.is_none() && inner.base_offset == 0
     }
 
-    /// Like `is_complete()` but also requires the data to still be in memory (not moved
-    /// out via `take_data()`). A reused decoder needs the bytes present -- a complete but
-    /// emptied buffer would read instant EOF (silence). This is `take_data()`'s own gate
-    /// without the take, so a `true` here guarantees a fresh decoder can read the track.
+    /// Like `is_complete()` but also requires the data to still be in memory. A
+    /// reused decoder needs the bytes present -- a complete but empty buffer
+    /// would read instant EOF (silence), so a `true` here guarantees a fresh
+    /// decoder can read the track.
     // Callers are all cfg(windows) (the buffer-reuse gates in thread/device.rs), so
     // Linux clippy sees it as dead; keep it compiled/type-checked there anyway
     // (same pattern as declick.rs / convert.rs).
@@ -166,16 +181,14 @@ impl RamBuffer {
         inner.total_len
     }
 
-    /// Take ownership of the complete data buffer (only if fully downloaded from offset 0).
-    /// Returns None if incomplete or base_offset != 0.
-    pub fn take_data(&self) -> Option<Vec<u8>> {
+    /// Take the ciphertext staging file the download parked at EOF. Gated on the same
+    /// completeness as `is_complete()`, so a partial or Range-restarted download never
+    /// yields one. No size check: `CipherSink::finish` refuses an empty sink, so one
+    /// never reaches the buffer.
+    pub fn take_ciphertext(&self) -> Option<(tempfile::NamedTempFile, u64)> {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.finished
-            && inner.error.is_none()
-            && !inner.data.is_empty()
-            && inner.base_offset == 0
-        {
-            Some(std::mem::take(&mut inner.data))
+        if inner.finished && inner.error.is_none() && inner.base_offset == 0 {
+            inner.ciphertext.take()
         } else {
             None
         }
@@ -400,6 +413,13 @@ impl RamBufferWriter {
         self.shared.cvar.notify_all();
         self.shared.async_notify.notify_one();
         true
+    }
+
+    /// Park the completed ciphertext staging file for the cache writer. Called
+    /// once, at EOF - never on the per-chunk path.
+    pub fn set_ciphertext(&self, staged: tempfile::NamedTempFile, len: u64) {
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.ciphertext = Some((staged, len));
     }
 
     pub fn finish(&self) {

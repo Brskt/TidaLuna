@@ -5,6 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// What the cached files contain: v1 is TIDAL's ciphertext as fetched, v0 was
+/// decrypted audio. Bump on any change to the contents - AES-CTR carries no auth
+/// tag, so a stale entry decodes to noise instead of failing. Wipe, never guess.
+const CACHE_FORMAT_VERSION: i64 = 1;
+
 /// Eviction hysteresis: evict until total_size < max_bytes * 0.9.
 const EVICTION_FACTOR: f64 = 0.9;
 
@@ -55,7 +60,7 @@ pub struct AudioCache {
     audio_dir: PathBuf,
     max_bytes: u64,
     /// Bumped on every `clear()`. A store thread that began its unlocked
-    /// `write_file` before a clear must not re-insert its row afterwards.
+    /// `persist_file` before a clear must not re-insert its row afterwards.
     generation: u64,
     /// Running total of `file_size` across the index, maintained under the
     /// cache lock so eviction never re-sums the table. Seeded from the DB at
@@ -96,6 +101,9 @@ impl AudioCache {
                 ON audio_cache (last_access);",
         )?;
 
+        Self::migrate_format(&conn, &audio_dir)?;
+        Self::sweep_orphaned_staging(&audio_dir);
+
         // Seed the running size once; every mutation keeps it current thereafter.
         let current_size = conn
             .query_row(
@@ -112,6 +120,58 @@ impl AudioCache {
             generation: 0,
             current_size,
         })
+    }
+
+    /// Drop every cached file when the on-disk generation isn't the one this
+    /// build reads. Runs before `current_size` is seeded so the total reflects
+    /// the wipe. `user_version` defaults to 0 on a pre-versioning database,
+    /// which is exactly the plaintext generation we must discard.
+    fn migrate_format(conn: &Connection, audio_dir: &Path) -> rusqlite::Result<()> {
+        let on_disk: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if on_disk == CACHE_FORMAT_VERSION {
+            return Ok(());
+        }
+
+        let dropped: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audio_cache", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        // Fail closed: committing the version after a failed wipe strands the
+        // survivors outside the size cap for good, and never retries.
+        if audio_dir.exists()
+            && let Err(e) = fs::remove_dir_all(audio_dir)
+        {
+            crate::vprintln!("[CACHE]  Format v{on_disk} -> v{CACHE_FORMAT_VERSION} deferred: {e}");
+            return Ok(());
+        }
+        // The staging path recreates it on demand, so a failure only defers staging.
+        fs::create_dir_all(audio_dir).ok();
+        conn.execute("DELETE FROM audio_cache", [])?;
+        conn.pragma_update(None, "user_version", CACHE_FORMAT_VERSION)?;
+
+        crate::vprintln!(
+            "[CACHE]  Format v{on_disk} -> v{CACHE_FORMAT_VERSION}: dropped {dropped} entries"
+        );
+        Ok(())
+    }
+
+    /// Delete staging files orphaned by an unclean exit: they sit at the audio dir
+    /// root (an indexed file always lives inside a 2-hex shard), so neither the index
+    /// nor eviction can see them and they would hold disk outside the size cap.
+    fn sweep_orphaned_staging(audio_dir: &Path) {
+        let Ok(entries) = fs::read_dir(audio_dir) else {
+            return;
+        };
+        let mut removed = 0u32;
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_file()) && fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            crate::vprintln!("[CACHE]  Removed {removed} orphaned staging file(s)");
+        }
     }
 
     /// A cache with no backing index, for when no location can host
@@ -205,26 +265,30 @@ impl AudioCache {
         );
     }
 
-    /// Atomically write a fully-downloaded track to its cache path (temp file
-    /// in the same directory, then rename). Intentionally an associated
-    /// function with no `&self`: this is the multi-MB I/O and must run WITHOUT
-    /// holding the global cache lock, so a concurrent track-load lookup is not
-    /// stalled behind the write. Pair with [`record`](Self::record).
-    pub fn write_file(path: &Path, data: &[u8]) -> anyhow::Result<()> {
+    /// Where a download stages its ciphertext, or `None` when the cache is disabled:
+    /// with no index the file could never be looked up again, so staging it would
+    /// write and delete a full track for nothing. Staging inside the audio dir keeps
+    /// [`persist_file`](Self::persist_file) a same-filesystem rename, and handing back
+    /// the directory lets the caller create the file without the cache lock held.
+    pub fn staging_dir(&self) -> Option<PathBuf> {
+        self.conn.is_some().then(|| self.audio_dir.clone())
+    }
+
+    /// Move a completed staging file to its cache path (a rename, so atomic). An
+    /// associated function with no `&self` on purpose: it must run without the global
+    /// cache lock so a concurrent lookup is not stalled behind it. Pair with `record`.
+    pub fn persist_file(path: &Path, staged: tempfile::NamedTempFile) -> anyhow::Result<()> {
         let shard_dir = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("cache path has no parent: {}", path.display()))?;
         fs::create_dir_all(shard_dir)?;
-
-        let tmp = tempfile::NamedTempFile::new_in(shard_dir)?;
-        fs::write(tmp.path(), data)?;
-        tmp.persist(path)?;
+        staged.persist(path)?;
         Ok(())
     }
 
     /// Record an already-written track in the index and evict LRU entries if
     /// over capacity. Short critical section: index insert + eviction only, no
-    /// large I/O. Pair with [`write_file`](Self::write_file).
+    /// large I/O. Pair with [`persist_file`](Self::persist_file).
     pub fn record(&mut self, track_id: &str, format: &str, file_size: u64) -> anyhow::Result<()> {
         let Some(conn) = &self.conn else {
             return Ok(());
@@ -253,7 +317,7 @@ impl AudioCache {
     }
 
     /// Current clear-generation. Snapshot this before an unlocked
-    /// [`write_file`](Self::write_file) and pass it to
+    /// [`persist_file`](Self::persist_file) and pass it to
     /// [`record_if_current`](Self::record_if_current).
     pub fn generation(&self) -> u64 {
         self.generation
@@ -438,6 +502,84 @@ mod tests {
                 .unwrap()
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_stale_format_generation_drops_every_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let path = {
+            let mut cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+            let path = cache.file_path("track");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"plaintext flac").unwrap();
+            cache.record("track", "flac", 14).unwrap();
+            assert!(cache.lookup_path("track").is_some());
+            path
+        };
+
+        // Pose as a pre-versioning database - the plaintext generation.
+        Connection::open(tmp.path().join("cache").join("index.db"))
+            .unwrap()
+            .pragma_update(None, "user_version", 0i64)
+            .unwrap();
+
+        let cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+        assert_eq!(cache.lookup_path("track"), None);
+        assert!(!path.exists());
+        assert_eq!(cache.total_size(), 0);
+    }
+
+    #[test]
+    fn a_matching_format_generation_keeps_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let mut cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+            let path = cache.file_path("track");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"ciphertext").unwrap();
+            cache.record("track", "flac", 10).unwrap();
+        }
+
+        let cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+        assert!(cache.lookup_path("track").is_some());
+        assert_eq!(cache.total_size(), 10);
+    }
+
+    #[test]
+    fn orphaned_staging_files_are_swept_but_sharded_entries_survive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sharded = {
+            let mut cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+            let path = cache.file_path("track");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"ciphertext").unwrap();
+            cache.record("track", "flac", 10).unwrap();
+            path
+        };
+
+        // A staging file left behind by an unclean exit: directly in the audio
+        // dir, never indexed.
+        let audio_dir = tmp.path().join("cache").join("audio");
+        let orphan = audio_dir.join(".tmpAbC123");
+        fs::write(&orphan, b"half a download").unwrap();
+
+        let cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
+        assert!(!orphan.exists(), "orphaned staging file must be swept");
+        assert!(sharded.exists(), "an indexed entry must survive the sweep");
+        assert!(cache.lookup_path("track").is_some());
+    }
+
+    #[test]
+    fn a_disabled_cache_never_offers_a_staging_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(AudioCache::disabled(tmp.path()).staging_dir().is_none());
+        assert!(
+            AudioCache::open_with_capacity(tmp.path(), 1000)
+                .unwrap()
+                .staging_dir()
+                .is_some()
+        );
     }
 
     #[test]

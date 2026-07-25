@@ -103,6 +103,9 @@ pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build
 pub struct PreloadedTrack {
     pub track: TrackInfo,
     pub data: Vec<u8>,
+    /// The CDN's ciphertext for `data`, carried so a preload hit can still
+    /// populate the disk cache (which stores ciphertext, not playable audio).
+    pub ciphertext: Option<(tempfile::NamedTempFile, u64)>,
 }
 
 #[derive(Debug)]

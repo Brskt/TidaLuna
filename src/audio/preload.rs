@@ -9,11 +9,19 @@ const PRELOAD_MAX_BYTES: usize = 32 * 1024 * 1024; // 32 MB
 
 use crate::util::fmt::{format_bytes, format_ms};
 
+/// A complete in-RAM fetch: plaintext for the decoder, plus the ciphertext the disk
+/// cache stores. `None` when staging failed or the fetch was capped - caching is
+/// best-effort and must never fail a load.
+pub struct FetchedTrack {
+    pub data: Vec<u8>,
+    pub ciphertext: Option<(tempfile::NamedTempFile, u64)>,
+}
+
 async fn fetch_and_decrypt_inner(
     url: &str,
     key: &str,
     max_bytes: Option<usize>,
-) -> anyhow::Result<Option<Vec<u8>>> {
+) -> anyhow::Result<Option<FetchedTrack>> {
     let start = std::time::Instant::now();
     let resp = HTTP_CLIENT.get(url).send().await?;
 
@@ -32,6 +40,9 @@ async fn fetch_and_decrypt_inner(
     let mut buffer = Vec::new();
     let mut reconnect_attempts: u32 = 0;
     const MAX_PRELOAD_RECONNECTS: u32 = 8;
+    // A reconnect resumes at `offset` and appends, so the staged bytes stay linear
+    // from zero - no equivalent of download_stream's Range restart exists here.
+    let mut cipher_sink = open_cipher_sink(&crate::player::canonical_track_id(url));
 
     'download: loop {
         let item = match stream.next().await {
@@ -89,6 +100,11 @@ async fn fetch_and_decrypt_inner(
             .acquire(TrafficClass::Preload, chunk.len() as u32)
             .await;
 
+        // Stage the CDN's bytes before decrypting the copy below.
+        if let Some(sink) = cipher_sink.take() {
+            cipher_sink = sink.append(&chunk).await;
+        }
+
         decrypt_buf.clear();
         decrypt_buf.extend_from_slice(&chunk);
         if let Some(ref dec) = decryptor {
@@ -121,12 +137,20 @@ async fn fetch_and_decrypt_inner(
         rate_mbps
     );
 
-    Ok(Some(buffer))
+    let ciphertext = match cipher_sink {
+        Some(sink) => sink.finish().await,
+        None => None,
+    };
+
+    Ok(Some(FetchedTrack {
+        data: buffer,
+        ciphertext,
+    }))
 }
 
-pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<Vec<u8>> {
+pub async fn fetch_and_decrypt(url: &str, key: &str) -> anyhow::Result<FetchedTrack> {
     match fetch_and_decrypt_inner(url, key, None).await? {
-        Some(buffer) => Ok(buffer),
+        Some(fetched) => Ok(fetched),
         None => anyhow::bail!("unexpected capped fetch in uncapped mode"),
     }
 }
@@ -144,13 +168,29 @@ pub async fn start_preload(track: TrackInfo) {
             return;
         }
 
+        // try_cache_hit serves a cached track before the preload is consulted, so
+        // fetching it spends network and a staged copy on bytes nothing reads.
+        // next_track stays set, so auto-load proceeds as for an over-size track.
+        let already_cached = crate::state::AUDIO_CACHE.lock().ok().is_some_and(|c| {
+            c.lookup_path(&crate::player::canonical_track_id(&track.url))
+                .is_some()
+        });
+        if already_cached {
+            crate::vprintln!("[PRELOAD] Next track is already cached, skipping fetch");
+            return;
+        }
+
         crate::vprintln!("[PRELOAD] Starting preload for next track");
         match fetch_and_decrypt_inner(&track.url, &track.key, Some(PRELOAD_MAX_BYTES)).await {
-            Ok(Some(data)) => {
-                if !data.is_empty() {
+            Ok(Some(fetched)) => {
+                if !fetched.data.is_empty() {
                     let mut lock = PRELOAD_STATE.lock().await;
                     if lock.next_track.as_ref() == Some(&track) {
-                        lock.data = Some(PreloadedTrack { track, data });
+                        lock.data = Some(PreloadedTrack {
+                            track,
+                            data: fetched.data,
+                            ciphertext: fetched.ciphertext,
+                        });
                     }
                 }
             }
@@ -212,6 +252,92 @@ pub fn start_download(
             _ = download_stream(resp, url, key, writer) => {}
         }
     })
+}
+
+/// How much ciphertext to accumulate before touching the disk.
+const STAGING_FLUSH_BYTES: usize = 1024 * 1024;
+
+/// Collects the stream's bytes as they arrive from the CDN, before decryption, so
+/// the disk cache stores ciphertext rather than playable audio. Chunks pile up in
+/// RAM and reach the disk one `STAGING_FLUSH_BYTES` block at a time on a blocking
+/// worker: reqwest yields 16-64 KB at a time, and writing each inline would put
+/// thousands of blocking writes on the runtime thread driving the download.
+struct CipherSink {
+    file: tempfile::NamedTempFile,
+    len: u64,
+    pending: Vec<u8>,
+}
+
+impl CipherSink {
+    /// By value because a flush moves the file onto a blocking worker. `None` means
+    /// staging failed and the caller must stop staging.
+    async fn append(mut self, chunk: &[u8]) -> Option<Self> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() < STAGING_FLUSH_BYTES {
+            return Some(self);
+        }
+        self.flush().await
+    }
+
+    async fn flush(mut self) -> Option<Self> {
+        if self.pending.is_empty() {
+            return Some(self);
+        }
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            self.file.write_all(&self.pending).ok()?;
+            self.len += self.pending.len() as u64;
+            self.pending.clear();
+            Some(self)
+        })
+        .await
+        .ok()?
+    }
+
+    /// Flush the tail and hand over the staging file, or `None` if nothing was ever
+    /// written. The one gate on emptiness, so no caller needs its own: a zero-length
+    /// entry would be stored, read back, rejected and deleted for nothing.
+    async fn finish(self) -> Option<(tempfile::NamedTempFile, u64)> {
+        let sink = self.flush().await?;
+        (sink.len > 0).then_some((sink.file, sink.len))
+    }
+}
+
+/// Staging sink for the ciphertext, or `None` if this track should not be staged.
+/// Caching is best-effort, so every failure here disables it silently. Refuses an
+/// already-indexed track and a disabled cache: neither could use the result, and
+/// both would write a full track only to delete it.
+fn open_cipher_sink(track_id: &str) -> Option<CipherSink> {
+    let dir = {
+        let cache = crate::state::AUDIO_CACHE.lock().ok()?;
+        if cache.lookup_path(track_id).is_some() {
+            return None;
+        }
+        cache.staging_dir()?
+    };
+    // Unlocked: syscalls, and the cache lock sits on every concurrent lookup.
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = tempfile::NamedTempFile::new_in(&dir).ok()?;
+    Some(CipherSink {
+        file,
+        len: 0,
+        pending: Vec::with_capacity(STAGING_FLUSH_BYTES),
+    })
+}
+
+/// Hand a complete-from-zero download's ciphertext to the cache writer. Every EOF
+/// path goes through here because one that forgets silently stops caching instead
+/// of failing, which is how the 416-on-reconnect exit was missed. A Range-started
+/// stream is not cacheable (the gate is `base_offset == 0`), so it drops the sink.
+async fn park_ciphertext(writer: &RamBufferWriter, sink: Option<CipherSink>, stream_offset: u64) {
+    if stream_offset != 0 {
+        return;
+    }
+    if let Some(sink) = sink
+        && let Some((file, len)) = sink.finish().await
+    {
+        writer.set_ciphertext(file, len);
+    }
 }
 
 async fn download_stream(
@@ -332,6 +458,15 @@ async fn download_stream(
             }
         };
 
+        // Staging follows the buffer's cacheability: only a stream from byte 0 can be
+        // cached, so a Range-based one stages nothing. Re-opening here also covers a
+        // server that ignored Range and put us back at 0.
+        let mut cipher_sink = if stream_offset == 0 {
+            open_cipher_sink(&crate::player::canonical_track_id(&url))
+        } else {
+            None
+        };
+
         let mut stream = stream_resp.bytes_stream();
         let mut offset = stream_offset;
         let mut decrypt_buf = Vec::with_capacity(128 * 1024);
@@ -385,6 +520,13 @@ async fn download_stream(
                             offset += chunk.len() as u64;
                             reconnect_attempts = 0; // progress made; reset the reconnect budget
                             let written = writer.write_counted(&decrypt_buf);
+                            // `chunk` is still ciphertext: decryption ran on the copy
+                            // in `decrypt_buf`. A discarded write means a restart is
+                            // imminent, so the file must not diverge from the buffer.
+                            cipher_sink = match cipher_sink.take() {
+                                Some(sink) if written => sink.append(&chunk).await,
+                                _ => None,
+                            };
                             chunk_count += 1;
                             bytes_since_restart += chunk.len() as u64;
 
@@ -480,7 +622,10 @@ async fn download_stream(
                                 break 'reconnect r.bytes_stream();
                             }
                             Ok(r) if r.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
-                                // offset is at/past EOF: all bytes are already buffered.
+                                // offset is at/past EOF: all bytes are already
+                                // buffered, so this download is complete and
+                                // cacheable just like a clean EOF.
+                                park_ciphertext(&writer, cipher_sink.take(), stream_offset).await;
                                 writer.finish();
                                 return;
                             }
@@ -516,6 +661,7 @@ async fn download_stream(
 
         // If we downloaded from byte 0, the entire file is in the buffer.
         if stream_offset == 0 {
+            park_ciphertext(&writer, cipher_sink.take(), stream_offset).await;
             writer.finish();
             break;
         }
