@@ -419,7 +419,7 @@ impl AudioPipeline {
         let chunk_size = 1024;
         let params = rubato::SincInterpolationParameters {
             sinc_len: 256,
-            f_cutoff: 0.95,
+            f_cutoff: Some(0.95),
             interpolation: rubato::SincInterpolationType::Linear,
             oversampling_factor: 256,
             window: rubato::WindowFunction::BlackmanHarris2,
@@ -465,7 +465,7 @@ impl AudioPipeline {
             let adapter = SequentialSliceOfVecs::new(&self.accum, src_ch, self.chunk_size)
                 .expect("invalid buffer dimensions");
 
-            match self.resampler.process(&adapter, 0, None) {
+            match self.resampler.process(&adapter, None) {
                 Ok(resampled) => {
                     let data = resampled.take_data();
                     self.remap_channels(&data, src_ch, &mut output);
