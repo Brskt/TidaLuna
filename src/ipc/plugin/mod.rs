@@ -1,3 +1,4 @@
+mod download;
 mod jsrt;
 mod lib_native;
 mod native;
@@ -66,6 +67,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
                 }
                 Err(e) => ipc_callback_err(&callback, 400, &format!("{e:#}")),
             }
+        }
+        "plugin.download" => {
+            download::handle_download(&msg, callback);
         }
         "proxy.fetch" => {
             proxy::handle_proxy_fetch_dispatch(&msg, callback);
