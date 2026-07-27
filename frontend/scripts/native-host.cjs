@@ -40,6 +40,8 @@ const SAFE_MODULES = new Set([
 ]);
 
 // ── Permanently blocked modules (no trust possible) ─────────────────────
+// No trust dialog can unlock these. require() returns an inert stub
+// (FORBIDDEN_STUBS) so dead-code requires can't kill a plugin; calls throw.
 const FORBIDDEN_MODULES = new Set([
     "child_process", "cluster", "vm", "v8",
     "inspector", "inspector/promises", "module", "repl", "process",
@@ -92,6 +94,21 @@ const ALLOWED_ENV_KEYS = new Set([
     "HOME", "USERPROFILE", "PATH", "APPDATA",
 ]);
 
+// Libraries read process.stderr.fd/.isTTY at init (debug, chalk) and crash on
+// undefined. Both writes go to stderr; stdout gets no fd because stdout carries
+// the host IPC lines - fd 1 would let a plugin forge replies.
+const mockedStdio = (function() {
+    var realStderr = process.stderr; // captured before hardenProcess blocks it
+    var toStderr = function(chunk) {
+        try { realStderr.write(chunk); } catch (_) {}
+        return true;
+    };
+    return {
+        stderr: Object.freeze({ fd: 2, isTTY: false, write: toStderr }),
+        stdout: Object.freeze({ isTTY: false, write: toStderr }),
+    };
+})();
+
 const mockedProcess = Object.freeze({
     env: Object.freeze(Object.fromEntries(
         Object.entries(process.env).filter(([k]) => ALLOWED_ENV_KEYS.has(k))
@@ -104,6 +121,8 @@ const mockedProcess = Object.freeze({
     hrtime: process.hrtime,
     cwd: () => process.cwd(),
     argv: Object.freeze([...process.argv]),
+    stderr: mockedStdio.stderr,
+    stdout: mockedStdio.stdout,
 });
 
 // ── Host-private refs (captured before globalThis hardening) ───────────
@@ -134,6 +153,7 @@ var _FunctionPrototypeBind = Function.prototype.bind;
 var _RealFunction = Function;
 var _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 var _SetPrototypeHas = Set.prototype.has;
+var _MapPrototypeGet = Map.prototype.get;
 var _ArrayIsArray = Array.isArray;
 // Web types used to faithfully encode request bodies / rebuild responses.
 var _RealHeaders = typeof Headers !== "undefined" ? Headers : undefined;
@@ -167,6 +187,140 @@ var shimmedWorkerThreads = (function() {
     });
     return _ObjectFreeze(shim);
 })();
+
+// ── Inert stubs for forbidden modules ─────────────────────────────────
+// Bundled deps require these as dead code they never run - socket.io-client
+// reaches child_process via xmlhttprequest-ssl, tty via debug - so throwing at
+// require killed plugins over unused code. Members throw on CALL, not on
+// property access: real code does require('child_process').spawn at top level.
+// Every entry here is frozen and stateless, so one shared instance is safe for
+// all plugins. A stub needing mutable state belongs in makeRequireProxy instead.
+
+// One line per member for the whole process: Rust forwards every stderr line into
+// console.log uncapped and rotates only at startup, so a plugin retrying on a timer
+// would grow that file without bound. No plugin name in the key - the stub is
+// shared, and warnInertStub's require-time line already gives attribution.
+var _warnedStubCalls = new Set();
+
+function makeForbiddenStub(id, members, answers) {
+    var stub = _ObjectCreate(null);
+    _ArrayPrototypeForEach.call(members, function(name) {
+        stub[name] = function() {
+            var msg = "[sandbox] " + id + "." + name + " is not available";
+            // Logged as well as thrown: a plugin catching it still leaves a trace.
+            // The throw is what stops the caller, so logging once is enough.
+            var callKey = id + "." + name;
+            if (!_SetPrototypeHas.call(_warnedStubCalls, callKey)) {
+                _warnedStubCalls.add(callKey);
+                try { hostStderr.write(msg + "\n"); } catch (_) {}
+            }
+            throw new Error(msg);
+        };
+    });
+    if (answers) {
+        _ArrayPrototypeForEach.call(_ObjectKeys(answers), function(key) {
+            stub[key] = answers[key];
+        });
+    }
+    return _ObjectFreeze(stub);
+}
+
+var FORBIDDEN_STUBS = (function() {
+    var t = _ObjectCreate(null);
+
+    t["child_process"] = makeForbiddenStub("child_process", [
+        "spawn", "spawnSync", "exec", "execSync",
+        "execFile", "execFileSync", "fork",
+    ]);
+
+    t["tty"] = makeForbiddenStub("tty", ["ReadStream", "WriteStream"], {
+        isatty: function() { return false; },
+    });
+
+    t["cluster"] = makeForbiddenStub("cluster",
+        ["fork", "disconnect", "setupPrimary", "setupMaster"], {
+            isPrimary: true, isMaster: true, isWorker: false,
+            workers: _ObjectFreeze({}),
+        });
+
+    // url() is undefined in real Node too when no inspector is attached.
+    var inspectorStub = makeForbiddenStub("inspector",
+        ["Session", "open", "close", "waitForDebugger"], {
+            url: function() { return undefined; },
+        });
+    t["inspector"] = inspectorStub;
+    t["inspector/promises"] = inspectorStub;
+
+    t["vm"] = makeForbiddenStub("vm", [
+        "Script", "SourceTextModule", "SyntheticModule", "createContext",
+        "isContext", "compileFunction", "runInContext", "runInNewContext",
+        "runInThisContext", "measureMemory",
+    ]);
+
+    t["v8"] = makeForbiddenStub("v8", [
+        "getHeapStatistics", "getHeapSpaceStatistics", "getHeapSnapshot",
+        "writeHeapSnapshot", "serialize", "deserialize", "setFlagsFromString",
+        "takeCoverage", "stopCoverage",
+    ]);
+
+    t["repl"] = makeForbiddenStub("repl", ["start", "REPLServer"]);
+    t["wasi"] = makeForbiddenStub("wasi", ["WASI"]);
+    t["trace_events"] = makeForbiddenStub("trace_events",
+        ["createTracing", "getEnabledCategories"]);
+
+    t["bun:ffi"] = makeForbiddenStub("bun:ffi", [
+        "dlopen", "CString", "ptr", "toBuffer", "toArrayBuffer",
+        "read", "JSCallback", "linkSymbols", "viewSource",
+    ]);
+    t["bun:jsc"] = makeForbiddenStub("bun:jsc", [
+        "serialize", "deserialize", "describe", "describeArray", "gcAndSweep",
+        "fullGC", "edenGC", "heapSize", "heapStats", "memoryUsage",
+        "setTimeZone", "callerSourceOrigin",
+    ]);
+    t["bun:sqlite"] = makeForbiddenStub("bun:sqlite", ["Database", "deserialize"]);
+
+    return _ObjectFreeze(t);
+})();
+
+// Per plugin, not in FORBIDDEN_STUBS: module-alias and v8-compile-cache assign
+// Module.prototype._compile at load time, so this must stay mutable - and a
+// mutable stub can't be shared or one plugin's patches reach the next.
+// Disconnected from the real Module: patches land on the throwaway prototype.
+function makeModuleStub() {
+    var FakeModule = function Module() {
+        throw new Error("[sandbox] module.Module is not available");
+    };
+    FakeModule.prototype = {};
+    FakeModule.builtinModules = _ObjectFreeze([]);
+    FakeModule._cache = {};
+    FakeModule._extensions = {};
+    FakeModule.createRequire = function() {
+        var msg = "[sandbox] module.createRequire is not available";
+        try { hostStderr.write(msg + "\n"); } catch (_) {}
+        throw new Error(msg);
+    };
+    FakeModule.syncBuiltinESMExports = function() {};
+    return FakeModule;
+}
+
+// One line per (plugin, module) so a plugin dragging a forbidden module in through
+// its dependency tree stays visible at LOGS=1 without dying for it. Per-plugin sets
+// rather than composite keys: forgetting a plugin is then a single delete, and no
+// delimiter has to be reserved inside plugin names or module ids.
+var _warnedStubs = new Map();
+function warnInertStub(pluginName, canonical) {
+    var seen = _MapPrototypeGet.call(_warnedStubs, pluginName);
+    if (!seen) {
+        seen = new Set();
+        _warnedStubs.set(pluginName, seen);
+    }
+    if (_SetPrototypeHas.call(seen, canonical)) return;
+    seen.add(canonical);
+    try {
+        hostStderr.write("[sandbox] " + pluginName + ": require('" + canonical
+            + "') is blocked - returned an inert stub, calls into it will throw\n");
+    } catch (_) {}
+}
 
 // ── Harden globalThis.process via Proxy ───────────────────────────────
 // Cannot fully replace - Bun's network modules need process.nextTick etc.
@@ -252,7 +406,8 @@ var shimmedWorkerThreads = (function() {
 })();
 
 // ── Proxied require factory ─────────────────────────────────────────────
-function makeRequireProxy(trustedModules, sandboxedFs, dataDir) {
+function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName) {
+    var moduleStub = null; // lazy, per plugin - see makeModuleStub
     return function proxiedRequire(id) {
         // Virtual module: plugin data directory
         if (id === "@luna/native-data" || id === "node:@luna/native-data")
@@ -266,6 +421,22 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir) {
         var canonical = canonicalize(id);
 
         if (isForbidden(id)) {
+            // Not a capability: already the plugin's ambient `process`. The
+            // globalThis Proxy would throw on .stderr where the ambient one works.
+            if (canonical === "process") return mockedProcess;
+
+            // Memoized so require('module') === require('module') within a plugin.
+            if (canonical === "module") {
+                warnInertStub(pluginName, canonical);
+                if (!moduleStub) moduleStub = makeModuleStub();
+                return moduleStub;
+            }
+
+            var stub = FORBIDDEN_STUBS[canonical];
+            if (stub) {
+                warnInertStub(pluginName, canonical);
+                return stub;
+            }
             throw new Error("[sandbox] require('" + canonical + "') is permanently blocked");
         }
 
@@ -1003,7 +1174,12 @@ rl.on("line", async (line) => {
                 sandboxedFs = makeSandboxedFs([canonicalDataDir], grants);
             }
 
-            var proxiedRequire = makeRequireProxy(trustedModules, sandboxedFs, dataDir);
+            // A register rebuilds this plugin's JS state on the same long-lived Bun
+            // process (disable/re-enable, reinstall, code update all land here), so
+            // forget its warned modules too or the inert-stub lines never reappear.
+            _warnedStubs.delete(name);
+
+            var proxiedRequire = makeRequireProxy(trustedModules, sandboxedFs, dataDir, name);
             // fetch gated on network trust (require('http')/'https' group), baked per-plugin
             // into the eval env - no shared mutable state to race across concurrent calls.
             var hasNetworkTrust = _SetPrototypeHas.call(trustedModules, "http")
@@ -1044,6 +1220,7 @@ rl.on("line", async (line) => {
         } else if (type === "cleanup") {
             delete modules[cmd.name];
             grantStores.delete(cmd.name);
+            _warnedStubs.delete(cmd.name);
             respond(id, { ok: true });
 
         } else {
