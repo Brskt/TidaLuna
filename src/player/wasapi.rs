@@ -860,7 +860,7 @@ fn try_open_stream(
     match open_exclusive_stream(device, sample_rate, channels, bits_per_sample) {
         Ok(resources) => Ok(resources),
         Err(e) => {
-            eprintln!("[WASAPI] Failed to open stream: {e}");
+            crate::vprintln!("[WASAPI] Failed to open stream: {e}");
             if is_device_in_use_error(&e) {
                 let _ = event_tx.send(ExclusiveEvent::DeviceLocked(e));
             } else if e.as_str() == "no compatible exclusive format found" {

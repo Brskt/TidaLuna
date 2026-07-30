@@ -307,7 +307,7 @@ wrap_browser_process_handler! {
             let pkce_credentials = crate::platform::auth::load_or_create_pkce_credentials(&data_dir);
             let pkce_credentials_json =
                 serde_json::to_string(&pkce_credentials).unwrap_or_else(|e| {
-                    eprintln!("[PKCE]   Failed to encode credentials for JS: {e}");
+                    crate::verr!("[PKCE]   Failed to encode credentials for JS: {e}");
                     format!("{{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"{}\",\"codeVerifier\":\"\"}}", crate::ui::nav::REDIRECT_URI)
                 });
 

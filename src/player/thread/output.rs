@@ -300,11 +300,11 @@ fn open_with_config(
             }
             // Device lost / stream invalidated: rebuild on the current default device.
             cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
-                eprintln!("[CPAL]   Stream error (device lost): {err}");
+                crate::vprintln!("[CPAL]   Stream error (device lost): {err}");
                 err_flag.store(STREAM_ERR_DEVICE_LOST, Relaxed);
             }
             _ => {
-                eprintln!("[CPAL]   Stream error: {err}");
+                crate::vprintln!("[CPAL]   Stream error: {err}");
                 err_flag.store(STREAM_ERR_UNKNOWN, Relaxed);
             }
         },
@@ -391,7 +391,7 @@ pub(super) fn open_output_stream(
     ) {
         Ok(opened) => Some(opened),
         Err(e) => {
-            eprintln!("[ERROR]  Failed to open cpal stream: {e}");
+            crate::vprintln!("[ERROR]  Failed to open cpal stream: {e}");
             None
         }
     }

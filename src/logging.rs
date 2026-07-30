@@ -100,6 +100,15 @@ pub fn vlog3(args: std::fmt::Arguments<'_>) {
     print_log(args);
 }
 
+/// A hard failure that has no other user-facing channel: never gated by `LOGS`,
+/// and it opens the sink itself so the trace survives at level 0.
+pub fn vlog_err(args: std::fmt::Arguments<'_>) {
+    ensure_file_sink();
+    print_log(args);
+}
+
+// The crate's only writer: the deny targets its callers, not the sink itself.
+#[allow(clippy::print_stderr)]
 #[inline]
 fn print_log(args: std::fmt::Arguments<'_>) {
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
@@ -112,8 +121,7 @@ fn print_log(args: std::fmt::Arguments<'_>) {
         args
     );
     eprintln!("{line}");
-    // Tee to the file sink when it's open (only opened once level >= 1). Callers
-    // reach print_log solely through the vlog* level gates, so no re-check here.
+    // Callers gate themselves: vlog* past their level, vlog_err by opening the sink.
     let mut guard = FILE_SINK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(file) = guard.as_mut() {
         let _ = writeln!(file, "{line}");
@@ -138,6 +146,14 @@ macro_rules! vprintln2 {
 macro_rules! vprintln3 {
     ($($arg:tt)*) => {
         $crate::logging::vlog3(format_args!($($arg)*))
+    };
+}
+
+/// Ungated: the level decides how chatty the log is, not whether a failure is traced.
+#[macro_export]
+macro_rules! verr {
+    ($($arg:tt)*) => {
+        $crate::logging::vlog_err(format_args!($($arg)*))
     };
 }
 
@@ -222,6 +238,62 @@ mod tests {
     use super::*;
     use std::fs;
     use time::{Date, Month, PrimitiveDateTime, Time};
+
+    static LOGGING_STATE: Mutex<()> = Mutex::new(());
+
+    /// libtest runs the crate in one process, several threads wide: a test that
+    /// mutates LOG_LEVEL or FILE_SINK races its neighbours and dirties the rest of
+    /// the run. Take this first; it serialises and restores.
+    struct LoggingState {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        level: u8,
+        sink: Option<File>,
+    }
+
+    impl LoggingState {
+        fn acquire() -> Self {
+            let _lock = LOGGING_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                _lock,
+                level: log_level(),
+                sink: FILE_SINK.lock().unwrap_or_else(|e| e.into_inner()).take(),
+            }
+        }
+    }
+
+    impl Drop for LoggingState {
+        fn drop(&mut self) {
+            store_level(self.level);
+            *FILE_SINK.lock().unwrap_or_else(|e| e.into_inner()) = self.sink.take();
+        }
+    }
+
+    #[test]
+    fn hard_failures_write_at_level_zero_while_gated_logs_do_not() {
+        let _state = LoggingState::acquire();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console.log");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        *FILE_SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+        store_level(0);
+
+        vlog(format_args!("gated-line-marker"));
+        vlog_err(format_args!("hard-failure-marker"));
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("hard-failure-marker"),
+            "a hard failure must reach console.log even at level 0"
+        );
+        assert!(
+            !written.contains("gated-line-marker"),
+            "a gated log must stay silent at level 0"
+        );
+    }
 
     #[test]
     fn effective_level_takes_the_max() {
@@ -315,6 +387,7 @@ mod tests {
 
     #[test]
     fn store_level_roundtrips_through_log_level() {
+        let _state = LoggingState::acquire();
         store_level(2);
         assert_eq!(log_level(), 2);
         store_level(0);

@@ -857,13 +857,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 Err(e) => crate::vprintln!("[ERROR]  cpal stream.play() failed: {e}"),
             }
         } else {
-            eprintln!("[ERROR]  start_playback: no cpal stream!");
+            crate::vprintln!("[ERROR]  start_playback: no cpal stream!");
         }
         if let Some(ref tx) = self.decode_cmd_tx {
             let _ = tx.send(DecodeCommand::Resume);
             crate::vprintln!("[PLAY]   DecodeCommand::Resume sent");
         } else {
-            eprintln!("[ERROR]  start_playback: no decode_cmd_tx!");
+            crate::vprintln!("[ERROR]  start_playback: no decode_cmd_tx!");
         }
         self.pre_seek_pos = None;
     }

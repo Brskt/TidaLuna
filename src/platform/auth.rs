@@ -70,7 +70,7 @@ pub(crate) fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredential
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        eprintln!(
+        crate::verr!(
             "[PKCE]   Failed to create directory {}: {e}",
             parent.display()
         );
@@ -79,12 +79,12 @@ pub(crate) fn load_or_create_pkce_credentials(data_dir: &Path) -> PkceCredential
     match serde_json::to_vec_pretty(&generated) {
         Ok(json) => {
             if let Err(e) = write_private(&path, &json) {
-                eprintln!("[PKCE]   Failed to persist credentials: {e}");
+                crate::verr!("[PKCE]   Failed to persist credentials: {e}");
             } else {
                 crate::vprintln!("[PKCE]   Persisted credentials");
             }
         }
-        Err(e) => eprintln!("[PKCE]   Failed to serialize credentials: {e}"),
+        Err(e) => crate::verr!("[PKCE]   Failed to serialize credentials: {e}"),
     }
     generated
 }

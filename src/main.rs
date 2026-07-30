@@ -1,4 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// A bare print reaches neither the LOGS gate nor <data_dir>/console.log: vprintln!
+// for what the level may silence, verr! for a failure with no other channel.
+// Crate-local, so it does not reach the updater, which has a real console.
+#![deny(clippy::print_stderr, clippy::print_stdout)]
 mod app_state;
 mod audio;
 mod bridge;
@@ -163,12 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Fail fast only if the file exists but is unreadable / not
                     // executable: that's an administrative misconfiguration we
                     // want loud rather than a silent fallback to no sandbox.
+                    // Fatal: must be loud at LOGS=0, and still traced on a desktop
+                    // launch where nothing is attached to stderr.
                     if !is_setuid_root && !is_executable {
-                        eprintln!(
+                        crate::verr!(
                             "chrome-sandbox at {} is neither setuid-root nor a normal executable.",
                             path.display()
                         );
-                        eprintln!("Reinstall the .deb or fix the binary's permissions.");
+                        crate::verr!("Reinstall the .deb or fix the binary's permissions.");
                         std::process::exit(1);
                     }
                 }

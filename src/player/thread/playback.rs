@@ -75,7 +75,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             (self.callback)(PlayerEvent::Duration(d, self.current_seq));
                         }
                         ExclusiveEvent::InitFailed(e) => {
-                            eprintln!("[WASAPI] Init failed, falling back to shared mode: {e}");
+                            crate::vprintln!(
+                                "[WASAPI] Init failed, falling back to shared mode: {e}"
+                            );
                             if let Some(cancel) = self.exclusive_stream_cancel.take() {
                                 cancel.store(true, Relaxed);
                             }
@@ -86,7 +88,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.rearm_shared_after_exclusive_failure();
                         }
                         ExclusiveEvent::DeviceLocked(e) => {
-                            eprintln!("[WASAPI] Device locked by another process: {e}");
+                            crate::vprintln!("[WASAPI] Device locked by another process: {e}");
                             if let Some(cancel) = self.exclusive_stream_cancel.take() {
                                 cancel.store(true, Relaxed);
                             }
