@@ -939,60 +939,8 @@ fn stream_to_file(mut reader: impl Read, dest: &Path, max: u64) -> Result<()> {
 }
 
 #[cfg(test)]
-mod download_tests {
-    use std::io::Cursor;
-
-    use super::{read_capped, stream_to_file};
-
-    #[test]
-    fn read_capped_returns_body_under_cap() {
-        let body = vec![3u8; 100];
-        assert_eq!(read_capped(Cursor::new(body.clone()), 1000).unwrap(), body);
-    }
-
-    #[test]
-    fn read_capped_allows_exactly_at_cap() {
-        let body = vec![5u8; 64];
-        assert_eq!(read_capped(Cursor::new(body.clone()), 64).unwrap(), body);
-    }
-
-    #[test]
-    fn read_capped_rejects_over_cap() {
-        let err = read_capped(Cursor::new(vec![0u8; 65]), 64).unwrap_err();
-        assert!(err.to_string().contains("cap"), "got: {err}");
-    }
-
-    #[test]
-    fn stream_to_file_writes_body_under_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("out.bin");
-        let body = vec![7u8; 100];
-        stream_to_file(Cursor::new(body.clone()), &dest, 1000).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(), body);
-    }
-
-    #[test]
-    fn stream_to_file_accepts_body_exactly_at_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("out.bin");
-        let body = vec![1u8; 64];
-        stream_to_file(Cursor::new(body.clone()), &dest, 64).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(), body);
-    }
-
-    #[test]
-    fn stream_to_file_rejects_body_over_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("out.bin");
-        let body = vec![0u8; 65];
-        let err = stream_to_file(Cursor::new(body), &dest, 64).unwrap_err();
-        assert!(err.to_string().contains("cap"), "got: {err}");
-        assert!(
-            !dest.exists(),
-            "partial file must be removed when the cap is exceeded"
-        );
-    }
-}
+#[path = "../tests/unit/main/download_tests.rs"]
+mod download_tests;
 
 fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     #[cfg(target_os = "windows")]
@@ -1187,40 +1135,5 @@ fn show_error(msg: &str) {
 }
 
 #[cfg(test)]
-mod manifest_tests {
-    use super::*;
-
-    #[test]
-    fn manifest_roundtrip_with_protocol_field() {
-        let json = r#"{
-            "version": "0.0.5-alpha",
-            "min_version": "0.0.4-alpha",
-            "target": "linux-amd64",
-            "files": {},
-            "sandbox_protocol_required": 1
-        }"#;
-        let m: Manifest = serde_json::from_str(json).unwrap();
-        assert_eq!(m.sandbox_protocol_required, Some(1));
-        let serialized = serde_json::to_string(&m).unwrap();
-        assert!(serialized.contains("\"sandbox_protocol_required\":1"));
-    }
-
-    #[test]
-    fn manifest_roundtrip_without_protocol_field_defaults_none() {
-        let json = r#"{
-            "version": "0.0.4-alpha",
-            "min_version": "0.0.4-alpha",
-            "target": "windows-amd64",
-            "files": {}
-        }"#;
-        let m: Manifest = serde_json::from_str(json).unwrap();
-        assert_eq!(m.sandbox_protocol_required, None);
-    }
-
-    #[test]
-    fn manifest_delta_from_roundtrip() {
-        let json = r#"{"version":"0.0.5-alpha","min_version":"0.0.4-alpha","target":"linux-amd64","files":{},"delta_from":"0.0.4-alpha"}"#;
-        let m: Manifest = serde_json::from_str(json).unwrap();
-        assert_eq!(m.delta_from.as_deref(), Some("0.0.4-alpha"));
-    }
-}
+#[path = "../tests/unit/main/manifest_tests.rs"]
+mod manifest_tests;

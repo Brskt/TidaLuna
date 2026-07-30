@@ -1032,84 +1032,12 @@ fn numeric_version(version: &str, parts: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::numeric_version;
-
-    #[test]
-    fn drops_prerelease_suffix() {
-        assert_eq!(numeric_version("0.0.4-alpha", 4), "0.0.4.0");
-        assert_eq!(numeric_version("1.2.3-rc.1", 4), "1.2.3.0");
-        assert_eq!(numeric_version("0.0.4-alpha", 3), "0.0.4");
-    }
-
-    #[test]
-    fn drops_build_metadata() {
-        assert_eq!(numeric_version("1.2.3+build.42", 4), "1.2.3.0");
-    }
-
-    #[test]
-    fn pads_missing_parts() {
-        assert_eq!(numeric_version("1", 4), "1.0.0.0");
-        assert_eq!(numeric_version("1.2", 4), "1.2.0.0");
-        assert_eq!(numeric_version("1.2", 3), "1.2.0");
-    }
-
-    #[test]
-    fn truncates_extra_parts() {
-        assert_eq!(numeric_version("1.2.3.4.5", 4), "1.2.3.4");
-        assert_eq!(numeric_version("1.2.3.4", 3), "1.2.3");
-    }
-
-    #[test]
-    fn passes_through_already_normal() {
-        assert_eq!(numeric_version("1.2.3.4", 4), "1.2.3.4");
-        assert_eq!(numeric_version("1.2.3", 3), "1.2.3");
-    }
-
-    #[test]
-    fn handles_garbage_suffix_per_part() {
-        assert_eq!(numeric_version("1abc.2def.3ghi", 4), "1.2.3.0");
-    }
-}
+#[path = "../tests/unit/main/tests.rs"]
+mod tests;
 
 #[cfg(test)]
-mod manifest_emission_tests {
-    use super::*;
-
-    #[test]
-    fn linux_manifest_emits_protocol_required() {
-        let manifest = Manifest {
-            version: "0.0.5-alpha".to_string(),
-            min_version: "0.0.4-alpha".to_string(),
-            target: "linux-amd64".to_string(),
-            files: BTreeMap::new(),
-            sandbox_protocol_required: Some(LINUX_SANDBOX_PROTOCOL_REQUIRED),
-            delta_from: None,
-        };
-        let json = serde_json::to_string(&manifest).unwrap();
-        assert!(
-            json.contains("\"sandbox_protocol_required\":1"),
-            "Linux manifest must carry the protocol field; got: {json}"
-        );
-    }
-
-    #[test]
-    fn windows_manifest_omits_protocol_required() {
-        let manifest = Manifest {
-            version: "0.0.5-alpha".to_string(),
-            min_version: "0.0.4-alpha".to_string(),
-            target: "windows-amd64".to_string(),
-            files: BTreeMap::new(),
-            sandbox_protocol_required: None,
-            delta_from: None,
-        };
-        let json = serde_json::to_string(&manifest).unwrap();
-        assert!(
-            !json.contains("sandbox_protocol_required"),
-            "Windows manifest must omit the protocol field; got: {json}"
-        );
-    }
-}
+#[path = "../tests/unit/main/manifest_emission_tests.rs"]
+mod manifest_emission_tests;
 
 /// Files in `new` that are new or whose sha256 differs from `old`. Files only
 /// in `old` (removed) are not returned; deletions are handled by the updater's
@@ -1259,40 +1187,8 @@ fn delta(flags: &[String]) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod delta_diff_tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    fn entry(sha: &str) -> FileEntry {
-        FileEntry {
-            sha256: sha.to_string(),
-            size: 1,
-        }
-    }
-
-    fn manifest_with(files: &[(&str, &str)]) -> Manifest {
-        Manifest {
-            version: "0.0.5-alpha".into(),
-            min_version: "0.0.4-alpha".into(),
-            target: "linux-amd64".into(),
-            files: files
-                .iter()
-                .map(|(p, s)| (p.to_string(), entry(s)))
-                .collect::<BTreeMap<_, _>>(),
-            sandbox_protocol_required: None,
-            delta_from: None,
-        }
-    }
-
-    #[test]
-    fn changed_set_includes_new_and_modified_only() {
-        let old = manifest_with(&[("a", "h1"), ("b", "h2"), ("gone", "h3")]);
-        let new = manifest_with(&[("a", "h1"), ("b", "h2_changed"), ("c", "h4")]);
-        let mut changed = delta_changed_files(&old, &new);
-        changed.sort();
-        assert_eq!(changed, vec!["b".to_string(), "c".to_string()]);
-    }
-}
+#[path = "../tests/unit/main/delta_diff_tests.rs"]
+mod delta_diff_tests;
 
 fn package(flags: &[String]) -> Result<(), String> {
     let mut arch: Option<String> = None;
