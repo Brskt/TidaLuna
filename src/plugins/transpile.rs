@@ -81,18 +81,20 @@ fn lower_es_modules(source: &str, filename: &str) -> anyhow::Result<String> {
             Statement::ImportDeclaration(d) => {
                 edits.push((d.span.start as usize, d.span.end as usize, lower_import(d)));
             }
+            Statement::ExportDeclaration(d) => {
+                // `export const|let|var|function|class ...` -> drop just `export `.
+                edits.push((
+                    d.span.start as usize,
+                    d.declaration.span().start as usize,
+                    String::new(),
+                ));
+            }
+            Statement::ExportFromDeclaration(d) => {
+                // `export { ... } from "m"` re-export -> drop.
+                edits.push((d.span.start as usize, d.span.end as usize, String::new()));
+            }
             Statement::ExportNamedDeclaration(d) => {
-                if let Some(decl) = &d.declaration {
-                    // `export const|let|var|function|class ...` -> drop just `export `.
-                    edits.push((
-                        d.span.start as usize,
-                        decl.span().start as usize,
-                        String::new(),
-                    ));
-                } else if d.source.is_some() {
-                    // `export { ... } from "m"` re-export -> drop.
-                    edits.push((d.span.start as usize, d.span.end as usize, String::new()));
-                } else if d.export_kind.is_type() {
+                if d.export_kind.is_type() {
                     // `export type { Foo }` - type-only, stripped by the TS
                     // transform; drop it so we don't emit a dangling reference.
                     edits.push((d.span.start as usize, d.span.end as usize, String::new()));

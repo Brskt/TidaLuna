@@ -66,7 +66,7 @@ audioadapter-buffers = "4.0.0"
 base16ct = { workspace = true }
 base64 = { workspace = true }
 cbc = "0.2.1"
-cef = { version = "150.2.1", features = ["build-util"] }
+cef = { version = "151.2.0", features = ["build-util"] }
 # Pinned to the PR #1183 merge (WASAPI/CoreAudio auto-reroute on default-device
 # change + unified Error/ErrorKind). Drop back to a crates.io release once cpal 0.18 ships.
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "c6aa4592ef07968ab6b431e62acab79c72869716", version = "0.18.0" }
@@ -77,7 +77,7 @@ fnv = "1.0.7"
 futures-util = "0.3.33"
 getrandom = { workspace = true }
 oauth2 = { version = "5.0.0", default-features = false }
-oxc = { version = "0.142.0", features = ["semantic", "transformer", "codegen"] }
+oxc = { version = "0.143.0", features = ["semantic", "transformer", "codegen"] }
 pbkdf2 = "0.13.0"
 png = "0.18.1"
 reqwest = { workspace = true, features = [
@@ -109,7 +109,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = [
   "system",
 ] }
 tempfile = "3.27.0"
-time = { version = "0.3.54", features = ["local-offset"] }
+time = { version = "0.3.55", features = ["local-offset"] }
 tokio = { version = "1.53.1", features = [
   "rt-multi-thread",
   "net",
@@ -130,7 +130,7 @@ async-trait = "0.1.91"
 gethostname = "1.1.0"
 md-5 = "0.11.0"
 mdns-sd = "0.20.3"
-rustls = "0.23.42"
+rustls = "0.23.43"
 rustls-pemfile = "2.2.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = { version = "0.30.0", features = [

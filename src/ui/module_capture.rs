@@ -58,21 +58,22 @@ pub(crate) fn append_capture(js: &str, module_id: &str) -> String {
     let mut entries: Vec<(String, String)> = Vec::new();
     for stmt in &parsed.program.body {
         match stmt {
-            Statement::ExportNamedDeclaration(d) => {
-                if let Some(decl) = &d.declaration {
-                    for name in declared_names(decl) {
-                        entries.push((name.clone(), name));
+            Statement::ExportDeclaration(d) => {
+                for name in declared_names(&d.declaration) {
+                    entries.push((name.clone(), name));
+                }
+            }
+            // `ExportNamedDeclaration` can no longer carry a source: the old `source.is_none()`
+            // test is the variant itself now.
+            Statement::ExportNamedDeclaration(d) if !d.export_kind.is_type() => {
+                for s in &d.specifiers {
+                    if s.export_kind.is_type() {
+                        continue;
                     }
-                } else if d.source.is_none() && !d.export_kind.is_type() {
-                    for s in &d.specifiers {
-                        if s.export_kind.is_type() {
-                            continue;
-                        }
-                        entries.push((
-                            module_export_name(&s.exported),
-                            module_export_name(&s.local),
-                        ));
-                    }
+                    entries.push((
+                        module_export_name(&s.exported),
+                        module_export_name(&s.local),
+                    ));
                 }
             }
             Statement::ExportDefaultDeclaration(d) => {
