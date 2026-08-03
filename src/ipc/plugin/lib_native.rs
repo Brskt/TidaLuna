@@ -151,7 +151,8 @@ pub(super) fn handle_show_open_dialog(msg: &IpcMessage, callback: IpcCallback) {
         .and_then(Value::as_array)
         .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    let mode = if properties.contains(&"openDirectory") {
+    let wants_directory = asked_for_a_directory(&properties);
+    let mode = if wants_directory {
         FileDialogMode::OPEN_FOLDER
     } else if properties.contains(&"multiSelections") {
         FileDialogMode::OPEN_MULTIPLE
@@ -162,9 +163,48 @@ pub(super) fn handle_show_open_dialog(msg: &IpcMessage, callback: IpcCallback) {
     let rx = show_file_dialog(mode, title, default_path, filters);
     crate::state::rt_handle().spawn(async move {
         let paths = rx.await.unwrap_or_default();
+        // A picked directory authorises the per-track writes an album makes into it, which no save
+        // dialog ever sees. Taken from the dialog's own answer; the renderer cannot name the folder
+        // itself, and off the async worker since canonicalising could block on a stalled mount.
+        if wants_directory {
+            let granted = paths.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                for path in &granted {
+                    crate::ui::file_dialog::record_folder_grant(std::path::Path::new(path));
+                }
+            })
+            .await;
+        }
         let result = json!({ "canceled": paths.is_empty(), "filePaths": paths });
         ipc_callback_ok(&callback, &result.to_string());
     });
+}
+
+/// Did the caller ask for a directory? This and nothing else mints a write grant: a dialog opened
+/// to read a file leaves no permission behind.
+fn asked_for_a_directory(properties: &[&str]) -> bool {
+    properties.contains(&"openDirectory")
+}
+
+/// Does this `defaultPath` name a directory rather than a file? Electron's contract allows a bare
+/// directory, meaning "open the dialog here with no suggested name", and `Path::file_name` ignores a
+/// trailing separator; treating one as a file name silently moved the dialog to its parent.
+fn names_a_directory(raw: &str) -> bool {
+    raw.chars().next_back().is_some_and(std::path::is_separator)
+        || std::path::Path::new(raw).is_dir()
+}
+
+/// The name to open the dialog on, sanitised BEFORE it opens. What the user confirms is what gets
+/// written. Sanitising after left the two different for any title carrying a character POSIX allows
+/// and Windows refuses, and the overwrite prompt was then about a file we never wrote. Skipped when
+/// the path names a directory: there is no name to clean.
+fn suggested_save_name(raw: &str) -> String {
+    if names_a_directory(raw) {
+        return raw.to_string();
+    }
+    super::download::sanitized_destination(raw)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 /// `showSaveDialog(options) -> Promise<{ canceled, filePath }>`
@@ -174,16 +214,56 @@ pub(super) fn handle_show_save_dialog(msg: &IpcMessage, callback: IpcCallback) {
         .get("title")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let default_path = opts
+    let raw_default = opts
         .get("defaultPath")
         .and_then(Value::as_str)
         .map(str::to_string);
     let filters = parse_filters(&opts);
 
-    let rx = show_file_dialog(FileDialogMode::SAVE, title, default_path, filters);
+    // Runs off the CEF UI thread (`on_query_str`): a stat on a plugin-chosen path, a dead network
+    // mount say, would otherwise freeze repainting for that mount's timeout. `show_file_dialog` posts
+    // its own UI-thread task and is safe to call from anywhere.
     crate::state::rt_handle().spawn(async move {
+        let default_path = match raw_default {
+            None => None,
+            Some(raw) => {
+                match tokio::task::spawn_blocking(move || suggested_save_name(&raw)).await {
+                    Ok(name) => Some(name),
+                    Err(e) => {
+                        crate::verr!("[DIALOG] Could not prepare the suggested name: {e}");
+                        None
+                    }
+                }
+            }
+        };
+        let rx = show_file_dialog(FileDialogMode::SAVE, title, default_path, filters);
         let paths = rx.await.unwrap_or_default();
         let file_path = paths.into_iter().next().unwrap_or_default();
+        // Recorded the way the download will resolve it, sanitised, since recording the raw answer
+        // would never match; JS still gets the raw path unchanged. Off the async worker because the
+        // existence test and the recording both touch the filesystem.
+        if !file_path.is_empty() {
+            let answered = file_path.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                match super::download::sanitized_destination(&answered) {
+                    Ok(dest) => {
+                        // The OS prompts about replacing only when the file is already there, and
+                        // only for the name it was given: sanitisation can rename that, and the
+                        // prompt then said nothing about what gets written.
+                        let confirmed = dest.as_os_str()
+                            == std::path::Path::new(&answered).as_os_str()
+                            && dest.exists();
+                        crate::ui::file_dialog::record_user_choice(&dest, confirmed);
+                    }
+                    Err(e) => {
+                        crate::verr!(
+                            "[DIALOG] Unusable destination, download not authorised: {e:#}"
+                        )
+                    }
+                }
+            })
+            .await;
+        }
         let result = json!({ "canceled": file_path.is_empty(), "filePath": file_path });
         ipc_callback_ok(&callback, &result.to_string());
     });

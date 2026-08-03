@@ -103,6 +103,115 @@ fn field_names_outside_printable_ascii_are_refused() {
     assert!(!valid_field_name("TITLÉ"));
 }
 
+/// The regression that shipped twice: the dialog recorded its raw answer while the download
+/// resolved the sanitised name; every destination sanitisation touched was refused. The two
+/// forms have to be the same form, and no test paired them.
+#[test]
+fn the_recorded_form_is_the_sanitised_one() {
+    let dir = tempfile::tempdir().unwrap();
+    // `:` is legal on Linux and sanitisation rewrites it: the two forms differ here.
+    let answered = dir.path().join("Song: Live.flac");
+    let dest = sanitized_destination(answered.to_str().unwrap()).unwrap();
+    assert_ne!(answered, dest, "the fixture must exercise a rename");
+
+    crate::ui::file_dialog::record_user_choice(&answered, false);
+    assert!(
+        crate::ui::file_dialog::authorisation_for(&dest).is_none(),
+        "recording the raw answer authorises nothing"
+    );
+
+    crate::ui::file_dialog::record_user_choice(&dest, false);
+    assert!(crate::ui::file_dialog::authorisation_for(&dest).is_some());
+}
+
+/// The user was asked about this exact file and said replace. It is replaced.
+#[tokio::test]
+async fn a_confirmed_replacement_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("song.flac");
+    std::fs::write(&dest, b"stale").unwrap();
+
+    let before = FileIdentity::of(&dest);
+    write_file(dest.clone(), b"fresh".to_vec(), OnExisting::Replace, before)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&dest).unwrap(), b"fresh");
+}
+
+/// The consent names a file, not a path, and the fetch between the two can run for an hour. What is
+/// at the destination now is not what the run was authorised against: replacing it would destroy
+/// something nobody was ever asked about, and `persist` renames over whatever it finds.
+#[tokio::test]
+async fn a_destination_swapped_while_downloading_is_not_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("song.flac");
+    std::fs::write(&dest, b"the file the user was asked about").unwrap();
+
+    let before = FileIdentity::of(&dest);
+
+    std::fs::remove_file(&dest).unwrap();
+    std::fs::write(&dest, b"someone else's file").unwrap();
+
+    let result = write_file(dest.clone(), b"fresh".to_vec(), OnExisting::Replace, before).await;
+
+    assert!(
+        result.is_err(),
+        "a swapped destination must not be replaced"
+    );
+    assert_eq!(std::fs::read(&dest).unwrap(), b"someone else's file");
+}
+
+/// The same rule from the other side: nothing was there when the run started; a file that turned
+/// up while it downloaded was never confirmed either.
+#[tokio::test]
+async fn a_file_arriving_where_none_was_is_not_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("song.flac");
+
+    let before = FileIdentity::of(&dest);
+    assert!(before.is_none(), "nothing is at the destination yet");
+
+    std::fs::write(&dest, b"arrived meanwhile").unwrap();
+
+    let result = write_file(dest.clone(), b"fresh".to_vec(), OnExisting::Replace, before).await;
+
+    assert!(result.is_err(), "an arrival must not be replaced");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"arrived meanwhile");
+}
+
+/// And a destination that stayed empty still writes. The check does not turn every first-time
+/// download into a refusal.
+#[tokio::test]
+async fn an_untouched_empty_destination_still_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("song.flac");
+
+    let before = FileIdentity::of(&dest);
+    write_file(dest.clone(), b"fresh".to_vec(), OnExisting::Replace, before)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&dest).unwrap(), b"fresh");
+}
+
+/// The other half of the rule. A file that turned up after the user answered, or one the
+/// dialog never named because sanitisation renamed it, was never confirmed. Refusing is the
+/// point: one earlier version destroyed it, and the one before that reported success while
+/// leaving it untouched.
+#[tokio::test]
+async fn an_unconfirmed_destination_is_neither_replaced_nor_called_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("song.flac");
+    std::fs::write(&dest, b"appeared meanwhile").unwrap();
+
+    let before = FileIdentity::of(&dest);
+    let result = write_file(dest.clone(), b"fresh".to_vec(), OnExisting::Fail, before).await;
+
+    assert!(result.is_err(), "an unconfirmed replacement must fail");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"appeared meanwhile");
+}
+
 /// A FLAC signature, a STREAMINFO block marked last, then frame bytes.
 fn flac(frame_bytes: usize) -> Vec<u8> {
     let mut out = b"fLaC".to_vec();
@@ -364,6 +473,24 @@ fn a_refusal_wrapped_by_another_error_still_answers_403() {
 
     let unrelated = anyhow::anyhow!("the write broke");
     assert_eq!(status_for(&unrelated), 500);
+}
+
+/// Nobody was asked about a file under a folder grant: one that appears while the track is
+/// downloading is the same outcome as one that was there before: kept, and the track counts as done.
+/// Returning `AlreadyExists` as a hard error contradicted the pre-fetch check three lines above it.
+#[tokio::test]
+async fn a_file_appearing_under_a_folder_grant_is_kept_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("song.flac");
+    std::fs::write(&dest, b"arrived mid-download").unwrap();
+
+    // `None`: nothing was there when the run started, which is what makes this an arrival.
+    let outcome = write_file(dest.clone(), b"ours".to_vec(), OnExisting::Skip, None)
+        .await
+        .expect("a folder grant must not fail on an existing file");
+
+    assert!(matches!(outcome, WriteOutcome::Skipped));
+    assert_eq!(std::fs::read(&dest).unwrap(), b"arrived mid-download");
 }
 
 /// A request admitted a moment before the run's deadline used to get its own full `TRACK_TIMEOUT`,

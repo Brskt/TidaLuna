@@ -4,6 +4,10 @@
 //! disk, so it hands them here: fetch the urls, decrypt with the player's decryptor, tag,
 //! write. Decryption follows the manifest's `encryptionType`; tagging does not follow its
 //! `codecs` field, see `run`.
+//!
+//! The renderer names the destination. A write is only legitimate if `ui::file_dialog`'s ledger shows
+//! the user answered a save or folder dialog for it; otherwise this channel is a general file-write
+//! primitive.
 
 use super::{IpcCallback, ipc_callback_err, ipc_callback_ok};
 use crate::app_state::IpcMessage;
@@ -204,11 +208,44 @@ fn refused_host(url: &str) -> String {
 
 async fn run(req: Request) -> anyhow::Result<()> {
     let dest = sanitized_destination(&req.path)?;
-    // Upstream returns without doing anything when the file is already there, which is
-    // what lets a plugin re-run over a library it has already downloaded.
-    if dest.exists() {
-        crate::vprintln!("[DOWNLOAD] Already present: {}", dest.display());
-        return Ok(());
+    // Auth and identity are matched, not spent; a failed fetch must not cost the user their answer.
+    // A symlink swap of an ancestor between here and the rename is an accepted window: closing it
+    // needs a directory handle `tempfile` cannot use, and plugins have no symlink call.
+    // Canonicalising ancestors blocks. This runs off the async worker rather than pinning a runtime
+    // thread on a stalled network mount.
+    // The snapshot is taken after the download permit: an already-finished sibling's write must be
+    // visible here, and anchoring at dialog time would flag our own queued write as tampering.
+    let (auth, before) = {
+        let dest = dest.clone();
+        tokio::task::spawn_blocking(move || {
+            (
+                crate::ui::file_dialog::authorisation_for(&dest),
+                FileIdentity::of(&dest),
+            )
+        })
+        .await?
+    };
+    let auth = auth.ok_or(Refused("destination was not chosen in a save dialog"))?;
+
+    // Settled before anything is fetched, from the same policy the write applies: the two cannot
+    // disagree. Asking here rather than at the rename is what keeps a doomed download from pulling
+    // and decrypting a whole track first.
+    if before.is_some() {
+        match OnExisting::for_authorisation(&auth) {
+            // Nobody was asked about this file; it is left alone and the track counts as done.
+            // Upstream behaved this way too, which is what lets a re-run over a part-downloaded
+            // album finish instead of failing track by track.
+            OnExisting::Skip => {
+                crate::vprintln!("[DOWNLOAD] Already present, keeping it: {}", dest.display());
+                return Ok(());
+            }
+            // The OS prompts only for the name it was handed: a sanitised rename means the
+            // answer confirmed nothing about the path actually being written.
+            OnExisting::Fail => {
+                return Err(Refused("destination exists and no replacement was confirmed").into());
+            }
+            OnExisting::Replace => {}
+        }
     }
 
     // DASH is never encrypted (no key fields; `Player::load_dash` decrypts nothing). Stated rather
@@ -256,11 +293,19 @@ async fn run(req: Request) -> anyhow::Result<()> {
 
     let size = finished.len() as u64;
     let shown = dest.display().to_string();
-    write_file(dest, finished).await?;
-    crate::vprintln!(
-        "[DOWNLOAD] Wrote {shown} ({})",
-        crate::util::fmt::format_bytes(size)
-    );
+    let outcome = write_file(dest, finished, OnExisting::for_authorisation(&auth), before).await?;
+    // Spent only now: one save dialog answer buys one file on disk, and a failure above leaves the
+    // answer usable for the retry. A folder grant is not spent at all.
+    crate::ui::file_dialog::consume(auth);
+    match outcome {
+        WriteOutcome::Written => crate::vprintln!(
+            "[DOWNLOAD] Wrote {shown} ({})",
+            crate::util::fmt::format_bytes(size)
+        ),
+        WriteOutcome::Skipped => {
+            crate::vprintln!("[DOWNLOAD] Appeared during the download, keeping it: {shown}")
+        }
+    }
     Ok(())
 }
 
@@ -358,7 +403,10 @@ fn is_iso_bmff(data: &[u8]) -> bool {
 /// Sanitize the file name only, leaving the directory as the caller gave it, as upstream
 /// does. The name is what carries a track title: an unsanitized `/` turns one into a
 /// directory, and a `:` on Windows addresses an NTFS alternate data stream.
-fn sanitized_destination(path: &str) -> anyhow::Result<std::path::PathBuf> {
+///
+/// Both the dialog handler and the download derive their ledger key through this; the two must keep
+/// agreeing, and a change here that alters the output shifts every key with it.
+pub(super) fn sanitized_destination(path: &str) -> anyhow::Result<std::path::PathBuf> {
     let raw = std::path::Path::new(path);
     let dir = raw
         .parent()
@@ -466,12 +514,83 @@ async fn fetch_track(urls: &[String]) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Enough to tell "still the file this run was authorised against" from "something else now": consent
+/// names a file, and the fetch can run an hour before the rename. Unix uses `(dev, ino)`; Windows has
+/// no stable equivalent (rust#63010); timestamps are a signal there, not proof.
+#[derive(PartialEq, Eq)]
+struct FileIdentity {
+    len: u64,
+    marks: (u64, u64),
+}
+
+impl FileIdentity {
+    /// `None` when nothing is there, which the comparison must tell apart from a file: "was absent,
+    /// is absent" is a match, "was absent, something arrived" is not.
+    fn of(path: &std::path::Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let marks = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(windows)]
+        let marks = {
+            use std::os::windows::fs::MetadataExt;
+            (meta.creation_time(), meta.last_write_time())
+        };
+        #[cfg(not(any(unix, windows)))]
+        let marks = (0, 0);
+        Some(Self {
+            len: meta.len(),
+            marks,
+        })
+    }
+}
+
+/// What to do when the destination exists at the rename. One value rather than a bool plus a check
+/// elsewhere: the pre-fetch test and the rename must not disagree, and they did: a file that appeared
+/// mid-download failed the track with `AlreadyExists` while the pre-fetch check called it done.
+#[derive(Clone, Copy)]
+enum OnExisting {
+    /// The user answered a replace prompt for this exact name.
+    Replace,
+    /// A folder grant: nobody was asked about this file; it is kept and the track counts as done.
+    Skip,
+    /// A save dialog answer that did not confirm a replacement. Refuse rather than destroy.
+    Fail,
+}
+
+impl OnExisting {
+    /// Derived from the authorisation: the policy has one origin.
+    fn for_authorisation(auth: &crate::ui::file_dialog::Authorisation) -> Self {
+        if auth.replace_confirmed() {
+            Self::Replace
+        } else if auth.skips_existing() {
+            Self::Skip
+        } else {
+            Self::Fail
+        }
+    }
+}
+
+/// Whether anything was actually written. The caller's log must not claim a write that was
+/// skipped.
+enum WriteOutcome {
+    Written,
+    Skipped,
+}
+
 /// Write to a temp file in the destination directory, then rename, so an interrupted write
-/// cannot leave a truncated file that `run`'s already-present check would skip for good.
-/// Flushed before the rename to survive power loss; mode widened from the temp file's
-/// owner-only default so a media server can read the library.
-async fn write_file(dest: std::path::PathBuf, data: Vec<u8>) -> anyhow::Result<()> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+/// leaves the previous file in place rather than a truncated one. Flushed before the rename to
+/// survive power loss; mode widened from the temp file's owner-only default so a media server
+/// can read the library.
+async fn write_file(
+    dest: std::path::PathBuf,
+    data: Vec<u8>,
+    on_existing: OnExisting,
+    before: Option<FileIdentity>,
+) -> anyhow::Result<WriteOutcome> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<WriteOutcome> {
         use std::io::Write;
 
         let dir = dest
@@ -487,18 +606,35 @@ async fn write_file(dest: std::path::PathBuf, data: Vec<u8>) -> anyhow::Result<(
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))?;
         }
-        match tmp.persist_noclobber(&dest) {
-            Ok(_) => Ok(()),
-            // Skipping an existing file is the stated behaviour, so one that appeared
-            // mid-download is the same outcome, not a failure; plain `persist` would replace it.
-            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                crate::vprintln!(
-                    "[DOWNLOAD] Destination appeared during the download, keeping it: {}",
-                    dest.display()
-                );
-                Ok(())
+        // Replaces only what the user was actually asked about. A file that appeared after they
+        // answered, or one whose sanitised rename meant the dialog asked about a different name, was
+        // never confirmed: refuse rather than destroy it.
+        match on_existing {
+            OnExisting::Replace => {
+                // The consent covers the file this run started against, and the fetch since then can
+                // have taken an hour. A different file here now is one nobody was asked about; it is
+                // not ours to destroy: `persist` renames over whatever it finds, without looking.
+                if FileIdentity::of(&dest) != before {
+                    return Err(
+                        Refused("the destination changed while the download was running").into(),
+                    );
+                }
+                tmp.persist(&dest).map_err(|e| e.error)?;
+                Ok(WriteOutcome::Written)
             }
-            Err(e) => Err(e.into()),
+            OnExisting::Skip => match tmp.persist_noclobber(&dest) {
+                Ok(_) => Ok(WriteOutcome::Written),
+                // The pre-fetch check already skips a file that was there when the track started;
+                // this is the same outcome for one that arrived while it downloaded.
+                Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Ok(WriteOutcome::Skipped)
+                }
+                Err(e) => Err(e.error.into()),
+            },
+            OnExisting::Fail => {
+                tmp.persist_noclobber(&dest).map_err(|e| e.error)?;
+                Ok(WriteOutcome::Written)
+            }
         }
     })
     .await?
