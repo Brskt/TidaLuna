@@ -26,11 +26,143 @@ type TrustMap = HashMap<String, watch::Sender<Option<bool>>>;
 
 static PENDING_TRUST: LazyLock<Mutex<TrustMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Every native module this process holds or is acquiring, keyed by module name.
+///
+/// One ledger under one lock: splitting settled and in-flight state let a registration settle between
+/// the two reads and pass the bound, let concurrent attempts on one module retire each other, and
+/// double-counted a re-registration into a spurious 403. Keying by module makes counting a scan of
+/// distinct entries: none of the three is expressible.
+static NATIVE_MODULES: LazyLock<Mutex<HashMap<String, ModuleEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Default)]
+struct ModuleEntry {
+    /// Attempts in flight for this module. The entry outlives every one of them; no attempt can
+    /// retire a module another is still acquiring.
+    in_flight: usize,
+    /// The channel once Bun has answered, `None` while the module is only being acquired.
+    channel: Option<Channel>,
+}
+
+struct Channel {
+    /// The token that reaches this module. The channel used to be `__LunaNative.{name}`, derivable
+    /// from the module name, and the call path checks no ownership. Rust returns the channel as the
+    /// register result. Plugin code never sees the difference.
+    token: String,
+    code_hash: String,
+}
+
+/// `None` if the RNG is unavailable: fail closed rather than fall back to a guessable channel.
+///
+/// Same name and hash reuses the token. Trust is keyed by `code_hash`, and minting a fresh one
+/// evicted a concurrent caller's. Different code replaces it, since Bun's `modules[name]` is one
+/// mutable slot with no caller identity of its own.
+fn issue_native_channel(name: &str, code_hash: &str) -> Option<String> {
+    let mut modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = modules.entry(name.to_string()).or_default();
+    if let Some(channel) = entry.channel.as_ref().filter(|c| c.code_hash == code_hash) {
+        return Some(channel.token.clone());
+    }
+    let token = crate::plugins::manager::random_capability()?;
+    entry.channel = Some(Channel {
+        token: token.clone(),
+        code_hash: code_hash.to_string(),
+    });
+    Some(token)
+}
+
+/// Distinct modules one plugin may hold at once. The name is caller-chosen and every registration
+/// also loads a module into the Bun child; without a bound, one plugin grows both this ledger and
+/// that child without limit. A plugin ships a fixed, tiny set of `.native.ts` files.
+const MAX_MODULES_PER_PLUGIN: usize = 8;
+
+/// One attempt's claim on a module, held from dispatch until it settles. Released by `Drop`. No exit
+/// path (Bun error, denied trust, dropped response channel) can leak one.
+struct PendingRegistration(String);
+
+impl PendingRegistration {
+    /// Claim `name` for this attempt, or `None` if the plugin is at the bound.
+    ///
+    /// A module the plugin already holds or is already acquiring needs no new slot; anything else
+    /// counts against the bound. One lock for the whole decision leaves nothing to settle underneath.
+    fn reserve(name: &str, plugin_prefix: &str) -> Option<Self> {
+        let mut modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
+        if !modules.contains_key(name)
+            && !admits_new_module(modules.keys().map(String::as_str), plugin_prefix)
+        {
+            return None;
+        }
+        modules.entry(name.to_string()).or_default().in_flight += 1;
+        Some(Self(name.to_string()))
+    }
+
+    /// The module this attempt is for. The attempt reads its name from here rather than keeping a
+    /// second copy: one owner, and nothing can drift between them.
+    fn module(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        let mut modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = modules.get_mut(&self.0) else {
+            // Uninstall cleared the entry while this attempt was in flight.
+            return;
+        };
+        entry.in_flight = entry.in_flight.saturating_sub(1);
+        // An attempt that never produced a channel leaves nothing behind; the slot goes back.
+        if entry.in_flight == 0 && entry.channel.is_none() {
+            modules.remove(&self.0);
+        }
+    }
+}
+
+/// Has this plugin room for one more distinct module? Counts the ledger's own entries, unique by
+/// construction: no module is counted twice however many attempts it has in flight. Refuses rather
+/// than evicting the oldest: an evicted token unreaches a module but does not unload it from Bun;
+/// eviction would bound this ledger while the child kept growing. Pure, and testable off the
+/// process-global the other tests share.
+fn admits_new_module<'a>(held: impl Iterator<Item = &'a str>, plugin_prefix: &str) -> bool {
+    held.filter(|module| module_belongs_to(module, plugin_prefix))
+        .count()
+        < MAX_MODULES_PER_PLUGIN
+}
+
+/// An empty token never resolves; a bare `__LunaNative.` cannot match. Scanned rather than indexed
+/// by token: the ledger holds at most `MAX_MODULES_PER_PLUGIN` per plugin. A scan per call is
+/// cheaper than keeping a second token-to-module index in step.
+fn module_for_native_channel(token: &str) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    NATIVE_MODULES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(_, entry)| entry.channel.as_ref().is_some_and(|c| c.token == token))
+        .map(|(module, _)| module.clone())
+}
+
 /// Clear in-memory watch channels for a plugin (called on uninstall).
 /// Keys are "name::module", so we remove any key starting with the plugin prefix.
 pub(super) fn clear_pending_trust(plugin_prefix: &str) {
     let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
     guard.retain(|key, _| !key.starts_with(plugin_prefix));
+}
+
+/// An empty prefix owns everything, the convention `clear_pending_trust` and `clear_trust_by_plugin`
+/// follow and what `plugin.uninstall_all` passes. Kept out of the map: testable without clearing a
+/// process-global the other tests share.
+fn module_belongs_to(module: &str, plugin_prefix: &str) -> bool {
+    if plugin_prefix.is_empty() {
+        return true;
+    }
+    // Names are "{plugin}/{file}.native.ts"; the separator stops "foo" matching "foobar". Split
+    // rather than formatted: this runs once per held module on every registration and every uninstall.
+    module
+        .strip_prefix(plugin_prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 fn compute_code_hash(code: &str) -> String {
@@ -77,25 +209,30 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         return;
     }
 
-    // "DiscordRPC/discord.native.ts" → "DiscordRPC"
-    // "@scope/pkg/foo.native.ts" → "@scope/pkg"
+    // "DiscordRPC/discord.native.ts" -> "DiscordRPC"
+    // "@scope/pkg/foo.native.ts" -> "@scope/pkg"
     let plugin_prefix = name
         .rsplit_once('/')
         .map(|(p, _)| p)
         .unwrap_or(&name)
         .to_string();
 
-    // Validate that the plugin prefix maps to a currently loaded plugin.
-    // Prevents a malicious plugin from calling registerNative with another
-    // plugin's name to inherit its trust grants.
-    let is_active = crate::app_state::with_state(|state| {
-        state
+    // Confirms only that some plugin bears this name, not that the caller is it; `registerNative`
+    // arrives through the shared `@luna/lib` with no capability attached. Known gap, closable only
+    // by a per-plugin `@luna/lib`: it hands out another plugin's `data_dir`, and byte-identical code
+    // inherits another plugin's grants (different code does not; `load_trust` filters on both).
+    // The load id is captured here rather than re-derived later, because it must answer "still this
+    // load" after the awaits below; it is `Some` exactly when the plugin is loaded.
+    let live = crate::app_state::with_state(|state| {
+        let url = state
             .plugin_manager
-            .url_for_name(&plugin_prefix)
-            .is_some_and(|url| state.plugin_manager.is_loaded(url))
+            .url_for_name(&plugin_prefix)?
+            .to_string();
+        let load_id = state.plugin_manager.current_load_id(&url)?;
+        Some((url, load_id))
     })
-    .unwrap_or(false);
-    if !is_active {
+    .flatten();
+    let Some((plugin_url, load_id)) = live else {
         crate::vprintln!(
             "[NATIVE] Rejected registerNative for '{}': plugin not active",
             name
@@ -106,7 +243,24 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
             &format!("registerNative: plugin '{}' is not active", plugin_prefix),
         );
         return;
-    }
+    };
+
+    // Reserved before Bun is touched; a caller looping fresh module names cannot grow its module
+    // table. Held for the whole registration since the ledger only writes once Bun answers;
+    // unawaited concurrent calls would otherwise all pass the check first.
+    let Some(reservation) = PendingRegistration::reserve(&name, &plugin_prefix) else {
+        crate::vprintln!(
+            "[NATIVE] Refused registerNative for '{name}': at the {MAX_MODULES_PER_PLUGIN} module bound"
+        );
+        ipc_callback_err(
+            &callback,
+            403,
+            &format!(
+                "registerNative: '{plugin_prefix}' already holds {MAX_MODULES_PER_PLUGIN} modules"
+            ),
+        );
+        return;
+    };
 
     crate::vprintln!(
         "[NATIVE] Registering module '{}' ({} bytes)",
@@ -169,38 +323,54 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
 
     do_register(
         runtime,
-        name,
-        code,
-        code_hash,
-        trust_grants,
-        manifest_json,
-        data_dir,
+        RegisterAttempt {
+            code,
+            code_hash,
+            trust_grants,
+            manifest_json,
+            data_dir,
+            plugin_url,
+            load_id,
+            reservation,
+        },
         callback,
     );
+}
+
+/// One registration attempt. These values all travel together through the trust retry, and the
+/// reservation has to travel with them: the slot is held for the whole attempt chain, not per call.
+struct RegisterAttempt {
+    code: String,
+    code_hash: String,
+    trust_grants: HashMap<String, bool>,
+    manifest_json: String,
+    data_dir: String,
+    /// The plugin this attempt was admitted for, and which load of it. Re-read at the mint, since
+    /// admission happened before an unbounded wait.
+    plugin_url: String,
+    load_id: u64,
+    /// Held from dispatch until the attempt settles, then released by `Drop`. Also the owner of the
+    /// module name, read through `module()`.
+    reservation: PendingRegistration,
 }
 
 /// Send register command to Bun, handle TRUST_REQUIRED sentinel.
 fn do_register(
     runtime: &'static NativeRuntime,
-    name: String,
-    code: String,
-    code_hash: String,
-    mut trust_grants: HashMap<String, bool>,
-    manifest_json: String,
-    data_dir: String,
+    mut attempt: RegisterAttempt,
     callback: IpcCallback,
 ) {
-    let trust_json: serde_json::Value = if trust_grants.is_empty() {
+    let trust_json: serde_json::Value = if attempt.trust_grants.is_empty() {
         serde_json::Value::Null
     } else {
-        serde_json::json!(trust_grants)
+        serde_json::json!(attempt.trust_grants)
     };
     let cmd = serde_json::json!({
         "type": "register",
-        "name": name,
-        "code": code,
+        "name": attempt.reservation.module(),
+        "code": attempt.code,
         "trust": trust_json,
-        "dataDir": data_dir,
+        "dataDir": attempt.data_dir,
     });
     let rx = match runtime.send_command(cmd) {
         Ok(rx) => rx,
@@ -222,14 +392,39 @@ fn do_register(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let channel = format!("__LunaNative.{name}");
+                // Admission can be arbitrarily stale (a trust dialog may sit open indefinitely).
+                // Re-check before minting: `issue_native_channel` inserts a missing entry; it would
+                // otherwise put back the one `clear_native_channels` just removed and hand a working
+                // token to an uninstalled plugin, which Bun never unloads. The load id also catches a
+                // disable-then-enable, where the plugin is back but this is not its registration.
+                let same_load = crate::app_state::with_state(|state| {
+                    state.plugin_manager.current_load_id(&attempt.plugin_url) == Some(attempt.load_id)
+                })
+                .unwrap_or(false);
+                if !same_load {
+                    crate::vprintln!(
+                        "[NATIVE] Dropped '{}': the plugin went away while the registration was in flight",
+                        attempt.reservation.module()
+                    );
+                    clear_pending_trust(attempt.reservation.module());
+                    ipc_callback_err(&callback, 500, "registerNative: plugin is no longer active");
+                    return;
+                }
+                let Some(token) =
+                    issue_native_channel(attempt.reservation.module(), &attempt.code_hash)
+                else {
+                    clear_pending_trust(attempt.reservation.module());
+                    ipc_callback_err(&callback, 500, "RNG unavailable");
+                    return;
+                };
+                let channel = format!("__LunaNative.{token}");
                 crate::vprintln!(
                     "[NATIVE] Registered '{}': {} exports ({})",
-                    name,
+                    attempt.reservation.module(),
                     exports.len(),
                     exports.join(", ")
                 );
-                clear_pending_trust(&name);
+                clear_pending_trust(attempt.reservation.module());
                 ipc_callback_ok(&callback, &format!("\"{channel}\""));
             }
             Ok(Err(e)) => {
@@ -237,10 +432,10 @@ fn do_register(
                     // Trim stack trace - only keep the module name (first line, no whitespace)
                     let module = raw.lines().next().unwrap_or(raw).trim().to_string();
 
-                    if trust_grants.get(&module) == Some(&false) {
+                    if attempt.trust_grants.get(&module) == Some(&false) {
                         crate::vprintln!(
-                            "[NATIVE] Trust previously denied for '{}' → module '{}'",
-                            name,
+                            "[NATIVE] Trust previously denied for '{}' -> module '{}'",
+                            attempt.reservation.module(),
                             module
                         );
                         ipc_callback_err(
@@ -248,21 +443,22 @@ fn do_register(
                             403,
                             &format!(
                                 "Plugin '{}' denied access to module '{}' (persisted)",
-                                name, module
+                                attempt.reservation.module(),
+                                module
                             ),
                         );
                         return;
                     }
 
                     crate::vprintln!(
-                        "[NATIVE] Trust required for '{}' → module '{}'",
-                        name,
+                        "[NATIVE] Trust required for '{}' -> module '{}'",
+                        attempt.reservation.module(),
                         module
                     );
 
                     // Dedup: if a dialog is already pending for this module,
                     // subscribe to the same watch channel - no duplicate popup.
-                    let trust_key = format!("{}::{}", name, module);
+                    let trust_key = format!("{}::{}", attempt.reservation.module(), module);
                     let mut rx = {
                         let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(existing_tx) = guard.get(&trust_key) {
@@ -274,9 +470,9 @@ fn do_register(
 
                             let dialog_key = trust_key.clone();
                             let dialog_rx = crate::ui::trust_dialog::show_trust_dialog(
-                                &name,
+                                attempt.reservation.module(),
                                 &module,
-                                &manifest_json,
+                                &attempt.manifest_json,
                             );
                             // Broadcast result without removing the key - late
                             // subscribers can still dedup via rx.borrow(). The key
@@ -312,8 +508,8 @@ fn do_register(
 
                     // Persist trust/denial (entire network group if applicable)
                     {
-                        let hash = code_hash.clone();
-                        let plugin = name.clone();
+                        let hash = attempt.code_hash.clone();
+                        let plugin = attempt.reservation.module().to_string();
                         let mod_name = module.clone();
                         crate::state::db().call_settings(move |conn| {
                             if is_net {
@@ -349,14 +545,18 @@ fn do_register(
 
                     if !granted {
                         crate::vprintln!(
-                            "[NATIVE] Trust denied for '{}' → module '{}'",
-                            name,
+                            "[NATIVE] Trust denied for '{}' -> module '{}'",
+                            attempt.reservation.module(),
                             module
                         );
                         ipc_callback_err(
                             &callback,
                             403,
-                            &format!("Plugin '{}' denied access to module '{}'", name, module),
+                            &format!(
+                                "Plugin '{}' denied access to module '{}'",
+                                attempt.reservation.module(),
+                                module
+                            ),
                         );
                         return;
                     }
@@ -364,25 +564,21 @@ fn do_register(
                     // Grant in-memory (entire network group if applicable)
                     if is_net {
                         for &m in NETWORK_MODULES {
-                            trust_grants.insert(m.to_string(), true);
+                            attempt.trust_grants.insert(m.to_string(), true);
                         }
                     } else {
-                        trust_grants.insert(module, true);
+                        attempt.trust_grants.insert(module, true);
                     }
-                    do_register(
-                        runtime,
-                        name,
-                        code,
-                        code_hash,
-                        trust_grants,
-                        manifest_json,
-                        data_dir,
-                        callback,
-                    );
+                    // The attempt's reservation travels with it, keeping the retry on the same slot.
+                    do_register(runtime, attempt, callback);
                     return;
                 }
 
-                crate::vprintln!("[NATIVE] Register failed for '{}': {}", name, e);
+                crate::vprintln!(
+                    "[NATIVE] Register failed for '{}': {}",
+                    attempt.reservation.module(),
+                    e
+                );
                 ipc_callback_err(&callback, 500, &e);
             }
             Err(_) => {
@@ -394,11 +590,15 @@ fn do_register(
 
 /// Handle `__LunaNative.{name}` IPC calls to a registered native module.
 pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
-    let module_name = msg
-        .channel
-        .strip_prefix("__LunaNative.")
-        .unwrap_or("")
-        .to_string();
+    // The channel carries the token Rust issued at registration, not the module name: a
+    // plugin cannot reach a module it did not register by naming it.
+    let token = msg.channel.strip_prefix("__LunaNative.").unwrap_or("");
+    let Some(module_name) = module_for_native_channel(token) else {
+        // Gated, and without the token: the caller is told, and the token must not reach the log.
+        crate::vprintln!("[NATIVE] Refused a call on an unissued channel");
+        ipc_callback_err(&callback, 403, "unknown native channel");
+        return;
+    };
     let export_name = msg
         .args
         .first()
@@ -439,3 +639,7 @@ pub(super) fn handle_native_call(msg: &IpcMessage, callback: IpcCallback) {
         }
     });
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/ipc/plugin/native.rs"]
+mod tests;
