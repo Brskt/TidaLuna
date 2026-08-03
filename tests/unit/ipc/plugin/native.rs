@@ -109,6 +109,19 @@ fn a_prefix_owns_its_own_modules_only() {
     assert!(!module_belongs_to("Other/x.native.ts", "Foo"));
 }
 
+/// Uninstall withdraws the plugin's persisted trust. A leftover token must stop reaching exports
+/// whose grants were just revoked.
+#[test]
+fn uninstalling_clears_every_token_the_plugin_held() {
+    let a = issue_native_channel("Gone/one.native.ts", "hash").expect("entropy available");
+    let b = issue_native_channel("Gone/two.native.ts", "hash").expect("entropy available");
+
+    clear_native_channels("Gone");
+
+    assert!(module_for_native_channel(&a).is_none());
+    assert!(module_for_native_channel(&b).is_none());
+}
+
 /// Different code is a real supersession: trust is keyed by code hash, and Bun's one slot now holds
 /// the new code.
 #[test]

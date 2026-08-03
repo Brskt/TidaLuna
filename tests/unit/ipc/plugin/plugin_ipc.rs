@@ -1,6 +1,6 @@
 //! Tests for `src/ipc/plugin/plugin_ipc.rs`, attached to it by `#[path]`.
 
-use super::{bump_capped, manifest_absent};
+use super::{CleanupScope, bump_capped, cleanup_scope_for_uninstall, manifest_absent};
 
 #[test]
 fn bump_capped_accumulates_under_cap() {
@@ -24,6 +24,22 @@ fn bump_capped_saturates_on_huge_add() {
     // A pathological chunk length must not overflow the running total into a pass.
     let err = bump_capped(usize::MAX - 1, usize::MAX, 1024).unwrap_err();
     assert!(err.to_string().contains("cap"), "got: {err}");
+}
+
+/// An url the database does not know yields no canonical name. Read as the `uninstall_all` sentinel,
+/// that cleared every plugin's trust rows, native channel tokens and capabilities (reachable by any
+/// plugin, and even by an argument-less call).
+#[test]
+fn an_uninstall_that_matched_no_plugin_clears_nothing() {
+    assert!(cleanup_scope_for_uninstall(String::new()).is_none());
+}
+
+#[test]
+fn an_uninstall_that_matched_a_plugin_clears_only_that_plugin() {
+    match cleanup_scope_for_uninstall("DiscordRPC".to_string()) {
+        Some(CleanupScope::Plugin(name)) => assert_eq!(name, "DiscordRPC"),
+        _ => panic!("a matched plugin must scope the cleanup to itself"),
+    }
 }
 
 #[test]

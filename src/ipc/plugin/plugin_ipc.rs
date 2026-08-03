@@ -410,6 +410,21 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, callback: IpcCallback) 
     });
 }
 
+/// What an uninstall must clear, typed rather than a bare name: an unknown url produced an empty name,
+/// which every clear below reads as "all". An unmatched `plugin.uninstall` wiped every plugin's
+/// trust rows, tokens and capabilities.
+pub(super) enum CleanupScope {
+    /// One plugin, by canonical manifest name.
+    Plugin(String),
+    /// Everything, from `plugin.uninstall_all`.
+    All,
+}
+
+/// The scope an uninstall leaves behind. No name means nothing matched, and nothing is cleared.
+pub(super) fn cleanup_scope_for_uninstall(name: String) -> Option<CleanupScope> {
+    (!name.is_empty()).then_some(CleanupScope::Plugin(name))
+}
+
 pub(super) fn handle_plugin_db(
     msg: IpcMessage,
     caller: &crate::ipc::caller::Caller,
@@ -434,8 +449,8 @@ pub(super) fn handle_plugin_db(
         return;
     }
 
-    // Result is (json_response, optional canonical name for trust clearing)
-    let result: Result<(String, Option<String>), String> =
+    // Result is (json_response, what the uninstall cleanup must clear)
+    let result: Result<(String, Option<CleanupScope>), String> =
         db.call_plugins(move |pc| match channel.as_str() {
             "plugin.list" => {
                 let plugins = crate::plugins::store::list(pc);
@@ -470,11 +485,11 @@ pub(super) fn handle_plugin_db(
                     }
                 }
                 crate::plugins::store::uninstall(pc, url)
-                    .map(|()| ("true".to_string(), Some(name)))
+                    .map(|()| ("true".to_string(), cleanup_scope_for_uninstall(name)))
                     .map_err(|e| e.to_string())
             }
             "plugin.uninstall_all" => crate::plugins::store::uninstall_all(pc)
-                .map(|()| ("true".to_string(), Some(String::new())))
+                .map(|()| ("true".to_string(), Some(CleanupScope::All)))
                 .map_err(|e| e.to_string()),
             "plugin.storage.get" => {
                 let ns = caller_ns.as_str();
@@ -536,23 +551,37 @@ pub(super) fn handle_plugin_db(
             _ => Err(format!("Unknown plugin channel: {}", channel)),
         });
 
-    // Clear native trust decisions using the canonical name returned by the DB layer.
-    if let Ok((_, Some(ref name))) = result {
-        let db_name = if name.is_empty() {
-            "%".to_string() // uninstall_all: SQL LIKE wildcard
-        } else {
-            name.clone()
+    // Clear native trust decisions for whatever the handler said was uninstalled.
+    if let Ok((_, Some(ref scope))) = result {
+        // Every prefix below follows one convention: empty owns everything.
+        let (db_name, trust_prefix, module_prefix, gone) = match scope {
+            // SQL LIKE wildcard, then the empty prefixes the in-memory clears read as "all".
+            CleanupScope::All => ("%".to_string(), String::new(), String::new(), String::new()),
+            // Delimit with "/" to avoid prefix collisions (e.g. "foo" matching "foobar/...")
+            CleanupScope::Plugin(name) => (
+                name.clone(),
+                format!("{name}/"),
+                name.clone(),
+                msg.arg(0).to_string(),
+            ),
         };
         crate::state::db().call_settings(move |conn| {
             let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &db_name);
         });
-        // Delimit with "/" to avoid prefix collisions (e.g. "foo" matching "foobar/...")
-        let trust_prefix = if name.is_empty() {
-            String::new() // uninstall_all: clear all pending trust
-        } else {
-            format!("{name}/")
-        };
         super::native::clear_pending_trust(&trust_prefix);
+        // The DB trust rows are gone above; the channel tokens that would still reach those
+        // modules must go with them.
+        super::native::clear_native_channels(&module_prefix);
+        // And the capability, for the same reason. Not done on disable, where the plugin's own unload
+        // handler still runs and still needs to be attributable, but uninstall is terminal. A
+        // leftover renderer closure must stop writing storage as a plugin that no longer exists.
+        with_state(|state| state.plugin_manager.revoke_capabilities(&gone));
+        // Also updates the manager's loaded-state: this handler is authoritative rather than relying
+        // on callers having disabled first (which is what `registerNative`'s in-flight check reads).
+        // Idempotent; today's JS always disables already, closing the gap only for a future caller.
+        if !gone.is_empty() {
+            with_state(|state| state.plugin_manager.mark_unloaded(&gone));
+        }
     }
 
     match result {

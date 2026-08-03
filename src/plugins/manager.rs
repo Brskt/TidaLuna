@@ -147,6 +147,19 @@ impl PluginManager {
         load_id
     }
 
+    /// Drop a plugin's capabilities, on UNINSTALL only (empty id means all, as `clear_pending_trust`
+    /// and `clear_native_channels` also read it). Not on disable, where `onUnload` still needs to be
+    /// attributable. Races that handler since `uninstall()` awaits `disable()` first (accepted,
+    /// because uninstall deletes the plugin's storage rows anyway).
+    pub fn revoke_capabilities(&mut self, plugin_id: &str) {
+        if plugin_id.is_empty() {
+            self.capabilities.clear();
+            return;
+        }
+        self.capabilities
+            .retain(|_, issued| issued.plugin_id != plugin_id);
+    }
+
     /// Drop this plugin's oldest capabilities past the bound.
     fn bound_capabilities_for(&mut self, plugin_id: &str) {
         let mut seqs: Vec<u64> = self

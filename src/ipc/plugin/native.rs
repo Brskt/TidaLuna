@@ -151,6 +151,16 @@ pub(super) fn clear_pending_trust(plugin_prefix: &str) {
     guard.retain(|key, _| !key.starts_with(plugin_prefix));
 }
 
+/// Drop a plugin's channel tokens on uninstall, which revokes its persisted trust: a leftover
+/// renderer closure would otherwise keep invoking exports whose grants were just withdrawn. Not done
+/// on disable, where the cleanup handler still runs after the unload is dispatched.
+pub(super) fn clear_native_channels(plugin_prefix: &str) {
+    NATIVE_MODULES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|module, _| !module_belongs_to(module, plugin_prefix));
+}
+
 /// An empty prefix owns everything, the convention `clear_pending_trust` and `clear_trust_by_plugin`
 /// follow and what `plugin.uninstall_all` passes. Kept out of the map: testable without clearing a
 /// process-global the other tests share.
