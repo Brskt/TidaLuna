@@ -21,7 +21,8 @@ static ENV_LOG_LEVEL: LazyLock<u8> = LazyLock::new(|| {
 /// the very top of `main`, then raised to `max(env, persisted)` once the DB is up.
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(0);
 
-/// The `console.log` append handle, opened lazily when the level first reaches >= 1.
+/// The `console.log` append handle. Opened lazily: when the level first reaches >= 1, or on the
+/// first `verr!`, which writes whatever the level says and so opens the sink at level 0 too.
 static FILE_SINK: Mutex<Option<File>> = Mutex::new(None);
 
 #[inline]

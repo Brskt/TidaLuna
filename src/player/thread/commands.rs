@@ -851,19 +851,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     pub(super) fn start_playback(&mut self) {
+        // Both fields are set and cleared together everywhere, and both callers reach here only with
+        // a stream: the old `else` arms were dead; a missing stream already surfaces as a
+        // `DeviceError` from `recover_audio_device`, which runs instead of this. `stream.play()`
+        // failing is the one real failure left and nothing else reports it. It is logged ungated.
         if let Some(ref stream) = self.cpal_stream {
             match stream.play() {
                 Ok(()) => crate::vprintln!("[PLAY]   cpal stream.play() OK"),
-                Err(e) => crate::vprintln!("[ERROR]  cpal stream.play() failed: {e}"),
+                Err(e) => crate::verr!("[ERROR]  cpal stream.play() failed: {e}"),
             }
-        } else {
-            crate::vprintln!("[ERROR]  start_playback: no cpal stream!");
         }
         if let Some(ref tx) = self.decode_cmd_tx {
             let _ = tx.send(DecodeCommand::Resume);
             crate::vprintln!("[PLAY]   DecodeCommand::Resume sent");
-        } else {
-            crate::vprintln!("[ERROR]  start_playback: no decode_cmd_tx!");
         }
         self.pre_seek_pos = None;
     }
