@@ -388,6 +388,46 @@ pub(crate) fn canonical_track_id(url: &str) -> String {
     url.split('?').next().unwrap_or(url).to_string()
 }
 
+/// Refreshes the retained credential only if the retained track is still the one `canonical_url_id`
+/// names. Not redundant with the caller's guard: that reads `committed_track`, set once a load reaches
+/// the pipeline, while this record is written synchronously: the two legitimately disagree
+/// mid-load. A duplicate `load(A)` racing behind `load(B)` would otherwise stamp A's credential onto
+/// B's still-running download, which then dies silently at its next reconnect.
+///
+/// The rule this encodes: a write is authorised by the state it writes, never by another that lags it.
+pub(crate) fn refresh_retained_credential(
+    retained: &mut Option<crate::state::TrackInfo>,
+    canonical_url_id: &str,
+    url: &str,
+    key: &str,
+) {
+    let Some(track) = retained
+        .as_mut()
+        .filter(|track| canonical_track_id(&track.url) == canonical_url_id)
+    else {
+        return;
+    };
+    track.url = url.to_string();
+    track.key = key.to_string();
+}
+
+/// The url a running download must fetch with, for the track it started for. The signed url is a
+/// credential, not identity: the SDK re-signs it every load and re-resolves it once its own 1h expiry
+/// lapses; a captured copy goes stale while the task legitimately runs on. Reconnects and range
+/// restarts read through here instead.
+///
+/// `None` means the task's track was replaced and it must stop. `load_with_policy` cancels the
+/// previous download first: an un-cancelled task always matches; this makes that invariant explicit
+/// rather than assumed.
+pub(crate) fn refreshed_fetch_url(
+    task_canonical_id: &str,
+    retained: Option<&crate::state::TrackInfo>,
+) -> Option<String> {
+    retained
+        .filter(|track| canonical_track_id(&track.url) == task_canonical_id)
+        .map(|track| track.url.clone())
+}
+
 /// True when a `load` targets the already-committed track: same canonical id
 /// (query stripped, since each load re-signs the CDN URL) and format. Re-loading
 /// would rebuild an identical pipeline, so the caller resumes instead. Both ids
@@ -949,6 +989,19 @@ impl Player {
                 );
                 return self.load_with_policy(url, format, key, ResumePolicy::Disabled, want_play);
             }
+            // Takes the new credential, keeps the play instance. The skip below correctly answers
+            // "same track?" but must not also mean "still fetchable": every same-track load carries a
+            // freshly signed url (HW-measured), and keeping the stale one meant the next reconnect
+            // used a signature the CDN had dropped, 403ing the track dead.
+            //
+            // A refresh, not a rebuild: a quality-swap re-assert still keeps its position; only the
+            // credential changes, and `refreshed_fetch_url` is what makes the download read it.
+            {
+                let mut retained = crate::state::CURRENT_TRACK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                refresh_retained_credential(&mut retained, &canonical_url_id, &url, &key);
+            }
             // Same-track re-assert keeping the play instance (a quality-swap re-load):
             // resumes if PLAYING pre-stop (resume_on_reassert), or if want_play is set --
             // click-to-play on a restored paused track is stop+load(same) with NO
@@ -1242,3 +1295,7 @@ mod media_error_code_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/player/cache_entry_validation_tests.rs"]
 mod cache_entry_validation_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/fetch_url_tests.rs"]
+mod fetch_url_tests;

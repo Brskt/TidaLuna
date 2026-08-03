@@ -340,12 +340,25 @@ async fn park_ciphertext(writer: &RamBufferWriter, sink: Option<CipherSink>, str
     }
 }
 
+/// The credential this task must fetch with now, or `None` if the task is stale. Read at each
+/// re-fetch rather than captured at start: the signed url is refreshed in place on a same-track
+/// re-assert; a captured copy would otherwise expire while the task is still legitimately running.
+fn current_fetch_url(task_canonical_id: &str) -> Option<String> {
+    let retained = crate::state::CURRENT_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::player::refreshed_fetch_url(task_canonical_id, retained.as_ref())
+}
+
 async fn download_stream(
     resp: reqwest::Response,
     url: String,
     key: String,
     writer: RamBufferWriter,
 ) {
+    // Captured once, only to recognise which track this task belongs to. The url itself is re-read
+    // per fetch through `current_fetch_url`, since it can be refreshed under us.
+    let task_canonical_id = crate::player::canonical_track_id(&url);
     let download_start = std::time::Instant::now();
     let decryptor = if key.is_empty() {
         None
@@ -398,8 +411,12 @@ async fn download_stream(
                 format_ms(download_start.elapsed().as_secs_f64() * 1000.0),
             );
 
+            let Some(fetch_url) = current_fetch_url(&task_canonical_id) else {
+                // The retained track is no longer ours: this task is stale.
+                return;
+            };
             let send_fut = crate::state::HTTP_CLIENT_PLAYBACK
-                .get(&url)
+                .get(&fetch_url)
                 .header("Range", &range_header)
                 .send();
             let range_resp = tokio::select! {
@@ -596,8 +613,12 @@ async fn download_stream(
                             _ = tokio::time::sleep(backoff) => {}
                         }
                         let range_header = format!("bytes={offset}-");
+                        let Some(fetch_url) = current_fetch_url(&task_canonical_id) else {
+                            // The retained track is no longer ours. This task is stale.
+                            return;
+                        };
                         let send_fut = crate::state::HTTP_CLIENT_PLAYBACK
-                            .get(&url)
+                            .get(&fetch_url)
                             .header("Range", &range_header)
                             .send();
                         // The playback client has no request timeout, so race the
