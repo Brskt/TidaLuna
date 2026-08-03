@@ -29,7 +29,7 @@ type Store = {
 };
 
 export async function setupConnectEventListeners(store: Store) {
-    // ── Controller events → Redux remotePlayback actions ─────────────
+    // ── Controller events -> Redux remotePlayback actions ─────────────
     onIpcEvent("connect.devices_received", (payload: DevicesReceivedPayload) => {
         store.dispatch({
             type: "remotePlayback/DEVICES_RECEIVED",

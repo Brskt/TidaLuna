@@ -1,7 +1,7 @@
 /// Async fetch handler for plugin.fetch IPC channel.
 ///
 /// Plugins call `fetch(url, opts)` which the security wrapper routes
-/// through cefQuery → Rust. This handler:
+/// through cefQuery -> Rust. This handler:
 ///   1. Parses the request (method, headers, body)
 ///   2. Injects the OAuth token for Tidal API requests
 ///   3. Executes the fetch via reqwest (async)

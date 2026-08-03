@@ -5,11 +5,11 @@
 //! Here we spawn a Bun child process and communicate via JSON lines on stdin/stdout.
 //!
 //! Lifecycle:
-//!   1. First `__Luna.registerNative` IPC → lazy-spawn Bun (via OnceLock in state.rs)
-//!   2. Send `register` command with module code → Bun evals, returns export names
-//!   3. Plugin calls `__LunaNative.{name}` IPC → `call` command to Bun → result back
-//!   4. App exit → tokio runtime dropped → stdin/stdout tasks cancelled →
-//!      pipes closed → native-host.cjs readline emits 'close' → process.exit(0)
+//!   1. First `__Luna.registerNative` IPC -> lazy-spawn Bun (via OnceLock in state.rs)
+//!   2. Send `register` command with module code -> Bun evals, returns export names
+//!   3. Plugin calls `__LunaNative.{name}` IPC -> `call` command to Bun -> result back
+//!   4. App exit -> tokio runtime dropped -> stdin/stdout tasks cancelled ->
+//!      pipes closed -> native-host.cjs readline emits 'close' -> process.exit(0)
 
 mod net_fetch;
 pub(crate) mod trust;

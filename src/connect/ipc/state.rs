@@ -1,5 +1,5 @@
 //! State snapshot query. Single source of truth for
-//! `connect.get_state`: callers go through `with_state` → `ConnectManager`.
+//! `connect.get_state`: callers go through `with_state` -> `ConnectManager`.
 
 use crate::app_state::{IpcCallback, with_state};
 

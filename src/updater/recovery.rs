@@ -52,7 +52,7 @@ pub(crate) fn recover_interrupted_update() {
 fn apply_journal(app_dir: &Path, journal: &Journal) {
     match journal.state.as_str() {
         "pending" => {
-            // Rollback: restore .bak → original
+            // Rollback: restore .bak -> original
             crate::vprintln!(
                 "[UPDATER] Rolling back incomplete update v{}",
                 journal.version

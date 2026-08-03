@@ -165,12 +165,12 @@ impl PreloadGate {
     /// Update gate based on buffer state. Returns new gate value.
     fn update(self, bp: &BufferProgress) -> Self {
         let total_len = bp.total_len.load(Relaxed);
-        // No active streaming playback → preload always allowed
+        // No active streaming playback -> preload always allowed
         if total_len == 0 {
             return PreloadGate::Active;
         }
 
-        // Playback paused/stopped → pause preload to save bandwidth
+        // Playback paused/stopped -> pause preload to save bandwidth
         if !bp.playback_active.load(Relaxed) {
             return PreloadGate::Paused;
         }

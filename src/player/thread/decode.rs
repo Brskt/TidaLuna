@@ -155,7 +155,7 @@ fn decode_loop(cfg: DecodeThreadConfig) {
     let mut pipeline = if source_rate != output_rate || source_channels != output_channels as usize
     {
         crate::vprintln!(
-            "[DECODE] Resampling: {}Hz/{}ch → {}Hz/{}ch",
+            "[DECODE] Resampling: {}Hz/{}ch -> {}Hz/{}ch",
             source_rate,
             source_channels,
             output_rate,

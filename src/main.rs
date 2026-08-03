@@ -159,9 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let is_setuid_root = meta.uid() == 0 && (mode & 0o4000) != 0;
                     let is_executable = (mode & 0o111) != 0;
                     // Both are valid:
-                    //   - setuid root → legacy SUID sandbox (postinst chmod 4755
+                    //   - setuid root -> legacy SUID sandbox (postinst chmod 4755
                     //     when unprivileged userns is unavailable)
-                    //   - normal executable, not setuid → namespace sandbox
+                    //   - normal executable, not setuid -> namespace sandbox
                     //     (Chromium picks userns automatically when chrome-sandbox
                     //     is present but not setuid root)
                     // Fail fast only if the file exists but is unreadable / not

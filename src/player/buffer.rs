@@ -272,9 +272,9 @@ impl Read for RamBuffer {
             }
 
             // Data not available - determine action:
-            //   cursor < buf_start  → data was discarded, need Range restart
-            //   cursor > buf_end + SEEK_LOOKAHEAD → too far ahead, Range restart
-            //   cursor <= buf_end + SEEK_LOOKAHEAD → wait for download to catch up
+            //   cursor < buf_start  -> data was discarded, need Range restart
+            //   cursor > buf_end + SEEK_LOOKAHEAD -> too far ahead, Range restart
+            //   cursor <= buf_end + SEEK_LOOKAHEAD -> wait for download to catch up
             if !inner.finished {
                 let needs_restart =
                     self.cursor < buf_start || self.cursor > buf_end + SEEK_LOOKAHEAD;

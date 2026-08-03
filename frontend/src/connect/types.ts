@@ -48,7 +48,7 @@ export interface QueueInfo {
     maxBeforeSize: number;
 }
 
-// ── IPC event payloads (Rust → frontend) ─────────────────────────────
+// ── IPC event payloads (Rust -> frontend) ─────────────────────────────
 
 export interface DevicesReceivedPayload {
     devices: MdnsDevice[];
@@ -110,7 +110,7 @@ export interface ConnectStateSnapshot {
     receiverActive?: boolean;
 }
 
-// ── Controller request payloads (frontend → Rust) ────────────────────
+// ── Controller request payloads (frontend -> Rust) ────────────────────
 
 export interface QueueLoadRequestData {
     audioquality?: string;

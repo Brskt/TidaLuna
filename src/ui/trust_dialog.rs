@@ -37,8 +37,8 @@ fn parse_trust(url: &str) -> Option<bool> {
 }
 
 fn build_html(plugin_name: &str, module: &str, manifest_json: &str) -> String {
-    // "DiscordRPC/discord.native.ts" → plugin="DiscordRPC", file="discord.native.ts"
-    // "@scope/pkg/foo.native.ts" → plugin="@scope/pkg", file="foo.native.ts"
+    // "DiscordRPC/discord.native.ts" -> plugin="DiscordRPC", file="discord.native.ts"
+    // "@scope/pkg/foo.native.ts" -> plugin="@scope/pkg", file="foo.native.ts"
     let (display_plugin, display_file) = match plugin_name.rsplit_once('/') {
         Some((p, f)) => (p, Some(f)),
         None => (plugin_name, None),

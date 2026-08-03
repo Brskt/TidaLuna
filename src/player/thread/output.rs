@@ -558,7 +558,7 @@ impl AudioPipeline {
                 let sample = if ch < src_ch {
                     data[f_idx * src_ch + ch]
                 } else if src_ch == 1 {
-                    data[f_idx * src_ch] // mono → multi: duplicate
+                    data[f_idx * src_ch] // mono -> multi: duplicate
                 } else {
                     0.0 // extra channels: silence
                 };

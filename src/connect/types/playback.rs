@@ -35,7 +35,7 @@ pub(crate) enum PlayerState {
 // The mobile TIDAL app accepts both (confirmed: play/pause works with uppercase).
 // We use uppercase with lowercase aliases for deserialization compatibility.
 
-// Playback notifications (device/receiver → controller/mobile)
+// Playback notifications (device/receiver -> controller/mobile)
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "command", rename_all = "camelCase")]
 #[allow(clippy::enum_variant_names)]

@@ -162,11 +162,11 @@ pub(super) struct RefreshSuccess {
 /// afterwards.
 ///
 /// Classifies server responses:
-/// * 2xx with `access_token` → `Ok(RefreshSuccess)`
-/// * 4xx/5xx carrying `error: "invalid_grant"` → `Err(AuthTerminated)`
-/// * Other non-success statuses → `Err(HttpStatus)`
-/// * Network / transport errors → `Err(Network)`
-/// * Parse errors → `Err(InvalidResponse)`
+/// * 2xx with `access_token` -> `Ok(RefreshSuccess)`
+/// * 4xx/5xx carrying `error: "invalid_grant"` -> `Err(AuthTerminated)`
+/// * Other non-success statuses -> `Err(HttpStatus)`
+/// * Network / transport errors -> `Err(Network)`
+/// * Parse errors -> `Err(InvalidResponse)`
 pub(super) async fn refresh_token(
     http: &reqwest::Client,
     oauth: &OAuthServerInfo,

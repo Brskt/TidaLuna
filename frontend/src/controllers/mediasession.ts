@@ -97,7 +97,7 @@ function ensureAudioContext() {
 }
 
 export function updatePlaybackState(playing: boolean) {
-    sendDbgIpc("[MediaSession] playbackState →", playing ? "playing" : "paused");
+    sendDbgIpc("[MediaSession] playbackState ->", playing ? "playing" : "paused");
     if (playing) {
         wantRunning = true;
         ensureAudioContext();

@@ -315,7 +315,7 @@ wrap_window_delegate! {
         }
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
             *self.browser_view.borrow_mut() = None;
-            // Closing via X without clicking a button → the caller's default.
+            // Closing via X without clicking a button -> the caller's default.
             self.core.send(self.core.on_close.clone());
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {

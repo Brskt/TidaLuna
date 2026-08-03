@@ -25,7 +25,7 @@ const getDependencyStoreUrl = (dependency: LunaPackageDependency, dependantPlugi
 	return dependency.storeUrl;
 };
 
-// --- Name → URL resolution ---
+// --- Name -> URL resolution ---
 
 const toPluginIdCandidates = (value: string): string[] => {
 	const trimmed = value.trim();

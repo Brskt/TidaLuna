@@ -32,7 +32,7 @@ pub(crate) enum ControllerSessionEvent {
 pub(crate) struct ControllerSession {
     current: Option<ActiveSession>,
     pub(crate) ws: Arc<WsClient>,
-    /// Internal nonce to correlate startSession → notifySessionStarted
+    /// Internal nonce to correlate startSession -> notifySessionStarted
     /// (startSession has no requestId - nonce correlates the response)
     pending_start_nonce: Option<u64>,
     nonce_counter: u64,
@@ -57,7 +57,7 @@ impl ControllerSession {
         device: &MdnsDevice,
         credential: Option<&str>,
     ) -> anyhow::Result<()> {
-        // Same device + session exists → resume
+        // Same device + session exists -> resume
         if let Some(ref session) = self.current
             && session.device.id == device.id
         {

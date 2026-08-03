@@ -195,7 +195,7 @@ pub(crate) fn get_code(conn: &mut Connection, url: &str) -> Option<String> {
 
 /// Return names of installed plugins that depend on `plugin_name`.
 /// Fail-closed: if any installed manifest has an invalid `luna` field, returns Err
-/// (we cannot guarantee the plugin isn't a dependant → block the operation).
+/// (we cannot guarantee the plugin isn't a dependant -> block the operation).
 pub(crate) fn find_dependants(
     conn: &mut Connection,
     plugin_name: &str,

@@ -147,7 +147,7 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.devices.get");
             },
             load: (url: string, streamFormat: string, encryptionKey: string = "") => {
-                sendDbgIpc("SDK→load", streamFormat);
+                sendDbgIpc("SDK->load", streamFormat);
                 // Echo of the current track: skip the reload. !isSelfLoad() because
                 // self-loads bypass this delegate, leaving loadedUrl/loadedFmt stale.
                 if (pendingStop && !isSelfLoad() && url === loadedUrl && streamFormat === loadedFmt) {
@@ -198,7 +198,7 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay);
             },
             play: () => {
-                sendDbgIpc("SDK→play");
+                sendDbgIpc("SDK->play");
                 cancelDeferredStop();
                 setDesired(true);
             },
@@ -219,7 +219,7 @@ export const createNativePlayerComponent = () => {
                 });
             },
             seek: (time: number) => {
-                sendDbgIpc("SDK→seek", time);
+                sendDbgIpc("SDK->seek", time);
                 cancelDeferredStop();
                 seekTarget = time;
                 _time = time;

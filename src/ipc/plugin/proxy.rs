@@ -424,7 +424,7 @@ fn proxy_transform_token_body_with(
     opaque: impl Fn() -> Option<String>,
 ) -> String {
     let Ok(mut json) = serde_json::from_str::<serde_json::Value>(body) else {
-        crate::vprintln!("[AUTH]   /oauth2/token → {} (non-JSON)", status);
+        crate::vprintln!("[AUTH]   /oauth2/token -> {} (non-JSON)", status);
         return body.to_string();
     };
     let Some(obj) = json.as_object_mut() else {
@@ -444,7 +444,7 @@ fn proxy_transform_token_body_with(
                 .and_then(|d| d.as_str())
                 .unwrap_or("");
             crate::vprintln!(
-                "[AUTH]   /oauth2/token → {} error={}: {}",
+                "[AUTH]   /oauth2/token -> {} error={}: {}",
                 status,
                 err,
                 desc
@@ -546,7 +546,7 @@ fn proxy_transform_token_body_with(
 
     crate::ipc::plugin::scrub_pkce_verifier();
     crate::vprintln!(
-        "[AUTH]   /oauth2/token → {} (captured via proxy, {} chars)",
+        "[AUTH]   /oauth2/token -> {} (captured via proxy, {} chars)",
         status,
         at.len()
     );

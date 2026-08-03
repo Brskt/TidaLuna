@@ -120,7 +120,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                     && matches!(kind, crate::ui::nav::PageKind::AuthHost);
                 if allowed {
                     crate::vprintln!(
-                        "[AUTH]   navigate_self → {}",
+                        "[AUTH]   navigate_self -> {}",
                         crate::util::truncate_str(&crate::util::redact_url_query(url), 120)
                     );
                     let browser = with_state(|state| state.browser.clone());

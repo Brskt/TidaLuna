@@ -6,7 +6,7 @@ pub(crate) enum SessionStatus {
     Suspended,
 }
 
-// Session commands (controller → device)
+// Session commands (controller -> device)
 #[derive(Serialize, Debug)]
 #[serde(tag = "command", rename_all = "camelCase")]
 #[allow(clippy::enum_variant_names)]
@@ -34,7 +34,7 @@ pub(crate) enum SessionCommand {
     },
 }
 
-// Session notifications (device → controller)
+// Session notifications (device -> controller)
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "command", rename_all = "camelCase")]
 #[allow(clippy::enum_variant_names)]

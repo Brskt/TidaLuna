@@ -84,7 +84,7 @@ let _forceTimeDispatch = false;
     _forceTimeDispatch = true;
 };
 
-// Short aliases used by the Rust bridge → SDK event names (carry seq).
+// Short aliases used by the Rust bridge -> SDK event names (carry seq).
 const SEQ_EVENTS: Record<string, string> = {
     "time": "mediacurrenttime",
     "duration": "mediaduration",

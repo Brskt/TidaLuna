@@ -3,7 +3,7 @@
  *
  * Bundles MUI, Emotion, semver, @inrixia/helpers, material-ui-confirm INTO the output.
  * External modules (@luna/core, @luna/lib, oby, react, react-dom/client, react/jsx-runtime)
- * are resolved at runtime via window.require() → luna.core.modules["name"].
+ * are resolved at runtime via window.require() -> luna.core.modules["name"].
  */
 import { build } from "esbuild";
 import { resolve, dirname } from "path";

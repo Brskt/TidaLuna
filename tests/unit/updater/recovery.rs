@@ -32,7 +32,7 @@ fn pending_rollback_skips_path_traversal_delete() {
     let victim = root.path().join("victim.txt");
     fs::write(&victim, b"keep me").unwrap();
 
-    // is_new=true → an unguarded rollback would remove app_dir/../victim.txt
+    // is_new=true -> an unguarded rollback would remove app_dir/../victim.txt
     apply_journal(
         &app_dir,
         &journal("pending", vec![jfile("../victim.txt", "", true)]),

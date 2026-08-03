@@ -71,7 +71,11 @@ impl OsMediaControls {
                 (MediaPlayback::Stopped, "Stopped")
             }
         };
-        crate::vprintln!("[MEDIA]  set_playback: {} → SMTC {}", state.as_str(), label);
+        crate::vprintln!(
+            "[MEDIA]  set_playback: {} -> SMTC {}",
+            state.as_str(),
+            label
+        );
         match self.controls.set_playback(playback) {
             Ok(()) => crate::vprintln!("[MEDIA]  set_playback OK"),
             Err(e) => crate::vprintln!("[MEDIA]  set_playback FAILED: {e}"),

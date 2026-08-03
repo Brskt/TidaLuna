@@ -15,7 +15,7 @@ pub(crate) enum WsClientEvent {
     Error(String),
 }
 
-/// Connection-scoped WebSocket TLS client (controller → device).
+/// Connection-scoped WebSocket TLS client (controller -> device).
 /// Each instance owns its connection - reconnect = new WsClient.
 pub(crate) struct WsClient {
     write_tx: mpsc::Sender<WsMessage>,
@@ -60,7 +60,7 @@ impl WsClient {
         let (write_tx, write_rx) = mpsc::channel::<WsMessage>(64);
         let cancel = CancellationToken::new();
 
-        // Write task: forward mpsc → WS sink, exit on cancel.
+        // Write task: forward mpsc -> WS sink, exit on cancel.
         {
             let cancel = cancel.clone();
             tokio::spawn(write_loop(write, write_rx, cancel));
@@ -69,7 +69,7 @@ impl WsClient {
         // Pong tracker for heartbeat
         let pong_received = Arc::new(AtomicBool::new(true));
 
-        // Read task: WS stream → dispatch, exit on cancel.
+        // Read task: WS stream -> dispatch, exit on cancel.
         {
             let pending = pending.clone();
             let event_tx = event_tx.clone();

@@ -191,7 +191,7 @@ export class LunaPlugin {
     }
 
     // --- Lifecycle ---
-    // All actions follow: update local state → persist to Rust DB → route to Rust → notify UI
+    // All actions follow: update local state -> persist to Rust DB -> route to Rust -> notify UI
 
     async load(): Promise<void> {
         // No-op: plugins are loaded into Rust at boot via jsrt.load_plugins.

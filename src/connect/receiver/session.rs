@@ -85,7 +85,7 @@ impl ReceiverSession {
             session.connected_sockets.remove(&socket_id);
 
             if session.connected_sockets.is_empty() {
-                // Last client gone → suspend session (keep for resume)
+                // Last client gone -> suspend session (keep for resume)
                 self.handle_session_ended(true).await;
             }
         }
@@ -253,7 +253,7 @@ impl ReceiverSession {
             .map(|s| s.session_id.clone())
             .unwrap_or_default();
 
-        // suspended = !stopCasting (if stopCasting=true → clean end, not suspended)
+        // suspended = !stopCasting (if stopCasting=true -> clean end, not suspended)
         self.handle_session_ended(!stop_casting).await;
 
         let notify = serde_json::json!({
@@ -302,7 +302,7 @@ impl ReceiverSession {
     async fn handle_session_ended(&mut self, suspended: bool) {
         if let Some(ref mut session) = self.session {
             if session.status == SessionStatus::Suspended && !suspended {
-                // Already suspended, now a real end → clear
+                // Already suspended, now a real end -> clear
                 self.session = None;
             } else if suspended {
                 session.status = SessionStatus::Suspended;

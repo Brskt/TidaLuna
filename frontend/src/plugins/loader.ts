@@ -72,7 +72,7 @@ export function exposeLoaderApi() {
     luna.core.loadedPlugins = LunaPlugin.plugins;
 
     // Register core plugins - fetch manifests from upstream GitHub repo.
-    // Maps core plugin name → subdirectory in Inrixia/TidaLuna/plugins/
+    // Maps core plugin name -> subdirectory in Inrixia/TidaLuna/plugins/
     const corePluginPaths: Record<string, string> = {
         "@luna/lib.native": "lib.native",
         "@luna/lib": "lib",

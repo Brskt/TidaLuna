@@ -112,7 +112,7 @@ pub(super) fn send_device_cmd(cmd: serde_json::Value, callback: IpcCallback) {
     }
 }
 
-// ── Event forwarding (controller → frontend) ─────────────────────────
+// ── Event forwarding (controller -> frontend) ─────────────────────────
 
 pub(super) fn forward_controller_notification(json: &serde_json::Value) {
     let cmd = json.get("command").and_then(|v| v.as_str()).unwrap_or("");
