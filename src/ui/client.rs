@@ -53,6 +53,16 @@ pub(crate) fn is_privileged_channel(channel: &str) -> bool {
         || channel == "window.open_url"
 }
 
+/// The channel in a form safe to log. `__LunaNative.<token>` carries the capability reaching one
+/// registered native module, and the redaction contract covers args only - so without this the token
+/// lands in the persistent sink, where pasting a log into an issue hands out a working handle.
+pub(crate) fn log_safe_channel(channel: &str) -> &str {
+    if channel.starts_with("__LunaNative.") {
+        return "__LunaNative.<token>";
+    }
+    channel
+}
+
 /// Privileged-frame gate decision: an untrusted frame's privileged channel is refused
 /// (403 if a reply is awaited, else a silent ack). Applied uniformly so a channel
 /// can't slip the gate by being absent from the dispatch list.
@@ -110,7 +120,7 @@ impl BrowserSideHandler for IpcQueryHandler {
                 PrivilegedGate::DropAck => {
                     crate::vprintln!(
                         "[IPC]    Dropped privileged fire-and-forget from untrusted frame: {}",
-                        msg.channel
+                        log_safe_channel(&msg.channel)
                     );
                     callback
                         .lock()
@@ -557,7 +567,7 @@ wrap_load_handler! {
                 exec_js_on_frame(&frame, &self.bundle_script);
 
                 // After post-login SPA navigation to app, signal JS to re-run init().
-                // Plugin loading is handled by init() → invokeIpc("jsrt.load_plugins").
+                // Plugin loading is handled by init() -> invokeIpc("jsrt.load_plugins").
                 if !is_login && prev == PageState::Login {
                     crate::app_state::emit_ipc_event("jsrt.post_login_init");
                     // Check for updates after login
@@ -666,7 +676,7 @@ wrap_request_handler! {
             if kind == PageKind::TidalCallback {
                 let web_url = url.replacen("tidal://", &format!("https://{}/", nav::HOST_DESKTOP), 1);
                 crate::vprintln!(
-                    "[AUTH]   Intercepted tidal:// redirect → {}",
+                    "[AUTH]   Intercepted tidal:// redirect -> {}",
                     crate::util::redact_url_query(&web_url)
                 );
                 with_state(|state| {
@@ -888,7 +898,7 @@ wrap_display_handler! {
                     {
                         crate::vprintln!(
                             "[IPC]    Dropped privileged __IPC__ console message: {}",
-                            parsed.channel
+                            log_safe_channel(&parsed.channel)
                         );
                         return 0;
                     }

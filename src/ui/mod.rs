@@ -19,4 +19,6 @@ pub(crate) mod trust_dialog;
 mod window_delegate;
 
 pub(crate) use app_bootstrap::TidalApp;
-pub(crate) use client::{NEEDS_BOOT_BLOB_PURGE, POST_LOGIN_RELOADED, is_privileged_channel};
+pub(crate) use client::{
+    NEEDS_BOOT_BLOB_PURGE, POST_LOGIN_RELOADED, is_privileged_channel, log_safe_channel,
+};

@@ -18,8 +18,12 @@ fn should_redact_args(channel: &str) -> bool {
 pub(crate) fn handle_ipc_message(request: &str) {
     let msg: IpcMessage = match serde_json::from_str(request) {
         Ok(m) => m,
-        Err(_) => {
-            crate::vprintln!("Received unknown IPC message: {}", request);
+        Err(e) => {
+            // The failure, never the envelope: it is renderer-supplied and may carry a capability,
+            // which must not reach the log. Serde names the offending field and position without
+            // echoing a well-formed one (`cap` only appears in the message when it is not a string,
+            // which no issued capability is).
+            crate::vprintln!("Received an IPC message that does not parse: {e}");
             return;
         }
     };
@@ -36,7 +40,7 @@ pub(crate) fn handle_ipc_message(request: &str) {
     if redacted_args {
         crate::vprintln!(
             "IPC Message: IpcMessage {{ channel: {:?}, args: [<redacted>] }}",
-            msg.channel
+            crate::ui::log_safe_channel(&msg.channel)
         );
     } else {
         crate::vprintln!("IPC Message: {}", msg);
