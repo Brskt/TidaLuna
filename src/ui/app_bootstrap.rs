@@ -199,6 +199,7 @@ const CEF_DISABLED_FEATURES: &[&str] = &[
     "MediaRouter",
     "OptimizationHints",
     "CalculateNativeWinOcclusion",
+    "ImmersiveReadAnything",
 ];
 
 const CEF_ENABLED_FEATURES: &[&str] = &["PartitionAllocMemoryReclaimer"];
