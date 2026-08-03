@@ -17,8 +17,16 @@ const sharedListeners: Record<string, Array<(...args: any[]) => void>> =
 
 // --- Public API ---
 
+// Captured once. Re-reading window.cefQuery per call let the first plugin to run redirect every
+// later call, for every plugin, for the rest of the session. Safe by construction: the app bundle
+// runs before any plugin, since it is what asks Rust to load them.
+const cefQuery = window.cefQuery;
+
+// Unattributed on purpose: `@luna/lib` imports these, and plugin code reaches the lib through
+// `window.luna.lib`; a capability here would be handed to whoever asked. Attributed calls are
+// built in the per-plugin wrapper (`src/plugins/wrapper.rs`), the only scope holding one.
 export const sendIpc = (channel: string, ...args: any[]) => {
-    window.cefQuery({
+    cefQuery({
         request: JSON.stringify({ channel, args }),
         onSuccess: () => {},
         onFailure: (code: number, msg: string) => console.error("[IPC] FAIL:", channel, code, msg),
@@ -37,7 +45,7 @@ let invokeCounter = 0;
 export const invokeIpc = (channel: string, ...args: any[]): Promise<any> => {
     return new Promise((resolve, reject) => {
         const id = `${++invokeCounter}`;
-        window.cefQuery({
+        cefQuery({
             request: JSON.stringify({ channel, args, id }),
             onSuccess: (response: string) => {
                 try {

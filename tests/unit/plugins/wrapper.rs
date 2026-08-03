@@ -9,6 +9,7 @@ fn test_wrap_produces_iife() {
         "console.log('hello');",
         0,
         0,
+        "cap",
     );
     assert!(result.starts_with("(function("));
     assert!(result.contains("'use strict'"));
@@ -18,7 +19,7 @@ fn test_wrap_produces_iife() {
 
 #[test]
 fn test_wrap_shadows_localstorage() {
-    let result = wrap_plugin_code("test", "", 0, 0);
+    let result = wrap_plugin_code("test", "", 0, 0, "cap");
     // localStorage should be a parameter name (shadowed to undefined)
     assert!(result.contains("localStorage"));
     // The IIFE call should pass undefined for it
@@ -27,7 +28,7 @@ fn test_wrap_shadows_localstorage() {
 
 #[test]
 fn test_wrap_contains_controlled_fetch() {
-    let result = wrap_plugin_code("test", "", 0, 0);
+    let result = wrap_plugin_code("test", "", 0, 0, "cap");
     assert!(result.contains("var fetch = function("));
     assert!(result.contains("plugin.fetch"));
     assert!(result.contains("__cq("));
@@ -35,7 +36,7 @@ fn test_wrap_contains_controlled_fetch() {
 
 #[test]
 fn test_wrap_contains_storage_api() {
-    let result = wrap_plugin_code("test", "", 0, 0);
+    let result = wrap_plugin_code("test", "", 0, 0, "cap");
     assert!(result.contains("__idbKeyval"));
     assert!(result.contains("plugin.storage.get"));
     assert!(result.contains("plugin.storage.set"));
@@ -45,14 +46,14 @@ fn test_wrap_contains_storage_api() {
 
 #[test]
 fn test_wrap_contains_unload_tracking() {
-    let result = wrap_plugin_code("test", "", 0, 0);
+    let result = wrap_plugin_code("test", "", 0, 0, "cap");
     assert!(result.contains("__pluginUnloads"));
     assert!(result.contains("onUnload"));
 }
 
 #[test]
 fn test_wrap_escapes_plugin_id() {
-    let result = wrap_plugin_code("it's a \"test\"", "", 0, 0);
+    let result = wrap_plugin_code("it's a \"test\"", "", 0, 0, "cap");
     // Single quotes escaped (embedded in JS single-quoted string)
     assert!(result.contains("it\\'s a"));
     // Double quotes pass through unescaped (safe in single-quoted JS context)
@@ -61,7 +62,7 @@ fn test_wrap_escapes_plugin_id() {
 
 #[test]
 fn test_wrap_shadows_dangerous_apis() {
-    let result = wrap_plugin_code("test", "", 0, 0);
+    let result = wrap_plugin_code("test", "", 0, 0, "cap");
     // All these should be parameter names (shadowed)
     // WebSocket intentionally NOT shadowed - plugins like DiscordRPC need it.
     for name in &[
@@ -93,8 +94,49 @@ fn test_wrap_shadows_dangerous_apis() {
 
 #[test]
 fn test_wrap_cefquery_private() {
-    let result = wrap_plugin_code("test", "", 0, 0);
+    let result = wrap_plugin_code("test", "", 0, 0, "cap");
     // cefQuery is captured as __cq (private), not exposed by name
     assert!(result.contains("__cq"));
     assert!(result.contains("window.cefQuery"));
+}
+
+#[test]
+fn the_capability_is_a_closure_parameter_and_never_a_global() {
+    let result = wrap_plugin_code("test", "", 0, 0, "CAP-TOKEN");
+    assert!(result.contains("__cap"), "the parameter is emitted");
+    assert!(
+        result.contains("'CAP-TOKEN'"),
+        "the value is passed as an argument"
+    );
+    // Reachable from a global, the capability would stop being one: any plugin could read it.
+    assert!(!result.contains("window.__cap"));
+    assert!(!result.contains("__cap ="));
+}
+
+/// The invocation pads one `undefined` per shadowed global; a miscount shifts every shadow by one and
+/// hands plugin code a real value where it should see `undefined`.
+#[test]
+fn every_iife_parameter_still_receives_an_argument() {
+    let result = wrap_plugin_code("test", "", 0, 0, "cap");
+    let params = result
+        .split("(async function(")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .expect("parameter list present")
+        .split(',')
+        .count();
+    let args = result
+        .rsplit("})('")
+        .next()
+        .and_then(|s| s.split(')').next())
+        .expect("argument list present")
+        .split(',')
+        .count();
+    assert_eq!(params, args, "parameters and arguments must stay in step");
+}
+
+#[test]
+fn the_capability_is_escaped_like_the_plugin_id() {
+    let result = wrap_plugin_code("test", "", 0, 0, "it's");
+    assert!(result.contains("it\\'s"));
 }

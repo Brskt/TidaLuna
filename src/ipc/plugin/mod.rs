@@ -51,9 +51,21 @@ pub(crate) fn ipc_callback_err(cb: &IpcCallback, code: i32, msg: &str) {
 }
 
 pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
+    // Resolved once, before dispatch: a handler resolving again could read a capability the gate
+    // accepted and eviction has since dropped, turning an allowed call unattributed after the fact.
+    let caller = crate::ipc::caller::Caller::resolve(&msg);
+    if is_plugin_attributed(&msg.channel)
+        && let Err((code, why)) = caller.require_plugin()
+    {
+        // Gated: the caller gets the refusal as its reply; the log is not the only channel, and
+        // an ungated write would let a refused-call loop drive the disk from the renderer.
+        crate::vprintln!("[IPC] Refused {}: {why}", msg.channel);
+        ipc_callback_err(&callback, code, why);
+        return;
+    }
     match msg.channel.as_str() {
         "plugin.fetch" => {
-            plugin_ipc::handle_plugin_fetch(&msg, callback);
+            plugin_ipc::handle_plugin_fetch(&msg, &caller, callback);
         }
         "tidal.fetch" => {
             plugin_ipc::handle_tidal_fetch(&msg, callback);
@@ -132,7 +144,20 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             crate::updater::handle_updater_status(callback);
         }
         _ => {
-            plugin_ipc::handle_plugin_db(msg, callback);
+            plugin_ipc::handle_plugin_db(msg, &caller, callback);
         }
     }
 }
+
+/// Channels whose handler acts on the caller's identity: serving one unattributed would mean
+/// acting on a name the caller chose. Only channels the wrapper's own shims reach can be listed, since
+/// those carry the capability. Anything through the shared `@luna/lib` arrives unattributed and is
+/// refused, `plugin.download` being the case in point. Matched exactly, not by prefix:
+/// `plugin.fetch_package` installs a plugin before one exists to hold a capability.
+fn is_plugin_attributed(channel: &str) -> bool {
+    channel.starts_with("plugin.storage.") || channel == "plugin.fetch"
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/ipc/plugin/mod.rs"]
+mod tests;

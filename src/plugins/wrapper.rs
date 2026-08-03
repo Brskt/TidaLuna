@@ -51,8 +51,17 @@ pub(super) fn escape_js(s: &str) -> String {
 /// `code` - already transpiled+bundled JS (no ES module syntax, ready for eval).
 ///
 /// Returns a self-executing JS string safe to pass to `frame.execute_java_script()`.
-pub fn wrap_plugin_code(plugin_id: &str, code: &str, load_id: u64, nonce: u64) -> String {
+pub fn wrap_plugin_code(
+    plugin_id: &str,
+    code: &str,
+    load_id: u64,
+    nonce: u64,
+    capability: &str,
+) -> String {
     let escaped_id = escape_js(plugin_id);
+    // Escaped like the id. `random_capability` emits hex only, but the escape keeps a future
+    // generator change from injecting into the surrounding JS string literal.
+    let escaped_cap = escape_js(capability);
 
     // Template uses string concatenation to avoid format!() escaping hell with JS braces.
     // The IIFE parameters shadow dangerous globals - they receive `undefined` as arguments.
@@ -81,7 +90,7 @@ pub fn wrap_plugin_code(plugin_id: &str, code: &str, load_id: u64, nonce: u64) -
     js.push_str("__pThen.call(\n");
     // Sensitive globals are shadowed as parameters (receive undefined at call site).
     // This only blocks bare identifiers - window.X still works (shared V8 context limitation).
-    js.push_str("(async function(__pid, __cq, __gen, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq, __LUNAR_CAPTURED_TOKEN__, __TIDALUNAR_CREDENTIALS__, __LUNAR_SEND_IPC__, __LUNAR_INVOKE_IPC__, __LUNAR_IPC_LISTENERS__, __LUNAR_IPC_ON__, __LUNAR_IPC_EMIT__, __LUNAR_CONFIG__, __LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery) {\n");
+    js.push_str("(async function(__pid, __cq, __gen, __cap, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq, __LUNAR_CAPTURED_TOKEN__, __TIDALUNAR_CREDENTIALS__, __LUNAR_SEND_IPC__, __LUNAR_INVOKE_IPC__, __LUNAR_IPC_LISTENERS__, __LUNAR_IPC_ON__, __LUNAR_IPC_EMIT__, __LUNAR_CONFIG__, __LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery) {\n");
     js.push_str("'use strict';\n");
 
     // --- Controlled fetch ---
@@ -102,7 +111,7 @@ var fetch = function(input, init) {
     }
     return new Promise(function(resolve, reject) {
         __cq({
-            request: JSON.stringify({ channel: 'plugin.fetch', args: [__pid, url, JSON.stringify({ method: method, headers: headers, body: opts.body || null })], id: String(++fetch.__seq) }),
+            request: JSON.stringify({ channel: 'plugin.fetch', args: [__pid, url, JSON.stringify({ method: method, headers: headers, body: opts.body || null })], id: String(++fetch.__seq), cap: __cap }),
             onSuccess: function(raw) {
                 try {
                     var r = JSON.parse(raw);
@@ -135,7 +144,7 @@ var __idbKeyval = {
     get: function(key) {
         return new Promise(function(resolve, reject) {
             __cq({
-                request: JSON.stringify({ channel: 'plugin.storage.get', args: [__pid, key], id: String(++__idbKeyval.__seq) }),
+                request: JSON.stringify({ channel: 'plugin.storage.get', args: [__pid, key], id: String(++__idbKeyval.__seq), cap: __cap }),
                 onSuccess: function(raw) {
                     try { resolve(raw === '' ? undefined : JSON.parse(raw)); } catch(e) { resolve(raw); }
                 },
@@ -146,7 +155,7 @@ var __idbKeyval = {
     set: function(key, value) {
         return new Promise(function(resolve, reject) {
             __cq({
-                request: JSON.stringify({ channel: 'plugin.storage.set', args: [__pid, key, JSON.stringify(value)], id: String(++__idbKeyval.__seq) }),
+                request: JSON.stringify({ channel: 'plugin.storage.set', args: [__pid, key, JSON.stringify(value)], id: String(++__idbKeyval.__seq), cap: __cap }),
                 onSuccess: function() { resolve(); },
                 onFailure: function(code, msg) { reject(new Error(msg)); }
             });
@@ -155,7 +164,7 @@ var __idbKeyval = {
     del: function(key) {
         return new Promise(function(resolve, reject) {
             __cq({
-                request: JSON.stringify({ channel: 'plugin.storage.del', args: [__pid, key], id: String(++__idbKeyval.__seq) }),
+                request: JSON.stringify({ channel: 'plugin.storage.del', args: [__pid, key], id: String(++__idbKeyval.__seq), cap: __cap }),
                 onSuccess: function() { resolve(); },
                 onFailure: function(code, msg) { reject(new Error(msg)); }
             });
@@ -164,7 +173,7 @@ var __idbKeyval = {
     keys: function() {
         return new Promise(function(resolve, reject) {
             __cq({
-                request: JSON.stringify({ channel: 'plugin.storage.keys', args: [__pid], id: String(++__idbKeyval.__seq) }),
+                request: JSON.stringify({ channel: 'plugin.storage.keys', args: [__pid], id: String(++__idbKeyval.__seq), cap: __cap }),
                 onSuccess: function(raw) {
                     try { resolve(JSON.parse(raw)); } catch(e) { resolve([]); }
                 },
@@ -221,13 +230,17 @@ if (typeof __exports !== 'undefined') {
     );
 
     // --- Inner IIFE close ---
-    // Arguments: pluginId, cefQuery ref, load_id, then undefined for all shadowed globals.
+    // Arguments: pluginId, cefQuery ref, load_id, capability, then undefined for all shadowed
+    // globals.
     // 10 original shadows (localStorage..importScripts, __pThen, __ackCq, __ackReq)
     // + 11 security shadows (__LUNAR_CAPTURED_TOKEN__..__LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery)
     js.push_str("})('");
     js.push_str(&escaped_id);
     js.push_str("', window.cefQuery, ");
     js.push_str(&load_id.to_string());
+    js.push_str(", '");
+    js.push_str(&escaped_cap);
+    js.push('\'');
     js.push_str(
         ", undefined, undefined, undefined, undefined, undefined, undefined, undefined\
          , undefined, undefined, undefined\

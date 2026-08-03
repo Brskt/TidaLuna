@@ -1,8 +1,17 @@
 use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, with_state};
 
-pub(super) fn handle_plugin_fetch(msg: &IpcMessage, callback: IpcCallback) {
-    let plugin_id = msg.arg(0).to_string();
+pub(super) fn handle_plugin_fetch(
+    msg: &IpcMessage,
+    caller: &crate::ipc::caller::Caller,
+    callback: IpcCallback,
+) {
+    // Taken from the gate's own resolution rather than read off argument 0 or resolved again: the
+    // plugin named in a blocked-exfiltration line is the one the gate actually admitted.
+    let plugin_id = match caller {
+        crate::ipc::caller::Caller::Plugin(url) => url.clone(),
+        crate::ipc::caller::Caller::Unattributed => String::new(),
+    };
     let url = msg.arg(1).to_string();
     let raw_opts = msg.arg(2);
     let opts_json = if raw_opts.is_empty() { "{}" } else { raw_opts }.to_string();
@@ -123,7 +132,7 @@ pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
     });
 }
 
-/// Enable: deps → DB enable → transpile → eval_js → persist `ever_dispatched`.
+/// Enable: deps -> DB enable -> transpile -> eval_js -> persist `ever_dispatched`.
 /// Not one transaction (DB write + renderer eval can't be); a crash mid-sequence
 /// self-heals on the next load via `do_load_plugins_inline` (re-inject/auto-disable).
 pub(super) fn handle_plugin_enable(msg: &IpcMessage, callback: IpcCallback) {
@@ -188,17 +197,30 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         .await;
     }
 
-    // 2. Mark loading. The ack nonce is generated off the AppState lock so an
-    // entropy failure fails the load instead of panicking under the guard.
-    let Some(nonce) = crate::plugins::manager::random_nonce() else {
+    // 2. Mark loading. The ack nonce and the caller capability are generated off the AppState
+    // lock; an entropy failure fails the load instead of panicking under the guard.
+    let (Some(nonce), Some(capability)) = (
+        crate::plugins::manager::random_nonce(),
+        crate::plugins::manager::random_capability(),
+    ) else {
         revert_enable(&url).await;
         return Err("RNG unavailable".to_string());
     };
-    let load_id = with_state(|state| state.plugin_manager.mark_loading(&url, &plugin_name, nonce))
-        .unwrap_or(0);
+    let load_id = with_state(|state| {
+        state
+            .plugin_manager
+            .mark_loading(&url, &plugin_name, nonce, &capability)
+    })
+    .unwrap_or(0);
 
     // 3. Transpile + wrap (load_id + nonce injected into wrapper for ack)
-    let js = match crate::plugins::PluginManager::transpile_and_wrap(&url, &code, load_id, nonce) {
+    let js = match crate::plugins::PluginManager::transpile_and_wrap(
+        &url,
+        &code,
+        load_id,
+        nonce,
+        &capability,
+    ) {
         Ok(js) => js,
         Err(e) => {
             with_state(|state| state.plugin_manager.mark_unloaded(&url));
@@ -272,7 +294,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Atomic disable: guard dependants → DB disable → eval_js cleanup → mark_unloaded.
+/// Atomic disable: guard dependants -> DB disable -> eval_js cleanup -> mark_unloaded.
 pub(super) fn handle_plugin_disable(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
@@ -388,10 +410,29 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, callback: IpcCallback) 
     });
 }
 
-pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
+pub(super) fn handle_plugin_db(
+    msg: IpcMessage,
+    caller: &crate::ipc::caller::Caller,
+    callback: IpcCallback,
+) {
     let db = crate::state::db();
     let channel = msg.channel.clone();
     let args = msg.args.clone();
+    // The storage namespace is the caller's url, never argument 0: that named a namespace with no
+    // check the caller owned it. Taken from the gate's resolution rather than resolved a second
+    // time, which could answer differently and silently move the write.
+    let caller_ns = match caller {
+        crate::ipc::caller::Caller::Plugin(url) => url.clone(),
+        crate::ipc::caller::Caller::Unattributed => String::new(),
+    };
+
+    // Storage rows are keyed by the caller: an unattributed one has no namespace, and `""` is not
+    // inert (it is a row every unattributed caller would share). The gate already refuses these
+    // channels; this is the floor under it.
+    if channel.starts_with("plugin.storage.") && caller_ns.is_empty() {
+        ipc_callback_err(&callback, 403, "unattributed call");
+        return;
+    }
 
     // Result is (json_response, optional canonical name for trust clearing)
     let result: Result<(String, Option<String>), String> =
@@ -436,7 +477,7 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
                 .map(|()| ("true".to_string(), Some(String::new())))
                 .map_err(|e| e.to_string()),
             "plugin.storage.get" => {
-                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let ns = caller_ns.as_str();
                 let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 match crate::plugins::store::storage_get(pc, ns, key) {
                     Some(val) => Ok((
@@ -447,7 +488,7 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
                 }
             }
             "plugin.storage.set" => {
-                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let ns = caller_ns.as_str();
                 let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 let value = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
                 crate::plugins::store::storage_set(pc, ns, key, value)
@@ -455,14 +496,14 @@ pub(super) fn handle_plugin_db(msg: IpcMessage, callback: IpcCallback) {
                     .map_err(|e| e.to_string())
             }
             "plugin.storage.del" => {
-                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let ns = caller_ns.as_str();
                 let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
                 crate::plugins::store::storage_del(pc, ns, key)
                     .map(|()| ("true".to_string(), None))
                     .map_err(|e| e.to_string())
             }
             "plugin.storage.keys" => {
-                let ns = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let ns = caller_ns.as_str();
                 let keys = crate::plugins::store::storage_keys(pc, ns);
                 Ok((
                     serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()),

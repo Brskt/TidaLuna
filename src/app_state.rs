@@ -12,6 +12,11 @@ pub(crate) struct IpcMessage {
     pub(crate) args: Vec<serde_json::Value>,
     #[serde(default)]
     pub(crate) id: Option<String>,
+    /// Caller capability, resolved to a `Caller` at ingress. A reserved envelope field, not a
+    /// positional argument: `arg(i)` indices stay correct; absent rather than a parse failure for
+    /// unattributed callers. Omitted from `Display` below on purpose. It must not reach the log.
+    #[serde(default)]
+    pub(crate) cap: Option<String>,
 }
 
 impl std::fmt::Display for IpcMessage {
