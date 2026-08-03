@@ -92,6 +92,15 @@ pub(crate) fn build_native_client(
         .expect("failed to build native HTTP client")
 }
 
+/// Build a client with a redirect policy of the caller's choosing, sharing the base tuning. Used by
+/// `plugin.download`, whose policy re-checks the host at every hop.
+pub(crate) fn build_client_with_redirect(redirect: reqwest::redirect::Policy) -> reqwest::Client {
+    base_client_builder()
+        .redirect(redirect)
+        .build()
+        .expect("failed to build redirect-checked HTTP client")
+}
+
 pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
 /// Dedicated HTTP client for playback (initial GET + Range restarts).

@@ -12,19 +12,38 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::time::Duration;
 
-/// TIDAL's own container. A DASH manifest needs an fMP4 remux that this does not do.
+/// TIDAL's own container: one url, FLAC or AAC, encrypted per the manifest.
 const BTS_MIME: &str = "application/vnd.tidal.bts";
+/// Segmented AAC. The init segment and its media segments concatenate into a fragmented MP4, which
+/// plays as written; upstream additionally remuxes it to progressive MP4 and tags it, which this does
+/// not do. The result is untagged.
+const DASH_MIME: &str = "application/dash+xml";
 
-/// Ceiling on one response body, enforced while streaming. The urls arrive as
-/// plugin-supplied JSON, so an unbounded body would otherwise be fully buffered before
-/// any check could fire. A hi-res track is tens of megabytes.
-const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
+/// Longest url list a real manifest produces. The list is plugin-supplied; without a bound, Rust
+/// would issue as many requests as asked, and the byte ceiling does not stop that, since a list of
+/// tiny 404s costs nothing per url. A captured DASH track ran 60 segments. This is headroom.
+const MAX_URLS: usize = 4096;
+
+fn is_supported_manifest(mime: &str) -> bool {
+    mime == BTS_MIME || mime == DASH_MIME
+}
+
+fn url_count_within_bounds(count: usize) -> bool {
+    count > 0 && count <= MAX_URLS
+}
+
+/// Bounds the whole accumulated buffer (all `MAX_URLS` segments share it), not one response.
+/// Unbounded plugin-supplied urls would otherwise buffer fully before any check fires.
+const MAX_DOWNLOAD_BYTES: usize = 512 * 1024 * 1024;
 /// Cover art is an image, not an album.
 const MAX_COVER_BYTES: usize = 16 * 1024 * 1024;
 
 /// Bounds a hang, not throughput: a peer that connects and then sends nothing would leave
 /// the renderer's promise pending for the life of the process.
 const TRACK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Bounds the whole run, not one url. A 4096-url list each inside its own `TRACK_TIMEOUT` would
+/// otherwise hold the single download permit for months.
+const WHOLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const COVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One download at a time, as upstream does: each holds a whole track in memory and the
@@ -45,6 +64,49 @@ const RESERVED_STEMS: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
+
+/// Hosts TIDAL serves audio from. A label-boundary suffix, never a substring: `evil-audio.tidal.com`
+/// is a host anyone can register and it contains the string.
+fn is_tidal_media_host(host: &str) -> bool {
+    host == "audio.tidal.com" || host.ends_with(".audio.tidal.com")
+}
+
+/// Cover art comes from its own host and does not belong on the media list.
+fn is_tidal_artwork_host(host: &str) -> bool {
+    host == "resources.tidal.com"
+}
+
+/// Host comes from the parsed url: `https://lgf.audio.tidal.com@evil.com/` reads as `evil.com` and is
+/// refused; HTTPS only. General outbound http is the trust-gated native `http(s)` module. This must
+/// not become a second, unprompted way to the same thing.
+fn allowed_url(url: &str, allow: fn(&str) -> bool) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    parsed.scheme() == "https" && allow(parsed.host_str().unwrap_or(""))
+}
+
+/// The same rule at every redirect hop. Checking the submitted url alone would be bypassed by an
+/// open redirect on an allowed host, and the shared client follows redirects with no policy at all.
+/// Media and artwork share one client; either host is acceptable mid-chain.
+fn redirect_allowed(url: &url::Url) -> bool {
+    let host = url.host_str().unwrap_or("");
+    url.scheme() == "https" && (is_tidal_media_host(host) || is_tidal_artwork_host(host))
+}
+
+/// Downloads use their own client. The redirect policy stays off every other caller of
+/// `HTTP_CLIENT`.
+static DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    crate::state::build_client_with_redirect(reqwest::redirect::Policy::custom(|attempt| {
+        if !redirect_allowed(attempt.url()) {
+            return attempt.error(Refused("redirect left the allowed TIDAL hosts"));
+        }
+        if attempt.previous().len() >= 10 {
+            return attempt.stop();
+        }
+        attempt.follow()
+    }))
+});
 
 #[derive(Deserialize)]
 struct Request {
@@ -71,19 +133,23 @@ pub(super) fn handle_download(msg: &IpcMessage, callback: IpcCallback) {
                 return;
             }
         };
-        if req.manifest_mime_type != BTS_MIME {
+        if !is_supported_manifest(&req.manifest_mime_type) {
+            ipc_callback_err(
+                &callback,
+                400,
+                &format!("unsupported manifest type {}", req.manifest_mime_type),
+            );
+            return;
+        }
+        if !url_count_within_bounds(req.urls.len()) {
             ipc_callback_err(
                 &callback,
                 400,
                 &format!(
-                    "only {BTS_MIME} downloads are supported, got {}",
-                    req.manifest_mime_type
+                    "manifest must carry 1 to {MAX_URLS} urls, got {}",
+                    req.urls.len()
                 ),
             );
-            return;
-        }
-        if req.urls.is_empty() {
-            ipc_callback_err(&callback, 400, "manifest has no urls");
             return;
         }
         // Taken after validation so a bad request answers at once instead of queueing.
@@ -96,9 +162,44 @@ pub(super) fn handle_download(msg: &IpcMessage, callback: IpcCallback) {
         };
         match run(req).await {
             Ok(()) => ipc_callback_ok(&callback, "true"),
-            Err(e) => ipc_callback_err(&callback, 500, &format!("{e:#}")),
+            Err(e) => ipc_callback_err(&callback, status_for(&e), &format!("{e:#}")),
         }
     });
+}
+
+/// A refusal this channel answers 403 with. A type, not a string match; a future refusal gets the
+/// right code without anyone remembering a list.
+#[derive(Debug)]
+struct Refused(&'static str);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// 403 for a permanent refusal, 500 for anything else. Walks the whole error chain: reqwest wraps the
+/// redirect policy's `Refused` as a source, and checking only the top answered 500 for a refusal.
+fn status_for(e: &anyhow::Error) -> i32 {
+    if e.chain().any(|cause| cause.is::<Refused>()) {
+        403
+    } else {
+        500
+    }
+}
+
+/// Bounded host only, never the full url: it is plugin-supplied and `verr!` is not gated. Logging it
+/// verbatim would let the renderer write unbounded text, escapes intact, into the persistent log.
+/// The host is what makes an unexpected regional CDN reportable.
+fn refused_host(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => {
+            crate::util::truncate_str(parsed.host_str().unwrap_or("no host"), 64).to_string()
+        }
+        Err(_) => "unparseable url".to_string(),
+    }
 }
 
 async fn run(req: Request) -> anyhow::Result<()> {
@@ -110,13 +211,18 @@ async fn run(req: Request) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Guessing from the key is what this replaces: a NONE manifest that still carries a
-    // keyId would otherwise be run through the keystream and written as noise.
-    let decrypt = match req.encryption_type.as_str() {
-        "OLD_AES" => true,
-        "NONE" => false,
-        "" if req.key_id.is_empty() => false,
-        other => anyhow::bail!("unusable manifest encryption type {other:?}"),
+    // DASH is never encrypted (no key fields; `Player::load_dash` decrypts nothing). Stated rather
+    // than inferred: a manifest must not claim otherwise and run segments through the FLAC keystream.
+    // BTS follows its own field: a NONE manifest still carrying a keyId would otherwise be decrypted.
+    let decrypt = if req.manifest_mime_type == DASH_MIME {
+        false
+    } else {
+        match req.encryption_type.as_str() {
+            "OLD_AES" => true,
+            "NONE" => false,
+            "" if req.key_id.is_empty() => false,
+            other => anyhow::bail!("unusable manifest encryption type {other:?}"),
+        }
     };
     let data = fetch_track(&req.urls).await?;
 
@@ -130,6 +236,12 @@ async fn run(req: Request) -> anyhow::Result<()> {
         Ok(data)
     })
     .await??;
+
+    // A plugin picks the dialog's `defaultPath`; a user accepting without reading it can be steered
+    // at a file another program acts on. Refusing non-audio keeps this channel from writing one.
+    if !is_audio_container(&decrypted) {
+        return Err(Refused("the stream is not an audio container").into());
+    }
 
     // `codecs` lies in both directions: it reports non-FLAC for real FLAC streams (why
     // upstream dropped the check) and BTS does carry AAC, so the container decides. A
@@ -150,6 +262,97 @@ async fn run(req: Request) -> anyhow::Result<()> {
         crate::util::fmt::format_bytes(size)
     );
     Ok(())
+}
+
+/// Checks structure (a FLAC block chain or an ISO-BMFF box chain accounting for every byte), not a
+/// magic prefix, which `#abcftyp\n[Desktop Entry]` fools. Judged on bytes, never the file name:
+/// `fileExtension()` answers `flac` for every BTS manifest including AAC, which arrives as ISO-BMFF.
+///
+/// This only proves the file cannot ALSO be parsed as something else from offset 0, the real risk of
+/// a plugin-picked `defaultPath`. It does not seal the opaque payload region (`mdat`, FLAC frames)
+/// against carried content; that needs a demuxer, not this.
+fn is_audio_container(data: &[u8]) -> bool {
+    is_flac_stream(data) || is_iso_bmff(data)
+}
+
+/// A FLAC signature at offset 0 plus a metadata block chain that terminates inside the data. Nothing
+/// may precede the signature, which is what a prefix polyglot cannot satisfy.
+fn is_flac_stream(data: &[u8]) -> bool {
+    if !data.starts_with(b"fLaC") {
+        return false;
+    }
+    let mut at = 4;
+    loop {
+        // 1 byte of last-block flag plus block type, then a 24-bit big-endian length.
+        let header = match data.get(at..at + 4) {
+            Some(h) => h,
+            None => return false,
+        };
+        // STREAMINFO must open the chain, and it is the one block with a fixed length.
+        if at == 4
+            && (header[0] & 0x7F != 0
+                || u32::from_be_bytes([0, header[1], header[2], header[3]]) != 34)
+        {
+            return false;
+        }
+        let len = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+        at = match at.checked_add(4).and_then(|a| a.checked_add(len)) {
+            Some(a) if a <= data.len() => a,
+            // A block that runs past the end describes something this is not.
+            _ => return false,
+        };
+        if header[0] & 0x80 != 0 {
+            // Last block. Frames follow, and there must be some: a header alone is not a track.
+            return at < data.len();
+        }
+    }
+}
+
+/// An ISO-BMFF box chain opening on `ftyp` and accounting for every byte to the end. The accounting
+/// rejects both a polyglot prefix and appended data: the first four bytes are a size; text there
+/// yields one that does not land on the end.
+fn is_iso_bmff(data: &[u8]) -> bool {
+    let mut at = 0usize;
+    let mut first = true;
+    while at < data.len() {
+        let header = match data.get(at..at + 8) {
+            Some(h) => h,
+            None => return false,
+        };
+        if first && &header[4..8] != b"ftyp" {
+            return false;
+        }
+        first = false;
+        let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let size = match size {
+            // Spec-legal for a final box, meaning "to end of file", which is the escape hatch: `ftyp`
+            // then a zero-size box swallows any payload and the walk still terminates happily. TIDAL
+            // writes explicit sizes.
+            0 => return false,
+            // 1 means a 64-bit size follows the type. Accepted for real media, whose `mdat` needs
+            // it past 4 GiB.
+            1 => {
+                let ext = match data.get(at + 8..at + 16) {
+                    Some(e) => e,
+                    None => return false,
+                };
+                match usize::try_from(u64::from_be_bytes(ext.try_into().unwrap_or([0; 8]))) {
+                    Ok(s) if s >= 16 => s,
+                    _ => return false,
+                }
+            }
+            s if s >= 8 => s,
+            // Smaller than its own header.
+            _ => return false,
+        };
+        at = match at.checked_add(size) {
+            Some(a) if a <= data.len() => a,
+            // A chain that runs past the end does not describe this file.
+            _ => return false,
+        };
+    }
+    // Landed exactly on the end, and saw at least the `ftyp`.
+    !first
 }
 
 /// Sanitize the file name only, leaving the directory as the caller gave it, as upstream
@@ -216,24 +419,46 @@ fn bound_name(name: &str) -> String {
     }
 }
 
+/// What is left of the run's deadline, capped at the per-request limit; `None` once it has passed.
+/// Derived from the deadline rather than tracked beside it: reqwest's timeout covers the streamed
+/// body; clamping it is what bounds the run. A request admitted just before the deadline with its
+/// own full `TRACK_TIMEOUT` would otherwise hold the single download permit half again as long.
+fn next_request_timeout(remaining: Duration) -> Option<Duration> {
+    (!remaining.is_zero()).then(|| TRACK_TIMEOUT.min(remaining))
+}
+
 /// Stream and stop at the ceiling: `Content-Length` is absent on a chunked response, and a
 /// buffered body is already allocated by the time it could be measured.
 async fn fetch_track(urls: &[String]) -> anyhow::Result<Vec<u8>> {
+    // `TRACK_TIMEOUT` bounds one url. With a list that long, a peer trickling a byte inside each
+    // url's own window would hold the single download permit for months and block every other
+    // plugin. The whole run gets a deadline too.
+    let deadline = tokio::time::Instant::now() + WHOLE_DOWNLOAD_TIMEOUT;
     let mut out = Vec::new();
     for url in urls {
-        let resp = crate::state::HTTP_CLIENT
-            .get(url)
-            .timeout(TRACK_TIMEOUT)
-            .send()
-            .await?;
+        if !allowed_url(url, is_tidal_media_host) {
+            // Gated, like the ingress refusal in `super::mod`: the caller learns of it from its own
+            // 403 (the log is not the only channel), and an ungated write would let a refused-call
+            // loop drive the disk from the renderer.
+            crate::vprintln!(
+                "[DOWNLOAD] Refused a url outside the TIDAL media hosts: {}",
+                refused_host(url)
+            );
+            return Err(Refused("download url is not a TIDAL media url").into());
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Some(timeout) = next_request_timeout(remaining) else {
+            anyhow::bail!("download exceeded {WHOLE_DOWNLOAD_TIMEOUT:?}");
+        };
+        let resp = DOWNLOAD_CLIENT.get(url).timeout(timeout).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("upstream status {}", resp.status());
         }
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            if out.len() + chunk.len() > MAX_BODY_BYTES {
-                anyhow::bail!("download exceeded the ceiling of {MAX_BODY_BYTES} bytes");
+            if out.len() + chunk.len() > MAX_DOWNLOAD_BYTES {
+                anyhow::bail!("download exceeded the ceiling of {MAX_DOWNLOAD_BYTES} bytes");
             }
             out.extend_from_slice(&chunk);
         }
@@ -339,12 +564,11 @@ async fn read_tags(meta: Option<&serde_json::Value>) -> (Vec<(String, String)>, 
 }
 
 async fn fetch_cover(url: &str) -> Option<Picture> {
-    let resp = match crate::state::HTTP_CLIENT
-        .get(url)
-        .timeout(COVER_TIMEOUT)
-        .send()
-        .await
-    {
+    if !allowed_url(url, is_tidal_artwork_host) {
+        crate::vprintln!("[DOWNLOAD] Cover url is not a TIDAL artwork url, skipping it");
+        return None;
+    }
+    let resp = match DOWNLOAD_CLIENT.get(url).timeout(COVER_TIMEOUT).send().await {
         Ok(resp) => resp,
         Err(e) => {
             crate::vprintln!("[DOWNLOAD] Cover fetch failed: {e}");
