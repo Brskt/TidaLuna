@@ -446,38 +446,49 @@ fn looks_like_media(data: &[u8]) -> bool {
         || looks_like_mpeg_frame(data)
 }
 
-/// Does `data` open on a plausible MPEG-audio or ADTS-AAC frame header? The sync
-/// word alone is far weaker than the four-byte magics beside it (11 bits accept 1
-/// random byte pair in 2048), so reserved and invalid fields are rejected too, and
-/// ADTS must have a successor frame where its own length field says. Raw ADTS does
-/// reach here: symphonia is built with `aac` and the decoder probes with no hint.
-fn looks_like_mpeg_frame(data: &[u8]) -> bool {
+/// Does `data` open on an ADTS-AAC frame header? Layer 00 with the 12th sync bit is a value MPEG
+/// audio reserves; the two families cannot be confused. The frame's own length field must point at
+/// a successor sync, which is what separates this from a bare sync word: 11 bits accept one random
+/// byte pair in 2048.
+fn looks_like_adts_frame(data: &[u8]) -> bool {
     if data.len() < 7 || data[0] != 0xFF {
         return false;
     }
+    if data[1] & 0xF0 != 0xF0 || data[1] & 0x06 != 0 {
+        return false;
+    }
+    // 13..15 are reserved rates; channel config 0 defers to an AudioSpecificConfig an ADTS
+    // stream never carries.
+    let sampling = (data[2] >> 2) & 0x0F;
+    let channels = ((data[2] & 0x01) << 2) | (data[3] >> 6);
+    if sampling > 12 || channels == 0 {
+        return false;
+    }
+    // A frame cannot be shorter than the header it starts with.
+    let frame_len =
+        (((data[3] & 0x03) as usize) << 11) | ((data[4] as usize) << 3) | ((data[5] >> 5) as usize);
+    if frame_len < 7 {
+        return false;
+    }
+    match data.get(frame_len..frame_len + 2) {
+        Some(next) => next[0] == 0xFF && next[1] & 0xF0 == 0xF0,
+        // The successor lies past what we were given; the header alone stands.
+        None => true,
+    }
+}
 
-    // Layer 00 with the 12th sync bit is ADTS, a value MPEG audio reserves, so the
-    // two families cannot be confused.
-    if data[1] & 0xF0 == 0xF0 && data[1] & 0x06 == 0 {
-        // 13..15 are reserved rates; channel config 0 defers to an
-        // AudioSpecificConfig an ADTS stream never carries.
-        let sampling = (data[2] >> 2) & 0x0F;
-        let channels = ((data[2] & 0x01) << 2) | (data[3] >> 6);
-        if sampling > 12 || channels == 0 {
-            return false;
-        }
-        // A frame cannot be shorter than the header it starts with.
-        let frame_len = (((data[3] & 0x03) as usize) << 11)
-            | ((data[4] as usize) << 3)
-            | ((data[5] >> 5) as usize);
-        if frame_len < 7 {
-            return false;
-        }
-        return match data.get(frame_len..frame_len + 2) {
-            Some(next) => next[0] == 0xFF && next[1] & 0xF0 == 0xF0,
-            // The successor lies past what we were given; the header alone stands.
-            None => true,
-        };
+/// A cache-side plausibility check, not a security gate. It is built to reject accidental noise, not
+/// an adversarial sequence, which is why `plugin.download` validates container structure instead. Raw
+/// ADTS reaches here since symphonia's `aac` build probes with no hint; the MPEG-audio half stops at
+/// the header because finding the next frame needs the bitrate tables.
+fn looks_like_mpeg_frame(data: &[u8]) -> bool {
+    if looks_like_adts_frame(data) {
+        return true;
+    }
+    // Everything below reads the first two bytes, and the ADTS shape is already excluded by the
+    // call above: layer 00 with the 12th sync bit is a value MPEG audio reserves.
+    if data.len() < 7 || data[0] != 0xFF || (data[1] & 0xF0 == 0xF0 && data[1] & 0x06 == 0) {
+        return false;
     }
 
     if data[1] & 0xE0 != 0xE0 {
