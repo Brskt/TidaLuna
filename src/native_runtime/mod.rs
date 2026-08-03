@@ -98,9 +98,13 @@ impl NativeRuntime {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to spawn Bun: {e}"))?;
+        // Entered explicitly: on Unix the spawn registers the piped fds and SIGCHLD with the
+        // runtime's drivers, and callers reach here from the CEF UI thread, which holds no context.
+        let mut child = {
+            let _guard = rt.enter();
+            cmd.spawn()
+                .map_err(|e| anyhow::anyhow!("Failed to spawn Bun: {e}"))?
+        };
 
         let stdout = child.stdout.take().expect("stdout captured");
         let stderr = child.stderr.take().expect("stderr captured");
