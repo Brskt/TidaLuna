@@ -1107,8 +1107,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
-    pub(super) fn handle_set_volume(&mut self, vol: f64) {
-        let vol_f32 = (vol / 100.0) as f32;
+    pub(super) fn handle_set_volume(&mut self, vol: crate::player::Volume) {
+        // Provably finite and within 0..=100 by construction, which leaves the cast below
+        // unable to saturate to infinity the way a raw f64 could.
+        let vol_f32 = (vol.as_percent() / 100.0) as f32;
         // Record the real UI level on every path (incl. the session-sync Ok path
         // below, which pins self.volume to 1.0). The reliable seed for the
         // exclusive digital gain when volume_sync.get() later fails on switch.

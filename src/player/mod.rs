@@ -117,6 +117,32 @@ impl MediaErrorCode {
     }
 }
 
+/// A volume percentage, always finite and within `0.0..=100.0`. Same reasoning as
+/// [`OutputMode`] below: the invariant lives in the type, not in whichever function happens
+/// to be its only consumer today.
+///
+/// Not cosmetic. `player.volume` takes any JSON number and the frontend forwards Redux's
+/// value unclamped; any input whose `/ 100.0` quotient passes `f32::MAX` casts to
+/// `f32::INFINITY`, which the cpal callback then multiplies into every sample unbounded. A
+/// non-finite input sanitizes to silence, never to full scale, the wrong guess here having to
+/// be the quiet one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Volume(f64);
+
+impl Volume {
+    pub fn from_percent(v: f64) -> Self {
+        Self(if v.is_finite() {
+            v.clamp(0.0, 100.0)
+        } else {
+            0.0
+        })
+    }
+
+    pub fn as_percent(self) -> f64 {
+        self.0
+    }
+}
+
 /// The audio output backend a `player.devices.set` selects. The three modes are
 /// mutually exclusive (a radio choice), so a single enum replaces the former
 /// `(exclusive, asio)` boolean pair, which could encode the invalid both-true
@@ -298,7 +324,7 @@ enum PlayerCommand {
     Pause,
     Stop(u32),
     Seek(f64),
-    SetVolume(f64),
+    SetVolume(Volume),
     GetAudioDevices(Option<String>),
     SetAudioDevice {
         id: String,
@@ -1278,8 +1304,10 @@ impl Player {
         self.send_cmd(PlayerCommand::Seek(time))
     }
 
+    /// Keeps the `f64` argument so no caller changes, but nothing past this point can
+    /// hold an out-of-range or non-finite level.
     pub fn set_volume(&self, volume: f64) -> anyhow::Result<()> {
-        self.send_cmd(PlayerCommand::SetVolume(volume))
+        self.send_cmd(PlayerCommand::SetVolume(Volume::from_percent(volume)))
     }
 
     #[cfg(target_os = "windows")]
@@ -1314,3 +1342,7 @@ mod cache_entry_validation_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/player/fetch_url_tests.rs"]
 mod fetch_url_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/volume_tests.rs"]
+mod volume_tests;
