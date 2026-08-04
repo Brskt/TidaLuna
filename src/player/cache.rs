@@ -17,6 +17,45 @@ const EVICTION_FACTOR: f64 = 0.9;
 /// batches instead of materializing the whole table.
 const EVICTION_BATCH: i64 = 64;
 
+/// What a [`drop_entry`](AudioCache::drop_entry) attempt accomplished. A bare `bool` could
+/// not separate "the file would not go, so the row was kept" from "the file went, there was
+/// no row"; those are opposite answers for a caller asking whether bytes remain on disk.
+#[must_use = "a kept file leaves its row behind, which the caller has to account for"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropOutcome {
+    /// File gone (removed, or already absent) and its index row with it.
+    Dropped,
+    /// File gone; there was no row to remove.
+    NoRow,
+    /// The file would not delete, so its row stays and keeps those bytes accounted for.
+    FileKept,
+}
+
+/// What became of a store request. A bare `Ok` could not separate "in the cache" from
+/// "written, then deleted by the eviction this same call triggered", which had the caller
+/// logging a successful store for a file already gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreOutcome {
+    /// Indexed and on disk.
+    Kept,
+    /// Refused before insert: the file alone exceeds the whole cache. No row and no file
+    /// survive, including a row left behind by an earlier failed read.
+    TooLarge,
+    /// Oversized like [`TooLarge`](Self::TooLarge), but the file would not delete. Indexed
+    /// at its true size instead; unindexed it escapes both accounting and eviction, and an
+    /// indexed lie lets `lookup_path` serve it. Holds the total over the cap until the file
+    /// becomes deletable, which any later eviction pass and store of the same id both retry
+    /// (its own store's pass cannot free it, and does not try).
+    TooLargeRetained,
+    /// Nothing indexed because the cache is disabled. No staging dir was ever handed out, and
+    /// any file staged regardless is removed (with no index it could never be found again).
+    Disabled,
+    /// Nothing indexed because a clear raced this unlocked write;
+    /// [`record_if_current`](AudioCache::record_if_current) removed the file it left behind.
+    /// Distinct from [`Disabled`](Self::Disabled) so the caller can name the right cause.
+    ClearedMidWrite,
+}
+
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -237,11 +276,10 @@ impl AudioCache {
         deleted > 0
     }
 
-    /// Drop an entry, reporting whether it went away: file first, index row only once
-    /// the file is gone. A sharded file is reachable by accounting and eviction only
-    /// through its row, so losing the row while the file survives strands the bytes
-    /// outside `max_bytes`.
-    pub fn drop_entry(&mut self, track_id: &str) -> bool {
+    /// Drop an entry: file first, index row only once the file is gone. A sharded file is
+    /// reachable by accounting and eviction only through its row, so losing the row while
+    /// the file survives strands the bytes outside `max_bytes`.
+    pub fn drop_entry(&mut self, track_id: &str) -> DropOutcome {
         let path = self.file_path(track_id);
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -249,10 +287,14 @@ impl AudioCache {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 crate::vprintln!("[CACHE]  Keeping the index row for {track_id}: {e}");
-                return false;
+                return DropOutcome::FileKept;
             }
         }
-        self.remove_index_entry(track_id)
+        if self.remove_index_entry(track_id) {
+            DropOutcome::Dropped
+        } else {
+            DropOutcome::NoRow
+        }
     }
 
     /// Update access metadata after a successful cache read.
@@ -286,12 +328,55 @@ impl AudioCache {
         Ok(())
     }
 
+    /// How far an overflow eviction drains, never a per-entry size limit. Eviction starts
+    /// only once `current_size` passes `max_bytes`; this is just the hysteresis floor.
+    fn eviction_target(&self) -> u64 {
+        (self.max_bytes as f64 * EVICTION_FACTOR) as u64
+    }
+
     /// Record an already-written track in the index and evict LRU entries if
     /// over capacity. Short critical section: index insert + eviction only, no
     /// large I/O. Pair with [`persist_file`](Self::persist_file).
-    pub fn record(&mut self, track_id: &str, format: &str, file_size: u64) -> anyhow::Result<()> {
+    pub fn record(
+        &mut self,
+        track_id: &str,
+        format: &str,
+        file_size: u64,
+    ) -> anyhow::Result<StoreOutcome> {
+        if self.conn.is_none() {
+            return Ok(StoreOutcome::Disabled);
+        }
+        // Admission control, before the row exists. The bound is `max_bytes`, not the
+        // eviction target: eviction only starts above `max_bytes`, and the target merely says
+        // how far a pass that started should drain. The one size no pass can resolve is an
+        // entry bigger than the whole cache, holding `current_size` over the cap with nothing
+        // else left to evict.
+        //
+        // `drop_entry`, not a bare `remove_file`: a row for this id can already exist, an
+        // entry that failed to decrypt being kept on purpose (`CacheReadError::Unreadable`).
+        let mut unremovable = false;
+        if file_size > self.max_bytes {
+            match self.drop_entry(track_id) {
+                // Ungated (a track that will never cache has no other channel), and the one
+                // site holding both sizes.
+                DropOutcome::Dropped | DropOutcome::NoRow => {
+                    crate::verr!(
+                        "[CACHE]  Not cached, {} exceeds the {} cache: {}",
+                        crate::player::format_bytes(file_size),
+                        crate::player::format_bytes(self.max_bytes),
+                        track_id
+                    );
+                    return Ok(StoreOutcome::TooLarge);
+                }
+                // The bytes are there and will not go. Indexing them at their real size is
+                // the only honest option; unindexed they escape accounting and eviction both.
+                DropOutcome::FileKept => unremovable = true,
+            }
+        }
+        // Unreachable, the disabled case having returned above; kept because `conn`'s
+        // immutable borrow must follow `drop_entry`'s `&mut self`.
         let Some(conn) = &self.conn else {
-            return Ok(());
+            return Ok(StoreOutcome::Disabled);
         };
         let now = now_epoch();
         let stamp = next_access_stamp(conn, now);
@@ -311,9 +396,15 @@ impl AudioCache {
         )?;
         self.current_size = (self.current_size + file_size).saturating_sub(prev_size as u64);
 
-        self.evict_if_needed()?;
+        // An undeletable oversized row is the one thing eviction can never free. Every other
+        // store hands over zero, keeping its own bytes in the measurement.
+        self.evict_if_needed(track_id, if unremovable { file_size } else { 0 })?;
 
-        Ok(())
+        Ok(if unremovable {
+            StoreOutcome::TooLargeRetained
+        } else {
+            StoreOutcome::Kept
+        })
     }
 
     /// Current clear-generation. Snapshot this before an unlocked
@@ -326,21 +417,22 @@ impl AudioCache {
     /// Like [`record`](Self::record), but a no-op if the cache was cleared
     /// (generation changed) since `expected_gen` was snapshotted. In that case
     /// the just-written file is removed so a clear can't leave an orphan.
-    /// Returns `Ok(true)` if recorded, `Ok(false)` if skipped due to a clear
-    /// or a disabled cache.
     pub fn record_if_current(
         &mut self,
         track_id: &str,
         format: &str,
         file_size: u64,
         expected_gen: u64,
-    ) -> anyhow::Result<bool> {
-        if self.conn.is_none() || self.generation != expected_gen {
+    ) -> anyhow::Result<StoreOutcome> {
+        if self.conn.is_none() {
             let _ = fs::remove_file(self.file_path(track_id));
-            return Ok(false);
+            return Ok(StoreOutcome::Disabled);
         }
-        self.record(track_id, format, file_size)?;
-        Ok(true)
+        if self.generation != expected_gen {
+            let _ = fs::remove_file(self.file_path(track_id));
+            return Ok(StoreOutcome::ClearedMidWrite);
+        }
+        self.record(track_id, format, file_size)
     }
 
     pub fn clear(&mut self) -> anyhow::Result<()> {
@@ -382,23 +474,32 @@ impl AudioCache {
         self.current_size
     }
 
-    /// Evict LRU entries until the running size is under `max_bytes * EVICTION_FACTOR`,
-    /// oldest first via the `last_access` index (no full sort), in bounded batches.
-    fn evict_if_needed(&mut self) -> anyhow::Result<()> {
+    /// Evict LRU entries until the running size is under `max_bytes * EVICTION_FACTOR`, oldest
+    /// first via the `last_access` index (no full sort), in bounded batches.
+    ///
+    /// `keep` is the row [`record`](Self::record) just inserted, never a candidate here, so no
+    /// store is undone by the eviction it triggered. `unreclaimable` is how many of its bytes
+    /// no pass could ever free; counted into the total, they hold it above a mark no candidate
+    /// can reach and the pass empties the cache trying. Only
+    /// [`TooLargeRetained`](StoreOutcome::TooLargeRetained) sets it (an oversized file that
+    /// would not delete); an ordinary store passes zero, its row being out of scope for this
+    /// pass yet evictable by the next.
+    fn evict_if_needed(&mut self, keep: &str, unreclaimable: u64) -> anyhow::Result<()> {
         if self.current_size <= self.max_bytes {
             return Ok(());
         }
-        let target = (self.max_bytes as f64 * EVICTION_FACTOR) as u64;
+        let target = self.eviction_target();
 
-        while self.current_size > target {
+        while self.current_size.saturating_sub(unreclaimable) > target {
             let batch: Vec<(String, i64)> = {
                 let Some(conn) = &self.conn else {
                     return Ok(());
                 };
                 let mut stmt = conn.prepare(
-                    "SELECT track_id, file_size FROM audio_cache ORDER BY last_access ASC LIMIT ?1",
+                    "SELECT track_id, file_size FROM audio_cache
+                     WHERE track_id != ?2 ORDER BY last_access ASC LIMIT ?1",
                 )?;
-                stmt.query_map(params![EVICTION_BATCH], |row| {
+                stmt.query_map(params![EVICTION_BATCH, keep], |row| {
                     Ok((row.get(0)?, row.get(1)?))
                 })?
                 .filter_map(|r| r.ok())
@@ -409,12 +510,12 @@ impl AudioCache {
             }
             let mut evicted_any = false;
             for (evict_id, size) in batch {
-                if self.current_size <= target {
+                if self.current_size.saturating_sub(unreclaimable) <= target {
                     break;
                 }
-                // Keeps the row when the file will not go, so the bytes stay accounted
-                // for instead of becoming an invisible orphan.
-                if !self.drop_entry(&evict_id) {
+                // Only a real drop frees bytes. A kept file leaves its row on purpose, and a
+                // missing row freed nothing; neither advances this pass.
+                if self.drop_entry(&evict_id) != DropOutcome::Dropped {
                     continue;
                 }
                 evicted_any = true;

@@ -645,12 +645,20 @@ async fn try_cache_hit(ctx: &LoadContext, track_id: &str, key: &str) -> LoadStep
             return LoadStep::Miss;
         }
         Ok(Err(CacheReadError::Corrupt(reason))) => {
-            crate::vprintln!(
-                "[CACHE]  Dropping unusable entry {}: {reason}",
-                short_id(track_id, 40)
-            );
             if let Ok(mut cache) = AUDIO_CACHE.lock() {
-                cache.drop_entry(track_id);
+                match cache.drop_entry(track_id) {
+                    cache::DropOutcome::Dropped | cache::DropOutcome::NoRow => crate::vprintln!(
+                        "[CACHE]  Dropped unusable entry {}: {reason}",
+                        short_id(track_id, 40)
+                    ),
+                    // The row outlives the failed delete, leaving `lookup_path` to hand back
+                    // the same bytes on every later read. Ungated because the only retries (an
+                    // eviction pass, the next store of this id) are not guaranteed to come.
+                    cache::DropOutcome::FileKept => crate::verr!(
+                        "[CACHE]  Unusable entry {} will keep failing, its file would not go: {reason}",
+                        short_id(track_id, 40)
+                    ),
+                }
             }
             return LoadStep::Miss;
         }

@@ -581,13 +581,26 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                     crate::vprintln!("[CACHE]  Lock poisoned, skipping index");
                                     return;
                                 };
+                                use crate::player::cache::StoreOutcome;
                                 match cache.record_if_current(&tid, &cache_format, len, store_gen) {
-                                    Ok(true) => crate::vprintln!(
+                                    Ok(StoreOutcome::Kept) => crate::vprintln!(
                                         "[CACHE]  Stored: {} ({}, encrypted)",
                                         tid,
                                         crate::player::format_bytes(len)
                                     ),
-                                    Ok(false) => crate::vprintln!(
+                                    // Reported with both sizes, ungated, by the cache itself.
+                                    Ok(StoreOutcome::TooLarge) => {}
+                                    // Ungated (disk held over the cap, no other channel), and
+                                    // retried only by a later eviction pass or store of this
+                                    // id.
+                                    Ok(StoreOutcome::TooLargeRetained) => crate::verr!(
+                                        "[CACHE]  Oversized entry could not be removed, indexed at {}: {}",
+                                        crate::player::format_bytes(len),
+                                        tid
+                                    ),
+                                    // Nothing was staged; nothing to report.
+                                    Ok(StoreOutcome::Disabled) => {}
+                                    Ok(StoreOutcome::ClearedMidWrite) => crate::vprintln!(
                                         "[CACHE]  Store discarded (cache cleared mid-write): {tid}"
                                     ),
                                     Err(e) => {
@@ -648,7 +661,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         if self.is_cached
                             && let Some(tid) = self.current_track_id.clone()
                             && let Ok(mut cache) = crate::state::AUDIO_CACHE.lock()
-                            && cache.drop_entry(&tid)
+                            && cache.drop_entry(&tid) == crate::player::cache::DropOutcome::Dropped
                         {
                             crate::vprintln!("[CACHE]  Dropped after a decode failure: {tid}");
                         }
