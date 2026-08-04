@@ -50,6 +50,11 @@ pub(crate) struct TidalConnectController {
     auth_token: String,
     refresh_token: String,
     session_credential: Option<String>,
+    /// Bumped on every WS install. `WsClient::shutdown()` emits `ConnectionLost`
+    /// unconditionally on its way out, so a socket we superseded on purpose looks exactly
+    /// like one the network killed and the event carries no identity of its own. Each
+    /// per-connection event loop remembers its generation and discards anything older.
+    connection_gen: u64,
 }
 
 impl TidalConnectController {
@@ -69,7 +74,12 @@ impl TidalConnectController {
             auth_token: String::new(),
             refresh_token: String::new(),
             session_credential: None,
+            connection_gen: 0,
         }
+    }
+
+    pub fn connection_gen(&self) -> u64 {
+        self.connection_gen
     }
 
     /// Start mDNS discovery.
@@ -95,12 +105,18 @@ impl TidalConnectController {
 
     /// Called after WsClient::connect succeeds (from IPC handler).
     /// Stores the WS client and starts/resumes a session.
+    ///
+    /// Returns the installed connection's generation, which the caller must hand to the event
+    /// loop it spawns; that is what lets a superseded socket's events be discarded.
     pub fn set_ws_and_start_session(
         &mut self,
         ws: Arc<WsClient>,
         device: &MdnsDevice,
         _credential: Option<&str>,
-    ) {
+    ) -> u64 {
+        // Bumped before either branch shuts an old socket down: the terminal event that
+        // shutdown provokes must already be from a stale generation by the time it lands.
+        self.connection_gen = self.connection_gen.wrapping_add(1);
         // Close old WS if switching device
         if let Some(ref mut old_session) = self.session {
             if old_session
@@ -111,13 +127,14 @@ impl TidalConnectController {
                 // so queue_start_or_resume sends resumeSession on the new socket.
                 old_session.ws.shutdown();
                 old_session.ws = ws;
-                return;
+                return self.connection_gen;
             }
             // Different device - close old connection
             old_session.ws.shutdown();
         }
         let session = ControllerSession::new(ws);
         self.session = Some(session);
+        self.connection_gen
     }
 
     /// Start or resume the session (sync part - the WS send is fire-and-forget).
@@ -129,13 +146,31 @@ impl TidalConnectController {
     }
 
     /// Disconnect from current device (sync - queues the endSession command).
-    pub fn disconnect(&mut self, stop_casting: bool) {
+    ///
+    /// Returns the event the caller must emit when this call retires the session. The device's
+    /// own `notifySessionEnded` cannot carry that announcement; `queue_end` only hands the
+    /// command to a spawned send, so the teardown below runs first and takes away both the
+    /// session the reply would be matched against and the currency of the loop delivering it.
+    /// Returned rather than emitted, as [`handle_ws_event`](Self::handle_ws_event) does it:
+    /// this layer speaks the protocol, the IPC layer above talks to the renderer.
+    #[must_use = "dropping the event leaves the renderer believing it is still connected"]
+    pub fn disconnect(&mut self, stop_casting: bool) -> Option<ControllerSessionEvent> {
         if let Some(ref mut session) = self.session {
             let _ = session.queue_end(stop_casting);
         }
-        if stop_casting {
-            self.session = None;
+        if !stop_casting {
+            return None;
         }
+        // Retiring the session retires its socket's event loop with it. Nothing here
+        // closes the socket; absent the bump, that loop stays current and goes on
+        // forwarding frames from a device the user has just disconnected from.
+        self.connection_gen = self.connection_gen.wrapping_add(1);
+        // `suspended: false` is what the device itself would answer, `stop_casting` being the
+        // protocol's way of saying "ended, not suspended". Nothing to announce without a
+        // session, the renderer never having been told it was connected.
+        self.session
+            .take()
+            .map(|_| ControllerSessionEvent::SessionEnded { suspended: false })
     }
 
     /// Handle a WS client event (message, connection lost, error).
@@ -312,6 +347,10 @@ impl TidalConnectController {
     pub fn shutdown(&mut self) {
         self.cancel.cancel();
         self.stop_discovery();
+        // Bumped ahead of the close: `WsClient::shutdown` provokes a terminal
+        // `ConnectionLost` that reads exactly like a real drop, and reporting that to the UI
+        // during teardown is the false disconnect this generation exists to suppress.
+        self.connection_gen = self.connection_gen.wrapping_add(1);
         // Close WS before dropping session
         if let Some(ref session) = self.session {
             session.ws.shutdown();

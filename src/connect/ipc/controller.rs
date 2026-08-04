@@ -122,12 +122,13 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
         match ws {
             Ok(ws) => {
                 let ws = Arc::new(ws);
-                {
+                let conn_gen = {
                     let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
                     let cred = guard.session_credential().map(|s| s.to_string());
-                    guard.set_ws_and_start_session(ws, &device, cred.as_deref());
+                    let conn_gen = guard.set_ws_and_start_session(ws, &device, cred.as_deref());
                     guard.start_session(&device, cred.as_deref());
-                }
+                    conn_gen
+                };
                 callback
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -137,13 +138,21 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
                 let ctrl_clone = ctrl.clone();
                 tokio::spawn(async move {
                     while let Some(event) = event_rx.recv().await {
+                        // Checked before the forward below, which pushes raw JSON to the
+                        // renderer without consulting the session; a guard further in would
+                        // still leak a superseded connection's frames. Breaking rather than
+                        // skipping, the generation only ever advancing. One take serves both
+                        // the check and the handler, nothing between them awaiting.
+                        let session_event = {
+                            let mut guard = ctrl_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            if guard.connection_gen() != conn_gen {
+                                break;
+                            }
+                            guard.handle_ws_event(&event)
+                        };
                         if let WsClientEvent::Message(ref json) = event {
                             forward_controller_notification(json);
                         }
-                        let session_event = {
-                            let mut guard = ctrl_clone.lock().unwrap_or_else(|e| e.into_inner());
-                            guard.handle_ws_event(&event)
-                        };
                         if let Some(se) = session_event {
                             emit_controller_session_event(&se);
                         }
@@ -165,14 +174,22 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
 
 pub(super) fn disconnect(msg: IpcMessage, callback: IpcCallback) {
     let stop = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-    with_state(|state| {
+    let session_event = with_state(|state| {
         if let Some(ref cm) = state.connect
             && let Some(ctrl) = cm.controller()
         {
             let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
-            guard.disconnect(stop);
+            return guard.disconnect(stop);
         }
-    });
+        None
+    })
+    .flatten();
+    // Outside both locks, and from here rather than the controller, on the same footing as the
+    // event loop above. Retiring the session is the only notice the renderer gets, the device's
+    // own reply having been overtaken by the teardown that provoked it.
+    if let Some(se) = session_event {
+        emit_controller_session_event(&se);
+    }
     callback
         .lock()
         .unwrap_or_else(|e| e.into_inner())
