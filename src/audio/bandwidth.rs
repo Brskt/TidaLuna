@@ -645,6 +645,14 @@ async fn governor_loop(mut rx: mpsc::Receiver<TokenRequest>, bp: Arc<BufferProgr
 /// Oversized chunks (> burst) are consumed in multiple passes across ticks.
 fn serve_queue(queue: &mut VecDeque<TokenRequest>, bucket: &mut TokenBucket, bytes_acc: &mut u64) {
     while let Some(front) = queue.front_mut() {
+        // A dropped `acquire()` future (seek cancelling the `select!`, `cancel_preload`
+        // aborting the task) takes only the caller's receiver; the request stays ours.
+        // Serving it spends real tokens on nobody and, since only the front is ever served,
+        // blocks every live request behind it. Checked each pass, it can die at any tick.
+        if front.reply.is_closed() {
+            queue.pop_front();
+            continue;
+        }
         let bite = (front.remaining as f64).min(bucket.burst) as u32;
         if bucket.try_consume(bite) {
             front.remaining -= bite;
