@@ -1031,6 +1031,13 @@ impl Player {
         segment_urls: Vec<String>,
         format: String,
     ) -> anyhow::Result<()> {
+        // The shared choke point. The IPC channel validates its own arguments, but the
+        // Connect receiver reaches this function directly in Rust and handed it an empty
+        // list, which loads as a header-only fMP4 and "completes" in zero samples.
+        if segment_urls.is_empty() {
+            anyhow::bail!("load_dash: refusing an empty segment list");
+        }
+
         let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,

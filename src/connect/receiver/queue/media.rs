@@ -208,7 +208,13 @@ fn apply_dash_manifest(manifest_bytes: &[u8], media: &mut MediaInfo) {
             );
         }
         Err(e) => {
-            crate::vprintln!("[connect::queue] DASH parse failed: {}", e);
+            // Ungated: `src_url` stays `None`, the track never starts, and nothing in the
+            // Connect protocol carries that refusal back to the controller. The log is the
+            // only channel, and a gated line would leave the default config without one.
+            crate::verr!(
+                "[connect::queue] DASH parse failed, track will not load: {}",
+                e
+            );
         }
     }
 }
