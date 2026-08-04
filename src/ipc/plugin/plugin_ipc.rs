@@ -4,6 +4,7 @@ use crate::app_state::{IpcCallback, IpcMessage, eval_js, with_state};
 pub(super) fn handle_plugin_fetch(
     msg: &IpcMessage,
     caller: &crate::ipc::caller::Caller,
+    query_id: i64,
     callback: IpcCallback,
 ) {
     // Taken from the gate's own resolution rather than read off argument 0 or resolved again: the
@@ -34,19 +35,12 @@ pub(super) fn handle_plugin_fetch(
         }
     }
 
-    dispatch_authenticated_fetch(
-        plugin_id,
-        url,
-        &opts_json,
-        msg.id.clone().unwrap_or_default(),
-        callback,
-        None,
-    );
+    dispatch_authenticated_fetch(plugin_id, url, &opts_json, query_id, callback, None);
 }
 
 /// Authenticated fetch restricted to TIDAL API hosts.
 /// Used by core bundle (@luna/lib) - the token never leaves Rust.
-pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
+pub(super) fn handle_tidal_fetch(msg: &IpcMessage, query_id: i64, callback: IpcCallback) {
     let url = msg.arg(0).to_string();
     let raw_opts = msg.arg(1);
     let opts_json = if raw_opts.is_empty() { "{}" } else { raw_opts }.to_string();
@@ -73,7 +67,7 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, callback: IpcCallback) {
         "@luna/lib".to_string(),
         url,
         &opts_json,
-        msg.id.clone().unwrap_or_default(),
+        query_id,
         callback,
         Some(token),
     );
@@ -83,7 +77,7 @@ fn dispatch_authenticated_fetch(
     plugin_id: String,
     url: String,
     opts_json: &str,
-    msg_id: String,
+    query_id: i64,
     callback: IpcCallback,
     pre_validated_token: Option<String>,
 ) {
@@ -92,11 +86,11 @@ fn dispatch_authenticated_fetch(
     let token = pre_validated_token
         .unwrap_or_else(|| with_state(|state| state.captured_token.clone()).unwrap_or_default());
     with_state(|state| {
-        state.pending_ipc_callbacks.insert(msg_id.clone(), callback);
+        state.pending_ipc_callbacks.insert(query_id, callback);
     });
     crate::state::rt_handle().spawn(async move {
         let result = crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
-        let Some(cb) = take_ipc_callback(&msg_id) else {
+        let Some(cb) = take_ipc_callback(query_id) else {
             return;
         };
         match result {
@@ -384,22 +378,25 @@ pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
 
 /// Check for code changes without modifying the DB. Returns `{ hash: "..." }` or error.
 /// Used by live reload polling.
-pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, callback: IpcCallback) {
+pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, query_id: i64, callback: IpcCallback) {
     let url = msg.arg(0).to_string();
-    let id = msg.id.clone().unwrap_or_default();
     with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
+        state.pending_ipc_callbacks.insert(query_id, callback);
     });
     crate::state::rt_handle().spawn(async move {
         let client = &*crate::state::HTTP_CLIENT;
         let base = sanitize_plugin_url(&url);
         let code_url = format!("{base}.mjs");
 
-        let Some(cb) = take_ipc_callback(&id) else {
+        let result = fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await;
+
+        // After the fetch, not before: a cancellation mid-flight must find the entry still in
+        // the map for `on_query_canceled` to drop, or this task resolves a retired callback.
+        let Some(cb) = take_ipc_callback(query_id) else {
             return;
         };
 
-        match fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await {
+        match result {
             Ok(code) => {
                 let hash = fnv_hash_str(&code);
                 let json = format!(r#"{{"hash":"{hash}"}}"#);
@@ -611,22 +608,35 @@ const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 /// memory if a plugin host returns an arbitrarily large body.
 const MAX_CODE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Stream `resp`'s body as text, failing if it exceeds `max` (rejected without
+/// Stream `resp`'s body into memory, failing if it exceeds `max` (rejected without
 /// buffering the whole body); mirrors the updater's capped download.
-async fn read_body_capped(
+///
+/// The one bounded body read on the plugin paths. Its callers differ only in how they decode
+/// the bytes afterwards, which is why the cap sits here and not at each decode.
+pub(super) async fn read_bytes_capped(
     resp: reqwest::Response,
     max: usize,
     what: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Vec<u8>> {
     use futures_util::StreamExt as _;
     let mut buf: Vec<u8> = Vec::new();
     let mut total = 0usize;
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("{what} transport failed: {e}"))?;
         total = bump_capped(total, chunk.len(), max)?;
         buf.extend_from_slice(&chunk);
     }
+    Ok(buf)
+}
+
+/// [`read_bytes_capped`] as text, rejecting anything that is not valid UTF-8.
+async fn read_body_capped(
+    resp: reqwest::Response,
+    max: usize,
+    what: &str,
+) -> anyhow::Result<String> {
+    let buf = read_bytes_capped(resp, max, what).await?;
     String::from_utf8(buf).map_err(|e| anyhow::anyhow!("{what} is not valid UTF-8: {e}"))
 }
 

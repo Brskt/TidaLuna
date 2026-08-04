@@ -64,7 +64,11 @@ pub(crate) struct AppState {
     pub(crate) plugin_manager: crate::plugins::PluginManager,
     pub(crate) captured_token: String,
     pub(crate) token_state: Option<crate::platform::secure_store::StoredTokenState>,
-    pub(crate) pending_ipc_callbacks: HashMap<String, IpcCallback>,
+    /// Keyed by CEF's own per-query id, never by the `id` the caller sent. Three independent
+    /// JS counters feed this map (`fetch.__seq` per plugin load, `@luna/lib`'s bundle-wide
+    /// one, the early-runtime's page-global one) and all start at 1, so a client-chosen key
+    /// collides across plugins, across reloads of one plugin, and across channels.
+    pub(crate) pending_ipc_callbacks: HashMap<i64, IpcCallback>,
     pub(crate) pending_window_save: Option<crate::settings::WindowState>,
     pub(crate) window_save_scheduled: bool,
     #[cfg(target_os = "windows")]

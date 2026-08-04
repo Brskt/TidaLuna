@@ -56,6 +56,11 @@ fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
 /// token_state exists). Must not start with `luna_` so `is_opaque()` won't accept it.
 const REDACTED_MARKER: &str = "[redacted-token]";
 
+/// Cap on an upstream body buffered for a plugin. The target is a plugin's to choose, and
+/// `proxy.fetch` is gated to TIDAL hosts whose API answers are JSON; a large asset under one of
+/// them is bounded here without cutting into any real response.
+const MAX_UPSTREAM_BYTES: usize = 8 * 1024 * 1024;
+
 /// Real OAuth tokens in play paired with the opaque they map to. Single source for
 /// `scrub_real_tokens` (uses both halves) and `leaks_real_token` (uses the real).
 fn real_token_pairs(state: &AppState) -> Vec<(String, String)> {
@@ -120,7 +125,7 @@ fn reject_non_tidal(
     false
 }
 
-pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallback) {
+pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, query_id: i64, callback: IpcCallback) {
     let url = crate::ui::nav::RequestUrl::new(
         msg.args
             .first()
@@ -134,21 +139,20 @@ pub(super) fn handle_proxy_fetch_dispatch(msg: &IpcMessage, callback: IpcCallbac
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let id = msg.id.clone().unwrap_or_default();
 
     if reject_non_tidal(&url, "proxy.fetch", &callback) {
         return;
     }
 
     with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
+        state.pending_ipc_callbacks.insert(query_id, callback);
     });
     crate::state::rt_handle().spawn(async move {
-        handle_proxy_fetch(id, url, opts_json).await;
+        handle_proxy_fetch(query_id, url, opts_json).await;
     });
 }
 
-pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, callback: IpcCallback) {
+pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, query_id: i64, callback: IpcCallback) {
     let url = crate::ui::nav::RequestUrl::new(
         msg.args
             .first()
@@ -156,25 +160,24 @@ pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, callback: IpcCallback
             .unwrap_or("")
             .to_string(),
     );
-    let id = msg.id.clone().unwrap_or_default();
 
     if reject_non_tidal(&url, "proxy.head", &callback) {
         return;
     }
 
     with_state(|state| {
-        state.pending_ipc_callbacks.insert(id.clone(), callback);
+        state.pending_ipc_callbacks.insert(query_id, callback);
     });
     crate::state::rt_handle().spawn(async move {
-        handle_proxy_head(id, url).await;
+        handle_proxy_head(query_id, url).await;
     });
 }
 
-async fn handle_proxy_head(id: String, url: crate::ui::nav::RequestUrl) {
+async fn handle_proxy_head(query_id: i64, url: crate::ui::nav::RequestUrl) {
     let client = &*crate::state::HTTP_CLIENT;
     let result = client.head(url.as_str()).send().await;
 
-    let Some(callback) = take_ipc_callback(&id) else {
+    let Some(callback) = take_ipc_callback(query_id) else {
         return;
     };
     match result {
@@ -193,7 +196,56 @@ async fn handle_proxy_head(id: String, url: crate::ui::nav::RequestUrl) {
     }
 }
 
-async fn handle_proxy_fetch(id: String, url: crate::ui::nav::RequestUrl, opts_json: String) {
+/// A response body as it came off the wire. An upstream error page can reflect a real OAuth
+/// token back at us, hence no accessor for the raw string: `scrubbed_for_log` and
+/// `into_reply` are the only exits and both run the token scrub.
+struct UpstreamBody(String);
+
+impl UpstreamBody {
+    /// A scrubbed prefix of at most `max_bytes`.
+    ///
+    /// Scrub the whole body first, truncate second, never the reverse. A cut ahead of the
+    /// scrub hands it a fragment it cannot match, and each substitution shortens the string,
+    /// sliding that fragment into the window returned here; widening the cut only covers the
+    /// token straddling it, not the one the shrinkage carries into view.
+    ///
+    /// Callers gate the call themselves, `format_args!` evaluating its arguments even at a
+    /// level that discards the line.
+    fn scrubbed_for_log(&self, max_bytes: usize) -> String {
+        let pairs = with_state(|state| real_token_pairs(state)).unwrap_or_default();
+        self.scrubbed_for_log_with(max_bytes, &pairs)
+    }
+
+    /// The seam behind [`scrubbed_for_log`](Self::scrubbed_for_log). One `APP_STATE` take for
+    /// the pairs, and a boundary a test can drive without the global state.
+    fn scrubbed_for_log_with(&self, max_bytes: usize, pairs: &[(String, String)]) -> String {
+        let scrubbed = scrub_real_tokens_with(self.0.clone(), pairs);
+        crate::util::truncate_str(&scrubbed, max_bytes).to_string()
+    }
+
+    /// The token-endpoint rewrite is the one caller that must see the real body: it
+    /// rewrites the token fields themselves. Its output is re-wrapped, keeping egress gated.
+    fn transform_token_body(self, status: u16) -> Self {
+        Self(proxy_transform_token_body(&self.0, status))
+    }
+
+    /// Serializes the whole reply and scrubs it as one string. Headers can carry a token
+    /// too, which is why the gate is wider than the body alone.
+    fn into_reply(
+        self,
+        status: u16,
+        headers: serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let json = serde_json::json!({
+            "status": status,
+            "body": self.0,
+            "headers": headers,
+        });
+        scrub_real_tokens(json.to_string())
+    }
+}
+
+async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts_json: String) {
     let client = &*crate::state::HTTP_CLIENT;
 
     let opts: serde_json::Map<String, serde_json::Value> = if !opts_json.is_empty() {
@@ -293,9 +345,6 @@ async fn handle_proxy_fetch(id: String, url: crate::ui::nav::RequestUrl, opts_js
 
     let result = req.send().await;
 
-    let Some(callback) = take_ipc_callback(&id) else {
-        return;
-    };
     match result {
         Ok(resp) => {
             let status = resp.status().as_u16();
@@ -330,30 +379,55 @@ async fn handle_proxy_fetch(id: String, url: crate::ui::nav::RequestUrl, opts_js
             }
             let is_token_endpoint = crate::ui::nav::is_token_endpoint(&url);
             let is_4xx = (400..500).contains(&(status as u32));
-            let body = resp.text().await.unwrap_or_default();
-            if is_4xx {
+            let body = match super::plugin_ipc::read_bytes_capped(
+                resp,
+                MAX_UPSTREAM_BYTES,
+                "the upstream body",
+            )
+            .await
+            {
+                // Lossy, as `Response::text` is. An undecodable byte must not start failing a
+                // path that never failed on one.
+                Ok(bytes) => UpstreamBody(String::from_utf8_lossy(&bytes).into_owned()),
+                // A body that hit the cap or died mid-stream is not a reply; handing back an
+                // empty one would tell the plugin the server answered with nothing.
+                Err(e) => {
+                    let Some(callback) = take_ipc_callback(query_id) else {
+                        return;
+                    };
+                    ipc_callback_err(&callback, 500, &format!("proxy.fetch failed: {e}"));
+                    return;
+                }
+            };
+            // By hand because `scrubbed_for_log` scrubs the whole body; as a bare `vprintln!`
+            // argument it would run at level zero too.
+            if is_4xx && crate::logging::log_level() >= 1 {
                 crate::vprintln!(
                     "[PROXY]  {} {} auth={} body={}",
                     status,
                     crate::util::truncate_str(&crate::util::redact_url_query(url.as_str()), 200),
                     has_auth,
-                    crate::util::truncate_str(&body, 400)
+                    body.scrubbed_for_log(400)
                 );
             }
             let body = if is_token_endpoint {
-                proxy_transform_token_body(&body, status)
+                body.transform_token_body(status)
             } else {
                 body
             };
-            let json = serde_json::json!({
-                "status": status,
-                "body": body,
-                "headers": headers_map,
-            });
-            // Defence-in-depth: scrub a leaked real token, as on the plugin.fetch path.
-            ipc_callback_ok(&callback, &scrub_real_tokens(json.to_string()));
+            // Claimed only now that the body is in hand: the read above streams, and a
+            // cancellation during it must find the entry still in the map for
+            // `on_query_canceled` to drop. The Set-Cookie mirroring above stays on the
+            // earlier side deliberately, being a cookie-jar side effect rather than a reply.
+            let Some(callback) = take_ipc_callback(query_id) else {
+                return;
+            };
+            ipc_callback_ok(&callback, &body.into_reply(status, headers_map));
         }
         Err(e) => {
+            let Some(callback) = take_ipc_callback(query_id) else {
+                return;
+            };
             ipc_callback_err(&callback, 500, &format!("proxy.fetch failed: {e}"));
         }
     }

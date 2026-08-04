@@ -34,8 +34,14 @@ pub(crate) fn scrub_pkce_verifier() {
     crate::vprintln!("[AUTH]   PKCE codeVerifier scrub requested");
 }
 
-fn take_ipc_callback(id: &str) -> Option<IpcCallback> {
-    with_state(|state| state.pending_ipc_callbacks.remove(id)).flatten()
+fn take_ipc_callback(query_id: i64) -> Option<IpcCallback> {
+    with_state(|state| state.pending_ipc_callbacks.remove(&query_id)).flatten()
+}
+
+/// Called from `IpcQueryHandler::on_query_canceled`. The in-flight task then finds `None`
+/// and returns instead of touching a callback the router has retired.
+pub(crate) fn drop_ipc_callback(query_id: i64) {
+    with_state(|state| state.pending_ipc_callbacks.remove(&query_id));
 }
 
 pub(crate) fn ipc_callback_ok(cb: &IpcCallback, result: &str) {
@@ -50,7 +56,7 @@ pub(crate) fn ipc_callback_err(cb: &IpcCallback, code: i32, msg: &str) {
         .failure(code, msg);
 }
 
-pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
+pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCallback) {
     // Resolved once, before dispatch: a handler resolving again could read a capability the gate
     // accepted and eviction has since dropped, turning an allowed call unattributed after the fact.
     let caller = crate::ipc::caller::Caller::resolve(&msg);
@@ -65,10 +71,10 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
     }
     match msg.channel.as_str() {
         "plugin.fetch" => {
-            plugin_ipc::handle_plugin_fetch(&msg, &caller, callback);
+            plugin_ipc::handle_plugin_fetch(&msg, &caller, query_id, callback);
         }
         "tidal.fetch" => {
-            plugin_ipc::handle_tidal_fetch(&msg, callback);
+            plugin_ipc::handle_tidal_fetch(&msg, query_id, callback);
         }
         "player.parse_dash" => {
             let xml = msg.arg(0);
@@ -84,10 +90,10 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             download::handle_download(&msg, callback);
         }
         "proxy.fetch" => {
-            proxy::handle_proxy_fetch_dispatch(&msg, callback);
+            proxy::handle_proxy_fetch_dispatch(&msg, query_id, callback);
         }
         "proxy.head" => {
-            proxy::handle_proxy_head_dispatch(&msg, callback);
+            proxy::handle_proxy_head_dispatch(&msg, query_id, callback);
         }
         "__Luna.registerNative" => {
             native::handle_register_native(&msg, callback);
@@ -123,7 +129,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, callback: IpcCallback) {
             plugin_ipc::handle_plugin_install(&msg, callback);
         }
         "plugin.check_hash" => {
-            plugin_ipc::handle_plugin_check_hash(&msg, callback);
+            plugin_ipc::handle_plugin_check_hash(&msg, query_id, callback);
         }
         "plugin.enable" => {
             plugin_ipc::handle_plugin_enable(&msg, callback);

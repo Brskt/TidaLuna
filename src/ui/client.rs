@@ -97,7 +97,7 @@ impl BrowserSideHandler for IpcQueryHandler {
         &self,
         _browser: Option<Browser>,
         frame: Option<Frame>,
-        _query_id: i64,
+        query_id: i64,
         request: &str,
         _persistent: bool,
         callback: Arc<Mutex<dyn cef::wrapper::message_router::BrowserSideCallback>>,
@@ -169,7 +169,7 @@ impl BrowserSideHandler for IpcQueryHandler {
                 if msg.channel.starts_with("connect.") {
                     crate::connect::ipc::handle_connect_invoke(msg, callback);
                 } else {
-                    handle_plugin_ipc(msg, callback);
+                    handle_plugin_ipc(msg, query_id, callback);
                 }
                 return true;
             }
@@ -181,6 +181,21 @@ impl BrowserSideHandler for IpcQueryHandler {
             .unwrap_or_else(|e| e.into_inner())
             .success_str("ok");
         true
+    }
+
+    /// CEF's contract: once a query is cancelled, explicitly or by browser destruction,
+    /// navigation or a renderer crash, no reference to its callback may be kept and none of
+    /// its methods may run.
+    ///
+    /// Honoured here only for the five channels that register in `pending_ipc_callbacks`, the
+    /// ones holding a callback across an unbounded `reqwest` call. Every other async handler
+    /// moves its callback into the spawned future or parks it in `plugin_load_waiters`, and
+    /// `connect.*` cannot be reached at all without giving `handle_connect_invoke` the
+    /// `query_id`; those rely on the wrapper's `detach()` plus a `Weak` making a late
+    /// `success`/`failure` a silent no-op. What none of it stops is work nobody awaits still
+    /// running, a download permit among it.
+    fn on_query_canceled(&self, _browser: Option<Browser>, _frame: Option<Frame>, query_id: i64) {
+        crate::ipc::plugin::drop_ipc_callback(query_id);
     }
 }
 
