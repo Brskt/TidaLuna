@@ -82,55 +82,96 @@ async fn download_update_inner(
     }
     check_cancel!(cancel);
 
-    let staging = prepare_staging_dir(&app_dir)?;
+    // A delta omits every file whose hash CI found unchanged between the two releases, a
+    // claim about the releases and not about this disk. Verification below can therefore
+    // reject the local base, in which case the same update retries against the full archive;
+    // failing hard would let one damaged file block every future update from inside the app.
+    let mut use_delta = manifest.delta_from.as_deref() == Some(current);
+    let staging = loop {
+        let staging = prepare_staging_dir(&app_dir)?;
 
-    let use_delta = manifest.delta_from.as_deref() == Some(current);
-    let (archive_name, archive_asset) = {
-        let delta_name = super::delta_archive_name(version);
-        let delta = if use_delta {
-            release.assets.iter().find(|a| a.name == delta_name)
-        } else {
-            None
+        let (archive_name, archive_asset) = {
+            let delta_name = super::delta_archive_name(version);
+            let delta = if use_delta {
+                release.assets.iter().find(|a| a.name == delta_name)
+            } else {
+                None
+            };
+            match delta {
+                Some(a) => {
+                    crate::vprintln!("[UPDATER] Using delta from v{current}");
+                    (delta_name, a)
+                }
+                None => {
+                    use_delta = false;
+                    let full = super::archive_name(version);
+                    let a = release
+                        .assets
+                        .iter()
+                        .find(|x| x.name == full)
+                        .with_context(|| format!("release missing {full}"))?;
+                    (full, a)
+                }
+            }
         };
-        match delta {
-            Some(a) => {
-                crate::vprintln!("[UPDATER] Using delta from v{current}");
-                (delta_name, a)
+
+        let archive_path = staging.join(&archive_name);
+        stream_to_file(
+            client,
+            &archive_asset.browser_download_url,
+            &archive_path,
+            cancel,
+        )
+        .await?;
+        check_cancel!(cancel);
+
+        crate::vprintln!("[UPDATER] Extracting...");
+        {
+            let archive = archive_path.clone();
+            let dest = staging.clone();
+            tokio::task::spawn_blocking(move || extract_archive(&archive, &dest))
+                .await
+                .context("extract task panicked")??;
+        }
+        fs::remove_file(&archive_path).ok();
+        check_cancel!(cancel);
+
+        // Off the runtime, like `extract_archive` above: verifying a delta hashes every file
+        // the archive did not ship, which is most of what CEF installs, and would stall every
+        // other task on the runtime, playback segment fetches included. `spawn_blocking`
+        // rather than `block_in_place` because work behind the latter cannot be cancelled and
+        // this path is built around a `CancellationToken`. Owned arguments because
+        // `spawn_blocking` demands `'static`, which is also why the list below is rebuilt per
+        // iteration rather than hoisted; ownership can only be handed over once, and the loop
+        // runs twice at most, on a delta-base mismatch.
+        let expected: Vec<(String, String)> = manifest
+            .files
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.sha256.clone()))
+            .collect();
+        let verify = {
+            let staging = staging.clone();
+            let app_dir = app_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                verify_staged_files(&expected, &staging, &app_dir, use_delta)
+            })
+            .await
+            .context("verify task panicked")?
+        };
+        match verify {
+            Ok(()) => break staging,
+            // Only reachable while `use_delta` is true, and the retry clears it, so this
+            // falls back exactly once.
+            Err(StagingError::DeltaBaseMismatch(what)) => {
+                crate::verr!(
+                    "[UPDATER] Local base does not match the delta's assumption ({what}); \
+                     re-downloading the full archive"
+                );
+                use_delta = false;
             }
-            None => {
-                let full = super::archive_name(version);
-                let a = release
-                    .assets
-                    .iter()
-                    .find(|x| x.name == full)
-                    .with_context(|| format!("release missing {full}"))?;
-                (full, a)
-            }
+            Err(StagingError::Fatal(e)) => return Err(e),
         }
     };
-
-    let archive_path = staging.join(&archive_name);
-    stream_to_file(
-        client,
-        &archive_asset.browser_download_url,
-        &archive_path,
-        cancel,
-    )
-    .await?;
-    check_cancel!(cancel);
-
-    crate::vprintln!("[UPDATER] Extracting...");
-    {
-        let archive = archive_path.clone();
-        let dest = staging.clone();
-        tokio::task::spawn_blocking(move || extract_archive(&archive, &dest))
-            .await
-            .context("extract task panicked")??;
-    }
-    fs::remove_file(&archive_path).ok();
-    check_cancel!(cancel);
-
-    verify_staged_files(&manifest, &staging, use_delta)?;
 
     let manifest_name = super::manifest_name();
     let sig_name = format!("{manifest_name}.sig");
@@ -257,29 +298,58 @@ async fn stream_to_file(
     Ok(())
 }
 
+/// Why staging verification failed, split by what the caller can do about it.
+enum StagingError {
+    /// A file the delta omitted as "unchanged" is absent or does not match the manifest
+    /// hash on disk. The downloaded bytes are fine; the assumed base is not, so the full
+    /// archive will succeed where this delta cannot.
+    DeltaBaseMismatch(String),
+    /// The bytes we just downloaded are wrong. Retrying the same thing cannot help.
+    Fatal(anyhow::Error),
+}
+
+/// `expected` pairs each manifest path with the SHA-256 the signed manifest records for it.
+/// Blocking and I/O-bound; call it through `spawn_blocking`.
 fn verify_staged_files(
-    manifest: &Manifest,
+    expected: &[(String, String)],
     staging: &Path,
+    app_dir: &Path,
     is_delta: bool,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), StagingError> {
     crate::vprintln!("[UPDATER] Verifying staged files...");
-    for (rel_path, entry) in &manifest.files {
+    for (rel_path, expected_hash) in expected {
         let staged_path = staging.join(rel_path);
         if !staged_path.exists() {
-            if is_delta {
-                // Delta archive: unchanged files are not shipped; the existing
-                // local copy is trusted (current version == manifest.delta_from).
-                continue;
+            if !is_delta {
+                return Err(StagingError::Fatal(anyhow::anyhow!(
+                    "staged file missing from full archive: {rel_path}"
+                )));
             }
-            bail!("staged file missing from full archive: {rel_path}");
+            // The signature makes the expected hash trustworthy, but what it attests is the
+            // hash table, never the state of this disk. Nothing else in the update reads the
+            // local copy of a file the delta skipped, so bit rot, an incomplete rollback or
+            // local tampering rode through and the update still reported success.
+            let local_path = app_dir.join(rel_path);
+            let local_hash = match sha256_file(&local_path) {
+                Ok(h) => h,
+                Err(e) => {
+                    return Err(StagingError::DeltaBaseMismatch(format!("{rel_path}: {e}")));
+                }
+            };
+            if local_hash != *expected_hash {
+                return Err(StagingError::DeltaBaseMismatch(format!(
+                    "{rel_path}: expected {expected_hash}, found {local_hash}"
+                )));
+            }
+            continue;
         }
-        let hash =
-            sha256_file(&staged_path).with_context(|| format!("hash staged file {rel_path}"))?;
-        if hash != entry.sha256 {
-            bail!(
-                "staged file {rel_path} hash mismatch: expected {}, got {hash}",
-                entry.sha256
-            );
+        let hash = sha256_file(&staged_path)
+            .with_context(|| format!("hash staged file {rel_path}"))
+            .map_err(StagingError::Fatal)?;
+        if hash != *expected_hash {
+            return Err(StagingError::Fatal(anyhow::anyhow!(
+                "staged file {rel_path} hash mismatch: expected {expected_hash}, got {hash}"
+            )));
         }
     }
     Ok(())
