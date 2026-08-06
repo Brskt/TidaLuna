@@ -685,7 +685,9 @@ jobs:
 
       - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Not GITHUB_TOKEN: tagging a commit whose workflow files differ from the branch
+          # tip needs `workflows: write`, which no `permissions:` key can grant.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           TAG_NAME: ${{ needs.version.outputs.version }}
           KIND: ${{ needs.version.outputs.kind }}
           BUILD_REF: ${{ needs.version.outputs.ref }}
