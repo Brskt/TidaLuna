@@ -26,8 +26,9 @@ pub(crate) struct ResumeStore {
 }
 
 impl ResumeStore {
-    pub fn load() -> Self {
-        let path = resume_store_path();
+    /// Read whatever `path` holds, migrating the old multi-entry format on the way. The path
+    /// is a parameter so a caller can own a store that writes outside the app's own file.
+    pub fn new(path: PathBuf) -> Self {
         let entry = fs::read(&path)
             .ok()
             .and_then(|bytes| {
@@ -53,6 +54,10 @@ impl ResumeStore {
             dirty: false,
             last_flush: Instant::now(),
         }
+    }
+
+    pub fn load() -> Self {
+        Self::new(resume_store_path())
     }
 
     pub fn get(&self, track_id: &str) -> Option<f64> {
