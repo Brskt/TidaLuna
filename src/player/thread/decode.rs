@@ -254,7 +254,32 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                     }
                 }
                 let _ = event_tx.send(DecodeEvent::Finished);
-                return;
+                crate::vprintln!("[DECODE] EOF, parked for seeks");
+                // Park rather than return: the reader can still move back before EOF.
+                // Returning drops cmd_rx, and a later seek then reaches a dead channel that
+                // answers no SeekComplete. A Stop or a dropped sender is the only way out.
+                loop {
+                    match cmd_rx.recv() {
+                        Ok(DecodeCommand::Seek(time)) => {
+                            do_decode_seek(
+                                time,
+                                &mut *format,
+                                &mut *decoder,
+                                &mut pipeline,
+                                &decode_ctx,
+                            );
+                            break;
+                        }
+                        Ok(DecodeCommand::Pause) => paused = true,
+                        Ok(DecodeCommand::Resume) => paused = false,
+                        Ok(DecodeCommand::Stop) => {
+                            crate::vprintln!("[DECODE] Stop received while parked, exiting");
+                            return;
+                        }
+                        Err(_) => return,
+                    }
+                }
+                continue;
             }
             Err(symphonia::core::errors::Error::ResetRequired) => {
                 decoder.reset();

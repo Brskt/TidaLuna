@@ -102,6 +102,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             let _ = handle.join();
         }
         self.decode_event_rx = None;
+        // Nothing survives to answer a seek sent to the thread just retired, and a pin left
+        // here follows the next track: pinned progress bar, suppressed resume writes.
+        self.seeking = false;
+        self.seek_target = None;
+        self.seek_wall_start = None;
     }
 
     /// Spawn the exclusive decoder for `buffer`, seeking the source to `seek_to`.
@@ -355,6 +360,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.buffer_stalled = false;
         self.pending_complete = false;
         self.last_played_snapshot = 0;
+        // A fresh track carries no stop of its own: a settled seek on a track loaded after
+        // a stop would otherwise announce Stopped for the new one.
+        self.stopped_retained = false;
 
         crate::vprintln!(
             "[LOAD #{load_gen}] handle_load enter | cached={} | track={}",
@@ -838,7 +846,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             (self.callback)(PlayerEvent::TimeUpdate(pos.max(0.0), self.current_seq));
             crate::vprintln!("[PLAY]   start at resume {:.1}s (pre-seeked)", pos);
         } else {
-            crate::vprintln!("[PLAY]   start from beginning");
+            // No pre-seek to apply says nothing about where the decoder sits: a resume
+            // after a paused seek starts at that target, not at zero.
+            crate::vprintln!("[PLAY]   start at {:.1}s", self.effective_position());
         }
         // A prior device-loss recovery may have torn down the stream (e.g. the device
         // was held exclusively by a fullscreen game). Resuming is a natural retry point:
@@ -885,6 +895,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // User pause: a same-track re-assert must not auto-resume. Set above the
         // windows early-returns so it covers every mode (see resume_on_reassert).
         self.resume_on_reassert = false;
+        // A pause is not a stop; handle_stop re-sets this after calling here. Ahead of the
+        // windows early-returns like resume_on_reassert, so every mode clears it.
+        self.stopped_retained = false;
         #[cfg(target_os = "windows")]
         {
             if self.is_asio_mode {
@@ -992,6 +1005,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Surface the SDK/UI/Connect/SMTC-visible "stopped" state even though the
         // pipeline is retained internally (handle_pause emits Paused first; the
         // final state observers settle on is Stopped).
+        self.stopped_retained = true;
         (self.callback)(PlayerEvent::StateChange(
             PlaybackState::Stopped,
             self.current_seq,

@@ -503,12 +503,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
         }
 
-        if !should_poll || !self.has_track || !self.is_playing {
+        // The decode thread answers a seek while paused: it dequeues the command, seeks, and
+        // reports SeekComplete. Draining its channel cannot wait for playback to resume.
+        if !should_poll || !self.has_track {
             return;
         }
 
-        // Detect decode thread stalling on RamBuffer (buffering)
-        if !self.is_cached
+        // Detect decode thread stalling on RamBuffer (buffering). Read before the drain
+        // below, so a seek landing this tick still counts as in flight: a range restart
+        // always blocks the reader, and that stall is the seek's own doing.
+        if self.is_playing
+            && !self.is_cached
             && !self.seeking
             && let Some(ref buf) = self.current_buffer
         {
@@ -541,11 +546,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 "from stream"
                             }
                         );
-                        if let Some(track_id) = self.current_track_id.as_ref() {
-                            self.resume_store.clear(track_id);
-                            self.resume_store.flush_if_due(true);
-                        }
-
                         // Store the ciphertext the download staged. The decoded bytes stay
                         // in the buffer: taking them would empty it and cost the track its
                         // reusability (see RamBuffer::is_reusable).
@@ -611,9 +611,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         }
 
                         self.pending_complete = true;
-                        // Track ended: a re-load of the same URL must now rebuild
-                        // (replay), so drop the committed-track reconcile signal.
-                        self.set_committed_track(None);
                         self.last_played_snapshot =
                             self.played_samples.load(Relaxed).wrapping_sub(1);
                         crate::vprintln!(
@@ -624,6 +621,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         );
                     }
                     DecodeEvent::SeekComplete => {
+                        // Only a decoder parked at EOF leaves a completion pending here, since
+                        // Finished arms it once nothing is left to decode. The mute freezes the
+                        // played count the drain check reads, which would take this for the end.
+                        self.pending_complete = false;
                         self.played_samples
                             .store(self.decoded_samples.load(Relaxed), Relaxed);
                         if let Some(ref m) = self.cpal_muted {
@@ -646,8 +647,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                     "streaming"
                                 }
                             );
+                            // handle_seek announces Seeking over the state it interrupted; that
+                            // state goes back here. is_playing covers every backend,
+                            // stopped_retained the distinction it cannot make (stop versus pause).
                             (self.callback)(PlayerEvent::StateChange(
-                                PlaybackState::Active,
+                                if self.is_playing {
+                                    PlaybackState::Active
+                                } else if self.stopped_retained {
+                                    PlaybackState::Stopped
+                                } else {
+                                    PlaybackState::Paused
+                                },
                                 self.current_seq,
                             ));
                         }
@@ -673,6 +683,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         // so nothing else clears committed_track. Drop it here so the SDK's
                         // same-track recovery reload rebuilds instead of resuming a dead decoder.
                         self.set_committed_track(None);
+                        // Every site that reports an error returns right after, so the channel
+                        // is dead: left Some, a later seek arms a guard nothing can clear.
+                        self.decode_cmd_tx = None;
                         // Settled below, outside the rx borrow.
                         fatal_decode = true;
                     }
@@ -684,8 +697,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Stopped maps to NOT_PLAYING (the SDK's failed-to-resume contract), and
         // stop_decode() keeps a later seek from muting against a dead channel.
         // Mid-stream errors with audio played keep the drain->Completed path.
+        // A paused player never reaches that drain path, and a dead decoder can no longer
+        // answer a seek in flight: settle here, or the media error arrives with no terminal
+        // state behind it and the seek pin never clears.
         if fatal_decode
-            && decode_failure_needs_settle(self.pending_complete, self.played_samples.load(Relaxed))
+            && (decode_failure_needs_settle(
+                self.pending_complete,
+                self.played_samples.load(Relaxed),
+            ) || !self.is_playing
+                || self.seeking)
         {
             self.stop_decode();
             self.pending_complete = false;
@@ -707,8 +727,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return;
         }
 
-        // Check if the ring buffer has drained after decode finished
-        if self.pending_complete {
+        // The drain check below compares played_samples against its own previous snapshot;
+        // a paused stream freezes that counter, and the track then reads as completed.
+        if !self.is_playing {
+            return;
+        }
+
+        // A seek in flight mutes cpal, which freezes that same counter, and the listener
+        // asked for another position: the track is not over.
+        if self.pending_complete && !self.seeking {
             let played = self.played_samples.load(Relaxed);
             if played > 0 && played == self.last_played_snapshot {
                 crate::vprintln!(
@@ -718,6 +745,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 );
                 self.pending_complete = false;
                 self.last_played_snapshot = 0;
+                // A played-out track owns no resume position, and a same-URL reload must
+                // rebuild rather than resume in place. Decode EOF arrives up to a ring buffer
+                // early, so a pause there would commit both against an unfinished track.
+                if let Some(track_id) = self.current_track_id.as_ref() {
+                    self.resume_store.clear(track_id);
+                    self.resume_store.flush_if_due(true);
+                }
+                self.set_committed_track(None);
                 (self.callback)(PlayerEvent::TimeUpdate(
                     self.current_duration,
                     self.current_seq,
@@ -726,6 +761,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     PlaybackState::Completed,
                     self.current_seq,
                 ));
+                // The decode thread parks at EOF rather than exiting; completion retires it.
+                // Left alone it holds a live command channel, and a seek on a finished track
+                // revives it to decode for nobody. The fatal-error settle above does the same.
+                self.stop_decode();
                 self.has_track = false;
                 self.is_playing = false;
                 self.current_track_id = None;

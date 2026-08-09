@@ -85,6 +85,10 @@ pub(super) struct PlayerThread<F> {
     is_cached: bool,
     is_playing: bool,
     has_track: bool,
+    // Whether the transport state last announced while not playing was Stopped rather than
+    // Paused. An SDK stop is a pause-retain (handle_stop), which is_playing cannot express,
+    // and a settled seek has to put back the one it interrupted. Read only when not playing.
+    stopped_retained: bool,
     // Whether a same-track re-assert (ReassertResume) should resume: handle_stop
     // sets it to the pre-stop is_playing, a user pause clears it (handle_pause).
     // So a user-paused track stays paused on re-assert; a quality-swap's stop->load->play
@@ -273,6 +277,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_format: String::new(),
             is_cached: false,
             is_playing: false,
+            stopped_retained: false,
             has_track: false,
             resume_on_reassert: false,
             pending_play: None,
