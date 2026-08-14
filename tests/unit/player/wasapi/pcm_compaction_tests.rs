@@ -32,7 +32,10 @@ fn reset_for_seek_credits_discarded_audio_as_consumed() {
 
     ctx.handle_push_pcm(7, vec![1u8; 1000]);
     ctx.write_cursor = 600;
-    ctx.handle_reset_for_seek(7, 0.0);
+    // The reset answers the seek on `event_tx`; the receiver stays alive, letting the
+    // send behave as it does in production, where the player thread is listening.
+    let (event_tx, _event_rx) = mpsc::channel();
+    ctx.handle_reset_for_seek(&event_tx, 7, 1, 0.0);
 
     // The 400 unplayed bytes were discarded: credited to the throttle.
     assert_eq!(ctx.consumed.load(Relaxed), 400);

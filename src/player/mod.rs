@@ -98,8 +98,8 @@ impl DeviceErrorKind {
 }
 
 /// `mediaerror` codes the SDK recognizes (its `mediaErrorCodeMap`); any other
-/// string degrades to `errorCode: undefined` on the SDK side. Typed so a site
-/// can't invent an off-contract code. `file_checksum_mismatch` has no producer here.
+/// string degrades to `errorCode: undefined` on the SDK side. Typed: a site
+/// cannot invent an off-contract code. `file_checksum_mismatch` has no producer here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaErrorCode {
     /// NPO01 - the source couldn't be fetched (HTTP failure, missing segment).
@@ -144,7 +144,7 @@ impl Volume {
 }
 
 /// The audio output backend a `player.devices.set` selects. The three modes are
-/// mutually exclusive (a radio choice), so a single enum replaces the former
+/// mutually exclusive (a radio choice), and a single enum replaces the former
 /// `(exclusive, asio)` boolean pair, which could encode the invalid both-true
 /// state. `Exclusive`/`Asio` are Windows-only at runtime (the frontend toggles
 /// gating them are win32-only); other platforms only ever see `Shared`.
@@ -160,7 +160,7 @@ pub enum OutputMode {
 
 /// Last `MediaFormat` emitted for the committed track (shared-path probe only;
 /// ASIO/exclusive loads don't emit one). Re-emitted on a same-track re-assert
-/// so the renderer's nulled per-load format snapshot isn't left empty.
+/// leaving the renderer's nulled per-load format snapshot filled.
 #[derive(Debug, Clone, Copy)]
 pub struct MediaFormatSnapshot {
     pub codec: &'static str,
@@ -219,6 +219,10 @@ pub enum PlayerEvent {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ResumePolicy {
     Disabled,
+    /// Start at 0 and discard a seek queued against this track while its device was
+    /// released. Distinct from `Disabled`, which a re-arm also sends when it merely
+    /// has no position to offer: only this variant expresses the SDK's load contract.
+    Restart,
     Auto,
     Explicit(f64),
 }
@@ -282,10 +286,10 @@ impl LoadContext {
     }
 }
 
-/// Sends `LoadSettled{generation}` on Drop, so the thread's in-flight marker is
+/// Sends `LoadSettled{generation}` on Drop: the thread's in-flight marker is
 /// cleared on every task exit (completion, return, panic, cancellation) - a
 /// panicked/aborted load can't leave a play deferring forever. Gen-matched on
-/// the thread side, so a stale settle is a no-op.
+/// the thread side; a stale settle is a no-op.
 struct LoadSettleGuard {
     cmd_tx: mpsc::Sender<PlayerCommand>,
     generation: u32,
@@ -332,7 +336,7 @@ enum PlayerCommand {
     },
     /// A load failed before reaching the pipeline: report the error, then settle
     /// the SDK's `load()` with `Duration(0.0, seq)` - its `mediaduration` await
-    /// has no timeout, so a mediaerror alone hangs it forever. Dropped when
+    /// has no timeout: a mediaerror alone hangs it forever. Dropped when
     /// `load_gen` is superseded (a stale failure must not settle a newer load).
     LoadFailed {
         error: String,
@@ -356,8 +360,8 @@ pub struct Player {
     /// (commit time, alongside `current_track_id`) and clears it on every track-end
     /// path; `load` reads it on the IPC thread to resume a same-track re-assert
     /// instead of rebuilding. It tracks the *committed* track, not the *requested*
-    /// one, so a duplicate load racing a still-in-flight load of a different track
-    /// can't falsely match and resume a stale pipeline. stop() is pause-retain, so
+    /// one; a duplicate load racing a still-in-flight load of a different track
+    /// cannot falsely match and resume a stale pipeline. stop() is pause-retain, and
     /// this survives a stop and the following play() resumes it in place.
     committed_track: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
 }
@@ -456,7 +460,7 @@ pub(crate) fn refreshed_fetch_url(
 
 /// True when a `load` targets the already-committed track: same canonical id
 /// (query stripped, since each load re-signs the CDN URL) and format. Re-loading
-/// would rebuild an identical pipeline, so the caller resumes instead. Both ids
+/// would rebuild an identical pipeline: the caller resumes instead. Both ids
 /// are canonical (caller strips the URL; `committed.0` is set at commit time).
 fn is_same_active_track(
     committed: Option<&(String, String)>,
@@ -562,7 +566,7 @@ fn looks_like_mpeg_frame(data: &[u8]) -> bool {
     }
     // Version 01, layer 00 and sampling 11 are reserved; bitrate 1111 is invalid and
     // 0000 is the free format nothing here emits. Finding the next frame would need
-    // the bitrate tables, so this stops at the header - what slips through is caught
+    // the bitrate tables; this stops at the header - what slips through is caught
     // by the decoder, which retires the entry.
     let version = (data[1] >> 3) & 0x03;
     let layer = (data[1] >> 1) & 0x03;
@@ -574,19 +578,19 @@ fn looks_like_mpeg_frame(data: &[u8]) -> bool {
 /// Why a cache entry could not be turned into playable bytes. The distinction is
 /// load-bearing: only `Corrupt` condemns the stored file.
 enum CacheReadError {
-    /// The file is gone from disk, so the index row is an orphan.
+    /// The file is gone from disk: the index row is an orphan.
     Orphaned,
     /// Could not read the file, or could not use the key. Neither says anything about
-    /// the stored ciphertext, so the entry must survive: evicting would discard a good
+    /// the stored ciphertext, and the entry must survive: evicting would discard a good
     /// file the next attempt would have to download again.
     Unreadable(String),
-    /// Decrypted, but not into a container we recognise, so the stored ciphertext no
+    /// Decrypted, but not into a container we recognise: the stored ciphertext no
     /// longer matches this key.
     Corrupt(String),
 }
 
 /// Read a cache entry and hand back playable bytes. Blocking and CPU-bound (a whole
-/// file read plus an AES pass over every byte), so callers run it off the runtime.
+/// file read plus an AES pass over every byte): callers run it off the runtime.
 fn read_cache_entry(path: &std::path::Path, key: &str) -> Result<Vec<u8>, CacheReadError> {
     let mut data = match std::fs::read(path) {
         Ok(d) => d,
@@ -597,7 +601,7 @@ fn read_cache_entry(path: &std::path::Path, key: &str) -> Result<Vec<u8>, CacheR
     };
 
     // Key-side only: `new` unwraps the key ID and `decrypt_in_place` can fail solely
-    // while building the cipher from it, so neither outcome depends on the disk bytes.
+    // while building the cipher from it; neither outcome depends on the disk bytes.
     if !key.is_empty()
         && let Err(e) = crate::audio::decrypt::FlacDecryptor::new(key)
             .and_then(|d| d.decrypt_in_place(&mut data, 0))
@@ -605,7 +609,7 @@ fn read_cache_entry(path: &std::path::Path, key: &str) -> Result<Vec<u8>, CacheR
         return Err(CacheReadError::Unreadable(format!("unusable key: {e}")));
     }
 
-    // AES-CTR is unauthenticated, so a stale key decrypts to noise and still returns
+    // AES-CTR is unauthenticated: a stale key decrypts to noise and still returns
     // Ok. This must run before `touch`, which would refresh the LRU position and keep
     // a bad entry from ever evicting.
     if !looks_like_media(&data) {
@@ -618,7 +622,7 @@ fn read_cache_entry(path: &std::path::Path, key: &str) -> Result<Vec<u8>, CacheR
 }
 
 /// `key` is the track's wrapped content key: cache files hold TIDAL's
-/// ciphertext, so a hit is only playable once decrypted. An empty key means the
+/// ciphertext; a hit is only playable once decrypted. An empty key means the
 /// stream was never encrypted, matching the download path's own check.
 async fn try_cache_hit(ctx: &LoadContext, track_id: &str, key: &str) -> LoadStep {
     let cache_t0 = std::time::Instant::now();
@@ -923,7 +927,7 @@ impl Player {
             prev.abort();
         }
 
-        // Cancel the previous track's download so a skip doesn't leak it streaming a
+        // Cancel the previous track's download; a skip must not leak it streaming a
         // full file into RAM (start_download races this token).
         let cancel_token = CancellationToken::new();
         if let Some(prev) = self
@@ -935,8 +939,8 @@ impl Player {
             prev.cancel();
         }
 
-        // Reset governor buffer progress so the new download isn't throttled
-        // by stale counters from the previous track.
+        // Reset governor buffer progress: stale counters from the previous track
+        // would otherwise throttle the new download.
         GOVERNOR.reset_buffer_progress();
 
         {
@@ -997,9 +1001,9 @@ impl Player {
         // the pipeline, either restart it (a fresh play instance) or resume it in place
         // (a keep-position re-assert), without a full rebuild. The comparison is against
         // the committed track (set by the player thread in handle_load), never the
-        // requested track, so a duplicate load racing a still-in-flight load of a
-        // different track can't falsely match and touch a stale pipeline. stop() is
-        // pause-retain, so the committed track survives. A genuine track change
+        // requested track: a duplicate load racing a still-in-flight load of a
+        // different track cannot falsely match and touch a stale pipeline. stop() is
+        // pause-retain, and the committed track survives. A genuine track change
         // (different canonical id/format) falls through to a full load.
         let canonical_url_id = canonical_track_id(&url);
         let same_committed = {
@@ -1021,7 +1025,7 @@ impl Player {
                     want_play,
                     short_id(&canonical_url_id, 60)
                 );
-                return self.load_with_policy(url, format, key, ResumePolicy::Disabled, want_play);
+                return self.load_with_policy(url, format, key, ResumePolicy::Restart, want_play);
             }
             // Takes the new credential, keeps the play instance. The skip below correctly answers
             // "same track?" but must not also mean "still fetchable": every same-track load carries a
@@ -1039,7 +1043,7 @@ impl Player {
             // Same-track re-assert keeping the play instance (a quality-swap re-load):
             // resumes if PLAYING pre-stop (resume_on_reassert), or if want_play is set --
             // click-to-play on a restored paused track is stop+load(same) with NO
-            // player.play (SDK-verified), so want_play is the only resume signal then.
+            // player.play (SDK-verified): want_play is the only resume signal then.
             crate::vprintln!(
                 "[LOAD]   idempotent reload skipped (same committed track, want_play={}): {}",
                 want_play,
@@ -1049,7 +1053,7 @@ impl Player {
             return Ok(());
         }
         // Different track (genuine select / queue advance): fresh load. `want_play` folds
-        // the SELECT's play-intent into the load so no separate player.play arrives while
+        // the SELECT's play-intent into the load: no separate player.play arrives while
         // the OLD track is still committed (decide_play would Resume it -> audible bleed).
         self.load_with_policy(url, format, key, ResumePolicy::Disabled, want_play)
     }
@@ -1093,7 +1097,7 @@ impl Player {
         }
         GOVERNOR.reset_buffer_progress();
 
-        // DASH isn't replayable via load_and_play (segmented), so clear the
+        // DASH isn't replayable via load_and_play (segmented); clear the
         // retained source: a post-DASH play re-arms nothing, not a stale track.
         *CURRENT_TRACK.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
@@ -1289,10 +1293,10 @@ impl Player {
 
     pub fn stop(&self) -> anyhow::Result<()> {
         // Pause-retain, not teardown: the in-flight load task and its download are
-        // kept (the download rides its own download_cancel token, not LOAD_SEQ) so a
+        // kept (the download rides its own download_cancel token, not LOAD_SEQ); a
         // same-track re-assert resumes in place. The LOAD_SEQ bump invalidates any
         // still-pending auto-play Load/ReplayRequest (rejected by handle_load's
-        // stale-gate and the flush.rs guard) so playback can't start after the stop;
+        // stale-gate and the flush.rs guard): playback cannot start after the stop;
         // it doesn't truncate the retained download, and a steady-state re-assert
         // resumes via Player::load, which bypasses both gates.
         LOAD_SEQ.fetch_add(1, Relaxed);
@@ -1304,7 +1308,7 @@ impl Player {
         self.send_cmd(PlayerCommand::Seek(time))
     }
 
-    /// Keeps the `f64` argument so no caller changes, but nothing past this point can
+    /// Keeps the `f64` argument, leaving callers untouched, but nothing past this point can
     /// hold an out-of-range or non-finite level.
     pub fn set_volume(&self, volume: f64) -> anyhow::Result<()> {
         self.send_cmd(PlayerCommand::SetVolume(Volume::from_percent(volume)))

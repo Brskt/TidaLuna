@@ -32,14 +32,15 @@ const PRE_SEEK_TOLERANCE: f64 = 2.0;
 const EXCLUSIVE_PAUSE_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long ASIO stays idle (paused or terminally stopped) before the driver is
-/// shut down so other apps regain the device. A short pause/resume within the
+/// shut down, letting other apps regain it. A short pause/resume within the
 /// window keeps the driver (instant resume, no pop); a resume after the release
 /// respawns it.
 #[cfg(target_os = "windows")]
 const ASIO_IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
 
 enum DecodeCommand {
-    Seek(f64),
+    /// Target seconds plus the identity minted for this dispatch, echoed back untouched.
+    Seek(f64, u32),
     Pause,
     Resume,
     Stop,
@@ -50,8 +51,15 @@ enum DecodeEvent {
     Finished,
     /// Decode error (non-fatal, logged).
     Error(String),
-    /// Seek completed - audio output can resume.
-    SeekComplete,
+    /// The answer to one dispatched seek. `position` travels with the event because
+    /// reading it back off `decoded_samples` at drain time is racy: ordinary decoding
+    /// advances that same counter. By the time the player drains the ack it has moved past
+    /// the landing point. `refused` says whether the decoder moved at all.
+    SeekComplete {
+        gen_id: u32,
+        position: f64,
+        refused: bool,
+    },
 }
 
 pub(super) struct PlayerThread<F> {
@@ -63,7 +71,7 @@ pub(super) struct PlayerThread<F> {
     // The app's authoritative volume (f32 bits): written by handle_set_volume on
     // every user/echoed change, adopted from the session only at cold start (see
     // volume_baseline_established). The sole seed source for the exclusive/ASIO
-    // digital gain -- never a live GetMasterVolume() query, which can be a fresh 1.0.
+    // digital gain, never a live GetMasterVolume() query, which can be a fresh 1.0.
     #[cfg(target_os = "windows")]
     last_volume: Arc<AtomicU32>,
     // Digital gain for the exclusive WASAPI render (it bypasses the OS mixer).
@@ -85,10 +93,11 @@ pub(super) struct PlayerThread<F> {
     is_cached: bool,
     is_playing: bool,
     has_track: bool,
-    // Whether the transport state last announced while not playing was Stopped rather than
-    // Paused. An SDK stop is a pause-retain (handle_stop), which is_playing cannot express,
-    // and a settled seek has to put back the one it interrupted. Read only when not playing.
-    stopped_retained: bool,
+    // The transport state to put back when a seek settles while not playing. `is_playing`
+    // covers Active; this REMEMBERS the one the seek interrupted instead of deriving it,
+    // because no combination of booleans can tell a fresh load (Ready) from an explicit
+    // pause (Paused) from an SDK stop, which is a pause-retain (Stopped).
+    idle_state: crate::player::PlaybackState,
     // Whether a same-track re-assert (ReassertResume) should resume: handle_stop
     // sets it to the pre-stop is_playing, a user pause clears it (handle_pause).
     // So a user-paused track stays paused on re-assert; a quality-swap's stop->load->play
@@ -97,7 +106,7 @@ pub(super) struct PlayerThread<F> {
     resume_on_reassert: bool,
     // A play that arrived before the track finished loading, tagged with the
     // LOAD_SEQ generation it was meant for. Applied once that load reaches the
-    // ready state so a play racing ahead of the async load isn't dropped, and
+    // ready state: a play racing ahead of the async load is not dropped, and
     // never applied to a track the user has since skipped past.
     pending_play: Option<u32>,
     // Generation of the in-flight load (set by LoadStarted, cleared by
@@ -116,15 +125,17 @@ pub(super) struct PlayerThread<F> {
     // Resume
     resume_store: ResumeStore,
     pending_resume_seek: Option<f64>,
-    // A user seek that arrived before the exclusive stream was ready. Supersedes
-    // pending_resume_seek at exclusive start (explicit seek wins over auto-resume).
+    // A user seek that arrived before the exclusive or ASIO stream was ready, tagged
+    // with the canonical id of the track it targets. Supersedes pending_resume_seek at
+    // stream start (explicit seek wins over auto-resume). Untagged, every load had to
+    // drop it: nothing said which track it belonged to.
     #[cfg(target_os = "windows")]
-    user_seek_override: Option<f64>,
+    user_seek_override: Option<(String, f64)>,
     pre_seek_pos: Option<f64>,
     allow_startup_auto_resume: bool,
     // Device
     current_device_id: Option<String>,
-    // Concrete name of the open cpal device, so the shared re-assert guard
+    // Concrete name of the open cpal device: the shared re-assert guard
     // compares physical identity, not the raw id the load path never stores.
     current_output_name: Option<String>,
     // Did the open stream come from a default selector ("auto"/"default"/none)?
@@ -139,9 +150,9 @@ pub(super) struct PlayerThread<F> {
     exclusive_stream_cancel: Option<Arc<AtomicBool>>,
     // Sender to the live exclusive decoder for in-place seeks (no respawn).
     #[cfg(target_os = "windows")]
-    exclusive_seek_tx: Option<mpsc::Sender<f64>>,
+    exclusive_seek_tx: Option<mpsc::Sender<(f64, u32)>>,
     // Live exclusive stream id: scopes Play/Pause to the adopted stream (mirrors
-    // current_asio_stream_id), so a premature or stale command can't act on the
+    // current_asio_stream_id): a premature or stale command cannot act on the
     // old render context.
     #[cfg(target_os = "windows")]
     current_exclusive_stream_id: Option<u32>,
@@ -151,8 +162,8 @@ pub(super) struct PlayerThread<F> {
     #[cfg(target_os = "windows")]
     last_exclusive_pos: Option<f64>,
     // Debounced device release: armed (now + EXCLUSIVE_PAUSE_RELEASE) when exclusive
-    // playback pauses; if it elapses still-paused, the IAudioClient is dropped so other
-    // apps regain the device. Cleared on resume/load/re-engage, so a short pause or a
+    // playback pauses; if it elapses still-paused, the IAudioClient is dropped and other
+    // apps regain the device. Cleared on resume/load/re-engage, and a short pause or a
     // track-change stop->load within the window never releases.
     #[cfg(target_os = "windows")]
     exclusive_release_at: Option<std::time::Instant>,
@@ -179,9 +190,9 @@ pub(super) struct PlayerThread<F> {
     asio_stream_cancel: Option<Arc<AtomicBool>>,
     // Sender to the live ASIO decoder for in-place seeks (no respawn).
     #[cfg(target_os = "windows")]
-    asio_seek_tx: Option<mpsc::Sender<f64>>,
+    asio_seek_tx: Option<mpsc::Sender<(f64, u32)>>,
     // The live ASIO decoder's stream_id; gates stale Stopped/Completed events (from a
-    // superseded stream) so they can't null a newer track's has_track.
+    // superseded stream): they cannot null a newer track's has_track.
     #[cfg(target_os = "windows")]
     current_asio_stream_id: Option<u32>,
     // Live ASIO position (floor-free, this session): restores the position on an
@@ -190,7 +201,7 @@ pub(super) struct PlayerThread<F> {
     last_asio_pos: Option<f64>,
     // ASIO progress watchdog: anchor reset on Active and on each forward TimeUpdate. If the
     // clock is started+playing but the position never advances within the timeout, a genuine
-    // driver failure not recovered by the asio_message reset path -> fall back to shared so the
+    // driver failure not recovered by the asio_message reset path -> fall back to shared, and the
     // track still plays (resampled).
     #[cfg(target_os = "windows")]
     asio_watchdog_at: Option<std::time::Instant>,
@@ -198,7 +209,7 @@ pub(super) struct PlayerThread<F> {
     asio_watchdog_pos: f64,
     // Per-track ASIO skip: the canonical id of a track whose sample rate the device can't clock
     // (RateUnsupported). Its shared re-arm must NOT re-engage ASIO (loop); cleared when a
-    // different track loads, so other rates keep using ASIO. Does NOT disable ASIO globally.
+    // different track loads; other rates keep using ASIO. Does NOT disable ASIO globally.
     #[cfg(target_os = "windows")]
     asio_skip_track: Option<String>,
     // Per-track exclusive skip: same idea for a track whose format the device can't do in
@@ -220,6 +231,10 @@ pub(super) struct PlayerThread<F> {
     // Seek state
     seeking: bool,
     seek_target: Option<f64>,
+    /// Identity of the currently pinned seek, shared by all three backends and echoed back
+    /// on settlement. Monotonic, never reset. Distinct from `decode::seek_gen` and
+    /// `asio::flush_gen`, which drive ring drains and mean something else entirely.
+    seek_ack_gen: u32,
     last_seek_emit: Option<f64>,
     seek_wall_start: Option<std::time::Instant>,
     cpal_muted: Option<Arc<AtomicBool>>,
@@ -277,7 +292,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_format: String::new(),
             is_cached: false,
             is_playing: false,
-            stopped_retained: false,
+            idle_state: crate::player::PlaybackState::Ready,
             has_track: false,
             resume_on_reassert: false,
             pending_play: None,
@@ -349,6 +364,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pending_unmute: false,
             seeking: false,
             seek_target: None,
+            seek_ack_gen: 0,
             last_seek_emit: None,
             seek_wall_start: None,
             cpal_muted: None,
@@ -476,9 +492,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::ReassertResume { want_play } => {
                 // Same-track re-assert (boombox does stop()+load(same)): its load() awaits
                 // `mediaduration` before the instance is seekable, but the idempotent skip
-                // never re-runs handle_load, so that event is never re-emitted and boombox's
+                // never re-runs handle_load: that event is never re-emitted and boombox's
                 // load() stalls, dropping later progress-bar seeks. Re-emit Duration (at the
-                // committed track's seq) so the re-load resolves and stays seekable.
+                // committed track's seq), letting the re-load resolve and stay seekable.
                 if self.current_duration > 0.0 {
                     (self.callback)(PlayerEvent::Duration(
                         self.current_duration,
@@ -514,7 +530,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             } => {
                 // Superseded load (stop() keeps its task alive; abort is
                 // cooperative): checked at processing time, like handle_load's
-                // stale-Load gate, so it also covers send/process races.
+                // stale-Load gate; it also covers send/process races.
                 if load_gen != LOAD_SEQ.load(Relaxed) {
                     crate::vprintln!("[LOAD #{load_gen}] stale LoadFailed, ignoring");
                     return;

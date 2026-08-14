@@ -10,10 +10,24 @@ use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
 
 /// Whether a fatal `DecodeEvent::Error` must be settled in place: the drain path
 /// only takes over after a trailing `Finished` and with at least one sample
-/// played - otherwise nothing else ever emits a terminal state. Pure so it can
+/// played - otherwise nothing else ever emits a terminal state. Pure, to
 /// be unit-tested without the audio pipeline.
 fn decode_failure_needs_settle(pending_complete: bool, played_samples: u64) -> bool {
     !pending_complete || played_samples == 0
+}
+
+/// Whether a backend's settlement answers the seek the player is actually waiting on.
+/// `stream_id` alone only proves the decoder was not replaced; two seeks issued on one
+/// live stream share it, leaving the older answer free to settle the newer. Pure, to be
+/// unit-tested without a backend. Windows-only: only the bypass backends carry an ack.
+#[cfg(target_os = "windows")]
+fn seek_ack_is_current(
+    current_stream_id: Option<u32>,
+    current_gen: u32,
+    ack_stream_id: u32,
+    ack_gen: u32,
+) -> bool {
+    current_stream_id == Some(ack_stream_id) && current_gen == ack_gen
 }
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
@@ -34,20 +48,83 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             .unwrap_or_else(|| self.played_position_secs())
     }
 
+    /// The state a settled seek puts back: `is_playing` covers Active, `idle_state` the rest.
+    /// Only a synchronous transport command may write `idle_state`, since a backend's own
+    /// echo arrives late enough to let a pause's ack overwrite a stop that superseded it.
+    pub(super) fn settled_state(&self) -> PlaybackState {
+        if self.is_playing {
+            PlaybackState::Active
+        } else {
+            self.idle_state
+        }
+    }
+
     #[cfg(target_os = "windows")]
     pub(super) fn poll_exclusive_events(&mut self) {
         if self.is_exclusive_mode {
             if let Some(ref handle) = self.exclusive_handle {
                 for ev in handle.poll_events() {
                     match ev {
+                        ExclusiveEvent::SeekSettled {
+                            stream_id,
+                            gen_id,
+                            position,
+                            refused,
+                        } => {
+                            // Both halves of the identity are needed: the stream rejects an ack
+                            // from a replaced decoder, the generation rejects an older sibling
+                            // seek's ack on that same decoder.
+                            if seek_ack_is_current(
+                                self.current_exclusive_stream_id,
+                                self.seek_ack_gen,
+                                stream_id,
+                                gen_id,
+                            ) {
+                                self.seeking = false;
+                                self.seek_target = None;
+                                self.seek_wall_start = None;
+                                if let Some(track_id) = self.current_track_id.clone() {
+                                    // Clear first, accepted or refused: `set` drops anything at
+                                    // or under RESUME_MIN_SECONDS, which leaves an older and
+                                    // later entry standing.
+                                    self.resume_store.clear(&track_id);
+                                    self.resume_store.set(&track_id, position);
+                                    self.resume_store.flush_if_due(refused);
+                                }
+                                self.last_exclusive_pos = Some(position);
+                                // handle_seek announced Seeking; its end is owed.
+                                (self.callback)(PlayerEvent::StateChange(
+                                    self.settled_state(),
+                                    self.current_seq,
+                                ));
+                                (self.callback)(PlayerEvent::TimeUpdate(
+                                    position,
+                                    self.current_seq,
+                                ));
+                            }
+                        }
                         ExclusiveEvent::TimeUpdate(t) => {
-                            if let Some(track_id) = self.current_track_id.as_ref() {
-                                self.resume_store.set(track_id, t);
+                            // While a seek is pending the render still reports the pre-seek
+                            // position (not rebased until the flush lands); pin the UI to the
+                            // target. Only SeekSettled ends the pin: distance from the target
+                            // cannot tell a refused seek from a stale report, which is what
+                            // left the pin held for the rest of the track.
+                            let report = match self.seek_target {
+                                Some(target) if self.seeking => target,
+                                _ => t,
+                            };
+                            // Only a settled seek writes a seek position: the pin is a target no
+                            // backend has accepted, and a pause arriving mid-seek forces a flush
+                            // that would put it on disk.
+                            if !self.seeking
+                                && let Some(track_id) = self.current_track_id.as_ref()
+                            {
+                                self.resume_store.set(track_id, report);
                                 self.resume_store.flush_if_due(false);
                             }
                             // Floor-free live position for an exclusive->shared re-arm.
-                            self.last_exclusive_pos = Some(t);
-                            (self.callback)(PlayerEvent::TimeUpdate(t, self.current_seq));
+                            self.last_exclusive_pos = Some(report);
+                            (self.callback)(PlayerEvent::TimeUpdate(report, self.current_seq));
                         }
                         ExclusiveEvent::StateChange(s) => {
                             if s == PlaybackState::Completed {
@@ -57,11 +134,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 }
                                 self.has_track = false;
                                 self.is_playing = false;
+                                // A seek in flight when the track ended can no longer be
+                                // answered: its sender dies below, and the pin would hold the
+                                // command loop at its 1ms seeking cadence until the next load.
+                                self.seeking = false;
+                                self.seek_target = None;
+                                self.seek_wall_start = None;
                                 self.current_track_id = None;
                                 self.set_committed_track(None);
                                 self.last_exclusive_pos = None;
                                 // Decoder exited (EndStream), its seek receiver
-                                // dropped: clear the dead sender so a later
+                                // dropped: clear the dead sender; a later
                                 // seek/play respawns a decoder.
                                 self.exclusive_seek_tx = None;
                                 crate::state::GOVERNOR
@@ -103,7 +186,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             if let Some(cancel) = self.exclusive_stream_cancel.take() {
                                 cancel.store(true, Relaxed);
                             }
-                            // Per-track skip: remember this track so its shared re-arm doesn't
+                            // Per-track skip: remember this track; its shared re-arm must not
                             // loop back into exclusive, but keep exclusive on globally
                             // (ExclusiveFormatUnsupported is not in the frontend disable list).
                             self.exclusive_skip_track = self.current_track_id.clone();
@@ -122,8 +205,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
 
             // Debounced release: once a pause has lingered past EXCLUSIVE_PAUSE_RELEASE
-            // without a resume or track change, hand the exclusive device back so other
-            // apps regain it. has_track=false + committed cleared makes the next play
+            // without a resume or track change, hand the exclusive device back, letting
+            // other apps regain it. has_track=false + committed cleared makes the next play
             // re-arm (decide_play ReArm) or a same-track reload reopen (no idempotent
             // skip); both reopen the client.
             if self.is_exclusive_mode
@@ -152,29 +235,63 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if let Some(ref handle) = self.asio_handle {
             for ev in handle.poll_events() {
                 match ev {
-                    AsioEvent::TimeUpdate(t) => {
-                        // While a live seek is pending the control thread still reports the
-                        // stale position (not rebased until ResetForSeek lands); pin the UI to
-                        // the target until `t` converges so the bar doesn't flicker back.
-                        let report = match self.seek_target {
-                            Some(target) if self.seeking => {
-                                if (t - target).abs() <= 1.0 {
-                                    self.seeking = false;
-                                    self.seek_target = None;
-                                    // Convergence IS progress: re-anchor the stall watchdog.
-                                    // A >=2s decoder-blocked seek that lands exactly on the
-                                    // pinned target would miss the 0.05 refresh below and
-                                    // trip a false RateUnsupported in this very poll.
-                                    self.asio_watchdog_pos = t;
-                                    self.asio_watchdog_at = Some(std::time::Instant::now());
-                                    t
-                                } else {
-                                    target
-                                }
+                    AsioEvent::SeekSettled {
+                        stream_id,
+                        gen_id,
+                        position,
+                        refused,
+                    } => {
+                        // Both halves of the identity are needed: the stream rejects an ack
+                        // from a decoder this thread has replaced, the generation rejects an
+                        // older sibling seek's ack on that same decoder. Without the second,
+                        // a stale settle re-anchors the watchdog below on a position that
+                        // has stopped moving, and 2s later ASIO ejects the track for good.
+                        if seek_ack_is_current(
+                            self.current_asio_stream_id,
+                            self.seek_ack_gen,
+                            stream_id,
+                            gen_id,
+                        ) {
+                            self.seeking = false;
+                            self.seek_target = None;
+                            self.seek_wall_start = None;
+                            if let Some(track_id) = self.current_track_id.clone() {
+                                // Clear first, accepted or refused: `set` drops anything at or
+                                // under RESUME_MIN_SECONDS, which leaves an older and later
+                                // entry standing.
+                                self.resume_store.clear(&track_id);
+                                self.resume_store.set(&track_id, position);
+                                self.resume_store.flush_if_due(refused);
                             }
+                            self.last_asio_pos = Some(position);
+                            // A >=2s decoder-blocked seek landing on the pinned target trips a
+                            // false RateUnsupported, hence the re-anchor.
+                            self.asio_watchdog_pos = position;
+                            self.asio_watchdog_at = Some(std::time::Instant::now());
+                            // handle_seek announced Seeking; its end is owed.
+                            (self.callback)(PlayerEvent::StateChange(
+                                self.settled_state(),
+                                self.current_seq,
+                            ));
+                            (self.callback)(PlayerEvent::TimeUpdate(position, self.current_seq));
+                        }
+                    }
+                    AsioEvent::TimeUpdate(t) => {
+                        // While a seek is pending the control thread still reports the stale
+                        // position (not rebased until ResetForSeek lands); pin the UI to the
+                        // target. Only SeekSettled ends the pin: distance from the target
+                        // cannot tell a refused seek from a stale report, which is what left
+                        // the pin held for the rest of the track.
+                        let report = match self.seek_target {
+                            Some(target) if self.seeking => target,
                             _ => t,
                         };
-                        if let Some(track_id) = self.current_track_id.as_ref() {
+                        // Only a settled seek writes a seek position: the pin is a target no
+                        // backend has accepted, and a pause arriving mid-seek forces a flush
+                        // that would put it on disk.
+                        if !self.seeking
+                            && let Some(track_id) = self.current_track_id.as_ref()
+                        {
                             self.resume_store.set(track_id, report);
                             self.resume_store.flush_if_due(false);
                         }
@@ -200,7 +317,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                     AsioEvent::Completed(sid) => {
                         // Ignore a completion from a superseded stream (a newer track
-                        // already loaded) -- only the current stream's completion clears
+                        // already loaded): only the current stream's completion clears
                         // the track; a stale one would force a spurious re-arm/double-load.
                         if self.current_asio_stream_id == Some(sid) {
                             if let Some(track_id) = self.current_track_id.as_ref() {
@@ -209,11 +326,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             }
                             self.has_track = false;
                             self.is_playing = false;
+                            // A seek in flight when the track ended can no longer be answered:
+                            // its sender dies below, and the pin would hold the command loop at
+                            // its 1ms seeking cadence until the next load.
+                            self.seeking = false;
+                            self.seek_target = None;
+                            self.seek_wall_start = None;
                             self.current_track_id = None;
                             self.set_committed_track(None);
                             self.last_asio_pos = None;
                             self.asio_watchdog_at = None;
-                            // Decoder exited (EndStream): clear the dead sender so a
+                            // Decoder exited (EndStream): clear the dead sender, and a
                             // later seek/play respawns a decoder.
                             self.asio_seek_tx = None;
                             crate::state::GOVERNOR
@@ -262,8 +385,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         if let Some(cancel) = self.asio_stream_cancel.take() {
                             cancel.store(true, Relaxed);
                         }
-                        // Per-track skip: remember this track so its shared re-arm does NOT
-                        // re-engage ASIO (loop), but keep ASIO on globally (no sticky clear --
+                        // Per-track skip: remember this track; its shared re-arm must NOT
+                        // re-engage ASIO (loop), but keep ASIO on globally (no sticky clear:
                         // `AsioRateUnsupported` is not in the frontend's disable list).
                         self.asio_skip_track = self.current_track_id.clone();
                         self.is_asio_mode = false;
@@ -287,7 +410,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         // Progress watchdog (a backstop): the clock reported Active but the position hasn't
         // advanced within the timeout -> the driver can't clock this track. Route it to shared
-        // as a PER-TRACK skip (RateUnsupported), NOT a hard failure -- a single un-clockable
+        // as a PER-TRACK skip (RateUnsupported), NOT a hard failure: a single un-clockable
         // track must never auto-disable ASIO for the whole session.
         if self.is_asio_mode
             && self.is_playing
@@ -302,9 +425,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             if let Some(cancel) = self.asio_stream_cancel.take() {
                 cancel.store(true, Relaxed);
             }
-            // Mirror the RateUnsupported exit: remember the track so its shared re-arm doesn't
+            // Mirror the RateUnsupported exit: remember the track; its shared re-arm must not
             // loop back into ASIO, and emit AsioRateUnsupported (not in the frontend's disable
-            // list) so ASIO stays enabled.
+            // list) to keep ASIO enabled.
             self.asio_skip_track = self.current_track_id.clone();
             self.is_asio_mode = false;
             self.asio_watchdog_at = None;
@@ -315,7 +438,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         // Debounced idle release (sustained pause or terminal stop): free the
-        // ASIO driver so other apps regain the device. loading_gen blocks a slow
+        // ASIO driver, letting other apps regain it. loading_gen blocks a slow
         // in-flight stop->load (a failed load settles it via LoadSettleGuard and
         // the release then proceeds). has_track=false + committed cleared route
         // the next play/load through the full rebuild path (start_asio_playback
@@ -330,7 +453,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             self.asio_release_at = None;
             // Cancel the detached decoder first: its wait sites never observe the
-            // control thread dying, so it would leak (thread + full-track buffer).
+            // control thread dying: it would leak (thread + full-track buffer).
             if let Some(cancel) = self.asio_stream_cancel.take() {
                 cancel.store(true, Relaxed);
                 if let Some(ref buf) = self.current_buffer {
@@ -389,8 +512,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         true
     }
 
-    /// ASIO failed: re-arm a fresh shared load at the live position so the current track
-    /// recovers immediately (the custom `deviceasio*` events aren't TIDAL-native, so the
+    /// ASIO failed: re-arm a fresh shared load at the live position; the current track
+    /// recovers immediately (the custom `deviceasio*` events aren't TIDAL-native, and the
     /// frontend won't re-arm). Mirrors the device.rs asio->shared switch. No-op without a track.
     #[cfg(target_os = "windows")]
     fn rearm_shared_after_asio_failure(&mut self) {
@@ -423,8 +546,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 play: was_playing,
             });
         } else {
-            // Non-replayable source (DASH): no track to re-arm, so playback stops (as in the
-            // device.rs switch paths). Logged so the silent stop is diagnosable.
+            // Non-replayable source (DASH): no track to re-arm, and playback stops (as in the
+            // device.rs switch paths). Logged to keep the silent stop diagnosable.
             crate::vprintln!(
                 "[ASIO] fallback: non-replayable source, playback stopped (cannot re-arm shared)"
             );
@@ -432,7 +555,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     /// Exclusive WASAPI failed (OS denied exclusive, or the device is locked): re-arm a
-    /// fresh shared load at the live position so the current track keeps playing instead
+    /// fresh shared load at the live position; the current track keeps playing instead
     /// of stopping. Mirrors `rearm_shared_after_asio_failure`. No-op without a track.
     #[cfg(target_os = "windows")]
     fn rearm_shared_after_exclusive_failure(&mut self) {
@@ -478,10 +601,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let should_poll = true;
 
         // Update governor buffer progress whenever a track is loaded, in EVERY output mode:
-        // the decode thread reads the RamBuffer in shared, exclusive, and ASIO alike, so the
+        // the decode thread reads the RamBuffer in shared, exclusive, and ASIO alike: the
         // governor's read_pos must track it regardless of `should_poll`. Gating it off froze
-        // read_pos, so the governor saw an ever-growing `ahead`, paused the download, and never
-        // resumed -- starving the decoder into silence.
+        // read_pos; the governor then saw an ever-growing `ahead`, paused the download, and
+        // never resumed, starving the decoder into silence.
         if self.has_track
             && let Some(ref buf) = self.current_buffer
         {
@@ -510,7 +633,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         // Detect decode thread stalling on RamBuffer (buffering). Read before the drain
-        // below, so a seek landing this tick still counts as in flight: a range restart
+        // below, letting a seek landing this tick still count as in flight: a range restart
         // always blocks the reader, and that stall is the seek's own doing.
         if self.is_playing
             && !self.is_cached
@@ -559,8 +682,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             std::thread::spawn(move || {
                                 let Some(tid) = track_id else { return };
                                 // Resolve the path under a brief lock, then write
-                                // the multi-MB file unlocked so a concurrent
-                                // track-load lookup isn't blocked behind it.
+                                // the multi-MB file unlocked; a concurrent
+                                // track-load lookup is not blocked behind it.
                                 let (path, store_gen) = {
                                     let Ok(cache) = crate::state::AUDIO_CACHE.lock() else {
                                         crate::vprintln!("[CACHE]  Lock poisoned, skipping store");
@@ -620,19 +743,50 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.current_duration,
                         );
                     }
-                    DecodeEvent::SeekComplete => {
+                    DecodeEvent::SeekComplete {
+                        gen_id,
+                        position,
+                        refused,
+                    } => {
+                        // A superseded seek's answer changes nothing here. Unmuting on one made
+                        // the ring audible while a newer seek was still on its way.
+                        if gen_id != self.seek_ack_gen {
+                            continue;
+                        }
                         // Only a decoder parked at EOF leaves a completion pending here, since
                         // Finished arms it once nothing is left to decode. The mute freezes the
                         // played count the drain check reads, which would take this for the end.
                         self.pending_complete = false;
-                        self.played_samples
-                            .store(self.decoded_samples.load(Relaxed), Relaxed);
+                        // Ring accounting, not position: this wants where decode stands now,
+                        // not `position`. Only an accepted seek flushed the ring and rebased
+                        // the decoder onto the landing point. A refusal moved nothing, and
+                        // rebasing on a decoder a whole ring ahead teleports the played count.
+                        if !refused {
+                            self.played_samples
+                                .store(self.decoded_samples.load(Relaxed), Relaxed);
+                        }
                         if let Some(ref m) = self.cpal_muted {
                             m.store(false, Relaxed);
                         }
                         if self.seeking {
                             self.seeking = false;
                             self.seek_target = None;
+                            // A refusal reports the decode cursor, which runs ahead of what was
+                            // heard; only the played counter answers where the listener is. The
+                            // two bypass backends build their own refusals on that same counter.
+                            let settled = if refused {
+                                self.played_position_secs()
+                            } else {
+                                position
+                            };
+                            // The settle is the only writer of a seek position on this path:
+                            // the periodic tick below returns early while playback is stopped,
+                            // and a seek taken in pause would otherwise never reach disk.
+                            if let Some(track_id) = self.current_track_id.as_ref() {
+                                self.resume_store.clear(track_id);
+                                self.resume_store.set(track_id, settled);
+                                self.resume_store.flush_if_due(refused);
+                            }
                             let wall_ms = self
                                 .seek_wall_start
                                 .take()
@@ -647,25 +801,28 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                     "streaming"
                                 }
                             );
-                            // handle_seek announces Seeking over the state it interrupted; that
-                            // state goes back here. is_playing covers every backend,
-                            // stopped_retained the distinction it cannot make (stop versus pause).
+                            // handle_seek announced Seeking over the state it interrupted; that
+                            // state goes back here.
                             (self.callback)(PlayerEvent::StateChange(
-                                if self.is_playing {
-                                    PlaybackState::Active
-                                } else if self.stopped_retained {
-                                    PlaybackState::Stopped
-                                } else {
-                                    PlaybackState::Paused
-                                },
+                                self.settled_state(),
                                 self.current_seq,
                             ));
+                        } else if refused {
+                            // A load-time pre-seek never arms the pin; its answer lands here.
+                            // The marker was a bet placed when that seek was sent, and a refusal
+                            // means nothing reached it. Left standing, it lets the follow-up seek
+                            // skip its own dispatch and persist a position never played.
+                            self.pre_seek_pos = None;
+                        } else {
+                            // Accepted: the marker becomes where the reader actually landed, which
+                            // is the figure the skip decision has to compare a later seek against.
+                            self.pre_seek_pos = Some(position);
                         }
                     }
                     DecodeEvent::Error(e) => {
                         crate::vprintln!("[DECODE] Error: {e}");
                         // Cached bytes that will not decode must not stay indexed: the load
-                        // path already refreshed their LRU position, so nothing else would
+                        // path already refreshed their LRU position: nothing else would
                         // ever retire them and every later play would fail the same way.
                         // Re-downloading one good track is the cheap side of that trade.
                         if self.is_cached
@@ -680,10 +837,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             code: MediaErrorCode::UnreadableFile,
                         });
                         // Init-time decode errors emit Error with no trailing Finished,
-                        // so nothing else clears committed_track. Drop it here so the SDK's
-                        // same-track recovery reload rebuilds instead of resuming a dead decoder.
+                        // and nothing else clears committed_track. Drop it here for the SDK's
+                        // same-track recovery reload to rebuild instead of resuming a dead decoder.
                         self.set_committed_track(None);
-                        // Every site that reports an error returns right after, so the channel
+                        // Every site that reports an error returns right after: the channel
                         // is dead: left Some, a later seek arms a guard nothing can clear.
                         self.decode_cmd_tx = None;
                         // Settled below, outside the rx borrow.
@@ -720,6 +877,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::state::GOVERNOR
                 .buffer_progress()
                 .set_playback_active(false);
+            self.idle_state = PlaybackState::Stopped;
             (self.callback)(PlayerEvent::StateChange(
                 PlaybackState::Stopped,
                 self.current_seq,
@@ -747,7 +905,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.last_played_snapshot = 0;
                 // A played-out track owns no resume position, and a same-URL reload must
                 // rebuild rather than resume in place. Decode EOF arrives up to a ring buffer
-                // early, so a pause there would commit both against an unfinished track.
+                // early; a pause there would commit both against an unfinished track.
                 if let Some(track_id) = self.current_track_id.as_ref() {
                     self.resume_store.clear(track_id);
                     self.resume_store.flush_if_due(true);

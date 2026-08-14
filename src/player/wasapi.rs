@@ -49,7 +49,14 @@ pub(super) enum ExclusiveCommand {
     /// re-base the reported position, without reopening the client.
     ResetForSeek {
         stream_id: u32,
+        gen_id: u32,
         start_secs: f64,
+    },
+    /// The decoder could not seek. Carries no position: the render owns the answer and
+    /// reports the seek unsettled, leaving the player to fall back on what it last knew.
+    SeekFailed {
+        stream_id: u32,
+        gen_id: u32,
     },
     /// Stream-scoped like PushPcm/EndStream (mirrors ASIO's Play/Pause): un-scoped, a
     /// premature Play (racing the decoder's probe) or a stale one from a superseded track
@@ -68,13 +75,28 @@ pub(super) enum ExclusiveCommand {
 
 pub(super) enum ExclusiveEvent {
     TimeUpdate(f64),
+    /// The answer to one dispatched seek, sent whatever the outcome. `position` is where
+    /// playback actually is (the landing point when the decoder seeked, the untouched
+    /// current position when it refused), never the target nobody reached. `refused`
+    /// drives the resume store: a refused target must be evicted, not persisted. Distinct
+    /// from `TimeUpdate`, sparing the player any guess about whether a periodic report is
+    /// this seek's answer; `stream_id`-scoped like `Completed`, keeping an ack off the
+    /// track that replaced it.
+    SeekSettled {
+        stream_id: u32,
+        /// Echoed back from the command untouched. Judging an ack's freshness belongs to
+        /// the player thread alone, the only party that knows which seek it awaits.
+        gen_id: u32,
+        position: f64,
+        refused: bool,
+    },
     StateChange(super::PlaybackState),
     Duration(f64),
     InitFailed(String),
     DeviceLocked(String),
     /// The device can't do THIS track's rate/bit-depth in exclusive (e.g. 88.2/176.4/192k on a
     /// 96k-max DAC), but exclusive itself works for other rates. Per-track shared fallback,
-    /// keeping exclusive enabled -- mirrors `AsioEvent::RateUnsupported`.
+    /// keeping exclusive enabled; mirrors `AsioEvent::RateUnsupported`.
     FormatUnsupported,
 }
 
@@ -150,8 +172,11 @@ pub(super) fn stream_flac_reader_to_wasapi<R>(
     cmd_tx: mpsc::Sender<ExclusiveCommand>,
     cancel: Arc<AtomicBool>,
     seek_to: Option<f64>,
+    // Identity of the initial seek, minted by the spawn alongside `stream_id`; the live
+    // seeks that follow carry their own on the channel.
+    seek_gen_id: u32,
     start_paused: bool,
-    seek_rx: mpsc::Receiver<f64>,
+    seek_rx: mpsc::Receiver<(f64, u32)>,
     consumed: Arc<AtomicU64>,
 ) -> Result<(), String>
 where
@@ -212,7 +237,7 @@ where
     crate::vprintln!(
         "[WASAPI-DBG] flac reader: probe OK ({sample_rate}Hz {channels}ch {stored_bps}bit), sending StartStream"
     );
-    // StartStream FIRST at offset 0 so the render adopts this stream_id and opens
+    // StartStream FIRST at offset 0 makes the render adopt this stream_id and open
     // the client immediately, rather than staying silent while a forward seek into
     // not-yet-downloaded data blocks below. The real landing position follows via
     // ResetForSeek (which needs the stream_id this sets).
@@ -229,11 +254,11 @@ where
         })
         .map_err(|_| "failed to send StartStream".to_string())?;
 
-    // Source seek AFTER StartStream so a forward seek past the buffered PCM moves
+    // Source seek AFTER StartStream, letting a forward seek past the buffered PCM move
     // (mirrors do_decode_seek). On success re-base the render via ResetForSeek; on
     // failure (offset not yet downloaded) seed an initial seek the decode loop
     // retries, rather than playing from 0.
-    let mut pending_initial_seek: Option<f64> = None;
+    let mut pending_initial_seek: Option<(f64, u32)> = None;
     let mut was_initial_seek = false;
     if let Some(t) = seek_to
         && t > 0.0
@@ -259,6 +284,7 @@ where
                     if cmd_tx
                         .send(ExclusiveCommand::ResetForSeek {
                             stream_id,
+                            gen_id: seek_gen_id,
                             start_secs: actual,
                         })
                         .is_err()
@@ -268,8 +294,22 @@ where
                 }
                 Err(e) => {
                     crate::vprintln!("[WASAPI] decoder seek to {t:.1}s failed, will retry: {e}");
-                    pending_initial_seek = Some(t);
+                    pending_initial_seek = Some((t, seek_gen_id));
                 }
+            }
+        } else {
+            // A target that `Time` cannot represent will not become representable: refuse it
+            // rather than arm a retry that can only fail the same way.
+            crate::vprintln!("[WASAPI] decoder seek to {t:.1}s is out of range");
+            was_initial_seek = false;
+            if cmd_tx
+                .send(ExclusiveCommand::SeekFailed {
+                    stream_id,
+                    gen_id: seek_gen_id,
+                })
+                .is_err()
+            {
+                return Ok(());
             }
         }
     }
@@ -314,7 +354,22 @@ where
             pending_seek = Some(t);
             was_initial_seek = false;
         }
-        if let Some(t) = pending_seek
+        // Answered here rather than in the chain below: a failed conversion makes that
+        // chain fall through as a whole, dropping the seek with no reply at all.
+        if let Some((t, gen_id)) = pending_seek
+            && symphonia::core::units::Time::try_from_secs_f64(t).is_none()
+        {
+            crate::vprintln!("[WASAPI] live seek to {t:.1}s is out of range");
+            pending_seek = None;
+            was_initial_seek = false;
+            if cmd_tx
+                .send(ExclusiveCommand::SeekFailed { stream_id, gen_id })
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        if let Some((t, gen_id)) = pending_seek
             && let Some(time_pos) = symphonia::core::units::Time::try_from_secs_f64(t)
         {
             match format_reader.seek(
@@ -336,6 +391,7 @@ where
                     if cmd_tx
                         .send(ExclusiveCommand::ResetForSeek {
                             stream_id,
+                            gen_id,
                             start_secs: actual,
                         })
                         .is_err()
@@ -346,7 +402,12 @@ where
                 Err(e) => {
                     crate::vprintln!("[WASAPI] live seek to {t:.1}s failed: {e}");
                     if was_initial_seek {
-                        pending_initial_seek = Some(t);
+                        pending_initial_seek = Some((t, gen_id));
+                    } else if cmd_tx
+                        .send(ExclusiveCommand::SeekFailed { stream_id, gen_id })
+                        .is_err()
+                    {
+                        return Ok(());
                     }
                 }
             }
@@ -356,7 +417,7 @@ where
             Ok(Some(p)) => p,
             Ok(None) => {
                 // Real EOF: arm completion, then PARK on the seek channel instead of
-                // returning -- dropping seek_rx would kill live seeks for the rest of the
+                // returning. Dropping seek_rx would kill live seeks for the rest of the
                 // track (a cached source decodes far ahead of playback). ResetForSeek
                 // un-ends the stream on a later seek, re-arming completion after it.
                 if cancel.load(Relaxed) {
@@ -366,7 +427,7 @@ where
                 let _ = cmd_tx.send(ExclusiveCommand::EndStream { stream_id });
                 // Disconnect is the ONLY exit while parked: every supersede path
                 // stores `cancel` then drops the sender, and natural completion
-                // just drops it -- either way nobody can seek this stream again.
+                // just drops it. Either way nobody can seek this stream again.
                 match seek_rx.recv() {
                     Ok(t) => {
                         pending_initial_seek = Some(t);
@@ -498,8 +559,8 @@ fn negotiate_format(
 
     let channel_mask = wasapi::make_channelmasks(ch).first().copied();
 
-    // Each candidate carries a "container/valid type" label so the negotiation
-    // logs identify exactly which shape a driver accepted or rejected.
+    // Each candidate carries a "container/valid type" label for the negotiation
+    // logs to identify exactly which shape a driver accepted or rejected.
     let mut candidates = Vec::new();
 
     // Priority 1: 32-bit container with source valid bits (integer)
@@ -685,7 +746,7 @@ fn open_exclusive_stream(
                     return Err(err_str);
                 }
                 // Exclusive disabled for the device in Windows: every candidate
-                // returns the same error, so stop probing and propagate it (lands
+                // returns the same error; stop probing and propagate it (lands
                 // in InitFailed -> ExclusiveModeNotAllowed, the permanent class).
                 if is_exclusive_mode_disabled_error(&err_str) {
                     crate::vprintln!(
@@ -713,7 +774,7 @@ fn is_device_in_use_error(err_str: &str) -> bool {
 /// Check if WASAPI reports exclusive mode disabled system-wide (the Windows
 /// "Allow applications to take exclusive control of this device" toggle is OFF).
 /// This is a session-level block (AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED,
-/// 0x8889000E), not a format-level rejection, so no other candidate can succeed.
+/// 0x8889000E), not a format-level rejection. No other candidate can succeed.
 fn is_exclusive_mode_disabled_error(err_str: &str) -> bool {
     err_str.contains("EXCLUSIVE_MODE_NOT_ALLOWED")
         || err_str.contains("8889000e")
@@ -833,7 +894,7 @@ enum RenderState {
 }
 
 /// Absolute frame index a seek/resume to `secs` corresponds to. Used as the
-/// `frames_played` baseline so position reporting stays correct after a seek.
+/// `frames_played` baseline for position reporting to stay correct after a seek.
 fn position_frames(secs: f64, sample_rate: u32) -> u64 {
     if sample_rate > 0 && secs.is_finite() && secs > 0.0 {
         (secs * sample_rate as f64) as u64
@@ -890,7 +951,7 @@ struct RenderContext {
     write_cursor: usize,
     frames_played: u64,
     // The adopted stream's consumed counter (minted per decoder spawn):
-    // credited as bytes are written to the device or discarded, so the
+    // credited as bytes are written to the device or discarded; the
     // decoder's sent-minus-consumed throttle stays honest even while this
     // thread is stuck opening the exclusive client.
     consumed: Arc<AtomicU64>,
@@ -904,7 +965,7 @@ struct RenderContext {
     last_time_report: Instant,
     state: RenderState,
     // Playing but the audio client is not started yet: held until a PCM cushion
-    // is buffered so a seeked start does not underrun into silence (Playing loop).
+    // is buffered, keeping a seeked start from underrunning into silence (Playing loop).
     pending_start: bool,
     // Whether the WASAPI clock is running. Distinct from pending_start: a fresh
     // start defers start_stream until a buffer of real PCM is pre-filled, and a
@@ -914,7 +975,7 @@ struct RenderContext {
     // endpoint before real PCM, to mask the DAC PLL relock at the new rate.
     post_start_silence_remaining: u32,
     // One period of zeros and a reused conversion/padding target, sized per
-    // format so the render loop never allocates.
+    // format, leaving the render loop free of allocation.
     silence_buf: Vec<u8>,
     scratch: Vec<u8>,
 }
@@ -954,8 +1015,8 @@ impl RenderContext {
         }
     }
 
-    /// Release the exclusive device on a real stop: drop the IAudioClient so other
-    /// apps regain the endpoint, then park in Idle. The next StartStream reopens it
+    /// Release the exclusive device on a real stop: drop the IAudioClient for other
+    /// apps to regain the endpoint, then park in Idle. The next StartStream reopens it
     /// (handle_start_stream sees `audio_client == None` and opens a fresh client).
     fn release_device(&mut self) {
         self.stop_audio_client();
@@ -998,8 +1059,8 @@ impl RenderContext {
         consumed: Arc<AtomicU64>,
     ) -> Result<(), ()> {
         // Reuse the open client on an unchanged format (reopening pops the DAC).
-        // A format change needs a fresh one: an exclusive client owns the device,
-        // so release the old one first (else the new initialize fails with
+        // A format change needs a fresh one, but an exclusive client owns the device.
+        // Release the old one first (else the new initialize fails with
         // AUDCLNT_E_DEVICE_IN_USE, 0x8889000A).
         let same_format = self.audio_client.is_some()
             && self.pcm_sample_rate == sample_rate
@@ -1024,7 +1085,7 @@ impl RenderContext {
                 event_tx,
             )?;
 
-            // Sized once per format so the per-period path never allocates.
+            // Sized once per format, keeping the per-period path allocation-free.
             let period_bytes =
                 bs as usize * (wf.get_bitspersample() as usize / 8) * channels as usize;
             self.silence_buf = vec![0u8; period_bytes];
@@ -1080,7 +1141,7 @@ impl RenderContext {
         // silence->audio edge (saturation). The Playing loop pre-fills, then starts.
         self.client_started = false;
         if start_paused {
-            // A paused load has an empty endpoint, so arm the deferred start: Play
+            // A paused load has an empty endpoint; arm the deferred start: Play
             // pre-fills before starting, rather than start_stream() on empty.
             self.pending_start = true;
             self.stop_audio_client();
@@ -1112,13 +1173,19 @@ impl RenderContext {
         }
     }
 
-    fn handle_reset_for_seek(&mut self, stream_id: u32, start_secs: f64) {
+    fn handle_reset_for_seek(
+        &mut self,
+        event_tx: &mpsc::Sender<ExclusiveEvent>,
+        stream_id: u32,
+        gen_id: u32,
+        start_secs: f64,
+    ) {
         if self.current_stream_id != Some(stream_id) {
             return;
         }
         // Always stop+Reset() the endpoint (a no-op on a stopped/unstarted
         // client) to drop queued pre-seek/pre-pause frames, then defer the
-        // restart so the loop pre-fills real PCM before starting -- an unfilled
+        // restart, letting the loop pre-fill real PCM before starting: an unfilled
         // exclusive buffer here is what made seeks saturate.
         if let Some(ref ac) = self.audio_client {
             let _ = ac.stop_stream();
@@ -1136,11 +1203,62 @@ impl RenderContext {
         self.stream_ended = false;
         self.pending_start = true;
         self.last_time_report = Instant::now();
+        // Answer the seek from here rather than leaving it to the periodic report: that
+        // report is only emitted by the playing arm; a seek taken in pause would reach
+        // no convergence at all and the player would stay pinned until the next Play.
+        let _ = event_tx.send(ExclusiveEvent::SeekSettled {
+            stream_id,
+            gen_id,
+            position: start_secs,
+            refused: false,
+        });
+    }
+
+    /// The decoder refused the seek. Answer anyway: an unanswered seek leaves the player
+    /// pinned on a target nothing will ever converge to, for the rest of the track. The
+    /// position is computed here rather than left to the player, whose own copy still
+    /// holds the optimistic target the dispatch wrote before this refusal was known.
+    fn handle_seek_failed(
+        &self,
+        event_tx: &mpsc::Sender<ExclusiveEvent>,
+        stream_id: u32,
+        gen_id: u32,
+    ) {
+        if self.current_stream_id != Some(stream_id) {
+            return;
+        }
+        let _ = event_tx.send(ExclusiveEvent::SeekSettled {
+            stream_id,
+            gen_id,
+            position: self.reported_position_secs(),
+            refused: true,
+        });
+    }
+
+    /// Position backed by audible audio: clamped to the frames actually covered by
+    /// buffered PCM, never reporting ahead of what can be heard on a forward seek into
+    /// a still-downloading region. Every position this thread reports comes from here.
+    fn reported_position_secs(&self) -> f64 {
+        if self.pcm_sample_rate == 0 {
+            return 0.0;
+        }
+        let src_bytes_per_frame = (self.pcm_src_bps / 8) as usize * self.pcm_channels as usize;
+        let consumed_frames = self
+            .write_cursor
+            .checked_div(src_bytes_per_frame)
+            .unwrap_or(0) as u64;
+        let buffered_frames = self
+            .pcm_data
+            .len()
+            .checked_div(src_bytes_per_frame)
+            .unwrap_or(0) as u64;
+        let baseline = self.frames_played.saturating_sub(consumed_frames);
+        self.frames_played.min(baseline + buffered_frames) as f64 / self.pcm_sample_rate as f64
     }
 }
 
-/// RAII guard registering the render thread with the MMCSS "Pro Audio" task so it
-/// wakes on the device period. The default timer granularity wakes too late and
+/// RAII guard registering the render thread with the MMCSS "Pro Audio" task, which
+/// wakes it on the device period. The default timer granularity wakes too late and
 /// starves the endpoint, which glitches. Reverted on drop.
 struct ProAudioMmcss(HANDLE);
 
@@ -1258,8 +1376,8 @@ fn render_thread_inner(
                     match cmd {
                         ExclusiveCommand::Play { stream_id } => {
                             // Play for the live stream while already Playing is a no-op;
-                            // one for a not-yet-adopted stream is latched so its
-                            // probe-delayed StartStream applies it.
+                            // one for a not-yet-adopted stream is latched for its
+                            // probe-delayed StartStream to apply it.
                             if ctx.current_stream_id != Some(stream_id) {
                                 ctx.pending_transport = Some((stream_id, true));
                             }
@@ -1267,7 +1385,7 @@ fn render_thread_inner(
                         ExclusiveCommand::Pause { stream_id } => {
                             // Stream-scoped: a stale pause from a superseded track must
                             // not stop the live stream; one for a not-yet-adopted stream
-                            // is latched so its StartStream starts paused.
+                            // is latched, making its StartStream start paused.
                             if ctx.current_stream_id != Some(stream_id) {
                                 ctx.pending_transport = Some((stream_id, false));
                                 continue;
@@ -1319,8 +1437,12 @@ fn render_thread_inner(
                         }
                         ExclusiveCommand::ResetForSeek {
                             stream_id,
+                            gen_id,
                             start_secs,
-                        } => ctx.handle_reset_for_seek(stream_id, start_secs),
+                        } => ctx.handle_reset_for_seek(&event_tx, stream_id, gen_id, start_secs),
+                        ExclusiveCommand::SeekFailed { stream_id, gen_id } => {
+                            ctx.handle_seek_failed(&event_tx, stream_id, gen_id)
+                        }
                         ExclusiveCommand::ReleaseDevice => ctx.release_device(),
                         ExclusiveCommand::Shutdown => {
                             ctx.stop_audio_client();
@@ -1360,7 +1482,7 @@ fn render_thread_inner(
 
                     // Post-format-change resync silence: hold the endpoint at zero while the
                     // DAC PLL relocks at the new rate. Emits silence without consuming pcm_data,
-                    // so the track head is delayed, not dropped.
+                    // delaying the track head rather than dropping it.
                     if ctx.post_start_silence_remaining > 0 {
                         let _ = rc.write_to_device(
                             available,
@@ -1371,7 +1493,7 @@ fn render_thread_inner(
                             .post_start_silence_remaining
                             .saturating_sub(available as u32);
                         if !ctx.client_started {
-                            // Pre-roll is in the endpoint; start the clock so it plays out and
+                            // Pre-roll is in the endpoint; starting the clock plays it out and
                             // frees space for the next silence buffer (exclusive event mode
                             // needs a buffer written before Start()).
                             let _ = ac.start_stream();
@@ -1445,7 +1567,7 @@ fn render_thread_inner(
 
                     if remaining_frames == 0 || buffering {
                         // A mid-stream underrun (no PCM, stream not ended): re-arm
-                        // the start cushion so the next refill rebuilds a buffer
+                        // the start cushion. The next refill rebuilds a buffer
                         // before resuming, preventing a repeated stutter.
                         if remaining_frames == 0 && !ctx.stream_ended {
                             ctx.pending_start = true;
@@ -1556,29 +1678,15 @@ fn render_thread_inner(
                     }
 
                     if ctx.last_time_report.elapsed().as_millis() >= 200 {
-                        // Clamp to frames actually backed by buffered PCM so a
-                        // forward seek into a still-downloading region never reports
-                        // a position ahead of audible audio.
-                        let consumed_frames = ctx
-                            .write_cursor
-                            .checked_div(src_bytes_per_frame)
-                            .unwrap_or(0) as u64;
-                        let buffered_frames = ctx
-                            .pcm_data
-                            .len()
-                            .checked_div(src_bytes_per_frame)
-                            .unwrap_or(0) as u64;
-                        let baseline = ctx.frames_played.saturating_sub(consumed_frames);
-                        let pos = ctx.frames_played.min(baseline + buffered_frames) as f64
-                            / ctx.pcm_sample_rate as f64;
-                        let _ = event_tx.send(ExclusiveEvent::TimeUpdate(pos));
+                        let _ =
+                            event_tx.send(ExclusiveEvent::TimeUpdate(ctx.reported_position_secs()));
                         ctx.last_time_report = Instant::now();
                     }
                 }
 
                 if start_clock_now {
-                    // The endpoint is pre-filled, so start the clock. Reset the diag
-                    // timer so the first gap reflects steady-state, not the cushion poll.
+                    // The endpoint is pre-filled. Start the clock, then reset the diag
+                    // timer, keeping the first gap on steady-state, not the cushion poll.
                     if let Some(ref ac) = ctx.audio_client {
                         let _ = ac.start_stream();
                     }
@@ -1597,15 +1705,15 @@ fn render_thread_inner(
                         ctx.pending_transport = Some((stream_id, true));
                         continue;
                     }
-                    // Pause armed pending_start + Reset() the endpoint, so the Playing
-                    // loop re-primes a full period before Start() (first-start/seek path).
+                    // Pause armed pending_start + Reset() the endpoint, leaving the Playing
+                    // loop to re-prime a full period before Start() (first-start/seek path).
                     ctx.state = RenderState::Playing;
                     let _ =
                         event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
                 }
                 Ok(ExclusiveCommand::Pause { stream_id }) => {
                     // Already paused; only a pause for a not-yet-adopted stream
-                    // matters -- latch it so its StartStream starts paused.
+                    // matters. Latching it makes its StartStream start paused.
                     if ctx.current_stream_id != Some(stream_id) {
                         ctx.pending_transport = Some((stream_id, false));
                     }
@@ -1640,8 +1748,12 @@ fn render_thread_inner(
                 Ok(ExclusiveCommand::EndStream { stream_id }) => ctx.handle_end_stream(stream_id),
                 Ok(ExclusiveCommand::ResetForSeek {
                     stream_id,
+                    gen_id,
                     start_secs,
-                }) => ctx.handle_reset_for_seek(stream_id, start_secs),
+                }) => ctx.handle_reset_for_seek(&event_tx, stream_id, gen_id, start_secs),
+                Ok(ExclusiveCommand::SeekFailed { stream_id, gen_id }) => {
+                    ctx.handle_seek_failed(&event_tx, stream_id, gen_id)
+                }
                 Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                 Ok(ExclusiveCommand::Shutdown) | Err(_) => {
                     ctx.stop_audio_client();

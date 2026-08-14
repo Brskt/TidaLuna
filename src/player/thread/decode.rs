@@ -42,8 +42,17 @@ struct DecodeContext<'a> {
     event_tx: &'a mpsc::Sender<DecodeEvent>,
 }
 
+/// Where the decoder stands right now, from the counter it shares with the ring. Used for
+/// the two outcomes that leave it untouched; the landing branch reports the timestamp the
+/// reader actually returned, which is exact at the source rate rather than the output one.
+fn undisturbed_position_secs(ctx: &DecodeContext) -> f64 {
+    let frames = ctx.decoded_samples.load(Relaxed) / ctx.output_channels.max(1) as u64;
+    frames as f64 / ctx.output_rate.max(1) as f64
+}
+
 fn do_decode_seek(
     time: f64,
+    gen_id: u32,
     format: &mut dyn symphonia::core::formats::FormatReader,
     decoder: &mut dyn AudioDecoder,
     pipeline: &mut Option<AudioPipeline>,
@@ -52,7 +61,11 @@ fn do_decode_seek(
     let seek_start = std::time::Instant::now();
     let Some(time_pos) = symphonia::core::units::Time::try_from_secs_f64(time) else {
         crate::vprintln!("[SEEK]   invalid seek target: {time}");
-        let _ = ctx.event_tx.send(DecodeEvent::SeekComplete);
+        let _ = ctx.event_tx.send(DecodeEvent::SeekComplete {
+            gen_id,
+            position: undisturbed_position_secs(ctx),
+            refused: true,
+        });
         return;
     };
     let seek_to = SeekTo::Time {
@@ -71,7 +84,11 @@ fn do_decode_seek(
             let out_ts = actual_ts * ctx.output_rate as u64 / ctx.source_rate as u64;
             ctx.decoded_samples
                 .store(out_ts * ctx.output_channels as u64, Relaxed);
-            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete);
+            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete {
+                gen_id,
+                position: actual_ts as f64 / ctx.source_rate.max(1) as f64,
+                refused: false,
+            });
             let seek_ms = seek_dur.as_secs_f64() * 1000.0;
             if seek_ms >= 1.0 {
                 crate::vprintln!("[SEEK]   decode: {:.0}ms (ts: {})", seek_ms, actual_ts);
@@ -84,7 +101,11 @@ fn do_decode_seek(
             }
         }
         Err(e) => {
-            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete);
+            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete {
+                gen_id,
+                position: undisturbed_position_secs(ctx),
+                refused: true,
+            });
             crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
         }
     }
@@ -211,9 +232,10 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                 }
             };
             match cmd {
-                DecodeCommand::Seek(time) => {
+                DecodeCommand::Seek(time, gen_id) => {
                     do_decode_seek(
                         time,
+                        gen_id,
                         &mut *format,
                         &mut *decoder,
                         &mut pipeline,
@@ -260,9 +282,10 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                 // answers no SeekComplete. A Stop or a dropped sender is the only way out.
                 loop {
                     match cmd_rx.recv() {
-                        Ok(DecodeCommand::Seek(time)) => {
+                        Ok(DecodeCommand::Seek(time, gen_id)) => {
                             do_decode_seek(
                                 time,
+                                gen_id,
                                 &mut *format,
                                 &mut *decoder,
                                 &mut pipeline,
@@ -365,9 +388,10 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                         paused = true;
                         break;
                     }
-                    DecodeCommand::Seek(time) => {
+                    DecodeCommand::Seek(time, gen_id) => {
                         do_decode_seek(
                             time,
+                            gen_id,
                             &mut *format,
                             &mut *decoder,
                             &mut pipeline,

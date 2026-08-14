@@ -1,8 +1,8 @@
 //! ASIO real-time host (Windows only).
 //!
 //! The driver invokes `bufferSwitch` on its own real-time thread. The four ASIO
-//! callbacks are bare C function pointers with no `this`, so they recover state
-//! from a process-global pointer; ASIO loads one driver at a time, so a single
+//! callbacks are bare C function pointers with no `this` and recover state
+//! from a process-global pointer; ASIO loads one driver at a time, making a single
 //! global fits. The callback must never allocate, lock, block, or panic (a panic
 //! crossing `extern "system"` aborts the process).
 
@@ -59,9 +59,9 @@ struct ToneCtx {
     /// The two ping/pong output-buffer addresses per channel, filled by
     /// `createBuffers`: `out_buffers[channel][double_buffer_index]`.
     out_buffers: [[*mut u8; 2]; CHANNELS],
-    /// Raw `IASIO` COM pointer, so the callback can signal `outputReady`.
+    /// Raw `IASIO` COM pointer, letting the callback signal `outputReady`.
     com: *mut core::ffi::c_void,
-    /// Absolute frame index of the next buffer, so the tone stays phase-continuous.
+    /// Absolute frame index of the next buffer, keeping the tone phase-continuous.
     frame_counter: AtomicU64,
     /// Pre-allocated interleaved-i32 scratch (`frames * CHANNELS`). Touched only on
     /// the driver's RT thread between `start` and `stop`, hence the `UnsafeCell`.
@@ -107,7 +107,7 @@ unsafe extern "system" fn tone_buffer_switch(double_buffer_index: i32, _direct_p
         return;
     }
     // SAFETY: `TONE_CTX` is set to a leaked `Box<ToneCtx>` before `ASIOStart` and
-    // is never freed, so the pointee stays live for any in-flight callback.
+    // is never freed, leaving the pointee live for any in-flight callback.
     let ctx = unsafe { &*ctx };
     let half = (double_buffer_index & 1) as usize; // mask to 0/1, never panics
     let frames = ctx.frames;
@@ -142,7 +142,7 @@ unsafe extern "system" fn tone_buffer_switch(double_buffer_index: i32, _direct_p
         }
         // SAFETY: `createBuffers` allocated `frames * bps` writable bytes for this
         // channel/half; `base` is the address it reported. The two indexings below
-        // stay within `frames * bps` and `frames * CHANNELS`, so neither panics.
+        // stay within `frames * bps` and `frames * CHANNELS`. Neither panics.
         let out = unsafe { core::slice::from_raw_parts_mut(base, frames * bps) };
         for f in 0..frames {
             let sample = scratch[f * CHANNELS + ch];
@@ -214,7 +214,7 @@ unsafe extern "system" fn tone_buffer_switch_time_info(
 pub(crate) fn run_tone_test(info: &AsioDriverInfo) {
     // SAFETY: a standard ASIO init -> createBuffers -> start -> stop -> dispose
     // sequence. `infos` and `callbacks` are locals that outlive `dispose_buffers`,
-    // so the pointers the driver retains stay valid for the whole session.
+    // keeping the pointers the driver retains valid for the whole session.
     unsafe {
         let driver = match AsioDriver::create(info.clsid) {
             Ok(d) => d,
@@ -229,7 +229,7 @@ pub(crate) fn run_tone_test(info: &AsioDriverInfo) {
         }
 
         // With `ASIO_PANEL` set, open the driver's own config dialog before we read
-        // its capabilities, so a device/buffer change applies before `createBuffers`.
+        // its capabilities, letting a device/buffer change apply before `createBuffers`.
         // Blocks until the user closes the panel.
         if std::env::var_os("ASIO_PANEL").is_some() {
             crate::vprintln!("[ASIO] tone: opening control panel (close it to continue)");
@@ -386,15 +386,15 @@ struct StreamCtx {
     out_buffers: [[*mut u8; 2]; CHANNELS],
     /// Raw `IASIO` COM pointer, for `outputReady`.
     com: *mut c_void,
-    /// Digital gain as f32 bits (1.0 = bit-perfect passthrough). Live so the
-    /// control thread can drive it from the volume slider.
+    /// Digital gain as f32 bits (1.0 = bit-perfect passthrough). Live, letting the
+    /// control thread drive it from the volume slider.
     gain: Arc<AtomicU32>,
     /// Lock-free ring consumer; touched only on the driver RT thread.
     consumer: UnsafeCell<rtrb::Consumer<i32>>,
     /// Pre-allocated interleaved-i32 scratch (`frames * channels`).
     scratch: UnsafeCell<Box<[i32]>>,
     /// Bumped by the control thread on seek/track-change; the RT callback drains
-    /// the ring once when it changes so stale pre-seek audio is not played
+    /// the ring once when it changes, keeping stale pre-seek audio from being played
     /// (mirrors the cpal `seek_gen` drain in `thread/output.rs`).
     flush_gen: Arc<AtomicU32>,
     /// The RT thread's last-seen flush generation (touched only on the RT thread).
@@ -403,7 +403,7 @@ struct StreamCtx {
     /// zero-fill); the control thread reads it for position reporting.
     played_frames: Arc<AtomicU64>,
     /// Set on pause: the RT callback emits silence without consuming the ring or
-    /// advancing position, so the driver clock stays running (device held).
+    /// advancing position, leaving the driver clock running (device held).
     paused: Arc<AtomicBool>,
     /// De-click envelope length in frames (DECLICK_FADE_MS at this stream's rate); shared by the
     /// teardown fade-out and the post-resync fade-in.
@@ -412,7 +412,7 @@ struct StreamCtx {
     /// teardown; the RT ramps the output down then holds zero (avoids the pre-stop click).
     fade_out: AtomicBool,
     /// RT sets this once a fully-silent buffer has reached the *playing* half (one switch
-    /// after the ramp), so the control thread can `ASIOStop` without cutting a non-zero sample.
+    /// after the ramp), letting the control thread `ASIOStop` without cutting a non-zero sample.
     fade_out_done: AtomicBool,
     /// RT-only: fully-silent buffers emitted since the ramp finished. `fade_out_done` is set
     /// on the 2nd, when the 1st is guaranteed to be the audible half.
@@ -420,7 +420,7 @@ struct StreamCtx {
     /// RT-only: frames elapsed in the teardown fade-out.
     fade_out_pos: AtomicUsize,
     /// Post-start resync silence remaining (frames): the RT emits zeros without consuming
-    /// the ring so the DAC PLL relock at the new rate is inaudible.
+    /// the ring, making the DAC PLL relock at the new rate inaudible.
     intro_silence: AtomicUsize,
     /// Frames of fade-in remaining after the resync silence (0 -> unity over `fade_len`).
     intro_fade: AtomicUsize,
@@ -436,7 +436,7 @@ static STREAM_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
 static STREAM_SWITCHES: AtomicU64 = AtomicU64::new(0);
 
 /// Set by `asio_message` on a driver `kAsioResetRequest`/`kAsioBufferSizeChange`; the control
-/// thread polls it and rebuilds the stream in place (capped -- a reset loop gives up to
+/// thread polls it and rebuilds the stream in place (capped; a reset loop gives up to
 /// `RateUnsupported`: per-track shared, ASIO stays on). See `handle_reset_request`.
 static STREAM_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -453,7 +453,7 @@ unsafe extern "system" fn stream_buffer_switch(
     }
     STREAM_SWITCHES.fetch_add(1, Ordering::Relaxed);
     // SAFETY: `STREAM_CTX` is a leaked `Box<StreamCtx>` set before `ASIOStart` and
-    // never freed, so the pointee stays live for any in-flight callback.
+    // never freed, leaving the pointee live for any in-flight callback.
     let ctx = unsafe { &*ctx };
     let half = (double_buffer_index & 1) as usize;
     let frames = ctx.frames;
@@ -465,7 +465,7 @@ unsafe extern "system" fn stream_buffer_switch(
     let scratch = unsafe { &mut *ctx.scratch.get() };
     let consumer = unsafe { &mut *ctx.consumer.get() };
 
-    // Flush-gen changed (seek / track-change): drain the ring once so stale
+    // Flush-gen changed (seek / track-change): drain the ring once; stale
     // pre-seek audio is not played, then adopt the new generation. Mirrors the
     // cpal `seek_gen` drain in `thread/output.rs`.
     let cur_gen = ctx.flush_gen.load(Ordering::Relaxed);
@@ -483,7 +483,7 @@ unsafe extern "system" fn stream_buffer_switch(
     //   fade_out (teardown ramp) > paused > intro_silence (resync) > normal (+ fade-in).
     if ctx.fade_out.load(Ordering::Relaxed) {
         // Format-change teardown requested: ramp the live output down to zero then hold
-        // silence, so the imminent ASIOStop never cuts a non-zero sample (pre-stop click).
+        // silence, and the imminent ASIOStop never cuts a non-zero sample (pre-stop click).
         let len = ctx.fade_len.max(1);
         let pos = ctx.fade_out_pos.load(Ordering::Relaxed);
         if pos < len {
@@ -514,7 +514,7 @@ unsafe extern "system" fn stream_buffer_switch(
                 *s = 0;
             }
             // ASIO plays one buffer ahead: signal done on the 2nd silent fill, when the 1st is
-            // the playing half, so ASIOStop truncates silence, not the last (non-zero) ramp.
+            // the playing half, and ASIOStop truncates silence, not the last (non-zero) ramp.
             if ctx.fade_out_silence.fetch_add(1, Ordering::Relaxed) >= 1 {
                 ctx.fade_out_done.store(true, Ordering::Relaxed);
             }
@@ -527,7 +527,7 @@ unsafe extern "system" fn stream_buffer_switch(
         }
     } else if ctx.intro_silence.load(Ordering::Relaxed) > 0 {
         // Post-start resync silence: hold zero while the DAC PLL relocks at the new rate.
-        // Do NOT consume the ring or advance position -- the track head is delayed, not
+        // Do NOT consume the ring or advance position. The track head is delayed, not
         // dropped; it plays out after the silence with a fade-in.
         for s in &mut scratch[..n] {
             *s = 0;
@@ -567,7 +567,7 @@ unsafe extern "system" fn stream_buffer_switch(
             ctx.intro_fade
                 .store(fin.saturating_sub(frames), Ordering::Relaxed);
         }
-        // Count only the real frames consumed (not the underrun zero-fill), so the
+        // Count only the real frames consumed (not the underrun zero-fill), keeping the
         // control thread's position reporting tracks audible audio.
         ctx.played_frames
             .fetch_add((to_read / channels) as u64, Ordering::Relaxed);
@@ -848,7 +848,7 @@ fn run_ring_to_asio(
             ];
         }
 
-        // Pre-fill a cushion so the first callbacks do not underrun.
+        // Pre-fill a cushion, keeping the first callbacks from underrunning.
         let cushion = frames * channels * 4;
         for _ in 0..1000 {
             if consumer.slots() >= cushion {
@@ -1059,7 +1059,14 @@ pub(crate) enum AsioCommand {
     /// without reopening the driver.
     ResetForSeek {
         stream_id: u32,
+        gen_id: u32,
         start_secs: f64,
+    },
+    /// The decoder could not seek. Carries no position: the control thread owns the answer
+    /// and reports the seek unsettled, leaving the player to fall back on what it last knew.
+    SeekFailed {
+        stream_id: u32,
+        gen_id: u32,
     },
     Play {
         stream_id: u32,
@@ -1074,16 +1081,31 @@ pub(crate) enum AsioCommand {
 /// `InitFailed` map to the matching `DeviceErrorKind::Asio*` + a Shared fallback.
 pub(crate) enum AsioEvent {
     TimeUpdate(f64),
+    /// The answer to one dispatched seek, sent whatever the outcome. `position` is where
+    /// playback actually is (the landing point when the decoder seeked, the untouched
+    /// current position when it refused), never the target nobody reached. `refused`
+    /// drives the resume store: a refused target must be evicted, not persisted. Distinct
+    /// from `TimeUpdate`, sparing the player any guess about whether a periodic report is
+    /// this seek's answer; `stream_id`-scoped like `Completed`, keeping an ack off the
+    /// track that replaced it.
+    SeekSettled {
+        stream_id: u32,
+        /// Echoed back from the command untouched. Judging an ack's freshness belongs to
+        /// the player thread alone, the only party that knows which seek it awaits.
+        gen_id: u32,
+        position: f64,
+        refused: bool,
+    },
     StateChange(PlaybackState),
     Duration(f64),
     DriverNotFound,
     FormatUnsupported,
-    /// The device can't play this track's format in ASIO -- either the rate was rejected up front
+    /// The device can't play this track's format in ASIO: either the rate was rejected up front
     /// (`can_sample_rate`/`set_sample_rate`) or the driver posted a reset it needs to clock it.
     /// Per-track: route THIS track to shared but keep ASIO on for other rates.
     RateUnsupported,
     InitFailed(String),
-    /// Track finished (EOF + drained). Carries the stream_id so a stale completion from a
+    /// Track finished (EOF + drained). Carries the stream_id: a stale completion from a
     /// superseded stream can't clear a newer track (which would force a re-arm/double-load).
     Completed(u32),
 }
@@ -1106,7 +1128,7 @@ enum AsioState {
     /// A format change is pending over a live clock: the RT is fading the old stream
     /// to silence and the run loop polls `fade_out_done` between commands, running
     /// `finish_rebuild` when it lands or `deadline` elapses. A dedicated state keeps
-    /// the loop on a bounded recv -- a pending rebuild can never starve behind the
+    /// the loop on a bounded recv: a pending rebuild can never starve behind the
     /// Idle/Paused arms' blocking `recv()`.
     Rebuilding {
         deadline: Instant,
@@ -1151,7 +1173,7 @@ struct ControlCtx {
     /// Shared with the live `StreamCtx`: real frames the RT callback has consumed.
     played_frames: Arc<AtomicU64>,
     /// Shared with the live `StreamCtx`: while true the RT callback emits silence without
-    /// consuming the ring, so the driver clock stays held (device kept) during a pause.
+    /// consuming the ring, leaving the driver clock held (device kept) during a pause.
     paused: Arc<AtomicBool>,
     /// Heap-stable callbacks struct handed to `createBuffers` (kept alive for the
     /// driver's lifetime).
@@ -1169,18 +1191,18 @@ struct ControlCtx {
     duration: f64,
     /// Frame index of the stream start (from `start_secs`).
     baseline_frames: u64,
-    /// `played_frames` snapshot at the last start/seek, subtracted so position is
+    /// `played_frames` snapshot at the last start/seek, subtracted, leaving position
     /// relative to this stream rather than the lifetime of the `played_frames` cell.
     played_offset: u64,
     stream_ended: bool,
     pending_start: bool,
     /// When the deferred (cold) start began waiting for a cushion; bounds the wait
-    /// so a slow/stalled decode can't leave ASIO silent forever.
+    /// keeping a slow/stalled decode from leaving ASIO silent forever.
     pending_since: Option<Instant>,
     client_started: bool,
     has_buffers: bool,
     /// Set when the ring first drains after EOF; completion fires after a short
-    /// grace so the last ASIO double-buffer plays out.
+    /// grace, letting the last ASIO double-buffer play out.
     drain_since: Option<Instant>,
     last_time_report: Instant,
     /// Throttle for the diagnostic status log.
@@ -1253,14 +1275,14 @@ impl ControlCtx {
                 return Err(AsioEvent::RateUnsupported);
             }
             // Some clock-locked interfaces accept can_sample_rate but reject the switch;
-            // rendering at the old clock plays wrong-speed, so fall back to shared.
+            // rendering at the old clock plays wrong-speed. Fall back to shared.
             if !asio_ok(driver.set_sample_rate(sample_rate as f64)) {
                 return Err(AsioEvent::RateUnsupported);
             }
             // set_sample_rate can return ASE_OK yet leave the driver on its old clock
             // (ASIO4ALL/Steinberg-style drivers apply a rate change only after a full
             // reload). createBuffers + start would then run at a phantom rate and
-            // bufferSwitch never fires -- the "clock won't start after a rate change"
+            // bufferSwitch never fires: the "clock won't start after a rate change"
             // hang. Read the rate back and require a match; poll briefly, since a few
             // drivers need a moment to report the new value (JUCE sleeps after setSampleRate).
             let target = sample_rate as f64;
@@ -1334,7 +1356,7 @@ impl ControlCtx {
                 ];
             }
 
-            // Two-second ring, at least 8 ASIO buffers so the pre-fill cushion always fits.
+            // Two-second ring, at least 8 ASIO buffers, enough for the pre-fill cushion to fit.
             let ring_capacity = (sample_rate as usize * channels * 2).max(frames * channels * 8);
             let (producer, consumer) = rtrb::RingBuffer::<i32>::new(ring_capacity);
             let flush_gen = Arc::new(AtomicU32::new(0));
@@ -1381,7 +1403,7 @@ impl ControlCtx {
 
     /// Arm the RT fade-to-silence, adopt the new stream's identity (so intervening
     /// commands target it), and hand the device rebuild to the run-loop `Rebuilding`
-    /// poll -- not blocking the control thread for the whole fade window.
+    /// poll, not blocking the control thread for the whole fade window.
     #[allow(clippy::too_many_arguments)]
     fn begin_deferred_rebuild(
         &mut self,
@@ -1424,7 +1446,7 @@ impl ControlCtx {
     /// Finish a deferred format-change rebuild: tear the faded stream down and open the
     /// new one. The logical identity was adopted at arm time; only the device resources
     /// and the transport settle here. ASIOStop/createBuffers stay synchronous
-    /// driver-paced COM on this thread (STA affinity) -- the deferral removes the fade
+    /// driver-paced COM on this thread (STA affinity); the deferral removes the fade
     /// wait, not the driver's own stop/rebuild cost.
     fn finish_rebuild(&mut self, start_paused: bool, event_tx: &mpsc::Sender<AsioEvent>) {
         self.dispose_stream();
@@ -1513,7 +1535,7 @@ impl ControlCtx {
 
         if !self.has_buffers || format_changed {
             // Rate change tears the stream down and re-creates buffers at the new rate (RME
-            // changes buffer size + channel count per rate, so reuse isn't possible).
+            // changes buffer size + channel count per rate, ruling reuse out).
             self.dispose_stream();
             match self.build_stream(sample_rate, want_channels) {
                 Ok(opened) => self.install_stream(opened, format_changed, sample_rate),
@@ -1526,18 +1548,18 @@ impl ControlCtx {
             // Adopting a DIFFERENT stream over a clock that never started: the ring still
             // holds the superseded stream's PCM, which would otherwise PLAY (a cold-restored
             // armed track bleeding into the next select) since maybe_start assumes a fresh
-            // ring. The clock is stopped here, so the control thread can safely drain it.
+            // ring. The clock is stopped here, leaving the control thread free to drain it.
             if !self.client_started && self.stream_id != Some(stream_id) {
                 self.discard_ring_leftovers();
             }
-            // Reuse the open buffers -- the clock stays RUNNING (continuous device hold).
-            // Bump flush_gen so the RT callback drains the previous track's audio from the
+            // Reuse the open buffers; the clock stays RUNNING (continuous device hold).
+            // Bump flush_gen, making the RT callback drain the previous track's audio from the
             // ring on its next tick. The control thread must NOT touch the consumer here (the
             // RT thread owns it while the clock runs); pump_ring is gated on the RT having
-            // drained (local_flush_gen == flush_gen) so the new track's head isn't lost.
+            // drained (local_flush_gen == flush_gen), keeping the new track's head.
             self.flush_gen.fetch_add(1, Ordering::Relaxed);
             // Same-format reuse keeps the clock; clear any unfinished resync silence / fade-in
-            // left from a just-prior rate change so it can't clip the head of this same-rate track.
+            // left from a just-prior rate change, keeping it from clipping the head of this same-rate track.
             if !self.ctx_ptr.is_null() {
                 // SAFETY: ctx_ptr is the live leaked StreamCtx; Relaxed stores of these
                 // standalone counters race-free with the RT's Relaxed reads.
@@ -1548,7 +1570,7 @@ impl ControlCtx {
                 }
             }
             // A Stop during cold-start pre-fill leaves reusable buffers but an idle driver.
-            // Re-arm the deferred cold start, guarded on !client_started so the normal
+            // Re-arm the deferred cold start, guarded on !client_started; the normal
             // reuse-while-running path can't double-start the live clock.
             if !self.client_started {
                 self.pending_start = true;
@@ -1570,8 +1592,8 @@ impl ControlCtx {
     }
 
     /// Adopt a stream's logical identity: ids, format, position baseline, per-stream
-    /// flags, and the decoder's throttle cell. Device resources are NOT touched, so a
-    /// deferred rebuild adopts these up front -- intervening commands then target the
+    /// flags, and the decoder's throttle cell. Device resources are NOT touched, and a
+    /// deferred rebuild adopts these up front; intervening commands then target the
     /// new stream by id while the old device is still fading.
     #[allow(clippy::too_many_arguments)]
     fn adopt_stream_identity(
@@ -1606,7 +1628,7 @@ impl ControlCtx {
         self.last_time_report = Instant::now();
         // Consume the latched intent only on id match; a mismatch targets a different,
         // not-yet-adopted stream (a rapid second skip's StartStream can lag this settle),
-        // so leave it for that stream's own adoption instead of discarding it here.
+        // leaving it for that stream's own adoption instead of discarding it here.
         let start_paused = match self.pending_transport {
             Some((id, play)) if self.stream_id == Some(id) => {
                 self.pending_transport = None;
@@ -1638,19 +1660,19 @@ impl ControlCtx {
         self.played_frames = opened.played_frames;
         self.paused = opened.paused;
         self.has_buffers = true;
-        // Fresh buffers: the clock is stopped (dispose_stream stopped it), so arm
+        // Fresh buffers: the clock is stopped (dispose_stream stopped it). Arm
         // the deferred cold start. On a REUSE track-change the clock keeps running
-        // (continuous device hold), so these are NOT reset there -- doing so would
+        // (continuous device hold), and these are NOT reset there: doing so would
         // make maybe_start issue a second driver.start() on the live driver.
         self.client_started = false;
         self.pending_start = true;
         self.pending_since = Some(Instant::now());
-        // Set the resync mask before ASIOStart (maybe_start) so the RT honours it from
+        // Set the resync mask before ASIOStart (maybe_start), letting the RT honour it from
         // the first callback.
         if format_changed && !self.ctx_ptr.is_null() {
             let resync = silence_frames(sample_rate, RESYNC_SILENCE_MS);
             // SAFETY: ctx_ptr was just installed and the clock is not started yet
-            // (pending_start), so no RT callback races these stores.
+            // (pending_start), leaving no RT callback to race these stores.
             unsafe {
                 let c = &*self.ctx_ptr;
                 c.intro_silence.store(resync, Ordering::Relaxed);
@@ -1661,7 +1683,7 @@ impl ControlCtx {
 
     fn handle_push_pcm(&mut self, stream_id: u32, samples: Vec<i32>) {
         // Only the adopted stream's PCM is staged; a superseded decoder's samples (id
-        // mismatch) are dropped, so that stale stream's ring starves to silence.
+        // mismatch) are dropped, starving that stale stream's ring to silence.
         if self.stream_id == Some(stream_id) {
             self.staging.extend(samples);
         }
@@ -1673,15 +1695,21 @@ impl ControlCtx {
         }
     }
 
-    fn handle_reset_for_seek(&mut self, stream_id: u32, start_secs: f64) {
+    fn handle_reset_for_seek(
+        &mut self,
+        event_tx: &mpsc::Sender<AsioEvent>,
+        stream_id: u32,
+        gen_id: u32,
+        start_secs: f64,
+    ) {
         if self.stream_id != Some(stream_id) {
             return;
         }
         // Re-base the position and flush stale pre-seek audio. While the clock runs the RT
         // callback drains the ring on the flush_gen bump; while it is stopped (cold/paused) the
-        // RT never ticks, so the ring is rebuilt below to evict any already-pumped pre-seek PCM.
+        // RT never ticks, and the ring is rebuilt below to evict any already-pumped pre-seek PCM.
         // Mid-rebuild the old ring is left alone: it is mid-fade (a drain would cut the ramp
-        // straight to zero -- the exact click the fade prevents) and finish_rebuild disposes
+        // straight to zero, the exact click the fade prevents) and finish_rebuild disposes
         // it wholesale anyway.
         if !matches!(self.state, AsioState::Rebuilding { .. }) {
             self.flush_gen.fetch_add(1, Ordering::Relaxed);
@@ -1696,13 +1724,13 @@ impl ControlCtx {
         self.stream_ended = false;
         self.drain_since = None;
 
-        // Clock stopped: the RT can't drain, so rebuild the ring to evict any pre-seek PCM
+        // Clock stopped: the RT can't drain. Rebuild the ring to evict any pre-seek PCM
         // already pumped into it, then adopt the flush generation on the RT side (else the
         // resume/maybe_start reconcile would mark the stale ring as seen and play it).
         if !self.client_started && !self.ctx_ptr.is_null() {
             let (producer, consumer) = rtrb::RingBuffer::<i32>::new(self.ring_capacity);
             self.producer = Some(producer);
-            // SAFETY: client_started == false means the driver clock was never started, so no
+            // SAFETY: client_started == false means the driver clock was never started, and no
             // RT callback is touching the consumer; safe to replace it and the local flush gen.
             unsafe {
                 *(*self.ctx_ptr).consumer.get() = consumer;
@@ -1711,6 +1739,46 @@ impl ControlCtx {
                     .store(self.flush_gen.load(Ordering::Relaxed), Ordering::Relaxed);
             }
         }
+        // Answer the seek from here rather than leaving it to the periodic report: that
+        // report is only emitted by the playing arm; a seek taken in pause would reach
+        // no convergence at all and the player would stay pinned until the next Play.
+        let _ = event_tx.send(AsioEvent::SeekSettled {
+            stream_id,
+            gen_id,
+            position: start_secs,
+            refused: false,
+        });
+    }
+
+    /// The decoder refused the seek. Answer anyway: an unanswered seek leaves the player
+    /// pinned on a target nothing will ever converge to, for the rest of the track. The
+    /// position is computed here rather than left to the player, whose own copy still
+    /// holds the optimistic target the dispatch wrote before this refusal was known.
+    fn handle_seek_failed(&self, event_tx: &mpsc::Sender<AsioEvent>, stream_id: u32, gen_id: u32) {
+        if self.stream_id != Some(stream_id) {
+            return;
+        }
+        let _ = event_tx.send(AsioEvent::SeekSettled {
+            stream_id,
+            gen_id,
+            position: self.reported_position_secs(),
+            refused: true,
+        });
+    }
+
+    /// Baseline plus the frames the RT callback has actually played, clamped to the
+    /// track duration. Every position this thread reports comes from here; the counters
+    /// only move on a confirmed transition, making it truthful while paused too.
+    fn reported_position_secs(&self) -> f64 {
+        let played = self
+            .played_frames
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.played_offset);
+        let mut pos = (self.baseline_frames + played) as f64 / self.sample_rate.max(1) as f64;
+        if self.duration > 0.0 {
+            pos = pos.min(self.duration);
+        }
+        pos
     }
 
     fn resume(&mut self, event_tx: &mpsc::Sender<AsioEvent>) {
@@ -1730,12 +1798,12 @@ impl ControlCtx {
             self.pending_since = None;
             // Adopt the current flush generation on the RT side before starting the clock: a
             // flush_gen bump from a paused initial-seek was never seen by the (stopped) RT, so
-            // the first callback would drain the ring -- which here holds the correct post-seek
+            // the first callback would drain the ring, which here holds the correct post-seek
             // audio, not stale pre-seek audio.
             if !self.ctx_ptr.is_null() {
                 let cur_gen = self.flush_gen.load(Ordering::Relaxed);
                 // SAFETY: ctx_ptr is the leaked StreamCtx, live until dispose_stream; the
-                // clock is stopped here (client_started==false) so no RT callback races this.
+                // clock is stopped here (client_started==false), leaving no RT callback to race this.
                 unsafe {
                     (*self.ctx_ptr)
                         .local_flush_gen
@@ -1764,9 +1832,9 @@ impl ControlCtx {
         // While the clock is running and an RT flush is still pending, do NOT write: the RT
         // callback drains the ring once when it observes a flush_gen bump (track-change /
         // seek) then sets local_flush_gen. Writing the new track's head before that drain
-        // would feed it into the drain and lose it. Gated on `client_started` so a paused
+        // would feed it into the drain and lose it. Gated on `client_started`; a paused
         // cold-start load (clock not yet started, RT never advances local_flush_gen) still
-        // fills the ring -- the resume reconcile prevents that ring from being drained.
+        // fills the ring; the resume reconcile prevents that ring from being drained.
         if self.client_started && !self.ctx_ptr.is_null() {
             let want = self.flush_gen.load(Ordering::Relaxed);
             // SAFETY: ctx_ptr is the live leaked StreamCtx (valid until dispose_stream);
@@ -1791,7 +1859,7 @@ impl ControlCtx {
             let written = chunk.fill_from_iter(self.staging.iter().copied().take(n));
             self.staging.drain(..written);
             // Ring entries count as consumed for the throttle: the ring bounds
-            // itself by capacity, so only channel + staging need the credit.
+            // itself by capacity, leaving only channel + staging to need the credit.
             self.consumed.fetch_add(written as u64, Ordering::Relaxed);
             if written == 0 {
                 break;
@@ -1799,8 +1867,8 @@ impl ControlCtx {
         }
     }
 
-    /// Once the pre-fill cushion is buffered, start the driver clock (deferred so the
-    /// first callbacks do not underrun - the ASIO analogue of wasapi's deferred Start).
+    /// Once the pre-fill cushion is buffered, start the driver clock (deferred to keep the
+    /// first callbacks from underrunning: the ASIO analogue of wasapi's deferred Start).
     fn maybe_start(&mut self, event_tx: &mpsc::Sender<AsioEvent>) {
         if !self.pending_start || self.driver.is_none() {
             return;
@@ -1821,12 +1889,12 @@ impl ControlCtx {
             return;
         }
         // Same reconcile as `resume`: an auto-play cold start with an initial seek bumped
-        // flush_gen while the clock was stopped, so adopt it before starting or the first
+        // flush_gen while the clock was stopped. Adopt it before starting or the first
         // callback would drain the (correct) post-seek cushion.
         if !self.ctx_ptr.is_null() {
             let cur_gen = self.flush_gen.load(Ordering::Relaxed);
             // SAFETY: ctx_ptr is the leaked StreamCtx, live until dispose_stream; the clock is
-            // stopped here (pending_start, client not started) so no RT callback races this.
+            // stopped here (pending_start, client not started), leaving no RT callback to race this.
             unsafe {
                 (*self.ctx_ptr)
                     .local_flush_gen
@@ -1860,20 +1928,12 @@ impl ControlCtx {
         if !self.client_started || self.last_time_report.elapsed().as_millis() < 200 {
             return;
         }
-        let played = self
-            .played_frames
-            .load(Ordering::Relaxed)
-            .saturating_sub(self.played_offset);
-        let mut pos = (self.baseline_frames + played) as f64 / self.sample_rate.max(1) as f64;
-        if self.duration > 0.0 {
-            pos = pos.min(self.duration);
-        }
-        let _ = event_tx.send(AsioEvent::TimeUpdate(pos));
+        let _ = event_tx.send(AsioEvent::TimeUpdate(self.reported_position_secs()));
         self.last_time_report = Instant::now();
     }
 
     /// Complete the track once EOF is reached, staging is drained, and the ring has
-    /// emptied - after a short grace so the last ASIO double-buffer plays out.
+    /// emptied, after a short grace that lets the last ASIO double-buffer play out.
     fn maybe_complete(&mut self, event_tx: &mpsc::Sender<AsioEvent>) {
         if !self.stream_ended || !self.staging.is_empty() || !self.client_started {
             return;
@@ -1888,7 +1948,7 @@ impl ControlCtx {
         }
         match self.drain_since {
             Some(since) if since.elapsed() >= Duration::from_millis(120) => {
-                // Keep the clock running (continuous hold) -- the RT emits silence until the
+                // Keep the clock running (continuous hold); the RT emits silence until the
                 // next track. flush_gen drops the last drained buffer.
                 self.flush_gen.fetch_add(1, Ordering::Relaxed);
                 let _ = event_tx.send(AsioEvent::TimeUpdate(self.duration));
@@ -1944,8 +2004,8 @@ impl ControlCtx {
         }
         STREAM_CTX.store(core::ptr::null_mut(), Ordering::Release);
         if !self.ctx_ptr.is_null() {
-            // SAFETY: ASIOStop above guarantees no RT callback is in flight, so the
-            // leaked StreamCtx box has no live reader and can be reclaimed.
+            // SAFETY: ASIOStop above guarantees no RT callback is in flight, which leaves
+            // the leaked StreamCtx box without a live reader and free to reclaim.
             unsafe {
                 drop(Box::from_raw(self.ctx_ptr));
             }
@@ -1956,15 +2016,15 @@ impl ControlCtx {
     }
 
     /// Drain the PCM still queued in the live ring (the decoded-but-unplayed head)
-    /// so a reset rebuild can re-queue it instead of skipping it. ASIOStop first so
+    /// letting a reset rebuild re-queue it instead of skipping it. ASIOStop first:
     /// no RT callback can race the read; dispose_stream's second stop is a no-op.
     fn drain_ring_leftovers(&mut self) -> Vec<i32> {
         self.stop_driver_if_running();
         if self.ctx_ptr.is_null() {
             return Vec::new();
         }
-        // SAFETY: the clock is stopped (no RT callback in flight), so the control
-        // thread is the only reader of the leaked StreamCtx until dispose_stream.
+        // SAFETY: the clock is stopped (no RT callback in flight), which leaves the control
+        // thread as the only reader of the leaked StreamCtx until dispose_stream.
         let consumer = unsafe { &mut *(*self.ctx_ptr).consumer.get() };
         let avail = consumer.slots();
         let mut out = Vec::with_capacity(avail);
@@ -1980,7 +2040,7 @@ impl ControlCtx {
     }
 
     /// Discard whatever PCM the ring still holds (superseded stream's head).
-    /// Only legal while the clock is stopped -- then the control thread is the
+    /// Only legal while the clock is stopped: then the control thread is the
     /// sole reader of the leaked StreamCtx consumer, same contract as
     /// `drain_ring_leftovers`, but the content is dropped, never restaged.
     fn discard_ring_leftovers(&mut self) {
@@ -1988,8 +2048,8 @@ impl ControlCtx {
         if self.ctx_ptr.is_null() {
             return;
         }
-        // SAFETY: the clock is stopped (no RT callback in flight), so the control
-        // thread is the only reader of the leaked StreamCtx.
+        // SAFETY: the clock is stopped (no RT callback in flight), which leaves the control
+        // thread as the only reader of the leaked StreamCtx.
         let consumer = unsafe { &mut *(*self.ctx_ptr).consumer.get() };
         let avail = consumer.slots();
         if avail > 0
@@ -2019,7 +2079,7 @@ impl ControlCtx {
             } => {
                 if let AsioState::Rebuilding { deadline, .. } = self.state {
                     // Latest-wins supersede: a rebuild is already pending on the fading
-                    // old stream, so re-target its adopted identity and keep the armed
+                    // old stream. Re-target its adopted identity and keep the armed
                     // fade + deadline; the single finish_rebuild then builds straight
                     // at the newest format (no second fade, no second build).
                     let want_channels = (channels as usize).clamp(1, CHANNELS);
@@ -2058,8 +2118,12 @@ impl ControlCtx {
             AsioCommand::EndStream { stream_id } => self.handle_end_stream(stream_id),
             AsioCommand::ResetForSeek {
                 stream_id,
+                gen_id,
                 start_secs,
-            } => self.handle_reset_for_seek(stream_id, start_secs),
+            } => self.handle_reset_for_seek(event_tx, stream_id, gen_id, start_secs),
+            AsioCommand::SeekFailed { stream_id, gen_id } => {
+                self.handle_seek_failed(event_tx, stream_id, gen_id)
+            }
             AsioCommand::Play { stream_id } => {
                 // Stream-scoped, like PushPcm/EndStream/Completed: a stale Play from a
                 // superseded track (the stop->load->play storm) must not resume the wrong
@@ -2073,7 +2137,7 @@ impl ControlCtx {
                     self.resume(event_tx);
                 } else if self.stream_id != Some(stream_id) {
                     // Pre-adoption: this stream's probe-delayed StartStream hasn't
-                    // landed yet -- latch the intent; its adoption applies it.
+                    // landed yet. Latch the intent; its adoption applies it.
                     self.pending_transport = Some((stream_id, true));
                 }
             }
@@ -2094,7 +2158,7 @@ impl ControlCtx {
                     let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Paused));
                 } else if self.stream_id != Some(stream_id) {
                     // Pre-adoption pause (e.g. clicked during an auto-play arm):
-                    // latch it so the adoption starts paused instead of dropping it.
+                    // latch it, making the adoption start paused instead of dropping it.
                     self.pending_transport = Some((stream_id, false));
                 }
             }
@@ -2132,7 +2196,7 @@ impl ControlCtx {
                             return;
                         }
                     }
-                    // Keep the ring topped while paused so resume is glitch-free.
+                    // Keep the ring topped while paused, making resume glitch-free.
                     self.handle_reset_request(&event_tx);
                     self.pump_ring();
                 }
@@ -2166,7 +2230,7 @@ impl ControlCtx {
                     self.log_status();
                 }
                 AsioState::Rebuilding { .. } => {
-                    // Same bounded cadence as Playing, so queued commands keep flowing
+                    // Same bounded cadence as Playing, keeping queued commands flowing
                     // while the RT fades. The Playing helpers stay off: until
                     // finish_rebuild, self.* mixes the adopted (new) identity with the
                     // old fading device, and pump_ring would feed the new track's head
@@ -2249,7 +2313,7 @@ impl ControlCtx {
         // The old ring still holds the decoded-but-unplayed head (up to a full ring).
         // dispose_stream would drop it while pump_ring refills from staging's current
         // point, desyncing the reported position from the audible content. Drain it
-        // back (stops the clock, so the position snapshot below is exact) and re-queue it.
+        // back (stops the clock, making the position snapshot below exact) and re-queue it.
         let leftovers = self.drain_ring_leftovers();
         // Preserve the audible position across the rebuild. build_stream mints a fresh,
         // zeroed played_frames counter; without carrying the current position forward the
@@ -2280,7 +2344,7 @@ impl ControlCtx {
                     restored.append(&mut self.staging);
                     self.staging = restored;
                 }
-                // Re-base onto the fresh (zeroed) counter so position continues from the
+                // Re-base onto the fresh (zeroed) counter, letting position continue from the
                 // pre-reset point instead of jumping back to the stream start.
                 self.baseline_frames = cur_pos_frames;
                 self.played_offset = self.played_frames.load(Ordering::Relaxed);
@@ -2296,7 +2360,7 @@ impl ControlCtx {
         }
     }
 
-    /// Diagnostic: periodically dump ring/staging/playback state so a mid-playback
+    /// Diagnostic: periodically dump ring/staging/playback state; a mid-playback
     /// silence can be classified (ring-starved vs stopped callback vs premature completion).
     fn log_status(&mut self) {
         if self.last_status.elapsed() < Duration::from_secs(1) {
@@ -2428,9 +2492,9 @@ impl Drop for AsioHandle {
 
 /// Decode a `RamBuffer` (the same source the cpal/exclusive paths read) to
 /// interleaved i32 and feed the ASIO control thread via `AsioCommand`. Mirrors
-/// `wasapi::stream_flac_reader_to_wasapi`, but the ring is i32 so `PushPcm` carries
+/// `wasapi::stream_flac_reader_to_wasapi`, but the ring is i32; `PushPcm` carries
 /// `Vec<i32>` directly (no byte-packing) and the RT host renders it as src_bps=32.
-/// `RamBuffer` is itself a `MediaSource`, so no `SizedMediaSource` wrapper is needed.
+/// `RamBuffer` is itself a `MediaSource`, needing no `SizedMediaSource` wrapper.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_reader_to_asio(
     reader: RamBuffer,
@@ -2438,8 +2502,11 @@ pub(crate) fn stream_reader_to_asio(
     cmd_tx: mpsc::Sender<AsioCommand>,
     cancel: Arc<AtomicBool>,
     seek_to: Option<f64>,
+    // Identity of the initial seek, minted by the spawn alongside `stream_id`; the live
+    // seeks that follow carry their own on the channel.
+    seek_gen_id: u32,
     start_paused: bool,
-    seek_rx: mpsc::Receiver<f64>,
+    seek_rx: mpsc::Receiver<(f64, u32)>,
     consumed: Arc<AtomicU64>,
 ) -> Result<(), String> {
     let mss = MediaSourceStream::new(Box::new(reader), Default::default());
@@ -2480,7 +2547,7 @@ pub(crate) fn stream_reader_to_asio(
         0.0
     };
 
-    // StartStream FIRST at offset 0 so the control thread opens the driver while a
+    // StartStream FIRST at offset 0 makes the control thread open the driver while a
     // forward seek into not-yet-downloaded data resolves; the landing position
     // follows via ResetForSeek (mirrors the exclusive path).
     cmd_tx
@@ -2495,7 +2562,7 @@ pub(crate) fn stream_reader_to_asio(
         })
         .map_err(|_| "failed to send StartStream".to_string())?;
 
-    let mut pending_initial_seek: Option<f64> = None;
+    let mut pending_initial_seek: Option<(f64, u32)> = None;
     let mut was_initial_seek = false;
     if let Some(t) = seek_to
         && t > 0.0
@@ -2521,6 +2588,7 @@ pub(crate) fn stream_reader_to_asio(
                     if cmd_tx
                         .send(AsioCommand::ResetForSeek {
                             stream_id,
+                            gen_id: seek_gen_id,
                             start_secs: actual,
                         })
                         .is_err()
@@ -2530,8 +2598,22 @@ pub(crate) fn stream_reader_to_asio(
                 }
                 Err(e) => {
                     crate::vprintln!("[ASIO] decoder seek to {t:.1}s failed, will retry: {e}");
-                    pending_initial_seek = Some(t);
+                    pending_initial_seek = Some((t, seek_gen_id));
                 }
+            }
+        } else {
+            // A target that `Time` cannot represent will not become representable: refuse it
+            // rather than arm a retry that can only fail the same way.
+            crate::vprintln!("[ASIO] decoder seek to {t:.1}s is out of range");
+            was_initial_seek = false;
+            if cmd_tx
+                .send(AsioCommand::SeekFailed {
+                    stream_id,
+                    gen_id: seek_gen_id,
+                })
+                .is_err()
+            {
+                return Ok(());
             }
         }
     }
@@ -2568,7 +2650,22 @@ pub(crate) fn stream_reader_to_asio(
             pending_seek = Some(t);
             was_initial_seek = false;
         }
-        if let Some(t) = pending_seek
+        // Answered here rather than in the chain below: a failed conversion makes that
+        // chain fall through as a whole, dropping the seek with no reply at all.
+        if let Some((t, gen_id)) = pending_seek
+            && symphonia::core::units::Time::try_from_secs_f64(t).is_none()
+        {
+            crate::vprintln!("[ASIO] live seek to {t:.1}s is out of range");
+            pending_seek = None;
+            was_initial_seek = false;
+            if cmd_tx
+                .send(AsioCommand::SeekFailed { stream_id, gen_id })
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        if let Some((t, gen_id)) = pending_seek
             && let Some(time_pos) = symphonia::core::units::Time::try_from_secs_f64(t)
         {
             match format_reader.seek(
@@ -2590,6 +2687,7 @@ pub(crate) fn stream_reader_to_asio(
                     if cmd_tx
                         .send(AsioCommand::ResetForSeek {
                             stream_id,
+                            gen_id,
                             start_secs: actual,
                         })
                         .is_err()
@@ -2600,7 +2698,12 @@ pub(crate) fn stream_reader_to_asio(
                 Err(e) => {
                     crate::vprintln!("[ASIO] live seek to {t:.1}s failed: {e}");
                     if was_initial_seek {
-                        pending_initial_seek = Some(t);
+                        pending_initial_seek = Some((t, gen_id));
+                    } else if cmd_tx
+                        .send(AsioCommand::SeekFailed { stream_id, gen_id })
+                        .is_err()
+                    {
+                        return Ok(());
                     }
                 }
             }
@@ -2614,7 +2717,7 @@ pub(crate) fn stream_reader_to_asio(
                     return Ok(());
                 }
                 // Real EOF: arm completion, then PARK on the seek channel instead of
-                // returning -- dropping seek_rx would kill live seeks for the rest of the
+                // returning. Dropping seek_rx would kill live seeks for the rest of the
                 // track (a cached source decodes far ahead of playback while the control
                 // thread still owns the buffered tail). ResetForSeek un-ends the stream on
                 // a later seek, re-arming completion after it.
@@ -2622,7 +2725,7 @@ pub(crate) fn stream_reader_to_asio(
                 let _ = cmd_tx.send(AsioCommand::EndStream { stream_id });
                 // Disconnect is the ONLY exit while parked: every supersede path
                 // stores `cancel` then drops the sender, and natural completion
-                // just drops it -- either way nobody can seek this stream again.
+                // just drops it. Either way nobody can seek this stream again.
                 match seek_rx.recv() {
                     Ok(t) => {
                         pending_initial_seek = Some(t);
