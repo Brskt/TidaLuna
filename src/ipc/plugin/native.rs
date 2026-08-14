@@ -375,12 +375,16 @@ fn do_register(
     } else {
         serde_json::json!(attempt.trust_grants)
     };
+    // Carried per registration rather than in the child's environment: the sandbox can
+    // withhold a register field from an untrusted plugin, and cannot withhold an env var
+    // from anyone. The host decides who receives it, so no predicate lives in two places.
     let cmd = serde_json::json!({
         "type": "register",
         "name": attempt.reservation.module(),
         "code": attempt.code,
         "trust": trust_json,
         "dataDir": attempt.data_dir,
+        "runtimeDir": std::env::var("XDG_RUNTIME_DIR").ok(),
     });
     let rx = match runtime.send_command(cmd) {
         Ok(rx) => rx,

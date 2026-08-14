@@ -72,8 +72,13 @@ BLOCKED_MODULES.forEach(function(id) {
 // Pre-load worker_threads for the safe shim below to capture its exports before hardening
 try { require("worker_threads"); } catch (_) {}
 
+// Captured methods, not id.startsWith/id.slice: a plugin that replaced either on
+// String.prototype could make canonicalize return "buffer", turning isSafe(anything)
+// true and handing back the real, unsandboxed module. Runs at decision time: the live
+// prototype is whatever the last plugin left it.
 function canonicalize(id) {
-    return id.startsWith("node:") ? id.slice(5) : id;
+    return _StringPrototypeStartsWith(id, "node:")
+        ? _StringPrototypeSlice(id, 5) : id;
 }
 
 function isSafe(id) {
@@ -88,11 +93,56 @@ function isBlocked(id) {
     return BLOCKED_MODULES.has(id) || BLOCKED_MODULES.has(canonicalize(id));
 }
 
+// ── Object statics, captured before anything can replace them ──────────
+// Ahead of the other host-private refs further down: the env builder below runs at
+// register time too, and `Object` is deliberately left unfrozen (freezePrimordials),
+// while restorePrototypes only ever restores PROTOTYPE descriptors. A plugin that
+// swaps Object.create would otherwise be handed the next plugin's env object.
+var _ObjectFreeze = Object.freeze;
+var _ObjectDefineProperty = Object.defineProperty;
+var _ObjectCreate = Object.create;
+var _ObjectKeys = Object.keys;
+var _ObjectPrototypeHasOwnProperty = Object.prototype.hasOwnProperty;
+
 // ── Mocked process (filtered env, no exit/kill/binding) ─────────────────
 const ALLOWED_ENV_KEYS = new Set([
     "TMPDIR", "TMP", "TEMP",
     "HOME", "USERPROFILE", "PATH", "APPDATA",
 ]);
+
+// A snapshot, not a live view: process.env IS globalThis.Bun.env, the same object that
+// hardenBun cannot neuter, so a plugin can plant a key there and every plugin
+// registered afterwards would inherit it. Read here, before any plugin has run.
+const ALLOWED_ENV_SNAPSHOT = (function() {
+    var pairs = [];
+    Object.entries(process.env).forEach(function(pair) {
+        if (ALLOWED_ENV_KEYS.has(pair[0])) pairs.push(pair);
+    });
+    return Object.freeze(pairs);
+})();
+
+// Extra entries arrive per plugin from the register command, never from the child's
+// own env, for the same reason the snapshot exists.
+//
+// Null prototype on purpose. A key withheld here has to read as undefined, and
+// restorePrototypes preserves added properties by design, so an inherited entry
+// would let one plugin plant a value that every other plugin reads as its own.
+function filterEnv(extraEnv) {
+    var env = _ObjectCreate(null);
+    for (var i = 0; i < ALLOWED_ENV_SNAPSHOT.length; i++) {
+        env[ALLOWED_ENV_SNAPSHOT[i][0]] = ALLOWED_ENV_SNAPSHOT[i][1];
+    }
+    if (extraEnv) {
+        var extra = _ObjectKeys(extraEnv);
+        for (var j = 0; j < extra.length; j++) env[extra[j]] = extraEnv[extra[j]];
+    }
+    // Node's process.env answers hasOwnProperty and bundled libraries call it. Own,
+    // non-enumerable and frozen: Object.keys stays clean and no plugin can reach it.
+    _ObjectDefineProperty(env, "hasOwnProperty", {
+        value: _ObjectPrototypeHasOwnProperty, enumerable: false,
+    });
+    return _ObjectFreeze(env);
+}
 
 // Libraries read process.stderr.fd/.isTTY at init (debug, chalk) and crash on
 // undefined. Both writes go to stderr; stdout gets no fd because stdout carries
@@ -109,21 +159,42 @@ const mockedStdio = (function() {
     };
 })();
 
-const mockedProcess = Object.freeze({
-    env: Object.freeze(Object.fromEntries(
-        Object.entries(process.env).filter(([k]) => ALLOWED_ENV_KEYS.has(k))
-    )),
+// Read at load time so the real process answers, not the Proxy that replaces it.
+// Only env differs between plugins; the rest is shared verbatim.
+const mockedProcessBase = {
     platform: process.platform,
     arch: process.arch,
     version: process.version,
     versions: Object.freeze({ ...process.versions }),
     nextTick: process.nextTick.bind(process),
     hrtime: process.hrtime,
-    cwd: () => process.cwd(),
+    cwd: process.cwd.bind(process),
     argv: Object.freeze([...process.argv]),
     stderr: mockedStdio.stderr,
     stdout: mockedStdio.stdout,
-});
+};
+
+function makeMockedProcess(extraEnv) {
+    return _ObjectFreeze({ env: filterEnv(extraEnv), ...mockedProcessBase });
+}
+
+const mockedProcess = makeMockedProcess(null);
+
+// Every module that can reach a unix endpoint, not just net: http and https get there
+// through request({ socketPath }). Keying discovery on net alone starves an http-only
+// plugin, which can still connect but has no way left to learn where.
+function reachesLocalEndpoint(trustedModules) {
+    return _SetPrototypeHas(trustedModules, "net")
+        || _SetPrototypeHas(trustedModules, "http")
+        || _SetPrototypeHas(trustedModules, "https");
+}
+
+// The runtime dir rides in on the register command, never in the child's env, because
+// globalThis.Bun.env would publish it to every plugin regardless of trust.
+function endpointEnvFor(trustedModules, runtimeDir) {
+    if (!runtimeDir || !reachesLocalEndpoint(trustedModules)) return mockedProcess;
+    return makeMockedProcess({ XDG_RUNTIME_DIR: runtimeDir });
+}
 
 // ── Host-private refs (captured before globalThis hardening) ───────────
 // After this point, host code must use these - not the globals.
@@ -132,11 +203,16 @@ var hostStdout = process.stdout;
 var hostStderr = process.stderr;
 var hostExit = process.exit.bind(process);
 var hostRequire = require;
-var _ObjectFreeze = Object.freeze;
-var _ObjectDefineProperty = Object.defineProperty;
-var _ObjectCreate = Object.create;
-var _ObjectKeys = Object.keys;
+// The Object statics live further up, ahead of the env builder that needs them.
 var _JSONStringify = JSON.stringify;
+var _PromiseReject = Promise.reject.bind(Promise);
+// Values, not the object: realFs.constants is handed to plugins on the fs facade and
+// is not frozen, so reading S_IFSOCK at decision time would read a plugin's number.
+var _S_IFMT = realFs.constants.S_IFMT;
+var _S_IFSOCK = realFs.constants.S_IFSOCK;
+// os.tmpdir() re-reads the env on every call, and the env is plugin-writable; captured
+// here, a later registration cannot take a directory of the plugin's choosing.
+var hostTmpDir = require("os").tmpdir();
 var _JSONParse = JSON.parse;
 var _RealRequest = typeof Request !== "undefined" ? Request : undefined;
 var _RealURL = typeof URL !== "undefined" ? URL : undefined;
@@ -145,15 +221,24 @@ var _RealTypeError = TypeError;
 var _Buffer = require("buffer").Buffer;
 var _setTimeout = setTimeout;
 var _clearTimeout = clearTimeout;
-// Prototype methods - immune to prototype pollution
-var _ArrayPrototypeJoin = Array.prototype.join;
-var _ArrayPrototypeForEach = Array.prototype.forEach;
-var _ArrayPrototypePush = Array.prototype.push;
-var _FunctionPrototypeBind = Function.prototype.bind;
+// Prototype methods, as uncurried-this invokers bound at load. Capturing the method
+// alone is not enough: `_m.call(x, ...)` reads `.call`, an own-settable property on the
+// extensible method object (and, failing that, the poisonable Function.prototype.call),
+// either of which a plugin can replace before it triggers host code. A bound invoker
+// captures the intrinsic [[Call]] now and never reads a property at decision time, so
+// `_someMethod(thisArg, ...args)` is immune. Built from bind+call captured this instant.
+var _uncurryThis = Function.prototype.bind.bind(Function.prototype.call);
+var _ArrayPrototypeJoin = _uncurryThis(Array.prototype.join);
+var _ArrayPrototypeForEach = _uncurryThis(Array.prototype.forEach);
+var _ArrayPrototypePush = _uncurryThis(Array.prototype.push);
+var _ArrayPrototypeSome = _uncurryThis(Array.prototype.some);
+var _ArrayFrom = Array.from;
+var _StringPrototypeSlice = _uncurryThis(String.prototype.slice);
+var _FunctionPrototypeBind = _uncurryThis(Function.prototype.bind);
 var _RealFunction = Function;
 var _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-var _SetPrototypeHas = Set.prototype.has;
-var _MapPrototypeGet = Map.prototype.get;
+var _SetPrototypeHas = _uncurryThis(Set.prototype.has);
+var _MapPrototypeGet = _uncurryThis(Map.prototype.get);
 var _ArrayIsArray = Array.isArray;
 // Web types used to faithfully encode request bodies / rebuild responses.
 var _RealHeaders = typeof Headers !== "undefined" ? Headers : undefined;
@@ -164,8 +249,9 @@ var _RealArrayBuffer = ArrayBuffer;
 var _RealArrayBufferIsView = ArrayBuffer.isView;
 var _RealUint8Array = Uint8Array;
 var _RealDOMException = typeof DOMException !== "undefined" ? DOMException : undefined;
-var _StringPrototypeStartsWith = String.prototype.startsWith;
-var _StringPrototypeToLowerCase = String.prototype.toLowerCase;
+var _StringPrototypeStartsWith = _uncurryThis(String.prototype.startsWith);
+var _StringPrototypeToLowerCase = _uncurryThis(String.prototype.toLowerCase);
+var _ArrayPrototypeIndexOf = _uncurryThis(Array.prototype.indexOf);
 // Real network fetch, captured before hardening neuters globalThis.fetch. Used
 // ONLY for local data:/blob: URLs - network egress always takes the IPC path below.
 var _RealFetch = typeof fetch === "function" ? fetch : undefined;
@@ -182,7 +268,7 @@ var shimmedWorkerThreads = (function() {
         "isMainThread", "parentPort", "workerData", "threadId", "resourceLimits",
     ];
     var shim = _ObjectCreate(null);
-    _ArrayPrototypeForEach.call(allowed, function(key) {
+    _ArrayPrototypeForEach(allowed, function(key) {
         if (key in real) shim[key] = real[key];
     });
     return _ObjectFreeze(shim);
@@ -204,13 +290,13 @@ var _warnedStubCalls = new Set();
 
 function makeForbiddenStub(id, members, answers) {
     var stub = _ObjectCreate(null);
-    _ArrayPrototypeForEach.call(members, function(name) {
+    _ArrayPrototypeForEach(members, function(name) {
         stub[name] = function() {
             var msg = "[sandbox] " + id + "." + name + " is not available";
             // Logged as well as thrown: a plugin catching it still leaves a trace.
             // The throw is what stops the caller; logging once is enough.
             var callKey = id + "." + name;
-            if (!_SetPrototypeHas.call(_warnedStubCalls, callKey)) {
+            if (!_SetPrototypeHas(_warnedStubCalls, callKey)) {
                 _warnedStubCalls.add(callKey);
                 try { hostStderr.write(msg + "\n"); } catch (_) {}
             }
@@ -218,7 +304,7 @@ function makeForbiddenStub(id, members, answers) {
         };
     });
     if (answers) {
-        _ArrayPrototypeForEach.call(_ObjectKeys(answers), function(key) {
+        _ArrayPrototypeForEach(_ObjectKeys(answers), function(key) {
             stub[key] = answers[key];
         });
     }
@@ -309,12 +395,12 @@ function makeModuleStub() {
 // delimiter has to be reserved inside plugin names or module ids.
 var _warnedStubs = new Map();
 function warnInertStub(pluginName, canonical) {
-    var seen = _MapPrototypeGet.call(_warnedStubs, pluginName);
+    var seen = _MapPrototypeGet(_warnedStubs, pluginName);
     if (!seen) {
         seen = new Set();
         _warnedStubs.set(pluginName, seen);
     }
-    if (_SetPrototypeHas.call(seen, canonical)) return;
+    if (_SetPrototypeHas(seen, canonical)) return;
     seen.add(canonical);
     try {
         hostStderr.write("[sandbox] " + pluginName + ": require('" + canonical
@@ -341,21 +427,21 @@ function warnInertStub(pluginName, canonical) {
         "_rawDebug", "_linkedBinding", "report",
     ]);
     var allowedBindings = new Set(["http_parser", "uv", "buffer", "constants", "config"]);
-    var origBinding = _FunctionPrototypeBind.call(realProcess.binding, realProcess);
+    var origBinding = _FunctionPrototypeBind(realProcess.binding, realProcess);
     var safeBinding = function(name) {
-        if (!_SetPrototypeHas.call(allowedBindings, name))
+        if (!_SetPrototypeHas(allowedBindings, name))
             throw new Error("[sandbox] process.binding('" + name + "') is not allowed");
         return origBinding(name);
     };
     var filteredEnv = mockedProcess.env; // already frozen + filtered by ALLOWED_ENV_KEYS
     var processProxy = new Proxy(realProcess, {
         get: function(target, prop) {
-            if (_SetPrototypeHas.call(blockedKeys, prop))
+            if (_SetPrototypeHas(blockedKeys, prop))
                 throw new Error("[sandbox] process." + prop + " is not available");
             if (prop === "env") return filteredEnv;
             if (prop === "binding") return safeBinding;
             var val = target[prop];
-            return typeof val === "function" ? _FunctionPrototypeBind.call(val, target) : val;
+            return typeof val === "function" ? _FunctionPrototypeBind(val, target) : val;
         },
         set: function() { throw new Error("[sandbox] process is read-only"); },
         deleteProperty: function() { throw new Error("[sandbox] process is read-only"); },
@@ -375,13 +461,13 @@ function warnInertStub(pluginName, canonical) {
     var noop = function() {};
     var toStderr = function() {
         try {
-            hostStderr.write(_ArrayPrototypeJoin.call(arguments, " ") + "\n");
+            hostStderr.write(_ArrayPrototypeJoin(arguments, " ") + "\n");
         } catch (_) {}
     };
-    _ArrayPrototypeForEach.call(["log", "warn", "error", "info", "debug",
+    _ArrayPrototypeForEach(["log", "warn", "error", "info", "debug",
      "trace", "dir", "dirxml", "table", "assert", "time", "timeLog", "timeEnd",
      "count", "countReset"], function(m) { safeConsole[m] = toStderr; });
-    _ArrayPrototypeForEach.call(["group", "groupCollapsed", "groupEnd",
+    _ArrayPrototypeForEach(["group", "groupCollapsed", "groupEnd",
      "clear", "profile", "profileEnd", "timeStamp"], function(m) { safeConsole[m] = noop; });
     _ObjectFreeze(safeConsole);
     _ObjectDefineProperty(globalThis, "console", {
@@ -398,7 +484,7 @@ function warnInertStub(pluginName, canonical) {
         (function*(){}).constructor,
         (async function*(){}).constructor,
     ];
-    _ArrayPrototypeForEach.call(ctors, function(ctor) {
+    _ArrayPrototypeForEach(ctors, function(ctor) {
         _ObjectDefineProperty(ctor.prototype, "constructor", {
             value: undefined, writable: false, configurable: false,
         });
@@ -406,7 +492,7 @@ function warnInertStub(pluginName, canonical) {
 })();
 
 // ── Proxied require factory ─────────────────────────────────────────────
-function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName) {
+function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, pluginProcess) {
     var moduleStub = null; // lazy, per plugin - see makeModuleStub
     return function proxiedRequire(id) {
         // Virtual module: plugin data directory
@@ -423,7 +509,7 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName) {
         if (isForbidden(id)) {
             // Not a capability: already the plugin's ambient `process`. The
             // globalThis Proxy would throw on .stderr where the ambient one works.
-            if (canonical === "process") return mockedProcess;
+            if (canonical === "process") return pluginProcess;
 
             // Memoized; require('module') === require('module') within a plugin.
             if (canonical === "module") {
@@ -467,8 +553,10 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName) {
             throw new Error("TRUST_REQUIRED:" + canonical);
         }
 
-        // Relative/absolute paths - blocked
-        if (id.startsWith(".") || id.startsWith("/") || /^[a-zA-Z]:/.test(id)) {
+        // Relative/absolute paths - blocked. Captured startsWith for the same reason
+        // as canonicalize, even though the fall-through below also throws.
+        if (_StringPrototypeStartsWith(id, ".") || _StringPrototypeStartsWith(id, "/")
+            || /^[a-zA-Z]:/.test(id)) {
             throw new Error("[sandbox] require('" + id + "') blocked: paths not allowed");
         }
 
@@ -485,7 +573,11 @@ function containsDynamicImport(code) {
     if (!transpiler) return true; // can't verify - block (fail-closed)
     try {
         var result = transpiler.scan(code);
-        return result.imports.some(function(i) { return i.kind === "dynamic-import"; });
+        // Captured some: this is the only gate on dynamic import(), which otherwise
+        // bypasses the require proxy entirely. A plugin that replaced Array.prototype.some
+        // with a false-returning stub would open that door for every later registration.
+        return _ArrayPrototypeSome(result.imports,
+            function(i) { return i.kind === "dynamic-import"; });
     } catch (e) {
         return true; // unparseable - block (fail-closed)
     }
@@ -558,7 +650,7 @@ function containsDynamicImport(code) {
         "SQL", "RedisClient", "S3Client", "postgres", // DB/S3 network clients
         "Glob", "FileSystemRouter", "Archive", "generateHeapSnapshot", "unsafe", // fs enum / memory outside sandbox
     ];
-    _ArrayPrototypeForEach.call(DANGEROUS, function(key) {
+    _ArrayPrototypeForEach(DANGEROUS, function(key) {
         if (key in realBun) {
             try {
                 _ObjectDefineProperty(realBun, key, {
@@ -573,7 +665,7 @@ function containsDynamicImport(code) {
 
 // ── Block globalThis.require/module/exports - prevent proxy bypass ────
 ;(function hardenGlobalRequire() {
-    _ArrayPrototypeForEach.call(["require", "module", "exports", "__dirname", "__filename"], function(prop) {
+    _ArrayPrototypeForEach(["require", "module", "exports", "__dirname", "__filename"], function(prop) {
         _ObjectDefineProperty(globalThis, prop, {
             get: function() { throw new Error("[sandbox] globalThis." + prop + " is not available"); },
             configurable: false,
@@ -594,13 +686,13 @@ function containsDynamicImport(code) {
     // Realm creators + WebSocket - no upstream plugin uses the browser WebSocket global
     // (DiscordRPC uses net IPC, ws-based plugins use require('ws') which goes through
     // http/net SAFE_MODULES, not globalThis.WebSocket)
-    _ArrayPrototypeForEach.call(["Worker", "ShadowRealm", "WebSocket"], function(prop) {
+    _ArrayPrototypeForEach(["Worker", "ShadowRealm", "WebSocket"], function(prop) {
         _ObjectDefineProperty(globalThis, prop, {
             value: undefined, writable: false, configurable: false,
         });
     });
     // Network globals with no legitimate plugin use
-    _ArrayPrototypeForEach.call(["XMLHttpRequest", "EventSource", "BroadcastChannel"], function(prop) {
+    _ArrayPrototypeForEach(["XMLHttpRequest", "EventSource", "BroadcastChannel"], function(prop) {
         if (prop in globalThis) {
             _ObjectDefineProperty(globalThis, prop, {
                 value: undefined, writable: false, configurable: false,
@@ -624,7 +716,7 @@ function containsDynamicImport(code) {
     if (typeof Request !== "undefined") fullFreeze.push(Request);
     if (typeof Headers !== "undefined") fullFreeze.push(Headers);
     if (typeof Response !== "undefined") fullFreeze.push(Response);
-    _ArrayPrototypeForEach.call(fullFreeze, function(obj) {
+    _ArrayPrototypeForEach(fullFreeze, function(obj) {
         try { _ObjectFreeze(obj); } catch (_) {}
         try { if (obj.prototype) _ObjectFreeze(obj.prototype); } catch (_) {}
     });
@@ -666,15 +758,15 @@ function normalizeHeaders(h) {
     var out = [];
     if (!h) return out;
     if (_RealHeaders && h instanceof _RealHeaders) {
-        h.forEach(function(v, k) { _ArrayPrototypePush.call(out, [k, String(v)]); });
+        h.forEach(function(v, k) { _ArrayPrototypePush(out, [k, String(v)]); });
     } else if (_ArrayIsArray(h)) {
         for (var i = 0; i < h.length; i++) {
-            if (h[i]) _ArrayPrototypePush.call(out, [String(h[i][0]), String(h[i][1])]);
+            if (h[i]) _ArrayPrototypePush(out, [String(h[i][0]), String(h[i][1])]);
         }
     } else if (typeof h === "object") {
         var keys = _ObjectKeys(h);
         for (var j = 0; j < keys.length; j++) {
-            _ArrayPrototypePush.call(out, [keys[j], String(h[keys[j]])]);
+            _ArrayPrototypePush(out, [keys[j], String(h[keys[j]])]);
         }
     }
     return out;
@@ -682,7 +774,7 @@ function normalizeHeaders(h) {
 
 function headersHave(pairs, lowerName) {
     for (var i = 0; i < pairs.length; i++) {
-        if (_StringPrototypeToLowerCase.call(pairs[i][0]) === lowerName) return true;
+        if (_StringPrototypeToLowerCase(pairs[i][0]) === lowerName) return true;
     }
     return false;
 }
@@ -690,7 +782,7 @@ function headersHave(pairs, lowerName) {
 // Serialize a FormData to a multipart/form-data Buffer with the given boundary.
 async function formDataToBuffer(fd, boundary) {
     var entries = [];
-    fd.forEach(function(value, key) { _ArrayPrototypePush.call(entries, [key, value]); });
+    fd.forEach(function(value, key) { _ArrayPrototypePush(entries, [key, value]); });
     var chunks = [];
     for (var i = 0; i < entries.length; i++) {
         var key = entries[i][0], value = entries[i][1];
@@ -698,16 +790,16 @@ async function formDataToBuffer(fd, boundary) {
         if (_RealBlob && value instanceof _RealBlob) {
             head += "; filename=\"" + (value.name || "blob") + "\"\r\nContent-Type: "
                 + (value.type || "application/octet-stream") + "\r\n\r\n";
-            _ArrayPrototypePush.call(chunks, _Buffer.from(head, "utf8"));
+            _ArrayPrototypePush(chunks, _Buffer.from(head, "utf8"));
             var ab = await value.arrayBuffer();
-            _ArrayPrototypePush.call(chunks, _Buffer.from(new _RealUint8Array(ab)));
-            _ArrayPrototypePush.call(chunks, _Buffer.from("\r\n", "utf8"));
+            _ArrayPrototypePush(chunks, _Buffer.from(new _RealUint8Array(ab)));
+            _ArrayPrototypePush(chunks, _Buffer.from("\r\n", "utf8"));
         } else {
             head += "\r\n\r\n" + String(value) + "\r\n";
-            _ArrayPrototypePush.call(chunks, _Buffer.from(head, "utf8"));
+            _ArrayPrototypePush(chunks, _Buffer.from(head, "utf8"));
         }
     }
-    _ArrayPrototypePush.call(chunks, _Buffer.from("--" + boundary + "--\r\n", "utf8"));
+    _ArrayPrototypePush(chunks, _Buffer.from("--" + boundary + "--\r\n", "utf8"));
     return _Buffer.concat(chunks);
 }
 
@@ -809,8 +901,8 @@ function makeIpcFetch(pluginName) {
 
         // Local schemes resolve in-process (no egress, no IPC, no trust concern).
         if (_RealFetch
-            && (_StringPrototypeStartsWith.call(url, "data:")
-                || _StringPrototypeStartsWith.call(url, "blob:"))) {
+            && (_StringPrototypeStartsWith(url, "data:")
+                || _StringPrototypeStartsWith(url, "blob:"))) {
             return _RealFetch(input, init);
         }
 
@@ -818,7 +910,7 @@ function makeIpcFetch(pluginName) {
 
         var enc = await encodeBody(body);
         if (enc.contentType && !headersHave(headers, "content-type")) {
-            _ArrayPrototypePush.call(headers, ["content-type", enc.contentType]);
+            _ArrayPrototypePush(headers, ["content-type", enc.contentType]);
         }
 
         return await new Promise(function(resolve, reject) {
@@ -935,7 +1027,7 @@ var _protoSnapshot = (function() {
         var proto = _protoTracked[i][0], names = _protoTracked[i][1];
         for (var j = 0; j < names.length; j++) {
             var desc = _ObjectGetOwnPropertyDescriptor(proto, names[j]);
-            if (desc) _ArrayPrototypePush.call(snap, [proto, names[j], desc]);
+            if (desc) _ArrayPrototypePush(snap, [proto, names[j], desc]);
         }
     }
     return snap;
@@ -950,7 +1042,7 @@ function restorePrototypes() {
     }
 }
 
-function evalPlugin(code, proxiedRequire, pluginFetch) {
+function evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess) {
     var m = { exports: {} };
     // eslint-disable-next-line no-new-func -- intentional: plugin code loading
     var fn = new _RealFunction(SHADOW_PARAMS_STR, code); // NOSONAR
@@ -959,7 +1051,7 @@ function evalPlugin(code, proxiedRequire, pluginFetch) {
             m, m.exports, proxiedRequire,
             undefined,
             undefined, undefined,
-            mockedProcess,
+            pluginProcess,
             pluginFetch
         );
     } finally {
@@ -975,23 +1067,36 @@ function hashCode(code) {
 
 // ── Sandboxed fs ────────────────────────────────────────────────────────
 // Minimal fs facade restricted to plugin dataDir + dialog-granted paths.
-// Blocks symlink/link/readlink/realpath, delete hors dataDir, options.fd/fs.
+// Blocks symlink/link/readlink, delete hors dataDir, options.fd/fs. realpath answers
+// inside the sandbox, and for the IPC dirs of a plugin trusted to open an endpoint.
 
-function canonicalizeFsPath(p) {
-    if (p instanceof URL || (typeof p === 'string' && p.startsWith('file:')))
+// Lexical only: URL/type/UNC handling and `..` collapse, without following symlinks.
+// `..` is still resolved away, so containment cannot be escaped, but a symlink keeps
+// its own path - which is what lets a bridged endpoint under a disclosed dir be seen.
+function lexicalFsPath(p) {
+    if (p instanceof URL
+        || (typeof p === 'string' && _StringPrototypeStartsWith(p, 'file:')))
         p = fileURLToPath(p);
     if (typeof p !== 'string')
         throw new Error("[sandbox] invalid path type");
     var resolved = pathMod.resolve(p);
     // Block UNC/device paths on Windows - they bypass startsWith containment checks
     if (process.platform === 'win32'
-        && pathMod.win32.parse(resolved).root.startsWith('\\\\'))
+        && _StringPrototypeStartsWith(pathMod.win32.parse(resolved).root, '\\\\'))
         throw new Error("[sandbox] UNC/device paths are not allowed");
+    return resolved;
+}
+
+function realpathOrAncestor(resolved) {
     try {
         return realFs.realpathSync(resolved);
     } catch (_) {
         return resolveFromExistingAncestor(resolved);
     }
+}
+
+function canonicalizeFsPath(p) {
+    return realpathOrAncestor(lexicalFsPath(p));
 }
 
 function resolveFromExistingAncestor(resolved) {
@@ -1010,27 +1115,34 @@ function resolveFromExistingAncestor(resolved) {
     return resolved;
 }
 
+// Captured String.prototype.startsWith, not the live one: plugin code runs again on
+// every `call`, and restorePrototypes only fires at the end of a register.
 function isInDirs(real, dirs) {
     for (var i = 0; i < dirs.length; i++) {
-        if (real === dirs[i] || real.startsWith(dirs[i] + pathMod.sep)) return true;
+        if (real === dirs[i]
+            || _StringPrototypeStartsWith(real, dirs[i] + pathMod.sep)) return true;
     }
     return false;
 }
 
+// Separate from assertRead because the probes below need the verdict, not a throw.
+function isReadable(real, dataDirs, grants) {
+    if (isInDirs(real, dataDirs)) return true;
+    if (grants.readFiles.has(real)) return true;
+    if (grants.writeFiles.has(real)) return true;
+    return isInDirs(real, _ArrayFrom(grants.dirs));
+}
+
 function assertRead(p, dataDirs, grants) {
-    var real = canonicalizeFsPath(p);
-    if (isInDirs(real, dataDirs)) return;
-    if (grants.readFiles.has(real)) return;
-    if (grants.writeFiles.has(real)) return;
-    if (isInDirs(real, Array.from(grants.dirs))) return;
-    throw new Error("[sandbox] fs read denied: " + p);
+    if (!isReadable(canonicalizeFsPath(p), dataDirs, grants))
+        throw new Error("[sandbox] fs read denied: " + p);
 }
 
 function assertWrite(p, dataDirs, grants) {
     var real = canonicalizeFsPath(p);
     if (isInDirs(real, dataDirs)) return;
     if (grants.writeFiles.has(real)) return;
-    if (isInDirs(real, Array.from(grants.dirs))) return;
+    if (isInDirs(real, _ArrayFrom(grants.dirs))) return;
     throw new Error("[sandbox] fs write denied: " + p);
 }
 
@@ -1043,7 +1155,7 @@ function assertDelete(p, dataDirs) {
 function assertMkdir(p, dataDirs, grants) {
     var real = canonicalizeFsPath(p);
     if (isInDirs(real, dataDirs)) return;
-    if (isInDirs(real, Array.from(grants.dirs))) return;
+    if (isInDirs(real, _ArrayFrom(grants.dirs))) return;
     throw new Error("[sandbox] fs mkdir denied: " + p);
 }
 
@@ -1054,16 +1166,105 @@ function rejectUnsafeOpts(opts) {
     }
 }
 
-function makeSandboxedFs(dataDirs, grants) {
+// Where a local IPC endpoint can live: the session runtime dir the register command
+// carried, plus the temp dir the child was started in and reports through cwd(). Built
+// per plugin, and an empty list is how a plugin without endpoint trust is expressed -
+// there is no separate flag to disagree with it.
+function probeDirsFor(runtimeDir) {
+    var out = [];
+    function add(dir) {
+        if (dir && _ArrayPrototypeIndexOf(out, dir) === -1) _ArrayPrototypePush(out, dir);
+    }
+    var candidates = [runtimeDir, hostTmpDir];
+    for (var i = 0; i < candidates.length; i++) {
+        if (!candidates[i] || typeof candidates[i] !== "string") continue;
+        var lexical = pathMod.resolve(candidates[i]);
+        var real;
+        try { real = realFs.realpathSync(lexical); } catch (_) { continue; }
+        // Both names for the one directory. existsSync compares the socket's lexical
+        // path, and a caller may hand us either the realpath or a path with a symlinked
+        // prefix (macOS TMPDIR under /var, its realpath under /private/var). Only dirs
+        // that resolve are added, so this is the same disclosed dir by two spellings.
+        add(real);
+        add(lexical);
+    }
+    return out;
+}
+
+// One gate for every realpath the facades expose (sync, its .native, the promises twin),
+// keeping the two facades from drifting into separate policies. Admits the disclosed dir
+// itself and never its children: an endpoint path is joined by the caller, not resolved.
+function makeGatedRealpath(dataDirs, grants, ipcDirs, resolve) {
+    return function(p, o) {
+        var real = canonicalizeFsPath(p);
+        if (!isReadable(real, dataDirs, grants)
+            && _ArrayPrototypeIndexOf(ipcDirs, real) === -1)
+            throw new Error("[sandbox] fs realpath denied: " + p);
+        return resolve(real, o);
+    };
+}
+
+// Reads the mode rather than calling stats.isSocket(): that method lives on a prototype
+// shared by every stat in the process, which a plugin reaches through the facade's own
+// statSync and can replace. `mode` is an own data property of each Stats object.
+//
+// Follows symlinks deliberately: a bridged endpoint (SSH, Flatpak) is a link to the
+// socket, so lstat would answer about the link instead.
+function isSocket(real) {
+    if (_S_IFSOCK === undefined) return false; // no such file type on this platform
+    try { return (realFs.statSync(real).mode & _S_IFMT) === _S_IFSOCK; }
+    catch (_) { return false; }
+}
+
+// One line per cause for the whole process, like _warnedStubCalls: a plugin probing on
+// a timer would otherwise grow the log without bound.
+var _warnedProbeRejects = new Set();
+function warnProbeReject(p, cause) {
+    if (_SetPrototypeHas(_warnedProbeRejects, cause)) return;
+    _warnedProbeRejects.add(cause);
+    try {
+        hostStderr.write("[sandbox] fs existsSync answered false for " + p
+            + " because the path was rejected: " + cause + "\n");
+    } catch (_) {}
+}
+
+function makeSandboxedFs(dataDirs, grants, ipcDirs) {
     function checkRead(p) { assertRead(p, dataDirs, grants); }
     function checkWrite(p) { assertWrite(p, dataDirs, grants); }
     function checkDelete(p) { assertDelete(p, dataDirs); }
     function checkMkdir(p) { assertMkdir(p, dataDirs, grants); }
 
+    function gatedRealpath(resolve) {
+        return makeGatedRealpath(dataDirs, grants, ipcDirs, resolve);
+    }
+
     var facade = {
         readFileSync: function(p, o) { checkRead(p); return realFs.readFileSync(p, o); },
         writeFileSync: function(p, d, o) { checkWrite(p); return realFs.writeFileSync(p, d, o); },
-        existsSync: function(p) { checkRead(p); return realFs.existsSync(p); },
+        existsSync: function(p) {
+            // Real existsSync answers false on every error, EACCES included, so a
+            // denial is an answer here rather than a throw. A rejected path shape is
+            // announced once: unannounced, a Windows named pipe - refused by the UNC
+            // guard - would be indistinguishable from an endpoint that is simply gone.
+            var lexical;
+            try {
+                lexical = lexicalFsPath(p);
+            } catch (e) {
+                warnProbeReject(p, e.message);
+                return false;
+            }
+            var real = realpathOrAncestor(lexical);
+            if (isReadable(real, dataDirs, grants)) return realFs.existsSync(real);
+            // Outside the sandbox, an endpoint inside a disclosed dir and nothing else.
+            // Containment is checked on the lexical path so a bridged endpoint (a symlink
+            // under the disclosed dir pointing at a socket elsewhere) is admitted, while
+            // the socket type is tested on the resolved target - only sockets ever pass,
+            // and a plugin has no write access to a disclosed dir to plant such a link.
+            // Whoever holds the trust that produced those dirs could learn the same by
+            // connecting; whoever does not cannot use the answer.
+            return isInDirs(lexical, ipcDirs) && isSocket(real);
+        },
+        realpathSync: gatedRealpath(realFs.realpathSync),
         mkdirSync: function(p, o) { checkMkdir(p); return realFs.mkdirSync(p, o); },
         unlinkSync: function(p) { checkDelete(p); return realFs.unlinkSync(p); },
         rmSync: function(p, o) { checkDelete(p); return realFs.rmSync(p, o); },
@@ -1086,21 +1287,34 @@ function makeSandboxedFs(dataDirs, grants) {
         constants: realFs.constants,
     };
 
+    // Callers feature-detect .native before using it (typescript, resolve); a facade
+    // without one fails their check and takes a path they only meant as a fallback.
+    facade.realpathSync.native =
+        gatedRealpath(realFs.realpathSync.native || realFs.realpathSync);
+
     _ObjectDefineProperty(facade, 'promises', {
-        get: function() { return makeSandboxedFsPromises(dataDirs, grants); },
+        get: function() { return makeSandboxedFsPromises(dataDirs, grants, ipcDirs); },
         enumerable: true,
     });
 
     return facade;
 }
 
-function makeSandboxedFsPromises(dataDirs, grants) {
+function makeSandboxedFsPromises(dataDirs, grants, ipcDirs) {
     function checkRead(p) { assertRead(p, dataDirs, grants); }
     function checkWrite(p) { assertWrite(p, dataDirs, grants); }
     function checkDelete(p) { assertDelete(p, dataDirs); }
     function checkMkdir(p) { assertMkdir(p, dataDirs, grants); }
 
+    var gatedRealpath = makeGatedRealpath(dataDirs, grants, ipcDirs, realFs.promises.realpath);
+
     return {
+        // Rejects rather than throwing: this twin is awaited, unlike the sync one. The
+        // captured reject, so a swapped Promise.reject cannot turn a denial into a
+        // resolved promise.
+        realpath: function(p, o) {
+            try { return gatedRealpath(p, o); } catch (e) { return _PromiseReject(e); }
+        },
         readFile: function(p, o) { checkRead(p); return realFs.promises.readFile(p, o); },
         writeFile: function(p, d, o) { checkWrite(p); return realFs.promises.writeFile(p, d, o); },
         mkdir: function(p, o) { checkMkdir(p); return realFs.promises.mkdir(p, o); },
@@ -1158,12 +1372,22 @@ rl.on("line", async (line) => {
                 return;
             }
 
+            // Own keys only: for...in walks Object.prototype, and restorePrototypes
+            // keeps added properties, so a plugin planting Object.prototype.fs = true
+            // would grant that module to every plugin registered afterwards.
             var trustedModules = new Set();
             if (trust) {
-                for (var mod in trust) {
-                    if (trust[mod] === true) trustedModules.add(mod);
+                var trustKeys = _ObjectKeys(trust);
+                for (var ti = 0; ti < trustKeys.length; ti++) {
+                    if (trust[trustKeys[ti]] === true) trustedModules.add(trustKeys[ti]);
                 }
             }
+
+            // Discovery follows the capability: a plugin that can already open a local
+            // endpoint may learn where one is. Empty list for everyone else.
+            var ipcDirs = reachesLocalEndpoint(trustedModules)
+                ? probeDirsFor(cmd.runtimeDir)
+                : [];
 
             // Build sandboxed fs restricted to plugin dataDir + grants
             var sandboxedFs = null;
@@ -1171,7 +1395,7 @@ rl.on("line", async (line) => {
                 realFs.mkdirSync(dataDir, { recursive: true });
                 var canonicalDataDir = realFs.realpathSync(dataDir);
                 var grants = getGrantStore(name);
-                sandboxedFs = makeSandboxedFs([canonicalDataDir], grants);
+                sandboxedFs = makeSandboxedFs([canonicalDataDir], grants, ipcDirs);
             }
 
             // A register rebuilds this plugin's JS state on the same long-lived Bun
@@ -1179,15 +1403,22 @@ rl.on("line", async (line) => {
             // forget its warned modules too or the inert-stub lines never reappear.
             _warnedStubs.delete(name);
 
-            var proxiedRequire = makeRequireProxy(trustedModules, sandboxedFs, dataDir, name);
+            // require('process') and the shadow parameter share this object. The
+            // globalThis Proxy cannot: it is one object for every plugin at once and
+            // keeps the narrow env. A dependency that reads env off the global therefore
+            // sees no runtime dir even here - fails closed, rather than handing it to
+            // the plugins that were refused it.
+            var pluginProcess = endpointEnvFor(trustedModules, cmd.runtimeDir);
+
+            var proxiedRequire = makeRequireProxy(trustedModules, sandboxedFs, dataDir, name, pluginProcess);
             // fetch gated on network trust (require('http')/'https' group), baked per-plugin
             // into the eval env - no shared mutable state to race across concurrent calls.
-            var hasNetworkTrust = _SetPrototypeHas.call(trustedModules, "http")
-                || _SetPrototypeHas.call(trustedModules, "https");
+            var hasNetworkTrust = _SetPrototypeHas(trustedModules, "http")
+                || _SetPrototypeHas(trustedModules, "https");
             var pluginFetch = hasNetworkTrust
                 ? makeIpcFetch(name)
                 : function() { throw new Error("[sandbox] fetch requires network trust - grant http/https"); };
-            var m = evalPlugin(code, proxiedRequire, pluginFetch);
+            var m = evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess);
             modules[name] = m.exports;
             respond(id, { ok: true, exports: _ObjectKeys(m.exports), hash: hashCode(code) });
 
