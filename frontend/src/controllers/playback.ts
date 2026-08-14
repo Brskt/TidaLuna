@@ -76,7 +76,7 @@ export const createPlaybackController = () => {
                                         const codec = manifest.codec?.split(".")?.[0] ?? "aac";
                                         setSelfLoad(true);
                                         // Self-load bypasses the SDK load delegate; drop any pending
-                                        // select-play intent so it can't leak into a later FLAC load.
+                                        // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
                                         sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec);
                                     }
@@ -90,7 +90,7 @@ export const createPlaybackController = () => {
                                         const encKey = manifest.keyId ?? "";
                                         setSelfLoad(true);
                                         // Self-load bypasses the SDK load delegate; drop any pending
-                                        // select-play intent so it can't leak into a later FLAC load.
+                                        // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
                                         sendIpc("player.load", streamUrl, codec, encKey);
                                     }
@@ -134,12 +134,9 @@ export const createPlaybackController = () => {
                 }
             }
         },
-        setCurrentTime: (time: any) => {
-            // No dbg IPC here: setCurrentTime fires on every position tick and would flood
-            // even at debug level (mirrors the mediacurrenttime exclusion in player.ts).
-            if (typeof time === 'number' && isFinite(time) && time >= 0) {
-                (window.NativePlayerComponent as any)?._setTime?.(time);
-            }
+        setCurrentTime: () => {
+            // Absorbed. Rust owns the position; TIDAL calls this with reset values a second
+            // writer would leak into the published getter.
         },
         setPlayQueueState: (state: any) => {
             sendDbgIpc("setPlayQueueState", JSON.stringify(state));

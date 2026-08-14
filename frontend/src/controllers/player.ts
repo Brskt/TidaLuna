@@ -7,22 +7,21 @@ export const createNativePlayerComponent = () => {
     let activePlayer: any = null;
     let activeGen = 0;
     let playerCallCount = 0;
-    // During a seek, holds the target position so that:
-    // 1) the currentTime getter returns it immediately (for polling readers)
-    // 2) stale bridge time events arriving before the backend catches up are
-    //    blocked in processEvent() instead of reverting the seek bar.
-    // Cleared once a bridge event close to the target arrives (±2s).
+    // During a seek, holds the target: the currentTime getter returns it immediately
+    // (for polling readers) before the first bridge event lands. Suppressing pre-seek
+    // positions is Rust's job: every backend reports the seek target until its decoder
+    // converges. The first event to arrive here is already the truth.
     let seekTarget: number | null = null;
     let _time = 0;
     let _lastVolume = -1;
     // Last mediaProduct.referenceId seen at load time. TIDAL mints a new referenceId
-    // per play instance (spec: unique per MediaProduct instance), so a change marks a
+    // per play instance (spec: unique per MediaProduct instance); a change marks a
     // fresh play (restart at 0) vs a same-instance re-assert (keep position).
     let lastReferenceId: string | null = null;
 
     // A quality-swap re-load re-asserts the current product as a same-track
     // stop/load/play burst. Defer the stop a microtask; a same-(url,fmt)
-    // load cancels it and skips the reload so playback is not torn down.
+    // load cancels it and skips the reload, leaving playback intact.
     let loadedUrl: string | null = null;
     let loadedFmt: string | null = null;
     let pendingStop = false;
@@ -30,9 +29,9 @@ export const createNativePlayerComponent = () => {
     const cancelDeferredStop = () => { pendingStop = false; };
 
     // Desired playback intent, deduped, routed here from both the SDK delegate and the
-    // Redux PLAY/PAUSE actions -- TIDAL sometimes resumes a paused track via stop()+load(same)
-    // WITHOUT calling play(), so relying on the SDK delegate alone misses it. null = unknown
-    // (forces the next emit); a genuine load() resets it so a queue advance still re-emits.
+    // Redux PLAY/PAUSE actions: TIDAL sometimes resumes a paused track via stop()+load(same)
+    // WITHOUT calling play(). Relying on the SDK delegate alone misses it. null = unknown
+    // (forces the next emit); a genuine load() resets it for a queue advance to re-emit.
     let desiredPlaying: boolean | null = null;
     const setDesired = (playing: boolean) => {
         if (desiredPlaying === playing) return;
@@ -40,12 +39,12 @@ export const createNativePlayerComponent = () => {
         sendIpc(playing ? "player.play" : "player.pause");
     };
     // A track/list SELECT (ADD_TRACK_LIST) sets this; the load delegate folds it into
-    // player.load as the auto_play flag so the SELECTED track plays atomically with its
-    // load -- never a separate player.play that would resume the still-committed OLD paused
+    // player.load as the auto_play flag: the SELECTED track plays atomically with its
+    // load, never a separate player.play that would resume the still-committed OLD paused
     // track (the "bleed"). Set on select, consumed/cleared per load.
     let wantPlayOnLoad = false;
 
-    // Stable handle published on tidalModules so @luna/lib PlayState.currentTime resolves.
+    // Stable handle published on tidalModules for @luna/lib PlayState.currentTime to resolve.
     const playerHandle = {
         get currentTime(): number { return seekTarget ?? _time; },
     };
@@ -68,13 +67,13 @@ export const createNativePlayerComponent = () => {
     };
 
     // Shared event processing: updates player state and emits to listeners.
-    // Returns false if the event was blocked (stale seek time).
     const processEvent = (event: string, target: any) => {
         if (event === "mediacurrenttime" && activePlayer) {
-            if (seekTarget !== null) {
-                if (Math.abs(target - seekTarget) > 2.0) return false;
-                seekTarget = null;
-            }
+            // Take every position at face value. Filtering on distance from the pin made a
+            // REFUSED seek indistinguishable from a stale one. Only a close-enough value
+            // cleared the pin, leaving the refusal's true position dropped and the pin held
+            // forever, freezing the SDK's position of record.
+            seekTarget = null;
             activePlayer.currentTime = target;
         } else if (event === "mediaduration" && activePlayer) {
             activePlayer.duration = target;
@@ -88,14 +87,14 @@ export const createNativePlayerComponent = () => {
         sendDbgIpc("Player() called", "count=" + playerCallCount);
 
         // Release the previous emitter's listeners before it is orphaned.  The
-        // old player object returned to the SDK still closes over its emitter,
-        // so without this the SDK's accumulated callbacks (and the React state
+        // old player object returned to the SDK still closes over its emitter;
+        // without this the SDK's accumulated callbacks (and the React state
         // they capture) stay reachable for the whole session.
         activeEmitter?.listeners.clear();
 
         const eventEmitter = {
             // One Set per event type: Set.add deduplicates by callback
-            // reference, matching the WHATWG addEventListener contract, so the
+            // reference, matching the WHATWG addEventListener contract. The
             // SDK re-subscribing on every render no longer stacks listeners.
             listeners: new Map<string, Set<Function>>(),
             addListener(event: string, cb: any) {
@@ -114,13 +113,13 @@ export const createNativePlayerComponent = () => {
                 if (!set || set.size === 0) return;
                 if (set.size === 1) {
                     // Hot path (e.g. mediacurrenttime usually has one listener):
-                    // read the single callback up front so it can't re-enter
+                    // read the single callback up front, blocking re-entry
                     // mid-dispatch, and skip the snapshot allocation.
                     const only = set.values().next().value;
                     if (only) only(arg);
                     return;
                 }
-                // Snapshot so a listener added or removed during dispatch
+                // Snapshot: a listener added or removed during dispatch
                 // doesn't affect the current pass.
                 for (const cb of [...set]) cb(arg);
             }
@@ -173,12 +172,12 @@ export const createNativePlayerComponent = () => {
                     const { store } = require("../../plugins/lib/src/redux/store");
                     const refId = store?.getState?.()?.playbackControls?.mediaProduct?.referenceId ?? null;
                     // Only a CHANGE from a known previous id is a fresh play; the first
-                    // observation (lastReferenceId null) just records it, so the startup
-                    // re-assert isn't mistaken for a replay.
+                    // observation (lastReferenceId null) just records it, keeping the startup
+                    // re-assert from being mistaken for a replay.
                     restart = lastReferenceId !== null && refId !== null && refId !== lastReferenceId;
                     if (refId !== null) lastReferenceId = refId;
                 } catch (_) {}
-                // On a restart, pin our reported head to 0 so it matches the position the
+                // On a restart, pin our reported head to 0 to match the position the
                 // SDK expects after a load, closing the mismatch that drives its seek loop.
                 if (restart) _time = 0;
                 // Fold the SELECT's play-intent into this load: the newly-selected track
@@ -186,14 +185,14 @@ export const createNativePlayerComponent = () => {
                 // resume the still-committed OLD paused track). Consume-and-clear.
                 const wantPlay = wantPlayOnLoad;
                 wantPlayOnLoad = false;
-                // desiredPlaying reflects reality: a wantPlay load ends PLAYING (so a later
-                // redundant SDK play() dedups); a plain load stays null so a real later play
-                // still re-emits (queue advance).
+                // desiredPlaying reflects reality: a wantPlay load ends PLAYING (letting a
+                // later redundant SDK play() dedup); a plain load stays null for a real later
+                // play to still re-emit (queue advance).
                 desiredPlaying = wantPlay ? true : null;
                 // Soft-reset format data (don't drain resolvers - playback.ts already did)
                 (window as any).__LUNAR_MEDIA_FORMAT__ = null;
                 // First fresh time report must not be held behind the 250ms throttle
-                // (armed against the OLD track's last dispatch) -- mirrors SEEK.
+                // (armed against the OLD track's last dispatch); mirrors SEEK.
                 (window as any).__LUNAR_FORCE_TIME_DISPATCH__?.();
                 sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay);
             },
@@ -207,8 +206,8 @@ export const createNativePlayerComponent = () => {
                 setDesired(false);
             },
             stop: () => {
-                // Deferred so the echo's synchronous load() can cancel it; a genuine stop
-                // flushes here and forgets the track so a later re-select reloads.
+                // Deferred for the echo's synchronous load() to cancel it; a genuine stop
+                // flushes here and forgets the track, leaving a later re-select to reload.
                 pendingStop = true;
                 queueMicrotask(() => {
                     if (!pendingStop) return;
@@ -223,7 +222,7 @@ export const createNativePlayerComponent = () => {
                 cancelDeferredStop();
                 seekTarget = time;
                 _time = time;
-                // Emit mediacurrenttime synchronously so the SDK layer (which
+                // Emit mediacurrenttime synchronously: the SDK layer (which
                 // wraps this player) picks up the new position immediately.
                 // This mirrors the official TIDAL SDK's nativePlayer.seek()
                 // where this.currentTime = seconds is set before the actual seek.
@@ -254,10 +253,10 @@ export const createNativePlayerComponent = () => {
             },
             releaseDevice: () => {},
             selectDevice: (device: AudioDevice, mode: "shared" | "exclusive") => {
-                // ASIO is sticky (it has no TIDAL device mode), so a TIDAL re-assert with
+                // ASIO is sticky (it has no TIDAL device mode): a TIDAL re-assert with
                 // "shared" (e.g. a track change) keeps ASIO running. But an explicit
-                // "exclusive" selection is the user switching modes, so it WINS over the
-                // ASIO flag (clear it) -- otherwise enabling exclusive while ASIO is on
+                // "exclusive" selection is the user switching modes; it WINS over the
+                // ASIO flag (clear it). Otherwise enabling exclusive while ASIO is on
                 // gets re-forced back to ASIO and never switches.
                 let effective: string;
                 if (mode === "exclusive") {
@@ -288,7 +287,7 @@ export const createNativePlayerComponent = () => {
         const captured = snapshot;
         snapshot = null;
 
-        // Replay snapshot events via chained setTimeout(0) so that each
+        // Replay snapshot events via chained setTimeout(0): each
         // event fires in its own macrotask.  This gives the SDK's async
         // handlers (which use `await nativeEvent('mediaduration')` then
         // `await mediaStateChange('active')`) a chance to resolve their
@@ -321,15 +320,11 @@ export const createNativePlayerComponent = () => {
     return {
         Player,
         activePlayer: playerHandle,
-        // Internal setter for playback controller - updates _time without
-        // emitting events or triggering backend seeks.  The currentTime getter
-        // (seekTarget ?? _time) ensures the correct value is always returned.
-        _setTime: (t: number) => { _time = t; },
         syncBridgeVolume: (v: number) => { _lastVolume = v; },
         // Deduped play/pause intent for SDK tracks, driven by the Redux
         // playbackControls/PLAY|PAUSE interceptors (see index.ts).
         setDesiredPlayback: (playing: boolean) => setDesired(playing),
-        // Set by a SELECT so the NEXT load auto-plays (see wantPlayOnLoad above);
+        // Set by a SELECT for the NEXT load to auto-play (see wantPlayOnLoad above);
         // clearPlayOnLoad drops it on a self-load path, which bypasses this delegate.
         requestPlayOnLoad: () => { wantPlayOnLoad = true; },
         clearPlayOnLoad: () => { wantPlayOnLoad = false; },
@@ -342,8 +337,8 @@ export const createNativePlayerComponent = () => {
                 if (gen > activeGen) activeGen = gen;
             }
 
-            // Before Player() - update snapshot with latest values.
-            // Each event type overwrites the previous value, so only the
+            // Before Player(): update snapshot with latest values.
+            // Each event type overwrites the previous value; only the
             // most recent state is kept (no unbounded growth).
             if (snapshot) {
                 if (event === "mediacurrenttime") {
