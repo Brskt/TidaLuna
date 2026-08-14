@@ -223,6 +223,45 @@ async fn a_seek_taken_while_paused_settles_without_a_resume() {
 
 #[cfg(target_os = "windows")]
 #[tokio::test]
+async fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_exclusive_mode = true;
+    h.player.resume_store.set("track-1", 42.0);
+
+    h.player
+        .settle_bypass_decode_failure("decode packet error: truncated frame".to_string());
+
+    assert!(
+        h.player.exclusive_release_at.is_some(),
+        "nothing else hands the device back: no EndStream means no completion path"
+    );
+    assert_eq!(
+        h.player.resume_store.get("track-1"),
+        Some(42.0),
+        "clearing it here would be treating a dead decoder as a finished track"
+    );
+    assert!(!h.player.has_track);
+    assert!(!h.player.is_playing);
+    assert!(!h.player.seeking);
+    assert!(
+        h.player.exclusive_seek_tx.is_none(),
+        "the sender points at a receiver the dead decoder dropped"
+    );
+    assert_eq!(h.player.idle_state, PlaybackState::Stopped);
+    assert_eq!(last_state(&h.events), Some(PlaybackState::Stopped));
+    assert!(
+        h.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::MediaError { .. })),
+        "a terminal state with no error leaves the SDK without a reason"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
 async fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());

@@ -4,7 +4,7 @@ use crate::player::{DeviceErrorKind, MediaErrorCode, PlaybackState, PlayerEvent,
 use std::sync::atomic::Ordering::Relaxed;
 
 #[cfg(target_os = "windows")]
-use crate::player::asio::host::AsioEvent;
+use crate::player::asio::host::{AsioCommand, AsioEvent};
 #[cfg(target_os = "windows")]
 use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
 
@@ -59,6 +59,66 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
+    /// A bypass decoder died mid-stream: the SDK is told why and left on a terminal state.
+    /// The resume point is deliberately kept, since the listener never reached the end.
+    #[cfg(target_os = "windows")]
+    pub(super) fn settle_bypass_decode_failure(&mut self, error: String) {
+        // Silence the backend and arm its release. Clearing bookkeeping is half of what
+        // `stop_decode()` does for the shared path; it also drops the cpal stream. Here the
+        // ring still holds DECODE_AHEAD_SECS of audio, and no EndStream means no completion.
+        if self.is_exclusive_mode {
+            if let Some(ref handle) = self.exclusive_handle {
+                match self.current_exclusive_stream_id {
+                    Some(stream_id) => handle.send(ExclusiveCommand::Pause { stream_id }),
+                    None => crate::vprintln!("[WASAPI] decode failure: no live stream to silence"),
+                }
+            }
+            // The debounced block checks for a handle itself: a timer set without one no-ops.
+            self.exclusive_release_at =
+                Some(std::time::Instant::now() + super::EXCLUSIVE_PAUSE_RELEASE);
+        }
+        if self.is_asio_mode {
+            if let Some(ref handle) = self.asio_handle {
+                match self.current_asio_stream_id {
+                    Some(stream_id) => handle.send(AsioCommand::Pause { stream_id }),
+                    None => crate::vprintln!("[ASIO]   decode failure: no live stream to silence"),
+                }
+            }
+            self.asio_release_at = Some(std::time::Instant::now() + super::ASIO_IDLE_RELEASE);
+        }
+        // Cached bytes that will not decode must not stay indexed: every later play would
+        // fail the same way, and the load path just refreshed their LRU position.
+        if self.is_cached
+            && let Some(tid) = self.current_track_id.clone()
+            && let Ok(mut cache) = crate::state::AUDIO_CACHE.lock()
+            && cache.drop_entry(&tid) == crate::player::cache::DropOutcome::Dropped
+        {
+            crate::vprintln!("[CACHE]  Dropped after a decode failure: {tid}");
+        }
+        (self.callback)(PlayerEvent::MediaError {
+            error,
+            code: MediaErrorCode::UnreadableFile,
+        });
+        // The SDK's same-track recovery reload rebuilds instead of resuming a dead decoder.
+        self.set_committed_track(None);
+        self.has_track = false;
+        self.is_playing = false;
+        self.seeking = false;
+        self.seek_target = None;
+        self.seek_wall_start = None;
+        self.exclusive_seek_tx = None;
+        self.asio_seek_tx = None;
+        self.current_track_id = None;
+        self.idle_state = PlaybackState::Stopped;
+        crate::state::GOVERNOR
+            .buffer_progress()
+            .set_playback_active(false);
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Stopped,
+            self.current_seq,
+        ));
+    }
+
     /// Where playback actually is, asked of the backend that owns it. `played_samples` (the
     /// cpal counter) sits frozen at the last shared position while ASIO or exclusive is
     /// engaged, since neither bypass backend writes it. `None` before anything played.
@@ -77,6 +137,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     #[cfg(target_os = "windows")]
     pub(super) fn poll_exclusive_events(&mut self) {
         if self.is_exclusive_mode {
+            // Settled after the loop, outside the handle borrow: the settle takes `&mut
+            // self`, where the arms below only touch fields.
+            let mut decode_failure: Option<String> = None;
             if let Some(ref handle) = self.exclusive_handle {
                 for ev in handle.poll_events() {
                     match ev {
@@ -140,6 +203,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             // Floor-free live position for an exclusive->shared re-arm.
                             self.last_exclusive_pos = Some(report);
                             (self.callback)(PlayerEvent::TimeUpdate(report, self.current_seq));
+                        }
+                        ExclusiveEvent::DecodeFailed { stream_id, error } => {
+                            if self.current_exclusive_stream_id == Some(stream_id) {
+                                crate::vprintln!("[WASAPI] decoder died: {error}");
+                                decode_failure = Some(error);
+                            }
                         }
                         ExclusiveEvent::StateChange(s) => {
                             if s == PlaybackState::Completed {
@@ -215,6 +284,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
             }
 
+            if let Some(error) = decode_failure {
+                self.settle_bypass_decode_failure(error);
+            }
+
             if !self.is_exclusive_mode {
                 self.exclusive_handle = None;
             }
@@ -247,6 +320,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if !self.is_asio_mode {
             return;
         }
+        // Settled after the loop, outside the handle borrow: the settle takes `&mut self`,
+        // where the arms below only touch fields.
+        let mut decode_failure: Option<String> = None;
         if let Some(ref handle) = self.asio_handle {
             for ev in handle.poll_events() {
                 match ev {
@@ -323,6 +399,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.asio_watchdog_at = Some(std::time::Instant::now());
                         }
                         (self.callback)(PlayerEvent::TimeUpdate(report, self.current_seq));
+                    }
+                    AsioEvent::DecodeFailed { stream_id, error } => {
+                        if self.current_asio_stream_id == Some(stream_id) {
+                            crate::vprintln!("[ASIO] decoder died: {error}");
+                            decode_failure = Some(error);
+                        }
                     }
                     AsioEvent::StateChange(s) => {
                         // Arm the progress watchdog when the clock starts; disarm on pause/stop.
@@ -425,6 +507,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                 }
             }
+        }
+
+        if let Some(error) = decode_failure {
+            self.settle_bypass_decode_failure(error);
         }
 
         // Progress watchdog (a backstop): the clock reported Active but the position hasn't

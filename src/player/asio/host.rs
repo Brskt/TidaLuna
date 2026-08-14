@@ -1068,6 +1068,12 @@ pub(crate) enum AsioCommand {
         stream_id: u32,
         gen_id: u32,
     },
+    /// The decoder thread died mid-stream. It is the one exit that signals nothing on its
+    /// own, which left the player holding a seek channel whose receiver was already gone.
+    DecodeFailed {
+        stream_id: u32,
+        error: String,
+    },
     Play {
         stream_id: u32,
     },
@@ -1108,6 +1114,13 @@ pub(crate) enum AsioEvent {
     /// Track finished (EOF + drained). Carries the stream_id: a stale completion from a
     /// superseded stream can't clear a newer track (which would force a re-arm/double-load).
     Completed(u32),
+    /// The decoder thread died mid-stream. Settled like the shared path's fatal decode
+    /// error, never like `Completed`: the track did not finish, and its resume point has
+    /// to survive. Stream-scoped, keeping a superseded decoder's death off a newer track.
+    DecodeFailed {
+        stream_id: u32,
+        error: String,
+    },
 }
 
 /// Absolute frame index for a position in seconds, the `played_frames` baseline so
@@ -1766,6 +1779,20 @@ impl ControlCtx {
         });
     }
 
+    /// Relay a decoder death to the player. Stream-scoped like the seek answers: a
+    /// superseded decoder dying must not retire the track that replaced it.
+    fn handle_decode_failed(
+        &self,
+        event_tx: &mpsc::Sender<AsioEvent>,
+        stream_id: u32,
+        error: String,
+    ) {
+        if self.stream_id != Some(stream_id) {
+            return;
+        }
+        let _ = event_tx.send(AsioEvent::DecodeFailed { stream_id, error });
+    }
+
     /// Baseline plus the frames the RT callback has actually played, clamped to the
     /// track duration. Every position this thread reports comes from here; the counters
     /// only move on a confirmed transition, making it truthful while paused too.
@@ -2123,6 +2150,9 @@ impl ControlCtx {
             } => self.handle_reset_for_seek(event_tx, stream_id, gen_id, start_secs),
             AsioCommand::SeekFailed { stream_id, gen_id } => {
                 self.handle_seek_failed(event_tx, stream_id, gen_id)
+            }
+            AsioCommand::DecodeFailed { stream_id, error } => {
+                self.handle_decode_failed(event_tx, stream_id, error)
             }
             AsioCommand::Play { stream_id } => {
                 // Stream-scoped, like PushPcm/EndStream/Completed: a stale Play from a
@@ -2767,7 +2797,14 @@ pub(crate) fn stream_reader_to_asio(
                 if cancel.load(Ordering::Relaxed) {
                     return Ok(());
                 }
-                return Err(format!("decode packet error: {e}"));
+                let error = format!("decode packet error: {e}");
+                // Returning alone tells nobody: the caller only logs, and the player would
+                // keep a seek channel this thread is about to drop.
+                let _ = cmd_tx.send(AsioCommand::DecodeFailed {
+                    stream_id,
+                    error: error.clone(),
+                });
+                return Err(error);
             }
         };
 

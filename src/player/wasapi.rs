@@ -58,6 +58,12 @@ pub(super) enum ExclusiveCommand {
         stream_id: u32,
         gen_id: u32,
     },
+    /// The decoder thread died mid-stream. It is the one exit that signals nothing on its
+    /// own, which left the player holding a seek channel whose receiver was already gone.
+    DecodeFailed {
+        stream_id: u32,
+        error: String,
+    },
     /// Stream-scoped like PushPcm/EndStream (mirrors ASIO's Play/Pause): un-scoped, a
     /// premature Play (racing the decoder's probe) or a stale one from a superseded track
     /// resumed the OLD armed track's PCM until the new StartStream landed.
@@ -98,6 +104,13 @@ pub(super) enum ExclusiveEvent {
     /// 96k-max DAC), but exclusive itself works for other rates. Per-track shared fallback,
     /// keeping exclusive enabled; mirrors `AsioEvent::RateUnsupported`.
     FormatUnsupported,
+    /// The decoder thread died mid-stream. Settled like the shared path's fatal decode
+    /// error, never like `Completed`: the track did not finish, and its resume point has
+    /// to survive. Stream-scoped, keeping a superseded decoder's death off a newer track.
+    DecodeFailed {
+        stream_id: u32,
+        error: String,
+    },
 }
 
 struct SizedMediaSource<R> {
@@ -441,7 +454,14 @@ where
                 if cancel.load(Relaxed) {
                     return Ok(());
                 }
-                return Err(format!("decode packet error: {e}"));
+                let error = format!("decode packet error: {e}");
+                // Returning alone tells nobody: the caller only logs, and the player would
+                // keep a seek channel this thread is about to drop.
+                let _ = cmd_tx.send(ExclusiveCommand::DecodeFailed {
+                    stream_id,
+                    error: error.clone(),
+                });
+                return Err(error);
             }
         };
 
@@ -1235,6 +1255,20 @@ impl RenderContext {
         });
     }
 
+    /// Relay a decoder death to the player. Stream-scoped like the seek answers: a
+    /// superseded decoder dying must not retire the track that replaced it.
+    fn handle_decode_failed(
+        &self,
+        event_tx: &mpsc::Sender<ExclusiveEvent>,
+        stream_id: u32,
+        error: String,
+    ) {
+        if self.current_stream_id != Some(stream_id) {
+            return;
+        }
+        let _ = event_tx.send(ExclusiveEvent::DecodeFailed { stream_id, error });
+    }
+
     /// Position backed by audible audio: clamped to the frames actually covered by
     /// buffered PCM, never reporting ahead of what can be heard on a forward seek into
     /// a still-downloading region. Every position this thread reports comes from here.
@@ -1442,6 +1476,9 @@ fn render_thread_inner(
                         } => ctx.handle_reset_for_seek(&event_tx, stream_id, gen_id, start_secs),
                         ExclusiveCommand::SeekFailed { stream_id, gen_id } => {
                             ctx.handle_seek_failed(&event_tx, stream_id, gen_id)
+                        }
+                        ExclusiveCommand::DecodeFailed { stream_id, error } => {
+                            ctx.handle_decode_failed(&event_tx, stream_id, error)
                         }
                         ExclusiveCommand::ReleaseDevice => ctx.release_device(),
                         ExclusiveCommand::Shutdown => {
@@ -1753,6 +1790,9 @@ fn render_thread_inner(
                 }) => ctx.handle_reset_for_seek(&event_tx, stream_id, gen_id, start_secs),
                 Ok(ExclusiveCommand::SeekFailed { stream_id, gen_id }) => {
                     ctx.handle_seek_failed(&event_tx, stream_id, gen_id)
+                }
+                Ok(ExclusiveCommand::DecodeFailed { stream_id, error }) => {
+                    ctx.handle_decode_failed(&event_tx, stream_id, error)
                 }
                 Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                 Ok(ExclusiveCommand::Shutdown) | Err(_) => {
