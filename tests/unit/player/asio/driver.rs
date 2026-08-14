@@ -31,3 +31,63 @@ fn rejects_malformed_clsid() {
 fn rejects_empty_name() {
     assert!(parse_driver_row("   ", "{12345678-1234-1234-1234-123456789ABC}").is_none());
 }
+
+/// Three drivers installed, only the second one's interface plugged in: the shape that
+/// made the app open the Thunderbolt driver and give up.
+fn installed() -> Vec<AsioDriverInfo> {
+    vec![
+        AsioDriverInfo {
+            name: "Focusrite Thunderbolt ASIO".to_string(),
+            clsid: 1,
+        },
+        AsioDriverInfo {
+            name: "Focusrite USB ASIO".to_string(),
+            clsid: 2,
+        },
+        AsioDriverInfo {
+            name: "Realtek ASIO".to_string(),
+            clsid: 3,
+        },
+    ]
+}
+
+#[test]
+fn an_explicit_request_never_falls_through_to_another_driver() {
+    let drivers = installed();
+    let picked = open_candidates(&drivers, Some("Focusrite USB ASIO"));
+    assert_eq!(picked.len(), 1);
+    assert_eq!(picked[0].clsid, 2);
+}
+
+#[test]
+fn a_request_is_matched_after_trimming() {
+    let drivers = installed();
+    let picked = open_candidates(&drivers, Some("  Realtek ASIO "));
+    assert_eq!(picked.len(), 1);
+    assert_eq!(picked[0].clsid, 3);
+}
+
+#[test]
+fn no_request_keeps_every_driver_in_enumeration_order() {
+    let drivers = installed();
+    let picked = open_candidates(&drivers, None);
+    assert_eq!(
+        picked.iter().map(|d| d.clsid).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
+#[test]
+fn a_request_naming_no_installed_driver_keeps_every_candidate() {
+    // What the device list sends today: a shared-mode device name, which no ASIO
+    // driver is called. Falling through to the open attempts is the point.
+    let drivers = installed();
+    let picked = open_candidates(&drivers, Some("Speakers (4- Focusrite USB Audio)"));
+    assert_eq!(picked.len(), 3);
+}
+
+#[test]
+fn nothing_installed_yields_no_candidate() {
+    assert!(open_candidates(&[], Some("Focusrite USB ASIO")).is_empty());
+    assert!(open_candidates(&[], None).is_empty());
+}

@@ -1,5 +1,5 @@
 //! ASIO driver discovery: enumerate `HKLM\SOFTWARE\ASIO\<name>` and parse each
-//! `CLSID`. The CLSID is a `u128` so the parsing stays platform-independent; the
+//! `CLSID`. The CLSID is a `u128`, keeping the parsing platform-independent; the
 //! Windows loader turns it into a `GUID` at the COM boundary.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
@@ -11,7 +11,7 @@ pub(crate) struct AsioDriverInfo {
 }
 
 /// Parse a registry CLSID string (`{8-4-4-4-12}` hex groups, braces optional)
-/// into a `u128` ordered so `GUID::from_u128` reproduces the textual form.
+/// into a `u128` ordered for `GUID::from_u128` to reproduce the textual form.
 /// Returns `None` for any malformed value.
 fn parse_clsid(s: &str) -> Option<u128> {
     let t = s.trim();
@@ -44,6 +44,22 @@ pub(crate) fn parse_driver_row(name: &str, clsid_str: &str) -> Option<AsioDriver
         name: name.to_string(),
         clsid,
     })
+}
+
+/// Order the installed drivers for an open attempt. A request naming an installed driver
+/// yields that driver ALONE: an explicit choice that fails is a failure, never a silent
+/// fall-through to another interface. Otherwise the enumeration order stands, because
+/// opening a driver is the only way to tell present hardware from absent.
+pub(crate) fn open_candidates<'a>(
+    drivers: &'a [AsioDriverInfo],
+    requested: Option<&str>,
+) -> Vec<&'a AsioDriverInfo> {
+    if let Some(want) = requested
+        && let Some(exact) = drivers.iter().find(|d| d.name == want.trim())
+    {
+        return vec![exact];
+    }
+    drivers.iter().collect()
 }
 
 /// Enumerate installed ASIO drivers from `HKLM\SOFTWARE\ASIO`.
@@ -235,6 +251,27 @@ fn probe_driver(info: &AsioDriverInfo) {
             );
         }
     }
+}
+
+/// The driver's own reason for the call that just failed. The SDK's `ASIOInit` wrapper
+/// copies this into `ASIODriverInfo.errorMessage`; driving the raw `IASIO` skips that
+/// wrapper: the text is lost unless fetched here.
+#[cfg(target_os = "windows")]
+pub(crate) fn driver_error_message(driver: &super::iasio::AsioDriver) -> Option<String> {
+    // The SDK sizes that field at 124 bytes. 256 leaves room, and forcing the last
+    // byte to NUL terminates a driver that fills the buffer without one.
+    let mut buf = [0 as core::ffi::c_char; 256];
+    // SAFETY: the driver is live and the buffer outlives the call.
+    unsafe { driver.get_error_message(buf.as_mut_ptr()) };
+    let last = buf.len() - 1;
+    buf[last] = 0;
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(0);
+    if len == 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = buf[..len].iter().map(|&b| b as u8).collect();
+    let text = String::from_utf8_lossy(&bytes).trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Encode a string as a NUL-terminated UTF-16 buffer for the wide registry API.

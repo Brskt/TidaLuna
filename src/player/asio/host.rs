@@ -27,7 +27,9 @@ use symphonia::core::meta::MetadataOptions;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
 use super::convert::{AsioSampleType, apply_gain, write_dst_sample};
-use super::driver::{AsioDriverInfo, enumerate_asio_drivers};
+use super::driver::{
+    AsioDriverInfo, driver_error_message, enumerate_asio_drivers, open_candidates,
+};
 use super::iasio::{
     AsioBool, AsioBufferInfo, AsioCallbacks, AsioChannelInfo, AsioDriver, AsioSampleRate, AsioTime,
     asio_ok, output_ready_raw,
@@ -1125,16 +1127,19 @@ struct OpenedAsioStream {
 }
 
 /// State owned by the ASIO control thread. Never crosses threads (created and used
-/// only on that thread), so it needs no `Send`.
+/// only on that thread), and needs no `Send`.
 struct ControlCtx {
     /// Shared digital gain (f32 bits), cloned into each `StreamCtx`.
     gain: Arc<AtomicU32>,
     /// The adopted stream's consumed counter (minted per decoder spawn):
-    /// credited as samples leave staging or are discarded, so the decoder's
-    /// sent-minus-consumed throttle stays honest even while this thread is
-    /// stuck opening the driver.
+    /// credited as samples leave staging or are discarded, keeping the decoder's
+    /// sent-minus-consumed throttle honest even while this thread is stuck
+    /// opening the driver.
     consumed: Arc<AtomicU64>,
     driver: Option<AsioDriver>,
+    /// The driver name the device switch asked for, when it named one at all.
+    /// `None` means "whichever installed driver opens first".
+    requested_driver: Option<String>,
     /// The single ring writer (the RT callback holds the matching `Consumer`).
     producer: Option<rtrb::Producer<i32>>,
     ring_capacity: usize,
@@ -1189,11 +1194,12 @@ struct ControlCtx {
 }
 
 impl ControlCtx {
-    fn new(gain: Arc<AtomicU32>) -> Self {
+    fn new(gain: Arc<AtomicU32>, requested_driver: Option<String>) -> Self {
         Self {
             gain,
             consumed: Arc::new(AtomicU64::new(0)),
             driver: None,
+            requested_driver,
             producer: None,
             ring_capacity: 0,
             staging: VecDeque::new(),
@@ -1453,36 +1459,40 @@ impl ControlCtx {
     ) -> Result<(), ()> {
         let want_channels = (channels as usize).clamp(1, CHANNELS);
 
-        // First stream: open the first enumerated ASIO driver; it persists across
-        // same-format tracks.
+        // First stream: open the driver the switch named, else the first enumerated
+        // one that opens. It persists across same-format tracks.
         if self.driver.is_none() {
-            let Some(info) = enumerate_asio_drivers().into_iter().next() else {
+            let installed = enumerate_asio_drivers();
+            let candidates = open_candidates(&installed, self.requested_driver.as_deref());
+            if candidates.is_empty() {
                 let _ = event_tx.send(AsioEvent::DriverNotFound);
                 return Err(());
-            };
-            crate::vprintln!("[ASIO] control: opening driver '{}'", info.name);
-            // SAFETY: standard COM create + init; the desktop window parents the panel.
-            let driver = match unsafe { AsioDriver::create(info.clsid) } {
-                Ok(d) => d,
-                Err(hr) => {
-                    let _ =
-                        event_tx.send(AsioEvent::InitFailed(format!("create failed: {hr:#010x}")));
-                    return Err(());
+            }
+            let mut last_error = String::new();
+            for info in candidates {
+                match try_open_driver(info) {
+                    Ok(driver) => {
+                        self.driver = Some(driver);
+                        self.has_buffers = false;
+                        break;
+                    }
+                    Err(reason) => {
+                        last_error = format!("'{}' {reason}", info.name);
+                        crate::vprintln!("[ASIO] control: {last_error}");
+                    }
                 }
-            };
-            if unsafe { driver.init(GetDesktopWindow()) } == 0 {
-                let _ = event_tx.send(AsioEvent::InitFailed("driver init failed".into()));
+            }
+            if self.driver.is_none() {
+                let _ = event_tx.send(AsioEvent::InitFailed(last_error));
                 return Err(());
             }
-            self.driver = Some(driver);
-            self.has_buffers = false;
         }
 
         let format_changed =
             self.has_buffers && (self.sample_rate != sample_rate || self.channels != want_channels);
 
-        // Live clock: defer teardown to the Rebuilding poll so the fade doesn't stall queued
-        // commands/position; a stopped/paused clock is already silent, so the sync path is fine.
+        // Live clock: defer teardown to the Rebuilding poll; the fade doesn't stall queued
+        // commands/position; a stopped/paused clock is already silent, and the sync path is fine.
         if format_changed
             && self.client_started
             && !self.ctx_ptr.is_null()
@@ -2320,12 +2330,40 @@ impl ControlCtx {
     }
 }
 
+/// Open one enumerated driver and verify it can actually play. The registry lists what is
+/// INSTALLED: a driver whose interface is unplugged enumerates identically to a live one,
+/// and `init` plus an output-channel count is all that parts them. The channel query here
+/// is a presence probe; `build_stream` re-queries per stream and owns the format verdict.
+fn try_open_driver(info: &AsioDriverInfo) -> Result<AsioDriver, String> {
+    crate::vprintln!("[ASIO] control: opening driver '{}'", info.name);
+    // SAFETY: standard COM create + init; the desktop window parents the panel.
+    let driver = match unsafe { AsioDriver::create(info.clsid) } {
+        Ok(d) => d,
+        Err(hr) => return Err(format!("create failed: {hr:#010x}")),
+    };
+    // SAFETY: the driver was just created, leaving the vtable call live.
+    if unsafe { driver.init(GetDesktopWindow()) } == 0 {
+        let reason = driver_error_message(&driver).unwrap_or_else(|| "no reason given".into());
+        return Err(format!("init failed: {reason}"));
+    }
+    let (mut ins, mut outs) = (0i32, 0i32);
+    // SAFETY: the driver is initialised and both out-params outlive the call.
+    if !asio_ok(unsafe { driver.get_channels(&mut ins, &mut outs) }) {
+        return Err("getChannels failed".into());
+    }
+    if outs <= 0 {
+        return Err(format!("no output channels ({ins} in / {outs} out)"));
+    }
+    Ok(driver)
+}
+
 fn control_thread(
     gain: Arc<AtomicU32>,
+    requested_driver: Option<String>,
     cmd_rx: mpsc::Receiver<AsioCommand>,
     event_tx: mpsc::Sender<AsioEvent>,
 ) {
-    ControlCtx::new(gain).run(cmd_rx, event_tx);
+    ControlCtx::new(gain, requested_driver).run(cmd_rx, event_tx);
 }
 
 /// Player-facing handle to the ASIO control thread. Mirrors `ExclusiveHandle`.
@@ -2336,12 +2374,14 @@ pub(crate) struct AsioHandle {
 }
 
 impl AsioHandle {
-    /// Spawn the ASIO control thread. It opens the first enumerated ASIO driver on
-    /// the first `StartStream`. `gain` is the shared digital-gain cell (f32 bits).
-    pub(crate) fn spawn(gain: Arc<AtomicU32>) -> Self {
+    /// Spawn the ASIO control thread. On the first `StartStream` it opens
+    /// `requested_driver` when that names an installed driver, else the first
+    /// enumerated one that opens. `gain` is the shared digital-gain cell (f32 bits).
+    pub(crate) fn spawn(gain: Arc<AtomicU32>, requested_driver: Option<String>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AsioCommand>();
         let (event_tx, event_rx) = mpsc::channel::<AsioEvent>();
-        let thread = thread::spawn(move || control_thread(gain, cmd_rx, event_tx));
+        let thread =
+            thread::spawn(move || control_thread(gain, requested_driver, cmd_rx, event_tx));
         Self {
             cmd_tx,
             event_rx,

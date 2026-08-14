@@ -103,8 +103,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 && self.asio_skip_track.as_deref() == self.current_track_id.as_deref()
             {
                 self.current_device_id = Some(id);
+                // A rate rejection and the progress watchdog both set this flag, and each
+                // logs its own reason where it decides: name the effect here, never a cause.
                 crate::vprintln!(
-                    "[ASIO] skip: device can't clock this track's rate; keeping the current output"
+                    "[ASIO] skip: this track is marked to play shared; keeping the current output"
                 );
                 return;
             }
@@ -186,9 +188,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.pending_device_switch = Some((id, mode));
                     return;
                 }
-                let handle = AsioHandle::spawn(self.exclusive_gain.clone());
+                let handle = AsioHandle::spawn(self.exclusive_gain.clone(), Some(id.clone()));
                 self.is_asio_mode = true;
-                // Drop any stale release timer from a prior ASIO session so a fresh
+                // Drop any stale release timer from a prior ASIO session; a fresh
                 // engagement can't fire it and shut down the handle we just spawned.
                 self.asio_release_at = None;
                 self.asio_handle = Some(handle);

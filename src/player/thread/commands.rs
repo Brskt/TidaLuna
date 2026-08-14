@@ -279,7 +279,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 crate::vprintln!("[ASIO] teardown still draining; this load plays shared");
                 return false;
             }
-            self.asio_handle = Some(AsioHandle::spawn(self.exclusive_gain.clone()));
+            self.asio_handle = Some(AsioHandle::spawn(
+                self.exclusive_gain.clone(),
+                self.current_device_id.clone(),
+            ));
         }
         // A queued user seek wins over the load-time resume position.
         let seek_to = self
