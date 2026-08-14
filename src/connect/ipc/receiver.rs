@@ -13,8 +13,8 @@ use crate::connect::types::ReceiverConfig;
 static RECEIVER_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// In-memory mirror of `connect.receiver_always_on` (seeded at boot, updated by
-/// `set_always_on`). The `start_receiver_task` gate reads it so every start path
-/// honors the toggle; an atomic, not a DB read, keeps that check race-free.
+/// `set_always_on`). The `start_receiver_task` gate reads it, making every start
+/// path honor the toggle; an atomic, not a DB read, keeps that check race-free.
 static RECEIVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_receiver_enabled(enabled: bool) {
@@ -30,7 +30,7 @@ pub(super) fn start() {
 
 /// Start the receiver if it isn't already running. The `ConnectManager` is
 /// never moved out of `AppState`: the async build runs on owned data, then the
-/// result is installed in a synchronous step, so concurrent `connect.*` IPC
+/// result is installed in a synchronous step; concurrent `connect.*` IPC
 /// keeps seeing a live manager throughout.
 pub(crate) async fn start_receiver_task(config: ReceiverConfig) {
     let _guard = RECEIVER_LIFECYCLE.lock().await;

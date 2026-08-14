@@ -1,8 +1,8 @@
 //! Pure PCM conversion for the ASIO output backend.
 //!
-//! `write_dst_sample` mirrors `wasapi::convert_pcm_frame`'s byte math so ASIO output is
+//! `write_dst_sample` mirrors `wasapi::convert_pcm_frame`'s byte math; ASIO output is
 //! bit-identical to the exclusive WASAPI path; the RT host deinterleaves inline into the
-//! per-channel buffers. Platform-independent, so unit-tested on any host.
+//! per-channel buffers. Platform-independent, and unit-tested on any host.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 /// The ASIO output sample types we support (a subset of `ASIOSampleType`).

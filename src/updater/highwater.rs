@@ -6,7 +6,7 @@
 //! manifest can be replayed as a downgrade.
 //!
 //! Guards only against remote replay (stale CDN, MITM, mirror), not a local
-//! attacker who could rewrite the mark - so a plain atomic 0600 file suffices.
+//! attacker who could rewrite the mark; a plain atomic 0600 file suffices.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -7,7 +7,7 @@
 //!
 //! Methods stay on `QueueManager` via a separate `impl` block: Rust allows
 //! a type's implementation to be spread across any number of files inside
-//! the same module. Visibility is `pub(super)` so `dispatch` in `mod.rs`
+//! the same module. Visibility is `pub(super)`: `dispatch` in `mod.rs`
 //! can call them, but nothing outside the queue module can.
 
 use super::media::resolve_media_url;
@@ -58,8 +58,8 @@ impl QueueManager {
             }
         }
 
-        // Extract currentMediaInfo hints before loading the queue window,
-        // so process_queue_window_response can resolve current_index immediately.
+        // Extract currentMediaInfo hints before loading the queue window;
+        // process_queue_window_response resolves current_index immediately.
         let current_item_id = payload
             .get("currentMediaInfo")
             .and_then(|c| c.get("itemId"))

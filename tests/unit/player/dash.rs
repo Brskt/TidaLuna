@@ -2,7 +2,7 @@
 //!
 //! Synthetic manifests rather than fixtures: the repo keeps no `.mpd` files, and every
 //! shape below is a spec construct we must handle whatever TIDAL happens to emit today.
-//! `timescale="44100"` throughout, so `d="441000"` is exactly ten seconds.
+//! `timescale="44100"` throughout: `d="441000"` is exactly ten seconds.
 
 use super::*;
 
@@ -98,7 +98,7 @@ fn a_periods_own_duration_bounds_its_timeline_not_the_presentation_total() {
 
 #[test]
 fn a_start_number_at_the_ceiling_is_refused_not_wrapped() {
-    // @startNumber is an unbounded xs:unsignedLong, so the *second* segment already walks off
+    // @startNumber is an unbounded xs:unsignedLong; the *second* segment already walks off
     // u64, nowhere near MAX_SEGMENTS: naked addition panicked under the dev profile's overflow
     // checks and wrapped $Number$ to 0 in release. Saturating instead would render the same
     // number for every slot past the ceiling, a list of duplicate URLs sold as a whole track.
@@ -155,7 +155,7 @@ fn a_partial_representation_template_still_inherits_the_adaptation_sets_offset()
 
 #[test]
 fn a_nonzero_presentation_time_offset_anchors_the_bound() {
-    // S@t is measured from the offset, so the Period's end in this tick space is offset plus
+    // S@t is measured from the offset. The Period's end in this tick space is offset plus
     // duration. Reading the bound as the duration alone made saturating_sub yield zero
     // repeats, and the fail-closed check then rejected a manifest that should play.
     let xml = mpd(
@@ -319,7 +319,7 @@ fn an_absurd_declared_duration_is_refused_before_it_allocates() {
 
 #[test]
 fn an_absurd_repeat_count_is_refused_before_it_allocates() {
-    // @r is an xs:integer with no upper facet, so i64::MAX is a legal manifest value.
+    // @r is an xs:integer with no upper facet; i64::MAX is a legal manifest value.
     let xml = mpd(
         r#" mediaPresentationDuration="PT30S""#,
         &period(
@@ -340,7 +340,7 @@ fn an_absurd_repeat_count_is_refused_before_it_allocates() {
 
 #[test]
 fn a_long_but_plausible_track_stays_under_the_cap() {
-    // Six hours at ten seconds a segment is 2 160 URLs: comfortably inside the bound, so the
+    // Six hours at ten seconds a segment is 2 160 URLs, comfortably inside the bound: the
     // guard cannot be mistaken for one that rejects real long-form audio.
     let xml = mpd(
         r#" mediaPresentationDuration="PT6H""#,

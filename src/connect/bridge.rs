@@ -3,7 +3,7 @@
 //! When the TIDAL Connect receiver is active on this host, player events
 //! (state changes, time updates, errors) are translated to `BridgeEvent`s
 //! and forwarded to the receiver's playback task. When inactive, the
-//! forwarding path short-circuits on an atomic flag so the hot player loop
+//! forwarding path short-circuits on an atomic flag: the hot player loop
 //! pays no lock cost.
 //!
 //! The bridge owns its own statics here rather than being exposed as a
@@ -27,13 +27,13 @@ use crate::player::{PlaybackState, PlayerEvent};
 pub(crate) static ENGINE_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// Fast check to skip the mutex lock when no receiver is active. Kept
-/// separate from `BRIDGE_TX` so the common "receiver inactive" path only
+/// separate from `BRIDGE_TX`; the common "receiver inactive" path only
 /// reads an atomic.
 static BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Whether a Connect controller is currently connected. While false the
 /// bridge is idle: local player events are not forwarded to the receiver at
-/// all, so the whole notify/broadcast chain stays dormant until someone
+/// all. The whole notify/broadcast chain stays dormant until someone
 /// connects. Toggled by the routing loop on the 0<->1 client edge.
 static BRIDGE_HAS_CLIENT: AtomicBool = AtomicBool::new(false);
 

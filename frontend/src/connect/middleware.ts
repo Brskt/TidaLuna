@@ -1,8 +1,8 @@
 // Receiver-side `media_changed` enrichment: the payload only carries a
-// `mediaId`, so we fetch the full track record from the TIDAL API before
+// `mediaId`; we fetch the full track record from the TIDAL API before
 // dispatching Redux actions, updating the player bar, and injecting the
-// cover image. Isolated from the pure relay listeners in `index.ts` so the
-// listener stays a relay and the network/DOM side-effects live here.
+// cover image. Isolated from the pure relay listeners in `index.ts`, keeping the
+// listener a relay while the network/DOM side-effects live here.
 
 import { tidalFetch } from "../ipc";
 import type { ReceiverMediaChangedPayload } from "./types";
@@ -47,7 +47,7 @@ export async function handleReceiverMediaChanged(
             ? `https://resources.tidal.com/images/${cover.replace(/-/g, "/")}/1280x1280.jpg`
             : undefined;
 
-        // Inject into content cache so selectors can find it.
+        // Inject into content cache for selectors to find it.
         store.dispatch({
             type: "content/LOAD_SINGLE_MEDIA_ITEM_SUCCESS",
             payload: { mediaItem: { type: "track", item: track } },

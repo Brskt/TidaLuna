@@ -18,7 +18,7 @@ use crate::connect::types::{MediaInfo, MediaMetadata, QueueItem, ServerInfo};
 use super::http::{is_trusted_server_url, resolve_auth_header};
 
 /// Build a `MediaInfo` payload from a cloud-queue item. Cloud-queue items
-/// often carry richer data in `display_info` than in `metadata`, so we
+/// often carry richer data in `display_info` than in `metadata`; we
 /// fill the metadata from display_info whenever the primary field is
 /// missing.
 pub(super) fn queue_item_to_media_info(item: &QueueItem) -> MediaInfo {

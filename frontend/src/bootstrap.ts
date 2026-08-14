@@ -1,6 +1,6 @@
 // Bootstrap: sets up globals that @luna/core and @luna/lib depend on.
 // This module MUST be imported before any @luna/* module.
-// ESM evaluates imports in order, so this runs first.
+// ESM evaluates imports in order; this runs first.
 
 import { setupIpcBridge } from "./plugins/ipc-bridge";
 import { installDateTimeFormatMemo } from "./intl-memo";

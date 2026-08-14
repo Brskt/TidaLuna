@@ -157,7 +157,7 @@ impl NativeRuntime {
                     }
                 };
 
-                // Child-initiated egress request: dispatch off the read loop so the
+                // Child-initiated egress request: dispatch off the read loop; the
                 // HTTP round-trip never blocks other responses.
                 match parsed.get("type").and_then(|t| t.as_str()) {
                     Some("net.fetch") => {

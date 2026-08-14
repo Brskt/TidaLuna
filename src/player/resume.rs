@@ -27,7 +27,7 @@ pub(crate) struct ResumeStore {
 
 impl ResumeStore {
     /// Read whatever `path` holds, migrating the old multi-entry format on the way. The path
-    /// is a parameter so a caller can own a store that writes outside the app's own file.
+    /// is a parameter, letting a caller own a store that writes outside the app's own file.
     pub fn new(path: PathBuf) -> Self {
         let entry = fs::read(&path)
             .ok()

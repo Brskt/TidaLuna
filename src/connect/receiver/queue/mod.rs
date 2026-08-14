@@ -22,7 +22,7 @@ use crate::connect::types::{
 
 // ── State machine ────────────────────────────────────────────────────
 
-/// Internal state of the queue façade. Kept private to the module so every
+/// Internal state of the queue façade. Kept private to the module, and every
 /// transition goes through a `QueueManager` method: external callers can
 /// observe effects through `QueueNotifyEvent`, but cannot mutate state
 /// directly. Sub-modules (`http.rs`, `media.rs`) take data by reference and
@@ -81,7 +81,7 @@ pub(crate) struct QueueManager {
 
     /// Linearized auth state. Seeded from the first ServerInfo that carries
     /// OAuth parameters; mutations during refresh go through RefreshGuard
-    /// so concurrent writers cannot produce torn state. The ServerInfo
+    /// which keeps concurrent writers from producing torn state. The ServerInfo
     /// fields above are kept in sync and remain the source used to build
     /// outgoing HTTP Authorization headers.
     auth: Option<Arc<AuthStore>>,
@@ -104,7 +104,7 @@ pub(crate) struct QueueManager {
     deferred_commands: Vec<DeferredCommand>,
     /// Exactly-once gate for client notifications on terminal auth failure.
     /// Reset whenever `sync_auth_from_server_info` installs a fresh generation
-    /// (login / relogin), so a new generation re-arms the notification.
+    /// (login / relogin): a new generation re-arms the notification.
     terminal_notified: bool,
 }
 
@@ -148,7 +148,7 @@ impl QueueManager {
         };
 
         // A fresh generation (login / relogin) re-arms the one-shot terminal
-        // notification so the next `invalid_grant` produces exactly one
+        // notification; the next `invalid_grant` produces exactly one
         // outgoing notification instead of being silently suppressed.
         self.terminal_notified = false;
 
@@ -167,7 +167,7 @@ impl QueueManager {
             }
             Some(store) => {
                 // The wire pushed a new set of tokens (relogin or quality
-                // change). Bump the generation so any in-flight refresh
+                // change). Bump the generation: any in-flight refresh
                 // guard tied to the previous snapshot will fail its CAS.
                 // Uses `store` (not CAS) because the wire is authoritative:
                 // a previously-terminated generation must not block the new
@@ -429,7 +429,7 @@ impl QueueManager {
                                     // A 401 on a request made with the freshly-
                                     // minted access token means the server has
                                     // revoked the grant out-of-band. Mark the
-                                    // generation Terminated(Revoked) so further
+                                    // generation Terminated(Revoked); further
                                     // refresh attempts against this snapshot are
                                     // rejected by `AuthStore::compare_and_swap`,
                                     // and notify the client exactly once.
@@ -489,8 +489,8 @@ impl QueueManager {
     /// Refresh OAuth token. The HTTP exchange lives in `http::refresh_token`;
     /// this method is the façade's CAS-plus-sync layer: it takes the current
     /// `AuthStore` snapshot, calls the stateless refresh helper, then
-    /// applies the outcome through `RefreshGuard` so a concurrent refresh
-    /// cannot produce torn state.
+    /// applies the outcome through `RefreshGuard`, which keeps a concurrent
+    /// refresh from producing torn state.
     async fn refresh_token(&mut self) -> Result<(), QueueError> {
         // Static OAuth server configuration (URL, grant_type, header) lives
         // in ServerInfo. The live refresh_token lives in AuthStore.
@@ -524,7 +524,7 @@ impl QueueManager {
             Err(e) => return Err(e),
         };
 
-        // Build the next auth state from the snapshot so `token_version`
+        // Build the next auth state from the snapshot: `token_version`
         // only advances once per successful refresh.
         let mut next = (*snapshot).clone();
         next.token_version += 1;
@@ -536,7 +536,7 @@ impl QueueManager {
         next.status = GenerationStatus::Active;
 
         // A lost CAS is a benign race, not an error: a concurrent writer already
-        // advanced the store, so adopt its current token instead of replaying
+        // advanced the store: adopt its current token instead of replaying
         // ours (rejected by the CAS, possibly orphaned under refresh-token
         // rotation).
         let cas_result = guard.try_apply(next);
@@ -564,7 +564,7 @@ impl QueueManager {
     }
 
     /// Mark the snapshot's generation `Terminated(InvalidGrant)`. Uses the
-    /// unconditional `store` so a later stale refresh can't erase the terminal
+    /// unconditional `store`; a later stale refresh cannot erase the terminal
     /// state. `suspect_replay` stays false: replay detection is server-side
     /// (RFC 9700 §4.14.2); the client only sets the flag heuristically.
     fn mark_generation_terminated(&mut self, snapshot: &Arc<TokenState>, provider_error: &str) {
@@ -582,7 +582,7 @@ impl QueueManager {
     /// Mark the current generation `Terminated(Revoked)` (no pre-captured
     /// snapshot). Used when a freshly-minted token is still rejected with 401
     /// (`invalid_token`, RFC 6750 §3.1), implying out-of-band revocation.
-    /// `store()` bypasses the CAS so a wire relogin can still install fresh
+    /// `store()` bypasses the CAS, letting a wire relogin still install fresh
     /// credentials.
     fn mark_generation_revoked(&mut self) {
         let Some(store) = self.auth.as_ref() else {
@@ -595,14 +595,14 @@ impl QueueManager {
 
     /// Persist a new access token into both content and queue ServerInfos.
     /// The AuthStore is the authoritative source; this keeps the wire-shaped
-    /// ServerInfo in sync so outgoing HTTP Authorization headers reflect the
+    /// ServerInfo in sync: outgoing HTTP Authorization headers reflect the
     /// refreshed token.
     fn update_access_token(&mut self, new_token: &str) -> Result<(), QueueError> {
         fn update_server(server: &mut Option<ServerInfo>, token: &str) {
             if let Some(s) = server
                 && let Some(ref mut ai) = s.auth_info
             {
-                // Update header_auth so resolve_auth_header uses the new token
+                // Update header_auth for resolve_auth_header to use the new token
                 if ai.header_auth.is_some() {
                     ai.header_auth = Some(format!("Bearer {}", token));
                 }
@@ -836,8 +836,8 @@ enum RefreshOutcome {
     Terminal(String),
 }
 
-/// Reconcile a refresh CAS result with the store's current state. Pure, so the
-/// audit-critical branch is unit-testable.
+/// Reconcile a refresh CAS result with the store's current state. Pure, which makes
+/// the audit-critical branch unit-testable.
 ///
 /// A lost CAS is not a failure: adopt the winner's current token rather than
 /// replay ours (rejected by the CAS, possibly orphaned under refresh-token

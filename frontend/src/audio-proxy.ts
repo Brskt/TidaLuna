@@ -1,4 +1,4 @@
-// Patches HTMLMediaElement so TIDAL SDK's <audio> elements for DASH/AAC
+// Patches HTMLMediaElement: TIDAL SDK's <audio> elements for DASH/AAC
 // mirror our Rust player's state instead of failing (CEF has no MSE).
 
 import { sendIpc } from "./ipc";
@@ -29,7 +29,7 @@ if (srcDesc) {
 				_proxyPlaying = false;
 				_proxyTime = 0;
 
-				// Emit readiness events so the SDK's saga continues normally.
+				// Emit readiness events for the SDK's saga to continue normally.
 				// Use microtask timing to match real media element behavior.
 				queueMicrotask(() => {
 					this.dispatchEvent(new Event("loadedmetadata"));

@@ -213,7 +213,7 @@ window.__pluginUnloads[__pid] = function() {
     // --- Register exports on window ---
     // strip_esm_syntax converts `export{F as Settings, T as unloads}` to
     // `var __exports = {Settings: F, unloads: T}`. We register this on window
-    // so extractSettings() can read it without re-executing the plugin.
+    // for extractSettings() to read without re-executing the plugin.
     // Also wire the plugin's own unloads Set into our cleanup system.
     js.push_str(
         r#"
@@ -251,7 +251,7 @@ if (typeof __exports !== 'undefined') {
     // Sent via .then() in the OUTER scope after the async IIFE fully resolves.
     // Uses captured __pThen (original Promise.prototype.then), __ackCq (original cefQuery),
     // and __ackReq (pre-serialized by Rust). All three are shadowed to undefined in the
-    // inner IIFE, so plugin code cannot access or forge them.
+    // inner IIFE; plugin code cannot access or forge them.
     // NOTE: This protects against self-spoofing by the current plugin. It does NOT protect
     // against cross-plugin spoofing (a previously loaded plugin could have patched globals
     // before this wrapper captured them). Full isolation would require separate V8 isolates.

@@ -37,7 +37,7 @@ fn quota_caps_namespace_key_count_but_allows_replace() {
     // A new third key exceeds the 2-key limit...
     let err = enforce_storage_quota(&mut conn, "ns", "c", "3", &TINY).unwrap_err();
     assert!(err.contains("key limit"), "got: {err}");
-    // ...but replacing an existing key adds no key, so it is allowed.
+    // ...but replacing an existing key adds no key; it is allowed.
     enforce_storage_quota(&mut conn, "ns", "a", "9", &TINY).expect("replace allowed");
 }
 

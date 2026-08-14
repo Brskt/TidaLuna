@@ -93,9 +93,9 @@ impl MdnsAdvertiser {
         }
     }
 
-    /// Borrow the shared daemon so callers can drive a bounded shutdown
+    /// Borrow the shared daemon for callers to drive a bounded shutdown
     /// through `MdnsBackend`. The daemon thread is not owned exclusively
-    /// by the advertiser, so shutdown is the caller's responsibility.
+    /// by the advertiser; shutdown is the caller's responsibility.
     pub(crate) fn daemon(&self) -> Arc<ServiceDaemon> {
         self.daemon.clone()
     }

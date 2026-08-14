@@ -34,7 +34,7 @@ fn whole_file_decrypt_matches_streamed_chunk_decrypt() {
     assert_eq!(whole, streamed);
 }
 
-/// CTR XORs against a keystream, so the same call reverses itself. That is
+/// CTR XORs against a keystream: the same call reverses itself. That is
 /// what makes storing ciphertext and decrypting on read lossless.
 #[test]
 fn decrypt_round_trips() {

@@ -16,7 +16,7 @@ pub(crate) async fn check_for_update(channel: UpdateChannel) -> Option<UpdateInf
 
     // Enumerate releases instead of GitHub's `releases/latest`: the fork
     // inherits upstream releases whose tags outrank ours on raw numbers, and
-    // only a release carrying this platform's manifest is installable, so the
+    // only a release carrying this platform's manifest is installable; the
     // pick is "newest installable", not "newest published".
     let releases = match fetch_gh_releases(client).await {
         Ok(r) => r,
@@ -116,8 +116,8 @@ pub(crate) async fn check_for_update(channel: UpdateChannel) -> Option<UpdateInf
 
     // Linux-only: advisory check that the system bootstrap supports the
     // manifest's required sandbox-helper protocol. Catches the "user has not
-    // run apt upgrade yet" case early so we don't waste bandwidth on a
-    // download we'd refuse to apply. The authoritative gate (after signature
+    // run apt upgrade yet" case early, sparing bandwidth on a download we'd
+    // refuse to apply. The authoritative gate (after signature
     // verification) lives in updater/src/main.rs::run.
     #[cfg(target_os = "linux")]
     if let Err(e) = super::util::enforce_sandbox_protocol_gate(&manifest) {
@@ -148,7 +148,7 @@ pub(crate) async fn check_for_update(channel: UpdateChannel) -> Option<UpdateInf
 /// Called after login on the tokio runtime.
 pub(crate) fn trigger_update_check() {
     // Managed installs (Nix, etc.) are upgraded by the package manager and the
-    // updater can't write to the read-only prefix; skip so no toast appears.
+    // updater can't write to the read-only prefix; skip, leaving no toast.
     if crate::util::is_managed_install() {
         crate::vprintln!("[UPDATER] Managed install; in-app updater disabled");
         return;

@@ -105,7 +105,7 @@ impl MdnsBrowser {
 }
 
 /// Cap on peer-supplied mDNS TXT fields (`fn`/`id`); a malicious advertiser
-/// fully controls these, so bound their length.
+/// fully controls these: bound their length.
 const MAX_DEVICE_FIELD_BYTES: usize = 256;
 
 fn service_info_to_device(info: &mdns_sd::ResolvedService) -> Option<MdnsDevice> {

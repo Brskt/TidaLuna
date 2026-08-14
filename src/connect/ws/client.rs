@@ -22,7 +22,7 @@ pub(crate) struct WsClient {
     pending: Arc<PendingRequests>,
     connected: Arc<AtomicBool>,
     /// Cooperative cancellation for the three per-connection tasks.
-    /// Triggered from `shutdown()` (sync) so the tasks can flush and close
+    /// Triggered from `shutdown()` (sync) to let the tasks flush and close
     /// the WS stream gracefully instead of being aborted mid-frame.
     cancel: CancellationToken,
 }
@@ -153,10 +153,10 @@ impl WsClient {
     /// Shutdown the connection. Sync, idempotent, Arc-compatible (`&self`).
     ///
     /// Flips `connected` (which the heartbeat observes as its alive flag),
-    /// cancels the shared token so `read_loop`/`write_loop` exit their
+    /// cancels the shared token for `read_loop`/`write_loop` to exit their
     /// `select!` arms, and fails any pending request waiters. The three
-    /// tasks unwind gracefully on their own; we no longer `abort()` them
-    /// so the WS stream gets a chance to close properly.
+    /// tasks unwind gracefully on their own; we no longer `abort()` them,
+    /// leaving the WS stream a chance to close properly.
     pub fn shutdown(&self) {
         self.connected.store(false, Ordering::Relaxed);
         self.cancel.cancel();

@@ -1,7 +1,7 @@
 //! `plugin.download`: the disk half of `MediaItem.download()`.
 //!
 //! The renderer computes the manifest, the destination and the tags but cannot write to
-//! disk, so it hands them here: fetch the urls, decrypt with the player's decryptor, tag,
+//! disk; it hands them here: fetch the urls, decrypt with the player's decryptor, tag,
 //! write. Decryption follows the manifest's `encryptionType`; tagging does not follow its
 //! `codecs` field, see `run`.
 //!
@@ -51,7 +51,7 @@ const WHOLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const COVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One download at a time, as upstream does: each holds a whole track in memory and the
-/// retagger allocates a second copy, so a parallel album would multiply that into gigabytes.
+/// retagger allocates a second copy. A parallel album would multiply that into gigabytes.
 static DOWNLOADS: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(1));
 
@@ -156,7 +156,7 @@ pub(super) fn handle_download(msg: &IpcMessage, callback: IpcCallback) {
             );
             return;
         }
-        // Taken after validation so a bad request answers at once instead of queueing.
+        // Taken after validation: a bad request answers at once instead of queueing.
         let _permit = match DOWNLOADS.acquire().await {
             Ok(permit) => permit,
             Err(e) => {
@@ -281,7 +281,7 @@ async fn run(req: Request) -> anyhow::Result<()> {
     }
 
     // `codecs` lies in both directions: it reports non-FLAC for real FLAC streams (why
-    // upstream dropped the check) and BTS does carry AAC, so the container decides. A
+    // upstream dropped the check) and BTS does carry AAC; the container decides. A
     // non-FLAC stream is written through untagged rather than failing the download.
     let finished = if req.tags.is_some() && decrypted.starts_with(b"fLaC") {
         let (comments, picture) = read_tags(req.tags.as_ref()).await;
@@ -580,10 +580,10 @@ enum WriteOutcome {
     Skipped,
 }
 
-/// Write to a temp file in the destination directory, then rename, so an interrupted write
+/// Write to a temp file in the destination directory, then rename: an interrupted write
 /// leaves the previous file in place rather than a truncated one. Flushed before the rename to
-/// survive power loss; mode widened from the temp file's owner-only default so a media server
-/// can read the library.
+/// survive power loss; mode widened from the temp file's owner-only default for a media
+/// server to read the library.
 async fn write_file(
     dest: std::path::PathBuf,
     data: Vec<u8>,
@@ -640,7 +640,7 @@ async fn write_file(
     .await?
 }
 
-/// A Vorbis field name is printable ASCII without `=`. The names arrive as JSON keys, so a
+/// A Vorbis field name is printable ASCII without `=`. The names arrive as JSON keys: a
 /// crafted one could emit an entry parsers split in the wrong place and read as a value.
 fn valid_field_name(name: &str) -> bool {
     !name.is_empty()
@@ -716,7 +716,7 @@ async fn fetch_cover(url: &str) -> Option<Picture> {
         return None;
     }
 
-    // The spec requires printable ASCII here, so a parameterised or non-ASCII header
+    // The spec requires printable ASCII here; a parameterised or non-ASCII header
     // value is rejected rather than written into the block.
     let mime = resp
         .headers()

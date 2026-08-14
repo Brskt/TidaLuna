@@ -1,7 +1,7 @@
 //! net.fetch RPC: the Bun child emits a net.fetch line on stdout; we HTTP it via
 //! reqwest and write net.fetch.result back. Auth is the cjs trust gate. Each plugin
-//! gets a cookie-isolated client pair (follow + no-redirect) so cookies can't link
-//! plugins; in-flight fetches are tracked by reqId so net.fetch.cancel can drop one.
+//! gets a cookie-isolated client pair (follow + no-redirect); cookies can't link
+//! plugins. In-flight fetches are tracked by reqId for net.fetch.cancel to drop one.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -60,7 +60,7 @@ fn parse_redirect_mode(req: &Value) -> RedirectMode {
     }
 }
 
-/// Headers arrive as an ordered array of `[name, value]` pairs so duplicate
+/// Headers arrive as an ordered array of `[name, value]` pairs: duplicate
 /// names (e.g. repeated request headers) survive instead of collapsing.
 fn parse_headers(req: &Value) -> Vec<(String, String)> {
     req.get("headers")
@@ -177,23 +177,23 @@ pub(crate) fn build_error_result(req_id: &Value, msg: &str) -> String {
 }
 
 /// A plugin's two cookie-jar-sharing clients: one follows redirects, one does
-/// not (for `redirect:'manual'`/`'error'`). Both share the same `Arc<Jar>` so a
+/// not (for `redirect:'manual'`/`'error'`). Both share the same `Arc<Jar>`; a
 /// plugin's cookies persist regardless of the redirect mode of a given request.
 struct PluginClients {
     follow: reqwest::Client,
     manual: reqwest::Client,
 }
 
-/// Per-plugin clients, keyed by plugin id, so cookies never link two plugins.
+/// Per-plugin clients, keyed by plugin id. Cookies never link two plugins.
 static PLUGIN_CLIENTS: LazyLock<Mutex<HashMap<String, PluginClients>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Bound concurrent egress so a plugin firing many fetches can't spawn unbounded
-/// 25 MB buffers at once.
+/// Bound concurrent egress: a plugin firing many fetches would otherwise spawn
+/// unbounded 25 MB buffers at once.
 static FETCH_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_FETCHES));
 
-/// In-flight fetches keyed by reqId, so a `net.fetch.cancel` can abort one.
+/// In-flight fetches keyed by reqId, letting a `net.fetch.cancel` abort one.
 static INFLIGHT: LazyLock<Mutex<HashMap<String, CancellationToken>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -230,7 +230,7 @@ fn unregister(key: &Option<String>) {
     }
 }
 
-/// Spawn a `net.fetch` on the runtime, tracked so a `net.fetch.cancel` can abort it.
+/// Spawn a `net.fetch` on the runtime, tracked against a later `net.fetch.cancel`.
 pub(crate) fn dispatch(req: Value, stdin_tx: mpsc::UnboundedSender<String>) {
     let key = reqid_key(&req);
     let token = CancellationToken::new();
@@ -282,7 +282,7 @@ async fn run_fetch(req: Value, stdin_tx: &mpsc::UnboundedSender<String>) {
         }
     };
 
-    // normalize_method already validated the token, so from_bytes can't fail.
+    // normalize_method already validated the token; from_bytes can't fail.
     let method = match reqwest::Method::from_bytes(parsed.method.as_bytes()) {
         Ok(m) => m,
         Err(_) => {

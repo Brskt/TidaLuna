@@ -27,7 +27,7 @@ wrap_request_context_handler! {
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
             // The SW precache fetch is browser-less (is_navigation=0) and reaches
-            // only the context handler. Scope to HTML docs so assets keep gzip.
+            // only the context handler. Scope to HTML docs, leaving assets gzipped.
             let url = RequestUrl::new(
                 request
                     .as_ref()
@@ -37,8 +37,8 @@ wrap_request_context_handler! {
             if is_document_url(&url) {
                 return Some(DocumentHandler::new());
             }
-            // SW precache of a React-family chunk: rewrite it (browser-less) so
-            // the cached chunk carries the capture call on warm loads too.
+            // SW precache of a React-family chunk: rewrite it (browser-less): the
+            // cached chunk then carries the capture call on warm loads too.
             if crate::ui::module_capture::target_module_id(&url).is_some() {
                 return Some(crate::ui::module_capture::CaptureRequestHandler::new());
             }
@@ -72,8 +72,8 @@ wrap_resource_request_handler! {
             request: Option<&mut Request>,
             _callback: Option<&mut Callback>,
         ) -> ReturnValue {
-            // The filter sees pre-decompression bytes; force identity so the
-            // plaintext <meta> tag matches (cf. token_filter).
+            // The filter sees pre-decompression bytes; force identity; the
+            // plaintext <meta> tag has to match (cf. token_filter).
             if let Some(req) = request {
                 let accept_name = CefString::from("Accept-Encoding");
                 let accept_val = CefString::from("identity");
@@ -108,7 +108,7 @@ wrap_resource_request_handler! {
 }
 
 // Only the shell HTML (root nav or *.html on the app host) is stripped; assets
-// stay untouched so they keep compression.
+// stay untouched and keep their compression.
 pub(crate) fn is_document_url(url: &RequestUrl) -> bool {
     let Some(parsed) = url.parsed() else {
         return false;

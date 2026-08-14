@@ -3,7 +3,7 @@
 // IPC channel for per-CEF-process CPU/RAM from src/debug/perf_monitor.rs and
 // draws sparklines, plus a few page-side metrics it can read for free.
 //
-// The draw loop runs ONLY while the overlay is visible (toggle: F9), so the
+// The draw loop runs ONLY while the overlay is visible (toggle: F9); the
 // tool never adds frames to what it is measuring when hidden.
 import { onIpcEvent } from "../ipc";
 
@@ -94,7 +94,7 @@ export function initPerfOverlay(): void {
     });
 
     // Engine metrics from CDP (src/debug/perf_observer.rs): listeners is a gauge;
-    // recalc_total is cumulative, so derive a per-second rate from its delta.
+    // recalc_total is cumulative; the per-second rate below comes from its delta.
     let prevRecalc = 0;
     let prevEngineT = 0;
     onIpcEvent("perf.engine", (e: { listeners: number; recalc_total: number }) => {
@@ -138,8 +138,8 @@ export function initPerfOverlay(): void {
         ctx.lineTo(WIDTH - 8, my);
         ctx.stroke();
         ctx.setLineDash([]);
-        // Label + current + window average, printed above the graph so the text
-        // never sits on top of the line.
+        // Label + current + window average, printed above the graph, keeping the
+        // text off the line.
         ctx.fillStyle = r.color;
         ctx.fillText(`${r.label} ${fmt(r.s.last)}${r.unit}`, 10, y - 4);
         ctx.fillStyle = "rgba(255,255,255,0.45)";
@@ -166,9 +166,9 @@ export function initPerfOverlay(): void {
         draw();
         requestAnimationFrame(loop);
     };
-    // Start hidden so the 60fps draw loop never runs (and never perturbs the
+    // Start hidden: the 60fps draw loop never runs (and never perturbs the
     // measurement) until explicitly toggled on with F9. Data still accumulates
-    // via the IPC handlers above so the graph has history when revealed.
+    // via the IPC handlers above, giving the graph history when revealed.
     canvas.style.display = "none";
 
     window.addEventListener("keydown", (e) => {

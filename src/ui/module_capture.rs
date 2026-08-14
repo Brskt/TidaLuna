@@ -2,7 +2,7 @@
 //! execution. Only the React-family `/assets/*.js` chunks are rewritten (matched
 //! by path): each is parsed with oxc, every export enumerated, and one
 //! `globalThis.__LUNA_CAP(id, {...exports})` call appended. TIDAL runs the chunk
-//! normally, so the call registers the live namespace and plugins share the host
+//! normally: the call registers the live namespace, and plugins share the host
 //! React instance (correct hooks/context/elements). No script neutralization,
 //! no blob eval, no double-run; any parse/validation miss falls back to bundled
 //! React. Mirrors the buffering/dual-handler shape of `csp_filter`.
@@ -46,7 +46,7 @@ pub(crate) fn target_module_id(url: &RequestUrl) -> Option<&'static str> {
 /// (`export ... from`) have no local binding and are skipped.
 pub(crate) fn append_capture(js: &str, module_id: &str) -> String {
     let allocator = oxc::allocator::Allocator::default();
-    // `.mjs` forces module mode so `export`/`import` parse (chunks are ESM).
+    // `.mjs` forces module mode for `export`/`import` to parse (chunks are ESM).
     let Ok(source_type) = oxc::span::SourceType::from_path(Path::new("chunk.mjs")) else {
         return js.to_string();
     };
@@ -149,8 +149,8 @@ wrap_resource_request_handler! {
             request: Option<&mut Request>,
             _callback: Option<&mut Callback>,
         ) -> ReturnValue {
-            // The filter sees pre-decompression bytes; force identity so the
-            // plaintext JS is parseable (cf. csp_filter / token_filter).
+            // The filter sees pre-decompression bytes; force identity; the
+            // plaintext JS has to be parseable (cf. csp_filter / token_filter).
             if let Some(req) = request {
                 let accept_name = CefString::from("Accept-Encoding");
                 let accept_val = CefString::from("identity");

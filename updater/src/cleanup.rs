@@ -11,7 +11,7 @@ use crate::Manifest;
 use crate::is_safe_relative_path;
 
 /// Read and parse a manifest from disk. Returns `None` for missing or
-/// unparseable input so callers can treat that as "no diff input" rather
+/// unparseable input: callers treat that as "no diff input" rather
 /// than a hard error, matching the apply-path's existing behavior on a
 /// missing or corrupt installed manifest.
 pub(crate) fn read_manifest(path: &Path) -> Option<Manifest> {
@@ -20,7 +20,7 @@ pub(crate) fn read_manifest(path: &Path) -> Option<Manifest> {
 }
 
 /// Paths present in `old` but absent from `new`, filtered through
-/// `is_safe_relative_path` so absolute / `..` / drive-prefix entries cannot
+/// `is_safe_relative_path`; absolute / `..` / drive-prefix entries cannot
 /// escape `app_dir`.
 pub(crate) fn diff_removed(old: &Manifest, new: &Manifest, app_dir: &Path) -> Vec<String> {
     old.files
@@ -31,8 +31,8 @@ pub(crate) fn diff_removed(old: &Manifest, new: &Manifest, app_dir: &Path) -> Ve
 }
 
 /// Delete each path under `app_dir`. `NotFound` is benign (already gone) and
-/// counted as a no-op success; every other `io::Error` is propagated so the
-/// caller can decide whether to fail.
+/// counted as a no-op success; every other `io::Error` is propagated for the
+/// caller to decide whether to fail.
 ///
 /// The installer's transactional retry of `manifest.old.json` depends on this
 /// helper actually exiting non-zero when a file could not be removed (e.g.
@@ -57,7 +57,7 @@ fn delete_paths(to_remove: &[String], app_dir: &Path) -> Result<usize> {
 /// computes the diff, deletes. Hard errors on `app_dir` not being a
 /// directory, `new_manifest` being unparseable, or any per-file delete
 /// failure other than `NotFound`. Treats a missing or unreadable old
-/// manifest as "no work" (returns Ok(0)) so first installs no-op cleanly.
+/// manifest as "no work" (returns Ok(0)), letting first installs no-op cleanly.
 pub(crate) fn cleanup_stale(
     app_dir: &Path,
     old_manifest: &Path,

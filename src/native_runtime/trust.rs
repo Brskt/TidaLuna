@@ -9,7 +9,7 @@ pub(crate) struct TrustDecision {
 ///
 /// Scoped to `code_hash`: a decision granted for one version of the native
 /// code does not apply once the code changes under the same plugin name. A
-/// hash mismatch yields no decisions, so the user is re-prompted - this is
+/// hash mismatch yields no decisions; the user is re-prompted, and that is
 /// what makes trust-on-first-use sound against code substitution.
 pub(crate) fn load_trust(
     conn: &mut Connection,
@@ -47,7 +47,7 @@ pub(crate) fn save_trust(
 }
 
 /// Clear ALL trust decisions for a plugin (any code hash).
-/// Called on plugin uninstall so reinstalling re-triggers trust dialogs.
+/// Called on plugin uninstall: reinstalling re-triggers trust dialogs.
 /// Uses LIKE prefix match because native module names are "{pluginName}/xxx.native.ts".
 /// The trailing '/' prevents matching "foobar" when clearing "foo".
 pub(crate) fn clear_trust_by_plugin(conn: &mut Connection, plugin: &str) -> rusqlite::Result<()> {

@@ -21,7 +21,7 @@ const METHOD_GET_METRICS: i32 = 2;
 
 thread_local! {
     // Held on the UI thread for the browser's lifetime; `Some` also marks that
-    // the observer and `Performance.enable` were already set up, so the costly
+    // the observer and `Performance.enable` were already set up: the costly
     // registration happens exactly once.
     static REGISTRATION: RefCell<Option<Registration>> = const { RefCell::new(None) };
 }
@@ -59,7 +59,7 @@ wrap_dev_tools_message_observer! {
             result: Option<&[u8]>,
         ) {
             // CEF assigns its own incrementing message id and ignores the one we
-            // pass, so results can't be matched by id. Tell a getMetrics reply
+            // pass; results can't be matched by id. Tell a getMetrics reply
             // from the Performance.enable ack by content: the ack carries no
             // metrics array.
             if success == 0 {

@@ -251,13 +251,13 @@ pub(crate) fn save_console(conn: &mut Connection, enabled: bool) {
     set(conn, "logging.console", &enabled.to_string());
 }
 
-/// Settings the window bootstrap needs, batched into one db read so they load
+/// Settings the window bootstrap needs, batched into one db read, loading
 /// off the CEF UI thread in main() instead of blocking on_context_initialized.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BootSettings {
     pub(crate) close_to_tray: bool,
     pub(crate) auto_check: bool,
-    // "dev" channel as a bool so BootSettings stays Copy.
+    // "dev" channel as a bool: BootSettings stays Copy.
     pub(crate) update_dev_channel: bool,
     pub(crate) receiver_always_on: bool,
     pub(crate) volume_sync: bool,

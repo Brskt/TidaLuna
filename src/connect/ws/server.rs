@@ -115,8 +115,8 @@ impl WsServer {
     /// Shut down the server and all client connections.
     pub async fn shutdown(&mut self) {
         // Cancelling the TaskGroup token stops the accept loop's select! and,
-        // as the parent of every per-client token, the read/write loops too,
-        // so they close their sinks gracefully before any abort.
+        // as the parent of every per-client token, the read/write loops too;
+        // they close their sinks gracefully before any abort.
         let report = self.tasks.shutdown(SERVER_SHUTDOWN_DEADLINE).await;
         if !report.panicked.is_empty() {
             crate::vprintln!(
@@ -137,7 +137,7 @@ impl WsServer {
 }
 
 /// Await the next inbound connection, returning `None` if `cancel` fires
-/// first so the accept loop breaks instead of blocking inside `accept()`.
+/// first: the accept loop breaks instead of blocking inside `accept()`.
 async fn accept_or_cancel(
     listener: &TcpListener,
     cancel: &CancellationToken,
@@ -253,7 +253,7 @@ async fn accept_loop(
                         "[connect::ws::server] Client {} ping timeout - disconnecting",
                         socket_id
                     );
-                    // Tear down the silent peer: cancel the read/write loops so its
+                    // Tear down the silent peer: cancel the read/write loops; its
                     // tasks, socket, and map entry are reclaimed (the read-loop
                     // cleanup removes the client). Previously the timeout only logged.
                     timeout_cancel.cancel();

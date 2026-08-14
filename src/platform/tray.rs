@@ -254,7 +254,7 @@ pub(crate) fn start_event_polling() {
 #[cfg(target_os = "linux")]
 pub(crate) fn start_event_polling() {
     // Linux uses tray-item/ksni which dispatches callbacks on its own thread;
-    // callbacks post tasks back to the CEF UI thread, so no polling loop needed.
+    // callbacks post tasks back to the CEF UI thread: no polling loop needed.
     POLLING_STARTED.store(true, Ordering::SeqCst);
 }
 

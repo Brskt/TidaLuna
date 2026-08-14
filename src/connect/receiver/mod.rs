@@ -154,10 +154,10 @@ async fn routing_loop(
 
     // Open WS client sockets. The empty<->non-empty edge toggles the bridge idle
     // state (bridge::set_client_connected): while empty, local player events are
-    // not forwarded to the receiver at all, so the connect notify/broadcast chain
+    // not forwarded to the receiver at all; the connect notify/broadcast chain
     // stays dormant. Tracking socket ids (not a bare counter) keeps the state
     // correct if a disconnect ever arrives without a matching connect. The server
-    // keeps listening and stays discoverable regardless. Reset the flag here so a
+    // keeps listening and stays discoverable regardless. Reset the flag here: a
     // stale value from a previous receiver session can't leak in.
     let mut connected_sockets: std::collections::HashSet<u32> = std::collections::HashSet::new();
     crate::connect::bridge::set_client_connected(false);
@@ -171,8 +171,8 @@ async fn routing_loop(
                 // The first message from a socket can arrive before its
                 // ClientConnected event (separate channels, no select ordering;
                 // the WS read loop is spawned before the event is sent). Arm the
-                // bridge here so a controller's initial load isn't dropped by
-                // forward() while the client still looks disconnected.
+                // bridge here, keeping a controller's initial load from being dropped
+                // by forward() while the client still looks disconnected.
                 if connected_sockets.insert(incoming.socket_id) {
                     crate::connect::bridge::set_client_connected(true);
                 }

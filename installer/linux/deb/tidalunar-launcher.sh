@@ -14,8 +14,8 @@ if [ ! -x "$USER_DIR/tidalunar" ]; then
         flock -x 9
         if [ ! -x "$USER_DIR/tidalunar" ]; then
             # Explicit --zstd (don't rely on tar autodetection). On failure,
-            # drop the marker binary so the next launch re-extracts instead of
-            # exec'ing a truncated tree; keep cache/auth untouched.
+            # drop the marker binary, letting the next launch re-extract instead
+            # of exec'ing a truncated tree; keep cache/auth untouched.
             if ! tar --zstd --no-same-owner --no-overwrite-dir --no-same-permissions \
                     -xf "$SYS_DIR/payload.tar.zst" -C "$USER_DIR"; then
                 printf '%s\n' "tidalunar: payload extraction failed" >&2

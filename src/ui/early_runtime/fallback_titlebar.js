@@ -1,6 +1,6 @@
 // Fallback window controls for frameless pages without TIDAL's `_bar_*` shell (the
-// login.tidal.com auth page gets no bundle). Injected from the early runtime so it
-// reaches those pages; hidden whenever TIDAL's own bar is present.
+// login.tidal.com auth page gets no bundle). Injected from the early runtime to
+// reach those pages; hidden whenever TIDAL's own bar is present.
 (function () {
     if (window.top !== window.self) return;
     if (window.__TL_FALLBACK_BAR__) return;
@@ -12,8 +12,8 @@
         }
     }
 
-    // F12 -> DevTools. Lives here (not the bundle) so it also works on the login
-    // page; the bundle no longer registers it, so the app never double-toggles.
+    // F12 -> DevTools. Lives here (not the bundle) to also work on the login
+    // page; the bundle no longer registers it, and the app never double-toggles.
     document.addEventListener("keydown", function (e) {
         if (e.key === "F12") { e.preventDefault(); ipc("window.devtools"); }
     }, true);
@@ -73,7 +73,7 @@
         }
         setMaximized(!!(window.__TIDALUNAR_WINDOW_STATE__ || {}).isMaximized);
         // Rust pushes maximize/restore via __TIDAL_CALLBACKS__.window.updateState (the
-        // bundle registers it on the app); define it here so the glyph stays in sync on
+        // bundle registers it on the app); define it here to keep the glyph in sync on
         // the bundle-less login page.
         window.__TIDAL_CALLBACKS__ = window.__TIDAL_CALLBACKS__ || {};
         if (!window.__TIDAL_CALLBACKS__.window) {
@@ -88,9 +88,9 @@
         bar.appendChild(right);
         document.body.appendChild(bar);
 
-        // Show only while TIDAL's bar is absent; disconnect once it mounts so the
-        // app's busy DOM is not watched. `settled` defers the first show off the
-        // login pages so the app never flashes the strip before `_bar_` renders.
+        // Show only while TIDAL's bar is absent; disconnect once it mounts, leaving
+        // the app's busy DOM unwatched. `settled` defers the first show off the
+        // login pages: the app never flashes the strip before `_bar_` renders.
         var cfg = self.__LUNAR_CONFIG__ || {};
         var authHosts = cfg.authHosts || [];
         var settled = authHosts.indexOf(location.hostname) !== -1 || location.pathname.indexOf("/login") === 0;

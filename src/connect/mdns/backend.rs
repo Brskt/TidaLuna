@@ -6,11 +6,11 @@
 //! cases: the daemon is already stopped, the internal channel is
 //! temporarily full (`Error::Again`), or the daemon never acknowledges
 //! within a reasonable time. This module wraps all three behind an
-//! `async` trait so callers only see a single deadline-bounded result.
+//! `async` trait: callers only see a single deadline-bounded result.
 //!
 //! The prod implementation wraps `ServiceDaemon`. The test implementation is
-//! a simple fake that plays back a scripted sequence of outcomes so shutdown
-//! behaviour can be exercised without a real multicast interface.
+//! a simple fake that plays back a scripted sequence of outcomes, exercising
+//! shutdown behaviour without a real multicast interface.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,11 +24,11 @@ pub enum ShutdownOutcome {
     /// `DaemonStatus::Shutdown` was observed within the deadline.
     Clean,
     /// Probing `status()` reported a stopped daemon (or the status channel
-    /// was dropped), so no shutdown work was required.
+    /// was dropped); no shutdown work was required.
     AlreadyStopped,
     /// Shutdown did not complete within the deadline. The caller can decide
     /// whether to proceed or to treat this as a failure. Includes diagnostic
-    /// counters so the degradation is observable in logs.
+    /// counters that make the degradation observable in logs.
     Degraded {
         retry_count: u32,
         last_status: Option<String>,
@@ -42,7 +42,7 @@ pub enum ShutdownOutcome {
 /// Service registration and browsing still go through `mdns-sd` directly.
 ///
 /// The trait is infallible: every failure mode is encoded in
-/// `ShutdownOutcome::Degraded` so the caller can react on a single enum.
+/// `ShutdownOutcome::Degraded`; the caller reacts on a single enum.
 #[async_trait]
 pub trait MdnsBackend: Send + Sync {
     async fn shutdown(&self, deadline: Duration) -> ShutdownOutcome;
@@ -167,7 +167,7 @@ async fn probe_already_stopped(daemon: &ServiceDaemon) -> bool {
 // Test backend
 // ---------------------------------------------------------------------------
 
-/// A scripted fake backend. Pushes are consumed in order so a single fake can
+/// A scripted fake backend. Pushes are consumed in order: a single fake can
 /// serve multiple shutdown() calls with different scripted outcomes.
 #[cfg(test)]
 pub struct FakeMdnsBackend {

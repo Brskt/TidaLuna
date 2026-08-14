@@ -45,7 +45,7 @@ fn main() {
 
     std::fs::copy(&bundle_path, &dest_path).expect("Failed to copy bundle.js to OUT_DIR");
 
-    // Bake the plugin ES modules alongside the bundle so luna_modules.rs can include_bytes! them
+    // Bake the plugin ES modules alongside the bundle for luna_modules.rs to include_bytes! them
     // and serve them via a ResourceHandler, instead of bundle.js carrying them as inline strings.
     for (src, name) in [
         (

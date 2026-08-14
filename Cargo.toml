@@ -88,7 +88,7 @@ reqwest = { workspace = true, features = [
   "cookies",
   "json",
   "form",
-  # Auto-decompress responses (and strip content-encoding) so a manually-built
+  # Auto-decompress responses (and strip content-encoding): a manually-built
   # JS Response in a native plugin never sees compressed bytes.
   "gzip",
   "brotli",

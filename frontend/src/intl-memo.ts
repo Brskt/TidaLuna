@@ -3,10 +3,10 @@
 // TIDAL builds a fresh Intl.DateTimeFormat on every time/date render tick
 // instead of reusing one. Each construction allocates a JS object, a locale
 // string, three ICU C++ Managed handles and a closure, churning RAM and CPU.
-// A formatter is immutable for a given (locales, options) - format(),
-// formatToParts() and resolvedOptions() are pure - so a shared cached instance
+// A formatter is immutable for a given (locales, options): format(),
+// formatToParts() and resolvedOptions() are pure, and a shared cached instance
 // behaves identically. TIDAL uses only a handful of distinct (locales, options)
-// combinations, so the cache stays tiny.
+// combinations; the cache stays tiny.
 
 // Cacheable only when the value serializes to a faithful key. Intl.Locale
 // objects and other non-string locales are excluded (they stringify to {}).
@@ -17,8 +17,8 @@ function isSafeLocales(v: unknown): boolean {
     return false;
 }
 
-// Plain object of primitive values only; null is excluded so the native
-// constructor throws on it as the spec requires.
+// Plain object of primitive values only; null is excluded for the native
+// constructor to throw on it as the spec requires.
 function isSafeOptions(v: unknown): boolean {
     if (v === undefined) return true;
     if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
@@ -49,9 +49,9 @@ export function installDateTimeFormatMemo(): void {
         }
 
         // Only cache when the args serialize faithfully to the key. Bypass for
-        // anything JSON.stringify would lose or conflate - notably Intl.Locale
+        // anything JSON.stringify would lose or conflate: notably Intl.Locale
         // objects (stringify to {} and collide) and null (which the native
-        // constructor must be allowed to throw on) - so semantics are preserved.
+        // constructor must be allowed to throw on). Semantics are preserved.
         if (!isSafeLocales(locales) || !isSafeOptions(options)) {
             return new (Original as any)(locales, options);
         }
@@ -68,7 +68,7 @@ export function installDateTimeFormatMemo(): void {
         let instance = cache.get(key);
         if (instance === undefined) {
             instance = new (Original as any)(locales, options);
-            // The instance is shared across all callers of this key, so freeze it
+            // The instance is shared across all callers of this key: freeze it
             // to prevent one caller mutating it (e.g. `fmt.format = ...`) from
             // poisoning the others. Prototype methods (format/resolvedOptions) are
             // unaffected by freezing the instance.

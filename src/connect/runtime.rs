@@ -3,7 +3,7 @@
 //! `TaskGroup` owns every async task spawned on behalf of the module and
 //! reports a classified outcome for each one at shutdown: completed, aborted,
 //! panicked, or still running past its deadline (for unabortable blocking
-//! work). This makes shutdown deterministic and observable, so a crash in one
+//! work). This makes shutdown deterministic and observable: a crash in one
 //! subsystem cannot leave orphan tasks holding network sockets or locks.
 
 // Panic reporting via JoinError::into_panic only works when the binary is
@@ -32,7 +32,7 @@ use tokio_util::task::TaskTracker;
 /// Lifecycle state of a single tracked task.
 ///
 /// Encoded as `u8` for atomic storage. Transitions are enforced through
-/// `try_transition` (compare_exchange), not raw `store`, so a terminal
+/// `try_transition` (compare_exchange), not raw `store`; a terminal
 /// classification can never be overwritten by a late `AbortRequested` write.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -106,8 +106,8 @@ fn try_transition(atom: &AtomicU8, to: TaskState) -> bool {
 struct TaskRecord {
     handle: JoinHandle<()>,
     abort: AbortHandle,
-    /// Shared with the task wrapper so the wrapper can mark
-    /// `GracefulCompleted` from inside the task.
+    /// Shared with the task wrapper, which marks `GracefulCompleted` from
+    /// inside the task.
     state: Arc<AtomicU8>,
 }
 
@@ -183,7 +183,7 @@ impl TaskGroup {
         let state = Arc::new(AtomicU8::new(TaskState::Running as u8));
         let state_for_task = state.clone();
 
-        // Wrap the user future so the wrapper writes GracefulCompleted on
+        // Wrap the user future to write GracefulCompleted on
         // normal exit. If the task panics, the wrapper never reaches the
         // final transition; shutdown() detects the panic via
         // JoinError::try_into_panic.

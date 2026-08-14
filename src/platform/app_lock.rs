@@ -56,7 +56,7 @@ pub(crate) struct AppLock {
 }
 
 /// `Some` if this is the first instance (keep the guard alive); `None` if another
-/// instance is already running (it has been signalled to focus, so exit).
+/// instance is already running (it has been signalled to focus; exit).
 pub(crate) fn acquire_or_signal() -> Option<AppLock> {
     #[cfg(windows)]
     {
@@ -112,11 +112,11 @@ mod windows_impl {
     struct SendHandle(HANDLE);
 
     // SAFETY: a Win32 HANDLE is process-wide and the event APIs (WaitForSingleObject,
-    // SetEvent) are thread-safe, so using it from the listener thread is sound.
+    // SetEvent) are thread-safe: using it from the listener thread is sound.
     unsafe impl Send for SendHandle {}
 
     impl SendHandle {
-        // Accessor (not a field read) so the closure captures the whole wrapper -
+        // Accessor (not a field read): the closure captures the whole wrapper;
         // disjoint capture of `.0` alone would move a bare `*mut c_void`, not Send.
         fn get(&self) -> HANDLE {
             self.0
@@ -228,7 +228,7 @@ mod windows_impl {
                 CloseHandle(event);
             }
         }
-        // SAFETY: release our handle so the kernel reaps the object on owner exit.
+        // SAFETY: release our handle, letting the kernel reap the object on owner exit.
         unsafe { CloseHandle(mutex) };
         None
     }

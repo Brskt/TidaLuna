@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 // --- IPC Query Handler (JS -> Rust via cefQuery) ---
 
 /// True unless the frame is `External` (untrusted origin). `cefQuery` reaches every
-/// frame, so privileged channels are gated here in Rust, not by JS wrapper isolation.
+/// frame: privileged channels are gated here in Rust, not by JS wrapper isolation.
 fn frame_is_trusted(frame: &Option<Frame>, memo: &Mutex<Option<(String, bool)>>) -> bool {
     let Some(frame) = frame else {
         return false;
@@ -21,7 +21,7 @@ fn frame_is_trusted(frame: &Option<Frame>, memo: &Mutex<Option<(String, bool)>>)
     trusted_via_memo(&mut memo.lock().unwrap_or_else(|e| e.into_inner()), url)
 }
 
-/// A hit requires the freshly fetched URL to match byte-for-byte, so
+/// A hit requires the freshly fetched URL to match byte-for-byte;
 /// interleaving frames can only thrash the memo, never get a stale verdict.
 fn trusted_via_memo(memo: &mut Option<(String, bool)>, url: String) -> bool {
     if let Some((cached_url, verdict)) = memo.as_ref()
@@ -54,7 +54,7 @@ pub(crate) fn is_privileged_channel(channel: &str) -> bool {
 }
 
 /// The channel in a form safe to log. `__LunaNative.<token>` carries the capability reaching one
-/// registered native module, and the redaction contract covers args only - so without this the token
+/// registered native module, and the redaction contract covers args only: without this the token
 /// lands in the persistent sink, where pasting a log into an issue hands out a working handle.
 pub(crate) fn log_safe_channel(channel: &str) -> &str {
     if channel.starts_with("__LunaNative.") {
@@ -64,8 +64,8 @@ pub(crate) fn log_safe_channel(channel: &str) -> &str {
 }
 
 /// Privileged-frame gate decision: an untrusted frame's privileged channel is refused
-/// (403 if a reply is awaited, else a silent ack). Applied uniformly so a channel
-/// can't slip the gate by being absent from the dispatch list.
+/// (403 if a reply is awaited, else a silent ack). Applied uniformly: a channel
+/// cannot slip the gate by being absent from the dispatch list.
 #[derive(Debug, PartialEq, Eq)]
 enum PrivilegedGate {
     Allow,
@@ -88,7 +88,7 @@ fn privileged_gate(privileged: bool, trusted: bool, has_id: bool) -> PrivilegedG
 #[derive(Default)]
 pub(super) struct IpcQueryHandler {
     // Mutex only because the shared handler's Sync bound demands it;
-    // on_query_str is UI-thread-only so the lock never contends.
+    // on_query_str is UI-thread-only; the lock never contends.
     frame_trust_memo: Mutex<Option<(String, bool)>>,
 }
 
@@ -456,14 +456,14 @@ pub(super) enum PageState {
 }
 
 /// One-shot guard for the post-login cold-boot reload (see on_loading_state_change).
-/// Reset on session_clear so each login triggers exactly one reload, and a bounce
+/// Reset on session_clear: each login triggers exactly one reload, and a bounce
 /// back to the login page can't turn it into a loop.
 pub(crate) static POST_LOGIN_RELOADED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// One-shot: armed at boot (finish_boot_tokens) when the SDK blob is unusable
 /// (corrupt or no token match). Consumed on the first navigation that injects
-/// the init script, so the renderer wipes the stale blob exactly once - never
+/// the init script; the renderer wipes the stale blob exactly once - never
 /// re-wiping a blob a later login writes to the same origin. Baking the purge
 /// into the reusable init_script instead would replay it on every reload.
 pub(crate) static NEEDS_BOOT_BLOB_PURGE: std::sync::atomic::AtomicBool =
@@ -490,7 +490,7 @@ wrap_load_handler! {
                     // One-shot boot purge of an unusable SDK blob, before the
                     // init script and before TIDAL's JS reads localStorage. The
                     // first boot navigation is desktop.tidal.com (the blob's
-                    // origin), so it lands once, on the right page.
+                    // origin): it lands once, on the right page.
                     if NEEDS_BOOT_BLOB_PURGE.swap(false, std::sync::atomic::Ordering::AcqRel) {
                         exec_js_on_frame(frame, crate::ipc::plugin::JS_PURGE_SDK_BLOB);
                     }
@@ -547,8 +547,8 @@ wrap_load_handler! {
 
                 // Transitioning from login to app. TIDAL registers its player SDK
                 // only during the cold bootstrap on the app route; the SPA
-                // login->app transition reaches the app without re-running it, so
-                // the play saga throws "No active player" (the redux activePlayer
+                // login->app transition reaches the app without re-running it, and
+                // the play saga then throws "No active player" (the redux activePlayer
                 // slice is rehydrated and is not what the saga checks). Reload the
                 // app root once to reproduce the known-good cold launch.
                 if prev == PageState::Login && !is_login {
@@ -641,7 +641,7 @@ fn write_render_crash_log(
     let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let (year, month, day) = (now.year(), u8::from(now.month()), now.day());
     let (hour, min, sec) = (now.hour(), now.minute(), now.second());
-    // Filename can't contain `/` or `:`, so the name uses dashes; the body
+    // Filename can't contain `/` or `:`, hence the dashes in the name; the body
     // keeps the readable HH:MM:SS DD/MM/YYYY form.
     let file_stamp = format!("{hour:02}-{min:02}-{sec:02}_{day:02}-{month:02}-{year}");
     let human_stamp = format!("{hour:02}:{min:02}:{sec:02} {day:02}/{month:02}/{year}");
@@ -770,20 +770,20 @@ wrap_request_handler! {
             );
 
             // Strip the CSP meta on the doc navigation (first load, no SW yet);
-            // the browser handler wins over the context one, so peel it off here.
-            // TokenResourceHandler is a no-op on the doc GET, so nothing is lost.
+            // the browser handler wins over the context one; peel it off here.
+            // TokenResourceHandler is a no-op on the doc GET: nothing is lost.
             if crate::ui::csp_filter::is_document_url(&url) {
                 return Some(crate::ui::csp_filter::DocumentHandler::new());
             }
 
-            // Rewrite React-family chunks to capture TIDAL's real React exports
-            // so plugins share the host instance (hooks/context).
+            // Rewrite React-family chunks to capture TIDAL's real React exports,
+            // letting plugins share the host instance (hooks/context).
             if crate::ui::module_capture::target_module_id(&url).is_some() {
                 return Some(crate::ui::module_capture::CaptureRequestHandler::new());
             }
 
             // GitHub plugin-store fetches: Chromium rejects the signed release-asset CDN
-            // redirect, so serve them via reqwest. Mirrored in the context handler (SW path).
+            // redirect; serve them via reqwest. Mirrored in the context handler (SW path).
             if let Some(h) =
                 crate::ui::store_proxy::intercept(url.as_str(), is_navigation, is_download)
             {
@@ -791,7 +791,7 @@ wrap_request_handler! {
             }
 
             // Luna's own plugin ES modules, baked into the binary and served on /__luna__/*.mjs
-            // (so bundle.js no longer carries them as inline strings).
+            // (bundle.js no longer carries them as inline strings).
             if let Some(h) =
                 crate::ui::luna_modules::intercept(url.as_str(), is_navigation, is_download)
             {
@@ -906,7 +906,7 @@ wrap_display_handler! {
             if let Some(msg) = message {
                 let s = msg.to_string();
                 if let Some(json) = s.strip_prefix("__IPC__:") {
-                    // Frame-less bridge: origin can't be established, so privileged
+                    // Frame-less bridge: origin can't be established: privileged
                     // channels are refused here (they must use the cefQuery router).
                     if let Ok(parsed) = serde_json::from_str::<IpcMessage>(json)
                         && is_privileged_channel(&parsed.channel)

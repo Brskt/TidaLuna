@@ -354,9 +354,9 @@ export class LunaPlugin {
     async extractSettings(): Promise<void> {
         try {
             // Try reading exports from the running plugin instance first.
-            // The security wrapper registers exports on window.__pluginExports
-            // so the Settings component shares state with the actual plugin.
-            // The plugin runs in an async IIFE - exports may not be registered yet.
+            // The security wrapper registers exports on window.__pluginExports;
+            // the Settings component shares state with the actual plugin.
+            // The plugin runs in an async IIFE: exports may not be registered yet.
             // Wait briefly for the plugin to finish executing before falling back.
             for (let attempt = 0; attempt < 10; attempt++) {
                 const pluginExports = (window as any).__pluginExports?.[this.url];

@@ -82,7 +82,7 @@ fn non_dev_prerelease_lists_keep_semver_order() {
 
 #[test]
 fn meets_min_version_is_dev_aware() {
-    // A dev build sits below its promoted base, so it misses that floor.
+    // A dev build sits below its promoted base; it misses that floor.
     assert!(!meets_min_version("0.0.14-alpha.dev.5", "0.0.14-alpha"));
     assert!(meets_min_version("0.0.14-alpha", "0.0.14-alpha.dev.5"));
 }

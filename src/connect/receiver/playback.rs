@@ -86,7 +86,7 @@ impl PlaybackController {
         }
         self.media_seq_no = media_seq_no;
         self.engine_gen += 1;
-        // Sync the shared atomic so flush.rs stamps events with the same gen
+        // Sync the shared atomic for flush.rs to stamp events with the same gen
         crate::connect::bridge::ENGINE_GEN
             .store(self.engine_gen, std::sync::atomic::Ordering::Relaxed);
 

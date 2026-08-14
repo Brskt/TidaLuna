@@ -7,18 +7,18 @@ const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// What the cached files contain: v1 is TIDAL's ciphertext as fetched, v0 was
 /// decrypted audio. Bump on any change to the contents - AES-CTR carries no auth
-/// tag, so a stale entry decodes to noise instead of failing. Wipe, never guess.
+/// tag: a stale entry decodes to noise instead of failing. Wipe, never guess.
 const CACHE_FORMAT_VERSION: i64 = 1;
 
 /// Eviction hysteresis: evict until total_size < max_bytes * 0.9.
 const EVICTION_FACTOR: f64 = 0.9;
 
-/// Victims fetched per eviction query, so a large overflow evicts in bounded
+/// Victims fetched per eviction query; a large overflow evicts in bounded
 /// batches instead of materializing the whole table.
 const EVICTION_BATCH: i64 = 64;
 
 /// What a [`drop_entry`](AudioCache::drop_entry) attempt accomplished. A bare `bool` could
-/// not separate "the file would not go, so the row was kept" from "the file went, there was
+/// not separate "the file would not go and the row was kept" from "the file went, there was
 /// no row"; those are opposite answers for a caller asking whether bytes remain on disk.
 #[must_use = "a kept file leaves its row behind, which the caller has to account for"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub enum DropOutcome {
     Dropped,
     /// File gone; there was no row to remove.
     NoRow,
-    /// The file would not delete, so its row stays and keeps those bytes accounted for.
+    /// The file would not delete; its row stays and keeps those bytes accounted for.
     FileKept,
 }
 
@@ -52,7 +52,7 @@ pub enum StoreOutcome {
     Disabled,
     /// Nothing indexed because a clear raced this unlocked write;
     /// [`record_if_current`](AudioCache::record_if_current) removed the file it left behind.
-    /// Distinct from [`Disabled`](Self::Disabled) so the caller can name the right cause.
+    /// Distinct from [`Disabled`](Self::Disabled), letting the caller name the right cause.
     ClearedMidWrite,
 }
 
@@ -64,7 +64,7 @@ fn now_epoch() -> i64 {
 }
 
 /// Monotonic stamp for the `last_access` LRU sort key: strictly greater than any
-/// existing value, so a backward wall-clock step can't make a fresh entry sort
+/// existing value: a backward wall-clock step cannot make a fresh entry sort
 /// older than the entries it was accessed after.
 fn next_access_stamp(conn: &Connection, now: i64) -> i64 {
     let max_seen: i64 = conn
@@ -102,7 +102,7 @@ pub struct AudioCache {
     /// `persist_file` before a clear must not re-insert its row afterwards.
     generation: u64,
     /// Running total of `file_size` across the index, maintained under the
-    /// cache lock so eviction never re-sums the table. Seeded from the DB at
+    /// cache lock, and eviction never re-sums the table. Seeded from the DB at
     /// open; a crash just re-seeds next boot.
     current_size: u64,
 }
@@ -162,7 +162,7 @@ impl AudioCache {
     }
 
     /// Drop every cached file when the on-disk generation isn't the one this
-    /// build reads. Runs before `current_size` is seeded so the total reflects
+    /// build reads. Runs before `current_size` is seeded: the total reflects
     /// the wipe. `user_version` defaults to 0 on a pre-versioning database,
     /// which is exactly the plaintext generation we must discard.
     fn migrate_format(conn: &Connection, audio_dir: &Path) -> rusqlite::Result<()> {
@@ -183,7 +183,7 @@ impl AudioCache {
             crate::vprintln!("[CACHE]  Format v{on_disk} -> v{CACHE_FORMAT_VERSION} deferred: {e}");
             return Ok(());
         }
-        // The staging path recreates it on demand, so a failure only defers staging.
+        // The staging path recreates it on demand; a failure only defers staging.
         fs::create_dir_all(audio_dir).ok();
         conn.execute("DELETE FROM audio_cache", [])?;
         conn.pragma_update(None, "user_version", CACHE_FORMAT_VERSION)?;
@@ -195,7 +195,7 @@ impl AudioCache {
     }
 
     /// Delete staging files orphaned by an unclean exit: they sit at the audio dir
-    /// root (an indexed file always lives inside a 2-hex shard), so neither the index
+    /// root (an indexed file always lives inside a 2-hex shard): neither the index
     /// nor eviction can see them and they would hold disk outside the size cap.
     fn sweep_orphaned_staging(audio_dir: &Path) {
         let Ok(entries) = fs::read_dir(audio_dir) else {
@@ -226,8 +226,8 @@ impl AudioCache {
         }
     }
 
-    /// On-disk path for a track. Depends only on the (fixed) audio dir, so the
-    /// caller can compute it under a brief lock and then write the file without
+    /// On-disk path for a track. Depends only on the (fixed) audio dir, letting the
+    /// caller compute it under a brief lock and then write the file without
     /// holding the global cache lock.
     pub(crate) fn file_path(&self, track_id: &str) -> PathBuf {
         let hash = track_hash(track_id);
@@ -254,7 +254,7 @@ impl AudioCache {
     }
 
     /// Remove an orphaned index entry (file missing from disk). Reports whether a row
-    /// went away, so a caller cannot mistake a silent no-op for a deletion.
+    /// went away; a caller cannot mistake a silent no-op for a deletion.
     pub fn remove_index_entry(&mut self, track_id: &str) -> bool {
         let Some(conn) = &self.conn else { return false };
         let prev_size: i64 = conn
@@ -277,7 +277,7 @@ impl AudioCache {
     }
 
     /// Drop an entry: file first, index row only once the file is gone. A sharded file is
-    /// reachable by accounting and eviction only through its row, so losing the row while
+    /// reachable by accounting and eviction only through its row: losing the row while
     /// the file survives strands the bytes outside `max_bytes`.
     pub fn drop_entry(&mut self, track_id: &str) -> DropOutcome {
         let path = self.file_path(track_id);
@@ -308,7 +308,7 @@ impl AudioCache {
     }
 
     /// Where a download stages its ciphertext, or `None` when the cache is disabled:
-    /// with no index the file could never be looked up again, so staging it would
+    /// with no index the file could never be looked up again; staging it would
     /// write and delete a full track for nothing. Staging inside the audio dir keeps
     /// [`persist_file`](Self::persist_file) a same-filesystem rename, and handing back
     /// the directory lets the caller create the file without the cache lock held.
@@ -316,9 +316,9 @@ impl AudioCache {
         self.conn.is_some().then(|| self.audio_dir.clone())
     }
 
-    /// Move a completed staging file to its cache path (a rename, so atomic). An
+    /// Move a completed staging file to its cache path (a rename, hence atomic). An
     /// associated function with no `&self` on purpose: it must run without the global
-    /// cache lock so a concurrent lookup is not stalled behind it. Pair with `record`.
+    /// cache lock: a concurrent lookup must not stall behind it. Pair with `record`.
     pub fn persist_file(path: &Path, staged: tempfile::NamedTempFile) -> anyhow::Result<()> {
         let shard_dir = path
             .parent()
@@ -380,7 +380,7 @@ impl AudioCache {
         };
         let now = now_epoch();
         let stamp = next_access_stamp(conn, now);
-        // INSERT OR REPLACE overwrites an existing row, so the running total moves
+        // INSERT OR REPLACE overwrites an existing row; the running total moves
         // by the size delta, not the full new size.
         let prev_size: i64 = conn
             .query_row(
@@ -416,7 +416,7 @@ impl AudioCache {
 
     /// Like [`record`](Self::record), but a no-op if the cache was cleared
     /// (generation changed) since `expected_gen` was snapshotted. In that case
-    /// the just-written file is removed so a clear can't leave an orphan.
+    /// the just-written file is removed, and a clear cannot leave an orphan.
     pub fn record_if_current(
         &mut self,
         track_id: &str,
@@ -445,7 +445,7 @@ impl AudioCache {
             None => (0, 0),
         };
 
-        // Fail closed: the rows are the only handle on these files, so dropping them
+        // Fail closed: the rows are the only handle on these files, and dropping them
         // after a failed wipe leaves the survivors outside the size cap for good.
         if self.audio_dir.exists()
             && let Err(e) = fs::remove_dir_all(&self.audio_dir)
@@ -477,7 +477,7 @@ impl AudioCache {
     /// Evict LRU entries until the running size is under `max_bytes * EVICTION_FACTOR`, oldest
     /// first via the `last_access` index (no full sort), in bounded batches.
     ///
-    /// `keep` is the row [`record`](Self::record) just inserted, never a candidate here, so no
+    /// `keep` is the row [`record`](Self::record) just inserted, never a candidate here; no
     /// store is undone by the eviction it triggered. `unreclaimable` is how many of its bytes
     /// no pass could ever free; counted into the total, they hold it above a mark no candidate
     /// can reach and the pass empties the cache trying. Only
@@ -521,7 +521,7 @@ impl AudioCache {
                 evicted_any = true;
                 crate::vprintln!("[CACHE]  Evicted: {} (freed {} KB)", evict_id, size / 1024);
             }
-            // The same LRU head comes back on every query, so stop rather than spin.
+            // The same LRU head comes back on every query: stop rather than spin.
             if !evicted_any {
                 crate::vprintln!("[CACHE]  Eviction stalled: no candidate could be removed");
                 break;

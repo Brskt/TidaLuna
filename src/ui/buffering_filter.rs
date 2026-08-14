@@ -2,7 +2,7 @@
 //! EOF, then drain the result across CEF's output chunks. `csp_filter`,
 //! `token_filter`, and `module_capture` each use this with their own transform.
 //! The only behavioral axis is `FilterOutcome`: emit the bytes, or fail closed
-//! and emit nothing (so a transform that must not leak its input can't).
+//! and emit nothing (a transform that must not leak its input then cannot).
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -80,7 +80,7 @@ wrap_response_filter! {
     }
 }
 
-/// The state machine, split out of the CEF wrapper so it can be unit-tested
+/// The state machine, split out of the CEF wrapper to be unit-tested
 /// without constructing a `BufferingFilter` (the macro erases the concrete type).
 fn run_filter(
     state: &mut FilterState,

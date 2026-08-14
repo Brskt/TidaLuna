@@ -151,7 +151,7 @@ pub(crate) struct AsioTime {
 
 // --- the COM vtable ---------------------------------------------------------
 
-/// The `IUnknown` base, declared here so the whole vtable stays in terms of the
+/// The `IUnknown` base, declared here to keep the whole vtable in terms of the
 /// windows-sys `GUID` (no cross-crate GUID mixing).
 #[repr(C)]
 pub(crate) struct IUnknownVtbl {
@@ -349,7 +349,7 @@ impl AsioDriver {
         unsafe { (self.vtbl().output_ready)(self.0) }
     }
 
-    /// The raw `IASIO` COM pointer, so the real-time callback (which holds no
+    /// The raw `IASIO` COM pointer; the real-time callback (which holds no
     /// `AsioDriver`) can signal `outputReady` via [`output_ready_raw`].
     pub(crate) fn as_ptr(&self) -> *mut c_void {
         self.0

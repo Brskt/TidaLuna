@@ -99,7 +99,7 @@ pub(super) fn resolve_device(device_id: Option<&str>) -> Option<cpal::Device> {
         .or_else(|| cpal::default_host().default_output_device())
 }
 
-// Concrete name a request id resolves to, so the guard compares physical
+// Concrete name a request id resolves to: the guard compares physical
 // identity, not the raw (aliasable) request string.
 pub(super) fn resolved_device_name(device_id: &str) -> Option<String> {
     output_device_name(&resolve_device(Some(device_id))?)
@@ -264,9 +264,9 @@ fn preferred_buffer_size(_device: &cpal::Device, _rate: u32) -> cpal::BufferSize
 
 /// Build a cpal output stream for one `StreamConfig` and wire it to a fresh ring
 /// buffer. The 5 control atomics are taken by `&Arc` and cloned in (a cpal
-/// callback owns what it captures, so each call needs its own consumer/callback);
-/// `rate`/`channels` are read back off `config`. Returns the build error so the
-/// caller can choose to ignore it (fall through to a fallback config) or log it.
+/// callback owns what it captures, and each call needs its own consumer/callback);
+/// `rate`/`channels` are read back off `config`. Returns the build error; the caller may
+/// ignore it (fall through to a fallback config) or log it.
 fn open_with_config(
     device: &cpal::Device,
     config: &cpal::StreamConfig,

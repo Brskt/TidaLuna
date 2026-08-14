@@ -5,13 +5,13 @@
 //! roughly `PING_TIMEOUT_MS` as dead. The ping cadence and the dead-peer
 //! deadline are kept independent: a Pong is awaited across each interval
 //! and the peer is dropped only after `PING_TIMEOUT_MS / PING_INTERVAL_MS`
-//! consecutive intervals without one, so the wait never stretches the ping
+//! consecutive intervals without one; the wait never stretches the ping
 //! period. The pre-split code duplicated this loop in both modules; this
 //! module centralises it and takes the per-side disconnection action as a
 //! closure (`on_timeout`).
 //!
 //! The `alive` flag is the shared "connection is up" bit. The driver
-//! flips it to `false` before invoking `on_timeout`, so observers that
+//! flips it to `false` before invoking `on_timeout`: observers that
 //! poll `alive` see the disconnection exactly once.
 
 use std::future::Future;
@@ -40,8 +40,8 @@ pub(crate) async fn run<F, Fut>(
     // period steady instead of firing a catch-up burst when a tick is late.
     let mut ping_tick = tokio::time::interval(Duration::from_millis(consts::PING_INTERVAL_MS));
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // The first tick completes immediately; consume it so the first Ping is sent
-    // right away and later ones are spaced by exactly one interval.
+    // The first tick completes immediately; consume it to send the first Ping
+    // right away and space later ones by exactly one interval.
     ping_tick.tick().await;
 
     // A peer that misses this many consecutive Pong windows is declared dead,
@@ -56,7 +56,7 @@ pub(crate) async fn run<F, Fut>(
         if write_tx.send(WsMessage::Ping(vec![].into())).await.is_err() {
             break;
         }
-        // Clear only after the Ping is enqueued, so a failed send exits above
+        // Clear only after the Ping is enqueued: a failed send exits above
         // without arming the missed-Pong check.
         pong_received.store(false, Ordering::Relaxed);
 

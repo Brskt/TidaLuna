@@ -69,11 +69,11 @@ impl ServerCertVerifier for TidalCertVerifier {
         ) {
             Ok(v) => Ok(v),
             Err(Error::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
-                // Hostname mismatch is expected - devices use IP addresses.
+                // Hostname mismatch is expected: devices use IP addresses.
                 // The CA chain was still validated by the inner verifier before
-                // it rejected the hostname, so the cert is authentic.
+                // it rejected the hostname; the cert is authentic.
                 //
-                // Logged so a LAN MITM can be spotted in traces: a legitimate
+                // Logged to surface a LAN MITM in traces: a legitimate
                 // device mismatch happens once per connection attempt, while
                 // a hostile peer could trigger a flood of these.
                 crate::vprintln!(

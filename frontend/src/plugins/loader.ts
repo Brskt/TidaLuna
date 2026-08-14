@@ -7,7 +7,7 @@ import { LunaPlugin as CoreLunaPlugin, modules } from "../../render/src";
 // and prototype methods must route through our system, not execute in CEF.
 
 // Static: fromStorage is the main entry point used by Plugin Store UI.
-// Return our LunaPlugin instances so all subsequent method calls (install,
+// Return our LunaPlugin instances: all subsequent method calls (install,
 // enable, etc.) go through our class which routes to Rust via IPC.
 CoreLunaPlugin.fromStorage = async function (storeInit: any): Promise<any> {
     return LunaPlugin.fromStorage(storeInit);
@@ -42,7 +42,7 @@ CoreLunaPlugin.prototype.reload = async function () {
     if (ours) await ours.reload();
 };
 
-// Wire the upstream registry so lifecycle methods can sync both registries.
+// Wire the upstream registry for lifecycle methods to sync both registries.
 setUpstreamPlugins(CoreLunaPlugin.plugins as any);
 
 // Expose management API on window.luna.core for devtools console / plugin use
@@ -81,7 +81,7 @@ export function exposeLoaderApi() {
     };
     for (const [name, dir] of Object.entries(corePluginPaths)) {
         if (LunaPlugin.plugins[name]) continue;
-        // Create plugin with name-only manifest immediately so it shows up in the UI
+        // Create plugin with name-only manifest immediately: it shows up in the UI
         const plugin = LunaPlugin.fromPluginInfo({
             url: name,
             name,

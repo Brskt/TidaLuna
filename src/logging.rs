@@ -22,7 +22,7 @@ static ENV_LOG_LEVEL: LazyLock<u8> = LazyLock::new(|| {
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(0);
 
 /// The `console.log` append handle. Opened lazily: when the level first reaches >= 1, or on the
-/// first `verr!`, which writes whatever the level says and so opens the sink at level 0 too.
+/// first `verr!`, which writes whatever the level says and opens the sink at level 0 too.
 static FILE_SINK: Mutex<Option<File>> = Mutex::new(None);
 
 #[inline]
@@ -31,7 +31,7 @@ pub fn log_level() -> u8 {
 }
 
 /// The `LOGS` env floor (read-once). Used by the Windows console sequencing in
-/// `main`; the console *window* is Windows-only, so this accessor is too.
+/// `main`; the console *window* is Windows-only, as is this accessor.
 #[cfg(target_os = "windows")]
 pub(crate) fn env_log_level() -> u8 {
     *ENV_LOG_LEVEL
@@ -102,7 +102,7 @@ pub fn vlog3(args: std::fmt::Arguments<'_>) {
 }
 
 /// A hard failure that has no other user-facing channel: never gated by `LOGS`,
-/// and it opens the sink itself so the trace survives at level 0.
+/// and it opens the sink itself: the trace survives at level 0.
 pub fn vlog_err(args: std::fmt::Arguments<'_>) {
     ensure_file_sink();
     print_log(args);
@@ -181,7 +181,7 @@ fn archive_name(ts: OffsetDateTime) -> String {
 }
 
 /// Keep only the `keep` newest `console-*.log` archives in `dir`; delete the rest.
-/// Names embed a `YYYY-MM-DD_HH-MM-SS` stamp so lexicographic order == chronological.
+/// Names embed a `YYYY-MM-DD_HH-MM-SS` stamp; lexicographic order == chronological.
 fn prune_logs(dir: &Path, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -211,7 +211,7 @@ fn local_offset() -> UtcOffset {
 
 /// At startup, archive a leftover `console.log` into `<data_dir>/logs/` named by
 /// its last-modified time, then prune to the 20 most recent. Unconditional:
-/// runs even when this session keeps logging off, so a leftover is never lost.
+/// runs even when this session keeps logging off, never losing a leftover.
 /// `console.log` always means "this session"; `logs/` holds past sessions.
 pub(crate) fn rotate_console_log(data_dir: &Path) {
     let current = data_dir.join("console.log");

@@ -49,7 +49,7 @@ fn privileged_untrusted_req_resp_is_refused() {
 
 #[test]
 fn privileged_untrusted_fire_and_forget_is_dropped() {
-    // No id = no JS consumer, so drop with an ack rather than a 403.
+    // No id = no JS consumer: drop with an ack rather than a 403.
     assert_eq!(privileged_gate(true, false, false), PrivilegedGate::DropAck);
 }
 

@@ -53,7 +53,7 @@ fn parse_set_cookie(header: &str) -> Option<cef::Cookie> {
 }
 
 /// Replacement for a real token with no opaque mapping (a captured token seen before
-/// token_state exists). Must not start with `luna_` so `is_opaque()` won't accept it.
+/// token_state exists). Must not start with `luna_`: `is_opaque()` would otherwise accept it.
 const REDACTED_MARKER: &str = "[redacted-token]";
 
 /// Cap on an upstream body buffered for a plugin. The target is a plugin's to choose, and
@@ -612,7 +612,7 @@ fn proxy_transform_token_body_with(
             let _ = crate::platform::secure_store::save(&data_dir, ts);
         }
 
-        // Carry opaque_rt out under this lock so it stays paired with opaque_at
+        // Carry opaque_rt out under this lock: it stays paired with opaque_at
         // (a concurrent refresh can't swap token_state in the gap).
         ort
     })
@@ -658,7 +658,7 @@ fn scrub_real_tokens_with(text: String, pairs: &[(String, String)]) -> String {
 }
 
 /// Defence-in-depth: replace any real OAuth token that leaked into a plugin-facing
-/// response with its opaque nonce. TIDAL APIs don't echo the bearer, so normally a no-op.
+/// response with its opaque nonce. TIDAL APIs don't echo the bearer: this is normally a no-op.
 pub(crate) fn scrub_real_tokens(text: String) -> String {
     let pairs = with_state(|state| real_token_pairs(state)).unwrap_or_default();
     scrub_real_tokens_with(text, &pairs)

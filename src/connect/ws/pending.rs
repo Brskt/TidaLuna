@@ -37,7 +37,7 @@ impl PendingRequests {
         let now = Instant::now();
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         // Reclaim entries whose caller is gone or that have aged out before
-        // inserting, so the map stays bounded by live in-flight requests.
+        // inserting: the map stays bounded by live in-flight requests.
         pending
             .retain(|_, (born, tx)| !tx.is_closed() && now.duration_since(*born) < PENDING_MAX_AGE);
         pending.insert(id, (now, tx));

@@ -3,7 +3,7 @@
 //! The plugin store fetches each `store.json` from a GitHub `releases/download` URL. GitHub
 //! 302-redirects to a signed `release-assets.githubusercontent.com` CDN URL, and Chromium's
 //! network stack rejects that redirect target with `net::ERR_INVALID_ARGUMENT` (an unguarded,
-//! unconfigurable header-safety check). reqwest follows the same redirect fine, so we take the
+//! unconfigurable header-safety check). reqwest follows the same redirect fine; we take the
 //! request over with a `ResourceHandler` and serve the bytes ourselves, transparent to the
 //! renderer. Non-GitHub store hosts keep going through CEF natively.
 
@@ -20,7 +20,7 @@ const STORE_FETCH_TIMEOUT_SECS: u64 = 15;
 /// Body cap: a `store.json` is a few KB; this only bounds a hostile/oversized source.
 const MAX_STORE_BYTES: usize = 16 * 1024 * 1024;
 
-/// True for any `store.json` fetch (any host). The host is not restricted -- the safety gate
+/// True for any `store.json` fetch (any host). The host is not restricted: the safety gate
 /// is the JSON validation in `fetch_store`, not an allow-list.
 fn should_proxy(url: &str) -> bool {
     (url.starts_with("https://") || url.starts_with("http://")) && url.ends_with("/store.json")
@@ -28,7 +28,7 @@ fn should_proxy(url: &str) -> bool {
 
 /// The store-proxy request handler for a matching GitHub store sub-resource fetch, else None.
 /// Wired into BOTH dispatches: the browser-level one (`client.rs`) and the context-level one
-/// (`csp_filter.rs`) -- TIDAL's service worker routes some fetches browser-less, and those
+/// (`csp_filter.rs`). TIDAL's service worker routes some fetches browser-less, and those
 /// reach only the context handler.
 pub(super) fn intercept(
     url: &str,
@@ -52,16 +52,16 @@ struct ProxyState {
     offset: usize,
     /// HTTP status to report; 0 means the fetch failed entirely -> reported as 502.
     status: i32,
-    /// Set when CEF calls `cancel`; the deferred `cont()` checks it (on the IO thread) so it
+    /// Set when CEF calls `cancel`; the deferred `cont()` checks it (on the IO thread) and
     /// never resumes a request CEF already aborted.
     cancelled: bool,
 }
 
 /// Fetch `url` via reqwest (following redirects, size/time capped) and return the body ONLY
-/// if it is a conforming store manifest -- a JSON object carrying a `plugins` array. `None`
+/// if it is a conforming store manifest: a JSON object carrying a `plugins` array. `None`
 /// on any failure (transport, timeout, oversized) or if the response is not a store manifest
 /// (an HTML error page, a binary, a `.exe`, or unrelated JSON). Any link is allowed; this
-/// content check is the only gate, so only real store data is served and nothing is executed.
+/// content check is the only gate; only real store data is served, and nothing is executed.
 async fn fetch_store(url: &str) -> Option<Vec<u8>> {
     let body = tokio::time::timeout(Duration::from_secs(STORE_FETCH_TIMEOUT_SECS), async {
         let resp = crate::state::HTTP_CLIENT.get(url).send().await.ok()?;
@@ -92,7 +92,7 @@ wrap_resource_request_handler! {
 
     impl ResourceRequestHandler {
         // The trait default returns RV_CANCEL, which kills the request before
-        // `resource_handler` can run -- so we must explicitly continue.
+        // `resource_handler` can run; we must explicitly continue.
         fn on_before_resource_load(
             &self,
             _browser: Option<&mut Browser>,
@@ -131,9 +131,9 @@ wrap_resource_handler! {
                 .as_ref()
                 .map(|r| userfree_to_string(&r.url()))
                 .unwrap_or_default();
-            // Async path: return now and finish via `callback` once the fetch resolves, so this
+            // Async path: return now and finish via `callback` once the fetch resolves: this
             // CEF IO thread is never parked on the (up to 15s) fetch. Resource-handler callbacks
-            // are sequenced on a shared CEF thread, so blocking here stalls all resource loads.
+            // are sequenced on a shared CEF thread, and blocking here stalls all resource loads.
             if let Some(hr) = handle_request {
                 *hr = 0;
             }
@@ -166,7 +166,7 @@ wrap_resource_handler! {
                     }
                 }
                 // Resume CEF on its own IO thread (Continue from a tokio worker is the
-                // documented crash class). Runs exactly once, so the request never hangs.
+                // documented crash class). Runs exactly once. The request never hangs.
                 let mut task = StoreContinueTask::new(callback, state);
                 post_task(ThreadId::IO, Some(&mut task));
             });
@@ -183,7 +183,7 @@ wrap_resource_handler! {
             let Some(resp) = response else {
                 return;
             };
-            // status 0 == reqwest failed outright -> 502 so the store UI sees `response.ok`
+            // status 0 == reqwest failed outright -> 502, which shows the store UI `response.ok`
             // false instead of hanging. Do NOT touch `redirect_url` (that re-enters the
             // failing Chromium path).
             let status = if st.status == 0 { 502 } else { st.status };
@@ -191,7 +191,7 @@ wrap_resource_handler! {
             resp.set_mime_type(Some(&CefString::from("application/json")));
             // Chromium still enforces CORS on this served cross-origin response (the
             // store fetches GitHub from the desktop.tidal.com origin); allow it. A simple
-            // GET needs no preflight, so this single header is enough.
+            // GET needs no preflight: this single header is enough.
             resp.set_header_by_name(
                 Some(&CefString::from("Access-Control-Allow-Origin")),
                 Some(&CefString::from("*")),
@@ -236,7 +236,7 @@ wrap_resource_handler! {
 
         fn cancel(&self) {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            // Mark cancelled so the deferred `cont()` task (also on the IO thread) skips a
+            // Mark cancelled for the deferred `cont()` task (also on the IO thread) to skip a
             // request CEF has already aborted.
             st.cancelled = true;
             st.body = Vec::new();

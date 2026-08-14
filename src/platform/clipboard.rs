@@ -1,6 +1,6 @@
 //! Process-wide clipboard writer.
 //!
-//! On X11 the clipboard contents are served by the owning process, so a
+//! On X11 the clipboard contents are served by the owning process: a
 //! transient `Clipboard` dropped right after `set_text` loses the selection on
 //! minimal window managers. A single long-lived owner thread keeps one
 //! `arboard::Clipboard` alive for the process lifetime and serializes writes,
@@ -17,8 +17,8 @@ fn writer() -> &'static Sender<String> {
         std::thread::Builder::new()
             .name("clipboard".into())
             .spawn(move || {
-                // Lazily create the clipboard so a transient init failure (no
-                // display yet) doesn't permanently kill the channel - retry on
+                // Lazily create the clipboard: a transient init failure (no
+                // display yet) doesn't permanently kill the channel; retry on
                 // the next write until it succeeds, then keep it alive.
                 let mut clipboard: Option<arboard::Clipboard> = None;
                 while let Ok(text) = rx.recv() {

@@ -87,7 +87,7 @@ fn usage() {
 
 fn clippy() -> Result<(), String> {
     // The updater is a separate workspace member that the default invocation
-    // skips, so lint it explicitly with the same flags.
+    // skips; lint it explicitly with the same flags.
     for pkg in ["tidalunar", "updater"] {
         run(
             "cargo",
@@ -180,7 +180,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     fs::create_dir_all(&bundle_dir).map_err(|e| format!("failed to create dist/: {e}"))?;
 
     // 4b. Pre-clean: delete files from previous manifest that won't be in the new build.
-    //     This runs BEFORE copying new files so stale artifacts don't contaminate the output.
+    //     Runs BEFORE copying new files, keeping stale artifacts out of the output.
     {
         let old_manifest_path = bundle_dir.join("manifest.json");
         if old_manifest_path.exists() {
@@ -367,15 +367,15 @@ fn generate_manifest(bundle_dir: &Path) -> Result<(), String> {
     let version = read_workspace_version()?;
 
     // Upgrade floor: minimum installed version allowed to apply this update,
-    // enforced in-app. "0.0.0" = no floor; keep it a concrete string so older
-    // clients can still parse the field.
+    // enforced in-app. "0.0.0" = no floor; keep it a concrete string (older
+    // clients still parse the field).
     let min_version = "0.0.0".to_string();
 
     let target = target_triple();
 
     // Linux: declare the sandbox-helper protocol this payload requires. The
     // .deb launcher reads it from $USER_DIR/SANDBOX_PROTOCOL_REQUIRED to gate
-    // against a stale system bootstrap. Written before collect_files so it
+    // against a stale system bootstrap. Written before collect_files: it
     // ships in the manifest, the update archives, and the payload tarball, and
     // is re-applied by in-app updates.
     if target.starts_with("linux-") {
@@ -772,7 +772,7 @@ fn copy_cef_files(cef_dir: &Path, bundle_dir: &Path) -> Result<(), String> {
 
 /// Sum the byte size of every regular file under `dir`, recursively.
 /// Used for the installer's manual `AddSize` estimate: NSIS can't see inside
-/// the pre-compressed payload.7z, so it needs the decompressed total.
+/// the pre-compressed payload.7z and needs the decompressed total.
 fn dir_size_bytes(dir: &Path) -> Result<u64, String> {
     let mut total = 0u64;
     for entry in fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
@@ -1137,7 +1137,7 @@ fn delta(flags: &[String]) -> Result<(), String> {
 
     match target.as_str() {
         "linux" => {
-            // Wrapped top-level dir, matching the full tarball so the updater's
+            // Wrapped top-level dir, matching the full tarball. The updater's
             // strip-1 extraction works unchanged.
             let wrap = format!("tidalunar_{version}_update_{token}");
             let stage_root = out_dir.join(format!("delta-build-{token}"));
@@ -1287,9 +1287,9 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
     // Windows arch token for filenames (x64 instead of Debian's amd64).
     let win_arch = if arch == "amd64" { "x64" } else { "arm64" };
 
-    // Remove any prior installers for this arch so older builds (typically a
+    // Remove any prior installers for this arch: older builds (typically a
     // version-suffixed .exe restored from cache or left from a local version
-    // bump) cannot be picked up by downstream globbers in CI (signtool,
+    // bump) cannot then be picked up by downstream globbers in CI (signtool,
     // Get-ChildItem | Select-Object -First 1, upload-artifact path glob).
     let stale_suffix = format!("_{win_arch}.exe");
     for entry in fs::read_dir(&out_dir).map_err(|e| e.to_string())? {
@@ -1341,7 +1341,7 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
 
     // Official 7-Zip standalone extractor shipped INSIDE the installer to
     // decompress payload.7z on the user's machine. Sourced via env (CI
-    // downloads it and pins its SHA-256) so no binary blob lives in git.
+    // downloads it and pins its SHA-256); no binary blob lives in git.
     let sevenzr = std::env::var_os("TIDALUNAR_7ZR_EXE")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
@@ -1350,7 +1350,7 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
              extractor (CI downloads it; locally point it at a trusted 7zr.exe)",
         )?;
 
-    // Build the solid, max-compression payload archive. cwd = dist so entries
+    // Build the solid, max-compression payload archive. cwd = dist: entries
     // store at archive root (no `dist/` prefix), matching extraction straight
     // into $INSTDIR. -mmt=on uses all runner cores.
     let payload = out_dir.join("payload.7z");
@@ -1569,10 +1569,10 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     // 8. dpkg-deb --build. -Znone: the data.tar's bulk is the already-zstd
-    //    payload.tar.zst (incompressible), so dpkg's default recompression
-    //    would burn time re-squeezing it for no gain. Skipping it keeps the
-    //    build fast; the few MB of uncompressed control files are negligible
-    //    next to the payload. (Same rationale as `SetCompress off` on Windows.)
+    //    payload.tar.zst (incompressible). dpkg's default recompression would
+    //    burn time re-squeezing it for no gain. Skipping it keeps the build
+    //    fast; the few MB of uncompressed control files are negligible next
+    //    to the payload. (Same rationale as `SetCompress off` on Windows.)
     let out_deb = out_dir.join(format!("tidalunar_{version}_{arch}.deb"));
     println!("Building .deb at {}", out_deb.display());
     let status = Command::new("dpkg-deb")

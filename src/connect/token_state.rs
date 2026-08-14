@@ -3,8 +3,8 @@
 //! A single `TokenState` bundles everything that belongs to a coherent
 //! authentication context: the access token itself, the refresh token, the
 //! scope, the expiry, and where the generation sits in its lifecycle. All
-//! updates replace the bundle atomically via `ArcSwap::compare_and_swap`,
-//! so there is no window in which two refresh attempts can interleave and
+//! updates replace the bundle atomically via `ArcSwap::compare_and_swap`:
+//! no window exists in which two refresh attempts can interleave and
 //! persist torn state (e.g. one task writing a new access token while
 //! another overwrites the refresh token).
 //!
@@ -42,9 +42,9 @@ pub enum GenerationStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminationReason {
     /// RFC 6749 invalid_grant or equivalent. `provider_error` preserves the
-    /// upstream diagnostic so the UI can show it. `suspect_replay` is an
+    /// upstream diagnostic for the UI to show. `suspect_replay` is an
     /// observational flag: the client cannot reliably detect replay by
-    /// itself (RFC 9700 §4.14.2), so it is set from heuristics only and
+    /// itself (RFC 9700 §4.14.2); it is set from heuristics only and
     /// never on its own terminates anything.
     InvalidGrant {
         provider_error: String,
@@ -60,7 +60,7 @@ pub enum TerminationReason {
 // ---------------------------------------------------------------------------
 
 /// Immutable snapshot of the authentication state. Stored behind an
-/// `ArcSwap` so reads are lock-free and writes are atomic.
+/// `ArcSwap`: reads are lock-free and writes are atomic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenState {
     /// Monotonic generation id. Incremented on login / relogin. Used to
@@ -97,7 +97,7 @@ pub enum CASError {
 // ---------------------------------------------------------------------------
 
 /// Lock-free store for the current `TokenState`. All updates go through
-/// `compare_and_swap` (either directly or via a `RefreshGuard`), so a
+/// `compare_and_swap` (either directly or via a `RefreshGuard`); a
 /// concurrent writer can never persist half of an update.
 pub struct AuthStore {
     inner: ArcSwap<TokenState>,
@@ -143,7 +143,7 @@ impl AuthStore {
     /// must not block the new tokens from being installed.
     ///
     /// Callers MUST advance `generation` past the current snapshot; this
-    /// method does not check ordering, so the caller is responsible for
+    /// method does not check ordering. The caller is responsible for
     /// making the replacement monotonically correct.
     pub fn store(&self, new: TokenState) {
         self.inner.store(Arc::new(new));

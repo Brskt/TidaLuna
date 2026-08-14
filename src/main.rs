@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // A bare print reaches neither the LOGS gate nor <data_dir>/console.log: vprintln!
 // for what the level may silence, verr! for a failure with no other channel.
-// Crate-local, so it does not reach the updater, which has a real console.
+// Crate-local: the updater has a real console and keeps its prints.
 #![deny(clippy::print_stderr, clippy::print_stdout)]
 mod app_state;
 mod audio;
@@ -31,9 +31,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use ui::flush::PlayerEventTask;
 
-/// Populate DISPLAY when launched from a shell without a graphical session env,
-/// so the X11 ozone backend can reach the X server (XWayland under a Wayland
-/// session, or a native X server).
+/// Populate DISPLAY when launched from a shell without a graphical session env;
+/// the X11 ozone backend needs it to reach the X server (XWayland under a
+/// Wayland session, or a native X server).
 #[cfg(target_os = "linux")]
 fn ensure_x11_env() {
     if std::env::var_os("DISPLAY").is_none() {
@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
-    // Set DLL search directory to bin/cef/ so delay-loaded libcef.dll is found
+    // Set DLL search directory to bin/cef/, where delay-loaded libcef.dll lives
     #[cfg(target_os = "windows")]
     if let Some(ref dir) = exe_dir {
         let cef_dir = dir.join("bin").join("cef");
@@ -216,8 +216,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     platform::desktop_entry::install();
 
-    // Open the sink early (and rotate last session's log) so early lines are
-    // captured; safe before DB init since cache_data_dir() is env-only.
+    // Open the sink early (and rotate last session's log) to capture early
+    // lines; safe before DB init since cache_data_dir() is env-only.
     crate::logging::rotate_console_log(&crate::state::cache_data_dir());
     if crate::logging::log_level() >= 1 {
         crate::logging::ensure_file_sink();
@@ -260,9 +260,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load the bootstrap settings snapshot once, off the CEF UI thread, as the
     // single source of truth: used here for the early log level + Windows console
-    // decision, and later for the init-script globals. Browser-only here, so no
-    // --type= guard; the env path opens the console first, so only attach when it
-    // didn't (no double-alloc).
+    // decision, and later for the init-script globals. Browser-only here, no
+    // --type= guard needed. The env path opens the console first; only attach
+    // when it didn't (no double-alloc).
     let boot = crate::state::db().call_settings(crate::settings::load_boot_settings);
     let _ = crate::state::BOOT_SETTINGS.set(boot);
     crate::logging::set_log_level(boot.log_level);
@@ -271,8 +271,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         attach_or_alloc_console();
     }
 
-    // After set_log_level so it's captured whether logging came from the LOGS
-    // env or the in-app setting.
+    // After set_log_level: captured whether logging came from the LOGS env or
+    // the in-app setting.
     crate::vprintln!("[INIT]   TidaLunar v{}", env!("CARGO_PKG_VERSION"));
 
     // Recover from any interrupted update before continuing startup
@@ -420,8 +420,8 @@ static BOOT_TOKEN_TASK: Mutex<Option<std::thread::JoinHandle<BootTokenOutcome>>>
 
 /// Reconcile decision computed off-thread. It never carries disk writes: once
 /// initialize() runs, Chromium owns the blob's LevelDB (verified: a join-time
-/// write fails on its lock), so the only mutation left - purging an unusable
-/// blob - is done by the renderer itself.
+/// write fails on its lock). The only mutation left, purging an unusable blob,
+/// is done by the renderer itself.
 enum BootTokenOutcome {
     /// Blob unusable or unrecognized; the renderer purges it before TIDAL's
     /// JS runs (init-script prefix).
@@ -438,7 +438,7 @@ enum BootTokenOutcome {
 }
 
 /// Restore the reconciled session into AppState. Runs before the first
-/// browser exists, so nothing can observe a half-populated state.
+/// browser exists; nothing can observe a half-populated state.
 fn restore_session(restored: platform::secure_store::StoredTokenState, needs_refresh: bool) {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -610,7 +610,7 @@ fn reconcile_sdk_blob(
 /// decision. Called from on_context_initialized before the init script is
 /// built: a restored session must be in AppState before the page can consume
 /// it. On an unusable blob it arms a one-shot renderer purge
-/// (`NEEDS_BOOT_BLOB_PURGE`), consumed on the first navigation, so TIDAL's JS
+/// (`NEEDS_BOOT_BLOB_PURGE`), consumed on the first navigation. TIDAL's JS then
 /// starts from a clean localStorage.
 pub(crate) fn finish_boot_tokens() {
     let task = BOOT_TOKEN_TASK

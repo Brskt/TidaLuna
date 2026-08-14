@@ -161,7 +161,7 @@ wrap_window_delegate! {
             }
 
             // CEF Views creates X11 windows directly and ignores Chromium's
-            // --class switch, so the window has no WM_CLASS by default and
+            // --class switch; the window has no WM_CLASS by default, and
             // GNOME cannot match the installed .desktop entry. Set it via
             // XSetClassHint here.
             #[cfg(target_os = "linux")]
@@ -246,7 +246,7 @@ wrap_window_delegate! {
                 return;
             }
             // A content change while minimized leaves the renderer's new
-            // compositor surface unembedded, so the window restores gray. A
+            // compositor surface unembedded: the window restores gray. A
             // Views hide/show cycle re-runs WasShown -> EmbedSurface to re-embed
             // it; posted (not inline) to avoid re-entering HWNDMessageHandler.
             if WAS_MINIMIZED.swap(false, Ordering::Relaxed) {

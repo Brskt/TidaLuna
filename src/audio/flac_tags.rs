@@ -79,7 +79,7 @@ pub(crate) fn retag(
         if body.len() > MAX_BLOCK {
             anyhow::bail!("metadata block of {} bytes exceeds 24 bits", body.len());
         }
-        // Every header is rebuilt from the block's new position, so a STREAMINFO that
+        // Every header is rebuilt from the block's new position: a STREAMINFO that
         // was flagged last in the input loses the flag once a comment follows it.
         let flag = if index == last { 0x80 } else { 0x00 };
         out.push(flag | block_type);

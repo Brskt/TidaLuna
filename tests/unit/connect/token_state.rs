@@ -117,8 +117,8 @@ fn store_bypasses_terminated_guard() {
 #[test]
 fn guard_against_stale_generation_rejects_refresh() {
     // Wire pushes a new generation while a refresh is prepared against
-    // the old one: the old refresh must fail to apply (VersionMismatch),
-    // so stale credentials from an earlier sign-in cannot overwrite the
+    // the old one: the old refresh must fail to apply (VersionMismatch);
+    // stale credentials from an earlier sign-in cannot overwrite the
     // freshly-installed ones.
     let store = AuthStore::new(seed(GenerationStatus::Active));
     let stale_guard = RefreshGuard::new(&store);
@@ -173,7 +173,7 @@ async fn concurrent_refreshes_only_one_wins() {
     // VersionMismatch and must not mutate the store.
     //
     // A `Barrier` forces both tasks to finish reading their snapshots
-    // before either is allowed to CAS, so the test exercises the race
+    // before either is allowed to CAS: the test exercises the race
     // rather than letting the scheduler serialise the two operations
     // and letting both win.
     use tokio::sync::Barrier;

@@ -317,8 +317,8 @@ pub(crate) fn storage_get(conn: &mut Connection, namespace: &str, key: &str) -> 
     .ok()
 }
 
-/// Per-namespace storage quota limits. Passed as a parameter so the quota logic
-/// can be unit-tested against tiny limits without large allocations.
+/// Per-namespace storage quota limits. Passed as a parameter for the quota
+/// logic to be unit-tested against tiny limits without large allocations.
 struct StorageLimits {
     max_value_bytes: usize,
     max_key_bytes: usize,

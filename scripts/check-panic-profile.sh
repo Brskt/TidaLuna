@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies that Cargo.toml sets panic = "unwind" on both release and dev profiles.
-# Required so src/connect/runtime.rs TaskGroup can report panics via
+# Required for src/connect/runtime.rs TaskGroup to report panics via
 # JoinError::into_panic; panic = "abort" terminates the process before
 # tokio can classify the join outcome.
 #

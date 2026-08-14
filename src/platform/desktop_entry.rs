@@ -1,9 +1,9 @@
 //! Linux: install a freedesktop `.desktop` entry plus an icon under
-//! `~/.local/share/` so the WM can match a taskbar/dock icon for our window.
+//! `~/.local/share/` for the WM to match a taskbar/dock icon for our window.
 //!
 //! GNOME Shell ignores `_NET_WM_ICON` and only resolves the icon through a
 //! `.desktop` file matched by `WM_CLASS`; KDE and others use both. We always
-//! write the entry so the user gets a real icon on every desktop.
+//! write the entry: the user gets a real icon on every desktop.
 //!
 //! Idempotent: each call rewrites only when the on-disk content differs from
 //! the current binary path or embedded icon.

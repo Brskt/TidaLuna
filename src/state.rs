@@ -25,7 +25,7 @@ pub(crate) static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
 });
 
 // TIDAL's bar component renders only when navigator.userAgent contains a
-// Windows OS token. We override at the JS layer so HTTP traffic keeps the
+// Windows OS token. We override at the JS layer: HTTP traffic keeps the
 // honest Linux UA above.
 #[cfg(target_os = "linux")]
 pub(crate) static JS_USER_AGENT: LazyLock<String> =
@@ -104,7 +104,7 @@ pub(crate) fn build_client_with_redirect(redirect: reqwest::redirect::Policy) ->
 pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
 /// Dedicated HTTP client for playback (initial GET + Range restarts).
-/// Separate from HTTP_CLIENT so playback gets its own TCP connection,
+/// Separate from HTTP_CLIENT; playback gets its own TCP connection,
 /// avoiding HTTP/2 bandwidth contention with preload downloads.
 pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
 
@@ -112,7 +112,7 @@ pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build
 pub struct PreloadedTrack {
     pub track: TrackInfo,
     pub data: Vec<u8>,
-    /// The CDN's ciphertext for `data`, carried so a preload hit can still
+    /// The CDN's ciphertext for `data`, carried for a preload hit to still
     /// populate the disk cache (which stores ciphertext, not playable audio).
     pub ciphertext: Option<(tempfile::NamedTempFile, u64)>,
 }
@@ -190,7 +190,7 @@ pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = Lazy
             let tmp = std::env::temp_dir().join("tidalunar");
             crate::player::cache::AudioCache::open(&tmp).unwrap_or_else(|e| {
                 // Never panic here: a panicking init poisons the LazyLock for
-                // the process lifetime, so every later touch would panic too.
+                // the process lifetime; every later touch would panic too.
                 crate::verr!("[CACHE]  Fallback failed, cache disabled: {e}");
                 crate::player::cache::AudioCache::disabled(&dir)
             })

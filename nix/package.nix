@@ -102,7 +102,7 @@ stdenv.mkDerivation {
     xorg.libxcb
   ];
 
-  # Chromium dlopen()s these; they aren't NEEDED entries, so add them to the runpath.
+  # Chromium dlopen()s these; they aren't NEEDED entries: add them to the runpath.
   runtimeDependencies = [
     libGL
     mesa
@@ -111,7 +111,7 @@ stdenv.mkDerivation {
   dontConfigure = true;
   dontBuild = true;
 
-  # Keep `tidalunar` next to `bin/cef/` so its $ORIGIN/bin/cef RPATH resolves
+  # Keep `tidalunar` next to `bin/cef/` for its $ORIGIN/bin/cef RPATH to resolve
   # libcef.so.
   installPhase = ''
     runHook preInstall
@@ -121,7 +121,7 @@ stdenv.mkDerivation {
 
     mkdir -p "$out/bin"
     # Chromium dlopen()s libGL.so.1 from libcef.so, and DT_RUNPATH doesn't apply
-    # to dlopen, so put it (+ the NixOS GPU driver) on LD_LIBRARY_PATH.
+    # to dlopen; put it (+ the NixOS GPU driver) on LD_LIBRARY_PATH.
     # TIDALUNAR_MANAGED_INSTALL makes the app skip its desktop self-install and
     # in-app updater (Nix owns both). Inert until a release carries the gate.
     makeWrapper "$out/libexec/tidalunar/tidalunar" "$out/bin/tidalunar" \

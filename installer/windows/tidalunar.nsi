@@ -30,8 +30,8 @@ Icon           "..\..\tidaluna.ico"
 UninstallIcon  "..\..\tidaluna.ico"
 
 ; SetShellVarContext default is `current` for per-user installs (matches our
-; RequestExecutionLevel user). It is NOT a global directive - placing it at
-; top level fails makensis. No code path here needs `all`, so we never call it.
+; RequestExecutionLevel user). It is NOT a global directive: placing it at
+; top level fails makensis. No code path here needs `all`; we never call it.
 
 VIProductVersion "${VERSION_NUMERIC}"
 VIAddVersionKey  "ProductName"     "TidaLunar"
@@ -200,7 +200,7 @@ FunctionEnd
 ; -------------------------------------------------------------------------
 ; AcquireInstallMutex - acquire by ownership via WaitForSingleObject.
 ; Caller must have called Get(un.)CurrentUserSid first ($9 = SID).
-; Labels are local to the calling function/section scope, so the same macro
+; Labels are local to the calling function/section scope: the same macro
 ; can be inserted in both .onInit and Section "Uninstall" without conflict.
 ; Contention message is parameterised since install/uninstall phrase it
 ; differently.
@@ -235,9 +235,9 @@ Function .onInit
   !insertmacro AcquireInstallMutex "Another TidaLunar installer or updater is running.$\nClick Retry once it finishes."
   ; $2 holds the owned mutex handle; OS releases on process exit.
 
-  ; Discard any incomplete updater transaction so post-install recovery
-  ; doesn't undo this install. Verified delete: Delete failure (AV held,
-  ; ACL block) leaves the file on disk, so we abort if the file persists.
+  ; Discard any incomplete updater transaction, keeping post-install recovery
+  ; from undoing this install. Verified delete: Delete failure (AV held,
+  ; ACL block) leaves the file on disk; we abort if the file persists.
   IfFileExists "$INSTDIR\.update-journal.json" 0 journal_clear
     MessageBox MB_YESNO|MB_ICONEXCLAMATION \
       "TidaLunar has a pending update transaction.$\nContinue and discard it?$\n$\n(Recommended: cancel, launch TidaLunar once to complete recovery, then re-run installer.)" \
@@ -269,7 +269,7 @@ Section "TidaLunar" SecMain
   ; 1. Stop running TidaLunar + its updater. Path-scoped via tracked .ps1
   ;    extracted to $PLUGINSDIR. taskkill /IM by image name would terminate
   ;    foreign Adobe/Office/Brave updater.exe processes. The .ps1 uses
-  ;    StartsWith with a trailing-backslash boundary so sibling installs
+  ;    StartsWith with a trailing-backslash boundary: sibling installs
   ;    like ...\TidaLunar-beta\ are untouched.
   SetOutPath $PLUGINSDIR
   File "kill-installdir-procs.ps1"
@@ -299,12 +299,12 @@ Section "TidaLunar" SecMain
     Abort
   journal_recheck_clear:
 
-  ; 4. Save old manifest aside so cleanup can compare old vs new.
+  ; 4. Save old manifest aside for cleanup to compare old vs new.
   ;
   ; Idempotency guard: if manifest.old.json from a previous failed cleanup
   ; still exists, run cleanup against it FIRST, using the still-current
   ; manifest.json. Catches files removed between v1->v2 (preserved when v2's
-  ; cleanup failed) so the chained v1->v2->v3 install doesn't strand them.
+  ; cleanup failed), keeping the chained v1->v2->v3 install from stranding them.
   ; Best-effort: drop the stale backup either way.
   IfFileExists "$INSTDIR\manifest.old.json" 0 manifest_save
   IfFileExists "$INSTDIR\manifest.json" 0 manifest_old_drop

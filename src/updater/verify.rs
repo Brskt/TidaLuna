@@ -11,7 +11,7 @@ const UPDATE_PUBLIC_KEY: [u8; 32] = [
 ];
 
 /// Verify the Ed25519 signature (`sig`, raw UTF-8 base64) over `manifest_bytes`.
-/// The pre-downloader stages files off the manifest, so reject a tampered or
+/// The pre-downloader stages files off the manifest: reject a tampered or
 /// unsigned manifest before any of it drives I/O.
 pub(super) fn verify_manifest_signature(manifest_bytes: &[u8], sig: &[u8]) -> Result<()> {
     let sig_b64 = std::str::from_utf8(sig).context("signature is not UTF-8")?;

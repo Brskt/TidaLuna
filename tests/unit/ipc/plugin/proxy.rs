@@ -47,7 +47,7 @@ fn redacted_marker_is_not_an_opaque_nonce() {
 fn a_second_token_does_not_slide_into_the_log_window_behind_the_first() {
     let t1 = format!("t1{}", "a".repeat(998));
     let t2 = format!("t2{}", "b".repeat(998));
-    // t2 starts at 1200, so a 400-byte window widened by one 1000-byte token admits only its
+    // t2 starts at 1200; a 400-byte window widened by one 1000-byte token admits only its
     // first 200 bytes: unmatched there, and 990 bytes closer to the front once t1 is replaced.
     let body = format!("{t1}{}{t2}", "-".repeat(200));
     let pairs = vec![

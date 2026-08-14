@@ -40,7 +40,7 @@ async fn fetch_and_decrypt_inner(
     let mut buffer = Vec::new();
     let mut reconnect_attempts: u32 = 0;
     const MAX_PRELOAD_RECONNECTS: u32 = 8;
-    // A reconnect resumes at `offset` and appends, so the staged bytes stay linear
+    // A reconnect resumes at `offset` and appends; the staged bytes stay linear
     // from zero - no equivalent of download_stream's Range restart exists here.
     let mut cipher_sink = open_cipher_sink(&crate::player::canonical_track_id(url));
 
@@ -53,7 +53,7 @@ async fn fetch_and_decrypt_inner(
             Ok(chunk) => chunk,
             Err(e) => {
                 // Idle connection died on a long pause: reconnect at `offset` and keep
-                // appending - the decrypt offset stays aligned so resumed bytes decrypt
+                // appending - the decrypt offset stays aligned and resumed bytes decrypt
                 // correctly. A 416 means `offset` is at/past EOF (all bytes buffered): finish.
                 crate::vprintln!("[PRELOAD] Stream error at byte {offset}: {e}");
                 stream = 'reconnect: loop {
@@ -170,7 +170,7 @@ pub async fn start_preload(track: TrackInfo) {
 
         // try_cache_hit serves a cached track before the preload is consulted, so
         // fetching it spends network and a staged copy on bytes nothing reads.
-        // next_track stays set, so auto-load proceeds as for an over-size track.
+        // next_track stays set: auto-load proceeds as for an over-size track.
         let already_cached = crate::state::AUDIO_CACHE.lock().ok().is_some_and(|c| {
             c.lookup_path(&crate::player::canonical_track_id(&track.url))
                 .is_some()
@@ -195,7 +195,7 @@ pub async fn start_preload(track: TrackInfo) {
                 }
             }
             Ok(None) => {
-                // Too large for RAM cache; keep only next_track so auto-load can still proceed.
+                // Too large for RAM cache; keep only next_track, letting auto-load proceed.
             }
             Err(e) => {
                 crate::vprintln!("[PRELOAD] Failed: {}", e);
@@ -295,7 +295,7 @@ impl CipherSink {
     }
 
     /// Flush the tail and hand over the staging file, or `None` if nothing was ever
-    /// written. The one gate on emptiness, so no caller needs its own: a zero-length
+    /// written. The one gate on emptiness, sparing every caller its own: a zero-length
     /// entry would be stored, read back, rejected and deleted for nothing.
     async fn finish(self) -> Option<(tempfile::NamedTempFile, u64)> {
         let sink = self.flush().await?;
@@ -304,7 +304,7 @@ impl CipherSink {
 }
 
 /// Staging sink for the ciphertext, or `None` if this track should not be staged.
-/// Caching is best-effort, so every failure here disables it silently. Refuses an
+/// Caching is best-effort: every failure here disables it silently. Refuses an
 /// already-indexed track and a disabled cache: neither could use the result, and
 /// both would write a full track only to delete it.
 fn open_cipher_sink(track_id: &str) -> Option<CipherSink> {
@@ -328,7 +328,7 @@ fn open_cipher_sink(track_id: &str) -> Option<CipherSink> {
 /// Hand a complete-from-zero download's ciphertext to the cache writer. Every EOF
 /// path goes through here because one that forgets silently stops caching instead
 /// of failing, which is how the 416-on-reconnect exit was missed. A Range-started
-/// stream is not cacheable (the gate is `base_offset == 0`), so it drops the sink.
+/// stream is not cacheable (the gate is `base_offset == 0`), and it drops the sink.
 async fn park_ciphertext(writer: &RamBufferWriter, sink: Option<CipherSink>, stream_offset: u64) {
     if stream_offset != 0 {
         return;
@@ -390,7 +390,7 @@ async fn download_stream(
                 Some(t) => t,
                 None => break,
             };
-            // A seek restart starts a fresh stream, so clear the reconnect
+            // A seek restart starts a fresh stream: clear the reconnect
             // budget - a `continue 'outer` from the reconnect loop lands here.
             reconnect_attempts = 0;
 
@@ -476,7 +476,7 @@ async fn download_stream(
         };
 
         // Staging follows the buffer's cacheability: only a stream from byte 0 can be
-        // cached, so a Range-based one stages nothing. Re-opening here also covers a
+        // cached; a Range-based one stages nothing. Re-opening here also covers a
         // server that ignored Range and put us back at 0.
         let mut cipher_sink = if stream_offset == 0 {
             open_cipher_sink(&crate::player::canonical_track_id(&url))
@@ -539,7 +539,7 @@ async fn download_stream(
                             let written = writer.write_counted(&decrypt_buf);
                             // `chunk` is still ciphertext: decryption ran on the copy
                             // in `decrypt_buf`. A discarded write means a restart is
-                            // imminent, so the file must not diverge from the buffer.
+                            // imminent: the file must not diverge from the buffer.
                             cipher_sink = match cipher_sink.take() {
                                 Some(sink) if written => sink.append(&chunk).await,
                                 _ => None,
@@ -580,7 +580,7 @@ async fn download_stream(
                 Some(Err(e)) => {
                     // Transient transport error (idle connection died on a long
                     // pause, or a blip): reconnect at `offset` and keep appending -
-                    // [base..offset] stays valid so the decode blocks at the frontier
+                    // [base..offset] stays valid, and the decode blocks at the frontier
                     // rather than ending the track. Terminal/exhausted retries end it.
                     if writer.is_cancelled() {
                         return;
@@ -621,7 +621,7 @@ async fn download_stream(
                             .get(&fetch_url)
                             .header("Range", &range_header)
                             .send();
-                        // The playback client has no request timeout, so race the
+                        // The playback client has no request timeout: race the
                         // send against restart/cancel: a stalled server must not pin
                         // this task past a seek/stop/new-track.
                         let reconnect_resp = tokio::select! {
@@ -644,7 +644,7 @@ async fn download_stream(
                             }
                             Ok(r) if r.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
                                 // offset is at/past EOF: all bytes are already
-                                // buffered, so this download is complete and
+                                // buffered: this download is complete and
                                 // cacheable just like a clean EOF.
                                 park_ciphertext(&writer, cipher_sink.take(), stream_offset).await;
                                 writer.finish();
@@ -688,8 +688,8 @@ async fn download_stream(
         }
 
         // Partial download (Range restart) reached EOF. The buffer covers
-        // [base_offset..EOF]. Mark finished so the decode thread sees EOF
-        // and emits "completed". If a backward seek needs data before
+        // [base_offset..EOF]. Mark finished: the decode thread sees EOF and
+        // emits "completed". If a backward seek needs data before
         // base_offset, buffer.rs clears `finished` and requests a restart.
         writer.finish();
         crate::vprintln2!(

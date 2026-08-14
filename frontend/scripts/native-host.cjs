@@ -41,7 +41,7 @@ const SAFE_MODULES = new Set([
 
 // ── Permanently blocked modules (no trust possible) ─────────────────────
 // No trust dialog can unlock these. require() returns an inert stub
-// (FORBIDDEN_STUBS) so dead-code requires can't kill a plugin; calls throw.
+// (FORBIDDEN_STUBS): dead-code requires can't kill a plugin; calls throw.
 const FORBIDDEN_MODULES = new Set([
     "child_process", "cluster", "vm", "v8",
     "inspector", "inspector/promises", "module", "repl", "process",
@@ -58,10 +58,10 @@ const BLOCKED_MODULES = new Set([
     "net", "http", "https", "http2", "tls", "dns", "dns/promises",
 ]);
 
-// ── Pre-load safe + blocked modules so Bun internal closures capture refs ──
+// ── Pre-load safe + blocked modules: Bun internal closures capture refs ──
 // Must happen before any globalThis mutation. Lazy init (bindings, stream
-// internals) completes now with mutable prototypes - we freeze later.
-// Blocked modules are pre-loaded too so their exports can be frozen (prevents
+// internals) completes now with mutable prototypes; we freeze later.
+// Blocked modules are pre-loaded too for their exports to be frozen (prevents
 // cross-plugin mutation when two plugins both receive network trust).
 SAFE_MODULES.forEach(function(id) {
     try { require(id); } catch (_) {}
@@ -69,7 +69,7 @@ SAFE_MODULES.forEach(function(id) {
 BLOCKED_MODULES.forEach(function(id) {
     try { require(id); } catch (_) {}
 });
-// Pre-load worker_threads so the safe shim below can capture its exports before hardening
+// Pre-load worker_threads for the safe shim below to capture its exports before hardening
 try { require("worker_threads"); } catch (_) {}
 
 function canonicalize(id) {
@@ -189,16 +189,16 @@ var shimmedWorkerThreads = (function() {
 })();
 
 // ── Inert stubs for forbidden modules ─────────────────────────────────
-// Bundled deps require these as dead code they never run - socket.io-client
-// reaches child_process via xmlhttprequest-ssl, tty via debug - so throwing at
+// Bundled deps require these as dead code they never run: socket.io-client
+// reaches child_process via xmlhttprequest-ssl, tty via debug, and throwing at
 // require killed plugins over unused code. Members throw on CALL, not on
 // property access: real code does require('child_process').spawn at top level.
-// Every entry here is frozen and stateless, so one shared instance is safe for
+// Every entry here is frozen and stateless; one shared instance is safe for
 // all plugins. A stub needing mutable state belongs in makeRequireProxy instead.
 
 // One line per member for the whole process: Rust forwards every stderr line into
-// console.log uncapped and rotates only at startup, so a plugin retrying on a timer
-// would grow that file without bound. No plugin name in the key - the stub is
+// console.log uncapped and rotates only at startup; a plugin retrying on a timer
+// would grow that file without bound. No plugin name in the key. The stub is
 // shared, and warnInertStub's require-time line already gives attribution.
 var _warnedStubCalls = new Set();
 
@@ -208,7 +208,7 @@ function makeForbiddenStub(id, members, answers) {
         stub[name] = function() {
             var msg = "[sandbox] " + id + "." + name + " is not available";
             // Logged as well as thrown: a plugin catching it still leaves a trace.
-            // The throw is what stops the caller, so logging once is enough.
+            // The throw is what stops the caller; logging once is enough.
             var callKey = id + "." + name;
             if (!_SetPrototypeHas.call(_warnedStubCalls, callKey)) {
                 _warnedStubCalls.add(callKey);
@@ -283,7 +283,7 @@ var FORBIDDEN_STUBS = (function() {
 })();
 
 // Per plugin, not in FORBIDDEN_STUBS: module-alias and v8-compile-cache assign
-// Module.prototype._compile at load time, so this must stay mutable - and a
+// Module.prototype._compile at load time; this must stay mutable, and a
 // mutable stub can't be shared or one plugin's patches reach the next.
 // Disconnected from the real Module: patches land on the throwaway prototype.
 function makeModuleStub() {
@@ -303,7 +303,7 @@ function makeModuleStub() {
     return FakeModule;
 }
 
-// One line per (plugin, module) so a plugin dragging a forbidden module in through
+// One line per (plugin, module): a plugin dragging a forbidden module in through
 // its dependency tree stays visible at LOGS=1 without dying for it. Per-plugin sets
 // rather than composite keys: forgetting a plugin is then a single delete, and no
 // delimiter has to be reserved inside plugin names or module ids.
@@ -425,7 +425,7 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName) {
             // globalThis Proxy would throw on .stderr where the ambient one works.
             if (canonical === "process") return mockedProcess;
 
-            // Memoized so require('module') === require('module') within a plugin.
+            // Memoized; require('module') === require('module') within a plugin.
             if (canonical === "module") {
                 warnInertStub(pluginName, canonical);
                 if (!moduleStub) moduleStub = makeModuleStub();
@@ -494,7 +494,7 @@ function containsDynamicImport(code) {
 // ── Harden eval - scan for dynamic import() before delegating ─────────
 // eval("import('fs')") bypasses containsDynamicImport (AST scan of source)
 // because the import() is inside a string literal. This wrapper scans the
-// final runtime string. Runs on the evaluated string, so concatenation
+// final runtime string. Runs on the evaluated string: concatenation
 // like "imp"+"ort('fs')" is caught after assembly.
 ;(function hardenEval() {
     var realEval = globalThis.eval;
@@ -525,7 +525,7 @@ function containsDynamicImport(code) {
     };
     SafeFunction.prototype = RealFunction.prototype;
     // Keep writable: bundled strict-mode libs do `fn.constructor = fn` (UTIF in node-vibrant),
-    // and a non-writable inherited slot throws on that. Value stays SafeFunction, so it's still scanned.
+    // and a non-writable inherited slot throws on that. Value stays SafeFunction; it's still scanned.
     _ObjectDefineProperty(RealFunction.prototype, "constructor", {
         value: SafeFunction, writable: true, configurable: false,
     });
@@ -535,9 +535,9 @@ function containsDynamicImport(code) {
 })();
 
 // ── Harden globalThis.Bun - neuter dangerous methods in-place ─────────
-// Bun is non-configurable so we can't replace it; its writable methods
+// Bun is non-configurable and can't be replaced; its writable methods
 // (spawn/file/write/...) ARE neutered below. Bun.fetch/Bun.env are
-// writable:false (can't neuter) - but env is scrubbed at spawn and fetch
+// writable:false (can't neuter), but env is scrubbed at spawn and fetch
 // egress is the IPC path's job; closing Bun.fetch direct = OS-level (backlog).
 ;(function hardenBun() {
     var realBun = globalThis.Bun;
@@ -757,8 +757,8 @@ function makeAbortError() {
     return err;
 }
 
-// Remove a pending fetch and tear down its timer + abort listener (one place,
-// so every settle path - timeout, transport-fail, abort, result - is symmetric).
+// Remove a pending fetch and tear down its timer + abort listener in one place,
+// making every settle path symmetric: timeout, transport-fail, abort, result.
 function settle(reqId) {
     var entry = pendingFetches.get(reqId);
     if (!entry) return null;
@@ -770,8 +770,8 @@ function settle(reqId) {
     return entry;
 }
 
-// Tell Rust to drop an in-flight net.fetch (the child gave up - abort or timeout)
-// so it stops doing network work nobody awaits.
+// Tell Rust to drop an in-flight net.fetch (the child gave up: abort or timeout);
+// it stops doing network work nobody awaits.
 function sendCancel(reqId) {
     try {
         hostStdout.write(_JSONStringify({ type: "net.fetch.cancel", reqId: reqId }) + "\n");
@@ -787,8 +787,8 @@ function makeIpcFetch(pluginName) {
             headers = normalizeHeaders(input.headers);
             redirect = input.redirect;
             signal = input.signal;
-            // The Request carries the body unless init overrides it; clone so the
-            // caller's Request isn't consumed.
+            // The Request carries the body unless init overrides it; clone to keep
+            // the caller's Request from being consumed.
             if (!(init && init.body != null) && input.body != null) {
                 try { body = await input.clone().arrayBuffer(); } catch (_) {}
             }
@@ -867,7 +867,7 @@ function handleFetchResult(cmd) {
     try {
         var hasBody = typeof cmd.body === "string" && cmd.body.length > 0;
         var bodyArg = hasBody ? _Buffer.from(cmd.body, "base64") : null;
-        // Rebuild Headers via append so duplicate names (Set-Cookie/Link) survive.
+        // Rebuild Headers via append: duplicate names (Set-Cookie/Link) survive.
         var headers = _RealHeaders ? new _RealHeaders() : {};
         if (_ArrayIsArray(cmd.headers)) {
             for (var i = 0; i < cmd.headers.length; i++) {
@@ -878,8 +878,8 @@ function handleFetchResult(cmd) {
             }
         }
         // The Response ctor rejects a status outside 200-599; build with a safe
-        // status, then restore the real one (1xx/999/...) on the instance so the
-        // plugin sees the true status without a thrown error.
+        // status, then restore the real one (1xx/999/...) on the instance for the
+        // plugin to see the true status without a thrown error.
         var realStatus = typeof cmd.status === "number" ? cmd.status : 200;
         var ctorStatus = realStatus >= 200 && realStatus <= 599 ? realStatus : 200;
         var res = new _RealResponse(bodyArg, {

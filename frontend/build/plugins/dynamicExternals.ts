@@ -2,7 +2,7 @@ import type { Plugin } from "esbuild";
 
 /**
  * Resolves external modules to `window.require("module")` at runtime.
- * Used by inline plugin builds (@luna/ui, @luna/dev) so their imports
+ * Used by inline plugin builds (@luna/ui, @luna/dev): their imports
  * are satisfied by the modules registered on `window.require`.
  */
 export const dynamicExternalsPlugin = (externals: string[]): Plugin => ({

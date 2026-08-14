@@ -24,10 +24,10 @@ function disarmGestureResume() {
 
 function createContext(): AudioContext | null {
     try {
-        // Route the silent context to a sink with no hardware device so it never
+        // Route the silent context to a sink with no hardware device: it never
         // contends with the native exclusive-WASAPI output (exclusive mode
         // invalidates any shared client on it, which throws an AudioContext error).
-        // The graph still renders, so MediaSession stays active. Fall back if unsupported.
+        // The graph still renders; MediaSession stays active. Fall back if unsupported.
         let c: AudioContext;
         try {
             const opts: AudioContextOptions & { sinkId?: { type: string } } = {
@@ -43,9 +43,9 @@ function createContext(): AudioContext | null {
         osc.connect(gain);
         gain.connect(c.destination);
         osc.start();
-        // Closed is terminal (no resume, no new nodes): drop it so the next
-        // ensureAudioContext() rebuilds. resume()'s transition to "running" is
-        // async, so statechange is the reliable de-arm signal, not a sync read.
+        // Closed is terminal (no resume, no new nodes): drop it for the next
+        // ensureAudioContext() to rebuild. resume()'s transition to "running" is
+        // async; statechange is the reliable de-arm signal, not a sync read.
         c.addEventListener("statechange", () => {
             if (ctx !== c) return;
             if (c.state === "closed") ctx = null;
@@ -83,7 +83,7 @@ function ensureAudioContext() {
     if (ctx.state === "suspended") {
         ctx.resume().then(() => {
             // resume() resolves even when the autoplay policy keeps the context
-            // suspended, so check the real state instead of trusting the promise.
+            // suspended. Check the real state instead of trusting the promise.
             if (ctx?.state === "running") {
                 sendDbgIpc("[MediaSession] AudioContext running");
             } else {

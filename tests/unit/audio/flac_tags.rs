@@ -20,7 +20,7 @@ fn comments() -> Vec<(String, String)> {
     ]
 }
 
-/// Walk the whole chain rather than stopping at the first flagged block, so an
+/// Walk the whole chain rather than stopping at the first flagged block; an
 /// uncleared STREAMINFO flag cannot hide behind an early return.
 fn chain(data: &[u8]) -> Vec<(u8, bool, Vec<u8>)> {
     let mut out = Vec::new();
@@ -63,7 +63,7 @@ fn only_the_final_block_is_flagged_last() {
     assert_eq!(flagged, vec![blocks.len() - 1]);
 }
 
-/// Decoded by hand as little endian, so swapping the encoder's byte order fails here
+/// Decoded by hand as little endian: swapping the encoder's byte order fails here
 /// rather than passing a test that only counts blocks.
 #[test]
 fn comment_entries_round_trip_as_little_endian() {

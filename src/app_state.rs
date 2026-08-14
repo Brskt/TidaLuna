@@ -66,7 +66,7 @@ pub(crate) struct AppState {
     pub(crate) token_state: Option<crate::platform::secure_store::StoredTokenState>,
     /// Keyed by CEF's own per-query id, never by the `id` the caller sent. Three independent
     /// JS counters feed this map (`fetch.__seq` per plugin load, `@luna/lib`'s bundle-wide
-    /// one, the early-runtime's page-global one) and all start at 1, so a client-chosen key
+    /// one, the early-runtime's page-global one) and all start at 1; a client-chosen key
     /// collides across plugins, across reloads of one plugin, and across channels.
     pub(crate) pending_ipc_callbacks: HashMap<i64, IpcCallback>,
     pub(crate) pending_window_save: Option<crate::settings::WindowState>,
@@ -130,9 +130,9 @@ const IPC_EMIT_PREFIX: &str =
     "if(typeof window.__LUNAR_IPC_EMIT__==='function')window.__LUNAR_IPC_EMIT__(";
 
 // Escape U+2028/U+2029 (JS line terminators serde leaves raw inside string
-// literals) so an embedded value can't terminate the statement.
+// literals): an embedded value can't terminate the statement.
 pub(crate) fn escape_js_line_terminators(s: String) -> String {
-    // Fast path: U+2028/U+2029 are vanishingly rare, so avoid two full-string
+    // Fast path: U+2028/U+2029 are vanishingly rare; avoid two full-string
     // scans + an allocation when neither is present (the normal case).
     if !s.contains(['\u{2028}', '\u{2029}']) {
         return s;
@@ -141,13 +141,13 @@ pub(crate) fn escape_js_line_terminators(s: String) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
-// JSON-encode as a JS string literal so a controlled value can't break out and inject.
+// JSON-encode as a JS string literal: a controlled value can't break out and inject.
 pub(crate) fn js_string_literal(s: &str) -> String {
     escape_js_line_terminators(serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()))
 }
 
 /// Build a `__TIDAL_IPC_RESPONSE__(id, null, result)` reply with the
-/// renderer-controlled `id` JSON-encoded so it can't break out and inject.
+/// renderer-controlled `id` JSON-encoded; it can't break out and inject.
 /// `result_json` is already-serialized JSON in value position.
 pub(crate) fn js_ipc_response(id: &str, result_json: &str) -> String {
     format!(

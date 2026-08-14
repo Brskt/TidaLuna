@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Called from both jsrt.set_token (primary path) and proxy.rs oauth2/token (fallback).
 /// Best-effort: eval_js may fail if no renderer frame is available.
 static PKCE_SCRUBBED: AtomicBool = AtomicBool::new(false);
-/// Re-arm the scrub latch so the next login cycle triggers a fresh scrub.
+/// Re-arm the scrub latch: the next login cycle triggers a fresh scrub.
 /// Called from session_clear and session_hard_reset.
 pub(super) fn reset_pkce_scrub() {
     PKCE_SCRUBBED.store(false, Ordering::SeqCst);

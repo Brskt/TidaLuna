@@ -10,7 +10,7 @@ fn js_string_literal_escapes_quotes_backslashes_and_newlines() {
 #[test]
 fn js_string_literal_escapes_line_and_paragraph_separators() {
     // serde_json leaves U+2028/U+2029 raw (RFC 8259), but they are JS line
-    // terminators; \u-escape them so the literal stays valid in any position.
+    // terminators; \u-escape them for the literal to stay valid in any position.
     assert_eq!(js_string_literal("a\u{2028}b"), "\"a\\u2028b\"");
     assert_eq!(js_string_literal("a\u{2029}b"), "\"a\\u2029b\"");
 }

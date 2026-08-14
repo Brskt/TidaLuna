@@ -174,7 +174,7 @@ fn delete_platform(_data_dir: &Path) -> Result<(), StoreError> {
 // it forces a keyring-unlock password prompt on every fresh session. The token
 // is kept away from plugins by path containment, not at-rest encryption: JS
 // plugins have no filesystem access, and native (Bun) plugins get an fs facade
-// scoped to cache_data_dir()/native/<plugin>/, so they cannot reach this file in
+// scoped to cache_data_dir()/native/<plugin>/; they cannot reach this file in
 // the data-dir root. A 0600 file in the data dir therefore satisfies the
 // in-scope boundary with no prompt.
 

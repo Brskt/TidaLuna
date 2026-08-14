@@ -10,7 +10,7 @@ const INITIAL_BUFFER_CAP: usize = 2 * 1024 * 1024; // 2 MB
 /// When the read cursor is slightly ahead of buf_end, wait for the sequential
 /// download to catch up instead of triggering a new Range restart. At the
 /// governed download rate this lookahead arrives in well under a restart's
-/// TTFB, so keep it small enough that waiting never loses to restarting.
+/// TTFB; keep it small enough that waiting never loses to restarting.
 const SEEK_LOOKAHEAD: u64 = 32 * 1024; // 32 KB
 
 struct Inner {
@@ -22,7 +22,7 @@ struct Inner {
     error: Option<String>,
     restart_target: Option<u64>,
     /// Ciphertext staging file for the disk cache, with its byte count. The download
-    /// loop owns it while streaming and parks it here only at EOF, so no per-chunk
+    /// loop owns it while streaming and parks it here only at EOF: no per-chunk
     /// write ever takes this lock.
     ciphertext: Option<(tempfile::NamedTempFile, u64)>,
 }
@@ -59,7 +59,7 @@ pub struct RamBuffer {
     cursor: u64, // reader's current position (absolute file offset)
     // Per-reader stop: `read` returns Interrupted without touching the shared
     // `cancelled` (which retires every reader). Drops a stale exclusive reader on
-    // a mode switch so it stops fighting the new shared reader.
+    // a mode switch, stopping it from fighting the new shared reader.
     reader_cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -102,7 +102,7 @@ impl RamBuffer {
         Self::from_complete_with_ciphertext(data, None)
     }
 
-    /// A complete buffer that also carries the ciphertext for the disk cache, so
+    /// A complete buffer that also carries the ciphertext for the disk cache:
     /// a preload hit or a no-Content-Length download can still be stored.
     pub fn from_complete_with_ciphertext(
         data: Vec<u8>,
@@ -143,7 +143,7 @@ impl RamBuffer {
         self
     }
 
-    /// Wake any reader blocked in `read` so it can re-check its stop signal.
+    /// Wake any reader blocked in `read` to re-check its stop signal.
     #[cfg(target_os = "windows")]
     pub fn wake_readers(&self) {
         self.shared.cvar.notify_all();
@@ -164,11 +164,11 @@ impl RamBuffer {
     }
 
     /// Like `is_complete()` but also requires the data to still be in memory. A
-    /// reused decoder needs the bytes present -- a complete but empty buffer
-    /// would read instant EOF (silence), so a `true` here guarantees a fresh
-    /// decoder can read the track.
-    // Callers are all cfg(windows) (the buffer-reuse gates in thread/device.rs), so
-    // Linux clippy sees it as dead; keep it compiled/type-checked there anyway
+    /// reused decoder needs the bytes present; a complete but empty buffer would
+    /// read instant EOF (silence). A `true` here guarantees a fresh decoder can
+    /// read the track.
+    // Callers are all cfg(windows) (the buffer-reuse gates in thread/device.rs), and
+    // Linux clippy therefore sees it as dead; keep it compiled/type-checked there anyway
     // (same pattern as declick.rs / convert.rs).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn is_reusable(&self) -> bool {
@@ -182,9 +182,9 @@ impl RamBuffer {
     }
 
     /// Take the ciphertext staging file the download parked at EOF. Gated on the same
-    /// completeness as `is_complete()`, so a partial or Range-restarted download never
-    /// yields one. No size check: `CipherSink::finish` refuses an empty sink, so one
-    /// never reaches the buffer.
+    /// completeness as `is_complete()`: a partial or Range-restarted download never
+    /// yields one. No size check; `CipherSink::finish` refuses an empty sink, and none
+    /// ever reaches the buffer.
     pub fn take_ciphertext(&self) -> Option<(tempfile::NamedTempFile, u64)> {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.finished && inner.error.is_none() && inner.base_offset == 0 {
@@ -488,7 +488,7 @@ impl RamBufferWriter {
 impl Drop for RamBufferWriter {
     fn drop(&mut self) {
         // If the download ended without finishing (cancelled mid-stream, an error
-        // path that returned, or a panic), retire the buffer so a reader blocked at
+        // path that returned, or a panic), retire the buffer; a reader blocked at
         // the frontier bails instead of hanging. No-op once finished.
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !inner.finished {

@@ -29,7 +29,7 @@ fn handle_session_clear() {
     unload_all_user_plugins();
 
     let parked = with_state(|state| {
-        // Stop the native player; it runs independent of the renderer, so a
+        // Stop the native player; it runs independent of the renderer: a
         // session clear alone won't halt audio on logout.
         let _ = state.player.stop();
         state.pending_player_events.clear();
@@ -41,8 +41,8 @@ fn handle_session_clear() {
         std::mem::take(&mut state.plugin_load_waiters)
     })
     .unwrap_or_default();
-    // Settle any parked cold-boot load requests so the renderer's invokeIpc
-    // resolves instead of hanging across the logout/login transition.
+    // Settle any parked cold-boot load requests, letting the renderer's invokeIpc
+    // resolve rather than hang across the logout/login transition.
     for cb in &parked {
         super::ipc_callback_ok(cb, "true");
     }
@@ -334,7 +334,7 @@ pub(crate) fn open_plugin_gate() {
 static GATE_TIMEOUT_ARMED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Force the gate open after 5s if the refresh never signals, so plugin load
+/// Force the gate open after 5s if the refresh never signals; plugin load
 /// can't hang forever. Safe: the egress filter still blocks any leaked token.
 pub(super) fn arm_gate_timeout() {
     if GATE_TIMEOUT_ARMED.swap(true, std::sync::atomic::Ordering::SeqCst) {

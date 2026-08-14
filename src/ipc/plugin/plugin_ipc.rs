@@ -355,7 +355,7 @@ pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
 
     // Gate: on a cold boot the real OAuth token still lives in TIDAL's SDK until
     // the proactive refresh rotates it to opaque nonces. Park the reply until the
-    // gate opens (refresh done or 5s safety timeout) so plugins can't read it.
+    // gate opens (refresh done or 5s safety timeout); plugins can't read it.
     let parked = with_state(|state| {
         if state.proactive_refresh_done {
             return false;
@@ -755,7 +755,7 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
 
     let info = install_result?;
 
-    // Clear native trust on (re)install so updated code re-prompts.
+    // Clear native trust on (re)install: updated code re-prompts.
     let trust_name = info.name.clone();
     crate::state::db().call_settings(move |conn| {
         let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &trust_name);
@@ -764,8 +764,8 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
     Ok(info)
 }
 
-/// Running byte-total guard; `saturating_add` so a huge chunk can't overflow into
-/// a pass. Mirrors the updater's download cap.
+/// Running byte-total guard; `saturating_add` keeps a huge chunk from overflowing
+/// into a pass. Mirrors the updater's download cap.
 fn bump_capped(running: usize, add: usize, max: usize) -> anyhow::Result<usize> {
     let next = running.saturating_add(add);
     if next > max {

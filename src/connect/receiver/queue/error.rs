@@ -1,7 +1,7 @@
 //! Errors raised by the queue subsystem.
 
 /// Unified error type for the queue subsystem. Each variant distinguishes a
-/// failure mode so the caller can react appropriately (e.g. refresh the
+/// failure mode for the caller to react appropriately (e.g. refresh the
 /// token on `TokenExpired`, relogin on `AuthTerminated`, retry on
 /// `HttpStatus` with backoff).
 #[derive(Debug, Clone)]

@@ -20,7 +20,7 @@ pub struct DashManifest {
 ///
 /// ISO/IEC 23009-1 bounds none of the inputs. `@r` is an `xs:integer` with no `maxInclusive`
 /// facet (clause 5.3.9.6.3) and `@mediaPresentationDuration` an `xs:duration` with an
-/// unbounded value space, so `mediaPresentationDuration="P100Y"` over one-tick segments is a
+/// unbounded value space: `mediaPresentationDuration="P100Y"` over one-tick segments is a
 /// schema-valid manifest that demands more allocations than the process can survive. Neither
 /// ingress is ours. `player.parse_dash` is reachable from any script in the TIDAL frame, which
 /// is where plugin code runs. `apply_dash_manifest` parses what the Connect receiver fetched
@@ -67,7 +67,7 @@ fn inherited<'a, T>(
 /// The segment number `offset` slots into the enumeration, refusing a `@startNumber` that
 /// walks off `u64`.
 ///
-/// The attribute is an unbounded `xs:unsignedLong` the manifest chooses, so a value near the
+/// The attribute is an unbounded `xs:unsignedLong` the manifest chooses; a value near the
 /// ceiling overflows on the *second* segment, nowhere near [`MAX_SEGMENTS`]. Saturating would
 /// be worse than refusing; every slot past the ceiling renders the same `$Number$`, a list of
 /// duplicate URLs passed off as a whole track.
@@ -97,7 +97,7 @@ fn period_duration_secs(mpd: &dash_mpd::MPD, period: &dash_mpd::Period) -> Optio
 /// Parse a DASH MPD XML string and extract segment URLs.
 ///
 /// Fails closed: a manifest that parses but yields no segments is an error, not an empty
-/// `Ok`. No caller knows more than this function about whether the list is complete, so none
+/// `Ok`. No caller knows more than this function about whether the list is complete, and none
 /// can tell a legitimately short track from an unresolvable duration or repeat count.
 pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
     // TIDAL uses group="main" (string) which violates the DASH spec (expects integer).

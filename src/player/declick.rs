@@ -1,7 +1,7 @@
 //! Shared de-click / resync primitives for the Windows audio backends (ASIO + WASAPI
 //! exclusive). Both restart the device on a sample-rate change, which pops the DAC; these
 //! helpers fade the stream edges and size the post-restart silence that masks the hardware
-//! PLL relock. Platform-independent, so the envelope math is unit-tested on any host.
+//! PLL relock. Platform-independent; the envelope math is unit-tested on any host.
 #![cfg_attr(not(target_os = "windows"), allow(dead_code))]
 
 /// De-click fade length: teardown fade-out and post-resync fade-in. Short enough
@@ -24,7 +24,7 @@ pub(crate) fn silence_frames(sample_rate: u32, ms: f64) -> usize {
 }
 
 /// Rising half-cosine fade-in coefficient at frame `pos` of `len` (0.0 -> 1.0). The
-/// derivative is zero at both ends, so the ramp adds no click of its own.
+/// derivative is zero at both ends: the ramp adds no click of its own.
 #[inline]
 pub(crate) fn fade_in_env(pos: usize, len: usize) -> f32 {
     0.5 * (1.0 - (std::f32::consts::PI * pos as f32 / len.max(1) as f32).cos())
@@ -44,7 +44,7 @@ pub(crate) fn fade_scale(sample: i32, env: f32) -> i32 {
 
 /// Milliseconds the control thread allows the RT fade-out before tearing the stream
 /// down anyway. `fade_out_done` lands two silent fills after the ramp (ASIO plays one
-/// buffer ahead), so cover the ramp's buffer periods plus 3 of slack, clamped to
+/// buffer ahead); cover the ramp's buffer periods plus 3 of slack, clamped to
 /// [`FADE_OUT_WAIT_MS`, `FADE_OUT_WAIT_MAX_MS`]. `frames`/`sample_rate` describe the
 /// OLD (fading) stream.
 #[inline]

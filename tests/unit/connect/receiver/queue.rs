@@ -26,7 +26,7 @@ fn won_cas_uses_our_token() {
 fn lost_cas_with_active_winner_adopts_winner_token() {
     // The audit bug: a benign VersionMismatch must NOT surface as an error
     // and must NOT replay our discarded token. A concurrent writer already
-    // installed a current Active token, so adopt the WINNER's token.
+    // installed a current Active token; adopt the WINNER's token.
     let current = tok("at-winner", GenerationStatus::Active);
     let outcome = reconcile_refresh(Err(CASError::VersionMismatch), "at-ours", &current);
     assert_eq!(outcome, RefreshOutcome::UseToken("at-winner".to_string()));

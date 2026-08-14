@@ -1,7 +1,7 @@
 //! Minimal Xlib FFI to set `WM_CLASS` on a CEF Views top-level window.
 //!
 //! CEF Views builds X11 windows itself and never threads Chromium's
-//! `--class=NAME` switch through, so the window starts with no class hint and
+//! `--class=NAME` switch through; the window starts with no class hint and
 //! GNOME (which only matches `.desktop` entries by `WM_CLASS`) falls back to a
 //! generic dock icon. We open a private X connection here, push an
 //! `XClassHint`, then close it - the window manager picks it up immediately.

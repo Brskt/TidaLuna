@@ -8,7 +8,7 @@ fn committed(canonical_id: &str, format: &str) -> (String, String) {
 
 #[test]
 fn same_canonical_id_and_format_is_idempotent() {
-    // The caller strips the query before calling, so both ids are canonical.
+    // The caller strips the query before calling; both ids are canonical.
     // (Production passes canonical_track_id("…?sig=2") == "…/abc".)
     let cur = committed("https://cdn/tracks/abc", "flac");
     assert!(is_same_active_track(

@@ -52,7 +52,7 @@ pub fn start() {
 }
 
 fn run() {
-    // All CEF subprocesses are spawned from this same binary, so matching by
+    // All CEF subprocesses are spawned from this same binary: matching by
     // process name collects the browser, renderer, GPU and utility processes
     // while ignoring unrelated ones. Matching the exe *path* is unreliable:
     // current_exe() and sysinfo can report the same binary with different path

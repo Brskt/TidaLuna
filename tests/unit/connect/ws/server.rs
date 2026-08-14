@@ -3,7 +3,7 @@
 use super::*;
 
 // The accept must observe a cancelled token instead of blocking forever in
-// accept() when no connection arrives. Driven at the helper so it needs no
+// accept() when no connection arrives. Driven at the helper: it needs no
 // TLS/connection setup.
 #[tokio::test]
 async fn accept_or_cancel_yields_none_when_cancelled() {

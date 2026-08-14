@@ -1,9 +1,9 @@
 //! Serves Luna's own plugin ES modules (`luna-ui.mjs`, `luna-dev.mjs`) to the renderer.
 //!
 //! Baked into the binary (`include_bytes!`) and served on a synthetic same-origin `/__luna__/*.mjs`
-//! path so the loader can `import()` them, instead of `bundle.js` carrying them as escaped string
-//! literals. Same `ResourceHandler` pattern as `store_proxy`, but synchronous (bytes are resident,
-//! so no fetch/callback/`Task`).
+//! path for the loader to `import()` them, instead of `bundle.js` carrying them as escaped string
+//! literals. Same `ResourceHandler` pattern as `store_proxy`, but synchronous (bytes are resident:
+//! no fetch/callback/`Task`).
 
 use std::sync::{Arc, Mutex};
 
@@ -25,8 +25,8 @@ fn resolve(url: &str) -> Option<&'static [u8]> {
 }
 
 /// The module-serving request handler for a matched `/__luna__/*.mjs` fetch, else None. Wired into
-/// BOTH dispatches (browser-level `client.rs` and context-level `csp_filter.rs`), like `store_proxy`
-/// -- the service-worker-routed fetch reaches only the context handler.
+/// BOTH dispatches (browser-level `client.rs` and context-level `csp_filter.rs`), like `store_proxy`:
+/// the service-worker-routed fetch reaches only the context handler.
 pub(super) fn intercept(
     url: &str,
     is_navigation: ::std::os::raw::c_int,
@@ -54,7 +54,7 @@ wrap_resource_request_handler! {
 
     impl ResourceRequestHandler {
         // The trait default returns RV_CANCEL, which kills the request before
-        // `resource_handler` runs -- continue so our handler serves it.
+        // `resource_handler` runs; continue for our handler to serve it.
         fn on_before_resource_load(
             &self,
             _browser: Option<&mut Browser>,
@@ -85,8 +85,8 @@ wrap_resource_handler! {
     }
 
     impl ResourceHandler {
-        // Synchronous: the bytes are resident (`include_bytes!`), so signal handled-now and let
-        // response_headers/read serve straight from the slice -- no async fetch/callback needed.
+        // Synchronous: the bytes are resident (`include_bytes!`). Signal handled-now and let
+        // response_headers/read serve straight from the slice, no async fetch/callback needed.
         fn open(
             &self,
             _request: Option<&mut Request>,
@@ -112,15 +112,15 @@ wrap_resource_handler! {
             resp.set_status(200);
             // Must be a JS MIME for Chromium's module loader to accept an import() target.
             resp.set_mime_type(Some(&CefString::from("text/javascript")));
-            // Served fresh from the binary; never cache, so a rebuilt module is never shadowed by
+            // Served fresh from the binary; never cache, or a rebuilt module ends up shadowed by
             // a stale copy at the stable path.
             resp.set_header_by_name(
                 Some(&CefString::from("Cache-Control")),
                 Some(&CefString::from("no-store")),
                 1,
             );
-            // The injected bundle imports these from an opaque (about:blank) origin, so the module
-            // fetch is CORS-checked even though it hits the same host; allow it (like store_proxy).
+            // The injected bundle imports these from an opaque (about:blank) origin, which
+            // CORS-checks the fetch even though it hits the same host; allow it (like store_proxy).
             resp.set_header_by_name(
                 Some(&CefString::from("Access-Control-Allow-Origin")),
                 Some(&CefString::from("*")),

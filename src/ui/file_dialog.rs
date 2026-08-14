@@ -1,6 +1,6 @@
 //! Native file open/save dialog via CEF `BrowserHost::run_file_dialog`. Backs
 //! `showOpenDialog` and `showSaveDialog` from `@luna/lib.native`. The dialog
-//! must run on the CEF UI thread, so the work is posted there as a Task; the
+//! must run on the CEF UI thread. The work is posted there as a Task; the
 //! selected paths are returned via a oneshot channel (empty = cancelled).
 
 use cef::*;
@@ -274,7 +274,7 @@ wrap_task! {
                 .flatten()
                 .and_then(|b| b.host())
             else {
-                // No browser/host: resolve empty so the JS promise still settles.
+                // No browser/host: resolve empty; the JS promise must still settle.
                 if let Some(tx) = self.sender.lock().unwrap_or_else(|e| e.into_inner()).take() {
                     let _ = tx.send(Vec::new());
                 }

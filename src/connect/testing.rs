@@ -1,7 +1,7 @@
 //! Test-only helpers for the connect module.
 //!
 //! `MockWsServer` is a plain-WS (not WSS) server that listens on a
-//! randomly-assigned localhost port so unit tests can exercise the
+//! randomly-assigned localhost port, letting unit tests exercise the
 //! parts of the TIDAL Connect protocol that depend on websocket
 //! framing without a real mobile device. TLS is intentionally out
 //! of scope here: the crypto layer is orthogonal to the protocol

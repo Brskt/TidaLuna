@@ -50,7 +50,7 @@ pub(crate) fn trigger_if_needed() {
 async fn do_refresh(refresh_token: String, client_id: String, req_scope: String) {
     if client_id.is_empty() {
         // The token endpoint rejects a refresh grant with no client_id (400,
-        // sub_status 1002), so a request here can only fail. Skip it; the token
+        // sub_status 1002): a request here can only fail. Skip it; the token
         // stays live and the SDK refreshes it near expiry.
         crate::vprintln!("[AUTH]   Proactive refresh: no client_id - skipped");
         return;
@@ -186,7 +186,7 @@ async fn do_refresh(refresh_token: String, client_id: String, req_scope: String)
             access_expires: now_secs + expires_in.unwrap_or(3600),
             user_id: user_id.clone(),
             granted_scopes: granted_scopes.clone(),
-            // Backfill from the client_id this refresh used, so a blob that
+            // Backfill from the client_id this refresh used; a blob that
             // arrived without one self-heals instead of staying empty.
             client_id: state
                 .token_state

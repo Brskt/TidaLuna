@@ -13,7 +13,7 @@ fi
 
 # 2. chrome-sandbox chmod: choose mode by the real unprivileged-userns policy.
 #    This script runs as root, whose own namespace capability is NOT
-#    representative of the non-root runtime user, so probe the kernel policy
+#    representative of the non-root runtime user; probe the kernel policy
 #    directly instead of `unshare --user true`. Setuid (4755) is the safe
 #    superset whenever unprivileged userns is restricted.
 SANDBOX='/opt/tidalunar/bin/cef/chrome-sandbox'

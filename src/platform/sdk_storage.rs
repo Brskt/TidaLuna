@@ -127,7 +127,7 @@ pub(crate) enum ReadRawResult {
     Raw(Box<RawSdkBlob>),
     Corrupt,
     /// Could not open the LevelDB (e.g. locked by another process); contents
-    /// unknown, so callers must not purge - it may hold valid credentials.
+    /// unknown: callers must not purge. It may hold valid credentials.
     Unreadable,
 }
 
@@ -210,7 +210,7 @@ enum OpenResult {
 }
 
 /// Chromium writes with Snappy (compressor id=1). Default CompressorList includes both
-/// NoneCompressor (0) and SnappyCompressor (1), so reads work. compressor=1 for writes.
+/// NoneCompressor (0) and SnappyCompressor (1); reads work. compressor=1 for writes.
 fn open_leveldb(path: &Path) -> OpenResult {
     if !path.exists() {
         return OpenResult::Missing;
@@ -264,7 +264,7 @@ fn write_ls_keys(db: &mut rusty_leveldb::DB, entries: &[(&str, &[u8])]) -> Optio
 /// Encrypted write entries for a fresh credential blob: new salt, data key and
 /// counter, including the full PBKDF2 derivation. Pure CPU, no I/O.
 /// Used when the secure store has tokens but the SDK storage is missing
-/// (TIDAL's SDK may refuse to persist non-JWT opaque tokens, so it is seeded
+/// (TIDAL's SDK may refuse to persist non-JWT opaque tokens: it is seeded
 /// with the real ones).
 pub(crate) fn build_seed_entries(
     access_token: &str,

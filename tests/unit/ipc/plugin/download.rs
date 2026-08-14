@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Separators are already directory boundaries by the time this sees them, so only the
+/// Separators are already directory boundaries by the time this sees them; only the
 /// last segment is cleaned, as upstream's `path.join`, which likewise cannot tell a
 /// caller's separator from one out of a track title.
 #[test]
@@ -62,7 +62,7 @@ fn an_over_long_name_is_bounded_and_keeps_its_extension() {
     assert!(out.ends_with(".flac"));
 }
 
-/// A byte budget, not a character count: 300 CJK characters are 900 bytes, so a cut that
+/// A byte budget, not a character count: 300 CJK characters are 900 bytes; a cut that
 /// counted characters would still hand the filesystem a name it refuses.
 #[test]
 fn a_multibyte_name_is_bounded_in_bytes_on_a_char_boundary() {
@@ -99,7 +99,7 @@ fn field_names_outside_printable_ascii_are_refused() {
     assert!(!valid_field_name(""));
     assert!(!valid_field_name("TITLE=X"));
     assert!(!valid_field_name("TIT\nLE"));
-    // to_uppercase is Unicode aware, so a non-ASCII key can reach here expanded.
+    // to_uppercase is Unicode aware: a non-ASCII key can reach here expanded.
     assert!(!valid_field_name("TITLÉ"));
 }
 

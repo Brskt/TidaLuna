@@ -1,6 +1,6 @@
 //! IPC handlers backing the `@luna/lib.native` module exports. Channels are
-//! prefixed `__Luna.` so they are routed to `handle_plugin_ipc` with Promise
-//! support and gated to trusted frames by `src/ui/client.rs`.
+//! prefixed `__Luna.`: routed to `handle_plugin_ipc` with Promise support and
+//! gated to trusted frames by `src/ui/client.rs`.
 
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, is_safe_open_url, open_in_os};
@@ -44,7 +44,7 @@ pub(super) fn handle_send_to_render(msg: &IpcMessage, callback: IpcCallback) {
 }
 
 /// Build the `__LUNAR_IPC_EMIT__(channel, ...args)` call. Channel and args are
-/// JSON-encoded with U+2028/U+2029 escaped so a value can't break out of its literal.
+/// JSON-encoded with U+2028/U+2029 escaped: a value can't break out of its literal.
 fn build_send_to_render_js(channel: &str, args: &[Value]) -> String {
     let args_js = args
         .iter()

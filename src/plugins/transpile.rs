@@ -95,8 +95,8 @@ fn lower_es_modules(source: &str, filename: &str) -> anyhow::Result<String> {
             }
             Statement::ExportNamedDeclaration(d) => {
                 if d.export_kind.is_type() {
-                    // `export type { Foo }` - type-only, stripped by the TS
-                    // transform; drop it so we don't emit a dangling reference.
+                    // `export type { Foo }`: type-only, stripped by the TS
+                    // transform; drop it, leaving no dangling reference.
                     edits.push((d.span.start as usize, d.span.end as usize, String::new()));
                 } else {
                     // `export { a as X }` -> `var __exports = { X: a };`
@@ -201,7 +201,7 @@ fn lower_import(decl: &ImportDeclaration) -> String {
 /// `export { a as X, type T, b }` -> `var __exports = { X: a, b: b };`
 ///
 /// Type-only specifiers (`export { type T }`) are dropped: the TS transform
-/// removes their binding, so emitting them would throw `ReferenceError`.
+/// removes their binding; emitting them would throw `ReferenceError`.
 fn build_exports_object(specifiers: &[ExportSpecifier]) -> String {
     let entries: Vec<String> = specifiers
         .iter()

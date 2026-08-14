@@ -136,7 +136,7 @@ pub(super) fn dev_order_key(v: &str) -> Option<(semver::Version, bool, u64)> {
 /// builds (`X.Y.Z-pre.dev.N`) ranking below their promoted release.
 ///
 /// Fail-safe: if either string is not valid SemVer, returns `false` (treated
-/// as "not newer", so we never offer or advance to an unparseable version).
+/// as "not newer"; we never offer or advance to an unparseable version).
 pub(super) fn is_newer(remote: &str, current: &str) -> bool {
     match (dev_order_key(remote), dev_order_key(current)) {
         (Some(remote), Some(current)) => remote > current,
@@ -146,7 +146,7 @@ pub(super) fn is_newer(remote: &str, current: &str) -> bool {
 
 /// True if `installed` satisfies the manifest's minimum-version floor
 /// (`installed >= min_version`), the skip-migration gate. Same dev-aware
-/// ordering as `is_newer` so the two gates can never disagree.
+/// ordering as `is_newer`: the two gates can never disagree.
 ///
 /// Fail-closed: an unparseable floor or installed version blocks the update.
 /// A no-op floor is encoded as `"0.0.0"` (every valid version satisfies it).
@@ -170,7 +170,7 @@ const SYSTEM_PROTOCOL_PATH: &str = "/usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION"
 /// Read the system bootstrap's protocol-version.
 ///
 /// `None` means the file is absent/unreadable: this is NOT a packaged `.deb`
-/// install (it's a `.tar.gz` or a dev build), so the cross-track gate does not
+/// install (it's a `.tar.gz` or a dev build); the cross-track gate does not
 /// apply. `Some(0)` is the conservative value for a present-but-malformed file
 /// on a real `.deb`. The gate only blocks when a system value is present and
 /// lower than the manifest requires.

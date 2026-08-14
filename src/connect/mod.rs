@@ -58,7 +58,7 @@ impl ConnectManager {
 
         // Spawn browser event polling task on the tokio runtime
         // (init_controller may be called from the CEF UI thread, not a tokio context).
-        // The TaskGroup requires a tokio context at spawn time, so enter the
+        // The TaskGroup requires a tokio context at spawn time: enter the
         // runtime before invoking it.
         let ctrl = controller.clone();
         let Some(rt) = crate::state::RT_HANDLE.get() else {
@@ -84,7 +84,7 @@ impl ConnectManager {
 
     /// Build a receiver (WS server + mDNS advertiser) without touching `self`.
     ///
-    /// The async work borrows nothing from `AppState`, so the caller can run it
+    /// The async work borrows nothing from `AppState`: the caller can run it
     /// without holding any lock and then hand the result to [`install_receiver`]
     /// in a synchronous step. This is what keeps the manager from being moved
     /// out of `AppState` across an await (the old `take()`/restore left a window
@@ -99,7 +99,7 @@ impl ConnectManager {
     }
 
     /// Install a freshly built receiver and route bridge events to it.
-    /// Synchronous: no await, so it runs entirely under the `AppState` lock.
+    /// Synchronous: no await, running entirely under the `AppState` lock.
     pub(crate) fn install_receiver(
         &mut self,
         receiver: ConnectReceiver,

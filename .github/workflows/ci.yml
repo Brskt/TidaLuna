@@ -17,7 +17,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Cancel superseded PR runs only; pushes finish so their cache save isn't evicted.
+  # Cancel superseded PR runs only; pushes finish, keeping their cache save from eviction.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -31,7 +31,7 @@ jobs:
   # Resolves the version this run builds and publishes.
   # - push: next dev build (latest public release, patch+1 keeping its phase
   #   label, then the next free .dev.N counter). The workflow-level concurrency
-  #   group serializes pushes, so two runs can never mint the same N.
+  #   group serializes pushes: two runs can never mint the same N.
   # - workflow_dispatch: the promoted version (input or the latest dev's base)
   #   plus the commit of the latest dev prerelease as the build ref.
   # - pull_request: no version, nothing publishes.
@@ -218,7 +218,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     env:
-      # Job-scoped so the Sign step's `if: env.WINDOWS_SIGNING_PFX != ''` can
+      # Job-scoped for the Sign step's `if: env.WINDOWS_SIGNING_PFX != ''` to
       # see the value (GitHub's documented secret-gating pattern).
       WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
       WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
@@ -361,7 +361,7 @@ jobs:
         run: |
           # Official 7-Zip standalone extractor, embedded in the installer to
           # unpack the payload.7z that `cargo xtask package` builds. 7-Zip ships
-          # no Authenticode signature, so fetch a versioned release asset (the
+          # no Authenticode signature; fetch a versioned release asset (the
           # floating 7-zip.org/a/7zr.exe changes content on every 7-Zip release)
           # and pin its SHA-256. Bump version and hash together, deliberately.
           $dst = Join-Path $env:RUNNER_TEMP '7zr.exe'
@@ -546,7 +546,7 @@ jobs:
             # Consecutive delta: diff this build against the previous release's
             # manifest, ship only changed files, and stamp delta_from BEFORE
             # signing (so the signature covers it). macOS is not an updater
-            # target, so it is skipped.
+            # target and is skipped.
             case "$target" in
               windows-amd64) dtarget=win32; darch=amd64; dasset="tidalunar_${VERSION}_update_win32_x64.zip" ;;
               windows-arm64) dtarget=win32; darch=arm64; dasset="tidalunar_${VERSION}_update_win32_arm64.zip" ;;
@@ -595,7 +595,7 @@ jobs:
 
             # Bundle archive = both the human portable download and the updater
             # payload. Windows ships a flat .zip; Linux uses the .tar.gz emitted
-            # by `cargo xtask package` (copied below), so no zip there. macOS is
+            # by `cargo xtask package` (copied below): no zip there. macOS is
             # not an updater target and keeps its plain bundle zip.
             case "$target" in
               windows-amd64) bundle_zip="tidalunar_${VERSION}_win32_x64.zip" ;;
@@ -713,8 +713,8 @@ jobs:
         with:
           tool: cargo-edit
 
-      # Keep the repo's version aligned with the latest public release so local
-      # builds self-identify correctly. cargo set-version updates Cargo.toml and
+      # Keep the repo's version aligned with the latest public release. Local
+      # builds then self-identify correctly. cargo set-version updates Cargo.toml and
       # the lockfile coherently; [skip ci] avoids a run whose only diff is the
       # bump.
       - name: Bump Cargo.toml to the released version

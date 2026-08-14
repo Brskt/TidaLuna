@@ -51,7 +51,7 @@ pub(crate) struct TidalConnectController {
     refresh_token: String,
     session_credential: Option<String>,
     /// Bumped on every WS install. `WsClient::shutdown()` emits `ConnectionLost`
-    /// unconditionally on its way out, so a socket we superseded on purpose looks exactly
+    /// unconditionally on its way out: a socket we superseded on purpose looks exactly
     /// like one the network killed and the event carries no identity of its own. Each
     /// per-connection event loop remembers its generation and discards anything older.
     connection_gen: u64,
@@ -123,8 +123,8 @@ impl TidalConnectController {
                 .connected_device()
                 .is_some_and(|d| d.id == device.id)
             {
-                // Same device reconnect - replace the dead WS, keep session state
-                // so queue_start_or_resume sends resumeSession on the new socket.
+                // Same device reconnect: replace the dead WS and keep session state,
+                // letting queue_start_or_resume send resumeSession on the new socket.
                 old_session.ws.shutdown();
                 old_session.ws = ws;
                 return self.connection_gen;
@@ -149,7 +149,7 @@ impl TidalConnectController {
     ///
     /// Returns the event the caller must emit when this call retires the session. The device's
     /// own `notifySessionEnded` cannot carry that announcement; `queue_end` only hands the
-    /// command to a spawned send, so the teardown below runs first and takes away both the
+    /// command to a spawned send. The teardown below runs first and takes away both the
     /// session the reply would be matched against and the currency of the loop delivering it.
     /// Returned rather than emitted, as [`handle_ws_event`](Self::handle_ws_event) does it:
     /// this layer speaks the protocol, the IPC layer above talks to the renderer.

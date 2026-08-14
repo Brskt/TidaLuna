@@ -95,13 +95,13 @@ wrap_resource_request_handler! {
 wrap_resource_request_handler! {
     pub(super) struct TokenResourceHandler {
         // Per-request slot: the client_id from this exchange's POST body, set in
-        // on_before_resource_load and read at response time, so the persisted
+        // on_before_resource_load and read at response time: the persisted
         // client_id is bound to the same exchange that minted the refresh_token
-        // (the SDK binds each token to its context's client_id). Arc so the
+        // (the SDK binds each token to its context's client_id). Arc, for the
         // macro's per-field Clone shares one slot across both callbacks.
         exchange_client_id: Arc<Mutex<Option<String>>>,
         // Current hop targets the token endpoint; set per on_before_resource_load
-        // entry so a redirect hop re-evaluates it, read at response-filter time.
+        // entry; a redirect hop re-evaluates it, read at response-filter time.
         token_exchange: Arc<AtomicBool>,
     }
 
@@ -231,7 +231,7 @@ fn capture_client_id(req: &mut Request, exchange_slot: &Mutex<Option<String>>) {
 /// brief rotation overlap); ANY other `luna_*` falls back to `current` - a
 /// nonce only ever means "the current user's token", and letting the raw
 /// opaque leave would be rejected by TIDAL and leak the placeholder. The caller
-/// must have checked `is_opaque`; callers gate this on `token_state` = Some, so
+/// must have checked `is_opaque`; callers gate this on `token_state` = Some:
 /// a stray opaque during a logged-out window resolves to nothing.
 pub(crate) fn resolve_opaque_access(
     ts: &crate::platform::secure_store::StoredTokenState,
@@ -278,7 +278,7 @@ fn rewrite_authorization_header(req: &mut Request) {
     }
 
     // None only when logged out (no token_state); otherwise every luna_*
-    // resolves to a real token, so nothing opaque reaches the wire.
+    // resolves to a real token; nothing opaque reaches the wire.
     let real_token = crate::app_state::with_state(|state| {
         state
             .token_state
@@ -327,7 +327,7 @@ fn inject_refresh_token(req: &mut Request, url: &RequestUrl) {
     }
 
     // None only when logged out (no token_state); otherwise every luna_*
-    // resolves to the current real refresh token, so the SDK's own refresh
+    // resolves to the current real refresh token; the SDK's own refresh
     // never leaves with a raw opaque (the ~1h logout).
     let real_rt = crate::app_state::with_state(|state| {
         state
@@ -378,7 +378,7 @@ enum ProcessResult {
 /// The client_id follows the refresh_token. A response carrying a NEW
 /// refresh_token is bound to the client_id of the exchange that minted it
 /// (`exchange_client_id`, this request's POST). A response with no new
-/// refresh_token reuses the prior one, so it keeps that generation's client_id
+/// refresh_token reuses the prior one: it keeps that generation's client_id
 /// (`prior_client_id`). This mirrors the SDK, which binds each token to its
 /// context's client_id and never refreshes across contexts - notably the
 /// app-level `client_credentials` token (no refresh_token) must not overwrite

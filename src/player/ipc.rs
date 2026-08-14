@@ -149,7 +149,7 @@ pub(crate) fn parse_player_ipc(
                 format: format.to_string(),
                 key: key.to_string(),
                 // 4th arg (optional): the renderer sets it when TIDAL minted a new
-                // mediaProduct.referenceId for this play instance, so a same-track
+                // mediaProduct.referenceId for this play instance: a same-track
                 // re-load must restart at 0 rather than resume in place.
                 restart: args.get(3).and_then(|v| v.as_bool()).unwrap_or(false),
                 // 5th arg (optional): a track/list SELECT wants the loaded track to

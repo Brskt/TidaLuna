@@ -21,8 +21,8 @@ pub(crate) fn escape_html(s: &str) -> String {
 
 /// Result-specific state shared by the dialog's request handler, window
 /// delegate, and UI-thread task. A single `Arc<DialogCore<R>>` reaches both the
-/// request handler (button click) and the window delegate (close-without-click),
-/// so the oneshot sender behind the mutex is `take()`n exactly once.
+/// request handler (button click) and the window delegate (close-without-click).
+/// The oneshot sender behind the mutex is `take()`n exactly once.
 struct DialogCore<R> {
     sender: Mutex<Option<oneshot::Sender<R>>>,
     /// Maps a button-navigation URL to its result, or `None` for any other nav.

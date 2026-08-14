@@ -20,8 +20,8 @@ const NETWORK_MODULES: &[&str] = &[
 ];
 
 /// Pending trust requests: keyed by "name::module".
-/// Uses watch channels so multiple concurrent register calls for the same
-/// plugin can share a single dialog prompt.
+/// Watch channels let concurrent register calls for the same plugin share a
+/// single dialog prompt.
 type TrustMap = HashMap<String, watch::Sender<Option<bool>>>;
 
 static PENDING_TRUST: LazyLock<Mutex<TrustMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -145,7 +145,7 @@ fn module_for_native_channel(token: &str) -> Option<String> {
 }
 
 /// Clear in-memory watch channels for a plugin (called on uninstall).
-/// Keys are "name::module", so we remove any key starting with the plugin prefix.
+/// Keys are "name::module"; we remove any key starting with the plugin prefix.
 pub(super) fn clear_pending_trust(plugin_prefix: &str) {
     let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
     guard.retain(|key, _| !key.starts_with(plugin_prefix));

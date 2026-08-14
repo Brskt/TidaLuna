@@ -33,7 +33,7 @@ use windows_sys::Win32::System::Threading::{
 const MUTEX_NAME_PREFIX: &str = "Global\\TidaLunarInstallLock-";
 
 /// Retrieve the current process user's SID as a string. Fail-closed: any
-/// failure returns Err so the caller aborts rather than fall back to a
+/// failure returns Err; the caller aborts rather than fall back to a
 /// shared name that loses per-user scoping.
 fn current_user_sid_string() -> Result<String> {
     unsafe {
@@ -121,7 +121,7 @@ pub fn try_acquire() -> Result<Option<InstallLock>> {
         if r == WAIT_OBJECT_0 || r == WAIT_ABANDONED {
             return Ok(Some(InstallLock { handle: h }));
         }
-        // Contention or wait error - release our handle so the kernel can
+        // Contention or wait error: release our handle, letting the kernel
         // reap the object once the real owner exits.
         CloseHandle(h);
         Ok(None)

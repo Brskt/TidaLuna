@@ -29,7 +29,7 @@ fn access_stamp_is_monotonic_across_clock_skew() {
         [],
     )
     .unwrap();
-    // Clock rewound to 50: the stamp must still exceed the existing max so a
+    // Clock rewound to 50: the stamp must still exceed the existing max; a
     // fresh entry can't sort older than entries it was accessed after.
     assert_eq!(next_access_stamp(&conn, 50), 1001);
     // A normal forward clock is honored as-is.
@@ -165,7 +165,7 @@ fn dropping_an_entry_clears_the_file_the_row_and_the_accounting() {
     assert_eq!(cache.total_size(), 0);
 }
 
-/// The row is itself the orphan here, so dropping has to succeed rather than
+/// The row is itself the orphan here: dropping has to succeed rather than
 /// refuse for want of a file.
 #[test]
 fn dropping_an_entry_whose_file_already_vanished_still_clears_the_row() {
@@ -190,7 +190,7 @@ fn dropping_an_entry_that_was_never_recorded_reports_no_row() {
 #[test]
 fn running_size_tracks_inserts_evictions_and_clear() {
     let tmp = tempfile::tempdir().unwrap();
-    // Small cap so a few inserts cross it and trigger eviction (target = 90).
+    // Small cap for a few inserts to cross it and trigger eviction (target = 90).
     let mut cache = AudioCache::open_with_capacity(tmp.path(), 100).unwrap();
     assert_eq!(cache.total_size(), 0);
 
@@ -235,7 +235,7 @@ fn an_entry_larger_than_the_whole_cache_is_refused_not_stored_then_evicted() {
     assert_eq!(cache.total_size(), 50);
 }
 
-/// An oversized entry whose file will not delete is indexed at its true size, so the eviction
+/// An oversized entry whose file will not delete is indexed at its true size. The eviction
 /// pass its own store triggers is asked for a target that row makes unreachable. Excluded from
 /// the candidates, its bytes are not reclaimable either: counting them in ground the pass
 /// through every other row and finished over the cap regardless, an empty cache for nothing.
@@ -253,13 +253,13 @@ fn an_undeletable_oversized_entry_does_not_evict_the_rest_of_the_cache() {
     fs::create_dir_all(&shard).unwrap();
     fs::write(&oversized, b"pcm").unwrap();
     // Dropping write permission on the shard makes the unlink fail with something other than
-    // NotFound, the only route to `DropOutcome::FileKept` and so to `TooLargeRetained`.
+    // NotFound, the only route to `DropOutcome::FileKept`, and from there to `TooLargeRetained`.
     let original = fs::metadata(&shard).unwrap().permissions();
     fs::set_permissions(&shard, fs::Permissions::from_mode(0o555)).unwrap();
 
     let outcome = cache.record("huge", "flac", 101);
 
-    // Before any assertion, so a failure still leaves a removable tempdir behind.
+    // Before any assertion: a failure still leaves a removable tempdir behind.
     fs::set_permissions(&shard, original).unwrap();
 
     assert_eq!(outcome.unwrap(), StoreOutcome::TooLargeRetained);
@@ -277,7 +277,7 @@ fn an_entry_between_the_target_and_the_cap_is_still_admitted() {
 
     assert_eq!(cache.record("big", "flac", 95).unwrap(), StoreOutcome::Kept);
     assert!(cache.lookup_path("big").is_some());
-    // 95 <= 100, so evict_if_needed returns before looking at anything.
+    // 95 <= 100; evict_if_needed returns before looking at anything.
     assert_eq!(cache.total_size(), 95);
 }
 
@@ -285,7 +285,7 @@ fn an_entry_between_the_target_and_the_cap_is_still_admitted() {
 fn refusing_an_oversized_entry_clears_a_row_left_from_an_earlier_read_failure() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cache = AudioCache::open_with_capacity(tmp.path(), 100).unwrap();
-    // An entry that fails to decrypt is deliberately kept (CacheReadError::Unreadable), so a
+    // An entry that fails to decrypt is deliberately kept (CacheReadError::Unreadable): a
     // row for this id can still be present when the track is re-fetched at a larger size.
     cache.record("track", "flac", 50).unwrap();
     assert!(cache.lookup_path("track").is_some());
@@ -307,7 +307,7 @@ fn a_store_is_never_undone_by_the_eviction_it_triggers() {
     let mut cache = AudioCache::open_with_capacity(tmp.path(), 100).unwrap();
     cache.record("old", "flac", 80).unwrap();
 
-    // 85 fits under the target (90) but pushes the total over the cap, so this insert
+    // 85 fits under the target (90) but pushes the total over the cap; this insert
     // triggers an eviction pass that must not reach the row it just wrote.
     assert_eq!(
         cache.record("fresh", "flac", 85).unwrap(),

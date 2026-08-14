@@ -17,9 +17,8 @@ const CRASH_QUIT: &str = "crash://quit";
 const DIALOG_W: i32 = 520;
 const DIALOG_H: i32 = 300;
 
-/// Set while a crash dialog is on screen so a fresh crash (e.g. the reloaded
-/// page dies again) does not stack a second dialog. Reset once the dialog
-/// resolves.
+/// Set while a crash dialog is on screen: a fresh crash (e.g. the reloaded page
+/// dies again) must not stack a second dialog. Reset once the dialog resolves.
 pub(crate) static CRASH_DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

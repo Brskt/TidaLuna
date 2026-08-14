@@ -242,10 +242,10 @@ wrap_app! {
             // reaches for the Secret Service (gnome-libsecret/kwallet) to protect
             // its cookie-encryption key, which pops a keyring-unlock dialog on
             // first launch. The TIDAL token is kept out of the CEF store and
-            // persisted separately, so at-rest cookie encryption isn't relied on.
+            // persisted separately; at-rest cookie encryption isn't relied on.
             // Must use the name/value form: append_switch("password-store=basic")
-            // stores the whole string as the switch key, so OSCrypt's in-process
-            // GetSwitchValueASCII("password-store") lookup would miss it.
+            // stores the whole string as the switch key, and OSCrypt's in-process
+            // GetSwitchValueASCII("password-store") lookup then misses it.
             #[cfg(target_os = "linux")]
             {
                 let name = CefString::from("password-store");
@@ -350,7 +350,7 @@ wrap_browser_process_handler! {
             // TIDAL's web frontend gates its native titlebar component on a
             // Windows platform token in navigator.userAgent. On Linux we keep the
             // real Linux UA for network traffic (CefSettings.user_agent) but
-            // expose a Windows-like UA to JavaScript so the titlebar renders.
+            // expose a Windows-like UA to JavaScript for the titlebar to render.
             #[cfg(target_os = "linux")]
             let ua_override = format!(
                 r#"(function(){{try{{var UA={ua:?};var AV=UA.replace('Mozilla/','');Object.defineProperty(Navigator.prototype,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(navigator,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(Navigator.prototype,'appVersion',{{get:function(){{return AV;}},configurable:true}});Object.defineProperty(navigator,'appVersion',{{get:function(){{return AV;}},configurable:true}});}}catch(e){{}}}})();"#,
@@ -418,7 +418,7 @@ document.title = "TidaLunar - A TIDAL client";
     }}
 }})();
 (function() {{
-    // Drop the SW + caches so the shell/chunks re-precache. Both self-heals below
+    // Drop the SW + caches for the shell/chunks to re-precache. Both self-heals below
     // self-stop once the cached resources are the rewritten ones.
     function bust() {{
         try {{
@@ -431,7 +431,7 @@ document.title = "TidaLunar - A TIDAL client";
     function cspHeal() {{
         if (document.querySelector('meta[http-equiv="Content-Security-Policy" i]')) bust();
     }}
-    // 2) A cache predating module-capture serves un-rewritten React chunks, so the
+    // 2) A cache predating module-capture serves un-rewritten React chunks, and the
     //    host React never registers. Bust once per session (sessionStorage guard
     //    prevents a loop if the chunk pattern ever stops matching) to re-precache.
     function reactHeal() {{

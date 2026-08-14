@@ -75,7 +75,7 @@ fn parse_oauth_error_code(body: &[u8]) -> Option<String> {
 }
 
 /// True if `url` is an https URL on a TIDAL-owned API host (`*.tidal.com` or
-/// `*.tidalhifi.com`). Connect server URLs are peer-supplied, so the receiver
+/// `*.tidalhifi.com`). Connect server URLs are peer-supplied; the receiver
 /// must never attach its token to a host it does not control.
 pub(super) fn is_trusted_server_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
@@ -150,7 +150,7 @@ pub(super) async fn post_with_auth(
 }
 
 /// Successful OAuth refresh outcome. The server may rotate the refresh
-/// token (OAuth 2.0 §6), so a new one is reported when present.
+/// token (OAuth 2.0 §6): a new one is reported when present.
 pub(super) struct RefreshSuccess {
     pub access_token: String,
     pub refresh_token: Option<String>,

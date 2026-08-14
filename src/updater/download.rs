@@ -61,7 +61,7 @@ async fn download_update_inner(
     #[cfg(target_os = "linux")]
     super::util::enforce_sandbox_protocol_gate(&manifest)?;
 
-    // Skip-migration floor; the signature is verified above, so min_version is trusted.
+    // Skip-migration floor; the signature is verified above and min_version is trusted.
     let current = env!("CARGO_PKG_VERSION");
     if !super::util::meets_min_version(current, &manifest.min_version) {
         anyhow::bail!(
@@ -160,7 +160,7 @@ async fn download_update_inner(
         };
         match verify {
             Ok(()) => break staging,
-            // Only reachable while `use_delta` is true, and the retry clears it, so this
+            // Only reachable while `use_delta` is true, and the retry clears it; this
             // falls back exactly once.
             Err(StagingError::DeltaBaseMismatch(what)) => {
                 crate::verr!(
@@ -301,7 +301,7 @@ async fn stream_to_file(
 /// Why staging verification failed, split by what the caller can do about it.
 enum StagingError {
     /// A file the delta omitted as "unchanged" is absent or does not match the manifest
-    /// hash on disk. The downloaded bytes are fine; the assumed base is not, so the full
+    /// hash on disk. The downloaded bytes are fine; the assumed base is not: the full
     /// archive will succeed where this delta cannot.
     DeltaBaseMismatch(String),
     /// The bytes we just downloaded are wrong. Retrying the same thing cannot help.
@@ -327,7 +327,7 @@ fn verify_staged_files(
             }
             // The signature makes the expected hash trustworthy, but what it attests is the
             // hash table, never the state of this disk. Nothing else in the update reads the
-            // local copy of a file the delta skipped, so bit rot, an incomplete rollback or
+            // local copy of a file the delta skipped. Bit rot, an incomplete rollback or
             // local tampering rode through and the update still reported success.
             let local_path = app_dir.join(rel_path);
             let local_hash = match sha256_file(&local_path) {
@@ -407,7 +407,7 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), anyhow::Error> {
 }
 
 /// Extract a `.tar.gz` whose entries are wrapped in a single top-level
-/// directory (the portable tarball layout), stripping that directory so files
+/// directory (the portable tarball layout), stripping it and leaving files
 /// land at `dest` root to match the manifest's relative paths. Unix modes from
 /// the tar header are preserved (keeps chrome-sandbox executable).
 #[cfg(target_os = "linux")]

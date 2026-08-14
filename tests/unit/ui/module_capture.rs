@@ -88,7 +88,7 @@ fn no_exports_returns_source_unchanged() {
 #[test]
 fn captures_minified_cjs_loader_exports() {
     // Mirrors TIDAL's react chunk tail: minified named exports of CJS loader
-    // fns. We must capture every binding so modules.ts can call the right one.
+    // fns. We must capture every binding for modules.ts to call the right one.
     let out = append_capture("var f=1,c=2,m=3;export{f as a,c as i,m as t};", "react");
     assert!(out.contains("a: f"));
     assert!(out.contains("i: c"));

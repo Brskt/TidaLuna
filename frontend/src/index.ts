@@ -23,8 +23,8 @@ import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
 import * as LibNative from "../plugins/lib.native/src/index.native";
 
-// Synchronous initialization: expose nativeInterface immediately so Tidal
-// detects desktop mode before its own scripts run.
+// Synchronous initialization: expose nativeInterface immediately for Tidal
+// to detect desktop mode before its own scripts run.
 const credentials: { credentialsStorageKey: string; codeChallenge: string; redirectUri: string; codeVerifier: string } =
     window.__TIDALUNAR_CREDENTIALS__ || {
         credentialsStorageKey: "tidal",
@@ -78,7 +78,7 @@ const PASSTHROUGH_EVENTS = new Set([
 let _lastTimeDispatch = 0;
 let _forceTimeDispatch = false;
 // Let the load delegate (player.ts) bypass the 250ms time throttle for the
-// first report of a fresh load, so the bar snaps to the new track's start
+// first report of a fresh load: the bar snaps to the new track's start
 // instead of holding the previous track's position (mirrors the SEEK arm).
 (window as any).__LUNAR_FORCE_TIME_DISPATCH__ = () => {
     _forceTimeDispatch = true;
@@ -185,16 +185,16 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             bridge.trigger(type, event.v);
             if (type === "deviceexclusivemodenotallowed") {
                 // Permanent: the device doesn't support exclusive mode. Neither
-                // the native player nor the SDK reverts the store's mode, so the
-                // toggle stays stuck on (Rust falls back to shared) -- re-select
-                // shared so activeDeviceMode resyncs. NOT for the transient
+                // the native player nor the SDK reverts the store's mode; the
+                // toggle stays stuck on (Rust falls back to shared). Re-select
+                // shared for activeDeviceMode to resync. NOT for the transient
                 // 'devicelocked' case: flipping it there would never re-arm
                 // exclusive once the device frees.
                 try {
                     const { store } = require("../plugins/lib/src/redux/store");
                     store.dispatch({ type: "player/SET_DEVICE_MODE", payload: "shared" });
                 } catch (_) {}
-                // Clear the persisted exclusive flag too, so a restart doesn't re-seed
+                // Clear the persisted exclusive flag too: a restart doesn't re-seed
                 // exclusive and re-enter the failing path (mirrors the ASIO failure clear).
                 (window as any).__TIDALUNAR_EXCLUSIVE__ = false;
                 sendIpc("settings.exclusive", false);
@@ -204,8 +204,8 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 type === "deviceasioformatunsupported" ||
                 type === "deviceasioinitfailed"
             ) {
-                // ASIO failed; Rust fell back to shared output. Clear the flag AND persist it
-                // so a restart doesn't re-seed ASIO and re-enter the failing path.
+                // ASIO failed; Rust fell back to shared output. Clear the flag AND persist it,
+                // keeping a restart from re-seeding ASIO and re-entering the failing path.
                 (window as any).__TIDALUNAR_ASIO__ = false;
                 sendIpc("settings.asio", false);
             }
@@ -264,7 +264,7 @@ const init = async () => {
         };
         add("playbackControls/PLAY", () => {
             // Self-load (DASH/AAC) keeps its direct path; SDK tracks go through the
-            // deduped desired-intent so a user PLAY reaches Rust even when TIDAL
+            // deduped desired-intent: a user PLAY reaches Rust even when TIDAL
             // resumes via stop+load(same) without calling nativePlayer.play().
             if (isSelfLoad()) sendIpc("player.play");
             else (window.NativePlayerComponent as any)?.setDesiredPlayback?.(true);
@@ -275,9 +275,9 @@ const init = async () => {
         // TIDAL's "play this" signal fires BEFORE the selected track's load (async
         // getPlaybackInfo gap) while the OLD track is still committed; resuming here audibly
         // replays the OLD track (the "bleed"). Request auto-play on the SELECTED track's
-        // load instead of a separate play -- fixes the bleed and the startup first-play.
+        // load instead of a separate play: fixes the bleed and the startup first-play.
         add("playQueue/ADD_TRACK_LIST_TO_PLAY_QUEUE", (p: { position?: number | string }) => {
-            // Only "now" carries play intent -- "next"/"last"/index are queue edits with no
+            // Only "now" carries play intent; "next"/"last"/index are queue edits with no
             // load following, and arming on them would force-resume a paused track later.
             // Unknown payload shapes keep the arm (HW-verified row-click sends {position:"now"}).
             const position = p?.position;
@@ -289,8 +289,8 @@ const init = async () => {
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;
         });
-        // Volume: for self-loaded tracks (DASH/AAC) the SDK doesn't call setVolume,
-        // so we forward Redux SET_VOLUME to Rust directly.
+        // Volume: for self-loaded tracks (DASH/AAC) the SDK doesn't call setVolume;
+        // we forward Redux SET_VOLUME to Rust directly.
         add("playbackControls/SET_VOLUME", (p: { volume: number }) => {
             if (isSelfLoad()) sendIpc("player.volume", p.volume);
         });
@@ -316,7 +316,7 @@ const init = async () => {
     };
 
     // Served from the Rust binary (luna_modules.rs) at /__luna__/*.mjs, not inlined. Absolute URL
-    // because the injected bundle's base is about:blank; in a var so esbuild leaves it a runtime
+    // because the injected bundle's base is about:blank; in a var for esbuild to leave it a runtime
     // import; loaded after the module registry above, which these resolve their deps through.
     try {
         const uiUrl = `${location.origin}/__luna__/ui.mjs`;

@@ -1,8 +1,8 @@
 export const initWindowControls = () => {
     // Branding: force document.title to "TidaLunar - A TIDAL client".
-    // Tidal's SPA overwrites the title on navigation, so we use a MutationObserver
+    // Tidal's SPA overwrites the title on navigation; we use a MutationObserver
     // on the <title> element to re-apply it whenever it changes. TIDAL's own
-    // titlebar component reads document.title, so this also drives the visible
+    // titlebar component reads document.title: this also drives the visible
     // title in the in-app bar.
     const TIDALUNAR_TITLE = "TidaLunar - A TIDAL client";
     const titleEl = document.querySelector("title");
@@ -13,7 +13,7 @@ export const initWindowControls = () => {
         const opts: MutationObserverInit = { childList: true, characterData: true, subtree: true };
         const titleObserver = new MutationObserver(() => {
             if (document.title !== TIDALUNAR_TITLE) {
-                // Disconnect while writing so our own mutation does not re-fire
+                // Disconnect while writing, keeping our own mutation from re-firing
                 // the observer, then reconnect.
                 titleObserver.disconnect();
                 document.title = TIDALUNAR_TITLE;
@@ -23,6 +23,6 @@ export const initWindowControls = () => {
         titleObserver.observe(titleEl, opts);
         window.addEventListener("pagehide", () => titleObserver.disconnect(), { once: true });
     }
-    // Window controls + F12 live in the early runtime (fallback_titlebar.js) so they
-    // also work on pages without the bundle, like the login.tidal.com auth page.
+    // Window controls + F12 live in the early runtime (fallback_titlebar.js), which
+    // also works on pages without the bundle, like the login.tidal.com auth page.
 };

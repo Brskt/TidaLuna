@@ -107,7 +107,7 @@ const ARCHIVE_SUFFIX: &str = {
 /// Read /usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION. `None` = file absent
 /// (not a packaged .deb install: tar.gz/dev, gate N/A); `Some(0)` = present but
 /// malformed. Mirrors src/updater/util.rs::read_system_sandbox_protocol; the
-/// standalone updater is intentionally dependency-free so this is duplicated.
+/// standalone updater is intentionally dependency-free and duplicates it.
 #[cfg(target_os = "linux")]
 fn read_system_sandbox_protocol() -> Option<u32> {
     fs::read_to_string("/usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION")
@@ -486,7 +486,7 @@ fn run() -> Result<()> {
 
             match verify_delta_base(&manifest, &args.app_dir, &staging_dir) {
                 Ok(()) => break,
-                // Only reachable while `use_delta` holds, and the retry clears it, so the
+                // Only reachable while `use_delta` holds, and the retry clears it; the
                 // fallback fires exactly once.
                 Err(what) if use_delta => {
                     eprintln!(
@@ -962,7 +962,7 @@ fn download_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> 
 /// Stream `reader` to `dest`, failing if more than `max` bytes arrive.
 fn stream_to_file(mut reader: impl Read, dest: &Path, max: u64) -> Result<()> {
     let mut file = fs::File::create(dest).with_context(|| format!("create {}", dest.display()))?;
-    // take(max + 1) so an over-cap body trips the check after writing at most
+    // take(max + 1): an over-cap body trips the check after writing at most
     // one byte past the limit, never buffering or storing the whole stream.
     let copied = std::io::copy(&mut reader.by_ref().take(max + 1), &mut file)
         .with_context(|| format!("write to {}", dest.display()))?;
@@ -1023,7 +1023,7 @@ fn extract_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
 }
 
 /// Extract a `.tar.gz` whose entries are wrapped in a single top-level
-/// directory, stripping it so files land at `dest_dir` root to match the
+/// directory, stripping it and leaving files at `dest_dir` root to match the
 /// manifest's relative paths. Unix modes from the tar header are preserved.
 #[cfg(target_os = "linux")]
 fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
@@ -1091,7 +1091,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 ///
 /// "Unchanged" is settled at release-build time by two manifests agreeing on a hash, which
 /// says nothing about the bytes on this machine, and no other step in the update reads the
-/// local copy of an omitted file. Reports the first disagreement so the caller can pick
+/// local copy of an omitted file. Reports the first disagreement for the caller to pick
 /// between a full-archive retry and failing outright.
 fn verify_delta_base(
     manifest: &Manifest,

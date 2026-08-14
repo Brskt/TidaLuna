@@ -19,7 +19,7 @@ fn out_of_range_levels_are_clamped() {
 #[test]
 fn a_large_finite_level_cannot_reach_infinity_at_the_cast() {
     // The actually-reachable path: an ordinary JSON number, well inside f64, whose
-    // `/ 100.0` quotient still exceeds f32::MAX (~3.4e38) and so casts to infinity.
+    // `/ 100.0` quotient still exceeds f32::MAX (~3.4e38) and casts to infinity.
     // The threshold is the quotient, not the input: 1e40 divides down to 1e38 and stays
     // finite, which is why this test pins 1e41 rather than the first value that looks big.
     let raw = 1e41_f64;
@@ -35,7 +35,7 @@ fn a_large_finite_level_cannot_reach_infinity_at_the_cast() {
 
 #[test]
 fn non_finite_levels_sanitize_to_silence_not_full_scale() {
-    // `.clamp()` alone would let NaN through unchanged, so the finite check is not
+    // `.clamp()` alone would let NaN through unchanged; the finite check is not
     // redundant. Silence is the safe wrong answer here; full scale is not.
     assert_eq!(Volume::from_percent(f64::NAN).as_percent(), 0.0);
     assert_eq!(Volume::from_percent(f64::NEG_INFINITY).as_percent(), 0.0);

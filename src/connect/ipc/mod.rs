@@ -1,7 +1,7 @@
 //! Top-level IPC dispatch for `connect.*` channels.
 //!
 //! Every inbound message is routed to a sub-module by domain
-//! (`controller`, `playback`, `queue`, `receiver`, `state`) so the bodies
+//! (`controller`, `playback`, `queue`, `receiver`, `state`); the bodies
 //! stay small and reviewable. Shared concerns (device-command dispatch,
 //! WS event forwarding, CEF posting) live in `helpers`.
 

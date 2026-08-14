@@ -1,7 +1,7 @@
 [alias]
 xtask = "run --package xtask --"
 
-# CEF lives in bin/cef/ — delay-load so AddDllDirectory works before first call
+# CEF lives in bin/cef/; delay-loading lets AddDllDirectory run before first call
 [target.x86_64-pc-windows-msvc]
 rustflags = [
   "-C",

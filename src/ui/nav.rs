@@ -145,7 +145,7 @@ pub(crate) fn is_token_endpoint(url: &RequestUrl) -> bool {
 }
 
 /// TIDAL API hosts that receive the injected OAuth bearer. Single source of truth for
-/// `is_tidal_api`, `needs_auto_injection`, `should_rewrite_token` so the lists can't drift.
+/// `is_tidal_api`, `needs_auto_injection`, `should_rewrite_token`; the lists cannot drift.
 pub(crate) fn is_tidal_api_host(host: &str) -> bool {
     matches!(
         host,
