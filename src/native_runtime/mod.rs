@@ -75,6 +75,9 @@ impl NativeRuntime {
             "USERPROFILE",
             "PATH",
             "APPDATA",
+            // Deliberately absent: XDG_RUNTIME_DIR. Anything forwarded here is readable
+            // by every plugin through globalThis.Bun.env, which cannot be neutered, so
+            // the value travels in the register command instead - see do_register.
             // Windows system vars (required for DLL loading, crypto, etc.)
             "SystemRoot",
             "WINDIR",
@@ -288,3 +291,7 @@ fn find_binary(exe_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     // No PATH fallback - fail closed for security
     None
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/native_runtime/host_script.rs"]
+mod tests;
