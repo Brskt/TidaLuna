@@ -353,6 +353,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // instead of spawn_asio_decoder silently no-oping on a missing handle.
         // A parked teardown must drain first (one driver instance at a time).
         if self.asio_handle.is_none() {
+            // A parked switch owns the next handle: `current_device_id` still names the
+            // device the user left, and the replay undoes this respawn, position included.
+            if self.pending_device_switch.is_some() {
+                self.is_asio_mode = false;
+                crate::vprintln!("[ASIO] a device switch is parked; this load plays shared");
+                return false;
+            }
             if !self.reap_asio_teardown_within(std::time::Duration::from_secs(2)) {
                 // Leave ASIO mode: the shared pipeline this load falls back to is then
                 // actually played and polled; the next devices.set re-assert

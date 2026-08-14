@@ -165,6 +165,34 @@ fn last_state(events: &Spy) -> Option<PlaybackState> {
     })
 }
 
+/// A re-armable track in the process-wide slot, for one test. A device switch refuses a live
+/// track it cannot replay; dropping restores the slot even when the test panics.
+#[cfg(target_os = "windows")]
+struct ReplayableTrack;
+
+#[cfg(target_os = "windows")]
+impl ReplayableTrack {
+    fn set(url: &str) -> Self {
+        *crate::state::CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(crate::state::TrackInfo {
+            url: url.to_string(),
+            key: String::new(),
+            format: "flac".to_string(),
+        });
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ReplayableTrack {
+    fn drop(&mut self) {
+        *crate::state::CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 #[tokio::test]
 async fn a_seek_taken_while_paused_settles_without_a_resume() {
     let dir = tempfile::tempdir().unwrap();
@@ -256,6 +284,70 @@ async fn the_auto_resume_is_taken_when_no_seek_was_queued() {
 
     assert_eq!(h.player.take_start_position(), Some(45.0));
     assert_eq!(h.player.pending_resume_seek, None);
+}
+
+/// The whole chain a queued seek has to survive, which nothing exercised in one piece: a
+/// parked switch, the shared fallback, a refusal, the reap, and the backend that spends it.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_queued_seek_survives_a_parked_switch_through_the_reap() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_playing = false;
+    // No buffer to reuse: the switch takes its still-streaming arm and spawns no decoder.
+    h.player.current_buffer = None;
+    h.player.is_asio_mode = true;
+    h.player.asio_handle = None;
+    h.player.pending_device_switch = Some(("dev-1".to_string(), crate::player::OutputMode::Asio));
+    h.player.user_seek_override = Some(("track-1".to_string(), 45.0));
+    // A live track the switch can re-arm. `has_track` without one is a DASH-only state, and
+    // every device switch refuses it.
+    let _track = ReplayableTrack::set("https://example.invalid/track-1.flac");
+
+    let started = h.player.start_asio_playback(
+        crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+        true,
+    );
+    assert!(!started, "a parked switch owns the next handle");
+    assert!(!h.player.is_asio_mode, "so this load plays shared");
+
+    // Standing in for the shared fallback, which needs a real device to reach.
+    if let Some(queued) = h.player.take_user_seek_override() {
+        h.player.pending_resume_seek = Some(queued);
+    }
+    h.player.pre_seek_pos = h.player.pending_resume_seek;
+
+    // The reader refuses it: the buffer has not reached 45s yet.
+    h.decode_events
+        .send(DecodeEvent::SeekComplete {
+            gen_id: h.player.seek_ack_gen,
+            position: 0.0,
+            refused: true,
+        })
+        .unwrap();
+    h.player.poll_playback();
+    assert_eq!(
+        h.player.pending_resume_seek,
+        Some(45.0),
+        "a refusal retires the marker, never the intent: another backend can still serve it"
+    );
+
+    h.player.asio_teardown = Some(std::thread::spawn(|| {}));
+    while !h.player.asio_teardown.as_ref().unwrap().is_finished() {
+        std::thread::yield_now();
+    }
+    h.player.poll_asio_teardown();
+    assert!(
+        h.player.pending_device_switch.is_none(),
+        "switch dispatched"
+    );
+    assert!(h.player.is_asio_mode, "ASIO owns the session again");
+
+    assert_eq!(
+        h.player.take_start_position(),
+        Some(45.0),
+        "the seek the listener asked for outlived the fallback, the refusal and the reap"
+    );
 }
 
 /// A load announces where it will open before the backend that consumes the pair is chosen.
@@ -480,6 +572,45 @@ async fn an_asio_seek_pins_and_announces_only_once_dispatched() {
         last_state(&h.events),
         Some(PlaybackState::Seeking),
         "a dispatched seek is announced; its settle then has something to close"
+    );
+}
+
+/// A park clears the seek channel with the handle. A Play landing in that window used to
+/// hand the UI the queued position as though a decoder had taken it.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_play_during_an_asio_park_reports_the_real_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_asio_mode = true;
+
+    // The park took the handle and cleared the channel behind it. With `current_buffer` None,
+    // no respawn can carry the position either: nothing at all can honour this seek.
+    h.player.asio_seek_tx = None;
+    h.player.last_asio_pos = Some(37.5);
+    h.player.pending_resume_seek = Some(120.0);
+
+    h.player.handle_play();
+
+    let positions: Vec<f64> = h
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|ev| match ev {
+            PlayerEvent::TimeUpdate(t, _) => Some(*t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        positions,
+        vec![37.5],
+        "announcing 120.0 would report a position no decoder holds and none will reach"
+    );
+    assert_eq!(
+        h.player.last_asio_pos,
+        Some(37.5),
+        "the fallback reports where playback stands without adopting the refused target"
     );
 }
 

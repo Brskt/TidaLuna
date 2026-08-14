@@ -2163,7 +2163,13 @@ impl ControlCtx {
                 }
             }
             AsioCommand::Shutdown => {
+                // This span is what a synchronous join would cost its caller.
+                let began = std::time::Instant::now();
                 self.teardown();
+                crate::vprintln!(
+                    "[ASIO] teardown: drained in {:.2}ms",
+                    began.elapsed().as_secs_f64() * 1000.0
+                );
                 return true;
             }
         }
@@ -2476,8 +2482,24 @@ impl AsioHandle {
     /// driver at a time).
     #[must_use]
     pub(crate) fn shutdown(mut self) -> Option<JoinHandle<()>> {
-        let _ = self.cmd_tx.send(AsioCommand::Shutdown);
-        self.thread.take()
+        let sent = self.cmd_tx.send(AsioCommand::Shutdown).is_ok();
+        let parked = self.thread.take();
+        // A dead control thread refuses the send and an already-reaped handle parks
+        // nothing: a timing marker has to report what happened, not what was attempted.
+        crate::vprintln!(
+            "[ASIO] teardown: Shutdown {}, thread {}",
+            if sent {
+                "sent"
+            } else {
+                "refused (control thread gone)"
+            },
+            if parked.is_some() {
+                "parked"
+            } else {
+                "already reaped"
+            }
+        );
+        parked
     }
 }
 
@@ -2485,7 +2507,13 @@ impl Drop for AsioHandle {
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(AsioCommand::Shutdown);
         if let Some(h) = self.thread.take() {
+            // Whoever drops a live handle pays the join here, park or no park.
+            let began = std::time::Instant::now();
             let _ = h.join();
+            crate::vprintln!(
+                "[ASIO] teardown: joined in Drop, caller blocked {:.2}ms",
+                began.elapsed().as_secs_f64() * 1000.0
+            );
         }
     }
 }

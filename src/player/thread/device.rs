@@ -14,7 +14,7 @@ use crate::player::wasapi::ExclusiveHandle;
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_set_audio_device(&mut self, id: String, mode: OutputMode) {
         // An ASIO teardown is still draining driver-side: two driver instances
-        // must never coexist and the old one still holds its KS claim, so park
+        // must never coexist and the old one still holds its KS claim: park
         // the switch (latest wins); poll_asio_teardown re-dispatches it.
         #[cfg(target_os = "windows")]
         if self.asio_teardown.is_some() {
@@ -22,7 +22,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return;
         }
         // TIDAL re-emits player.devices.set (same device) right before play; rebuilding
-        // here stops the decoder and reopens cpal, so the unpause reloads and reseeks.
+        // here stops the decoder and reopens cpal; the unpause reloads and reseeks.
         // No-op only while the shared stream is live (a dead one must still retry).
         #[cfg(target_os = "windows")]
         let shared_reassert =
@@ -41,11 +41,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 || super::output::resolved_device_name(&id).as_deref()
                     == self.current_output_name.as_deref())
         {
-            // Same physical device -- no rebuild, even across an id-class flip. Our own
+            // Same physical device: no rebuild, even across an id-class flip. Our own
             // ASIO-off toggle sends "auto" while TIDAL re-asserts the concrete device id;
             // gating on `requested_is_default == output_is_default` would force a rebuild
             // that raced effective_position() to a stale zero and restarted the track. Adopt the new
-            // id AND its follow-class so a later default-device change is still handled.
+            // id AND its follow-class, keeping a later default-device change handled.
             self.current_device_id = Some(id);
             self.output_is_default = requested_is_default;
             return;
@@ -53,7 +53,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(target_os = "windows")]
         {
             // Idempotent ASIO re-assert: TIDAL re-emits player.devices.set around play/track
-            // changes. Already in ASIO mode, this must be a pure no-op -- the decoder-cancel
+            // changes. Already in ASIO mode, this must be a pure no-op: the decoder-cancel
             // below would kill the live decoder with no respawn, leaving the ring silent.
             if mode == OutputMode::Asio && self.is_asio_mode {
                 self.current_device_id = Some(id);
@@ -61,7 +61,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             // Exclusive omits has_track (unlike shared): a track-change set arrives
             // after stop cleared it and re-arming would double-load. is_exclusive_mode
-            // implies a live handle, so a dead pipeline still re-arms.
+            // implies a live handle; a dead pipeline still re-arms.
             if mode == OutputMode::Exclusive
                 && self.is_exclusive_mode
                 && self.current_device_id.as_deref() == Some(id.as_str())
@@ -74,7 +74,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     /// The switch body past the idempotent no-op guards. The teardown poll
     /// re-dispatches a parked switch here directly: is_asio_mode stays true
-    /// for the whole drain, so the guards above would no-op the replay (a
+    /// for the whole drain, and the guards above would no-op the replay (a
     /// parked switch back to ASIO would never respawn the handle).
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     pub(super) fn apply_device_switch(&mut self, id: String, mode: OutputMode) {
@@ -95,7 +95,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             // Per-track mode skip: bail BEFORE retiring the live reader below. Toggling to
             // a mode this track can't do (e.g. ASIO while it plays in exclusive due to
-            // asio_skip_track) must not kill the live decoder with nothing re-armed -- that
+            // asio_skip_track) must not kill the live decoder with nothing re-armed: that
             // leaves silence with stale is_playing/mode flags. Keep the current backend
             // playing; the skip clears on the next different-track load.
             if mode == OutputMode::Asio
@@ -140,14 +140,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Reaching here is a real shared/exclusive -> ASIO switch (the idempotent
                 // re-assert and the per-track skip both returned above, pre-cancel).
                 let was_playing = self.is_playing;
-                let position = self
-                    .current_track_id
-                    .as_deref()
-                    .and_then(|tid| self.resume_store.get(tid))
-                    .or_else(|| {
-                        let p = self.played_position_secs();
-                        (p > 0.0).then_some(p)
-                    });
+                // The owning backend's live position first: mid-switch the old mode flag is
+                // still true, and the cpal counter there reads a frozen shared offset.
+                // resume_store is the cold fallback, 200ms-sampled, unwritten past decoder EOF.
+                let position = self.live_position_secs().or_else(|| {
+                    self.current_track_id
+                        .as_deref()
+                        .and_then(|tid| self.resume_store.get(tid))
+                });
 
                 // Non-replayable source (DASH clears CURRENT_TRACK): no-op the switch
                 // instead of killing playback (the re-arm below needs a track).
@@ -164,7 +164,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.cpal_stream = None;
                 self.cpal_stream_error = None;
 
-                // ASIO bypasses the OS mixer, so seed the shared digital gain from the
+                // ASIO bypasses the OS mixer: seed the shared digital gain from the
                 // app's own volume state (last_volume), NOT a live GetMasterVolume()
                 // query: a fresh session reports 1.0 regardless of the real level (MS
                 // docs), which would blast full scale. Matches JUCE/foobar/JRiver --
@@ -184,6 +184,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     // Driver-timed teardown: park the switch, the poll re-dispatches it.
                     // The switch supersedes any pending idle release.
                     self.asio_release_at = None;
+                    // The cancel above condemned this reader; a send would queue for nobody.
+                    self.asio_seek_tx = None;
+                    // Left armed through an unbounded drain, the watchdog ejects the track.
+                    self.asio_watchdog_at = None;
                     self.asio_teardown = old.shutdown();
                     self.pending_device_switch = Some((id, mode));
                     return;
@@ -205,7 +209,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.loading_gen = None;
                     self.pending_play = None;
                     crate::vprintln!("[AUDIO] Switched to ASIO output (retained buffer)");
-                    self.spawn_asio_decoder(buffer, position, !was_playing);
+                    // The seek queued while the old device was released is still pending, and
+                    // this spawn is its last reader: nothing downstream looks at it.
+                    let seek_to = self.take_user_seek_override().or(position);
+                    self.spawn_asio_decoder(buffer, seek_to, !was_playing);
                     return;
                 }
                 // Still-streaming buffer: a fresh load re-probes cleanly (handle_load takes
@@ -234,22 +241,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
             if mode == OutputMode::Exclusive {
                 // (The per-track format skip returned above, before the cancel block.)
-                // Position from resume_store (refreshed every 200ms from the played
-                // time); falls back to the live played position when nothing is stored
-                // yet. Carried on the ReplayRequest below (or the retained-buffer reuse),
-                // applied at the exclusive spawn.
+                // The owning backend's live position first: an ASIO-to-exclusive switch runs
+                // with is_asio_mode still true; the cpal counter would be a frozen shared
+                // offset. resume_store is the cold fallback. Carried on the ReplayRequest
+                // below (or the retained-buffer reuse), applied at the exclusive spawn.
                 let was_playing = self.is_playing;
-                let position = self
-                    .current_track_id
-                    .as_deref()
-                    .and_then(|tid| self.resume_store.get(tid))
-                    .or_else(|| {
-                        let p = self.played_position_secs();
-                        (p > 0.0).then_some(p)
-                    });
+                let position = self.live_position_secs().or_else(|| {
+                    self.current_track_id
+                        .as_deref()
+                        .and_then(|tid| self.resume_store.get(tid))
+                });
 
                 // Non-replayable source (DASH clears CURRENT_TRACK): the teardown
-                // re-arms via ReplayRequest, which needs a track, so no-op the
+                // re-arms via ReplayRequest, which needs a track; no-op the
                 // switch instead of killing playback.
                 let replayable = crate::state::CURRENT_TRACK
                     .lock()
@@ -268,7 +272,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // trigger a shared-cpal rebuild while we are in exclusive mode.
                 self.cpal_stream_error = None;
 
-                // Exclusive bypasses the OS mixer, so seed the render's digital gain
+                // Exclusive bypasses the OS mixer: seed the render's digital gain
                 // from the app's own volume state (last_volume), NOT a live
                 // GetMasterVolume() query: a fresh session reports 1.0 regardless of
                 // the real level (MS docs), which would blast full scale. Breaks
@@ -286,6 +290,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 if let Some(old) = self.asio_handle.take() {
                     // The switch supersedes any pending idle release.
                     self.asio_release_at = None;
+                    // The cancel above condemned this reader; a send would queue for nobody.
+                    self.asio_seek_tx = None;
+                    // Left armed through an unbounded drain, the watchdog ejects the track.
+                    self.asio_watchdog_at = None;
                     self.asio_teardown = old.shutdown();
                     self.pending_device_switch = Some((id, mode));
                     return;
@@ -296,7 +304,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
                 let handle = ExclusiveHandle::spawn(id.clone(), self.exclusive_gain.clone());
                 self.is_exclusive_mode = true;
-                // Drop any stale release timer from a prior exclusive session so a fresh
+                // Drop any stale release timer from a prior exclusive session; a fresh
                 // engagement can't fire it and release the device we just acquired.
                 self.exclusive_release_at = None;
                 self.exclusive_handle = Some(handle);
@@ -315,11 +323,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         "[AUDIO] Switched to exclusive WASAPI (retained buffer): {}",
                         id
                     );
-                    self.spawn_exclusive_decoder(buffer, position, !was_playing);
+                    // Same as the ASIO switch above: this spawn is the last reader of a seek
+                    // queued while the old device was released.
+                    let seek_to = self.take_user_seek_override().or(position);
+                    self.spawn_exclusive_decoder(buffer, seek_to, !was_playing);
                     return;
                 }
                 // Still-streaming buffer: symphonia's probe would race the mid-stream churn
-                // (silence), so re-arm a fresh load that probes cleanly; handle_load takes
+                // (silence): re-arm a fresh load that probes cleanly; handle_load takes
                 // the exclusive branch since is_exclusive_mode is set.
                 self.has_track = false;
                 self.is_playing = false;
@@ -343,7 +354,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 return;
             } else if self.is_exclusive_mode {
                 // Same non-replayable guard: with no CURRENT_TRACK there's nothing
-                // to re-arm, so no-op instead of killing playback.
+                // to re-arm; no-op instead of killing playback.
                 let replayable = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -378,7 +389,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // shared pipeline on it in place (the device-switch path), no network
                 // re-download and no idle stall. A seek killed mid-flight by the exclusive
                 // entry must not survive into the rebuilt pipeline (it would pin the poll
-                // loop at a ghost position), so clear it first.
+                // loop at a ghost position): clear it first.
                 if self
                     .current_buffer
                     .as_ref()
@@ -391,7 +402,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     return;
                 }
 
-                // Still-streaming buffer: the exclusive reader parks it mid-range, so a
+                // Still-streaming buffer: the exclusive reader parks it mid-range, and a
                 // fresh shared load probes cleanly instead of blocking the player loop.
                 let was_playing = self.is_playing;
                 self.has_track = false;
@@ -425,6 +436,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     // Driver-timed teardown: park the switch, the poll re-dispatches it.
                     // The switch supersedes any pending idle release.
                     self.asio_release_at = None;
+                    // The cancel above condemned this reader; a send would queue for nobody.
+                    self.asio_seek_tx = None;
+                    // Left armed through an unbounded drain, the watchdog ejects the track.
+                    self.asio_watchdog_at = None;
                     self.asio_teardown = old.shutdown();
                     self.pending_device_switch = Some((id, mode));
                     return;
@@ -495,11 +510,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return;
         }
         let was_playing = self.is_playing;
+        // Sampled before stop_decode() clears it, like was_playing: only a rebuild that
+        // interrupted a real transport seek may re-announce one.
+        let was_seeking = self.seeking;
         self.stop_decode();
         self.cpal_stream = None;
         if let Some(ref buffer) = self.current_buffer {
             let buffer = buffer.clone();
-            self.rebuild_pipeline_on_device(buffer, was_playing, position);
+            self.rebuild_pipeline_on_device(buffer, was_playing, was_seeking, position);
         }
     }
 
@@ -514,9 +532,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         &mut self,
         buffer: RamBuffer,
         was_playing: bool,
+        was_seeking: bool,
         seek_to: f64,
     ) {
-        // Track unchanged on a switch/recovery, so the format is known. Re-probing
+        // Track unchanged on a switch/recovery: the format is known. Re-probing
         // here would block the player thread on a mid-stream buffer, which means
         // silence since the pipeline is already torn down. Reuse the format for the
         // cpal open; the decode thread re-probes on its own thread.
@@ -576,10 +595,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(target_os = "windows")]
         self.init_volume_sync();
 
+        // Minted before the borrow below: a rebuild's reposition is a seek like any other,
+        // and its ack has to be attributable or the settle below never closes.
+        let rebuild_gen = self.next_seek_gen();
         if seek_to > 0.0
             && let Some(ref tx) = self.decode_cmd_tx
         {
-            let _ = tx.send(DecodeCommand::Seek(seek_to));
+            let _ = tx.send(DecodeCommand::Seek(seek_to, rebuild_gen));
+            // Re-arm ONLY when a real transport seek was interrupted: stop_decode() cleared
+            // it, and whoever re-issues it owns putting it back. An internal reposition must
+            // stay invisible; announced, it settles as Active, and the stall detector emits
+            // Idle only on the edge. A buffering track would read as playing until it ends.
+            if was_seeking {
+                self.seeking = true;
+                self.seek_target = Some(seek_to);
+                self.seek_wall_start = Some(std::time::Instant::now());
+            }
         }
 
         if was_playing {

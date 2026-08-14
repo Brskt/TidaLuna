@@ -59,6 +59,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
+    /// Where playback actually is, asked of the backend that owns it. `played_samples` (the
+    /// cpal counter) sits frozen at the last shared position while ASIO or exclusive is
+    /// engaged, since neither bypass backend writes it. `None` before anything played.
+    #[cfg(target_os = "windows")]
+    pub(super) fn live_position_secs(&self) -> Option<f64> {
+        if self.is_asio_mode {
+            return self.last_asio_pos;
+        }
+        if self.is_exclusive_mode {
+            return self.last_exclusive_pos;
+        }
+        let shared = self.effective_position();
+        (shared > 0.0).then_some(shared)
+    }
+
     #[cfg(target_os = "windows")]
     pub(super) fn poll_exclusive_events(&mut self) {
         if self.is_exclusive_mode {
@@ -265,9 +280,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             }
                             self.last_asio_pos = Some(position);
                             // A >=2s decoder-blocked seek landing on the pinned target trips a
-                            // false RateUnsupported, hence the re-anchor.
-                            self.asio_watchdog_pos = position;
-                            self.asio_watchdog_at = Some(std::time::Instant::now());
+                            // false RateUnsupported, hence the re-anchor. Only while the clock
+                            // runs: paused, a settle proves nothing and the anchor reads as a
+                            // stall on the first Play.
+                            if self.is_playing {
+                                self.asio_watchdog_pos = position;
+                                self.asio_watchdog_at = Some(std::time::Instant::now());
+                            }
                             // handle_seek announced Seeking; its end is owed.
                             (self.callback)(PlayerEvent::StateChange(
                                 self.settled_state(),
@@ -484,10 +503,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             && let Some(handle) = self.asio_teardown.take()
         {
             let _ = handle.join();
+            crate::vprintln!("[ASIO] teardown: reaped");
         }
         if self.asio_teardown.is_none()
             && let Some((id, mode)) = self.pending_device_switch.take()
         {
+            crate::vprintln!("[ASIO] teardown: parked switch re-dispatched");
             self.apply_device_switch(id, mode);
         }
     }
