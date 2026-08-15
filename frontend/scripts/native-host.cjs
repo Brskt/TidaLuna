@@ -1112,6 +1112,18 @@ function canonicalizeFsPath(p) {
     return realpathOrAncestor(lexicalFsPath(p));
 }
 
+// Resolves the parent and leaves the final component as written, which is the identity a
+// removal acts on: `unlink` takes a directory entry away, not the file it names. Resolving
+// the leaf would judge a symlink's target and then remove the link, and denying that case
+// outright would refuse a plugin its own links inside its own dataDir.
+function canonicalizeLeafPath(p) {
+    var lexical = lexicalFsPath(p);
+    var parent = pathMod.dirname(lexical);
+    // A filesystem root names no entry; leave it whole for the gate to refuse on its own.
+    if (parent === lexical) return lexical;
+    return pathMod.join(realpathOrAncestor(parent), pathMod.basename(lexical));
+}
+
 function resolveFromExistingAncestor(resolved) {
     var parts = [];
     var current = resolved;
@@ -1146,29 +1158,36 @@ function isReadable(real, dataDirs, grants) {
     return isInDirs(real, _ArrayFrom(grants.dirs));
 }
 
+// Every gate below returns the path it authorized, and its caller operates on that one.
+// Handing back nothing left each facade method to re-derive a target from the argument,
+// which is a second path: canonicalization is not the identity, so the two disagree
+// wherever a symlink or a forged resolution stands between them, and the check then
+// answers about one file while the operation touches another.
 function assertRead(p, dataDirs, grants) {
-    if (!isReadable(canonicalizeFsPath(p), dataDirs, grants))
+    var real = canonicalizeFsPath(p);
+    if (!isReadable(real, dataDirs, grants))
         throw new Error("[sandbox] fs read denied: " + p);
+    return real;
 }
 
 function assertWrite(p, dataDirs, grants) {
     var real = canonicalizeFsPath(p);
-    if (isInDirs(real, dataDirs)) return;
-    if (grants.writeFiles.has(real)) return;
-    if (isInDirs(real, _ArrayFrom(grants.dirs))) return;
+    if (isInDirs(real, dataDirs)) return real;
+    if (grants.writeFiles.has(real)) return real;
+    if (isInDirs(real, _ArrayFrom(grants.dirs))) return real;
     throw new Error("[sandbox] fs write denied: " + p);
 }
 
 function assertDelete(p, dataDirs) {
-    var real = canonicalizeFsPath(p);
-    if (isInDirs(real, dataDirs)) return;
+    var real = canonicalizeLeafPath(p);
+    if (isInDirs(real, dataDirs)) return real;
     throw new Error("[sandbox] fs delete denied: " + p);
 }
 
 function assertMkdir(p, dataDirs, grants) {
     var real = canonicalizeFsPath(p);
-    if (isInDirs(real, dataDirs)) return;
-    if (isInDirs(real, _ArrayFrom(grants.dirs))) return;
+    if (isInDirs(real, dataDirs)) return real;
+    if (isInDirs(real, _ArrayFrom(grants.dirs))) return real;
     throw new Error("[sandbox] fs mkdir denied: " + p);
 }
 
@@ -1242,18 +1261,18 @@ function warnProbeReject(p, cause) {
 }
 
 function makeSandboxedFs(dataDirs, grants, ipcDirs) {
-    function checkRead(p) { assertRead(p, dataDirs, grants); }
-    function checkWrite(p) { assertWrite(p, dataDirs, grants); }
-    function checkDelete(p) { assertDelete(p, dataDirs); }
-    function checkMkdir(p) { assertMkdir(p, dataDirs, grants); }
+    function checkRead(p) { return assertRead(p, dataDirs, grants); }
+    function checkWrite(p) { return assertWrite(p, dataDirs, grants); }
+    function checkDelete(p) { return assertDelete(p, dataDirs); }
+    function checkMkdir(p) { return assertMkdir(p, dataDirs, grants); }
 
     function gatedRealpath(resolve) {
         return makeGatedRealpath(dataDirs, grants, ipcDirs, resolve);
     }
 
     var facade = {
-        readFileSync: function(p, o) { checkRead(p); return realFs.readFileSync(p, o); },
-        writeFileSync: function(p, d, o) { checkWrite(p); return realFs.writeFileSync(p, d, o); },
+        readFileSync: function(p, o) { return realFs.readFileSync(checkRead(p), o); },
+        writeFileSync: function(p, d, o) { return realFs.writeFileSync(checkWrite(p), d, o); },
         existsSync: function(p) {
             // Real existsSync answers false on every error, EACCES included, so a
             // denial is an answer here rather than a throw. A rejected path shape is
@@ -1278,24 +1297,19 @@ function makeSandboxedFs(dataDirs, grants, ipcDirs) {
             return isInDirs(lexical, ipcDirs) && isSocket(real);
         },
         realpathSync: gatedRealpath(realFs.realpathSync),
-        mkdirSync: function(p, o) { checkMkdir(p); return realFs.mkdirSync(p, o); },
-        unlinkSync: function(p) { checkDelete(p); return realFs.unlinkSync(p); },
-        rmSync: function(p, o) { checkDelete(p); return realFs.rmSync(p, o); },
-        statSync: function(p, o) { checkRead(p); return realFs.statSync(p, o); },
+        mkdirSync: function(p, o) { return realFs.mkdirSync(checkMkdir(p), o); },
+        unlinkSync: function(p) { return realFs.unlinkSync(checkDelete(p)); },
+        rmSync: function(p, o) { return realFs.rmSync(checkDelete(p), o); },
+        statSync: function(p, o) { return realFs.statSync(checkRead(p), o); },
         accessSync: function(p, mode) {
             var m = (mode === undefined) ? _F_OK : mode;
             if (m & _X_OK)
                 throw new Error("[sandbox] fs X_OK denied");
-            if (m & realFs.constants.W_OK)
-                checkWrite(p);
-            else
-                checkRead(p);
-            return realFs.accessSync(p, mode);
+            return realFs.accessSync((m & _W_OK) ? checkWrite(p) : checkRead(p), mode);
         },
         createWriteStream: function(p, o) {
             rejectUnsafeOpts(o);
-            checkWrite(p);
-            return realFs.createWriteStream(p, o);
+            return realFs.createWriteStream(checkWrite(p), o);
         },
         constants: _fsConstantsFrozen,
     };
@@ -1314,10 +1328,10 @@ function makeSandboxedFs(dataDirs, grants, ipcDirs) {
 }
 
 function makeSandboxedFsPromises(dataDirs, grants, ipcDirs) {
-    function checkRead(p) { assertRead(p, dataDirs, grants); }
-    function checkWrite(p) { assertWrite(p, dataDirs, grants); }
-    function checkDelete(p) { assertDelete(p, dataDirs); }
-    function checkMkdir(p) { assertMkdir(p, dataDirs, grants); }
+    function checkRead(p) { return assertRead(p, dataDirs, grants); }
+    function checkWrite(p) { return assertWrite(p, dataDirs, grants); }
+    function checkDelete(p) { return assertDelete(p, dataDirs); }
+    function checkMkdir(p) { return assertMkdir(p, dataDirs, grants); }
 
     var gatedRealpath = makeGatedRealpath(dataDirs, grants, ipcDirs, realFs.promises.realpath);
 
@@ -1328,21 +1342,17 @@ function makeSandboxedFsPromises(dataDirs, grants, ipcDirs) {
         realpath: function(p, o) {
             try { return gatedRealpath(p, o); } catch (e) { return _PromiseReject(e); }
         },
-        readFile: function(p, o) { checkRead(p); return realFs.promises.readFile(p, o); },
-        writeFile: function(p, d, o) { checkWrite(p); return realFs.promises.writeFile(p, d, o); },
-        mkdir: function(p, o) { checkMkdir(p); return realFs.promises.mkdir(p, o); },
-        stat: function(p, o) { checkRead(p); return realFs.promises.stat(p, o); },
-        unlink: function(p) { checkDelete(p); return realFs.promises.unlink(p); },
-        rm: function(p, o) { checkDelete(p); return realFs.promises.rm(p, o); },
+        readFile: function(p, o) { return realFs.promises.readFile(checkRead(p), o); },
+        writeFile: function(p, d, o) { return realFs.promises.writeFile(checkWrite(p), d, o); },
+        mkdir: function(p, o) { return realFs.promises.mkdir(checkMkdir(p), o); },
+        stat: function(p, o) { return realFs.promises.stat(checkRead(p), o); },
+        unlink: function(p) { return realFs.promises.unlink(checkDelete(p)); },
+        rm: function(p, o) { return realFs.promises.rm(checkDelete(p), o); },
         access: function(p, mode) {
             var m = (mode === undefined) ? _F_OK : mode;
             if (m & _X_OK)
                 return Promise.reject(new Error("[sandbox] fs X_OK denied"));
-            if (m & realFs.constants.W_OK)
-                checkWrite(p);
-            else
-                checkRead(p);
-            return realFs.promises.access(p, mode);
+            return realFs.promises.access((m & _W_OK) ? checkWrite(p) : checkRead(p), mode);
         },
     };
 }
