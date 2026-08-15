@@ -210,6 +210,19 @@ var _PromiseReject = Promise.reject.bind(Promise);
 // is not frozen, so reading S_IFSOCK at decision time would read a plugin's number.
 var _S_IFMT = realFs.constants.S_IFMT;
 var _S_IFSOCK = realFs.constants.S_IFSOCK;
+// The access() mode bits fall under that same rule: they pick which gate a probe goes
+// through, so a live read lets a plugin route a write-mode probe into the read gate.
+var _F_OK = realFs.constants.F_OK;
+var _W_OK = realFs.constants.W_OK;
+var _X_OK = realFs.constants.X_OK;
+// Handed out in place of the live object. Callers legitimately read these, and a shallow
+// freeze covers all of them, every own value being a number.
+var _fsConstantsFrozen = (function() {
+    var out = {};
+    var keys = _ObjectKeys(realFs.constants);
+    for (var i = 0; i < keys.length; i++) out[keys[i]] = realFs.constants[keys[i]];
+    return _ObjectFreeze(out);
+})();
 // os.tmpdir() re-reads the env on every call, and the env is plugin-writable; captured
 // here, a later registration cannot take a directory of the plugin's choosing.
 var hostTmpDir = require("os").tmpdir();
@@ -1270,8 +1283,8 @@ function makeSandboxedFs(dataDirs, grants, ipcDirs) {
         rmSync: function(p, o) { checkDelete(p); return realFs.rmSync(p, o); },
         statSync: function(p, o) { checkRead(p); return realFs.statSync(p, o); },
         accessSync: function(p, mode) {
-            var m = (mode === undefined) ? realFs.constants.F_OK : mode;
-            if (m & realFs.constants.X_OK)
+            var m = (mode === undefined) ? _F_OK : mode;
+            if (m & _X_OK)
                 throw new Error("[sandbox] fs X_OK denied");
             if (m & realFs.constants.W_OK)
                 checkWrite(p);
@@ -1284,7 +1297,7 @@ function makeSandboxedFs(dataDirs, grants, ipcDirs) {
             checkWrite(p);
             return realFs.createWriteStream(p, o);
         },
-        constants: realFs.constants,
+        constants: _fsConstantsFrozen,
     };
 
     // Callers feature-detect .native before using it (typescript, resolve); a facade
@@ -1322,8 +1335,8 @@ function makeSandboxedFsPromises(dataDirs, grants, ipcDirs) {
         unlink: function(p) { checkDelete(p); return realFs.promises.unlink(p); },
         rm: function(p, o) { checkDelete(p); return realFs.promises.rm(p, o); },
         access: function(p, mode) {
-            var m = (mode === undefined) ? realFs.constants.F_OK : mode;
-            if (m & realFs.constants.X_OK)
+            var m = (mode === undefined) ? _F_OK : mode;
+            if (m & _X_OK)
                 return Promise.reject(new Error("[sandbox] fs X_OK denied"));
             if (m & realFs.constants.W_OK)
                 checkWrite(p);
