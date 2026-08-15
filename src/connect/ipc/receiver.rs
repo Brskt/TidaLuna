@@ -21,6 +21,11 @@ pub(crate) fn set_receiver_enabled(enabled: bool) {
     RECEIVER_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+/// False in a clone the TIDAL Connect server key never reached. The TLS acceptor takes
+/// that key through `include_bytes!`, which no Rust condition can guard; `build.rs` probes
+/// for the file and reports the result as a cfg.
+const SERVER_KEY_BUNDLED: bool = cfg!(has_connect_server_key);
+
 pub(super) fn start() {
     let Some(rt) = crate::state::RT_HANDLE.get() else {
         return;
@@ -38,6 +43,21 @@ pub(crate) async fn start_receiver_task(config: ReceiverConfig) {
     // Setting is authoritative on every path: a start while off is a no-op
     // (this is what closes the SDK remoteDesktop bypass).
     if !RECEIVER_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // Ungated: the TLS acceptor reports the same absence, but only through the gated log
+    // below, which would leave a default config with no channel at all. Announced once per
+    // process, `discover` spawning this task on every device-picker open and the verdict
+    // being settled at build time. Checked after the setting, since a user who turned the
+    // receiver off needs no word about it.
+    if !SERVER_KEY_BUNDLED {
+        static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+        if !ANNOUNCED.swap(true, Ordering::Relaxed) {
+            crate::verr!(
+                "[connect::ipc] Receiver unavailable: no TIDAL Connect server key was bundled at build time"
+            );
+        }
         return;
     }
 

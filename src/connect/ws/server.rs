@@ -380,6 +380,7 @@ async fn client_read_loop(
 }
 
 /// Build a TLS acceptor using the embedded TIDAL Connect server cert+key.
+#[cfg(has_connect_server_key)]
 fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
     use rustls::ServerConfig;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -398,6 +399,14 @@ fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
         .with_single_cert(certs, key)?;
 
     Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Stand-in for a build the server key never reached, `include_bytes!` having no way to
+/// take a file that is absent. `ConnectReceiver::start` gives up on this error before it
+/// reaches the mDNS advertiser, leaving such a build to announce no receiver at all.
+#[cfg(not(has_connect_server_key))]
+fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
+    anyhow::bail!("no TIDAL Connect server key was bundled at build time")
 }
 
 #[cfg(test)]

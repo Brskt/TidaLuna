@@ -62,6 +62,19 @@ fn main() {
             .unwrap_or_else(|e| panic!("Failed to copy {} to OUT_DIR: {e}", src.display()));
     }
 
+    // `include_bytes!` resolves before any Rust code runs, which leaves the Connect
+    // receiver unable to test for its own TLS key; the probe belongs here instead. That
+    // key is a credential kept out of the repo, and a clone without it is the normal case.
+    println!("cargo:rerun-if-changed=src/connect/ws/certs");
+    println!("cargo:rustc-check-cfg=cfg(has_connect_server_key)");
+    if Path::new("src/connect/ws/certs/tidal_server_key.pem").exists() {
+        println!("cargo:rustc-cfg=has_connect_server_key");
+    } else {
+        println!(
+            "cargo:warning=tidal_server_key.pem is absent, so the TIDAL Connect receiver is compiled out (the controller is unaffected)"
+        );
+    }
+
     // Windows icon
     #[cfg(target_os = "windows")]
     {
