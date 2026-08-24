@@ -433,6 +433,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
+    /// Undo the commit this load made at entry. `committed_track` answers `Player::load`'s
+    /// "same track?" on the caller thread, but `decide_play` keys on `has_track`, and after a
+    /// failed load that flag still describes the track this one replaced: a re-assert minted
+    /// before the failure then resumes a pipeline built from a buffer already cancelled here.
+    fn abandon_failed_load(&mut self) {
+        self.set_committed_track(None);
+        self.has_track = false;
+        // These two describe the track this load replaced, and every emitter that reads them
+        // keys on the flag just cleared: left standing they answer for a track that is gone,
+        // under the seq of the one that failed. `current_seq` stays. It names this load,
+        // which any event emitted now belongs to.
+        self.played_samples.store(0, Relaxed);
+        self.current_duration = 0.0;
+    }
+
     /// Announce a track that is loaded and silent. The bypass backends open their device on
     /// another thread, which costs seconds on a rate-locked interface; the frontend otherwise
     /// keeps the `active` it last had and runs its own clock over a stream yet to start.
@@ -628,9 +643,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Settle the SDK's load() (its `mediaduration` await has no
                 // timeout); 0, not the previous track's stale current_duration.
                 (self.callback)(PlayerEvent::Duration(0.0, self.current_seq));
-                // This load failed; drop the reconcile signal committed at entry
-                // or a same-track reload would resume a pipeline that never built.
-                self.set_committed_track(None);
+                self.abandon_failed_load();
                 return false;
             }
         };
@@ -667,7 +680,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let device = match self.resolve_output_device() {
             Some(d) => d,
             None => {
-                self.set_committed_track(None);
+                self.abandon_failed_load();
                 return false;
             }
         };
@@ -680,7 +693,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     (self.callback)(PlayerEvent::DeviceError(
                         DeviceErrorKind::FormatNotSupported,
                     ));
-                    self.set_committed_track(None);
+                    self.abandon_failed_load();
                     return false;
                 }
             };
@@ -721,7 +734,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Same shape as the cpal-open failure above. The endpoint is open but nothing
             // will feed it; the load is abandoned rather than announced as Ready.
             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
-            self.set_committed_track(None);
+            self.abandon_failed_load();
             return false;
         };
 
