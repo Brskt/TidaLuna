@@ -43,12 +43,15 @@ impl SpeakerBridge {
 
     /// Load and play a track. Extracts url/format/key from MediaInfo.
     /// Supports both direct streams (BTS/FLAC) and DASH (AAC).
-    pub fn prepare(&self, media_info: &MediaInfo) {
+    ///
+    /// `false` when the track never reached the player. No `PlayerEvent` follows a refusal, so
+    /// the caller's `Preparing` would stand forever unless it answers for the failure itself.
+    pub fn prepare(&self, media_info: &MediaInfo) -> bool {
         let url = match &media_info.src_url {
             Some(url) => url.clone(),
             None => {
-                crate::vprintln!("[connect::bridge] MediaInfo without srcUrl - cannot load");
-                return;
+                crate::verr!("[connect::bridge] MediaInfo without srcUrl - cannot load");
+                return false;
             }
         };
 
@@ -75,12 +78,16 @@ impl SpeakerBridge {
                 segments.len(),
                 format
             );
-            with_state(|state| {
-                if let Err(e) = state.player.load_dash(url, segments, format) {
-                    crate::vprintln!("[connect::bridge] Player DASH load error: {}", e);
-                }
-            });
-            return;
+            return with_state(
+                |state| match state.player.load_dash(url, segments, format) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        crate::verr!("[connect::bridge] Player DASH load error: {}", e);
+                        false
+                    }
+                },
+            )
+            .unwrap_or(false);
         }
 
         // Direct stream path (BTS/FLAC)
@@ -92,11 +99,14 @@ impl SpeakerBridge {
             .unwrap_or("")
             .to_string();
 
-        with_state(|state| {
-            if let Err(e) = state.player.load_and_play(url, format, key) {
-                crate::vprintln!("[connect::bridge] Player load error: {}", e);
+        with_state(|state| match state.player.load_and_play(url, format, key) {
+            Ok(()) => true,
+            Err(e) => {
+                crate::verr!("[connect::bridge] Player load error: {}", e);
+                false
             }
-        });
+        })
+        .unwrap_or(false)
     }
 
     /// The player thread is the only receiver and nothing restarts it: a refused send means

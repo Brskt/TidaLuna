@@ -105,8 +105,15 @@ impl PlaybackController {
         self.state = PbState::Preparing;
         self.play_state = PbPlayState::Playing; // Default intent: autoplay
 
-        self.bridge.prepare(&media_info);
+        let handed_to_player = self.bridge.prepare(&media_info);
         self.notify_media_changed().await;
+        if !handed_to_player {
+            // Nothing reached the player: no `PlayerEvent` will ever arrive, and `Preparing`
+            // would stand for the rest of the session. Answer for it here, where the state that
+            // would be stranded lives.
+            self.on_playback_error("media could not be loaded", self.engine_gen)
+                .await;
+        }
     }
 
     /// Prepare next media for gapless playback.
@@ -398,3 +405,7 @@ impl PlaybackController {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/connect/receiver/playback.rs"]
+mod tests;
