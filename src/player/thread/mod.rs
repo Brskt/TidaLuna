@@ -424,7 +424,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.coalesced_cmds.push(PlayerCommand::Seek(time));
             }
 
-            let cmds: Vec<PlayerCommand> = self.coalesced_cmds.drain(..).collect();
+            let cmds = std::mem::take(&mut self.coalesced_cmds);
             for cmd in cmds {
                 self.handle_command(cmd);
             }

@@ -185,7 +185,7 @@ fn a_wider_output_duplicates_a_mono_source() {
         "peak {}: silence duplicated is still silence",
         peak(settled)
     );
-    for (frame, pair) in settled.chunks_exact(2).enumerate() {
+    for (frame, pair) in settled.as_chunks::<2>().0.iter().enumerate() {
         assert_eq!(pair[0], pair[1], "the channels diverged at frame {frame}");
     }
 }

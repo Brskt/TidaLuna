@@ -53,7 +53,14 @@ fn decode_ls_value(raw: &[u8]) -> Option<Vec<u8>> {
             if !payload.len().is_multiple_of(2) {
                 return None;
             }
-            Some(payload.chunks_exact(2).map(|pair| pair[0]).collect())
+            Some(
+                payload
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| pair[0])
+                    .collect(),
+            )
         }
         _ => None,
     }
