@@ -267,14 +267,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             }
                         }
                         ExclusiveEvent::Duration { stream_id, secs } => {
-                            // Forwarded only for the stream still owned: a superseded stream
-                            // measured another track.
+                            // Forwarded only for the stream still owned, which is what makes
+                            // the id below the right one: it names the track this thread is
+                            // committed to, and a superseded stream measured another.
                             if verdict_names_current_stream(
                                 self.current_exclusive_stream_id,
                                 Some(stream_id),
                             ) {
                                 self.current_duration = secs;
-                                (self.callback)(PlayerEvent::Duration(secs, self.current_seq));
+                                (self.callback)(PlayerEvent::Duration(
+                                    secs,
+                                    self.current_seq,
+                                    self.current_product_id.clone(),
+                                ));
                             }
                         }
                         ExclusiveEvent::InitFailed(e) => {
@@ -505,7 +510,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             Some(stream_id),
                         ) {
                             self.current_duration = secs;
-                            (self.callback)(PlayerEvent::Duration(secs, self.current_seq));
+                            (self.callback)(PlayerEvent::Duration(
+                                secs,
+                                self.current_seq,
+                                self.current_product_id.clone(),
+                            ));
                         }
                     }
                     AsioEvent::DriverNotFound => {

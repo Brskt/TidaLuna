@@ -31,11 +31,25 @@ pub(crate) static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
 pub(crate) static JS_USER_AGENT: LazyLock<String> =
     LazyLock::new(|| build_user_agent("Windows NT 10.0; WOW64"));
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A retained source: what to fetch it with, and the id the frontend knows it by. The id lives
+/// here because the paths that replay a retained source (a re-arm, a recover) are handed no id
+/// of their own, and a measurement taken on a replay must still name its track.
+#[derive(Clone, Debug, Eq)]
 pub struct TrackInfo {
     pub url: String,
     pub key: String,
     pub format: String,
+    pub product_id: Option<String>,
+}
+
+/// Equality answers "is this the same source", which is what preload matching asks, and the id
+/// has no part in that. It must not: the preload delegate strips identity before Rust sees it,
+/// so a preloaded copy carries `None` while the load that comes to claim it carries the real id.
+/// Comparing ids here would make every gapless preload hit miss.
+impl PartialEq for TrackInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.url == other.url && self.key == other.key && self.format == other.format
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -43,6 +57,9 @@ pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub quality: String,
+    /// Tells one track from the next. `None` when the payload carried no id, which no
+    /// comparison may read as a match: two unidentified tracks are not the same track.
+    pub id: Option<String>,
 }
 
 pub static CURRENT_METADATA: LazyLock<Arc<Mutex<Option<TrackMetadata>>>> =

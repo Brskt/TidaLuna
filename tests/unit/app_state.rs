@@ -1,6 +1,65 @@
 //! Tests for `src/app_state.rs`, attached to it by `#[path]`.
 
-use super::{js_ipc_response, js_string_literal};
+use super::{MeasuredDuration, js_ipc_response, js_string_literal, settle_recorded_duration};
+
+/// A measurement as an ingress hands it over, before the slot decides anything.
+fn measured(id: Option<&str>, secs: f64) -> MeasuredDuration {
+    MeasuredDuration::new(id.map(ToOwned::to_owned), secs)
+}
+
+#[test]
+fn a_blank_id_names_no_track() {
+    // The type claims `None` means "named no track"; minting holds it to that. Left alone, a
+    // blank would satisfy `same_track` against the next blank and lend one length to another.
+    assert_eq!(measured(Some(""), 200.0).track_id, None);
+    assert_eq!(measured(Some("   "), 200.0).track_id, None);
+    assert_eq!(measured(None, 200.0).track_id, None);
+}
+
+#[test]
+fn a_measurement_naming_a_track_takes_the_slot() {
+    let slot = settle_recorded_duration(None, measured(Some("A"), 300.0));
+    assert_eq!(slot.as_ref().and_then(|m| m.track_id.as_deref()), Some("A"));
+    assert_eq!(slot.map(|m| m.secs), Some(300.0));
+}
+
+#[test]
+fn a_measurement_naming_no_track_does_not_evict_one_that_does() {
+    // A recover through `retained_product_id` can still measure with no id to give; the
+    // gapless advance no longer does. Storing an untagged one would cost A the length a frame
+    // had yet to claim, and buy nothing: an untagged measurement matches no frame.
+    let slot = settle_recorded_duration(Some(measured(Some("A"), 300.0)), measured(None, 250.0));
+
+    assert_eq!(slot.as_ref().and_then(|m| m.track_id.as_deref()), Some("A"));
+    assert_eq!(slot.map(|m| m.secs), Some(300.0));
+}
+
+#[test]
+fn no_arrival_leaves_the_slot_emptier_than_it_found_it() {
+    // A payload carrying no length says nothing about the one a decode already measured.
+    // The Connect metadata task assumed the opposite and wiped a decoded length every time
+    // repeat-one re-announced the very track that was playing.
+    for arriving in [
+        measured(None, 0.0),
+        measured(Some(""), 250.0),
+        measured(Some("B"), 250.0),
+    ] {
+        let slot = settle_recorded_duration(Some(measured(Some("A"), 300.0)), arriving);
+        assert!(
+            slot.is_some(),
+            "an arrival emptied a slot that held a length"
+        );
+    }
+}
+
+#[test]
+fn a_fresh_measurement_of_a_named_track_replaces_the_earlier_one() {
+    // A quality swap or a recover re-measures the same track, and the later figure wins.
+    let slot =
+        settle_recorded_duration(Some(measured(Some("A"), 300.0)), measured(Some("A"), 301.5));
+
+    assert_eq!(slot.map(|m| m.secs), Some(301.5));
+}
 
 #[test]
 fn js_string_literal_escapes_quotes_backslashes_and_newlines() {

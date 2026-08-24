@@ -8,6 +8,9 @@ pub(crate) enum PlayerIpc {
         url: String,
         format: String,
         key: String,
+        /// The frontend's own id for this track. Empty is read as absent: a blank id would
+        /// compare equal to another blank one and lend a length across tracks.
+        product_id: Option<String>,
         restart: bool,
         want_play: bool,
     },
@@ -21,11 +24,15 @@ pub(crate) enum PlayerIpc {
         init_url: String,
         segment_urls: Vec<String>,
         format: String,
+        product_id: Option<String>,
     },
     Preload {
         url: String,
         format: String,
         key: String,
+        /// The track this preload is for, read off the play queue by the renderer. The
+        /// gapless advance is driven in Rust, so this is the only chance to name it.
+        product_id: Option<String>,
     },
     PreloadCancel,
     Metadata {
@@ -53,6 +60,14 @@ pub(crate) enum PlayerIpc {
 pub(crate) enum PlayerIpcParseError {
     InvalidArgs(&'static str),
     UnknownChannel(String),
+}
+
+/// A track id the renderer may or may not have, read exactly as the metadata frame reads its
+/// own: the renderer forwards TIDAL's `mediaProduct.productId` untouched, and that is a number
+/// as often as a string. Reading only strings here tagged those loads with nothing while the
+/// metadata frame named the same track, so `same_track` could never match.
+fn optional_id(arg: Option<&Value>) -> Option<String> {
+    arg.and_then(crate::util::metadata::value_track_id)
 }
 
 fn parse_player_recover_args(args: &[Value]) -> Option<(String, String, String, Option<f64>)> {
@@ -156,6 +171,9 @@ pub(crate) fn parse_player_ipc(
                 // auto-play; folded here instead of a separate player.play that would
                 // resume the old committed track. Applies only to a different-track load.
                 want_play: args.get(4).and_then(|v| v.as_bool()).unwrap_or(false),
+                // 6th arg (optional): the track this load is for. A length measured here
+                // can be published under that track and no other.
+                product_id: optional_id(args.get(5)),
             }),
             _ => Err(PlayerIpcParseError::InvalidArgs("player.load")),
         },
@@ -174,6 +192,7 @@ pub(crate) fn parse_player_ipc(
                     init_url: init_url.to_string(),
                     segment_urls,
                     format: format.to_string(),
+                    product_id: optional_id(args.get(3)),
                 })
             }
         }
@@ -194,6 +213,9 @@ pub(crate) fn parse_player_ipc(
                 url: url.to_string(),
                 format: format.to_string(),
                 key: key.to_string(),
+                // 4th arg (optional): older renderers send three. An absent id lands the
+                // track untagged, which is what this channel did for every preload before.
+                product_id: optional_id(args.get(3)),
             }),
             _ => Err(PlayerIpcParseError::InvalidArgs("player.preload")),
         },

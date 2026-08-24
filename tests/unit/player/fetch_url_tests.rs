@@ -8,6 +8,7 @@ fn track(url: &str) -> TrackInfo {
         url: url.to_string(),
         key: String::new(),
         format: "flac".to_string(),
+        product_id: None,
     }
 }
 
@@ -47,6 +48,7 @@ fn the_retained_credential_is_refreshed_for_its_own_track() {
         "https://cdn.test/mediatracks/abc",
         "https://cdn.test/mediatracks/abc?sig=NEW",
         "key",
+        None,
     );
 
     let refreshed = retained.expect("still retained");
@@ -67,6 +69,7 @@ fn a_stale_load_cannot_overwrite_a_newer_tracks_credential() {
         "https://cdn.test/mediatracks/older",
         "https://cdn.test/mediatracks/older?sig=A",
         "key-a",
+        None,
     );
 
     let untouched = retained.expect("still retained");
@@ -75,6 +78,66 @@ fn a_stale_load_cannot_overwrite_a_newer_tracks_credential() {
         "the newer track's credential must survive"
     );
     assert!(untouched.key.is_empty(), "and its key too");
+}
+
+/// The id refreshes with the credential, so a later replay of this source still knows its track.
+#[test]
+fn the_retained_id_is_refreshed_alongside_the_credential() {
+    let mut retained = Some(track("https://cdn.test/mediatracks/abc?sig=OLD"));
+
+    refresh_retained_credential(
+        &mut retained,
+        "https://cdn.test/mediatracks/abc",
+        "https://cdn.test/mediatracks/abc?sig=NEW",
+        "key",
+        Some("120002099"),
+    );
+
+    assert_eq!(
+        retained.expect("still retained").product_id.as_deref(),
+        Some("120002099")
+    );
+}
+
+/// A load carrying no id must not blank the one already retained. A quality swap arrives without
+/// one, and erasing it there cost the track its name for every replay that followed.
+#[test]
+fn a_load_without_an_id_leaves_the_retained_one_alone() {
+    let mut retained = Some(TrackInfo {
+        product_id: Some("120002099".to_string()),
+        ..track("https://cdn.test/mediatracks/abc?sig=OLD")
+    });
+
+    refresh_retained_credential(
+        &mut retained,
+        "https://cdn.test/mediatracks/abc",
+        "https://cdn.test/mediatracks/abc?sig=NEW",
+        "key",
+        None,
+    );
+
+    assert_eq!(
+        retained.expect("still retained").product_id.as_deref(),
+        Some("120002099"),
+        "an id-less load erased the identity a replay needs"
+    );
+}
+
+/// Equality answers "is this the same source", which is the question a preload hit asks. The
+/// preload delegate is handed no id, so the preloaded copy carries none while the load that comes
+/// to claim it carries the real one. Comparing ids here would make every gapless hit miss.
+#[test]
+fn two_records_of_one_source_match_whether_or_not_they_name_the_track() {
+    let preloaded = track("https://cdn.test/mediatracks/abc?sig=A");
+    let claimed = TrackInfo {
+        product_id: Some("120002099".to_string()),
+        ..track("https://cdn.test/mediatracks/abc?sig=A")
+    };
+
+    assert_eq!(
+        preloaded, claimed,
+        "a preload hit stopped matching once the load carried an id"
+    );
 }
 
 /// Identity is the query-stripped path; a task started on one signature still matches the track

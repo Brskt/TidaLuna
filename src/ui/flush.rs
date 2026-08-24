@@ -76,6 +76,39 @@ enum MediaControlAction {
     },
 }
 
+/// What a measured length becomes on arrival: the tag is the measurement's own id, whatever
+/// the shared slot happens to say by the time this runs, and the length goes out beside a name
+/// only while that slot still names the same track. Reading the slot for the tag was the defect
+/// this separates out: the slot answers "which track is announced", never "which track was
+/// measured", and the two differ for as long as a load takes to reach the decoder.
+///
+/// A mismatch publishes nothing rather than publishing with no length: `set_metadata` replaces
+/// the whole metadata object, so an empty duration erases one the announced track may already
+/// have had. The announced-metadata handler publishes instead, when its own frame lands.
+///
+/// The measurement returned here is only offered to the slot; `record_measured_duration` owns
+/// whether it lands, and turns an untagged one away.
+fn settle_measured_duration(
+    duration: f64,
+    measured: Option<String>,
+    announced: Option<&crate::state::TrackMetadata>,
+) -> (crate::app_state::MeasuredDuration, MediaControlAction) {
+    let action = match announced {
+        Some(meta) if crate::ipc::player::same_track(measured.as_deref(), meta.id.as_deref()) => {
+            MediaControlAction::SetMetadata {
+                title: meta.title.clone(),
+                artist: meta.artist.clone(),
+                duration: Some(duration),
+            }
+        }
+        _ => MediaControlAction::None,
+    };
+    (
+        crate::app_state::MeasuredDuration::new(measured, duration),
+        action,
+    )
+}
+
 fn run_post_lock_effects(mut effects: PostLockEffects) {
     match effects.mc_action {
         MediaControlAction::SetPlayback(st) => {
@@ -145,7 +178,18 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     crate::state::rt_handle().spawn(async move {
                         if let Some(next) = crate::audio::preload::take_next_track().await {
                             crate::vprintln!("[AUTO]   Loading preloaded next track");
-                            if let Err(e) = player.load_and_play(next.url, next.format, next.key) {
+                            // The id the preload carried. This branch is the advance for
+                            // SDK-native tracks, which is every FLAC: nothing re-tags one
+                            // afterwards, and untagged its measured length was neither
+                            // published nor kept; the track ran its whole life with no
+                            // duration in the OS controls. Self-load streams (DASH, and
+                            // non-FLAC BTS) advance in the renderer and tag their own load.
+                            if let Err(e) = player.load_and_play(
+                                next.url,
+                                next.format,
+                                next.key,
+                                next.product_id,
+                            ) {
                                 crate::vprintln!("[AUTO]   Failed to load next track: {e}");
                             }
                         } else {
@@ -168,21 +212,21 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::state(st.as_str(), seq));
             }
-            PlayerEvent::Duration(duration, seq) => {
-                state.media_duration = Some(duration);
-
-                match crate::state::CURRENT_METADATA.lock() {
-                    Ok(lock) => {
-                        if let Some(ref meta) = *lock {
-                            mc_action = MediaControlAction::SetMetadata {
-                                title: meta.title.clone(),
-                                artist: meta.artist.clone(),
-                                duration: Some(duration),
-                            };
-                        }
+            PlayerEvent::Duration(duration, seq, track_id) => {
+                // Taken by value to keep the decision below out of the lock, and to record the
+                // measurement even under a poisoned one: what the slot says only ever decided
+                // whether to publish, never what the length was measured on.
+                let announced = match crate::state::CURRENT_METADATA.lock() {
+                    Ok(lock) => lock.clone(),
+                    Err(e) => {
+                        crate::vprintln!("[BRIDGE] CURRENT_METADATA lock poisoned: {e}");
+                        None
                     }
-                    Err(e) => crate::vprintln!("[BRIDGE] CURRENT_METADATA lock poisoned: {e}"),
-                }
+                };
+                let (measured, action) =
+                    settle_measured_duration(duration, track_id, announced.as_ref());
+                state.record_measured_duration(measured);
+                mc_action = action;
 
                 state
                     .pending_player_events
@@ -276,8 +320,14 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         return;
                     }
                     crate::vprintln!("[REPLAY] re-arming retained source");
-                    if let Err(e) = player.rearm(track.url, track.format, track.key, position, play)
-                    {
+                    if let Err(e) = player.rearm(
+                        track.url,
+                        track.format,
+                        track.key,
+                        track.product_id,
+                        position,
+                        play,
+                    ) {
                         crate::vprintln!("[REPLAY] re-arm failed: {e}");
                     }
                 });
@@ -360,3 +410,7 @@ wrap_task! {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/ui/flush.rs"]
+mod tests;

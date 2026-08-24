@@ -185,7 +185,12 @@ impl MediaFormatSnapshot {
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     TimeUpdate(f64, u32),
-    Duration(f64, u32),
+    /// Seconds, the load's event generation, and the id of the track the length was
+    /// measured on. The id travels with the measurement because the only shared slot that
+    /// names a track is rewritten by whichever load announces itself first, which is not
+    /// the one being measured. `None` when the load carried no id, and a measurement that
+    /// names no track is published under none.
+    Duration(f64, u32, Option<String>),
     StateChange(PlaybackState, u32),
     AudioDevices(Vec<AudioDevice>, Option<String>),
     DeviceError(DeviceErrorKind),
@@ -232,6 +237,9 @@ struct LoadRequest {
     load_gen: u32,
     seq: u32,
     track_id: String,
+    /// The frontend's own id for this track, distinct from `track_id`: that one is the
+    /// canonical URL, which the frontend never sees and cannot match a measurement against.
+    product_id: Option<String>,
     resume_policy: ResumePolicy,
     load_start: std::time::Instant,
     cached: bool,
@@ -251,6 +259,7 @@ struct LoadContext {
     auto_play: bool,
     cmd_tx: mpsc::Sender<PlayerCommand>,
     format: String,
+    product_id: Option<String>,
     /// Cancelled when a newer load supersedes this one or on stop.
     cancel_token: CancellationToken,
 }
@@ -267,6 +276,7 @@ impl LoadContext {
                 load_gen: self.load_gen,
                 seq: self.event_seq,
                 track_id,
+                product_id: self.product_id.clone(),
                 resume_policy: self.resume_policy,
                 load_start: self.load_start,
                 cached,
@@ -282,6 +292,7 @@ impl LoadContext {
             code,
             seq: self.event_seq,
             load_gen: self.load_gen,
+            product_id: self.product_id.clone(),
         });
     }
 }
@@ -324,6 +335,13 @@ enum PlayerCommand {
     /// (`want_play`); a user-paused re-assert with no intent stays paused.
     ReassertResume {
         want_play: bool,
+        /// This load's own id for the committed track, the freshest there is. `None` leaves the
+        /// id the thread already holds alone: a re-assert refreshes, it does not erase.
+        product_id: Option<String>,
+        /// The canonical track this re-assert was minted for, which the branch that mints it
+        /// has already matched against the committed one. Carried because the match happened
+        /// on the caller's thread and can be stale by the time this is handled.
+        track_id: String,
     },
     Pause,
     Stop(u32),
@@ -343,6 +361,9 @@ enum PlayerCommand {
         code: MediaErrorCode,
         seq: u32,
         load_gen: u32,
+        /// The failed load's own id, never the thread's current one: this fires before
+        /// `handle_load` ran, which leaves the thread still committed to the previous track.
+        product_id: Option<String>,
     },
     EmitMaxConnections,
     #[cfg(target_os = "windows")]
@@ -430,6 +451,7 @@ pub(crate) fn refresh_retained_credential(
     canonical_url_id: &str,
     url: &str,
     key: &str,
+    product_id: Option<&str>,
 ) {
     let Some(track) = retained
         .as_mut()
@@ -439,6 +461,23 @@ pub(crate) fn refresh_retained_credential(
     };
     track.url = url.to_string();
     track.key = key.to_string();
+    // Refreshes what this load knows and erases nothing it does not: a load arriving without an
+    // id must not blank the one a later replay of this same source still needs.
+    if let Some(id) = product_id {
+        track.product_id = Some(id.to_string());
+    }
+}
+
+/// The id retained for a source, when the retained source is this one. A recover is handed a
+/// fresh credential for the track already playing and no identity at all; the retained copy is
+/// where that identity was last known.
+fn retained_product_id(canonical_url_id: &str) -> Option<String> {
+    CURRENT_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|track| canonical_track_id(&track.url) == canonical_url_id)
+        .and_then(|track| track.product_id.clone())
 }
 
 /// The url a running download must fetch with, for the track it started for. The signed url is a
@@ -470,14 +509,28 @@ fn is_same_active_track(
     committed.is_some_and(|(id, fmt)| fmt == format && id == canonical_url_id)
 }
 
-fn print_track_banner(format: &str) {
+/// Whether the announced metadata describes a track other than this load's. The slot answers
+/// "what was announced last", never "which track is this load", and a Rust-driven advance runs
+/// ahead of the announcement. Only a POSITIVE disagreement counts: a load carrying no id of its
+/// own (what a recover through `retained_product_id` looks like) is no evidence of staleness,
+/// and treating it as such would withhold a title that was correct.
+pub(crate) fn announcement_is_stale(load: Option<&str>, announced: Option<&str>) -> bool {
+    matches!((load, announced), (Some(a), Some(b)) if a != b)
+}
+
+/// `product_id` is the load's own id, used only to tell whether the announced metadata
+/// describes this load. Logging-only: nothing downstream reads the banner.
+fn print_track_banner(format: &str, product_id: Option<&str>) {
     let Ok(lock) = CURRENT_METADATA.lock() else {
         crate::vprintln!("[PLAYER] CURRENT_METADATA lock poisoned, skipping banner");
         return;
     };
     let format_upper = format.to_uppercase();
-    let (title, artist, quality) = match lock.as_ref() {
-        Some(m) => (
+    let announced_id = lock.as_ref().and_then(|m| m.id.as_deref());
+    let unannounced = product_id.filter(|load| announcement_is_stale(Some(load), announced_id));
+    let (title, artist, quality) = match (unannounced, lock.as_ref()) {
+        (Some(id), _) => (id, "not announced yet", format_upper.as_str()),
+        (None, Some(m)) => (
             if m.title.is_empty() {
                 "Unknown"
             } else {
@@ -494,7 +547,7 @@ fn print_track_banner(format: &str) {
                 m.quality.as_str()
             },
         ),
-        None => ("Unknown", "Unknown", format_upper.as_str()),
+        (None, None) => ("Unknown", "Unknown", format_upper.as_str()),
     };
     crate::vprintln!("══════════════════════════════════════════");
     crate::vprintln!("  {} - {}", title, artist);
@@ -907,6 +960,7 @@ impl Player {
         url: String,
         format: String,
         key: String,
+        product_id: Option<String>,
         resume_policy: ResumePolicy,
         auto_play: bool,
     ) -> anyhow::Result<()> {
@@ -916,7 +970,7 @@ impl Player {
         });
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         crate::vprintln!("[LOAD #{load_gen}] start");
-        print_track_banner(&format);
+        print_track_banner(&format, product_id.as_deref());
 
         if let Some(prev) = self
             .load_handle
@@ -949,6 +1003,7 @@ impl Player {
                 url: url.clone(),
                 format: format.clone(),
                 key: key.clone(),
+                product_id: product_id.clone(),
             });
         }
 
@@ -960,6 +1015,7 @@ impl Player {
             auto_play,
             cmd_tx: self.cmd_tx.clone(),
             format: format.clone(),
+            product_id,
             cancel_token,
         };
 
@@ -972,6 +1028,7 @@ impl Player {
                 url: url.clone(),
                 format: format.clone(),
                 key: key.clone(),
+                product_id: ctx.product_id.clone(),
             };
             let track_id = canonical_track_id(&url);
 
@@ -994,6 +1051,7 @@ impl Player {
         url: String,
         format: String,
         key: String,
+        product_id: Option<String>,
         restart: bool,
         want_play: bool,
     ) -> anyhow::Result<()> {
@@ -1025,7 +1083,14 @@ impl Player {
                     want_play,
                     short_id(&canonical_url_id, 60)
                 );
-                return self.load_with_policy(url, format, key, ResumePolicy::Restart, want_play);
+                return self.load_with_policy(
+                    url,
+                    format,
+                    key,
+                    product_id,
+                    ResumePolicy::Restart,
+                    want_play,
+                );
             }
             // Takes the new credential, keeps the play instance. The skip below correctly answers
             // "same track?" but must not also mean "still fetchable": every same-track load carries a
@@ -1038,7 +1103,13 @@ impl Player {
                 let mut retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                refresh_retained_credential(&mut retained, &canonical_url_id, &url, &key);
+                refresh_retained_credential(
+                    &mut retained,
+                    &canonical_url_id,
+                    &url,
+                    &key,
+                    product_id.as_deref(),
+                );
             }
             // Same-track re-assert keeping the play instance (a quality-swap re-load):
             // resumes if PLAYING pre-stop (resume_on_reassert), or if want_play is set --
@@ -1049,17 +1120,37 @@ impl Player {
                 want_play,
                 short_id(&canonical_url_id, 60)
             );
-            let _ = self.send_cmd(PlayerCommand::ReassertResume { want_play });
+            // The id travels with the re-assert: this branch never reaches `handle_load`, which
+            // is the only other place the thread learns which track it is measuring. Dropping
+            // it here left a gapless-advanced track nameless for the rest of its life.
+            let _ = self.send_cmd(PlayerCommand::ReassertResume {
+                want_play,
+                product_id,
+                track_id: canonical_url_id,
+            });
             return Ok(());
         }
         // Different track (genuine select / queue advance): fresh load. `want_play` folds
         // the SELECT's play-intent into the load: no separate player.play arrives while
         // the OLD track is still committed (decide_play would Resume it -> audible bleed).
-        self.load_with_policy(url, format, key, ResumePolicy::Disabled, want_play)
+        self.load_with_policy(
+            url,
+            format,
+            key,
+            product_id,
+            ResumePolicy::Disabled,
+            want_play,
+        )
     }
 
-    pub fn load_and_play(&self, url: String, format: String, key: String) -> anyhow::Result<()> {
-        self.load_with_policy(url, format, key, ResumePolicy::Disabled, true)
+    pub fn load_and_play(
+        &self,
+        url: String,
+        format: String,
+        key: String,
+        product_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.load_with_policy(url, format, key, product_id, ResumePolicy::Disabled, true)
     }
 
     /// Load a DASH stream by fetching init + media segments and concatenating them.
@@ -1068,6 +1159,7 @@ impl Player {
         init_url: String,
         segment_urls: Vec<String>,
         format: String,
+        product_id: Option<String>,
     ) -> anyhow::Result<()> {
         // The shared choke point. The IPC channel validates its own arguments, but the
         // Connect receiver reaches this function directly in Rust and handed it an empty
@@ -1085,7 +1177,7 @@ impl Player {
             "[DASH-LOAD #{load_gen}] start - {} segments",
             segment_urls.len()
         );
-        print_track_banner(&format);
+        print_track_banner(&format, product_id.as_deref());
 
         if let Some(prev) = self
             .load_handle
@@ -1121,6 +1213,7 @@ impl Player {
                             code: MediaErrorCode::NoSuchFile,
                             seq: event_seq,
                             load_gen,
+                            product_id: product_id.clone(),
                         });
                         return;
                     }
@@ -1132,6 +1225,7 @@ impl Player {
                         code: MediaErrorCode::NoSuchFile,
                         seq: event_seq,
                         load_gen,
+                        product_id: product_id.clone(),
                     });
                     return;
                 }
@@ -1142,6 +1236,7 @@ impl Player {
                         code: MediaErrorCode::NoSuchFile,
                         seq: event_seq,
                         load_gen,
+                        product_id: product_id.clone(),
                     });
                     return;
                 }
@@ -1195,6 +1290,7 @@ impl Player {
                             code: MediaErrorCode::NoSuchFile,
                             seq: event_seq,
                             load_gen,
+                            product_id: product_id.clone(),
                         });
                         return;
                     }
@@ -1217,6 +1313,7 @@ impl Player {
                     load_gen,
                     seq: event_seq,
                     track_id,
+                    product_id,
                     resume_policy: ResumePolicy::Disabled,
                     load_start,
                     cached: false,
@@ -1246,10 +1343,15 @@ impl Player {
         key: String,
         target_time: Option<f64>,
     ) -> anyhow::Result<()> {
+        // The SDK's `recover` delegate carries only a url and a key: the id comes from the
+        // retained source instead. A recover re-fetches the track already playing, never
+        // another; the retained id is that track's own.
+        let product_id = retained_product_id(&canonical_track_id(&url));
         self.load_with_policy(
             url,
             format,
             key,
+            product_id,
             Self::resume_policy_for(target_time),
             false,
         )
@@ -1264,6 +1366,7 @@ impl Player {
         url: String,
         format: String,
         key: String,
+        product_id: Option<String>,
         position: Option<f64>,
         play: bool,
     ) -> anyhow::Result<()> {
@@ -1274,7 +1377,7 @@ impl Player {
             Some(t) => ResumePolicy::Explicit(t),
             None => ResumePolicy::Disabled,
         };
-        self.load_with_policy(url, format, key, policy, play)
+        self.load_with_policy(url, format, key, product_id, policy, play)
     }
 
     fn send_cmd(&self, cmd: PlayerCommand) -> anyhow::Result<()> {
@@ -1350,3 +1453,7 @@ mod fetch_url_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/player/volume_tests.rs"]
 mod volume_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/banner_tests.rs"]
+mod banner_tests;

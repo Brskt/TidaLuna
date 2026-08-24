@@ -79,7 +79,9 @@ impl SpeakerBridge {
                 format
             );
             return with_state(
-                |state| match state.player.load_dash(url, segments, format) {
+                // No id yet on this path: the receiver reads its own from the controller, and
+                // an untagged measurement is turned away rather than charged to another track.
+                |state| match state.player.load_dash(url, segments, format, None) {
                     Ok(()) => true,
                     Err(e) => {
                         crate::verr!("[connect::bridge] Player DASH load error: {}", e);
@@ -99,13 +101,15 @@ impl SpeakerBridge {
             .unwrap_or("")
             .to_string();
 
-        with_state(|state| match state.player.load_and_play(url, format, key) {
-            Ok(()) => true,
-            Err(e) => {
-                crate::verr!("[connect::bridge] Player load error: {}", e);
-                false
-            }
-        })
+        with_state(
+            |state| match state.player.load_and_play(url, format, key, None) {
+                Ok(()) => true,
+                Err(e) => {
+                    crate::verr!("[connect::bridge] Player load error: {}", e);
+                    false
+                }
+            },
+        )
         .unwrap_or(false)
     }
 

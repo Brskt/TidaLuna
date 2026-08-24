@@ -52,6 +52,29 @@ impl IpcMessage {
     }
 }
 
+/// A track length and the track it was measured on. The identity cannot be recovered
+/// later: the current-metadata slot has already moved on to the next track.
+pub(crate) struct MeasuredDuration {
+    /// `None` when the payload named no track, and such a measurement matches nothing: a
+    /// length is never lent to another track.
+    pub(crate) track_id: Option<String>,
+    pub(crate) secs: f64,
+}
+
+impl MeasuredDuration {
+    /// Mints a measurement, holding the field above to what it claims: a blank id names no
+    /// track. Every producer goes through here, and an ingress that skips its own normalizing
+    /// still cannot mint an id equal to the next blank one.
+    pub(crate) fn new(track_id: Option<String>, secs: f64) -> Self {
+        Self {
+            track_id: track_id
+                .as_deref()
+                .and_then(crate::util::metadata::trimmed_non_empty),
+            secs,
+        }
+    }
+}
+
 pub(crate) struct AppState {
     pub(crate) player: Arc<crate::player::Player>,
     pub(crate) pending_time_update: Option<(f64, u32)>,
@@ -60,7 +83,7 @@ pub(crate) struct AppState {
     pub(crate) browser: Option<Browser>,
     pub(crate) flush_scheduled: bool,
     pub(crate) media_controls: Option<crate::platform::media_controls::OsMediaControls>,
-    pub(crate) media_duration: Option<f64>,
+    pub(crate) media_duration: Option<MeasuredDuration>,
     pub(crate) plugin_manager: crate::plugins::PluginManager,
     pub(crate) captured_token: String,
     pub(crate) token_state: Option<crate::platform::secure_store::StoredTokenState>,
@@ -85,6 +108,28 @@ pub(crate) struct AppState {
     pub(crate) plugin_load_waiters: Vec<IpcCallback>,
     pub(crate) last_client_id: String,
     pub(crate) connect: Option<crate::connect::ConnectManager>,
+}
+
+/// What the slot becomes when a measurement arrives, stated without an `AppState` behind it.
+///
+/// An untagged measurement names no track: it can never satisfy `same_track`. Storing one
+/// buys nothing and costs whichever tagged length a frame had yet to claim.
+fn settle_recorded_duration(
+    current: Option<MeasuredDuration>,
+    measured: MeasuredDuration,
+) -> Option<MeasuredDuration> {
+    if measured.track_id.is_none() {
+        return current;
+    }
+    Some(measured)
+}
+
+impl AppState {
+    /// The one way `media_duration` is written, and it never empties: a payload that carries
+    /// no length is not evidence that the last measured one was wrong.
+    pub(crate) fn record_measured_duration(&mut self, measured: MeasuredDuration) {
+        self.media_duration = settle_recorded_duration(self.media_duration.take(), measured);
+    }
 }
 
 // SAFETY: holds non-Send CEF/OS handles (Browser, OsMediaControls, ThumbBar);

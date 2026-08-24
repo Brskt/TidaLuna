@@ -74,6 +74,12 @@ struct PlayerIpcEffects {
     mc_metadata: Option<(String, String, Option<f64>)>,
 }
 
+/// Whether a measured length may be published under an announced track's name. Two ids match
+/// or nothing does: an unidentified payload is not evidence of sameness.
+pub(crate) fn same_track(measured: Option<&str>, announced: Option<&str>) -> bool {
+    matches!((measured, announced), (Some(a), Some(b)) if a == b)
+}
+
 fn handle_player_ipc(msg: &IpcMessage) {
     let effects =
         with_state(
@@ -83,10 +89,14 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         url,
                         format,
                         key,
+                        product_id,
                         restart,
                         want_play,
                     } => {
-                        if let Err(e) = state.player.load(url, format, key, restart, want_play) {
+                        if let Err(e) = state
+                            .player
+                            .load(url, format, key, product_id, restart, want_play)
+                        {
                             crate::vprintln!("[PLAYER] Failed to load track: {}", e);
                         }
                         PlayerIpcEffects::default()
@@ -95,8 +105,13 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         init_url,
                         segment_urls,
                         format,
+                        product_id,
                     } => {
-                        if let Err(e) = state.player.load_dash(init_url, segment_urls, format) {
+                        if let Err(e) =
+                            state
+                                .player
+                                .load_dash(init_url, segment_urls, format, product_id)
+                        {
                             crate::vprintln!("[PLAYER] Failed to load DASH track: {}", e);
                         }
                         PlayerIpcEffects::default()
@@ -112,8 +127,22 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         }
                         PlayerIpcEffects::default()
                     }
-                    PlayerIpc::Preload { url, format, key } => {
-                        let track = TrackInfo { url, format, key };
+                    PlayerIpc::Preload {
+                        url,
+                        format,
+                        key,
+                        product_id,
+                    } => {
+                        // The renderer names the track off the play queue; the SDK's own
+                        // delegate carries only the url triple. A tag that names the wrong
+                        // track fails closed: `same_track` refuses it downstream and nothing
+                        // is published, which is exactly what an absent tag already does.
+                        let track = TrackInfo {
+                            url,
+                            format,
+                            key,
+                            product_id,
+                        };
                         crate::state::rt_handle().spawn(async move {
                             crate::audio::preload::start_preload(track).await;
                         });
@@ -127,15 +156,24 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     }
                     PlayerIpc::Metadata { payload } => {
                         let meta = crate::util::metadata::parse_track_metadata(&payload);
-                        let duration = state.media_duration;
+                        let (title, artist) = (meta.title.clone(), meta.artist.clone());
                         let mc = state.media_controls.take();
-                        let mc_metadata = Some((meta.title.clone(), meta.artist.clone(), duration));
+                        // The measurement's own tag vouches for the length; the shared
+                        // metadata slot cannot, being rewritten by a track's first frame.
+                        // Nothing is cleared here either: a measurement can land before its
+                        // own metadata, and no `Duration` event is owed to replace it.
+                        let length = state
+                            .media_duration
+                            .as_ref()
+                            .filter(|d| same_track(d.track_id.as_deref(), meta.id.as_deref()))
+                            .map(|d| d.secs);
                         match crate::state::CURRENT_METADATA.lock() {
                             Ok(mut lock) => *lock = Some(meta),
                             Err(e) => {
                                 crate::vprintln!("[PLAYER] CURRENT_METADATA lock poisoned: {e}")
                             }
                         }
+                        let mc_metadata = Some((title, artist, length));
                         PlayerIpcEffects {
                             mc,
                             mc_metadata,

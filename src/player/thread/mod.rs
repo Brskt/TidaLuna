@@ -92,6 +92,9 @@ pub(super) struct PlayerThread<F> {
     // Track state
     current_buffer: Option<RamBuffer>,
     current_track_id: Option<String>,
+    /// The frontend's id for the committed track, kept beside the canonical one so a
+    /// measurement taken here can name the track the frontend will announce it under.
+    current_product_id: Option<String>,
     current_format: String,
     is_cached: bool,
     is_playing: bool,
@@ -293,6 +296,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             decode_reader_cancel: None,
             current_buffer: None,
             current_track_id: None,
+            current_product_id: None,
             current_format: String::new(),
             is_cached: false,
             is_playing: false,
@@ -493,7 +497,28 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::LoadStarted { generation } => self.handle_load_started(generation),
             PlayerCommand::LoadSettled { generation } => self.handle_load_settled(generation),
             PlayerCommand::Play => self.handle_play(),
-            PlayerCommand::ReassertResume { want_play } => {
+            PlayerCommand::ReassertResume {
+                want_play,
+                product_id,
+                track_id,
+            } => {
+                // Applied only while `track_id` still names the committed track (see the field
+                // docs on `ReassertResume`). Erasing instead of refreshing would cost a
+                // quality-swapped track its name, and a generation cannot stand in for the id
+                // match: the newer load bumps `LOAD_SEQ` before this command is minted.
+                let names_committed = self.current_track_id.as_deref() == Some(track_id.as_str());
+                if !names_committed {
+                    crate::vprintln!(
+                        "[LOAD]   re-assert names {}, committed is {:?}; keeping the live id",
+                        crate::util::fmt::short_id(&track_id, 60),
+                        self.current_track_id
+                            .as_deref()
+                            .map(|id| crate::util::fmt::short_id(id, 60))
+                    );
+                }
+                if names_committed && product_id.is_some() {
+                    self.current_product_id = product_id;
+                }
                 // Same-track re-assert (boombox does stop()+load(same)): its load() awaits
                 // `mediaduration` before the instance is seekable, but the idempotent skip
                 // never re-runs handle_load: that event is never re-emitted and boombox's
@@ -503,6 +528,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     (self.callback)(PlayerEvent::Duration(
                         self.current_duration,
                         self.current_seq,
+                        self.current_product_id.clone(),
                     ));
                 }
                 // Same re-drive for the format snapshot the renderer nulls on every
@@ -531,6 +557,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 code,
                 seq,
                 load_gen,
+                product_id,
             } => {
                 // Superseded load (stop() keeps its task alive; abort is
                 // cooperative): checked at processing time, like handle_load's
@@ -543,7 +570,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // awaits `mediaduration` with no timeout, and 0 is its own
                 // unknown-duration sentinel.
                 (self.callback)(PlayerEvent::MediaError { error, code });
-                (self.callback)(PlayerEvent::Duration(0.0, seq));
+                // The failed load's own id, carried on the command: this runs before
+                // `handle_load`; the thread is still committed to the previous track, and
+                // `self.current_product_id` would name it instead.
+                (self.callback)(PlayerEvent::Duration(0.0, seq, product_id));
             }
             PlayerCommand::EmitMaxConnections => {
                 (self.callback)(PlayerEvent::MaxConnectionsReached);

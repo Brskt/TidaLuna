@@ -78,7 +78,7 @@ export const createPlaybackController = () => {
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
-                                        sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec);
+                                        sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec, productId);
                                     }
                                 }
                                 if (pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
@@ -92,7 +92,10 @@ export const createPlaybackController = () => {
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
-                                        sendIpc("player.load", streamUrl, codec, encKey);
+                                        // restart/wantPlay repeat the defaults this call has
+                                        // always been parsed with; they are spelled out only
+                                        // so productId lands on the index player.load reads.
+                                        sendIpc("player.load", streamUrl, codec, encKey, false, false, productId);
                                     }
                                 }
                             } catch (e) { console.error("[luna:playback] playbackInfo/self-load error:", e); }

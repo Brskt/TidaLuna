@@ -168,9 +168,16 @@ export const createNativePlayerComponent = () => {
                 // 0) Rust must restart the committed track instead of resuming it. A same
                 // referenceId (a quality-swap re-load) keeps its position.
                 let restart = false;
+                // The track this load is for. Read from the same mediaProduct object as
+                // referenceId below, so it is exactly as current as the restart decision
+                // this delegate already ships; Rust needs it to publish a measured length
+                // under this track rather than whichever one announced itself first.
+                let productId: string | null = null;
                 try {
                     const { store } = require("../../plugins/lib/src/redux/store");
-                    const refId = store?.getState?.()?.playbackControls?.mediaProduct?.referenceId ?? null;
+                    const mediaProduct = store?.getState?.()?.playbackControls?.mediaProduct;
+                    productId = mediaProduct?.productId ?? null;
+                    const refId = mediaProduct?.referenceId ?? null;
                     // Only a CHANGE from a known previous id is a fresh play; the first
                     // observation (lastReferenceId null) just records it, keeping the startup
                     // re-assert from being mistaken for a replay.
@@ -194,7 +201,7 @@ export const createNativePlayerComponent = () => {
                 // First fresh time report must not be held behind the 250ms throttle
                 // (armed against the OLD track's last dispatch); mirrors SEEK.
                 (window as any).__LUNAR_FORCE_TIME_DISPATCH__?.();
-                sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay);
+                sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay, productId ?? "");
             },
             play: () => {
                 sendDbgIpc("SDK->play");
@@ -242,7 +249,17 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.volume", volume);
             },
             preload: (url: string, streamFormat: string, encryptionKey: string = "") => {
-                sendIpc("player.preload", url, streamFormat, encryptionKey);
+                // The delegate carries only the url triple, but the queue already names what
+                // plays next. For SDK-native tracks the advance runs in Rust and nothing
+                // re-tags them afterwards, which makes this the only chance to name one.
+                // Self-load streams take the renderer path in index.ts and tag their own load.
+                let nextId = "";
+                try {
+                    const { store } = require("../../plugins/lib/src/redux/store");
+                    const { playQueue: q } = store.getState();
+                    nextId = String(q?.elements?.[q.currentIndex + 1]?.mediaItemId ?? "");
+                } catch (_) {}
+                sendIpc("player.preload", url, streamFormat, encryptionKey, nextId);
             },
             cancelPreload: () => {
                 sendIpc("player.preload.cancel");

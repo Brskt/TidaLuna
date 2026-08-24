@@ -469,6 +469,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             load_gen,
             seq: event_seq,
             track_id,
+            product_id,
             resume_policy,
             load_start,
             cached,
@@ -486,6 +487,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
 
         self.current_track_id = Some(track_id.clone());
+        self.current_product_id = product_id;
         self.set_committed_track(Some((track_id.clone(), format.clone())));
         self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
         self.current_seq = event_seq;
@@ -642,7 +644,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 });
                 // Settle the SDK's load() (its `mediaduration` await has no
                 // timeout); 0, not the previous track's stale current_duration.
-                (self.callback)(PlayerEvent::Duration(0.0, self.current_seq));
+                (self.callback)(PlayerEvent::Duration(
+                    0.0,
+                    self.current_seq,
+                    self.current_product_id.clone(),
+                ));
                 self.abandon_failed_load();
                 return false;
             }
@@ -778,6 +784,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             (self.callback)(PlayerEvent::Duration(
                 self.current_duration,
                 self.current_seq,
+                self.current_product_id.clone(),
             ));
         }
 
