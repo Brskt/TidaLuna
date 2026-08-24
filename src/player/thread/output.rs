@@ -399,110 +399,151 @@ pub(super) fn open_output_stream(
 
 // --- AudioPipeline ---
 
+/// Source frames the resampler takes per call. Shared with the tests, which size their
+/// fixtures against it: a private literal would let the two drift apart in silence.
+pub(super) const CHUNK_SIZE: usize = 1024;
+
 pub(super) struct AudioPipeline {
-    resampler: rubato::Async<f32>,
+    /// Absent when source and output share a rate: a sinc filter at ratio 1.0 returns
+    /// samples that were already correct, minus a low-pass and a lead-in delay. Rate parity
+    /// gets the channel remap alone.
+    resampler: Option<rubato::Async<f32>>,
     source_channels: usize,
     output_channels: usize,
-    chunk_size: usize,
     accum: Vec<Vec<f32>>,
     accum_frames: usize,
 }
 
 impl AudioPipeline {
+    /// Fails rather than panics: the rate pair comes from a container header and a device,
+    /// neither of which this thread controls, and a panic here takes the decode thread down
+    /// without a `Finished` or an `Error` for the player to act on.
     pub fn new(
         source_rate: u32,
         output_rate: u32,
         source_channels: usize,
         output_channels: usize,
-    ) -> Self {
-        let ratio = output_rate as f64 / source_rate as f64;
-        let chunk_size = 1024;
-        let params = rubato::SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: Some(0.95),
-            interpolation: rubato::SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: rubato::WindowFunction::BlackmanHarris2,
+    ) -> Result<Self, String> {
+        let resampler = if source_rate == output_rate {
+            None
+        } else {
+            let params = rubato::SincInterpolationParameters {
+                sinc_len: 256,
+                f_cutoff: Some(0.95),
+                interpolation: rubato::SincInterpolationType::Linear,
+                oversampling_factor: 256,
+                window: rubato::WindowFunction::BlackmanHarris2,
+            };
+            Some(
+                rubato::Async::<f32>::new_sinc(
+                    output_rate as f64 / source_rate as f64,
+                    2.0,
+                    &params,
+                    CHUNK_SIZE,
+                    source_channels,
+                    rubato::FixedAsync::Input,
+                )
+                .map_err(|e| format!("resampler {source_rate} -> {output_rate}: {e}"))?,
+            )
         };
 
-        let resampler = rubato::Async::<f32>::new_sinc(
-            ratio,
-            2.0,
-            &params,
-            chunk_size,
-            source_channels,
-            rubato::FixedAsync::Input,
-        )
-        .expect("failed to create resampler");
+        // The accumulator stages frames for the resampler and has no second reader: rate parity
+        // leaves it unbuilt rather than holding a buffer `process` and `flush` both skip.
+        let accum = if resampler.is_some() {
+            vec![Vec::with_capacity(CHUNK_SIZE * 2); source_channels]
+        } else {
+            Vec::new()
+        };
 
-        Self {
+        Ok(Self {
             resampler,
             source_channels,
             output_channels,
-            chunk_size,
-            accum: vec![Vec::with_capacity(chunk_size * 2); source_channels],
+            accum,
             accum_frames: 0,
-        }
+        })
     }
 
-    pub fn process(&mut self, interleaved: &[f32]) -> Vec<f32> {
+    pub fn resamples(&self) -> bool {
+        self.resampler.is_some()
+    }
+
+    /// Errors instead of dropping the chunk: a gated log paired with an unconditional drain
+    /// lets a whole track vanish under normal-looking playback.
+    pub fn process(&mut self, interleaved: &[f32]) -> Result<Vec<f32>, String> {
         use audioadapter_buffers::direct::SequentialSliceOfVecs;
-        use rubato::Resampler;
 
-        let src_ch = self.source_channels;
+        let Self {
+            resampler,
+            source_channels,
+            output_channels,
+            accum,
+            accum_frames,
+        } = self;
+        let (src_ch, out_ch) = (*source_channels, *output_channels);
+
+        let Some(resampler) = resampler.as_mut() else {
+            let mut output = Vec::new();
+            remap_channels(interleaved, src_ch, out_ch, &mut output);
+            return Ok(output);
+        };
+
         let frames = interleaved.len() / src_ch;
-
         for f in 0..frames {
             for ch in 0..src_ch {
-                self.accum[ch].push(interleaved[f * src_ch + ch]);
+                accum[ch].push(interleaved[f * src_ch + ch]);
             }
         }
-        self.accum_frames += frames;
+        *accum_frames += frames;
 
         let mut output = Vec::new();
+        while *accum_frames >= CHUNK_SIZE {
+            let data = {
+                let adapter = SequentialSliceOfVecs::new(accum, src_ch, CHUNK_SIZE)
+                    .map_err(|e| format!("resampler input rejected: {e}"))?;
+                resampler
+                    .process(&adapter, None)
+                    .map_err(|e| format!("resampling failed: {e}"))?
+                    .take_data()
+            };
+            remap_channels(&data, src_ch, out_ch, &mut output);
 
-        while self.accum_frames >= self.chunk_size {
-            let adapter = SequentialSliceOfVecs::new(&self.accum, src_ch, self.chunk_size)
-                .expect("invalid buffer dimensions");
-
-            match self.resampler.process(&adapter, None) {
-                Ok(resampled) => {
-                    let data = resampled.take_data();
-                    self.remap_channels(&data, src_ch, &mut output);
-                }
-                Err(e) => {
-                    crate::vprintln!("[RESAMPLE] Error: {e}");
-                }
+            for ch in accum.iter_mut() {
+                ch.drain(..CHUNK_SIZE);
             }
-
-            for ch in &mut self.accum {
-                ch.drain(..self.chunk_size);
-            }
-            self.accum_frames -= self.chunk_size;
+            *accum_frames -= CHUNK_SIZE;
         }
 
-        output
+        Ok(output)
     }
 
-    pub fn flush(&mut self) -> Vec<f32> {
+    pub fn flush(&mut self) -> Result<Vec<f32>, String> {
         use audioadapter_buffers::direct::SequentialSliceOfVecs;
-        use rubato::{Indexing, Resampler};
+        use rubato::Indexing;
 
-        if self.accum_frames == 0 {
-            return Vec::new();
+        let Self {
+            resampler,
+            source_channels,
+            output_channels,
+            accum,
+            accum_frames,
+        } = self;
+        let (src_ch, out_ch) = (*source_channels, *output_channels);
+
+        // Nothing accumulates without a resampler: `process` remaps and returns in one go.
+        let Some(resampler) = resampler.as_mut() else {
+            return Ok(Vec::new());
+        };
+        if *accum_frames == 0 {
+            return Ok(Vec::new());
         }
 
-        let src_ch = self.source_channels;
-        let partial_frames = self.accum_frames;
-
-        for ch in &mut self.accum {
-            ch.resize(self.chunk_size, 0.0);
+        let partial_frames = *accum_frames;
+        for ch in accum.iter_mut() {
+            ch.resize(CHUNK_SIZE, 0.0);
         }
 
-        let adapter = SequentialSliceOfVecs::new(&self.accum, src_ch, self.chunk_size)
-            .expect("invalid buffer dimensions");
-
-        let out_max = self.resampler.output_frames_max();
+        let out_max = resampler.output_frames_max();
         let mut out_buf =
             audioadapter_buffers::owned::InterleavedOwned::<f32>::new(0.0, src_ch, out_max);
 
@@ -513,26 +554,24 @@ impl AudioPipeline {
             active_channels_mask: None,
         };
 
-        let mut output = Vec::new();
-        match self
-            .resampler
-            .process_into_buffer(&adapter, &mut out_buf, Some(&indexing))
-        {
-            Ok((_consumed, written)) => {
-                let data = out_buf.take_data();
-                let used = &data[..written * src_ch];
-                self.remap_channels(used, src_ch, &mut output);
-            }
-            Err(e) => {
-                crate::vprintln!("[RESAMPLE] Flush error: {e}");
-            }
-        }
+        let written = {
+            let adapter = SequentialSliceOfVecs::new(accum, src_ch, CHUNK_SIZE)
+                .map_err(|e| format!("resampler input rejected: {e}"))?;
+            let (_consumed, written) = resampler
+                .process_into_buffer(&adapter, &mut out_buf, Some(&indexing))
+                .map_err(|e| format!("flushing the resampler failed: {e}"))?;
+            written
+        };
 
-        for ch in &mut self.accum {
+        let mut output = Vec::new();
+        let data = out_buf.take_data();
+        remap_channels(&data[..written * src_ch], src_ch, out_ch, &mut output);
+
+        for ch in accum.iter_mut() {
             ch.clear();
         }
-        self.accum_frames = 0;
-        output
+        *accum_frames = 0;
+        Ok(output)
     }
 
     pub fn reset(&mut self) {
@@ -540,30 +579,39 @@ impl AudioPipeline {
             ch.clear();
         }
         self.accum_frames = 0;
-        self.resampler.reset();
-    }
-
-    fn remap_channels(&self, data: &[f32], src_ch: usize, output: &mut Vec<f32>) {
-        let out_ch = self.output_channels;
-        let frames = data.len() / src_ch;
-        output.reserve(frames * out_ch);
-
-        if src_ch == out_ch {
-            output.extend_from_slice(data);
-            return;
-        }
-
-        for f_idx in 0..frames {
-            for ch in 0..out_ch {
-                let sample = if ch < src_ch {
-                    data[f_idx * src_ch + ch]
-                } else if src_ch == 1 {
-                    data[f_idx * src_ch] // mono -> multi: duplicate
-                } else {
-                    0.0 // extra channels: silence
-                };
-                output.push(sample);
-            }
+        if let Some(resampler) = self.resampler.as_mut() {
+            // The sinc history holds up to `sinc_len` frames of pre-seek audio; leaving it
+            // loaded bleeds them into the first output after the seek.
+            resampler.reset();
         }
     }
 }
+
+/// Free function rather than a method: `process` holds a split borrow of the accumulator
+/// and the resampler, which a `&self` receiver would conflict with.
+fn remap_channels(data: &[f32], src_ch: usize, out_ch: usize, output: &mut Vec<f32>) {
+    let frames = data.len() / src_ch;
+    output.reserve(frames * out_ch);
+
+    if src_ch == out_ch {
+        output.extend_from_slice(data);
+        return;
+    }
+
+    for f_idx in 0..frames {
+        for ch in 0..out_ch {
+            let sample = if ch < src_ch {
+                data[f_idx * src_ch + ch]
+            } else if src_ch == 1 {
+                data[f_idx * src_ch] // mono -> multi: duplicate
+            } else {
+                0.0 // extra channels: silence
+            };
+            output.push(sample);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/thread/output.rs"]
+mod tests;
