@@ -20,14 +20,24 @@ use super::http::{is_trusted_server_url, resolve_auth_header};
 /// Build a `MediaInfo` payload from a cloud-queue item. Cloud-queue items
 /// often carry richer data in `display_info` than in `metadata`; we
 /// fill the metadata from display_info whenever the primary field is
-/// missing.
+/// missing. The length also comes from the item's own top-level field,
+/// which window items carry without any `display_info` beside it.
 pub(super) fn queue_item_to_media_info(item: &QueueItem) -> MediaInfo {
     let mut metadata: Option<MediaMetadata> = item
         .metadata
         .as_ref()
         .and_then(|m| serde_json::from_value(m.clone()).ok());
 
-    if let Some(ref di) = item.display_info {
+    // Resolved before the block below rather than inside it. `duration_ms` sits at the item's
+    // own top level and nothing else gates it, but its only reader used to be an `.or()` within
+    // the `display_info` branch; an item carrying a length and no display info lost it.
+    let duration = item
+        .display_info
+        .as_ref()
+        .and_then(|di| di.duration)
+        .or(item.duration_ms);
+
+    if item.display_info.is_some() || duration.is_some() {
         let md = metadata.get_or_insert(MediaMetadata {
             title: None,
             album_title: None,
@@ -35,20 +45,22 @@ pub(super) fn queue_item_to_media_info(item: &QueueItem) -> MediaInfo {
             duration: None,
             images: None,
         });
-        if md.title.is_none() {
-            md.title = di.title.clone();
-        }
-        if md.album_title.is_none() {
-            md.album_title = di.album_title.clone();
-        }
-        if md.artists.is_none() {
-            md.artists = di.artists.clone();
-        }
-        if md.images.is_none() {
-            md.images = di.images.clone();
+        if let Some(ref di) = item.display_info {
+            if md.title.is_none() {
+                md.title = di.title.clone();
+            }
+            if md.album_title.is_none() {
+                md.album_title = di.album_title.clone();
+            }
+            if md.artists.is_none() {
+                md.artists = di.artists.clone();
+            }
+            if md.images.is_none() {
+                md.images = di.images.clone();
+            }
         }
         if md.duration.is_none() {
-            md.duration = di.duration.or(item.duration_ms);
+            md.duration = duration;
         }
     }
 
@@ -255,3 +267,7 @@ fn apply_bts_manifest(manifest_bytes: &[u8], media: &mut MediaInfo) {
         cd["encryptionKey"] = serde_json::Value::String(key_id.to_string());
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/connect/receiver/queue/media.rs"]
+mod tests;
