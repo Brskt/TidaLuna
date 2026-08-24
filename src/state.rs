@@ -79,6 +79,26 @@ fn build_http_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
+/// The clients that stream an encrypted media body, which is the only traffic here with an
+/// unbounded await on a body that a silent server can hold open forever.
+///
+/// A whole-request timeout is the wrong shape: one body is a whole track. `read_timeout` is the
+/// right one. Its clock is created inside `poll_frame` and torn down on every delivered frame,
+/// so the stretch the governor spends not polling between chunks costs no budget at all. It
+/// also bounds the wait for response headers, through a separate one-shot deadline, which is
+/// what ends a server that accepts the connection and then answers nothing.
+///
+/// 15s clears the 8s connect budget above with room for a cold CDN edge's TTFB. Deliberately not
+/// on `base_client_builder`: the plugin egress clients layer on that one, and a plugin's chosen
+/// destination may answer at whatever cadence it likes.
+fn build_media_client() -> reqwest::Client {
+    base_client_builder()
+        .cookie_store(true)
+        .read_timeout(Duration::from_secs(15))
+        .build()
+        .expect("failed to build media HTTP client")
+}
+
 /// Build a native-plugin egress client with a caller-owned cookie jar (for
 /// per-plugin isolation) and a redirect policy (follow vs manual/error).
 pub(crate) fn build_native_client(
@@ -106,7 +126,12 @@ pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_cli
 /// Dedicated HTTP client for playback (initial GET + Range restarts).
 /// Separate from HTTP_CLIENT; playback gets its own TCP connection,
 /// avoiding HTTP/2 bandwidth contention with preload downloads.
-pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
+pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build_media_client);
+
+/// Preload's own client, kept off `HTTP_CLIENT` for the read timeout rather than for contention:
+/// its download loop has the same governor-then-chunk shape as playback's and the same await a
+/// silent server can hold open, while `HTTP_CLIENT` also serves `plugin.fetch`.
+pub static HTTP_CLIENT_PRELOAD: LazyLock<reqwest::Client> = LazyLock::new(build_media_client);
 
 #[derive(Debug)]
 pub struct PreloadedTrack {

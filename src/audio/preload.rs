@@ -1,7 +1,7 @@
 use crate::audio::bandwidth::TrafficClass;
 use crate::audio::decrypt::FlacDecryptor;
 use crate::player::buffer::RamBufferWriter;
-use crate::state::{GOVERNOR, HTTP_CLIENT, PRELOAD_STATE, PreloadedTrack, TrackInfo};
+use crate::state::{GOVERNOR, HTTP_CLIENT_PRELOAD, PRELOAD_STATE, PreloadedTrack, TrackInfo};
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +23,7 @@ async fn fetch_and_decrypt_inner(
     max_bytes: Option<usize>,
 ) -> anyhow::Result<Option<FetchedTrack>> {
     let start = std::time::Instant::now();
-    let resp = HTTP_CLIENT.get(url).send().await?;
+    let resp = HTTP_CLIENT_PRELOAD.get(url).send().await?;
 
     if !resp.status().is_success() {
         anyhow::bail!("Upstream status: {}", resp.status());
@@ -66,7 +66,7 @@ async fn fetch_and_decrypt_inner(
                     let backoff = std::time::Duration::from_millis(250 * reconnect_attempts as u64);
                     tokio::time::sleep(backoff).await;
                     let range_header = format!("bytes={offset}-");
-                    match HTTP_CLIENT
+                    match HTTP_CLIENT_PRELOAD
                         .get(url)
                         .header("Range", &range_header)
                         .send()
