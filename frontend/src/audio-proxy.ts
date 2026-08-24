@@ -8,6 +8,10 @@ let _proxyDuration = 0;
 let _proxyTime = 0;
 let _proxyPlaying = false;
 
+// The src of the stream we were told will not play. Held as the src, not a flag: TIDAL
+// re-assigns the identical manifest after a failure, and only that one stays refused.
+let _failedSrc: string | null = null;
+
 let _selfLoad = false;
 export function setSelfLoad(v: boolean) { _selfLoad = v; }
 export function isSelfLoad() { return _selfLoad; }
@@ -28,6 +32,12 @@ if (srcDesc) {
 				_proxyElement = this;
 				_proxyPlaying = false;
 				_proxyTime = 0;
+
+				// A refused stream keeps its verdict while it is the one assigned: announcing
+				// readiness again puts the transport back into buffering. Another source
+				// gets a fresh verdict.
+				if (value === _failedSrc) return;
+				_failedSrc = null;
 
 				// Emit readiness events for the SDK's saga to continue normally.
 				// Use microtask timing to match real media element behavior.
@@ -110,6 +120,9 @@ for (const [prop, getter] of Object.entries({
 		end: () => _proxyDuration,
 	}),
 	networkState: () => 2, // NETWORK_LOADING (keeps SDK happy)
+	// Null even for a refused stream, deliberately. Shaka reads this property rather than the
+	// event, and turns anything non-null into S3016: the one error code TIDAL answers by
+	// advancing the queue.
 	error: () => null,
 }) as [string, () => any][]) {
 	const origDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, prop);
@@ -160,6 +173,17 @@ export function proxyEnded() {
 	if (!_proxyElement || !((_proxyElement as any)._lunarProxy)) return;
 	_proxyPlaying = false;
 	_proxyElement.dispatchEvent(new Event("ended"));
+}
+
+// Retire the loaded stream: stop announcing it ready, and say nothing else.
+//
+// Withholding the readiness burst is the whole remedy and deliberately the whole scope. Every
+// way of telling TIDAL the element failed was measured, and each one advances the queue;
+// halting playback without moving it is `playbackControls/STOP`, left to the caller.
+export function proxyFail() {
+	if (!_proxyElement || !((_proxyElement as any)._lunarProxy)) return;
+	_failedSrc = (_proxyElement as any)._lunarSrc ?? null;
+	_proxyPlaying = false;
 }
 
 export function proxyReset() {

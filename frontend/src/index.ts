@@ -11,7 +11,7 @@ import { createWindowController } from "./controllers/window";
 import { createTidalConnectController, createRemoteDesktopController, setupConnectEventListeners } from "./connect";
 import { createNativePlayerComponent } from "./controllers/player";
 import { updatePlaybackState } from "./controllers/mediasession";
-import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, isSelfLoad } from "./audio-proxy";
+import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
 import { initWindowControls } from "./ui/window-controls";
 import { invokeIpc, sendIpc, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
@@ -183,6 +183,12 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             bridge.trigger(mapped, event.v, event.seq);
         } else if (PASSTHROUGH_EVENTS.has(type)) {
             bridge.trigger(type, event.v);
+            if (type === "mediaerror") {
+                // Rust has published this since the bridge was written and it stopped at the
+                // SDK delegate, leaving the element it describes unaware. Kept deliberately:
+                // this is how player-side errors reach the client.
+                proxyFail();
+            }
             if (type === "deviceexclusivemodenotallowed") {
                 // Permanent: the device doesn't support exclusive mode. Neither
                 // the native player nor the SDK reverts the store's mode; the

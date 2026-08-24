@@ -1,6 +1,10 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
-import { setSelfLoad } from "../audio-proxy";
+import { proxyFail, setSelfLoad } from "../audio-proxy";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
+
+// `player.parse_dash` failure code for "no decoder here handles this codec", mirroring HTTP
+// 415. Set in `src/ipc/plugin/mod.rs`; every other parse failure answers 400.
+const UNDECODABLE_PROFILE = 415;
 
 export const createPlaybackController = () => {
     let delegate: any = null;
@@ -98,7 +102,53 @@ export const createPlaybackController = () => {
                                         sendIpc("player.load", streamUrl, codec, encKey, false, false, productId);
                                     }
                                 }
-                            } catch (e) { console.error("[luna:playback] playbackInfo/self-load error:", e); }
+                            } catch (e) {
+                                console.error("[luna:playback] playbackInfo/self-load error:", e);
+                                // A rejection is a resumption too, and it reached here by
+                                // skipping the check above. Returning covers the tail as well,
+                                // which would otherwise write this track's identity over the
+                                // current one. The log stays: it names a real failure either way.
+                                if (lastTransitionId !== productId) return;
+                                // 415 is the one failure a listener can act on: no decoder for
+                                // this codec. Rust names it for the console, the banner below
+                                // carries the human sentence. Other failures stay silent as
+                                // before; a network hiccup is not a quality problem.
+                                if ((e as any)?.code === UNDECODABLE_PROFILE) {
+                                    // Deliberately no `player.pause`. Answering "paused" to a
+                                    // TIDAL that just asked to play reads as a failed start,
+                                    // and it advances the queue; measured on two tracks.
+                                    proxyFail();
+                                    // `mediaerror` is the sanctioned channel and this component
+                                    // already speaks it: the SDK listens on us and reads
+                                    // `e.target.errorCode`. It raises `player/ERROR`, winning
+                                    // the one-second race TIDAL arms on every autoplay load.
+                                    // Losing that race writes SET_PLAYBACK_STATE("STALLED"),
+                                    // whose reducer forces the desired state back to PLAYING.
+                                    // The code sits outside TIDAL's three-key map on purpose;
+                                    // a mapped one raises a second banner beside ours.
+                                    (window.NativePlayerComponent as any)?.trigger?.("mediaerror", {
+                                        error: "stream codec not supported by this build",
+                                        errorCode: "tidalunar_undecodable_profile",
+                                    });
+                                    // TIDAL's own pairing for a failure on the current track.
+                                    // STOP is grouped with PAUSE in the reducer, never with
+                                    // SKIP_NEXT; IDLE clears a STALLED without touching intent.
+                                    store.dispatch({ type: "playbackControls/STOP" });
+                                    store.dispatch({
+                                        type: "playbackControls/SET_PLAYBACK_STATE",
+                                        payload: "IDLE",
+                                    });
+                                    store.dispatch({
+                                        type: "message/MESSAGE_ERROR",
+                                        payload: {
+                                            id: Date.now(),
+                                            category: "PLAYBACK",
+                                            severity: "ERROR",
+                                            message: "TidaLunar cannot play music below 320 kbps for the moment. Please change the quality in TIDAL's settings.",
+                                        },
+                                    });
+                                }
+                            }
 
                             const oldCtx = controls.playbackContext ?? {};
                             const ctx = { ...oldCtx, actualProductId: productId, actualAudioQuality: actualQuality ?? oldCtx.actualAudioQuality, actualDuration: item.duration ?? oldCtx.actualDuration ?? 0, actualVideoQuality: null, bitDepth: pbi?.bitDepth ?? oldCtx.bitDepth ?? null, sampleRate: pbi?.sampleRate ?? oldCtx.sampleRate ?? null };
