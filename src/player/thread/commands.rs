@@ -973,6 +973,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             crate::vprintln!("[ASIO]   play: no live stream id; nothing to resume");
                         }
                     }
+                } else {
+                    // Still in ASIO mode with the handle gone: a device switch parked behind the
+                    // driver teardown owns the next one. `is_playing` below is the only record of
+                    // this Play, read back by the parked switch to decide whether to resume. Loud:
+                    // until that reap lands the transport reports Active with nothing feeding it.
+                    crate::verr!("[ASIO]   play: handle released, waiting on the parked switch");
                 }
                 self.is_playing = true;
                 crate::state::GOVERNOR
