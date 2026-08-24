@@ -118,14 +118,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     /// Queue a seek issued while no bypass decoder is live, tagged with the track it
-    /// targets so the upcoming load can tell whether it still applies.
+    /// targets so the upcoming load can tell whether it still applies. Reports whether the
+    /// seek was kept: a dropped one is owed an answer; nothing will make it come true.
     #[cfg(target_os = "windows")]
-    fn queue_user_seek(&mut self, time: f64) {
+    fn queue_user_seek(&mut self, time: f64) -> bool {
         match self.current_track_id.clone() {
-            Some(track_id) => self.user_seek_override = Some((track_id, time)),
+            Some(track_id) => {
+                self.user_seek_override = Some((track_id, time));
+                true
+            }
             // A decode failure drops the track identity before the SDK's recovery reload;
             // with nothing to tag, the seek has no load it could survive to.
-            None => crate::vprintln!("[SEEK]   queued seek dropped: no track to tag it with"),
+            None => {
+                crate::vprintln!("[SEEK]   queued seek dropped: no track to tag it with");
+                false
+            }
         }
     }
 
@@ -1245,8 +1252,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                 } else {
                     // No live decoder yet: queue as a user seek override, which
-                    // supersedes any auto-resume the upcoming load resolves.
-                    self.queue_user_seek(latest_time);
+                    // supersedes any auto-resume the upcoming load resolves. Untagged, the
+                    // queue keeps nothing: the target the UI already took would stand.
+                    if !self.queue_user_seek(latest_time) {
+                        let live = self.last_asio_pos.unwrap_or(0.0);
+                        (self.callback)(PlayerEvent::TimeUpdate(live, self.current_seq));
+                    }
                 }
                 return;
             }
@@ -1289,8 +1300,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                 } else {
                     // No live decoder yet: queue as a user seek override, which
-                    // supersedes any auto-resume the upcoming load resolves.
-                    self.queue_user_seek(latest_time);
+                    // supersedes any auto-resume the upcoming load resolves. Untagged, the
+                    // queue keeps nothing: the target the UI already took would stand.
+                    if !self.queue_user_seek(latest_time) {
+                        let live = self.last_exclusive_pos.unwrap_or(0.0);
+                        (self.callback)(PlayerEvent::TimeUpdate(live, self.current_seq));
+                    }
                 }
                 return;
             }
@@ -1350,8 +1365,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             (self.callback)(PlayerEvent::TimeUpdate(live, self.current_seq));
             crate::vprintln!("[SEEK]   no decoder and no load coming; position restored");
         } else {
+            // The IPC handler flushed the target before dispatching. Staying silent leaves a
+            // position playback never reached on screen until some later load announces one.
+            // The intention still waits; a respawn skipping handle_load reads this slot.
+            let live = self.played_position_secs();
             self.pending_resume_seek = Some(latest_time);
-            crate::vprintln!("[SEEK]   queued until player ready");
+            (self.callback)(PlayerEvent::TimeUpdate(live, self.current_seq));
+            crate::vprintln!("[SEEK]   queued until player ready; position restored");
         }
     }
 

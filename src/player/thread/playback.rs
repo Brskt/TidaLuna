@@ -993,6 +993,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 self.settled_state(),
                                 self.current_seq,
                             ));
+                            // The answer carries its own position, as both bypass backends do.
+                            // The periodic tick below cannot stand in for it: a pause returns
+                            // early there, leaving the target handle_seek announced on screen
+                            // until playback resumes.
+                            (self.callback)(PlayerEvent::TimeUpdate(settled, self.current_seq));
                         } else if refused {
                             // A load-time pre-seek never arms the pin; its answer lands here.
                             // The marker was a bet placed when that seek was sent, and a refusal
