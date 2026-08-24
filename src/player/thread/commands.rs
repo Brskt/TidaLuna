@@ -433,6 +433,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
+    /// Announce a track that is loaded and silent. The bypass backends open their device on
+    /// another thread, which costs seconds on a rate-locked interface; the frontend otherwise
+    /// keeps the `active` it last had and runs its own clock over a stream yet to start.
+    #[cfg(target_os = "windows")]
+    fn announce_loaded(&self) {
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Ready,
+            self.current_seq,
+        ));
+    }
+
     pub(super) fn handle_load(
         &mut self,
         req: LoadRequest,
@@ -574,6 +585,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 "[ASIO] Progressive decode started ({:.0}ms setup)",
                 decode_start.elapsed().as_secs_f64() * 1000.0
             );
+            self.announce_loaded();
             return true;
         }
 
@@ -598,6 +610,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 "[WASAPI] Progressive decode started ({:.0}ms setup)",
                 decode_start.elapsed().as_secs_f64() * 1000.0
             );
+            self.announce_loaded();
             return true;
         }
 
