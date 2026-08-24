@@ -224,6 +224,19 @@ impl RamBuffer {
 
 impl Read for RamBuffer {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Liveness is judged here rather than in the download task, because this is the only
+        // side that knows anyone is HARMED. The writer goes quiet for reasons that are entirely
+        // correct (parked after a partial EOF, or holding back while the governor withholds
+        // playback tokens), and a clock on the writer's own idleness cannot tell those from a
+        // dead server. Counted locally: a starved reader never leaves this call, so the count
+        // is per-wait by construction and a reader that gets even one byte starts over.
+        //
+        // Six cycles, matching the tolerance the product already shipped. The floor it has to
+        // clear is the download's own retry budget: eight reconnects backing off 250ms x attempt
+        // sums to 9s of sleep before the writer gives up and reports the failure itself.
+        const STALL_CYCLES: u32 = 6;
+        let mut starved_cycles: u32 = 0;
+
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         loop {
@@ -334,6 +347,7 @@ impl Read for RamBuffer {
             inner = guard;
             if wait_res.timed_out() {
                 // Waited the full timeout with no progress: genuine starvation.
+                starved_cycles += 1;
                 crate::vprintln3!(
                     "[BUFFER] STARVED: 5s timeout at cursor={cursor_at_park} | base={} buf_end={} finished={} target={:?}",
                     inner.base_offset,
@@ -341,6 +355,21 @@ impl Read for RamBuffer {
                     inner.finished,
                     inner.restart_target,
                 );
+                if starved_cycles >= STALL_CYCLES {
+                    // Only this reader is told. Setting `error` or `cancelled` would outlive the
+                    // stall: three paths in `device.rs` respawn a decoder on this same buffer,
+                    // two of them without consulting `is_reusable()`, so a shared flag would turn
+                    // an ordinary device switch into a dead track. Leaving `Inner` untouched lets
+                    // a later respawn read on normally if the writer was alive after all.
+                    crate::verr!(
+                        "[BUFFER] Starved {}s at cursor={cursor_at_park}, giving up on this read",
+                        starved_cycles * 5
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "no data from the download for 30s",
+                    ));
+                }
             }
         }
     }
