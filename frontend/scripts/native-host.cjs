@@ -103,6 +103,30 @@ var _ObjectDefineProperty = Object.defineProperty;
 var _ObjectCreate = Object.create;
 var _ObjectKeys = Object.keys;
 var _ObjectPrototypeHasOwnProperty = Object.prototype.hasOwnProperty;
+var _ObjectGetPrototypeOf = Object.getPrototypeOf;
+var _ObjectSetPrototypeOf = Object.setPrototypeOf;
+var _ObjectPrototypeRef = Object.prototype;
+
+// Working arrays the host writes into, built with no prototype so a plugin-planted
+// Array.prototype["0"] accessor has nothing to intercept. The order is the whole point:
+// nulling after the writes is too late, the first one already reached the setter. Note
+// this costs the array its inherited methods; callers go through the captured
+// invokers above (a spread would look for a Symbol.iterator that is no longer there).
+function bareArray() {
+    var a = [];
+    _ObjectSetPrototypeOf(a, null);
+    return a;
+}
+
+// For targets whose prototype cannot be dropped, functions above all: defineProperty
+// writes an own property outright where assignment would offer the value to an accessor
+// inherited from the unfrozen Function.prototype. This file has no "use strict":
+// misdirected assignment fails silently and the planted property wins for good.
+function ownProp(target, name, value) {
+    _ObjectDefineProperty(target, name, {
+        value: value, writable: true, enumerable: true, configurable: true,
+    });
+}
 
 // ── Mocked process (filtered env, no exit/kill/binding) ─────────────────
 const ALLOWED_ENV_KEYS = new Set([
@@ -111,7 +135,7 @@ const ALLOWED_ENV_KEYS = new Set([
 ]);
 
 // A snapshot, not a live view: process.env IS globalThis.Bun.env, the same object that
-// hardenBun cannot neuter, so a plugin can plant a key there and every plugin
+// hardenBun cannot neuter. A plugin can plant a key there and every plugin
 // registered afterwards would inherit it. Read here, before any plugin has run.
 const ALLOWED_ENV_SNAPSHOT = (function() {
     var pairs = [];
@@ -125,7 +149,7 @@ const ALLOWED_ENV_SNAPSHOT = (function() {
 // own env, for the same reason the snapshot exists.
 //
 // Null prototype on purpose. A key withheld here has to read as undefined, and
-// restorePrototypes preserves added properties by design, so an inherited entry
+// restorePrototypes preserves added properties by design: an inherited entry
 // would let one plugin plant a value that every other plugin reads as its own.
 function filterEnv(extraEnv) {
     var env = _ObjectCreate(null);
@@ -203,15 +227,32 @@ var hostStdout = process.stdout;
 var hostStderr = process.stderr;
 var hostExit = process.exit.bind(process);
 var hostRequire = require;
+
+// A failed write arrives as an `error` event, not as a throw at the call site. A
+// try/catch around `.write()` never sees it and an unlistened event ends the process.
+// Measured: one broken pipe took the whole child down, and with it every plugin's
+// native support. Nothing respawns it. Both streams need this, not just stdout;
+// stderr is written from the warning paths and from the stdout handler just below, so
+// leaving it bare would kill the process through the very handler meant to save it.
+// Nothing constructive is left to do once a pipe is gone: no line can reach Rust.
+hostStdout.on("error", function() {
+    try { hostStderr.write("[sandbox] stdout write failed\n"); } catch (_) {}
+});
+hostStderr.on("error", function() {});
 // The Object statics live further up, ahead of the env builder that needs them.
 var _JSONStringify = JSON.stringify;
 var _PromiseReject = Promise.reject.bind(Promise);
+// The constructor too, and for a sharper reason than the static: an executor is handed
+// `resolve`/`reject`, and ipcFetch stores that pair in `pendingFetches`, a map shared by
+// every plugin in this process. Resolving `Promise` at call time lets whoever replaced it
+// last receive another plugin's settlement functions.
+var _RealPromise = Promise;
 // Values, not the object: realFs.constants is handed to plugins on the fs facade and
-// is not frozen, so reading S_IFSOCK at decision time would read a plugin's number.
+// is not frozen; reading S_IFSOCK at decision time would read a plugin's number.
 var _S_IFMT = realFs.constants.S_IFMT;
 var _S_IFSOCK = realFs.constants.S_IFSOCK;
 // The access() mode bits fall under that same rule: they pick which gate a probe goes
-// through, so a live read lets a plugin route a write-mode probe into the read gate.
+// through. A live read lets a plugin route a write-mode probe into the read gate.
 var _F_OK = realFs.constants.F_OK;
 var _W_OK = realFs.constants.W_OK;
 var _X_OK = realFs.constants.X_OK;
@@ -244,6 +285,7 @@ var _uncurryThis = Function.prototype.bind.bind(Function.prototype.call);
 var _ArrayPrototypeJoin = _uncurryThis(Array.prototype.join);
 var _ArrayPrototypeForEach = _uncurryThis(Array.prototype.forEach);
 var _ArrayPrototypePush = _uncurryThis(Array.prototype.push);
+var _ArrayPrototypeUnshift = _uncurryThis(Array.prototype.unshift);
 var _ArrayPrototypeSome = _uncurryThis(Array.prototype.some);
 var _ArrayFrom = Array.from;
 var _StringPrototypeSlice = _uncurryThis(String.prototype.slice);
@@ -251,6 +293,8 @@ var _FunctionPrototypeBind = _uncurryThis(Function.prototype.bind);
 var _RealFunction = Function;
 var _ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 var _SetPrototypeHas = _uncurryThis(Set.prototype.has);
+var _SetPrototypeAdd = _uncurryThis(Set.prototype.add);
+var _SetPrototypeDelete = _uncurryThis(Set.prototype.delete);
 var _MapPrototypeGet = _uncurryThis(Map.prototype.get);
 var _ArrayIsArray = Array.isArray;
 // Web types used to faithfully encode request bodies / rebuild responses.
@@ -268,6 +312,175 @@ var _ArrayPrototypeIndexOf = _uncurryThis(Array.prototype.indexOf);
 // Real network fetch, captured before hardening neuters globalThis.fetch. Used
 // ONLY for local data:/blob: URLs - network egress always takes the IPC path below.
 var _RealFetch = typeof fetch === "function" ? fetch : undefined;
+// The listener pair, uncurried: `signal` comes FROM the plugin; freezing EventTarget is
+// only half of it. An own property on the instance still shadows a frozen prototype. These
+// invokers throw on anything that is not a real EventTarget, and both call sites already
+// swallow: a forged signal loses its listener instead of being handed the host's closure.
+var _AddEventListener = typeof EventTarget !== "undefined"
+    ? _uncurryThis(EventTarget.prototype.addEventListener)
+    : undefined;
+var _RemoveEventListener = typeof EventTarget !== "undefined"
+    ? _uncurryThis(EventTarget.prototype.removeEventListener)
+    : undefined;
+
+// Nothing else here guards `EventEmitter`/`Writable`/`Readable`: freezeModuleExports cannot
+// reach them, freezePrimordials only knows globals, restorePrototypes tracks six others, while
+// `events`/`stream` reach every plugin untrusted. Two zero-trust escapes came through that gap:
+// a forged IPC `call` into another plugin's module via the shared readline's `emit`, and the raw
+// fs WriteStream with its `Symbol(kFs)` handed back through `on`/`once`.
+//
+// Pinned rather than frozen or captured, both measured. `Object.freeze` breaks every
+// construction, this host's own readline included: EventEmitter's constructor shadows an
+// inherited default by plain assignment (`this[kCapture] = ...`). Capturing misses the other
+// side: Bun's Writable constructor calls `this.once(Symbol(kConstruct))` inside
+// createWriteStream. A plugin's assignment then fails silently, as everywhere in this file.
+function pinMethod(proto, name) {
+    var d = _ObjectGetOwnPropertyDescriptor(proto, name);
+    if (!d || !("value" in d)) return;
+    _ObjectDefineProperty(proto, name, {
+        value: d.value, writable: false, configurable: false, enumerable: d.enumerable,
+    });
+}
+;(function pinStreamMethods() {
+    var EE = require("events").EventEmitter;
+    var Writable = require("stream").Writable;
+    var Readable = require("stream").Readable;
+    pinMethod(EE.prototype, "on");
+    pinMethod(EE.prototype, "once");
+    pinMethod(EE.prototype, "addListener");
+    pinMethod(EE.prototype, "emit");
+    pinMethod(EE.prototype, "removeListener");
+    pinMethod(EE.prototype, "listenerCount");
+    pinMethod(Writable.prototype, "write");
+    pinMethod(Writable.prototype, "end");
+    pinMethod(Writable.prototype, "destroy");
+    pinMethod(Writable.prototype, "cork");
+    pinMethod(Writable.prototype, "uncork");
+    pinMethod(Writable.prototype, "setDefaultEncoding");
+    pinMethod(Readable.prototype, "push");
+    pinMethod(Readable.prototype, "read");
+    pinMethod(Readable.prototype, "isPaused");
+})();
+
+// Every line this process writes to Rust is built on a null prototype: JSON.stringify finds
+// no INHERITED toJSON to call. Object.prototype is left unfrozen for npm compat,
+// restorePrototypes preserves additions, and toJSON has no default to shadow: adding it IS
+// the attack, replacing the whole payload of every message afterwards. Pinning it there is
+// no answer either; measured, a non-writable inherited data property makes the ordinary
+// `obj.toJSON = fn` idiom throw. Only plain objects and arrays are rebuilt: anything else
+// keeps its prototype; a plugin class still gets its own toJSON honoured, and those
+// prototypes are either frozen here or the plugin's own business. Cycles become null through
+// the tracked ancestors; a depth cap would not do, it would EXPAND a cycle by the branching
+// factor rather than cut it. Shared non-ancestor references serialize twice, as they did before.
+//
+// Two trackers, because scanning `path` costs one comparison per ancestor: a chain nested D
+// deep pays O(D^2), and a plugin picks D. Measured at 20 000 deep, one return value held the
+// single Bun process every plugin shares for 205 ms. Past INERT_SCAN_DEPTH the ancestors move
+// into a Set and membership stops tracking depth.
+//
+// `seen` is a parameter, never per-call state: a frame is in Set mode only if its caller
+// handed it one. The Set then lives as long as the subtree that crossed the threshold, while
+// a sibling that never goes deep starts over on the array at no cost. A frame that MINTED the
+// Set still has `seen === null` itself, and pops the array on the way out because its own
+// entry went there. Re-entrancy is what rules per-call state out: a plugin getter read during
+// the walk can reach sendCancel through its own AbortController, letting a second ipcLine
+// start and finish inside this one, which would clear a shared tracker's ancestors underneath
+// it. Order is load-bearing at the mint too: the push precedes the threshold test, and the
+// seed loop reads a `path` that already holds the node being entered.
+var INERT_SCAN_DEPTH = 32;
+
+function inertValue(value, path, seen) {
+    if (value === null || typeof value !== "object") return value;
+    if (seen !== null) {
+        if (_SetPrototypeHas(seen, value)) return null;
+    } else {
+        for (var k = 0; k < path.length; k++) if (path[k] === value) return null;
+    }
+    var isArray = _ArrayIsArray(value);
+    if (!isArray) {
+        var proto = _ObjectGetPrototypeOf(value);
+        if (proto !== _ObjectPrototypeRef && proto !== null) return value;
+    }
+    var childSeen = seen;
+    if (seen !== null) {
+        _SetPrototypeAdd(seen, value);
+    } else {
+        path[path.length] = value;
+        if (path.length > INERT_SCAN_DEPTH) {
+            childSeen = new Set();
+            for (var si = 0; si < path.length; si++) _SetPrototypeAdd(childSeen, path[si]);
+        }
+    }
+    var out;
+    if (isArray) {
+        // Still an array to Array.isArray and to JSON's array branch (neither consults the
+        // prototype chain), so the wire format is unchanged.
+        out = bareArray();
+        for (var i = 0; i < value.length; i++) out[i] = inertValue(value[i], path, childSeen);
+    } else {
+        out = _ObjectCreate(null);
+        var keys = _ObjectKeys(value);
+        for (var j = 0; j < keys.length; j++) {
+            out[keys[j]] = inertValue(value[keys[j]], path, childSeen);
+        }
+    }
+    if (seen !== null) _SetPrototypeDelete(seen, value);
+    else path.length = path.length - 1;
+    return out;
+}
+
+// The same hazard as above, applied at every depth rather than only the top level: the trap
+// is handed `this`; a planted Array.prototype.toJSON both READ and replaced whichever slot
+// it got (another plugin's request headers, its exported names, anything it returned). Adding
+// it to _protoTracked does not help either; that snapshot only stores properties that already
+// exist, and this one does not.
+function ipcLine(fields) {
+    // The ancestor stack is bare too: it is written by index; a planted accessor there
+    // both read every node on its way past and kept `length` at 0, which made the pop
+    // underflow and threw RangeError out of every line this process tried to send.
+    return _JSONStringify(inertValue(fields, bareArray(), null)) + "\n";
+}
+
+// A plugin picks what it returns and what it throws: it picks what `ipcLine` has to
+// serialize, and the space of values that break serialization has no useful bound: a
+// BigInt, a Proxy whose ownKeys trap throws, an own toJSON (which the null-prototype
+// rebuild does NOT remove, only an inherited one), thirty thousand levels of nesting.
+// Rather than chase that space, the response is made total: this line answers when the
+// faithful one cannot. A caller always gets an answer and the process never dies for
+// want of one. Every operation here is deliberately primitive-only: JSON.stringify on a
+// string or a number never consults a prototype, where on an object it would.
+var MAX_ERROR_LEN = 4096;
+
+function fallbackLine(id, label) {
+    var idJson = (typeof id === "string" || typeof id === "number") ? _JSONStringify(id) : "null";
+    return "{\"id\":" + idJson + ",\"error\":" + _JSONStringify(label) + "}\n";
+}
+
+// Reads the DESCRIPTOR, never the property: an accessor has no `value`; a poisoned
+// getter is not merely caught here, it is never invoked. `String(e)` is gone rather than
+// guarded. On an object it runs the plugin's own Symbol.toPrimitive. The one step
+// left that can throw is the descriptor read itself against a hostile Proxy trap, and
+// that is what the try covers (not the design, one named gap in it).
+function safeErrorString(e) {
+    try {
+        if (typeof e === "string")
+            return e.length > MAX_ERROR_LEN ? _StringPrototypeSlice(e, 0, MAX_ERROR_LEN) : e;
+        if (typeof e === "number" || typeof e === "boolean") return String(e);
+        if (e === null || typeof e !== "object") return "[sandbox] non-string error";
+        var msg = "";
+        var stack = "";
+        var msgDesc = _ObjectGetOwnPropertyDescriptor(e, "message");
+        if (msgDesc && typeof msgDesc.value === "string") msg = msgDesc.value;
+        var stackDesc = _ObjectGetOwnPropertyDescriptor(e, "stack");
+        if (stackDesc && typeof stackDesc.value === "string") stack = stackDesc.value;
+        if (!msg && !stack) return "[sandbox] non-string error";
+        var combined = stack ? msg + "\n" + stack : msg;
+        return combined.length > MAX_ERROR_LEN
+            ? _StringPrototypeSlice(combined, 0, MAX_ERROR_LEN) : combined;
+    } catch (_) {
+        return "[sandbox] error normalization failed";
+    }
+}
 
 // ── worker_threads shim (fail-closed allowlist, no Worker) ────────────
 // Exposes only communication/utility APIs. Worker constructor is blocked
@@ -389,16 +602,18 @@ function makeModuleStub() {
     var FakeModule = function Module() {
         throw new Error("[sandbox] module.Module is not available");
     };
+    // `prototype` is the one name a function already owns (it takes an assignment); the
+    // rest are new names on an object whose prototype every plugin can reach.
     FakeModule.prototype = {};
-    FakeModule.builtinModules = _ObjectFreeze([]);
-    FakeModule._cache = {};
-    FakeModule._extensions = {};
-    FakeModule.createRequire = function() {
+    ownProp(FakeModule, "builtinModules", _ObjectFreeze([]));
+    ownProp(FakeModule, "_cache", {});
+    ownProp(FakeModule, "_extensions", {});
+    ownProp(FakeModule, "createRequire", function() {
         var msg = "[sandbox] module.createRequire is not available";
         try { hostStderr.write(msg + "\n"); } catch (_) {}
         throw new Error(msg);
-    };
-    FakeModule.syncBuiltinESMExports = function() {};
+    });
+    ownProp(FakeModule, "syncBuiltinESMExports", function() {});
     return FakeModule;
 }
 
@@ -431,7 +646,9 @@ function warnInertStub(pluginName, canonical) {
     var realProcess = process;
     var blockedKeys = new Set([
         "exit", "abort", "kill",
-        "stdin", "stdout", "stderr",
+        // stdout and stderr are answered with the inert stub below rather than listed here:
+        // the engine's own stream code reads them (a throw denied more than it protected).
+        "stdin",
         "mainModule", "getBuiltinModule",
         "execPath", "execArgv",
         "dlopen", "chdir",
@@ -453,6 +670,15 @@ function warnInertStub(pluginName, canonical) {
                 throw new Error("[sandbox] process." + prop + " is not available");
             if (prop === "env") return filteredEnv;
             if (prop === "binding") return safeBinding;
+            // Bun's own Readable.prototype.pipe compares its destination against
+            // process.stdout to decide whether to end it. Throwing here made
+            // `readable.pipe(dest)` fail for every plugin on every destination. The stub
+            // answers that comparison while being nobody's stdout: it must stay mockedStdio;
+            // `target.stdout` is the live fd 1 carrying host replies, and handing it over is
+            // the IPC forgery this whole block exists to prevent. Same object the plugin's own
+            // shadowed `process` already exposes (this widens nothing).
+            if (prop === "stdout") return mockedStdio.stdout;
+            if (prop === "stderr") return mockedStdio.stderr;
             var val = target[prop];
             return typeof val === "function" ? _FunctionPrototypeBind(val, target) : val;
         },
@@ -507,6 +733,14 @@ function warnInertStub(pluginName, canonical) {
 // ── Proxied require factory ─────────────────────────────────────────────
 function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, pluginProcess) {
     var moduleStub = null; // lazy, per plugin - see makeModuleStub
+    // Asks the set, not the object. `trustedModules.has(id)` answers with whatever method
+    // the object in hand carries, and this gate decides whether a plugin is handed the real
+    // `net`/`http`/`fs`; `reachesLocalEndpoint` already reads it this way, and the gap
+    // between the two forms is what let a rebound global answer for the store.
+    function isTrusted(id, canonical) {
+        return _SetPrototypeHas(trustedModules, id)
+            || _SetPrototypeHas(trustedModules, canonical);
+    }
     return function proxiedRequire(id) {
         // Virtual module: plugin data directory
         if (id === "@luna/native-data" || id === "node:@luna/native-data")
@@ -544,23 +778,24 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, plug
             if (canonical === "worker_threads") {
                 if (!shimmedWorkerThreads)
                     throw new Error("[sandbox] worker_threads is not available in this environment");
-                if (trustedModules.has(id) || trustedModules.has(canonical))
+                if (isTrusted(id, canonical))
                     return shimmedWorkerThreads;
                 throw new Error("TRUST_REQUIRED:" + canonical);
             }
             // fs/fs-promises: return sandboxed facade instead of real module
             if (canonical === "fs" && sandboxedFs) {
-                if (trustedModules.has(id) || trustedModules.has(canonical))
+                if (isTrusted(id, canonical))
                     return sandboxedFs;
                 throw new Error("TRUST_REQUIRED:" + canonical);
             }
             if (canonical === "fs/promises" && sandboxedFs) {
-                if (trustedModules.has("fs") || trustedModules.has("fs/promises")
-                    || trustedModules.has(id) || trustedModules.has(canonical))
+                if (_SetPrototypeHas(trustedModules, "fs")
+                    || _SetPrototypeHas(trustedModules, "fs/promises")
+                    || isTrusted(id, canonical))
                     return sandboxedFs.promises;
                 throw new Error("TRUST_REQUIRED:fs");
             }
-            if (trustedModules.has(id) || trustedModules.has(canonical)) {
+            if (isTrusted(id, canonical)) {
                 return require(id);
             }
             throw new Error("TRUST_REQUIRED:" + canonical);
@@ -626,7 +861,12 @@ function containsDynamicImport(code) {
             if (typeof arguments[i] === "string" && containsDynamicImport(arguments[i]))
                 throw new Error("[sandbox] Function blocked: dynamic import() is not allowed");
         }
-        return RealFunction.apply(this, arguments);
+        // Reflect.apply, not RealFunction.apply: the latter reads `apply` off a
+        // Function.prototype this file deliberately leaves unfrozen, and a poisoned one
+        // receives `this === RealFunction`, the real unwrapped constructor, handed to the
+        // plugin after the scan above already ran. Reflect is frozen and name-pinned, and
+        // its apply invokes [[Call]] directly instead of reading a property off the target.
+        return Reflect.apply(RealFunction, this, arguments);
     };
     SafeFunction.prototype = RealFunction.prototype;
     // Keep writable: bundled strict-mode libs do `fn.constructor = fn` (UTIF in node-vibrant),
@@ -718,20 +958,49 @@ function containsDynamicImport(code) {
 // Prevents prototype pollution that could influence host logic.
 // Split: full-freeze safe constructors, prototype-only for risky ones.
 ;(function freezePrimordials() {
-    // Safe to fully freeze (no lazy mutation by stdlib after pre-load)
+    // Safe to fully freeze (no lazy mutation by stdlib after pre-load). Held as NAMES, not
+    // values, because one list has to drive two operations that must never disagree: what
+    // gets frozen, and what gets pinned to its name. The web tier at the end arrived with
+    // the fetch path: the body encoder reads members off those while one plugin's request
+    // is built from a value another plugin supplied, including the Blob name/type getters
+    // that land inside a multipart header.
     var fullFreeze = [
-        URL, Map, Set, WeakMap, WeakSet, RegExp, Date,
-        JSON, Math, Reflect,
-        Int8Array, Uint8Array, Int16Array, Uint16Array,
-        Int32Array, Uint32Array, Float32Array, Float64Array,
-        BigInt64Array, BigUint64Array, Symbol,
+        "URL", "Map", "Set", "WeakMap", "WeakSet", "RegExp", "Date",
+        "JSON", "Math", "Reflect",
+        "Int8Array", "Uint8Array", "Int16Array", "Uint16Array",
+        "Int32Array", "Uint32Array", "Float32Array", "Float64Array",
+        "BigInt64Array", "BigUint64Array", "Symbol",
+        "Request", "Headers", "Response", "FormData", "Blob", "URLSearchParams",
+        // The views above were listed, their backing buffer was not: ArrayBuffer carries no
+        // own Symbol.hasInstance. One was freely definable, and such a trap receives the
+        // object under test: a read channel on another plugin's request body while it
+        // answers true and nothing looks wrong. And Buffer: freezing the `buffer` module's
+        // exports is shallow. Buffer.from and Buffer.prototype.toString stayed writable
+        // while every body encode reads them. Freezing Uint8Array does not cover either:
+        // both are Buffer's OWN properties, not inherited.
+        "ArrayBuffer", "Buffer",
+        // The abort tier. A fetch hands its own `onAbort` closure to
+        // signal.addEventListener, and that closure already carries the reqId; whoever
+        // intercepts the registration can settle and cancel a request belonging to someone
+        // else. Freezing closes the shared-prototype half; the instance half needs the
+        // captured invokers above, because the signal itself comes from the plugin.
+        "EventTarget", "AbortSignal", "AbortController",
     ];
-    if (typeof Request !== "undefined") fullFreeze.push(Request);
-    if (typeof Headers !== "undefined") fullFreeze.push(Headers);
-    if (typeof Response !== "undefined") fullFreeze.push(Response);
-    _ArrayPrototypeForEach(fullFreeze, function(obj) {
+    _ArrayPrototypeForEach(fullFreeze, function(name) {
+        var obj = globalThis[name];
+        if (obj === undefined || obj === null) return;
         try { _ObjectFreeze(obj); } catch (_) {}
         try { if (obj.prototype) _ObjectFreeze(obj.prototype); } catch (_) {}
+        // Pinning the NAME is the other half, and it is the half that was missing. Freezing
+        // the object stops its own properties from moving; nothing stopped
+        // `globalThis.Set = class extends Set { has() { return true; } }`, after which host
+        // code doing `new Set()` builds a store the plugin controls, which is how a trust
+        // set and an fs grant store came to answer a plugin's questions with its own answers.
+        try {
+            _ObjectDefineProperty(globalThis, name, {
+                value: obj, writable: false, configurable: false,
+            });
+        } catch (_) {}
     });
 
     // Built-in prototypes (Object, Array, Function, String, Promise, Error, etc.)
@@ -739,6 +1008,28 @@ function containsDynamicImport(code) {
     // property names (e.g. node-inspect-extracted), which throws in strict mode
     // when the prototype is frozen. The shared-module mutation vector is covered
     // by freezeSafeModuleExports() below instead.
+
+    // Those same six still get their NAME pinned, which is a different question from the
+    // one the note above answers. Freezing a prototype and rebinding a global are separate
+    // powers, and only the first carries the npm cost: pinning stops
+    // `globalThis.String = f` and nothing else. `String.prototype.x = y` and
+    // `String.raw = f` both still work, measured.
+    // Not cosmetic. `String(...)` runs at six decision-time sites and `new Error(...)` at
+    // thirty (every gate in this file) with no captured fallback. A rebound String let
+    // one plugin rewrite the URL of another's fetch, carrying its Authorization header and
+    // its cookie jar to a host of the attacker's choosing.
+    // `Function` is absent because hardenFunction already pinned it, to SafeFunction.
+    // Known cost, measured and accepted: zone.js assigns `globalThis.Promise`
+    // unconditionally and would now throw. It is Angular tooling and nothing on this path
+    // bundles it. A plugin writing the legacy `global.Promise = require('bluebird')` line
+    // fails the same way: silently while sloppy, loudly under "use strict".
+    _ArrayPrototypeForEach(["Object", "Array", "String", "Promise", "Error"], function(name) {
+        try {
+            _ObjectDefineProperty(globalThis, name, {
+                value: globalThis[name], writable: false, configurable: false,
+            });
+        } catch (_) {}
+    });
 })();
 
 // ── Freeze module exports (safe + blocked) ────────────────────────────
@@ -750,7 +1041,14 @@ function containsDynamicImport(code) {
         set.forEach(function(id) {
             try {
                 var mod = hostRequire(id);
-                if (mod && typeof mod === "object") _ObjectFreeze(mod);
+                // Functions too: Bun exports `events`, `stream`, `assert` and `assert/strict`
+                // as callables, and testing only for "object" skipped all four in silence.
+                // Freezing the module object leaves its `.prototype` writable, which is why
+                // the stream/emitter methods are pinned by name above; this half only stops
+                // `mod.Foo = evil`.
+                if (mod && (typeof mod === "object" || typeof mod === "function")) {
+                    _ObjectFreeze(mod);
+                }
             } catch (_) {}
         });
     }
@@ -765,16 +1063,34 @@ var pendingFetches = new Map();
 var nextFetchId = 1;
 var FETCH_GUARD_MS = 60000;
 
+// The read-side twin of `ownProp`, against the same hazard from the other direction.
+// Anything a plugin hands in inherits whatever another plugin left on Object.prototype or
+// Array.prototype, both deliberately unfrozen for npm compat, and the ordinary idioms
+// `if (opts.method)` and `if (h[i])` make the presence test and the read the SAME
+// operation (the inherited value is already in hand before anything could reject it).
+// A hole in an array reads through exactly the same way an absent key does.
+// Never `hasOwnProperty.call`: that reads `.call` off the unfrozen Function.prototype at
+// decision time, which is the hazard rather than the guard.
+function ownRead(obj, name) {
+    return _ObjectGetOwnPropertyDescriptor(obj, name) === undefined ? undefined : obj[name];
+}
+
 function normalizeHeaders(h) {
     // Ordered [name, value] pairs: preserves duplicate header names and avoids the
     // __proto__ hazard of a plain object. Headers tested first (a Map's forEach differs).
-    var out = [];
+    var out = bareArray();
     if (!h) return out;
     if (_RealHeaders && h instanceof _RealHeaders) {
         h.forEach(function(v, k) { _ArrayPrototypePush(out, [k, String(v)]); });
     } else if (_ArrayIsArray(h)) {
         for (var i = 0; i < h.length; i++) {
-            if (h[i]) _ArrayPrototypePush(out, [String(h[i][0]), String(h[i][1])]);
+            // The pair itself can be sparse too: both levels are read as own or not
+            // at all; a forged pair reaches the wire otherwise.
+            var pair = ownRead(h, i);
+            if (!pair) continue;
+            var pName = ownRead(pair, 0);
+            var pValue = ownRead(pair, 1);
+            _ArrayPrototypePush(out, [String(pName), String(pValue)]);
         }
     } else if (typeof h === "object") {
         var keys = _ObjectKeys(h);
@@ -794,9 +1110,9 @@ function headersHave(pairs, lowerName) {
 
 // Serialize a FormData to a multipart/form-data Buffer with the given boundary.
 async function formDataToBuffer(fd, boundary) {
-    var entries = [];
+    var entries = bareArray();
     fd.forEach(function(value, key) { _ArrayPrototypePush(entries, [key, value]); });
-    var chunks = [];
+    var chunks = bareArray();
     for (var i = 0; i < entries.length; i++) {
         var key = entries[i][0], value = entries[i][1];
         var head = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + key + "\"";
@@ -870,7 +1186,7 @@ function settle(reqId) {
     pendingFetches.delete(reqId);
     _clearTimeout(entry.timer);
     if (entry.signal && entry.onAbort) {
-        try { entry.signal.removeEventListener("abort", entry.onAbort); } catch (_) {}
+        try { _RemoveEventListener(entry.signal, "abort", entry.onAbort); } catch (_) {}
     }
     return entry;
 }
@@ -879,7 +1195,7 @@ function settle(reqId) {
 // it stops doing network work nobody awaits.
 function sendCancel(reqId) {
     try {
-        hostStdout.write(_JSONStringify({ type: "net.fetch.cancel", reqId: reqId }) + "\n");
+        hostStdout.write(ipcLine({ type: "net.fetch.cancel", reqId: reqId }));
     } catch (_) {}
 }
 
@@ -897,19 +1213,30 @@ function makeIpcFetch(pluginName) {
             if (!(init && init.body != null) && input.body != null) {
                 try { body = await input.clone().arrayBuffer(); } catch (_) {}
             }
-        } else if (input && typeof input === "object" && typeof input.url === "string") {
-            url = input.url;
-            if (input.method) method = input.method;
-            if (input.headers) headers = normalizeHeaders(input.headers);
+        } else if (input && typeof input === "object" && typeof ownRead(input, "url") === "string") {
+            // Every field here is read as own or not at all. A plain `{url}` object carries
+            // none of the others in its own right; the plain reads walked to
+            // Object.prototype, and one plugin setting `Object.prototype.method` there
+            // rewrote the outbound request of every OTHER plugin, with no trust of any kind.
+            url = ownRead(input, "url");
+            var inMethod = ownRead(input, "method");
+            if (inMethod) method = inMethod;
+            var inHeaders = ownRead(input, "headers");
+            if (inHeaders) headers = normalizeHeaders(inHeaders);
         } else {
             url = String(input);
         }
         if (init) {
-            if (init.method) method = init.method;
-            if (init.headers) headers = normalizeHeaders(init.headers);
-            if (init.body != null) body = init.body;
-            if (init.redirect) redirect = init.redirect;
-            if (init.signal !== undefined) signal = init.signal;
+            var itMethod = ownRead(init, "method");
+            if (itMethod) method = itMethod;
+            var itHeaders = ownRead(init, "headers");
+            if (itHeaders) headers = normalizeHeaders(itHeaders);
+            var itBody = ownRead(init, "body");
+            if (itBody != null) body = itBody;
+            var itRedirect = ownRead(init, "redirect");
+            if (itRedirect) redirect = itRedirect;
+            var itSignal = ownRead(init, "signal");
+            if (itSignal !== undefined) signal = itSignal;
         }
 
         // Local schemes resolve in-process (no egress, no IPC, no trust concern).
@@ -926,7 +1253,7 @@ function makeIpcFetch(pluginName) {
             _ArrayPrototypePush(headers, ["content-type", enc.contentType]);
         }
 
-        return await new Promise(function(resolve, reject) {
+        return await new _RealPromise(function(resolve, reject) {
             var reqId = nextFetchId++;
             var timer = _setTimeout(function() {
                 var e = settle(reqId);
@@ -943,17 +1270,17 @@ function makeIpcFetch(pluginName) {
                     sendCancel(reqId);
                     e.reject(makeAbortError());
                 };
-                try { signal.addEventListener("abort", onAbort); } catch (_) {}
+                try { _AddEventListener(signal, "abort", onAbort); } catch (_) {}
             }
             pendingFetches.set(reqId, {
                 resolve: resolve, reject: reject, timer: timer, signal: signal, onAbort: onAbort,
             });
             try {
-                hostStdout.write(_JSONStringify({
+                hostStdout.write(ipcLine({
                     type: "net.fetch", reqId: reqId, plugin: pluginName,
                     url: url, method: method, headers: headers, body: enc.b64,
                     redirect: redirect || "follow",
-                }) + "\n");
+                }));
             } catch (e) {
                 var en = settle(reqId);
                 if (en) en.reject(new _RealTypeError("[sandbox] fetch transport failed"));
@@ -966,7 +1293,13 @@ function handleFetchResult(cmd) {
     var entry = settle(cmd.reqId);
     if (!entry) return;
     if (!cmd.ok) {
-        entry.reject(new _RealTypeError(cmd.error || "fetch failed"));
+        // The dispatcher calls this one BEFORE entering its try: a throw here has no
+        // handler anywhere. `new TypeError(x)` coerces x, and coercing a nested array runs
+        // Array.prototype.toString down its whole depth: measured, that overflows the
+        // stack and ends the process. Rust only sends a string here today; accepting only
+        // a string is what keeps that from being load-bearing.
+        var why = typeof cmd.error === "string" ? cmd.error : "fetch failed";
+        entry.reject(new _RealTypeError(why));
         return;
     }
     try {
@@ -1084,7 +1417,7 @@ function hashCode(code) {
 // inside the sandbox, and for the IPC dirs of a plugin trusted to open an endpoint.
 
 // Lexical only: URL/type/UNC handling and `..` collapse, without following symlinks.
-// `..` is still resolved away, so containment cannot be escaped, but a symlink keeps
+// `..` is still resolved away; containment cannot be escaped, but a symlink keeps
 // its own path - which is what lets a bridged endpoint under a disclosed dir be seen.
 function lexicalFsPath(p) {
     if (p instanceof URL
@@ -1125,17 +1458,30 @@ function canonicalizeLeafPath(p) {
 }
 
 function resolveFromExistingAncestor(resolved) {
-    var parts = [];
+    var parts = bareArray();
     var current = resolved;
     while (true) {
+        var real;
+        // Only a realpathSync throw means "this ancestor does not exist yet". The join used
+        // to share this catch. Anything it threw promoted an existing ancestor to a
+        // missing one, the walk ran on to the root, and the fallthrough handed the gate the
+        // caller's raw lexical path with its symlinks unresolved, authorizing a write
+        // outside the dataDir that isInDirs then read as contained.
         try {
-            return pathMod.join(realFs.realpathSync(current), ...parts);
+            real = realFs.realpathSync(current);
         } catch (_) {
-            parts.unshift(pathMod.basename(current));
+            _ArrayPrototypeUnshift(parts, pathMod.basename(current));
             var parent = pathMod.dirname(current);
             if (parent === current) break;
             current = parent;
+            continue;
         }
+        var args = bareArray();
+        args[0] = real;
+        for (var i = 0; i < parts.length; i++) args[i + 1] = parts[i];
+        // Reflect.apply reads length and indices where a spread would want an iterator,
+        // the same reason the call handler below avoids one.
+        return Reflect.apply(pathMod.join, pathMod, args);
     }
     return resolved;
 }
@@ -1153,14 +1499,14 @@ function isInDirs(real, dirs) {
 // Separate from assertRead because the probes below need the verdict, not a throw.
 function isReadable(real, dataDirs, grants) {
     if (isInDirs(real, dataDirs)) return true;
-    if (grants.readFiles.has(real)) return true;
-    if (grants.writeFiles.has(real)) return true;
+    if (_SetPrototypeHas(grants.readFiles, real)) return true;
+    if (_SetPrototypeHas(grants.writeFiles, real)) return true;
     return isInDirs(real, _ArrayFrom(grants.dirs));
 }
 
 // Every gate below returns the path it authorized, and its caller operates on that one.
 // Handing back nothing left each facade method to re-derive a target from the argument,
-// which is a second path: canonicalization is not the identity, so the two disagree
+// which is a second path: canonicalization is not the identity. The two disagree
 // wherever a symlink or a forged resolution stands between them, and the check then
 // answers about one file while the operation touches another.
 function assertRead(p, dataDirs, grants) {
@@ -1173,7 +1519,7 @@ function assertRead(p, dataDirs, grants) {
 function assertWrite(p, dataDirs, grants) {
     var real = canonicalizeFsPath(p);
     if (isInDirs(real, dataDirs)) return real;
-    if (grants.writeFiles.has(real)) return real;
+    if (_SetPrototypeHas(grants.writeFiles, real)) return real;
     if (isInDirs(real, _ArrayFrom(grants.dirs))) return real;
     throw new Error("[sandbox] fs write denied: " + p);
 }
@@ -1191,19 +1537,219 @@ function assertMkdir(p, dataDirs, grants) {
     throw new Error("[sandbox] fs mkdir denied: " + p);
 }
 
-function rejectUnsafeOpts(opts) {
-    if (opts && typeof opts === 'object') {
-        if ('fd' in opts) throw new Error("[sandbox] options.fd not allowed");
-        if ('fs' in opts) throw new Error("[sandbox] options.fs not allowed");
+// The write-stream surface Node documents, minus the two that are capabilities rather than
+// settings. `fd` makes Node ignore the path entirely, and `fs` hands it functions to call.
+var WRITE_STREAM_OPTS = [
+    "flags", "encoding", "mode", "autoClose", "emitClose", "start", "highWaterMark",
+    "signal", "flush",
+];
+
+// Every name the WriteStream/Writable/WritableState/EventEmitter constructors read BY NAME,
+// measured by reading those constructors on Bun and on Node, not the names a caller may pass.
+var ENGINE_STREAM_OPT_NAMES = [
+    "fd", "fs", "flags", "mode", "start", "flush", "encoding", "autoClose",
+    "objectMode", "highWaterMark", "emitClose", "defaultEncoding", "autoDestroy",
+    "destroy", "final", "construct", "write", "writev", "signal",
+    "captureRejections", "decodeStrings", "path",
+];
+
+// Returns the options it authorized, and the caller opens with THOSE, the same rule the path
+// gates above follow. Refusing was not enough: `'fd' in opts` is a [[HasProperty]] check while
+// Node finds the option by enumeration; a Proxy whose `has` trap lied and whose ownKeys told
+// the truth passed the gate and still supplied a descriptor. Naming only the keys we allow
+// makes that smuggle inexpressible.
+//
+// Sanitizing what we hand over is half the job: the engine re-copies our keys onto a plain
+// object of ITS OWN (`copyObject`) and reads the options off that, where any name absent from
+// ours resolves up to whatever a plugin left on Object.prototype: measured, a handed-over
+// `fd`, an `fs` taking every write, a `construct` that hangs the process. Every name is
+// therefore set OWN, `undefined` where nothing authorized it; both runtimes read that as absent.
+//
+// No shape leaves unsaturated. `undefined`, `null` and the bare string are the shapes plugins
+// actually use, and passing one through untouched let the engine build the object itself.
+function authorizedWriteStreamOpts(opts) {
+    var bareEncoding = typeof opts === "string" ? opts : undefined;
+    var carried = opts !== null && opts !== undefined && typeof opts === "object";
+    // No prototype on `out`: an inherited setter would take the assignment below, and no own
+    // property would land to shadow the engine's read.
+    var out = _ObjectCreate(null);
+    _ArrayPrototypeForEach(ENGINE_STREAM_OPT_NAMES, function(key) {
+        if (key === "encoding" && bareEncoding !== undefined) {
+            out[key] = bareEncoding;
+        } else if (carried && _ArrayPrototypeIndexOf(WRITE_STREAM_OPTS, key) !== -1) {
+            // A plugin `get` trap fires here, once, and it is this copy the engine receives.
+            out[key] = opts[key];
+        } else {
+            out[key] = undefined;
+        }
+    });
+    return out;
+}
+
+// The outcome test: it catches an `fd` that reached the engine anyway, and reads an OWN
+// descriptor because a plain read of `stream.path` answers from an inherited getter just as
+// happily. A refused stream is left open rather than destroyed: closing it would rest on the
+// autoClose default for an fd-bound stream, and being wrong there shuts our own pipe.
+function openAuthorizedWriteStream(real, opts) {
+    var stream = realFs.createWriteStream(real, authorizedWriteStreamOpts(opts));
+    if (_ObjectGetOwnPropertyDescriptor(stream, "path") && stream.path === real) return stream;
+    throw new Error("[sandbox] fs write stream did not open on the authorized path: " + real);
+}
+
+// Bun's Writable constructor seeds its handler store with exactly these names: subscribing
+// to one of them finds an own property and never reads through to Object.prototype. Measured:
+// `_events` owns close/error/prefinish/finish/drain on a fresh stream, and subscribing to any
+// name it does NOT own makes the engine's own `handlers.push` fail against whatever a plugin
+// left on the prototype. Subscribing to only these at construction is what keeps one poisoned
+// name from denying every write stream in the process.
+var WRITE_STREAM_SEEDED_EVENTS = ["error", "finish", "close", "drain"];
+// The rest read through: they are subscribed to only when a plugin asks for one. The
+// exposure then belongs to the caller that wanted it rather than to every caller, and it
+// refuses by name instead of going quiet.
+var WRITE_STREAM_LAZY_EVENTS = ["open", "ready", "pipe", "unpipe"];
+
+// The one method in this whole facade that would otherwise hand back a live engine object, and
+// that object carries an own Symbol(kFs) holding the REAL fs module. `getOwnPropertySymbols` is
+// public (a Symbol is lexically private, not access-controlled), so the plugin reads it and
+// every gate in this file is out of the picture. Measured: a read and a write outside the
+// dataDir, in the same call where the plugin's own sandboxed readFileSync was denied.
+//
+// A wrapper owns its OWN listener registry, and that is the load-bearing part. EventEmitter
+// invokes a listener with `this` bound to the emitter it was registered on: forwarding
+// `real.on(cb)` would hand the raw stream back as `this` on the plugin's first 'finish'
+// handler. No Proxy can close that: registration already happened on the real object, and the
+// traps are never consulted again. Measured, both ways round.
+// Same reason every chainable method returns the wrapper: Writable returns `this`, so
+// forwarding the return value leaks the stream through the ordinary `.on(...).destroy()` idiom.
+// Not built on EventEmitter deliberately: its prototype is neither frozen nor tracked by
+// restorePrototypes; extending it would add a consumer of an unguarded shared prototype.
+function wrapWriteStream(real) {
+    var listeners = _ObjectCreate(null);
+    var wrapper = _ObjectCreate(null);
+    // Read once, here: a per-call `real.write` would re-read a property the engine's own
+    // prototype exposes, and this way the wrapper's behaviour is fixed at construction.
+    var realWrite = real.write;
+    var realEnd = real.end;
+    var realDestroy = real.destroy;
+    var realCork = real.cork;
+    var realUncork = real.uncork;
+    var realSetDefaultEncoding = real.setDefaultEncoding;
+
+    function slotFor(ev) {
+        if (listeners[ev] === undefined) listeners[ev] = bareArray();
+        return listeners[ev];
     }
+
+    function addListener(ev, fn, once, front) {
+        if (typeof fn !== "function") return wrapper;
+        if (_ArrayPrototypeIndexOf(WRITE_STREAM_LAZY_EVENTS, ev) !== -1) relay(ev);
+        var list = slotFor(ev);
+        var entry = _ObjectCreate(null);
+        entry.fn = fn;
+        entry.once = !!once;
+        if (front) {
+            for (var i = list.length; i > 0; i--) list[i] = list[i - 1];
+            list[0] = entry;
+        } else {
+            list[list.length] = entry;
+        }
+        return wrapper;
+    }
+
+    function dispatch(ev, args) {
+        var list = listeners[ev];
+        if (list === undefined) return false;
+        // Snapshot: a listener is free to add or remove listeners while it runs.
+        var live = bareArray();
+        for (var i = 0; i < list.length; i++) live[i] = list[i];
+        for (var j = 0; j < live.length; j++) {
+            var entry = live[j];
+            if (entry.once) removeEntry(ev, entry.fn);
+            // Contained on purpose, and this diverges from Node: there, a throwing listener
+            // reaches the top and ends the process, which here would be one plugin ending
+            // every plugin's native support. The throw belongs to whoever registered it.
+            try { Reflect.apply(entry.fn, wrapper, args); }
+            catch (e) { try { hostStderr.write("[sandbox] write stream listener threw: " + safeErrorString(e) + "\n"); } catch (_) {} }
+        }
+        return live.length > 0;
+    }
+
+    function removeEntry(ev, fn) {
+        var list = listeners[ev];
+        if (list === undefined) return wrapper;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].fn !== fn) continue;
+            for (var j = i; j < list.length - 1; j++) list[j] = list[j + 1];
+            list.length = list.length - 1;
+            break;
+        }
+        return wrapper;
+    }
+
+    // Relays read `arguments` and never `this` (nothing they hand on can be the raw stream).
+    // Subscribing for 'error' also means the engine never sees that event as unhandled, which
+    // on its own would have ended the process.
+    var relayed = _ObjectCreate(null);
+    function relay(ev) {
+        if (relayed[ev]) return;
+        try { real.on(ev, function() { dispatch(ev, arguments); }); }
+        catch (_) {
+            // Only the lazy names can land here, and only because a plugin left something under
+            // that name on Object.prototype. Refusing names the cause at the call that asked
+            // for it; going quiet instead would leave that plugin waiting on an event forever.
+            throw new Error("[sandbox] fs write stream cannot report '" + ev
+                + "': Object.prototype." + ev + " is set");
+        }
+        relayed[ev] = true;
+    }
+    _ArrayPrototypeForEach(WRITE_STREAM_SEEDED_EVENTS, relay);
+
+    ownProp(wrapper, "write", function() { return Reflect.apply(realWrite, real, arguments); });
+    ownProp(wrapper, "end", function() { Reflect.apply(realEnd, real, arguments); return wrapper; });
+    ownProp(wrapper, "destroy", function() { Reflect.apply(realDestroy, real, arguments); return wrapper; });
+    ownProp(wrapper, "cork", function() { Reflect.apply(realCork, real, arguments); });
+    ownProp(wrapper, "uncork", function() { Reflect.apply(realUncork, real, arguments); });
+    ownProp(wrapper, "setDefaultEncoding", function(enc) {
+        Reflect.apply(realSetDefaultEncoding, real, [enc]);
+        return wrapper;
+    });
+    ownProp(wrapper, "on", function(ev, fn) { return addListener(ev, fn, false, false); });
+    ownProp(wrapper, "addListener", function(ev, fn) { return addListener(ev, fn, false, false); });
+    ownProp(wrapper, "once", function(ev, fn) { return addListener(ev, fn, true, false); });
+    ownProp(wrapper, "prependListener", function(ev, fn) { return addListener(ev, fn, false, true); });
+    ownProp(wrapper, "prependOnceListener", function(ev, fn) { return addListener(ev, fn, true, true); });
+    ownProp(wrapper, "off", function(ev, fn) { return removeEntry(ev, fn); });
+    ownProp(wrapper, "removeListener", function(ev, fn) { return removeEntry(ev, fn); });
+    ownProp(wrapper, "emit", function(ev) {
+        var args = bareArray();
+        for (var i = 1; i < arguments.length; i++) args[i - 1] = arguments[i];
+        return dispatch(ev, args);
+    });
+
+    // Primitives only, read off `real` at call time. A getter that returned `real` itself, or
+    // anything holding it, would reopen the whole thing.
+    _ArrayPrototypeForEach(
+        ["fd", "path", "bytesWritten", "writable", "writableEnded", "writableFinished",
+            "writableNeedDrain", "writableHighWaterMark", "writableLength", "destroyed", "closed"],
+        function(name) {
+            _ObjectDefineProperty(wrapper, name, {
+                get: function() { return real[name]; }, enumerable: true, configurable: false,
+            });
+        });
+
+    return _ObjectFreeze(wrapper);
 }
 
 // Where a local IPC endpoint can live: the session runtime dir the register command
-// carried, plus the temp dir the child was started in and reports through cwd(). Built
-// per plugin, and an empty list is how a plugin without endpoint trust is expressed -
-// there is no separate flag to disagree with it.
+// carried, plus `hostTmpDir`, the OS temp dir this process resolves for itself, not the
+// directory the parent started it in. Those are two independent answers: the parent picks
+// a cwd, this one reads the env, and the two precedences differ (Rust consults TMPDIR
+// alone, os.tmpdir() falls through TMPDIR, TMP, TEMP); agreement is a coincidence of
+// the usual environment rather than something either side guarantees. Built per plugin,
+// and an empty list is how a plugin without endpoint trust is expressed: there is no
+// separate flag to disagree with it.
 function probeDirsFor(runtimeDir) {
-    var out = [];
+    var out = bareArray();
     function add(dir) {
         if (dir && _ArrayPrototypeIndexOf(out, dir) === -1) _ArrayPrototypePush(out, dir);
     }
@@ -1216,7 +1762,7 @@ function probeDirsFor(runtimeDir) {
         // Both names for the one directory. existsSync compares the socket's lexical
         // path, and a caller may hand us either the realpath or a path with a symlinked
         // prefix (macOS TMPDIR under /var, its realpath under /private/var). Only dirs
-        // that resolve are added, so this is the same disclosed dir by two spellings.
+        // that resolve are added: this is the same disclosed dir by two spellings.
         add(real);
         add(lexical);
     }
@@ -1241,7 +1787,7 @@ function makeGatedRealpath(dataDirs, grants, ipcDirs, resolve) {
 // statSync and can replace. `mode` is an own data property of each Stats object.
 //
 // Follows symlinks deliberately: a bridged endpoint (SSH, Flatpak) is a link to the
-// socket, so lstat would answer about the link instead.
+// socket (lstat would answer about the link instead).
 function isSocket(real) {
     if (_S_IFSOCK === undefined) return false; // no such file type on this platform
     try { return (realFs.statSync(real).mode & _S_IFMT) === _S_IFSOCK; }
@@ -1274,7 +1820,7 @@ function makeSandboxedFs(dataDirs, grants, ipcDirs) {
         readFileSync: function(p, o) { return realFs.readFileSync(checkRead(p), o); },
         writeFileSync: function(p, d, o) { return realFs.writeFileSync(checkWrite(p), d, o); },
         existsSync: function(p) {
-            // Real existsSync answers false on every error, EACCES included, so a
+            // Real existsSync answers false on every error, EACCES included: a
             // denial is an answer here rather than a throw. A rejected path shape is
             // announced once: unannounced, a Windows named pipe - refused by the UNC
             // guard - would be indistinguishable from an endpoint that is simply gone.
@@ -1308,16 +1854,15 @@ function makeSandboxedFs(dataDirs, grants, ipcDirs) {
             return realFs.accessSync((m & _W_OK) ? checkWrite(p) : checkRead(p), mode);
         },
         createWriteStream: function(p, o) {
-            rejectUnsafeOpts(o);
-            return realFs.createWriteStream(checkWrite(p), o);
+            return wrapWriteStream(openAuthorizedWriteStream(checkWrite(p), o));
         },
         constants: _fsConstantsFrozen,
     };
 
     // Callers feature-detect .native before using it (typescript, resolve); a facade
     // without one fails their check and takes a path they only meant as a fallback.
-    facade.realpathSync.native =
-        gatedRealpath(realFs.realpathSync.native || realFs.realpathSync);
+    ownProp(facade.realpathSync, "native",
+        gatedRealpath(realFs.realpathSync.native || realFs.realpathSync));
 
     _ObjectDefineProperty(facade, 'promises', {
         get: function() { return makeSandboxedFsPromises(dataDirs, grants, ipcDirs); },
@@ -1336,23 +1881,47 @@ function makeSandboxedFsPromises(dataDirs, grants, ipcDirs) {
     var gatedRealpath = makeGatedRealpath(dataDirs, grants, ipcDirs, realFs.promises.realpath);
 
     return {
-        // Rejects rather than throwing: this twin is awaited, unlike the sync one. The
-        // captured reject, so a swapped Promise.reject cannot turn a denial into a
-        // resolved promise.
+        // Every gate throws, but this facade is awaited: each arm owes a REJECTED promise
+        // and must never throw at the call site, or a caller that chains `.catch()` rather
+        // than wrapping in try/catch never sees the denial at all. The conversion uses the
+        // captured reject. A swapped `Promise.reject` cannot turn a denial into a
+        // resolved promise. The gates are called inside the try on purpose: as an argument
+        // expression they run before any promise exists, which is what threw synchronously.
         realpath: function(p, o) {
             try { return gatedRealpath(p, o); } catch (e) { return _PromiseReject(e); }
         },
-        readFile: function(p, o) { return realFs.promises.readFile(checkRead(p), o); },
-        writeFile: function(p, d, o) { return realFs.promises.writeFile(checkWrite(p), d, o); },
-        mkdir: function(p, o) { return realFs.promises.mkdir(checkMkdir(p), o); },
-        stat: function(p, o) { return realFs.promises.stat(checkRead(p), o); },
-        unlink: function(p) { return realFs.promises.unlink(checkDelete(p)); },
-        rm: function(p, o) { return realFs.promises.rm(checkDelete(p), o); },
+        readFile: function(p, o) {
+            try { return realFs.promises.readFile(checkRead(p), o); }
+            catch (e) { return _PromiseReject(e); }
+        },
+        writeFile: function(p, d, o) {
+            try { return realFs.promises.writeFile(checkWrite(p), d, o); }
+            catch (e) { return _PromiseReject(e); }
+        },
+        mkdir: function(p, o) {
+            try { return realFs.promises.mkdir(checkMkdir(p), o); }
+            catch (e) { return _PromiseReject(e); }
+        },
+        stat: function(p, o) {
+            try { return realFs.promises.stat(checkRead(p), o); }
+            catch (e) { return _PromiseReject(e); }
+        },
+        unlink: function(p) {
+            try { return realFs.promises.unlink(checkDelete(p)); }
+            catch (e) { return _PromiseReject(e); }
+        },
+        rm: function(p, o) {
+            try { return realFs.promises.rm(checkDelete(p), o); }
+            catch (e) { return _PromiseReject(e); }
+        },
         access: function(p, mode) {
             var m = (mode === undefined) ? _F_OK : mode;
             if (m & _X_OK)
-                return Promise.reject(new Error("[sandbox] fs X_OK denied"));
-            return realFs.promises.access((m & _W_OK) ? checkWrite(p) : checkRead(p), mode);
+                return _PromiseReject(new Error("[sandbox] fs X_OK denied"));
+            try {
+                var gated = (m & _W_OK) ? checkWrite(p) : checkRead(p);
+                return realFs.promises.access(gated, mode);
+            } catch (e) { return _PromiseReject(e); }
         },
     };
 }
@@ -1367,7 +1936,10 @@ function getGrantStore(pluginName) {
 }
 
 // ── State ───────────────────────────────────────────────────────────────
-const modules = {};
+// Name -> exports, with no prototype: an accessor planted under a plugin's exact module
+// name swallowed the registration (the ack still reported the real exports) and then
+// answered every later call with the attacker's function, holding the real arguments.
+const modules = _ObjectCreate(null);
 
 // ── IPC ─────────────────────────────────────────────────────────────────
 // Reuse bootstrap readline if available, fall back to own instance for standalone dev usage.
@@ -1396,7 +1968,7 @@ rl.on("line", async (line) => {
             }
 
             // Own keys only: for...in walks Object.prototype, and restorePrototypes
-            // keeps added properties, so a plugin planting Object.prototype.fs = true
+            // keeps added properties. A plugin planting Object.prototype.fs = true
             // would grant that module to every plugin registered afterwards.
             var trustedModules = new Set();
             if (trust) {
@@ -1451,9 +2023,21 @@ rl.on("line", async (line) => {
             var args = cmd.args;
             var mod = modules[name];
             if (!mod) { respondError(id, "module '" + name + "' not registered"); return; }
-            var member = mod[fnName];
+            // `module.exports` is an ordinary object: a name the module never exported
+            // resolves up its chain. A plugin that plants a function at that name on
+            // Object.prototype has it run here and its return value answered as if the
+            // module had exported it. Rust's channel token keeps the caller on its own
+            // module today. The reach is self-inflicted, but the read is wrong on its
+            // own terms, and the token is not this file's invariant to lean on.
+            var member = ownRead(mod, fnName);
             if (typeof member === "function") {
-                var result = await member(...(args || []));
+                // Reflect.apply rather than a spread: spreading reads
+                // Array.prototype[Symbol.iterator], and _protoTracked lists string keys
+                // only; a poisoned iterator is never restored, not even by a later
+                // register, and this line runs for every call of every plugin afterwards.
+                // Reflect.apply reads length and indices instead of iterating.
+                var callArgs = _ArrayIsArray(args) ? args : [];
+                var result = await Reflect.apply(member, undefined, callArgs);
                 respond(id, { ok: true, result: result ?? null });
             } else {
                 respond(id, { ok: true, result: member ?? null });
@@ -1481,16 +2065,22 @@ rl.on("line", async (line) => {
             respondError(id, "unknown command type: " + type);
         }
     } catch (e) {
-        var msg = e?.message || String(e);
-        if (e?.stack) msg += "\n" + e.stack;
-        respondError(id, msg);
+        respondError(id, e);
     }
 });
 
 function respond(id, data) {
-    hostStdout.write(_JSONStringify({ id, ...data }) + "\n");
+    var line;
+    try { line = ipcLine({ id, ...data }); }
+    catch (e) { line = fallbackLine(id, "[sandbox] response serialization failed: " + safeErrorString(e)); }
+    hostStdout.write(line);
 }
 
+// Takes the error raw and normalizes it here: no caller has to know that reading
+// `.message` off a thrown value runs code the plugin wrote.
 function respondError(id, error) {
-    hostStdout.write(_JSONStringify({ id, error }) + "\n");
+    var line;
+    try { line = ipcLine({ id, error: safeErrorString(error) }); }
+    catch (e) { line = fallbackLine(id, "[sandbox] response serialization failed: " + safeErrorString(e)); }
+    hostStdout.write(line);
 }
