@@ -136,15 +136,15 @@ impl RamBuffer {
     }
 
     /// Attach a per-reader stop signal: when set, this reader's `read` returns
-    /// Interrupted, leaving other readers untouched. Windows exclusive path only.
-    #[cfg(target_os = "windows")]
+    /// Interrupted, leaving other readers untouched. This is what lets a buffer outlive
+    /// the decoder that was reading it, for the next decoder to pick up.
     pub fn with_reader_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.reader_cancel = Some(cancel);
         self
     }
 
-    /// Wake any reader blocked in `read` to re-check its stop signal.
-    #[cfg(target_os = "windows")]
+    /// Wake any reader blocked in `read` to re-check its stop signal. Setting the signal
+    /// without this leaves the reader parked until its own timeout expires.
     pub fn wake_readers(&self) {
         self.shared.cvar.notify_all();
     }
@@ -173,7 +173,14 @@ impl RamBuffer {
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub fn is_reusable(&self) -> bool {
         let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.finished && inner.error.is_none() && inner.base_offset == 0 && !inner.data.is_empty()
+        // A cancel outlives the download it stopped and there is no un-cancel: every later
+        // read reports Interrupted; a finished buffer that was cancelled reads no better
+        // than an empty one.
+        !inner.cancelled
+            && inner.finished
+            && inner.error.is_none()
+            && inner.base_offset == 0
+            && !inner.data.is_empty()
     }
 
     pub fn total_len(&self) -> u64 {
@@ -499,3 +506,7 @@ impl Drop for RamBufferWriter {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/buffer.rs"]
+mod tests;

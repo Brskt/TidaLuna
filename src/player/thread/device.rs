@@ -3,6 +3,8 @@ use super::output::open_output_stream;
 use super::{DecodeCommand, PlayerThread};
 use crate::player::buffer::RamBuffer;
 use crate::player::{DeviceErrorKind, OutputMode, PlayerEvent};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
 
@@ -617,6 +619,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let decoded_samples = self.decoded_samples.clone();
 
         let decode_buffer = buffer.clone();
+        let reader_cancel = Arc::new(AtomicBool::new(false));
+        self.decode_reader_cancel = Some(reader_cancel.clone());
         let Some(decode_handle) = spawn_decode_thread(DecodeThreadConfig {
             buffer: decode_buffer,
             producer: opened.producer,
@@ -626,6 +630,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             output_rate: actual_rate,
             output_channels: actual_channels,
             seek_gen: opened.seek_gen,
+            reader_cancel,
         }) else {
             // This function's own convention on failure: report the device and leave, rather
             // than install a pipeline whose decoder does not exist.

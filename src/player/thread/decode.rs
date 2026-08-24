@@ -2,7 +2,7 @@ use super::output::AudioPipeline;
 use super::{DecodeCommand, DecodeEvent};
 use crate::player::buffer::RamBuffer;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::time::Duration;
 use symphonia::core::codecs::CodecParameters;
@@ -21,12 +21,23 @@ pub(super) struct DecodeThreadConfig {
     pub output_rate: u32,
     pub output_channels: u16,
     pub seek_gen: Arc<AtomicU32>,
+    /// Retires this thread's reader. A field rather than a call the spawner has to remember:
+    /// a decoder parked in a starved read answers no command, and whoever joins it waits.
+    pub reader_cancel: Arc<AtomicBool>,
 }
 
 /// `None` when the OS refuses the thread, for the caller to report like any other pipeline
 /// failure. Panicking here would unwind the player thread instead, and nothing respawns it:
 /// the process keeps running with a transport that answers no command.
-pub(super) fn spawn_decode_thread(cfg: DecodeThreadConfig) -> Option<std::thread::JoinHandle<()>> {
+pub(super) fn spawn_decode_thread(
+    mut cfg: DecodeThreadConfig,
+) -> Option<std::thread::JoinHandle<()>> {
+    // Bound the reader to this thread here: no spawn site can hand the buffer over
+    // without the signal that retires it.
+    cfg.buffer = cfg
+        .buffer
+        .clone()
+        .with_reader_cancel(cfg.reader_cancel.clone());
     match std::thread::Builder::new()
         .name("decode".into())
         .spawn(move || {
@@ -129,6 +140,9 @@ fn decode_loop(cfg: DecodeThreadConfig) {
         output_rate,
         output_channels,
         seek_gen,
+        // The spawner already bound it to `buffer`; the loop meets it as a read that
+        // returns Interrupted, never as a flag it polls.
+        reader_cancel: _,
     } = cfg;
     crate::vprintln!("[DECODE] Thread started, probing format...");
     let mss = MediaSourceStream::new(Box::new(buffer), Default::default());

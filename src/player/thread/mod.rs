@@ -86,6 +86,9 @@ pub(super) struct PlayerThread<F> {
     decode_cmd_tx: Option<mpsc::Sender<DecodeCommand>>,
     decode_event_rx: Option<mpsc::Receiver<DecodeEvent>>,
     decode_handle: Option<std::thread::JoinHandle<()>>,
+    /// Retires the decode thread's own reader, per-reader: the buffer it was reading
+    /// stays usable for the decoder a device switch respawns on it.
+    decode_reader_cancel: Option<Arc<AtomicBool>>,
     // Track state
     current_buffer: Option<RamBuffer>,
     current_track_id: Option<String>,
@@ -287,6 +290,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             decode_cmd_tx: None,
             decode_event_rx: None,
             decode_handle: None,
+            decode_reader_cancel: None,
             current_buffer: None,
             current_track_id: None,
             current_format: String::new(),

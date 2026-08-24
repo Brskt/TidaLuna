@@ -17,10 +17,10 @@ use cpal::traits::StreamTrait;
 use crate::player::asio::host::{AsioCommand, AsioHandle};
 #[cfg(target_os = "windows")]
 use crate::player::{ASIO_STREAM_SEQ, EXCLUSIVE_STREAM_SEQ, wasapi};
-#[cfg(target_os = "windows")]
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 #[cfg(target_os = "windows")]
 use std::thread;
 #[cfg(target_os = "windows")]
@@ -157,6 +157,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn stop_decode(&mut self) {
         if let Some(tx) = self.decode_cmd_tx.take() {
             let _ = tx.send(DecodeCommand::Stop);
+        }
+        // A decoder starved at the download frontier is parked in its read, not on that
+        // channel, and the join below runs on this thread: retire its reader so the read
+        // returns now. Per-reader, so a buffer the caller is about to hand to the next
+        // decoder survives, which cancelling the buffer would not.
+        if let Some(cancel) = self.decode_reader_cancel.take() {
+            cancel.store(true, Relaxed);
+            if let Some(ref buf) = self.current_buffer {
+                buf.wake_readers();
+            }
         }
         self.cpal_stream = None;
         if let Some(handle) = self.decode_handle.take() {
@@ -675,6 +685,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let decoded_samples = self.decoded_samples.clone();
 
         let decode_buffer = buffer.clone();
+        let reader_cancel = Arc::new(AtomicBool::new(false));
+        self.decode_reader_cancel = Some(reader_cancel.clone());
         let Some(decode_handle) = spawn_decode_thread(DecodeThreadConfig {
             buffer: decode_buffer,
             producer: ring_producer,
@@ -684,6 +696,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             output_rate: actual_rate,
             output_channels: actual_channels,
             seek_gen,
+            reader_cancel,
         }) else {
             // Same shape as the cpal-open failure above. The endpoint is open but nothing
             // will feed it; the load is abandoned rather than announced as Ready.
