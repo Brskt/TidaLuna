@@ -99,43 +99,42 @@ impl SpeakerBridge {
         });
     }
 
+    /// The player thread is the only receiver and nothing restarts it: a refused send means
+    /// this command and every later one is gone. The controller has no reply channel here, which
+    /// is exactly why the log has to be ungated.
+    fn send_transport(command: &str, sent: anyhow::Result<()>) {
+        if let Err(e) = sent {
+            crate::verr!("[connect::bridge] {command} not delivered: {e}");
+        }
+    }
+
     /// No-op - gapless is handled by PlaybackController calling set_media() on completion.
     pub fn prepare_next(&self, _media_info: &MediaInfo) {
         crate::vprintln!("[connect::bridge] prepare_next - gapless via set_media on completion");
     }
 
     pub fn play(&self) {
-        with_state(|state| {
-            let _ = state.player.play();
-        });
+        with_state(|state| Self::send_transport("play", state.player.play()));
     }
 
     pub fn pause(&self) {
-        with_state(|state| {
-            let _ = state.player.pause();
-        });
+        with_state(|state| Self::send_transport("pause", state.player.pause()));
     }
 
     pub fn stop(&self) {
-        with_state(|state| {
-            let _ = state.player.stop();
-        });
+        with_state(|state| Self::send_transport("stop", state.player.stop()));
     }
 
     /// Seek to position in milliseconds.
     pub fn seek(&self, position_ms: u64) {
         let seconds = position_ms as f64 / 1000.0;
-        with_state(|state| {
-            let _ = state.player.seek(seconds);
-        });
+        with_state(|state| Self::send_transport("seek", state.player.seek(seconds)));
     }
 
     /// Set volume. Connect uses 0.0-1.0, Player uses 0-100.
     pub fn set_volume(&self, level: f64) {
         let volume = (level * 100.0).clamp(0.0, 100.0);
-        with_state(|state| {
-            let _ = state.player.set_volume(volume);
-        });
+        with_state(|state| Self::send_transport("setVolume", state.player.set_volume(volume)));
     }
 
     /// Mute by setting volume to 0 (Player has no native mute).
@@ -145,8 +144,6 @@ impl SpeakerBridge {
         } else {
             (saved_level * 100.0).clamp(0.0, 100.0)
         };
-        with_state(|state| {
-            let _ = state.player.set_volume(volume);
-        });
+        with_state(|state| Self::send_transport("setMute", state.player.set_volume(volume)));
     }
 }

@@ -15,6 +15,16 @@ fn should_redact_args(channel: &str) -> bool {
         )
 }
 
+/// The player thread is the only receiver and nothing restarts it: a refused send means this
+/// command and every later one is gone. These handlers have no reply channel to the renderer
+/// (`sendIpc` attaches no id, and `player.*` is not in the callback-aware dispatch), which is
+/// exactly why the log has to be ungated: it is the only place the loss can surface.
+fn report_undelivered(command: &str, sent: anyhow::Result<()>) {
+    if let Err(e) = sent {
+        crate::verr!("[IPC]    player.{command} not delivered: {e}");
+    }
+}
+
 pub(crate) fn handle_ipc_message(request: &str) {
     let msg: IpcMessage = match serde_json::from_str(request) {
         Ok(m) => m,
@@ -133,15 +143,15 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         }
                     }
                     PlayerIpc::Play => {
-                        let _ = state.player.play();
+                        report_undelivered("play", state.player.play());
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::Pause => {
-                        let _ = state.player.pause();
+                        report_undelivered("pause", state.player.pause());
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::Stop => {
-                        let _ = state.player.stop();
+                        report_undelivered("stop", state.player.stop());
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::Seek { time } => {
@@ -149,22 +159,25 @@ fn handle_player_ipc(msg: &IpcMessage) {
                             crate::player::LOAD_SEQ.load(std::sync::atomic::Ordering::Relaxed);
                         state.pending_time_update = Some((time, seq));
                         let batch = take_flush_batch(state);
-                        let _ = state.player.seek(time);
+                        report_undelivered("seek", state.player.seek(time));
                         PlayerIpcEffects {
                             batch: Some(batch),
                             ..Default::default()
                         }
                     }
                     PlayerIpc::Volume { volume } => {
-                        let _ = state.player.set_volume(volume);
+                        report_undelivered("volume", state.player.set_volume(volume));
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::DevicesGet { request_id } => {
-                        let _ = state.player.get_audio_devices(request_id);
+                        report_undelivered(
+                            "devices.get",
+                            state.player.get_audio_devices(request_id),
+                        );
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::DevicesSet { id, mode } => {
-                        let _ = state.player.set_audio_device(id, mode);
+                        report_undelivered("devices.set", state.player.set_audio_device(id, mode));
                         PlayerIpcEffects::default()
                     }
                 },
