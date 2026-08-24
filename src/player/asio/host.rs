@@ -2477,16 +2477,26 @@ impl AsioHandle {
     /// Spawn the ASIO control thread. On the first `StartStream` it opens
     /// `requested_driver` when that names an installed driver, else the first
     /// enumerated one that opens. `gain` is the shared digital-gain cell (f32 bits).
-    pub(crate) fn spawn(gain: Arc<AtomicU32>, requested_driver: Option<String>) -> Self {
+    /// `None` when the OS refuses the thread. `thread::spawn` would panic there, on the
+    /// player thread that called it, and nothing respawns that one.
+    pub(crate) fn spawn(gain: Arc<AtomicU32>, requested_driver: Option<String>) -> Option<Self> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AsioCommand>();
         let (event_tx, event_rx) = mpsc::channel::<AsioEvent>();
-        let thread =
-            thread::spawn(move || control_thread(gain, requested_driver, cmd_rx, event_tx));
-        Self {
+        let thread = match thread::Builder::new()
+            .name("asio-control".into())
+            .spawn(move || control_thread(gain, requested_driver, cmd_rx, event_tx))
+        {
+            Ok(t) => t,
+            Err(e) => {
+                crate::verr!("[ASIO] cannot spawn the control thread: {e}");
+                return None;
+            }
+        };
+        Some(Self {
             cmd_tx,
             event_rx,
             thread: Some(thread),
-        }
+        })
     }
 
     pub(crate) fn send(&self, cmd: AsioCommand) {

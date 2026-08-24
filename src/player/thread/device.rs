@@ -192,7 +192,51 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.pending_device_switch = Some((id, mode));
                     return;
                 }
-                let handle = AsioHandle::spawn(self.exclusive_gain.clone(), Some(id.clone()));
+                let Some(handle) = AsioHandle::spawn(self.exclusive_gain.clone(), Some(id.clone()))
+                else {
+                    // The user asked for this device by name: the refusal is theirs to see.
+                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioInitFailed));
+                    // The decoder and the cpal stream are already gone here: returning bare would
+                    // leave `has_track`/`is_playing` naming a track with no backend, and nothing
+                    // polls for that. Fall back like the two ->shared branches below, but not
+                    // through `rearm_shared_after_asio_failure`: it re-derives its position from
+                    // `last_asio_pos`, stale once a session has left ASIO before.
+                    if self
+                        .current_buffer
+                        .as_ref()
+                        .is_some_and(RamBuffer::is_reusable)
+                    {
+                        self.seeking = false;
+                        self.seek_target = None;
+                        crate::vprintln!(
+                            "[ASIO] spawn failed; rebuilding shared on the retained buffer"
+                        );
+                        self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                        return;
+                    }
+                    // Still streaming, and a rebuild would race the decoder probe against a
+                    // moving base_offset. The track is re-loaded instead, as the siblings do.
+                    self.has_track = false;
+                    self.is_playing = false;
+                    self.loading_gen = None;
+                    self.pending_play = None;
+                    self.seeking = false;
+                    self.seek_target = None;
+                    crate::vprintln!("[ASIO] spawn failed; re-arming shared");
+                    let track = crate::state::CURRENT_TRACK
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    if let Some(track) = track {
+                        (self.callback)(PlayerEvent::ReplayRequest {
+                            track,
+                            expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                            position,
+                            play: was_playing,
+                        });
+                    }
+                    return;
+                };
                 self.is_asio_mode = true;
                 // Drop any stale release timer from a prior ASIO session; a fresh
                 // engagement can't fire it and shut down the handle we just spawned.
@@ -573,7 +617,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let decoded_samples = self.decoded_samples.clone();
 
         let decode_buffer = buffer.clone();
-        let decode_handle = spawn_decode_thread(DecodeThreadConfig {
+        let Some(decode_handle) = spawn_decode_thread(DecodeThreadConfig {
             buffer: decode_buffer,
             producer: opened.producer,
             decoded_samples,
@@ -582,7 +626,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             output_rate: actual_rate,
             output_channels: actual_channels,
             seek_gen: opened.seek_gen,
-        });
+        }) else {
+            // This function's own convention on failure: report the device and leave, rather
+            // than install a pipeline whose decoder does not exist.
+            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
+            return;
+        };
 
         let stream = opened.stream;
 

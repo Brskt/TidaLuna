@@ -23,13 +23,21 @@ pub(super) struct DecodeThreadConfig {
     pub seek_gen: Arc<AtomicU32>,
 }
 
-pub(super) fn spawn_decode_thread(cfg: DecodeThreadConfig) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
+/// `None` when the OS refuses the thread, for the caller to report like any other pipeline
+/// failure. Panicking here would unwind the player thread instead, and nothing respawns it:
+/// the process keeps running with a transport that answers no command.
+pub(super) fn spawn_decode_thread(cfg: DecodeThreadConfig) -> Option<std::thread::JoinHandle<()>> {
+    match std::thread::Builder::new()
         .name("decode".into())
         .spawn(move || {
             decode_loop(cfg);
-        })
-        .expect("failed to spawn decode thread")
+        }) {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            crate::verr!("[DECODE] cannot spawn the decode thread: {e}");
+            None
+        }
+    }
 }
 
 struct DecodeContext<'a> {

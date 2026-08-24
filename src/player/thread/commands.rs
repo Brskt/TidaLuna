@@ -368,10 +368,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 crate::vprintln!("[ASIO] teardown still draining; this load plays shared");
                 return false;
             }
-            self.asio_handle = Some(AsioHandle::spawn(
-                self.exclusive_gain.clone(),
-                self.current_device_id.clone(),
-            ));
+            let Some(handle) =
+                AsioHandle::spawn(self.exclusive_gain.clone(), self.current_device_id.clone())
+            else {
+                // Same fallback as the two guards above: with no control thread there is no
+                // ASIO pipeline, and the shared one is what actually gets played and polled.
+                self.is_asio_mode = false;
+                return false;
+            };
+            self.asio_handle = Some(handle);
         }
         // A queued user seek wins over the load-time resume position.
         let seek_to = self.take_start_position();
@@ -670,7 +675,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let decoded_samples = self.decoded_samples.clone();
 
         let decode_buffer = buffer.clone();
-        let decode_handle = spawn_decode_thread(DecodeThreadConfig {
+        let Some(decode_handle) = spawn_decode_thread(DecodeThreadConfig {
             buffer: decode_buffer,
             producer: ring_producer,
             decoded_samples,
@@ -679,7 +684,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             output_rate: actual_rate,
             output_channels: actual_channels,
             seek_gen,
-        });
+        }) else {
+            // Same shape as the cpal-open failure above. The endpoint is open but nothing
+            // will feed it; the load is abandoned rather than announced as Ready.
+            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
+            self.set_committed_track(None);
+            return false;
+        };
 
         self.cpal_stream = Some(stream);
         self.decode_cmd_tx = Some(decode_cmd_tx);
