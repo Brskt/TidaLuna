@@ -1103,13 +1103,27 @@ pub(crate) enum AsioEvent {
         refused: bool,
     },
     StateChange(PlaybackState),
-    Duration(f64),
+    /// The adopted stream's track length. Stream-scoped like `Completed`: a superseded
+    /// stream reports one too, and downstream nothing can tell whose it was.
+    Duration {
+        stream_id: u32,
+        secs: f64,
+    },
     DriverNotFound,
-    FormatUnsupported,
+    /// The driver cannot render this stream: it exposes fewer output channels than the track
+    /// asks for, or a sample type this host does not convert. Stream-scoped like
+    /// `RateUnsupported`, the channel count being the TRACK's and not the device's alone.
+    FormatUnsupported {
+        stream_id: Option<u32>,
+    },
     /// The device can't play this track's format in ASIO: either the rate was rejected up front
     /// (`can_sample_rate`/`set_sample_rate`) or the driver posted a reset it needs to clock it.
-    /// Per-track: route THIS track to shared but keep ASIO on for other rates.
-    RateUnsupported,
+    /// Per-track: route THIS track to shared but keep ASIO on for other rates. Stream-scoped
+    /// like `Completed`; `None` when the build ran before any stream was adopted, and a
+    /// verdict that cannot name its stream marks no track.
+    RateUnsupported {
+        stream_id: Option<u32>,
+    },
     InitFailed(String),
     /// Track finished (EOF + drained). Carries the stream_id: a stale completion from a
     /// superseded stream can't clear a newer track (which would force a re-arm/double-load).
@@ -1274,6 +1288,7 @@ impl ControlCtx {
     /// already be created and `init`'d.
     fn build_stream(
         &self,
+        stream_id: Option<u32>,
         sample_rate: u32,
         channels: usize,
     ) -> Result<OpenedAsioStream, AsioEvent> {
@@ -1285,12 +1300,12 @@ impl ControlCtx {
         // and outlives the stream (dropped only with the handle).
         unsafe {
             if !asio_ok(driver.can_sample_rate(sample_rate as f64)) {
-                return Err(AsioEvent::RateUnsupported);
+                return Err(AsioEvent::RateUnsupported { stream_id });
             }
             // Some clock-locked interfaces accept can_sample_rate but reject the switch;
             // rendering at the old clock plays wrong-speed. Fall back to shared.
             if !asio_ok(driver.set_sample_rate(sample_rate as f64)) {
-                return Err(AsioEvent::RateUnsupported);
+                return Err(AsioEvent::RateUnsupported { stream_id });
             }
             // set_sample_rate can return ASE_OK yet leave the driver on its old clock
             // (ASIO4ALL/Steinberg-style drivers apply a rate change only after a full
@@ -1312,7 +1327,7 @@ impl ControlCtx {
                 crate::vprintln!(
                     "[ASIO] set_sample_rate({target} Hz) not applied (driver reports {actual} Hz); this track plays shared"
                 );
-                return Err(AsioEvent::RateUnsupported);
+                return Err(AsioEvent::RateUnsupported { stream_id });
             }
 
             let (mut num_in, mut num_out) = (0i32, 0i32);
@@ -1320,7 +1335,7 @@ impl ControlCtx {
                 return Err(AsioEvent::InitFailed("getChannels failed".into()));
             }
             if num_out < channels as i32 {
-                return Err(AsioEvent::FormatUnsupported);
+                return Err(AsioEvent::FormatUnsupported { stream_id });
             }
 
             let (mut min, mut max, mut pref, mut gran) = (0i32, 0i32, 0i32, 0i32);
@@ -1341,7 +1356,7 @@ impl ControlCtx {
                 return Err(AsioEvent::InitFailed("getChannelInfo failed".into()));
             }
             let Some(dst) = AsioSampleType::from_asio(ch_info.sample_type) else {
-                return Err(AsioEvent::FormatUnsupported);
+                return Err(AsioEvent::FormatUnsupported { stream_id });
             };
             let bps = dst.bytes_per_sample();
 
@@ -1466,7 +1481,7 @@ impl ControlCtx {
         // Drop a driver reset aimed at the stream just disposed; one posted for the new
         // stream during/after build_stream below is preserved.
         STREAM_RESET_REQUESTED.store(false, Ordering::Relaxed);
-        match self.build_stream(self.sample_rate, self.channels) {
+        match self.build_stream(self.stream_id, self.sample_rate, self.channels) {
             Ok(opened) => {
                 self.install_stream(opened, true, self.sample_rate);
                 self.settle_transport(start_paused, event_tx);
@@ -1550,7 +1565,7 @@ impl ControlCtx {
             // Rate change tears the stream down and re-creates buffers at the new rate (RME
             // changes buffer size + channel count per rate, ruling reuse out).
             self.dispose_stream();
-            match self.build_stream(sample_rate, want_channels) {
+            match self.build_stream(Some(stream_id), sample_rate, want_channels) {
                 Ok(opened) => self.install_stream(opened, format_changed, sample_rate),
                 Err(ev) => {
                     let _ = event_tx.send(ev);
@@ -1631,7 +1646,10 @@ impl ControlCtx {
         self.baseline_frames = position_frames(start_secs, sample_rate);
         self.stream_ended = false;
         self.drain_since = None;
-        let _ = event_tx.send(AsioEvent::Duration(duration_secs));
+        let _ = event_tx.send(AsioEvent::Duration {
+            stream_id,
+            secs: duration_secs,
+        });
     }
 
     /// Apply any latched `pending_transport` Play/Pause (see the field doc for the id-match
@@ -2334,7 +2352,9 @@ impl ControlCtx {
             crate::vprintln!(
                 "[ASIO] reset/rebuild gave up (>4); this track plays shared (ASIO stays on)"
             );
-            let _ = event_tx.send(AsioEvent::RateUnsupported);
+            let _ = event_tx.send(AsioEvent::RateUnsupported {
+                stream_id: self.stream_id,
+            });
             self.dispose_stream();
             self.state = AsioState::Idle;
             return;
@@ -2361,7 +2381,7 @@ impl ControlCtx {
                 .saturating_sub(self.played_offset),
         );
         self.dispose_stream();
-        match self.build_stream(sr, ch) {
+        match self.build_stream(self.stream_id, sr, ch) {
             Ok(opened) => {
                 STREAM_CTX.store(opened.ctx_ptr, Ordering::Release);
                 self.ctx_ptr = opened.ctx_ptr;
@@ -2497,6 +2517,24 @@ impl AsioHandle {
             event_rx,
             thread: Some(thread),
         })
+    }
+
+    /// A handle wired to channels the caller owns, with no control thread behind it: a test
+    /// can hand the player the very events a driver would have sent. `thread: None` is what
+    /// keeps `Drop` from joining one that was never spawned.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (Self, mpsc::Sender<AsioEvent>, mpsc::Receiver<AsioCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<AsioCommand>();
+        let (event_tx, event_rx) = mpsc::channel::<AsioEvent>();
+        (
+            Self {
+                cmd_tx,
+                event_rx,
+                thread: None,
+            },
+            event_tx,
+            cmd_rx,
+        )
     }
 
     pub(crate) fn send(&self, cmd: AsioCommand) {

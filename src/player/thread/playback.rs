@@ -30,6 +30,14 @@ fn seek_ack_is_current(
     current_stream_id == Some(ack_stream_id) && current_gen == ack_gen
 }
 
+/// Whether a per-track device verdict may be charged to the track now playing. Two ids match
+/// or nothing does: a refusal can take seconds, and a superseded stream's would otherwise mark
+/// whatever track loaded while it negotiated. Pure, to be unit-tested without a backend.
+#[cfg(target_os = "windows")]
+fn verdict_names_current_stream(current: Option<u32>, verdict: Option<u32>) -> bool {
+    matches!((current, verdict), (Some(a), Some(b)) if a == b)
+}
+
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn samples_to_secs(&self, samples: u64) -> f64 {
         let channels = self.channels.max(1) as u64;
@@ -211,7 +219,16 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             }
                         }
                         ExclusiveEvent::StateChange(s) => {
-                            if s == PlaybackState::Completed {
+                            // Transport states only. Completion arrives named, below: clearing
+                            // the track is the one effect a superseded stream must never have,
+                            // and this arm cannot tell whose stream it is.
+                            (self.callback)(PlayerEvent::StateChange(s, self.current_seq));
+                        }
+                        ExclusiveEvent::Completed(sid) => {
+                            // Ignore a completion from a superseded stream (a newer track
+                            // already loaded): only the current stream's completion clears
+                            // the track; a stale one would force a spurious re-arm/double-load.
+                            if self.current_exclusive_stream_id == Some(sid) {
                                 if let Some(track_id) = self.current_track_id.as_ref() {
                                     self.resume_store.clear(track_id);
                                     self.resume_store.flush_if_due(true);
@@ -234,12 +251,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 crate::state::GOVERNOR
                                     .buffer_progress()
                                     .set_playback_active(false);
+                                (self.callback)(PlayerEvent::StateChange(
+                                    PlaybackState::Completed,
+                                    self.current_seq,
+                                ));
+                            } else {
+                                // Logged, unlike the ASIO twin's silent drop: its own
+                                // `FormatUnsupported`/`RateUnsupported` siblings name the
+                                // superseded stream, and a completion earns the same.
+                                crate::vprintln!(
+                                    "[WASAPI] completion for superseded stream {}; current is {:?}",
+                                    sid,
+                                    self.current_exclusive_stream_id
+                                );
                             }
-                            (self.callback)(PlayerEvent::StateChange(s, self.current_seq));
                         }
-                        ExclusiveEvent::Duration(d) => {
-                            self.current_duration = d;
-                            (self.callback)(PlayerEvent::Duration(d, self.current_seq));
+                        ExclusiveEvent::Duration { stream_id, secs } => {
+                            // Forwarded only for the stream still owned: a superseded stream
+                            // measured another track.
+                            if verdict_names_current_stream(
+                                self.current_exclusive_stream_id,
+                                Some(stream_id),
+                            ) {
+                                self.current_duration = secs;
+                                (self.callback)(PlayerEvent::Duration(secs, self.current_seq));
+                            }
                         }
                         ExclusiveEvent::InitFailed(e) => {
                             crate::vprintln!(
@@ -263,17 +299,30 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Locked));
                             self.rearm_shared_after_exclusive_failure();
                         }
-                        ExclusiveEvent::FormatUnsupported => {
-                            crate::vprintln!(
-                                "[WASAPI] device can't do this track's format in exclusive; this track plays shared (exclusive stays on for other rates)"
-                            );
+                        ExclusiveEvent::FormatUnsupported { stream_id } => {
                             if let Some(cancel) = self.exclusive_stream_cancel.take() {
                                 cancel.store(true, Relaxed);
                             }
                             // Per-track skip: remember this track; its shared re-arm must not
                             // loop back into exclusive, but keep exclusive on globally
                             // (ExclusiveFormatUnsupported is not in the frontend disable list).
-                            self.exclusive_skip_track = self.current_track_id.clone();
+                            // Only the stream still owned may be marked: the refusal took the
+                            // render thread down whichever stream it judged; the re-arm below
+                            // is owed either way, but the mark belongs to the refused track.
+                            if verdict_names_current_stream(
+                                self.current_exclusive_stream_id,
+                                Some(stream_id),
+                            ) {
+                                crate::vprintln!(
+                                    "[WASAPI] device can't do this track's format in exclusive; this track plays shared (exclusive stays on for other rates)"
+                                );
+                                self.exclusive_skip_track = self.current_track_id.clone();
+                            } else {
+                                crate::vprintln!(
+                                    "[WASAPI] format refused for superseded stream {stream_id} (current {:?}); re-arming shared without marking the live track",
+                                    self.current_exclusive_stream_id
+                                );
+                            }
                             self.is_exclusive_mode = false;
                             (self.callback)(PlayerEvent::DeviceError(
                                 DeviceErrorKind::ExclusiveFormatUnsupported,
@@ -449,9 +498,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             ));
                         }
                     }
-                    AsioEvent::Duration(d) => {
-                        self.current_duration = d;
-                        (self.callback)(PlayerEvent::Duration(d, self.current_seq));
+                    AsioEvent::Duration { stream_id, secs } => {
+                        // Same scoping as the exclusive twin.
+                        if verdict_names_current_stream(
+                            self.current_asio_stream_id,
+                            Some(stream_id),
+                        ) {
+                            self.current_duration = secs;
+                            (self.callback)(PlayerEvent::Duration(secs, self.current_seq));
+                        }
                     }
                     AsioEvent::DriverNotFound => {
                         crate::vprintln!(
@@ -466,35 +521,59 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         ));
                         self.rearm_shared_after_asio_failure();
                     }
-                    AsioEvent::FormatUnsupported => {
-                        crate::vprintln!(
-                            "[ASIO] Driver rejects the track format, falling back to shared"
-                        );
-                        if let Some(cancel) = self.asio_stream_cancel.take() {
-                            cancel.store(true, Relaxed);
+                    AsioEvent::FormatUnsupported { stream_id } => {
+                        // Scoped like `RateUnsupported` below: the channel-count half of this
+                        // refusal reads the TRACK's channels, so a superseded verdict would
+                        // cancel a live decoder over a count the driver was never asked about.
+                        // The sample-type half is the driver's own, and the next build re-reports it.
+                        if verdict_names_current_stream(self.current_asio_stream_id, stream_id) {
+                            crate::vprintln!(
+                                "[ASIO] Driver rejects the track format, falling back to shared"
+                            );
+                            if let Some(cancel) = self.asio_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+                            self.is_asio_mode = false;
+                            (self.callback)(PlayerEvent::DeviceError(
+                                DeviceErrorKind::AsioFormatUnsupported,
+                            ));
+                            self.rearm_shared_after_asio_failure();
+                        } else {
+                            crate::vprintln!(
+                                "[ASIO] format refused for superseded stream {stream_id:?} (current {:?}); the live track keeps ASIO",
+                                self.current_asio_stream_id
+                            );
                         }
-                        self.is_asio_mode = false;
-                        (self.callback)(PlayerEvent::DeviceError(
-                            DeviceErrorKind::AsioFormatUnsupported,
-                        ));
-                        self.rearm_shared_after_asio_failure();
                     }
-                    AsioEvent::RateUnsupported => {
-                        crate::vprintln!(
-                            "[ASIO] device can't clock this track's rate; this track plays shared (ASIO stays on for other rates)"
-                        );
-                        if let Some(cancel) = self.asio_stream_cancel.take() {
-                            cancel.store(true, Relaxed);
+                    AsioEvent::RateUnsupported { stream_id } => {
+                        // Scoped whole, like `Completed` and `DecodeFailed` above, and unlike the
+                        // exclusive twin. There the refusal takes the one render thread down
+                        // whichever stream it judged, so its re-arm is owed either way; no ASIO
+                        // refusal does that. `finish_rebuild` and the reset give-up leave the
+                        // control thread alive on `Idle`, so acting on a superseded verdict would
+                        // cancel a live decoder and demote a track the driver never refused.
+                        if verdict_names_current_stream(self.current_asio_stream_id, stream_id) {
+                            if let Some(cancel) = self.asio_stream_cancel.take() {
+                                cancel.store(true, Relaxed);
+                            }
+                            // Per-track skip: remember this track; its shared re-arm must NOT
+                            // re-engage ASIO (loop), but keep ASIO on globally (no sticky clear:
+                            // `AsioRateUnsupported` is not in the frontend's disable list).
+                            crate::vprintln!(
+                                "[ASIO] device can't clock this track's rate; this track plays shared (ASIO stays on for other rates)"
+                            );
+                            self.asio_skip_track = self.current_track_id.clone();
+                            self.is_asio_mode = false;
+                            (self.callback)(PlayerEvent::DeviceError(
+                                DeviceErrorKind::AsioRateUnsupported,
+                            ));
+                            self.rearm_shared_after_asio_failure();
+                        } else {
+                            crate::vprintln!(
+                                "[ASIO] rate refused for superseded stream {stream_id:?} (current {:?}); the live track keeps ASIO",
+                                self.current_asio_stream_id
+                            );
                         }
-                        // Per-track skip: remember this track; its shared re-arm must NOT
-                        // re-engage ASIO (loop), but keep ASIO on globally (no sticky clear:
-                        // `AsioRateUnsupported` is not in the frontend's disable list).
-                        self.asio_skip_track = self.current_track_id.clone();
-                        self.is_asio_mode = false;
-                        (self.callback)(PlayerEvent::DeviceError(
-                            DeviceErrorKind::AsioRateUnsupported,
-                        ));
-                        self.rearm_shared_after_asio_failure();
                     }
                     AsioEvent::InitFailed(e) => {
                         crate::vprintln!("[ASIO] Init failed, falling back to shared mode: {e}");

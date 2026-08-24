@@ -96,14 +96,29 @@ pub(super) enum ExclusiveEvent {
         position: f64,
         refused: bool,
     },
+    /// Transport states only. They report what the endpoint is doing, not what a track is, so
+    /// no emitter of one has to know which stream it belongs to.
     StateChange(super::PlaybackState),
-    Duration(f64),
+    /// Track finished (EOF + drained). Stream-scoped: a stale completion from a superseded
+    /// stream must not clear a newer track, which would force a re-arm/double-load. Mirrors
+    /// `AsioEvent::Completed`.
+    Completed(u32),
+    /// The adopted stream's track length. Stream-scoped like `SeekSettled`: a superseded
+    /// stream reports one too, and downstream nothing can tell whose it was.
+    Duration {
+        stream_id: u32,
+        secs: f64,
+    },
     InitFailed(String),
     DeviceLocked(String),
     /// The device can't do THIS track's rate/bit-depth in exclusive (e.g. 88.2/176.4/192k on a
     /// 96k-max DAC), but exclusive itself works for other rates. Per-track shared fallback,
-    /// keeping exclusive enabled; mirrors `AsioEvent::RateUnsupported`.
-    FormatUnsupported,
+    /// keeping exclusive enabled; mirrors `AsioEvent::RateUnsupported`. Stream-scoped: a
+    /// refusal costs seconds on a rate-locked device, long enough for the track it judges to
+    /// stop being the one playing.
+    FormatUnsupported {
+        stream_id: u32,
+    },
     /// The decoder thread died mid-stream. Settled like the shared path's fatal decode
     /// error, never like `Completed`: the track did not finish, and its resume point has
     /// to survive. Stream-scoped, keeping a superseded decoder's death off a newer track.
@@ -923,21 +938,17 @@ fn position_frames(secs: f64, sample_rate: u32) -> u64 {
     }
 }
 
-/// Stop the current stream (if any), open a new exclusive stream, and dispatch
-/// error events on failure. Returns Ok with the new resources, or Err(()) when
-/// an error event has been sent and the render thread should exit.
+/// Open a new exclusive stream and dispatch error events on failure. Returns Ok with the
+/// new resources, or Err(()) when an error event has been sent and the render thread
+/// should exit. The caller has already dropped whatever client it held.
 fn try_open_stream(
     device: &wasapi::Device,
+    stream_id: u32,
     sample_rate: u32,
     channels: u32,
     bits_per_sample: u32,
-    audio_client: &Option<AudioClient>,
     event_tx: &mpsc::Sender<ExclusiveEvent>,
 ) -> Result<(AudioClient, AudioRenderClient, Handle, WaveFormat, u32), ()> {
-    if let Some(ac) = audio_client {
-        let _ = ac.stop_stream();
-    }
-
     match open_exclusive_stream(device, sample_rate, channels, bits_per_sample) {
         Ok(resources) => Ok(resources),
         Err(e) => {
@@ -948,7 +959,7 @@ fn try_open_stream(
                 // Per-track: this track's format isn't exclusive-compatible, but exclusive
                 // itself is fine for other rates. Play shared, keep exclusive on (do NOT treat
                 // it as a device-wide ExclusiveModeNotAllowed, which would disable exclusive).
-                let _ = event_tx.send(ExclusiveEvent::FormatUnsupported);
+                let _ = event_tx.send(ExclusiveEvent::FormatUnsupported { stream_id });
             } else {
                 let _ = event_tx.send(ExclusiveEvent::InitFailed(e));
             }
@@ -1098,10 +1109,10 @@ impl RenderContext {
 
             let (ac, rc, ev, wf, bs) = try_open_stream(
                 device,
+                stream_id,
                 sample_rate,
                 channels,
                 bits_per_sample,
-                &self.audio_client,
                 event_tx,
             )?;
 
@@ -1155,7 +1166,10 @@ impl RenderContext {
             _ => start_paused,
         };
 
-        let _ = event_tx.send(ExclusiveEvent::Duration(duration_secs));
+        let _ = event_tx.send(ExclusiveEvent::Duration {
+            stream_id,
+            secs: duration_secs,
+        });
         // Do NOT start the clock yet: per IAudioClient::Start the buffer must
         // hold real PCM first, else the tiny exclusive buffer underruns at the
         // silence->audio edge (saturation). The Playing loop pre-fills, then starts.
@@ -1592,8 +1606,18 @@ fn render_thread_inner(
                         if ctx.stream_ended && remaining_frames == 0 {
                             // Stream ended before any audio decoded: complete now.
                             let _ = event_tx.send(ExclusiveEvent::TimeUpdate(ctx.pcm_duration));
-                            let _ = event_tx
-                                .send(ExclusiveEvent::StateChange(super::PlaybackState::Completed));
+                            match ctx.current_stream_id {
+                                Some(stream_id) => {
+                                    let _ = event_tx.send(ExclusiveEvent::Completed(stream_id));
+                                }
+                                // Every path into `Playing` sets the id and every reset of it
+                                // sets `Idle`, so this is a broken invariant rather than a case
+                                // to fold: an unnamed completion would be charged to whichever
+                                // stream is current when it lands.
+                                None => crate::verr!(
+                                    "[WASAPI] completion while Playing with no stream id"
+                                ),
+                            }
                             ctx.stop_audio_client();
                             ctx.current_stream_id = None;
                             ctx.stream_ended = true;
@@ -1620,8 +1644,16 @@ fn render_thread_inner(
                         }
 
                         let _ = event_tx.send(ExclusiveEvent::TimeUpdate(ctx.pcm_duration));
-                        let _ = event_tx
-                            .send(ExclusiveEvent::StateChange(super::PlaybackState::Completed));
+                        match ctx.current_stream_id {
+                            Some(stream_id) => {
+                                let _ = event_tx.send(ExclusiveEvent::Completed(stream_id));
+                            }
+                            // Same broken invariant as the drained-early branch above: loud,
+                            // never folded onto whichever stream happens to be current.
+                            None => {
+                                crate::verr!("[WASAPI] completion while Playing with no stream id")
+                            }
+                        }
 
                         ctx.stop_audio_client();
                         ctx.client_started = false;
