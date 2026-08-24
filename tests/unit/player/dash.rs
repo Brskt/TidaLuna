@@ -351,6 +351,89 @@ fn a_long_but_plausible_track_stays_under_the_cap() {
 }
 
 #[test]
+fn an_undecodable_aac_profile_is_refused_before_anything_downloads() {
+    // TIDAL's 96 kbps tier serves HE-AAC (`mp4a.40.5`, AudioObjectType 5 = SBR). Symphonia
+    // decodes AAC-LC only and rejects the rest at codec init, by which point the whole track
+    // has been fetched and an output device opened: the user got silence and a 10 ms flash of
+    // "Playing". The manifest already names the profile, so the refusal belongs here.
+    for codec in ["mp4a.40.5", "mp4a.40.29"] {
+        let xml = mpd(
+            r#" mediaPresentationDuration="PT30S""#,
+            &format!(
+                r#"<Period>
+    <AdaptationSet mimeType="audio/mp4">
+      <Representation id="1" codecs="{codec}" audioSamplingRate="44100" bandwidth="96000">
+        {TPL_HEAD} duration="441000" />
+      </Representation>
+    </AdaptationSet>
+  </Period>"#
+            ),
+        );
+        let err = match parse_dash_mpd(&xml) {
+            Ok(_) => panic!("an undecodable AAC profile must be refused: {codec}"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains(codec), "{err}");
+        // This text is for the log. What a listener is told (which quality to pick) is the
+        // renderer's wording, reached through the failure code rather than this string: a
+        // message written for both audiences serves neither.
+        assert!(
+            !err.to_string().contains("320"),
+            "the listener-facing advice belongs to the renderer, not the log: {err}"
+        );
+    }
+}
+
+#[test]
+fn the_profile_refusal_is_typed_so_ipc_can_give_it_its_own_code() {
+    // The renderer has to tell "we cannot decode this" apart from "the manifest is broken" to
+    // choose what to show the user, and it only ever sees the IPC failure code. Matching on
+    // the prose would make the banner disappear the day someone rewords the message.
+    let xml = mpd(
+        r#" mediaPresentationDuration="PT30S""#,
+        &format!(
+            r#"<Period>
+    <AdaptationSet mimeType="audio/mp4">
+      <Representation id="1" codecs="mp4a.40.5" audioSamplingRate="44100" bandwidth="96000">
+        {TPL_HEAD} duration="441000" />
+      </Representation>
+    </AdaptationSet>
+  </Period>"#
+        ),
+    );
+    let err = parse_dash_mpd(&xml).expect_err("HE-AAC must be refused");
+    let typed = err
+        .downcast_ref::<UndecodableProfile>()
+        .expect("the refusal must carry its own type, not just a message");
+    assert_eq!(typed.codec, "mp4a.40.5");
+
+    // A malformed manifest must NOT wear that type, or every parse failure would be reported
+    // to the user as a quality problem.
+    let broken = mpd(
+        "",
+        &period("", &format!(r#"{TPL_HEAD} duration="441000" />"#)),
+    );
+    let other = parse_dash_mpd(&broken).expect_err("no duration source must still be an error");
+    assert!(
+        other.downcast_ref::<UndecodableProfile>().is_none(),
+        "an unrelated parse failure must not be typed as a profile refusal: {other}"
+    );
+}
+
+#[test]
+fn aac_lc_is_not_caught_by_the_profile_check() {
+    // The guard must not be mistakable for one that rejects the 320 kbps tier, which decodes
+    // today. `mp4a.40.2` is AudioObjectType 2, plain AAC-LC.
+    let xml = mpd(
+        r#" mediaPresentationDuration="PT30S""#,
+        &period("", &format!(r#"{TPL_HEAD} duration="441000" />"#)),
+    );
+    let m = parse_dash_mpd(&xml).expect("AAC-LC must still parse");
+    assert_eq!(m.codec, "mp4a.40.2");
+    assert_eq!(m.segment_urls.len(), 3);
+}
+
+#[test]
 fn zero_timescale_does_not_divide_by_zero() {
     // timescale="0" is invalid; it must fall back to the spec default rather than
     // producing an infinite segment count.

@@ -83,7 +83,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
                     let json = serde_json::to_string(&manifest).unwrap_or_else(|_| "null".into());
                     ipc_callback_ok(&callback, &json);
                 }
-                Err(e) => ipc_callback_err(&callback, 400, &format!("{e:#}")),
+                Err(e) => {
+                    ipc_callback_err(&callback, parse_dash_failure_code(&e), &format!("{e:#}"))
+                }
             }
         }
         "plugin.download" => {
@@ -162,6 +164,18 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
 /// `plugin.fetch_package` installs a plugin before one exists to hold a capability.
 fn is_plugin_attributed(channel: &str) -> bool {
     channel.starts_with("plugin.storage.") || channel == "plugin.fetch"
+}
+
+/// The failure code `player.parse_dash` answers `err` with.
+///
+/// A profile no decoder here handles is not a malformed manifest, and the code is all the
+/// renderer gets to tell them apart: one earns the listener a message naming the quality to
+/// pick, the other earns silence. 415 mirrors HTTP's Unsupported Media Type.
+fn parse_dash_failure_code(err: &anyhow::Error) -> i32 {
+    match err.downcast_ref::<crate::player::dash::UndecodableProfile>() {
+        Some(_) => 415,
+        None => 400,
+    }
 }
 
 #[cfg(test)]

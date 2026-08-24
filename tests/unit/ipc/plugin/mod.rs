@@ -27,6 +27,21 @@ fn the_install_channel_is_not_caught_by_the_fetch_prefix() {
     assert!(!is_plugin_attributed("plugin.fetch_package"));
 }
 
+/// The renderer sees only the code. It has to show a listener "pick a higher quality" for one
+/// of these and stay quiet for the other, so reporting both as 400 left the message
+/// unreachable and matching on the prose would lose it at the first rewording.
+#[test]
+fn an_undecodable_profile_reports_a_different_code_than_a_broken_manifest() {
+    let undecodable: anyhow::Error = crate::player::dash::UndecodableProfile {
+        codec: "mp4a.40.5".into(),
+    }
+    .into();
+    assert_eq!(parse_dash_failure_code(&undecodable), 415);
+
+    let malformed = anyhow::anyhow!("MPD has no periods");
+    assert_eq!(parse_dash_failure_code(&malformed), 400);
+}
+
 /// Widening this to channels no capability reaches would refuse calls the app itself makes.
 #[test]
 fn channels_no_handler_attributes_are_left_alone() {

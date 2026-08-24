@@ -94,6 +94,44 @@ fn period_duration_secs(mpd: &dash_mpd::MPD, period: &dash_mpd::Period) -> Optio
         .map(|d| d.as_secs_f64())
 }
 
+/// MPEG-4 Audio Object Type 2, plain AAC-LC: the only profile this build decodes.
+const AAC_LC_OBJECT_TYPE: u16 = 2;
+
+/// A manifest naming an audio profile no decoder in this build can handle.
+///
+/// A type rather than a bare message, because two different callers need to tell it apart
+/// from a malformed manifest: the IPC layer gives it a failure code of its own, and the
+/// renderer picks what to show the user from that code. Matching on the prose would drop the
+/// user's message the first time someone rewords it, and say nothing when it did.
+#[derive(Debug)]
+pub struct UndecodableProfile {
+    pub codec: String,
+}
+
+impl std::fmt::Display for UndecodableProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this stream is {}, which TidaLunar cannot decode: only AAC-LC is supported",
+            self.codec
+        )
+    }
+}
+
+impl std::error::Error for UndecodableProfile {}
+
+/// The MPEG-4 Audio Object Type a codec string names, if it names one.
+///
+/// Per RFC 6381 clause 3.3 an `mp4a` codec carries the ObjectTypeIndication in hex and, for
+/// `40` (MPEG-4 Audio), the Audio Object Type after it in decimal. Any other family, or a
+/// truncated `mp4a.40`, yields `None`: this parser only speaks for the profiles it can name,
+/// and leaves the rest to the decoder.
+fn mp4a_object_type(codec: &str) -> Option<u16> {
+    codec
+        .strip_prefix("mp4a.40.")
+        .and_then(|aot| aot.parse().ok())
+}
+
 /// Parse a DASH MPD XML string and extract segment URLs.
 ///
 /// Fails closed: a manifest that parses but yields no segments is an error, not an empty
@@ -121,6 +159,16 @@ pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
         .ok_or_else(|| anyhow::anyhow!("MPD adaptation set has no representations"))?;
 
     let codec = repr.codecs.clone().unwrap_or_default();
+    // `symphonia-codec-aac` decodes AAC-LC and nothing else: it refuses every other object
+    // type, and SBR besides, at codec init. That refusal used to land after the whole track
+    // had been fetched and an output device opened, so the tier played silence. TIDAL serves
+    // HE-AAC (object type 5) at 96 kbps and the manifest says so right here, before a single
+    // segment is pulled.
+    if let Some(aot) = mp4a_object_type(&codec)
+        && aot != AAC_LC_OBJECT_TYPE
+    {
+        return Err(UndecodableProfile { codec }.into());
+    }
     let sample_rate = repr
         .audioSamplingRate
         .as_deref()
