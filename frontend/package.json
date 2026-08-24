@@ -3,11 +3,13 @@
   "module": "src/index.ts",
   "type": "module",
   "scripts": {
-    "build": "bun esbuild.config.ts"
+    "build": "bun esbuild.config.ts",
+    "test": "bun test tests/"
   },
   "devDependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
+    "@happy-dom/global-registrator": "^20.11.6",
     "@mui/icons-material": "^7.3.9",
     "@mui/material": "^7.3.9",
     "@octokit/openapi-types": "^27.0.0",

@@ -1,0 +1,5 @@
+[test]
+# `src/ipc.ts` captures `window.cefQuery` at module load, and `src/audio-proxy.ts` patches
+# `HTMLMediaElement.prototype` at module load too. Both need their globals to exist before the
+# first import, which only a preload can guarantee.
+preload = ["./tests/setup.ts"]
