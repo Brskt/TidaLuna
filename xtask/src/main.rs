@@ -189,11 +189,12 @@ fn bundle(flags: &[String]) -> Result<(), String> {
                 .ok()
                 .and_then(|v| v.get("files")?.as_object().cloned())
             {
-                // Known files in the new layout (anything outside these paths is stale)
+                // Known files in the new layout (anything outside these paths is stale).
+                // `bin/cef/` is absent here: it gets the stricter rule below.
                 let new_layout_prefixes: &[&str] = if cfg!(target_os = "macos") {
                     &[] // macOS uses .app bundle, no flat layout
                 } else {
-                    &["bin/cef/", "bin/bun", "bin/native-host"]
+                    &["bin/bun", "bin/native-host"]
                 };
                 let new_layout_roots: &[&str] = if cfg!(target_os = "macos") {
                     &[]
@@ -208,13 +209,21 @@ fn bundle(flags: &[String]) -> Result<(), String> {
                 };
 
                 let mut cleaned = 0u32;
+                const CEF_PREFIX: &str = "bin/cef/";
                 for old_path in old_files.keys() {
-                    let dominated = new_layout_roots.iter().any(|r| old_path == *r)
-                        || new_layout_prefixes.iter().any(|p| old_path.starts_with(p));
-                    if !dominated {
-                        if fs::remove_file(bundle_dir.join(old_path)).is_ok() {
-                            cleaned += 1;
+                    // Everything under bin/cef/ comes from the CEF distribution; an entry
+                    // whose source is gone is one it no longer ships, be it a renamed library
+                    // or another platform's leftovers. The updater's manifest is built from
+                    // whatever survives this loop.
+                    let stale = match old_path.strip_prefix(CEF_PREFIX) {
+                        Some(rest) if !cfg!(target_os = "macos") => !cef_dir.join(rest).exists(),
+                        _ => {
+                            !new_layout_roots.iter().any(|r| old_path == *r)
+                                && !new_layout_prefixes.iter().any(|p| old_path.starts_with(p))
                         }
+                    };
+                    if stale && fs::remove_file(bundle_dir.join(old_path)).is_ok() {
+                        cleaned += 1;
                     }
                 }
                 // Remove empty dirs left behind
