@@ -38,6 +38,13 @@ impl BufferProgress {
         self.playback_active.store(active, Relaxed);
     }
 
+    /// Request the boosted playback rate. The reader is waiting on bytes a Range restart has
+    /// to fetch from a cold offset, and the starvation watchdog can only infer that later,
+    /// from an `ahead` the restart just made meaningless.
+    pub fn request_seek_boost(&self) {
+        self.seek_boost.store(true, Relaxed);
+    }
+
     fn take_seek_boost(&self) -> bool {
         self.seek_boost.swap(false, Relaxed)
     }
@@ -673,3 +680,7 @@ fn drain_queue_ungoverned(queue: &mut VecDeque<TokenRequest>) {
         let _ = req.reply.send(());
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/audio/bandwidth.rs"]
+mod tests;

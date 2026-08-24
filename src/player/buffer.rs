@@ -331,6 +331,15 @@ impl Read for RamBuffer {
                         inner.restart_target = Some(restart_pos);
                         drop(inner);
                         self.shared.async_notify.notify_one();
+                        // This reader is about to wait on a refetch from a cold offset, which
+                        // is what the boosted rate exists for. Asking here rather than at the
+                        // seek keeps it to the restarts that actually lack bytes.
+                        // Reads run on threads with no runtime, and GOVERNOR's init spawns a
+                        // task: `main.rs` forcing it at startup is what keeps this from being
+                        // the first touch. Tests reaching here need their own runtime.
+                        crate::state::GOVERNOR
+                            .buffer_progress()
+                            .request_seek_boost();
                         inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     }
                 }
