@@ -1348,6 +1348,34 @@ impl RenderContext {
         }
     }
 
+    /// What a `Play` means wherever it reaches the render loop. The stream id decides first; one
+    /// for a stream not yet adopted is latched for its own `StartStream`, never applied to the
+    /// context currently armed.
+    ///
+    /// The running state is read here rather than presumed by the caller. The drain serving
+    /// `Playing` loses it mid-burst whenever a `Pause` and the `Play` answering it reach one
+    /// `try_recv` sweep, and a caller still holding "we are playing" reads that pair as a no-op.
+    fn apply_play(&mut self, event_tx: &mpsc::Sender<ExclusiveEvent>, stream_id: u32) {
+        if self.current_stream_id != Some(stream_id) {
+            // Latched, NOT resumed: only the matching adoption may apply it, and an id that
+            // never matches leaves playback waiting on a user action.
+            crate::vprintln!(
+                "[WASAPI] Play latched for stream {stream_id}, current is {:?}",
+                self.current_stream_id
+            );
+            self.pending_transport = Some((stream_id, true));
+            return;
+        }
+        if matches!(self.state, RenderState::Playing) {
+            return;
+        }
+        crate::vprintln!("[WASAPI] render resumed by Play (stream {stream_id})");
+        // The pause armed `pending_start` and flushed a dirty endpoint: the playing loop
+        // re-primes a full period ahead of Start() rather than restarting over a stale tail.
+        self.state = RenderState::Playing;
+        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+    }
+
     fn handle_end_stream(&mut self, stream_id: u32) {
         if self.current_stream_id == Some(stream_id) {
             self.stream_ended = true;
@@ -1608,12 +1636,7 @@ fn render_thread_inner(
                     let handler = cmd.label();
                     match cmd {
                         ExclusiveCommand::Play { stream_id } => {
-                            // Play for the live stream while already Playing is a no-op;
-                            // one for a not-yet-adopted stream is latched for its
-                            // probe-delayed StartStream to apply it.
-                            if ctx.current_stream_id != Some(stream_id) {
-                                ctx.pending_transport = Some((stream_id, true));
-                            }
+                            ctx.apply_play(&event_tx, stream_id)
                         }
                         ExclusiveCommand::Pause { stream_id } => {
                             // Stream-scoped: a stale pause from a superseded track must
@@ -2042,21 +2065,9 @@ fn render_thread_inner(
                 };
                 match cmd {
                     Ok(ExclusiveCommand::Play { stream_id }) => {
-                        // Stream-scoped: a premature Play for a not-yet-adopted stream
-                        // (its StartStream lands only after the decoder's probe) or a
-                        // stale one for a superseded stream must not resume the OLD
-                        // armed context. Latch it: the adoption applies it on id match.
-                        // Falls through instead of skipping ahead, like the Playing arm's
-                        // Pause: an early exit would leave the probe's span open.
-                        if ctx.current_stream_id != Some(stream_id) {
-                            ctx.pending_transport = Some((stream_id, true));
-                        } else {
-                            // Pause armed pending_start and flushed a dirty endpoint, leaving
-                            // the Playing loop to re-prime a full period before Start().
-                            ctx.state = RenderState::Playing;
-                            let _ = event_tx
-                                .send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
-                        }
+                        // Falls through on the latched branch, like the Playing arm's Pause:
+                        // an early exit would leave the probe's span open.
+                        ctx.apply_play(&event_tx, stream_id)
                     }
                     Ok(ExclusiveCommand::Pause { stream_id }) => {
                         // Already paused; only a pause for a not-yet-adopted stream
@@ -2139,3 +2150,7 @@ mod endpoint_flush_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/player/wasapi/stall_probe_tests.rs"]
 mod stall_probe_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/wasapi/transport_tests.rs"]
+mod transport_tests;
