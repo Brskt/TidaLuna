@@ -331,6 +331,10 @@ async fn routing_loop(
                         crate::vprintln!("[connect::bridge] <- PlaybackError {} (gen={})", status_code, engine_gen);
                         playback_ctrl.on_playback_error(status_code, engine_gen).await;
                     }
+                    BridgeEvent::DurationMeasured { duration_ms, ref track_id, engine_gen } => {
+                        crate::vprintln!("[connect::bridge] <- DurationMeasured {}ms (gen={})", duration_ms, engine_gen);
+                        playback_ctrl.on_duration_measured(duration_ms, track_id.as_deref(), engine_gen).await;
+                    }
                 }
             }
 
@@ -396,7 +400,12 @@ fn emit_receiver_metadata(media: &crate::connect::types::MediaInfo) {
         None
     };
     // Post to CEF UI thread - OsMediaControls (SMTC) requires UI thread access.
-    let mut task = ReceiverMetadataTask::new(title.to_string(), artist.to_string(), duration_secs);
+    let mut task = ReceiverMetadataTask::new(
+        media.track_id(),
+        title.to_string(),
+        artist.to_string(),
+        duration_secs,
+    );
     post_task(ThreadId::UI, Some(&mut task));
 
     // Emit full MediaInfo to frontend for player bar + Redux updates
@@ -405,6 +414,7 @@ fn emit_receiver_metadata(media: &crate::connect::types::MediaInfo) {
 
 wrap_task! {
     struct ReceiverMetadataTask {
+        track_id: Option<String>,
         title: String,
         artist: String,
         duration_secs: Option<f64>,
@@ -414,6 +424,31 @@ wrap_task! {
             crate::app_state::with_state(|state| {
                 if let Some(ref mut mc) = state.media_controls {
                     mc.set_metadata(&self.title, &self.artist, self.duration_secs);
+                }
+                // Recorded together because the controller hands them over together. The
+                // frontend echoes this track back as a `player.metadata` frame after a
+                // network round trip; without the id, that frame could not tell the length
+                // was measured for its own track. A frame with no length records nothing; an
+                // art or title refresh says nothing about a duration already decoded, and
+                // repeat-one re-announces the very track that is playing.
+                if let Some(secs) = self.duration_secs {
+                    state.record_measured_duration(crate::app_state::MeasuredDuration::new(
+                        self.track_id.clone(),
+                        secs,
+                    ));
+                }
+                match crate::state::CURRENT_METADATA.lock() {
+                    Ok(mut lock) => {
+                        *lock = Some(crate::state::TrackMetadata {
+                            title: self.title.clone(),
+                            artist: self.artist.clone(),
+                            quality: String::new(),
+                            id: self.track_id.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        crate::vprintln!("[connect] CURRENT_METADATA lock poisoned: {e}")
+                    }
                 }
             });
         }

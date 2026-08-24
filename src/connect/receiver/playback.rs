@@ -285,6 +285,49 @@ impl PlaybackController {
         }
     }
 
+    /// The local decoder measured the track's real length. `NotifyMediaChanged` is the only
+    /// message carrying a length: correcting one means sending it a second time.
+    /// It is sent only when the figure actually changes: a repeat the controller did not need
+    /// is a repeat it might render.
+    pub async fn on_duration_measured(
+        &mut self,
+        duration_ms: u64,
+        track_id: Option<&str>,
+        engine_gen: u64,
+    ) {
+        if engine_gen != self.engine_gen {
+            return;
+        }
+        let corrected = {
+            let Some(media) = self.current_media.as_mut() else {
+                return;
+            };
+            // Both sides are Connect's own id space, the measurement having been seeded by
+            // `speaker_bridge` from this same `track_id()`. Two ids match or nothing does.
+            if !crate::ipc::player::same_track(track_id, media.track_id().as_deref()) {
+                return;
+            }
+            let metadata = media.metadata.get_or_insert(MediaMetadata {
+                title: None,
+                album_title: None,
+                artists: None,
+                duration: None,
+                images: None,
+            });
+            if metadata.duration == Some(duration_ms) {
+                false
+            } else {
+                metadata.duration = Some(duration_ms);
+                true
+            }
+        };
+        if !corrected {
+            return;
+        }
+        self.current_duration_ms = duration_ms;
+        self.notify_media_changed().await;
+    }
+
     /// Track finished playing.
     pub async fn on_playback_completed(&mut self, engine_gen: u64) {
         if engine_gen != self.engine_gen {

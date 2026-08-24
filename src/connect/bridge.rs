@@ -123,6 +123,15 @@ pub(crate) fn forward(event: &PlayerEvent) {
             status_code: error.clone(),
             engine_gen,
         }),
+        // Zero is the sentinel a failed load emits to settle the SDK's `mediaduration` await,
+        // not a length: forwarding it would announce a track of no duration to the controller.
+        PlayerEvent::Duration(secs, _seq, track_id) if *secs > 0.0 => {
+            Some(BridgeEvent::DurationMeasured {
+                duration_ms: (*secs * 1000.0) as u64,
+                track_id: track_id.clone(),
+                engine_gen,
+            })
+        }
         _ => None,
     };
 

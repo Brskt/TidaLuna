@@ -24,6 +24,14 @@ pub(crate) enum BridgeEvent {
         status_code: String,
         engine_gen: u64,
     },
+    /// The local decoder measured the track's real length. The queue metadata is the only other
+    /// source the controller ever sees, and window items reach us without one. Carries the track
+    /// it was measured on: a measurement outliving its track must not be charged to the next.
+    DurationMeasured {
+        duration_ms: u64,
+        track_id: Option<String>,
+        engine_gen: u64,
+    },
 }
 
 /// Bridge between TIDAL Connect receiver and the local Rust player.
@@ -78,17 +86,18 @@ impl SpeakerBridge {
                 segments.len(),
                 format
             );
-            return with_state(
-                // No id yet on this path: the receiver reads its own from the controller, and
-                // an untagged measurement is turned away rather than charged to another track.
-                |state| match state.player.load_dash(url, segments, format, None) {
+            // Named in Connect's space from end to end, never compared against the
+            // frontend's: the receiver's metadata task records this same id.
+            let media_id = media_info.track_id();
+            return with_state(|state| {
+                match state.player.load_dash(url, segments, format, media_id) {
                     Ok(()) => true,
                     Err(e) => {
                         crate::verr!("[connect::bridge] Player DASH load error: {}", e);
                         false
                     }
-                },
-            )
+                }
+            })
             .unwrap_or(false);
         }
 
@@ -101,8 +110,9 @@ impl SpeakerBridge {
             .unwrap_or("")
             .to_string();
 
+        let media_id = media_info.track_id();
         with_state(
-            |state| match state.player.load_and_play(url, format, key, None) {
+            |state| match state.player.load_and_play(url, format, key, media_id) {
                 Ok(()) => true,
                 Err(e) => {
                     crate::verr!("[connect::bridge] Player load error: {}", e);

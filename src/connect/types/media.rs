@@ -19,6 +19,15 @@ pub(crate) struct MediaInfo {
     pub policy: serde_json::Value,
 }
 
+impl MediaInfo {
+    /// The controller's id for this track, absent when it names nothing. The wire field is a
+    /// required `String` with no floor of its own; a controller that sends `""` would mint an
+    /// id equal to the next blank one and lend one track's length to another.
+    pub(crate) fn track_id(&self) -> Option<String> {
+        crate::util::metadata::trimmed_non_empty(&self.media_id)
+    }
+}
+
 pub(crate) fn default_policy() -> serde_json::Value {
     serde_json::json!({"canNext": true, "canPrevious": true})
 }
