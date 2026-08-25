@@ -34,7 +34,7 @@ Or unpack the portable `.tar.gz` and run `./tidalunar`.
 
 ### macOS
 
-Apple Silicon only. Unzip `tidalunar-macos-arm64.zip` and run `tidalunar.app` (unsigned: right-click > Open on first launch). No in-app updater on macOS; re-download to update.
+Unzip `tidalunar_<version>_macos_arm64.zip` (Apple Silicon) or `tidalunar_<version>_macos_x64.zip` (Intel) and run `tidalunar.app` (unsigned: right-click > Open on first launch). No in-app updater on macOS; re-download to update.
 
 ### NixOS
 

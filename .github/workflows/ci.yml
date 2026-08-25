@@ -216,6 +216,8 @@ jobs:
             os: windows-11-arm
           - target: macos-arm64
             os: macos-latest
+          - target: macos-x64
+            os: macos-26-intel
     runs-on: ${{ matrix.os }}
     env:
       # Job-scoped for the Sign step's `if: env.WINDOWS_SIGNING_PFX != ''` to
@@ -532,7 +534,7 @@ jobs:
         run: |
           mkdir -p release-assets
 
-          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64 macos-arm64; do
+          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64 macos-arm64 macos-x64; do
             dir="artifacts/tidalunar-${target}"
             if [ ! -d "$dir" ]; then
               echo "Warning: $dir not found, skipping"
@@ -600,7 +602,8 @@ jobs:
             case "$target" in
               windows-amd64) bundle_zip="tidalunar_${VERSION}_win32_x64.zip" ;;
               windows-arm64) bundle_zip="tidalunar_${VERSION}_win32_arm64.zip" ;;
-              macos-arm64)   bundle_zip="tidalunar-macos-arm64.zip" ;;
+              macos-arm64)   bundle_zip="tidalunar_${VERSION}_macos_arm64.zip" ;;
+              macos-x64)     bundle_zip="tidalunar_${VERSION}_macos_x64.zip" ;;
               *)             bundle_zip="" ;;
             esac
             if [ -n "$bundle_zip" ]; then
@@ -658,7 +661,8 @@ jobs:
               ("Windows arm64", f"tidalunar_{version}_arm64.exe", f"tidalunar_{version}_win32_arm64.zip"),
               ("Linux amd64", f"tidalunar_{version}_amd64.deb", f"tidalunar_{version}_linux_amd64.tar.gz"),
               ("Linux arm64", f"tidalunar_{version}_arm64.deb", f"tidalunar_{version}_linux_arm64.tar.gz"),
-              ("macOS arm64", None, "tidalunar-macos-arm64.zip"),
+              ("macOS x64", None, f"tidalunar_{version}_macos_x64.zip"),
+              ("macOS arm64", None, f"tidalunar_{version}_macos_arm64.zip"),
           ]
           assets = {p.name for p in Path("release-assets").iterdir()}
           table, refs = [], []
