@@ -26,8 +26,10 @@ pub(crate) struct TokenGeneration {
 pub(crate) enum StoreError {
     /// Backend not available (no Keychain, DPAPI failure, etc.)
     Unavailable,
-    /// Backend accessible but operation failed (permission, I/O, lock)
-    Backend,
+    /// Backend accessible but operation failed (permission, I/O, lock). Carries the
+    /// platform's own message: the variant alone cannot tell a refused Keychain
+    /// prompt from a full disk, and that distinction is the reason to report it.
+    Backend(String),
     /// Data present but not valid JSON / wrong schema
     Corrupt,
 }
@@ -76,7 +78,7 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
             &mut output,
         )
     }
-    .map_err(|_| StoreError::Backend)?;
+    .map_err(|e| StoreError::Backend(e.to_string()))?;
 
     let encrypted =
         unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
@@ -86,10 +88,15 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     // Best-effort durability: sync_all flushes file content, persist does an atomic
     // rename. Directory fsync is not done - a power loss right after persist could
     // lose the entry, which is acceptable (triggers re-login, not corruption).
-    let mut f = tempfile::NamedTempFile::new_in(data_dir).map_err(|_| StoreError::Backend)?;
-    f.write_all(&encrypted).map_err(|_| StoreError::Backend)?;
-    f.as_file().sync_all().map_err(|_| StoreError::Backend)?;
-    f.persist(&path).map_err(|_| StoreError::Backend)?;
+    let mut f = tempfile::NamedTempFile::new_in(data_dir)
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    f.write_all(&encrypted)
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    f.as_file()
+        .sync_all()
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    f.persist(&path)
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
     Ok(())
 }
 
@@ -103,7 +110,7 @@ fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
     let encrypted = match std::fs::read(&path) {
         Ok(v) => v,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(StoreError::Backend),
+        Err(e) => return Err(StoreError::Backend(e.to_string())),
     };
 
     let input = CRYPT_INTEGER_BLOB {
@@ -137,7 +144,7 @@ fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
     match std::fs::remove_file(data_dir.join("auth_tokens.dpapi")) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(StoreError::Backend),
+        Err(e) => Err(StoreError::Backend(e.to_string())),
     }
 }
 
@@ -146,7 +153,7 @@ fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
 #[cfg(target_os = "macos")]
 fn save_platform(_data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     security_framework::passwords::set_generic_password("com.tidaluna", "auth_state", plaintext)
-        .map_err(|_| StoreError::Backend)
+        .map_err(|e| StoreError::Backend(e.to_string()))
 }
 
 #[cfg(target_os = "macos")]
@@ -154,7 +161,7 @@ fn load_platform(_data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
     match security_framework::passwords::get_generic_password("com.tidaluna", "auth_state") {
         Ok(v) => Ok(Some(v)),
         Err(e) if e.code() == -25300 => Ok(None), // errSecItemNotFound
-        Err(_) => Err(StoreError::Backend),
+        Err(e) => Err(StoreError::Backend(e.to_string())),
     }
 }
 
@@ -163,7 +170,7 @@ fn delete_platform(_data_dir: &Path) -> Result<(), StoreError> {
     match security_framework::passwords::delete_generic_password("com.tidaluna", "auth_state") {
         Ok(()) => Ok(()),
         Err(e) if e.code() == -25300 => Ok(()), // errSecItemNotFound
-        Err(_) => Err(StoreError::Backend),
+        Err(e) => Err(StoreError::Backend(e.to_string())),
     }
 }
 
@@ -184,13 +191,18 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt;
 
     let path = data_dir.join("auth_tokens.json");
-    let mut f = tempfile::NamedTempFile::new_in(data_dir).map_err(|_| StoreError::Backend)?;
+    let mut f = tempfile::NamedTempFile::new_in(data_dir)
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
     f.as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(|_| StoreError::Backend)?;
-    f.write_all(plaintext).map_err(|_| StoreError::Backend)?;
-    f.as_file().sync_all().map_err(|_| StoreError::Backend)?;
-    f.persist(&path).map_err(|_| StoreError::Backend)?;
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    f.write_all(plaintext)
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    f.as_file()
+        .sync_all()
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    f.persist(&path)
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
     Ok(())
 }
 
@@ -199,7 +211,7 @@ fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
     match std::fs::read(data_dir.join("auth_tokens.json")) {
         Ok(v) => Ok(Some(v)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(StoreError::Backend),
+        Err(e) => Err(StoreError::Backend(e.to_string())),
     }
 }
 
@@ -208,6 +220,6 @@ fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
     match std::fs::remove_file(data_dir.join("auth_tokens.json")) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(StoreError::Backend),
+        Err(e) => Err(StoreError::Backend(e.to_string())),
     }
 }

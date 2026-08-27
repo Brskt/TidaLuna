@@ -515,8 +515,10 @@ fn process_token_response_with(
         state.captured_token = at.to_string();
 
         let data_dir = crate::state::cache_data_dir();
-        if let Some(ref ts) = state.token_state {
-            let _ = crate::platform::secure_store::save(&data_dir, ts);
+        if let Some(ref ts) = state.token_state
+            && let Err(e) = crate::platform::secure_store::save(&data_dir, ts)
+        {
+            crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
         }
     });
 

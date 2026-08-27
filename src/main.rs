@@ -506,10 +506,10 @@ fn start_boot_token_reconcile(data_dir: &std::path::Path, cef_profile: &std::pat
             vprintln!("[AUTH]   Secure store corrupt - purged SDK blob");
             return;
         }
-        Err(platform::secure_store::StoreError::Backend) => {
+        Err(platform::secure_store::StoreError::Backend(e)) => {
             // Transient (I/O/lock/permission), not corrupt: keep the SDK blob; it
             // re-seeds from the stored token next launch.
-            vprintln!("[AUTH]   Secure store backend error (transient) - left intact");
+            vprintln!("[AUTH]   Secure store backend error (transient) - left intact: {e}");
             return;
         }
     };
