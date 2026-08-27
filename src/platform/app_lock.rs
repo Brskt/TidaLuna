@@ -8,6 +8,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// Reaches only the focus-signal path, which exists on the platforms that have a
+// guard to signal from.
+#[cfg(any(windows, target_os = "linux"))]
 use cef::*;
 
 /// Gates `post_focus` until the CEF UI thread exists.

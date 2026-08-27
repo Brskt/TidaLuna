@@ -7,7 +7,11 @@ use tokio_util::bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 
 use super::types::{GhRelease, Manifest, UPDATER_STATE, UpdaterPhase};
-use super::util::{exe_dir, fetch_gh_release, is_safe_relative_path, sha256_file};
+use super::util::{exe_dir, fetch_gh_release, sha256_file};
+// Extraction is zip on Windows and tar.gz on Linux; anywhere else bails before
+// it needs to vet an entry's path.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use super::util::is_safe_relative_path;
 
 macro_rules! check_cancel {
     ($cancel:expr) => {
