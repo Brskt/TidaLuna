@@ -515,10 +515,21 @@ fn process_token_response_with(
         state.captured_token = at.to_string();
 
         let data_dir = crate::state::cache_data_dir();
-        if let Some(ref ts) = state.token_state
-            && let Err(e) = crate::platform::secure_store::save(&data_dir, ts)
-        {
-            crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
+        if let Some(ref ts) = state.token_state {
+            // Only a durable generation belongs on disk. One without a refresh
+            // token would replace a credential that still works with one that
+            // cannot refresh, and the next launch seeds the SDK's own blob from
+            // it, handing TIDAL an empty refresh token verbatim. The access
+            // token above serves this session from memory either way.
+            if ts.current.is_durable() {
+                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
+                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
+                }
+            } else {
+                crate::vprintln!(
+                    "[AUTH]   Exchange carried no refresh token - stored credential kept"
+                );
+            }
         }
     });
 

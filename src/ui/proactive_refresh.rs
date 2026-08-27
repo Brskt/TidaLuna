@@ -206,10 +206,21 @@ async fn do_refresh(refresh_token: String, client_id: String, req_scope: String)
         state.captured_token = at.clone();
 
         let data_dir = crate::state::cache_data_dir();
-        if let Some(ref ts) = state.token_state
-            && let Err(e) = crate::platform::secure_store::save(&data_dir, ts)
-        {
-            crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
+        if let Some(ref ts) = state.token_state {
+            // Same rule as the two token paths, and this is the site that meets
+            // it most easily. The refresh awaits the network, a session_clear can
+            // empty token_state in the gap, and a refresh that reuses its token
+            // returns no new one. Both arms of the fallback are then gone and the
+            // generation would carry no refresh token at all.
+            if ts.current.is_durable() {
+                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
+                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
+                }
+            } else {
+                crate::vprintln!(
+                    "[AUTH]   Refresh landed with no refresh token - stored credential kept"
+                );
+            }
         }
     });
 

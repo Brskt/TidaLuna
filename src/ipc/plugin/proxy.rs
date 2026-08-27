@@ -608,10 +608,19 @@ fn proxy_transform_token_body_with(
         state.captured_token = at.clone();
 
         let data_dir = crate::state::cache_data_dir();
-        if let Some(ref ts) = state.token_state
-            && let Err(e) = crate::platform::secure_store::save(&data_dir, ts)
-        {
-            crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
+        if let Some(ref ts) = state.token_state {
+            // Same rule as the response-filter path: a generation with no refresh
+            // token cannot re-establish a session and must not replace one on
+            // disk that can. Both sites share this AppState and both apply it.
+            if ts.current.is_durable() {
+                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
+                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
+                }
+            } else {
+                crate::vprintln!(
+                    "[AUTH]   Exchange carried no refresh token - stored credential kept"
+                );
+            }
         }
 
         // Carry opaque_rt out under this lock: it stays paired with opaque_at

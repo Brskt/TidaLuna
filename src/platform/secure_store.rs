@@ -21,6 +21,20 @@ pub(crate) struct TokenGeneration {
     pub client_id: String,
 }
 
+impl TokenGeneration {
+    /// True when this generation can still re-establish a session on a later
+    /// launch, which is the only reason to keep one on disk.
+    ///
+    /// The refresh token is the sole part that outlives the access token's
+    /// expiry. A generation without one is scoped to the running process: it
+    /// serves requests now and is worth nothing stored. Two exchanges arrive
+    /// that way, both legitimate - an app-level `client_credentials` token, and
+    /// any response that reuses a refresh token we no longer hold.
+    pub(crate) fn is_durable(&self) -> bool {
+        !self.refresh_token.is_empty()
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)] // not every variant is constructed on every platform
 pub(crate) enum StoreError {
@@ -223,3 +237,7 @@ fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
         Err(e) => Err(StoreError::Backend(e.to_string())),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/platform/secure_store.rs"]
+mod tests;
