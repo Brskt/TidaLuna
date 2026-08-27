@@ -4856,6 +4856,8 @@ dependencies = [
  "md-5",
  "mdns-sd",
  "oauth2",
+ "objc2",
+ "objc2-app-kit",
  "oxc",
  "pbkdf2",
  "png",

@@ -1,6 +1,8 @@
 pub(crate) mod app_lock;
 pub(crate) mod auth;
 #[cfg(target_os = "macos")]
+pub(crate) mod cef_app;
+#[cfg(target_os = "macos")]
 pub(crate) mod cef_loader;
 pub(crate) mod clipboard;
 #[cfg(target_os = "linux")]

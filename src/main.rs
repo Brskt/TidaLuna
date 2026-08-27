@@ -390,6 +390,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Claim the application singleton before the call below, and only here: CEF
+    // builds the UI message pump inside initialize(), and the pump asks once, at
+    // creation, whether the singleton answers Chromium's protocol. Arrive after
+    // it and a stock NSApplication already holds the slot, which is how closing
+    // the window used to abort the process. Everything past the subprocess exit
+    // above runs in the browser alone and needs no role check.
+    #[cfg(target_os = "macos")]
+    platform::cef_app::install();
+
     // initialize() returns 0 both for a process-singleton relaunch (exit cleanly)
     // and for a genuine init failure; the exit code tells them apart.
     if initialize(
