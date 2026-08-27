@@ -273,10 +273,15 @@ fn write_ls_keys(db: &mut rusty_leveldb::DB, entries: &[(&str, &[u8])]) -> Optio
 /// Used when the secure store has tokens but the SDK storage is missing
 /// (TIDAL's SDK may refuse to persist non-JWT opaque tokens: it is seeded
 /// with the real ones).
+///
+/// `expires_ms` is named for its unit because the SDK reads a milliseconds
+/// epoch here and this side keeps seconds: `TokenGeneration::access_expires_ms`
+/// is the conversion, and passing a raw `access_expires` would seed a token the
+/// SDK judges expired on sight.
 pub(crate) fn build_seed_entries(
     access_token: &str,
     refresh_token: &str,
-    expires: u64,
+    expires_ms: u64,
     user_id: Option<&str>,
     granted_scopes: &[String],
 ) -> Option<SdkEntries> {
@@ -292,7 +297,7 @@ pub(crate) fn build_seed_entries(
     let credentials_json = serde_json::json!({
         "accessToken": {
             "token": access_token,
-            "expires": expires,
+            "expires": expires_ms,
             "userId": user_id.unwrap_or(""),
             "grantedScopes": granted_scopes,
         },

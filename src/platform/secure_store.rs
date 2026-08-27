@@ -33,6 +33,19 @@ impl TokenGeneration {
     pub(crate) fn is_durable(&self) -> bool {
         !self.refresh_token.is_empty()
     }
+
+    /// The access-token expiry in the unit TIDAL's own SDK reads.
+    ///
+    /// `access_expires` is a seconds epoch everywhere on this side, but every
+    /// expiry handed to the web SDK is a milliseconds one: its OAuth parser
+    /// stores `Date.now() + expires_in * 1000`, and its freshness check compares
+    /// against `Date.now() + 60000`. Seconds are smaller by a factor of a
+    /// thousand, so a token passed in them reads as long expired however much
+    /// life it has left. Both paths that reach the SDK come through here, which
+    /// is the point: they used to disagree.
+    pub(crate) fn access_expires_ms(&self) -> u64 {
+        self.access_expires.saturating_mul(1000)
+    }
 }
 
 #[derive(Debug)]

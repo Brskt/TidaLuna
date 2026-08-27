@@ -527,7 +527,7 @@ fn start_boot_token_reconcile(data_dir: &std::path::Path, cef_profile: &std::pat
             let seeded = platform::sdk_storage::build_seed_entries(
                 &cur.access_token,
                 &cur.refresh_token,
-                cur.access_expires,
+                cur.access_expires_ms(),
                 cur.user_id.as_deref(),
                 &cur.granted_scopes,
             )

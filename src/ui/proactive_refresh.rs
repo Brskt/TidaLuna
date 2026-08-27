@@ -229,7 +229,7 @@ async fn do_refresh(refresh_token: String, client_id: String, req_scope: String)
         state
             .token_state
             .as_ref()
-            .map(|ts| ts.current.access_expires * 1000)
+            .map(|ts| ts.current.access_expires_ms())
     })
     .flatten()
     .unwrap_or(0);
