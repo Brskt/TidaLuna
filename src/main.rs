@@ -105,6 +105,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Windows and Linux read their bundled CEF payloads relative to the running
+    // executable. macOS carries them inside the .app and resolves them
+    // elsewhere; nothing there consumes this.
+    #[cfg(not(target_os = "macos"))]
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -123,6 +127,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(target_os = "linux")]
     ensure_x11_env();
+
+    // Adopts the sandbox context in a subprocess, then fills the CEF dispatch
+    // table while it is still empty: api_hash just below is the first entry point
+    // that would otherwise be a null pointer. The guard outlives every CEF call.
+    #[cfg(target_os = "macos")]
+    let _cef_bootstrap = platform::cef_loader::bootstrap();
 
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
@@ -349,13 +359,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_agent = CefString::from(crate::state::USER_AGENT.as_str());
 
     // CEF resources (.pak, locales, icudtl.dat) live in bin/cef/
-    let cef_res_dir = exe_dir
-        .as_ref()
-        .map(|d| d.join("bin").join("cef"))
-        .unwrap_or_default();
-    let resources_dir_path = CefString::from(cef_res_dir.to_string_lossy().as_ref());
-    // CEF 147 (cef crate 148) wants the locales dir set explicitly.
-    let locales_dir_path = CefString::from(cef_res_dir.join("locales").to_string_lossy().as_ref());
+    #[cfg(not(target_os = "macos"))]
+    let (resources_dir_path, locales_dir_path) = {
+        let cef_res_dir = exe_dir
+            .as_ref()
+            .map(|d| d.join("bin").join("cef"))
+            .unwrap_or_default();
+        // CEF 147 (cef crate 148) wants the locales dir set explicitly.
+        let locales = cef_res_dir.join("locales");
+        (
+            CefString::from(cef_res_dir.to_string_lossy().as_ref()),
+            CefString::from(locales.to_string_lossy().as_ref()),
+        )
+    };
 
     let settings = Settings {
         no_sandbox: 0,
@@ -364,7 +380,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_agent,
         background_color: 0xFF111111,
         chrome_app_icon_id: 101,
+        // Left unset on macOS, where CEF reads .pak and locales from the bundle on
+        // its own: a non-empty value overrides that lookup and must be absolute,
+        // and the locales field is ignored there outright.
+        #[cfg(not(target_os = "macos"))]
         resources_dir_path,
+        #[cfg(not(target_os = "macos"))]
         locales_dir_path,
         ..Default::default()
     };
