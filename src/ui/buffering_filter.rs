@@ -3,6 +3,7 @@
 //! `token_filter`, and `module_capture` each use this with their own transform.
 //! The only behavioral axis is `FilterOutcome`: emit the bytes, or fail closed
 //! and emit nothing (a transform that must not leak its input then cannot).
+//! The request half of the contract lives here too, in `force_identity_encoding`.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -43,6 +44,16 @@ pub(crate) fn new_buffering_filter(capacity: usize, transform: Transform) -> Res
         transform,
         RefCell::new(FilterState::Accumulating(Vec::with_capacity(capacity))),
     )
+}
+
+/// Refuse compression on a request whose response a buffering filter will rewrite.
+/// The filter sees pre-decompression bytes; the body has to arrive as plaintext.
+/// This is the other half of `new_buffering_filter`'s contract, and a transform that
+/// goes without it reads compressed bytes and silently finds nothing to rewrite.
+pub(crate) fn force_identity_encoding(req: &mut Request) {
+    let name = CefString::from("Accept-Encoding");
+    let value = CefString::from("identity");
+    req.set_header_by_name(Some(&name), Some(&value), 1);
 }
 
 wrap_response_filter! {

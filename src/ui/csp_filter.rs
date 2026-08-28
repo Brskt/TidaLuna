@@ -1,7 +1,7 @@
 use cef::*;
 use std::sync::Arc;
 
-use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
+use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
 use crate::ui::nav::RequestUrl;
 use crate::ui::token_filter::userfree_to_string;
 
@@ -72,12 +72,9 @@ wrap_resource_request_handler! {
             request: Option<&mut Request>,
             _callback: Option<&mut Callback>,
         ) -> ReturnValue {
-            // The filter sees pre-decompression bytes; force identity; the
-            // plaintext <meta> tag has to match (cf. token_filter).
+            // The `<meta>` tag has to match as plaintext.
             if let Some(req) = request {
-                let accept_name = CefString::from("Accept-Encoding");
-                let accept_val = CefString::from("identity");
-                req.set_header_by_name(Some(&accept_name), Some(&accept_val), 1);
+                force_identity_encoding(req);
             }
             ReturnValue::CONTINUE
         }

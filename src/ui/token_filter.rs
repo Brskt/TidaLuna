@@ -2,7 +2,7 @@ use cef::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
+use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
 use crate::ui::nav::RequestUrl;
 
 /// Convert a CefStringUserfree to String without the crate's eprintln on null.
@@ -123,9 +123,7 @@ wrap_resource_request_handler! {
                 }
 
                 if token_endpoint {
-                    let accept_name = CefString::from("Accept-Encoding");
-                    let accept_val = CefString::from("identity");
-                    req.set_header_by_name(Some(&accept_name), Some(&accept_val), 1);
+                    force_identity_encoding(req);
                     capture_client_id(req, &self.exchange_client_id);
                     inject_refresh_token(req, &url);
                 }
