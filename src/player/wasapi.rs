@@ -1989,8 +1989,8 @@ fn render_thread_inner(
                         diag_logged = true;
                         let (mut mn, mut mx) = (i16::MAX, i16::MIN);
                         if dst_store == 16 {
-                            for s in write_slice.chunks_exact(2) {
-                                let v = i16::from_le_bytes([s[0], s[1]]);
+                            for s in write_slice.as_chunks::<2>().0 {
+                                let v = i16::from_le_bytes(*s);
                                 mn = mn.min(v);
                                 mx = mx.max(v);
                             }
