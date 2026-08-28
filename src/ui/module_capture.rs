@@ -1,11 +1,18 @@
 //! Capture TIDAL's real React module exports as a side effect of its own chunk
-//! execution. Only the React-family `/assets/*.js` chunks are rewritten (matched
-//! by path): each is parsed with oxc, every export enumerated, and one
+//! execution. The React-family `/assets/*.js` chunks are rewritten (matched by
+//! path): each is parsed with oxc, every export enumerated, and one
 //! `globalThis.__LUNA_CAP(id, {...exports})` call appended. TIDAL runs the chunk
 //! normally: the call registers the live namespace, and plugins share the host
 //! React instance (correct hooks/context/elements). No script neutralization,
 //! no blob eval, no double-run; any parse/validation miss falls back to bundled
 //! React. Mirrors the buffering/dual-handler shape of `csp_filter`.
+//!
+//! Export capture cannot reach everything. `createRoot` is assigned onto a CJS
+//! exports object inside the entry chunk, which exports nothing at all. No import
+//! of any kind resolves it. That one gets a second, cheaper rewrite: tagging the
+//! assignment itself makes evaluating the chunk bind the host's own root factory
+//! to a global (`tag_create_root`). Both rewrites are no-ops when their pattern
+//! is absent, and the renderer degrades on its own from there.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -18,17 +25,22 @@ use crate::ui::buffering_filter::{FilterOutcome, new_buffering_filter};
 use crate::ui::nav::RequestUrl;
 use crate::ui::token_filter::userfree_to_string;
 
-/// Map a TIDAL asset URL to the module id plugins import, or `None` if the chunk
-/// is not one we capture. Order matters: `react-dom-` before bare `react-`.
-pub(crate) fn target_module_id(url: &RequestUrl) -> Option<&'static str> {
+/// File name of a TIDAL `/assets/*.js` chunk, or `None` for any other URL.
+fn asset_name(url: &RequestUrl) -> Option<&str> {
     let parsed = url.parsed()?;
     if parsed.host_str() != Some(crate::ui::nav::HOST_DESKTOP) {
         return None;
     }
-    let name = parsed
+    parsed
         .path()
         .strip_prefix("/assets/")
-        .filter(|n| n.ends_with(".js"))?;
+        .filter(|n| n.ends_with(".js"))
+}
+
+/// Map a TIDAL asset URL to the module id plugins import, or `None` if the chunk
+/// is not one we capture. Order matters: `react-dom-` before bare `react-`.
+pub(crate) fn target_module_id(url: &RequestUrl) -> Option<&'static str> {
+    let name = asset_name(url)?;
     if name.starts_with("react-dom-") {
         Some("react-dom/client")
     } else if name.starts_with("jsx-runtime-") {
@@ -38,6 +50,27 @@ pub(crate) fn target_module_id(url: &RequestUrl) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// What rewrite a TIDAL chunk needs on its way to the renderer.
+#[derive(Clone, Copy)]
+pub(crate) enum ChunkRewrite {
+    /// React-family chunk: append a capture of its exports under this module id.
+    Capture(&'static str),
+    /// Entry chunk: tag the `createRoot` assignment, which no export carries.
+    TagCreateRoot,
+}
+
+/// Classify a TIDAL asset URL, or `None` when the chunk is left untouched. The
+/// React-family names are tried first; `index-` is Vite's entry chunk, the only
+/// one that assigns `createRoot`.
+pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
+    if let Some(id) = target_module_id(url) {
+        return Some(ChunkRewrite::Capture(id));
+    }
+    asset_name(url)?
+        .starts_with("index-")
+        .then_some(ChunkRewrite::TagCreateRoot)
 }
 
 /// Append `globalThis.__LUNA_CAP(id, { <export>: <local>, ... })` capturing every
@@ -136,7 +169,47 @@ fn export_default_name(kind: &ExportDefaultDeclarationKind) -> Option<String> {
     }
 }
 
-// --- Request handler that attaches the capture filter to React chunks ---
+/// Bind TIDAL's own `createRoot` to a global by tagging the assignment that
+/// defines it: `X.createRoot=` becomes `X.createRoot=globalThis.__lunaCreateRoot=`.
+/// Evaluating the chunk then leaves the host's root factory reachable, which no
+/// import can do: it sits on a CJS exports object the entry chunk never exports;
+/// a renderer that needs a root has no other way to obtain the host's. Only the
+/// first assignment is tagged; the other mentions of the name are calls. Returns
+/// `js` unchanged when the pattern is absent (a chunk that merely matched the
+/// name costs nothing).
+pub(crate) fn tag_create_root(js: &str) -> String {
+    const NEEDLE: &str = ".createRoot";
+    const TAG: &str = "globalThis.__lunaCreateRoot=";
+    let bytes = js.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = js[from..].find(NEEDLE) {
+        let start = from + rel;
+        from = start + NEEDLE.len();
+        // A property of an identifier, not the tail of some longer name.
+        let is_property = bytes[..start]
+            .last()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'$');
+        if !is_property {
+            continue;
+        }
+        // An assignment, not a call or a comparison: one `=` with no `=` after it.
+        let mut eq = from;
+        while bytes.get(eq).is_some_and(u8::is_ascii_whitespace) {
+            eq += 1;
+        }
+        if bytes.get(eq) != Some(&b'=') || bytes.get(eq + 1) == Some(&b'=') {
+            continue;
+        }
+        let mut out = String::with_capacity(js.len() + TAG.len());
+        out.push_str(&js[..=eq]);
+        out.push_str(TAG);
+        out.push_str(&js[eq + 1..]);
+        return out;
+    }
+    js.to_string()
+}
+
+// --- Request handler that attaches the rewrite filter to TIDAL's chunks ---
 
 wrap_resource_request_handler! {
     pub(crate) struct CaptureRequestHandler;
@@ -182,12 +255,21 @@ wrap_resource_request_handler! {
                     .map(|r| userfree_to_string(&r.url()))
                     .unwrap_or_default(),
             );
-            let module_id = target_module_id(&url)?.to_string();
+            let rewrite = chunk_rewrite(&url)?;
+            // The entry chunk is megabytes where a React chunk is kilobytes. This
+            // only sizes the first allocation: the buffer itself grows unbounded.
+            let capacity = match rewrite {
+                ChunkRewrite::Capture(_) => 128 * 1024,
+                ChunkRewrite::TagCreateRoot => 2 * 1024 * 1024,
+            };
             Some(new_buffering_filter(
-                128 * 1024,
+                capacity,
                 Arc::new(move |body| {
                     FilterOutcome::Emit(match std::str::from_utf8(&body) {
-                        Ok(js) => append_capture(js, &module_id).into_bytes(),
+                        Ok(js) => match rewrite {
+                            ChunkRewrite::Capture(id) => append_capture(js, id).into_bytes(),
+                            ChunkRewrite::TagCreateRoot => tag_create_root(js).into_bytes(),
+                        },
                         Err(_) => body,
                     })
                 }),

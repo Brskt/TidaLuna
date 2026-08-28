@@ -96,6 +96,84 @@ fn captures_minified_cjs_loader_exports() {
 }
 
 #[test]
+fn classifies_the_entry_chunk_for_tagging() {
+    let u = |s: &str| RequestUrl::new(s.to_string());
+    assert!(matches!(
+        chunk_rewrite(&u("https://desktop.tidal.com/assets/index-DnBBD1pK.js")),
+        Some(ChunkRewrite::TagCreateRoot)
+    ));
+    // React-family names still win, and still carry their module id.
+    assert!(matches!(
+        chunk_rewrite(&u("https://desktop.tidal.com/assets/react-dom-C54PbMuF.js")),
+        Some(ChunkRewrite::Capture("react-dom/client"))
+    ));
+    assert!(matches!(
+        chunk_rewrite(&u("https://desktop.tidal.com/assets/react-CXLoTpP3.js")),
+        Some(ChunkRewrite::Capture("react"))
+    ));
+    // Neither an entry chunk, nor JS, nor the app host.
+    assert!(chunk_rewrite(&u("https://desktop.tidal.com/assets/polyfills-x.js")).is_none());
+    assert!(chunk_rewrite(&u("https://desktop.tidal.com/assets/index-x.css")).is_none());
+    assert!(chunk_rewrite(&u("https://resources.tidal.com/assets/index-x.js")).is_none());
+}
+
+#[test]
+fn a_split_out_react_dom_client_chunk_is_still_captured() {
+    // TIDAL serves one `react-dom-*` chunk today, but nothing stops it from splitting the
+    // client entry into its own `react-dom-client-*`. The prefix test already covers that
+    // shape; pin it against a later rewrite of the classifier dropping it in silence.
+    let u = |s: &str| RequestUrl::new(s.to_string());
+    assert_eq!(
+        target_module_id(&u(
+            "https://desktop.tidal.com/assets/react-dom-client-C54PbMuF.js"
+        )),
+        Some("react-dom/client")
+    );
+    assert!(matches!(
+        chunk_rewrite(&u(
+            "https://desktop.tidal.com/assets/react-dom-client-C54PbMuF.js"
+        )),
+        Some(ChunkRewrite::Capture("react-dom/client"))
+    ));
+}
+
+#[test]
+fn tags_the_create_root_assignment() {
+    // The shape TIDAL's entry chunk carries: one assignment onto a CJS exports
+    // object, every other mention of the name being a call.
+    let src =
+        "var ek=t();e.createRoot=function(e,t){return 1};window.__reactRoot??=ek.createRoot(Z9);";
+    let out = tag_create_root(src);
+    assert!(out.contains("e.createRoot=globalThis.__lunaCreateRoot=function(e,t){"));
+    // Exactly one tag lands: the calls are left alone.
+    assert_eq!(out.matches("__lunaCreateRoot").count(), 1);
+    assert!(out.contains("ek.createRoot(Z9)"));
+}
+
+#[test]
+fn tag_skips_calls_comparisons_and_longer_names() {
+    for src in [
+        "ek.createRoot(container);",
+        "if(m.createRoot==null){}",
+        "if(m.createRoot===f){}",
+        "x.createRootContainer=1;",
+        "console.log(1);",
+    ] {
+        assert_eq!(tag_create_root(src), src, "must not tag: {src}");
+    }
+}
+
+#[test]
+fn tag_splices_by_byte_across_multibyte_source() {
+    // The tag is spliced at byte offsets: every index has to land on a char
+    // boundary even when earlier bytes are multibyte.
+    let src = "const s=\"héllo wörld 日本語\";e.createRoot=function(){};";
+    let out = tag_create_root(src);
+    assert!(out.contains("e.createRoot=globalThis.__lunaCreateRoot=function(){}"));
+    assert!(out.contains("héllo wörld 日本語"));
+}
+
+#[test]
 fn non_utf8_body_passes_through_unchanged() {
     // append_capture only handles &str; the filter's strict decode guards the
     // non-UTF-8 path, but a lone invalid byte through append_capture must not

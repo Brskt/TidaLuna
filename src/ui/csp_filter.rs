@@ -37,9 +37,9 @@ wrap_request_context_handler! {
             if is_document_url(&url) {
                 return Some(DocumentHandler::new());
             }
-            // SW precache of a React-family chunk: rewrite it (browser-less): the
-            // cached chunk then carries the capture call on warm loads too.
-            if crate::ui::module_capture::target_module_id(&url).is_some() {
+            // SW precache of a chunk we rewrite: do it here too (browser-less), so
+            // the cached chunk carries the capture and the tag on warm loads.
+            if crate::ui::module_capture::chunk_rewrite(&url).is_some() {
                 return Some(crate::ui::module_capture::CaptureRequestHandler::new());
             }
             // Store fetches routed through the service worker reach only this context
