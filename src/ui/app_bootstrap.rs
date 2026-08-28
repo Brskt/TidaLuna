@@ -417,40 +417,12 @@ document.title = "TidaLunar - A TIDAL client";
         document.addEventListener('DOMContentLoaded', inject);
     }}
 }})();
-(function() {{
-    // Drop the SW + caches for the shell/chunks to re-precache. Both self-heals below
-    // self-stop once the cached resources are the rewritten ones.
-    function bust() {{
-        try {{
-            if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller || !window.caches) return;
-            navigator.serviceWorker.getRegistrations().then(function(rs) {{ rs.forEach(function(r) {{ r.unregister(); }}); }});
-            caches.keys().then(function(ks) {{ ks.forEach(function(k) {{ caches.delete(k); }}); }});
-        }} catch (e) {{}}
-    }}
-    // 1) Stale CSP meta on a SW-served shell -> re-precache the stripped shell.
-    function cspHeal() {{
-        if (document.querySelector('meta[http-equiv="Content-Security-Policy" i]')) bust();
-    }}
-    // 2) A cache predating module-capture serves un-rewritten React chunks, and the
-    //    host React never registers. Bust once per session (sessionStorage guard
-    //    prevents a loop if the chunk pattern ever stops matching) to re-precache.
-    function reactHeal() {{
-        try {{
-            if (sessionStorage.getItem('__luna_react_heal')) return;
-            if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return;
-            if (window.__lunaHostModules && window.__lunaHostModules.react) return;
-            sessionStorage.setItem('__luna_react_heal', '1');
-            bust();
-        }} catch (e) {{}}
-    }}
-    function run() {{ cspHeal(); setTimeout(reactHeal, 5000); }}
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
-    else run();
-}})();"#,
+{cache_heal}"#,
                 ua_override = ua_override,
                 platform = platform,
                 close_to_tray = close_to_tray,
-                pkce_credentials_json = pkce_credentials_json
+                pkce_credentials_json = pkce_credentials_json,
+                cache_heal = include_str!("early_runtime/cache_heal.js")
             );
 
             // Precompose the guard-wrapped injection once (this runs a single time at boot); the
