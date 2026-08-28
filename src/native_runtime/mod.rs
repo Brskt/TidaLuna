@@ -276,6 +276,24 @@ impl NativeRuntime {
     }
 }
 
+/// Version the bundled Bun reports, or `None` when it is absent or refuses to answer.
+/// Asked of the binary rather than baked from the build: a stale `dist/` is exactly the
+/// case worth logging, and a constant would state the intent instead of the fact. Spawns;
+/// callers gate on the log level, because `vprintln!` evaluates its arguments either way.
+pub(crate) fn bundled_bun_version() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let bun = find_binary(exe.parent()?, if cfg!(windows) { "bun.exe" } else { "bun" })?;
+    let out = std::process::Command::new(bun)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
 /// Find a binary next to the executable, or fall back to bare name (resolved via PATH by OS).
 fn find_binary(exe_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     // bin/ subdirectory (new layout)

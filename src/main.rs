@@ -284,6 +284,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // After set_log_level: captured whether logging came from the LOGS env or
     // the in-app setting.
     crate::vprintln!("[INIT]   TidaLunar v{}", env!("CARGO_PKG_VERSION"));
+    crate::vprintln!("[INIT]   Chromium {}", state::chromium_version());
+    // Guarded, not just logged: asking Bun its version spawns it, and `vprintln!`
+    // evaluates arguments before the level check.
+    if crate::logging::log_level() >= 1 {
+        match native_runtime::bundled_bun_version() {
+            Some(v) => crate::vprintln!("[INIT]   Bun v{v}"),
+            None => crate::vprintln!("[INIT]   Bun not found in bin/"),
+        }
+    }
 
     // Recover from any interrupted update before continuing startup
     updater::recover_interrupted_update();

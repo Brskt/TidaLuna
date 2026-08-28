@@ -3,15 +3,25 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 
+/// Chromium version CEF wraps, `MAJOR.MINOR.BUILD.PATCH`. This is not the `cef` crate
+/// version: the crate tracks CEF releases, which wrap their own Chromium. One owner keeps
+/// the user agent and the startup log from disagreeing about which browser this is.
+pub(crate) fn chromium_version() -> String {
+    format!(
+        "{}.{}.{}.{}",
+        cef::sys::CHROME_VERSION_MAJOR,
+        cef::sys::CHROME_VERSION_MINOR,
+        cef::sys::CHROME_VERSION_BUILD,
+        cef::sys::CHROME_VERSION_PATCH,
+    )
+}
+
 fn build_user_agent(os_token: &str) -> String {
     format!(
-        "Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) TidaLunar/{ver} Chrome/{cmaj}.{cmin}.{cbld}.{cpat} Safari/537.36",
+        "Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) TidaLunar/{ver} Chrome/{chrome} Safari/537.36",
         os = os_token,
         ver = env!("CARGO_PKG_VERSION"),
-        cmaj = cef::sys::CHROME_VERSION_MAJOR,
-        cmin = cef::sys::CHROME_VERSION_MINOR,
-        cbld = cef::sys::CHROME_VERSION_BUILD,
-        cpat = cef::sys::CHROME_VERSION_PATCH,
+        chrome = chromium_version(),
     )
 }
 
