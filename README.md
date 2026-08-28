@@ -46,7 +46,7 @@ nix profile install github:Brskt/TidaLuna   # or: nix run github:Brskt/TidaLuna
 
 ### All platforms
 
-- Rust (edition 2024, rustc >= 1.95)
+- Rust (edition 2024, rustc >= 1.96)
 - Bun
 - CMake
 - Ninja

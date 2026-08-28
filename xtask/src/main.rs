@@ -819,7 +819,7 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     };
     let bun_dst = bundle_dir.join(bun_name);
 
-    const BUN_VERSION: &str = "1.3.14";
+    const BUN_VERSION: &str = "1.4.0";
 
     // Cache dir persists across builds (dist/ is cleaned each time)
     let cache_dir = project_root()?.join(".cache").join("bun");
