@@ -1,4 +1,6 @@
 {
+  lib,
+  stdenv,
   mkShell,
   rustc,
   cargo,
@@ -27,7 +29,8 @@ mkShell {
     ninja
     pkg-config
   ];
-  buildInputs = [
+  # Linux-only
+  buildInputs = lib.optionals stdenv.isLinux [
     alsa-lib
     dbus
     libxkbcommon
