@@ -75,6 +75,16 @@ fn main() {
         );
     }
 
+    // CEF lives in bin/cef/: libcef.dll is delay-loaded to let AddDllDirectory run before
+    // the first call. Emitted here rather than as a target-wide rustflag, which also
+    // reached xtask and updater; neither imports libcef, and the linker said so (LNK4199).
+    // Unqualified, which covers this package's test harness too. The triple keeps the
+    // reach the rustflag had; the arm64 target never carried it.
+    if env::var("TARGET").as_deref() == Ok("x86_64-pc-windows-msvc") {
+        println!("cargo:rustc-link-arg=/DELAYLOAD:libcef.dll");
+        println!("cargo:rustc-link-arg=delayimp.lib");
+    }
+
     // Windows icon
     #[cfg(target_os = "windows")]
     {
