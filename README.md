@@ -1,46 +1,60 @@
-# TidaLunar
+<p align="center">
+  <img src="tidaluna.png" width="128" alt="TidaLunar">
+</p>
 
-A desktop TIDAL client written in Rust with CEF (Chromium Embedded Framework) and a native audio engine (symphonia, cpal, rubato).
+<h1 align="center">TidaLunar</h1>
+
+<p align="center">
+  A native desktop TIDAL client written in Rust, bundling the <a href="https://github.com/Inrixia/TidaLuna">TidaLuna</a> client mod.
+</p>
+
+<p align="center">
+  Windows &middot; Linux &middot; macOS &middot; NixOS
+</p>
+
+<p align="center">
+  <a href="https://github.com/Brskt/TidaLuna/releases/latest"><img src="https://img.shields.io/github/v/release/Brskt/TidaLuna?include_prereleases&style=flat-square" alt="Latest release"></a>
+  <a href="https://github.com/Brskt/TidaLuna/releases"><img src="https://img.shields.io/github/downloads/Brskt/TidaLuna/total?style=flat-square" alt="Downloads"></a>
+  <a href="https://github.com/Brskt/TidaLuna/actions/workflows/ci.yml?query=branch%3Alunar-cef"><img src="https://img.shields.io/github/actions/workflow/status/Brskt/TidaLuna/ci.yml?branch=lunar-cef&style=flat-square" alt="Build"></a>
+  <a href="https://discord.gg/jK3uHrJGx4"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square" alt="Discord"></a>
+</p>
 
 ## Features
 
-- FLAC and AAC/DASH streaming with adaptive buffering and next-track preloading.
-- Audio cache (SQLite index, 2 GB LRU with sharded files).
-- Audio device selection.
-- Resampling via rubato when device sample rate differs from source.
-- Optional exclusive WASAPI or ASIO output on Windows, bypassing the OS mixer.
-- Media controls integration (MPRIS on Linux, SMTC and taskbar thumbnail buttons on Windows).
-- Close-to-tray with system tray icon (Windows, Linux, macOS).
-- In-app updater with Stable/Dev release channels (Windows, Linux).
-- Plugin system: hybrid Rust + CEF execution with per-plugin sandboxing.
-- Native plugin modules via Bun child process.
-- Built-in plugin store with install-from-URL.
+- [TidaLuna](https://github.com/Inrixia/TidaLuna) ships built in
+- Lighter and smoother
+- TIDAL Connect receiver (Windows, Linux, macOS)
+- Audio cache system
+- ASIO output on Windows
+- OS volume sync on Windows
+- System media controls integration
+- In-app updater
+- More to come
 
-## Install
+## Roadmap
 
-Prebuilt downloads for each release are on [GitHub Releases](https://github.com/Brskt/TidaLuna/releases/latest).
+- Exclusive ALSA output on Linux
+- Crossfade
+- Cache settings
 
-### Windows
+## Download
 
-Run the `.exe` installer (per-user, no admin prompt), or unzip the portable `.zip` and run `tidalunar.exe`.
+Every build is on [GitHub Releases](https://github.com/Brskt/TidaLuna/releases/latest).
 
-### Linux
+| Platform | Formats |
+| --- | --- |
+| Windows | `.exe` installer (per-user, no admin prompt), portable `.zip` |
+| Linux | `.deb` (amd64, arm64), portable `.tar.gz` |
+| macOS | `.zip` (Apple Silicon, Intel) |
+| NixOS | flake |
 
-```bash
-sudo apt install ./tidalunar_<version>_amd64.deb   # or _arm64.deb
-```
+- **Linux:** `sudo apt install ./tidalunar_<version>_amd64.deb`, or unpack the `.tar.gz` and run `./tidalunar`.
+- **macOS:** unsigned, so right-click > Open on first launch. No in-app updater; re-download to update.
+- **NixOS:** `nix profile install github:Brskt/TidaLuna`, or `nix run github:Brskt/TidaLuna`.
 
-Or unpack the portable `.tar.gz` and run `./tidalunar`.
+## Support
 
-### macOS
-
-Unzip `tidalunar_<version>_macos_arm64.zip` (Apple Silicon) or `tidalunar_<version>_macos_x64.zip` (Intel) and run `tidalunar.app` (unsigned: right-click > Open on first launch). No in-app updater on macOS; re-download to update.
-
-### NixOS
-
-```bash
-nix profile install github:Brskt/TidaLuna   # or: nix run github:Brskt/TidaLuna
-```
+Something not working? Come ask on the [TidaLuna Discord](https://discord.gg/jK3uHrJGx4).
 
 ## Requirements
 
@@ -143,3 +157,8 @@ set "LOGS=1" && dist\tidalunar.exe
 - Linux: `~/.local/share/tidalunar`
 - Windows: `%LOCALAPPDATA%\tidalunar`
 - macOS: `~/.local/share/tidalunar`
+
+---
+
+TIDAL is a trademark of its respective owner. TidaLunar is an unofficial client,
+not affiliated with or endorsed by TIDAL.
