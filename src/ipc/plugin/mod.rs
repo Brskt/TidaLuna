@@ -1,4 +1,5 @@
 mod download;
+mod inject;
 mod jsrt;
 mod lib_native;
 mod native;
@@ -98,7 +99,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
             proxy::handle_proxy_head_dispatch(&msg, query_id, callback);
         }
         "__Luna.registerNative" => {
-            native::handle_register_native(&msg, callback);
+            native::handle_register_native(&msg, &caller, callback);
         }
         "__Luna.clipboardWriteText" => {
             lib_native::handle_clipboard_write_text(&msg, callback);

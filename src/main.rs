@@ -335,6 +335,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Gate open by default; cold boot closes it below when a refresh is due.
         proactive_refresh_done: true,
         plugin_load_waiters: Vec::new(),
+        plugin_load_in_flight: None,
+        session_epoch: 0,
         last_client_id: String::new(),
         connect: Some(crate::connect::ConnectManager::new()),
     })));

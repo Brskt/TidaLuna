@@ -15,24 +15,28 @@ pub(crate) fn trigger_if_needed() {
         return;
     }
 
-    let (refresh_token, client_id, scope) = match crate::app_state::with_state(|state| {
-        let ts = state.token_state.as_ref()?;
-        let cid = if ts.current.client_id.is_empty() {
-            state.last_client_id.clone()
-        } else {
-            ts.current.client_id.clone()
+    // The epoch is read here, with the credential it refreshes, and carried through the
+    // network round trip: it names the session this work answers for.
+    let (refresh_token, client_id, scope, session_epoch) =
+        match crate::app_state::with_state(|state| {
+            let ts = state.token_state.as_ref()?;
+            let cid = if ts.current.client_id.is_empty() {
+                state.last_client_id.clone()
+            } else {
+                ts.current.client_id.clone()
+            };
+            Some((
+                ts.current.refresh_token.clone(),
+                cid,
+                ts.current.granted_scopes.join(" "),
+                state.session_epoch,
+            ))
+        })
+        .flatten()
+        {
+            Some(captured) => captured,
+            None => return,
         };
-        Some((
-            ts.current.refresh_token.clone(),
-            cid,
-            ts.current.granted_scopes.join(" "),
-        ))
-    })
-    .flatten()
-    {
-        Some(triple) => triple,
-        None => return,
-    };
 
     if refresh_token.is_empty() {
         return;
@@ -40,14 +44,19 @@ pub(crate) fn trigger_if_needed() {
 
     crate::vprintln!("[AUTH]   Proactive refresh: starting");
     crate::state::rt_handle().spawn(async move {
-        do_refresh(refresh_token, client_id, scope).await;
+        do_refresh(refresh_token, client_id, scope, session_epoch).await;
         // Open the gate on every exit path; safe even on refresh failure (the
         // token stays live, but the egress filter blocks exfil).
         crate::ipc::plugin::open_plugin_gate();
     });
 }
 
-async fn do_refresh(refresh_token: String, client_id: String, req_scope: String) {
+async fn do_refresh(
+    refresh_token: String,
+    client_id: String,
+    req_scope: String,
+    session_epoch: u64,
+) {
     if client_id.is_empty() {
         // The token endpoint rejects a refresh grant with no client_id (400,
         // sub_status 1002): a request here can only fail. Skip it; the token
@@ -156,7 +165,21 @@ async fn do_refresh(refresh_token: String, client_id: String, req_scope: String)
     let session_scopes_json =
         serde_json::to_string(&granted_scopes).unwrap_or_else(|_| "[]".to_string());
 
-    crate::app_state::with_state(|state| {
+    // Whether the commit happened. The check has to live INSIDE the closure (that is what
+    // makes it atomic with the writes it guards), and its answer has to travel back out:
+    // everything after this call has side effects of its own, and a bare `return` in a
+    // closure leaves them running.
+    let committed = crate::app_state::with_state(|state| {
+        // The session this refresh belongs to may have ended while it was on the network.
+        // Committing anyway re-authenticates the running process as the account the user
+        // left: `captured_token` below is what the proxy injects as `Authorization: Bearer`,
+        // not a draft for a later disk write. The bump and this read are both critical
+        // sections of the one `AppState` mutex; a commit that runs after a logout OBSERVES
+        // the new epoch, by happens-before, not by luck.
+        if state.session_epoch != session_epoch {
+            crate::vprintln!("[AUTH]   Refresh answered for a session already left, dropped");
+            return false;
+        }
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -220,7 +243,17 @@ async fn do_refresh(refresh_token: String, client_id: String, req_scope: String)
                 );
             }
         }
-    });
+        true
+    })
+    .unwrap_or(false);
+
+    // The opaque, the user and the scopes below are locals from the response, not re-reads:
+    // pushing them would hand the live SDK a token nothing registered, and an unregistered
+    // opaque resolves to whichever session is current, the departed account's work landing
+    // on somebody else's session.
+    if !committed {
+        return;
+    }
 
     // Push opaques to TIDAL's SDK via session delegate
     let expires_ms = crate::app_state::with_state(|state| {

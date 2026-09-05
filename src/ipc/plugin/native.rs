@@ -201,7 +201,11 @@ fn ensure_native_runtime() -> Result<&'static NativeRuntime, String> {
     Ok(NATIVE_RUNTIME.get().unwrap())
 }
 
-pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
+pub(super) fn handle_register_native(
+    msg: &IpcMessage,
+    caller: &crate::ipc::caller::Caller,
+    callback: IpcCallback,
+) {
     let name = msg
         .args
         .first()
@@ -227,22 +231,31 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         .unwrap_or(&name)
         .to_string();
 
-    // Confirms only that some plugin bears this name, not that the caller is it; `registerNative`
-    // arrives through the shared `@luna/lib` with no capability attached. Known gap, closable only
-    // by a per-plugin `@luna/lib`: it hands out another plugin's `data_dir`, and byte-identical code
-    // inherits another plugin's grants (different code does not; `load_trust` filters on both).
+    // The acting plugin is the capability's, never argument 0's. Read off the argument, this only
+    // ever confirmed that SOME plugin bore the claimed name. A caller naming another one got that
+    // plugin's `data_dir`, inherited its trust grants whenever the code hashed the same, and could
+    // hold its eight module slots until it was uninstalled. The dispatcher refuses this channel
+    // unattributed; the arm below is the floor under that gate rather than its own gate.
+    let plugin_url = match caller {
+        crate::ipc::caller::Caller::Plugin(url) => url.clone(),
+        crate::ipc::caller::Caller::Unattributed => {
+            crate::vprintln!("[NATIVE] Refused registerNative for '{name}': unattributed call");
+            ipc_callback_err(&callback, 403, "unattributed call");
+            return;
+        }
+    };
+
     // The load id is captured here rather than re-derived later, because it must answer "still this
-    // load" after the awaits below; it is `Some` exactly when the plugin is loaded.
+    // load" after the awaits below; it is `Some` exactly when the plugin is loaded. The declared
+    // name comes with it, from the same read: two reads could straddle a reload and describe two
+    // different loads.
     let live = crate::app_state::with_state(|state| {
-        let url = state
-            .plugin_manager
-            .url_for_name(&plugin_prefix)?
-            .to_string();
-        let load_id = state.plugin_manager.current_load_id(&url)?;
-        Some((url, load_id))
+        let declared = state.plugin_manager.name_for_url(&plugin_url)?.to_string();
+        let load_id = state.plugin_manager.current_load_id(&plugin_url)?;
+        Some((declared, load_id))
     })
     .flatten();
-    let Some((plugin_url, load_id)) = live else {
+    let Some((declared_name, load_id)) = live else {
         crate::vprintln!(
             "[NATIVE] Rejected registerNative for '{}': plugin not active",
             name
@@ -254,6 +267,22 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         );
         return;
     };
+
+    // The argument still carries the MODULE file, which is its own to name; the plugin half of it
+    // is a claim, and this is where it stops being taken on trust. Refused loudly rather than
+    // rewritten to the declared name: a rewrite would move a plugin whose bundle disagrees with
+    // its manifest to a different `data_dir`, silently leaving the data it had written behind.
+    if declared_name != plugin_prefix {
+        crate::verr!(
+            "[NATIVE] Refused registerNative for '{name}': the caller declares '{declared_name}', not '{plugin_prefix}'"
+        );
+        ipc_callback_err(
+            &callback,
+            403,
+            "registerNative: the module names another plugin",
+        );
+        return;
+    }
 
     // Reserved before Bun is touched; a caller looping fresh module names cannot grow its module
     // table. Held for the whole registration since the ledger only writes once Bun answers;
@@ -278,6 +307,9 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         code.len()
     );
 
+    // Spawns the Bun child the first time a session needs one, on this thread. It stays here on
+    // purpose: a `OnceLock` makes it once-per-process and it waits on nothing afterwards, while
+    // moving the spawn out of a tokio runtime context is what crashed it before.
     let runtime = match ensure_native_runtime() {
         Ok(rt) => rt,
         Err(e) => {
@@ -294,19 +326,9 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
         code.trim().len()
     );
 
-    let manifest_json: String = crate::state::db().call_plugins({
-        let prefix = plugin_prefix.clone();
-        move |pc| {
-            pc.query_row(
-                "SELECT manifest FROM plugins WHERE name = ?1 AND installed = 1",
-                rusqlite::params![prefix],
-                |row| row.get(0),
-            )
-            .unwrap_or_default()
-        }
-    });
-
-    // Reject path traversal in plugin names (malicious manifest with "../" in name)
+    // Reject path traversal in plugin names (malicious manifest with "../" in name). Ahead of the
+    // read below rather than between the two it used to sit between: the check needs neither, and
+    // refusing before touching the database costs the actor nothing.
     if plugin_prefix.contains("..") {
         ipc_callback_err(&callback, 400, "registerNative: invalid plugin name");
         return;
@@ -319,32 +341,65 @@ pub(super) fn handle_register_native(msg: &IpcMessage, callback: IpcCallback) {
     }
     let data_dir = data_dir_path.to_string_lossy().to_string();
 
-    let trust_grants: HashMap<String, bool> = {
-        let decisions = crate::state::db().call_settings({
+    // Everything above is in-memory and stays here. The two reads leave: this handler is entered
+    // on the CEF UI thread, where each actor round trip froze the window. They travel as one trip
+    // because the actor hands out both connections at once, and they keep the keys they already
+    // used: the manifest by `plugin_prefix`, the grants by name and code hash together.
+    crate::state::rt_handle().spawn(async move {
+        let read = tokio::task::spawn_blocking({
+            let prefix = plugin_prefix.clone();
             let plugin = name.clone();
-            let code_hash = code_hash.clone();
-            move |conn| crate::native_runtime::trust::load_trust(conn, &plugin, &code_hash)
-        });
-        decisions
+            let hash = code_hash.clone();
+            move || {
+                crate::state::db().call(move |pc, sc| {
+                    let manifest_json: String = pc
+                        .query_row(
+                            "SELECT manifest FROM plugins WHERE name = ?1 AND installed = 1",
+                            rusqlite::params![prefix],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or_default();
+                    let decisions = crate::native_runtime::trust::load_trust(sc, &plugin, &hash);
+                    (manifest_json, decisions)
+                })
+            }
+        })
+        .await;
+
+        let (manifest_json, decisions) = match read {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Refusing beats registering with no grants read: an empty map reads as "nothing
+                // was ever trusted" and would re-prompt for modules the user already answered.
+                crate::verr!("[NATIVE] registerNative state read did not run: {e}");
+                ipc_callback_err(
+                    &callback,
+                    500,
+                    "registerNative: could not read plugin state",
+                );
+                return;
+            }
+        };
+        let trust_grants: HashMap<String, bool> = decisions
             .into_iter()
             .map(|d| (d.module, d.granted))
-            .collect()
-    };
+            .collect();
 
-    do_register(
-        runtime,
-        RegisterAttempt {
-            code,
-            code_hash,
-            trust_grants,
-            manifest_json,
-            data_dir,
-            plugin_url,
-            load_id,
-            reservation,
-        },
-        callback,
-    );
+        do_register(
+            runtime,
+            RegisterAttempt {
+                code,
+                code_hash,
+                trust_grants,
+                manifest_json,
+                data_dir,
+                plugin_url,
+                load_id,
+                reservation,
+            },
+            callback,
+        );
+    });
 }
 
 /// One registration attempt. These values all travel together through the trust retry, and the
@@ -377,7 +432,7 @@ fn do_register(
     };
     // Carried per registration rather than in the child's environment: the sandbox can
     // withhold a register field from an untrusted plugin, and cannot withhold an env var
-    // from anyone. The host decides who receives it, so no predicate lives in two places.
+    // from anyone. The host decides who receives it; no predicate lives in two places.
     let cmd = serde_json::json!({
         "type": "register",
         "name": attempt.reservation.module(),
@@ -525,31 +580,43 @@ fn do_register(
                         let hash = attempt.code_hash.clone();
                         let plugin = attempt.reservation.module().to_string();
                         let mod_name = module.clone();
-                        crate::state::db().call_settings(move |conn| {
-                            if is_net {
-                                for &m in NETWORK_MODULES {
-                                    if let Err(e) = crate::native_runtime::trust::save_trust(
-                                        conn, &hash, &plugin, m, granted,
-                                    ) {
-                                        crate::vprintln!(
-                                            "[NATIVE] Failed to save trust for {}::{}: {}",
-                                            plugin,
-                                            m,
-                                            e
-                                        );
+                        // Awaited rather than posted: the dedup key below may only go once this
+                        // write is durable. Handed to the blocking pool: the round trip parks
+                        // that pool's thread instead of this tokio worker.
+                        let written = tokio::task::spawn_blocking(move || {
+                            crate::state::db().call_settings(move |conn| {
+                                if is_net {
+                                    for &m in NETWORK_MODULES {
+                                        if let Err(e) = crate::native_runtime::trust::save_trust(
+                                            conn, &hash, &plugin, m, granted,
+                                        ) {
+                                            crate::vprintln!(
+                                                "[NATIVE] Failed to save trust for {}::{}: {}",
+                                                plugin,
+                                                m,
+                                                e
+                                            );
+                                        }
                                     }
+                                } else if let Err(e) = crate::native_runtime::trust::save_trust(
+                                    conn, &hash, &plugin, &mod_name, granted,
+                                ) {
+                                    crate::vprintln!(
+                                        "[NATIVE] Failed to save trust for {}::{}: {}",
+                                        plugin,
+                                        mod_name,
+                                        e
+                                    );
                                 }
-                            } else if let Err(e) = crate::native_runtime::trust::save_trust(
-                                conn, &hash, &plugin, &mod_name, granted,
-                            ) {
-                                crate::vprintln!(
-                                    "[NATIVE] Failed to save trust for {}::{}: {}",
-                                    plugin,
-                                    mod_name,
-                                    e
-                                );
-                            }
-                        });
+                            })
+                        })
+                        .await;
+                        if let Err(e) = written {
+                            // The key still goes below. A decision that never reached the disk
+                            // must re-prompt, which is what losing the key produces; keeping it
+                            // would dedup a later caller against a grant nothing recorded.
+                            crate::verr!("[NATIVE] Trust write did not run: {e}");
+                        }
                     }
                     // DB is durable - safe to remove the dedup key now.
                     {
