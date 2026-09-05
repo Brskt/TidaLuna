@@ -4,4 +4,5 @@ export * from "./getPlaybackInfo.dasha.native";
 export * from "./observable";
 export * from "./parseDate";
 export * from "./safeTimeout";
+export * from "./sameItemId";
 export * from "./downloadObject";

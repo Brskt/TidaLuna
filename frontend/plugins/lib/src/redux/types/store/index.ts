@@ -1,4 +1,5 @@
 import type { AudioQuality, Content } from "./content";
+import type { Entities } from "./Entities";
 import type { Notification } from "./Notification";
 import type { AccumulatedPlaybackTime, PlaybackControls } from "./Playback";
 import type { CloudQueue, PlayQueue } from "./PlayQueue";
@@ -10,6 +11,7 @@ import type { UserProfile } from "./UserProfile";
 export * from "../actions/ContextMenu";
 export * from "../actions/MediaCollection";
 export * from "./content";
+export * from "./Entities";
 export * from "./Lyrics";
 export * from "./Notification";
 export * from "./Playback";
@@ -29,6 +31,8 @@ export interface TidalStoreState {
 	auth: Auth;
 	cloudQueue: CloudQueue;
 	content: Content;
+	/** Optional because it is TIDAL's, not ours: a build that predates it simply has none. */
+	entities?: Entities;
 	etag: Record<string, string>;
 	experimentationPlatform: ExperimentationPlatform;
 	favorites: Favorites;
