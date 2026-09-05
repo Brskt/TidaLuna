@@ -565,7 +565,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                     AsioEvent::FormatUnsupported { stream_id } => {
                         // Scoped like `RateUnsupported` below: the channel-count half of this
-                        // refusal reads the TRACK's channels, so a superseded verdict would
+                        // refusal reads the TRACK's channels; a superseded verdict would
                         // cancel a live decoder over a count the driver was never asked about.
                         // The sample-type half is the driver's own, and the next build re-reports it.
                         if verdict_names_current_stream(self.current_asio_stream_id, stream_id) {
@@ -588,12 +588,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         }
                     }
                     AsioEvent::RateUnsupported { stream_id } => {
-                        // Scoped whole, like `Completed` and `DecodeFailed` above, and unlike the
-                        // exclusive twin. There the refusal takes the one render thread down
-                        // whichever stream it judged, so its re-arm is owed either way; no ASIO
-                        // refusal does that. `finish_rebuild` and the reset give-up leave the
-                        // control thread alive on `Idle`, so acting on a superseded verdict would
-                        // cancel a live decoder and demote a track the driver never refused.
+                        // Scoped whole, like `Completed` and `DecodeFailed` above, and unlike
+                        // the exclusive twin, whose refusal takes the render thread down
+                        // whichever stream it judged. No ASIO refusal does that, and acting on
+                        // a superseded verdict would cancel a live decoder and demote a track
+                        // the driver never refused.
                         if verdict_names_current_stream(self.current_asio_stream_id, stream_id) {
                             if let Some(cancel) = self.asio_stream_cancel.take() {
                                 cancel.store(true, Relaxed);

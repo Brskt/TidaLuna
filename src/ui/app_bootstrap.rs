@@ -441,6 +441,11 @@ document.title = "TidaLunar - A TIDAL client";
 
             // Precompose the guard-wrapped injection once (this runs a single time at boot); the
             // nav path then borrows it, instead of re-format!-copying the whole bundle per load.
+            //
+            // What the sentinel is for: `on_loading_state_change` reports the browser's aggregate
+            // load state, and a subframe finishing its own load calls it again on a main document
+            // that never changed. A fresh document brings a fresh `window`, which lifts the
+            // sentinel exactly when the bundle does need to run again.
             let bundle_script = format!(
                 "if(!window.__TL_INJECTED__){{window.__TL_INJECTED__=true;{}}}",
                 include_str!(concat!(env!("OUT_DIR"), "/bundle.js"))

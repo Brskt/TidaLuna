@@ -209,11 +209,10 @@ impl MediaErrorCode {
 /// [`OutputMode`] below: the invariant lives in the type, not in whichever function happens
 /// to be its only consumer today.
 ///
-/// Not cosmetic. `player.volume` takes any JSON number and the frontend forwards Redux's
-/// value unclamped; any input whose `/ 100.0` quotient passes `f32::MAX` casts to
-/// `f32::INFINITY`, which the cpal callback then multiplies into every sample unbounded. A
-/// non-finite input sanitizes to silence, never to full scale, the wrong guess here having to
-/// be the quiet one.
+/// Not cosmetic: `player.volume` takes any JSON number and the frontend forwards Redux's value
+/// unclamped, so an input whose `/ 100.0` quotient passes `f32::MAX` casts to `f32::INFINITY`,
+/// which the cpal callback multiplies into every sample. A non-finite input sanitizes to
+/// silence, never to full scale, the wrong guess here having to be the quiet one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Volume(f64);
 

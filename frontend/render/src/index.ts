@@ -17,7 +17,7 @@ export * from "./LunaPlugin";
 export * from "./ReactiveStore";
 export * from "./SettingsTransfer";
 
-// Ensure window.luna is set up
+// Side-effect import, kept above the rest: window.core defines window.luna.
 import "./window.core";
 
 import { initTidalInternals, seedTidalConfig } from "./exposeTidalInternals";

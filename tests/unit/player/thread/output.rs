@@ -318,7 +318,7 @@ fn peak(samples: &[f32]) -> f32 {
 }
 
 /// Frequency of one channel, from its rising zero crossings. A sine crosses zero upward once
-/// per period, so the count over a known duration is the frequency. Preferred to an FFT here
+/// per period; the count over a known duration is the frequency. Preferred to an FFT here
 /// because it needs no window choice and no dependency. It says nothing about amplitude: a
 /// tone attenuated to nothing still crosses zero on schedule, hence the `peak` every caller
 /// pairs it with.

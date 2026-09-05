@@ -134,7 +134,7 @@ struct Harness {
     _decode_cmds: mpsc::Receiver<DecodeCommand>,
 }
 
-/// A player holding one loaded, playing shared-path track. `dir` owns the resume file, so
+/// A player holding one loaded, playing shared-path track. `dir` owns the resume file:
 /// no ordering or timing of the calls below can reach the one the running app writes.
 fn harness(dir: &std::path::Path) -> Harness {
     let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -257,7 +257,7 @@ async fn a_failed_load_leaves_no_track_behind() {
     );
 }
 
-/// The re-assert is the one load path that never reaches `handle_load`, so it is the only one that
+/// The re-assert is the one load path that never reaches `handle_load`; it is the only one that
 /// has to carry the id itself. Dropping it there left a gapless-advanced track nameless for the
 /// rest of its life, with every length it measured publishable under nothing.
 #[tokio::test]
@@ -306,7 +306,7 @@ async fn a_re_assert_without_an_id_keeps_the_one_already_known() {
     );
 }
 
-/// The re-assert is minted from a `committed_track` read on the caller's thread, so a load for
+/// The re-assert is minted from a `committed_track` read on the caller's thread, and a load for
 /// another track can commit between the mint and the handling. Applying the id then would rename
 /// the arriving track after the one that just left, and every length it measures along with it.
 #[tokio::test]
@@ -475,7 +475,7 @@ async fn a_seek_with_no_track_to_tag_is_not_queued() {
 }
 
 /// Dropping the untagged seek is the deliberate half; the silence was not. With no tag the seek
-/// is gone, so nothing will ever make the target the transport already took come true.
+/// is gone; nothing will ever make the target the transport already took come true.
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
@@ -650,7 +650,7 @@ async fn a_refused_seek_persists_what_was_played_not_what_was_decoded() {
     );
 }
 
-/// The tick that reports a landing returns early on a paused stream, so the settle has to carry
+/// The tick that reports a landing returns early on a paused stream: the settle has to carry
 /// the position itself. Without it the bar keeps the target `handle_seek` announced, for as long
 /// as the pause lasts. Both bypass backends already answer this way.
 #[tokio::test]
@@ -729,7 +729,7 @@ async fn stopping_the_decoder_retires_its_reader() {
     );
 }
 
-/// A failed load clears the flag every position emitter keys on, so the fields describing that
+/// A failed load clears the flag every position emitter keys on; the fields describing that
 /// position have to fall with it. The seek answer is the shortest path to the consequence: it
 /// would otherwise carry the replaced track's position under the failed load's seq.
 #[tokio::test]
@@ -803,7 +803,7 @@ async fn a_refused_pre_seek_is_not_announced_as_the_start_position() {
     );
 }
 
-/// Two seeks in flight: `SeekComplete` used to carry no identity, so the stale first answer
+/// Two seeks in flight: `SeekComplete` used to carry no identity, and the stale first answer
 /// could settle the pin and persist its own position over the seek still being awaited.
 #[tokio::test]
 async fn a_superseded_seek_answer_settles_nothing() {
@@ -919,7 +919,7 @@ async fn a_bypass_load_announces_that_nothing_plays_yet() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
-    // No handle, so the branch is taken and spawns nothing. That is the window under test: the
+    // No handle: the branch is taken and spawns nothing. That is the window under test: the
     // device is not open, and nothing downstream can speak for it until it is.
     h.player.exclusive_handle = None;
 
@@ -1047,9 +1047,9 @@ async fn a_seek_queued_behind_a_load_persists_nothing() {
 }
 
 /// The shape natural completion leaves behind. The IPC handler flushes the seek target to the
-/// frontend before the thread ever sees it, so a refusal that says nothing leaves the bar on a
+/// frontend before the thread ever sees it; a refusal that says nothing leaves the bar on a
 /// position playback never reached, for as long as no load lands. The counter is set apart from
-/// the target so the answer cannot be a constant.
+/// the target, keeping the answer from being a constant.
 #[tokio::test]
 async fn a_seek_with_nothing_loaded_answers_with_the_played_position() {
     let dir = tempfile::tempdir().unwrap();
@@ -1082,7 +1082,7 @@ async fn a_seek_with_nothing_loaded_answers_with_the_played_position() {
 
 /// The other way into the same branch: a fatal decode error nulled the sender while a newer load
 /// is still fetching. That load's own `handle_load` overwrites the queued target before any
-/// decoder reads it, so the queue cannot be what answers the frontend here either.
+/// decoder reads it; the queue cannot be what answers the frontend here either.
 #[tokio::test]
 async fn a_seek_queued_behind_a_load_answers_the_optimistic_jump() {
     let dir = tempfile::tempdir().unwrap();
@@ -1399,7 +1399,7 @@ fn asio_harness(
 
 /// A rate refusal from a stream already superseded must not reach the track that replaced it.
 /// The exclusive twin re-arms shared on any refusal, and may: its own takes the one render
-/// thread down whichever stream it judged, so the re-arm is owed either way. No ASIO refusal
+/// thread down whichever stream it judged, and the re-arm is owed either way. No ASIO refusal
 /// does that, `finish_rebuild` and the reset give-up both leaving the control thread alive.
 #[cfg(target_os = "windows")]
 #[tokio::test]

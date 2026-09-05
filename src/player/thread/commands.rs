@@ -50,13 +50,13 @@ impl IncomingFailure {
 /// Pure, to be unit-tested without the audio pipeline.
 #[derive(Debug, PartialEq)]
 pub(super) enum PlayAction {
-    /// A live pipeline exists - resume it.
+    /// A live pipeline exists: resume it.
     Resume,
-    /// A load for this generation is genuinely in flight - wait for it.
+    /// A load for this generation is genuinely in flight: wait for it.
     DeferTo(u32),
-    /// No load is coming, but a previously-loaded source is retained - reload it.
+    /// No load is coming, but a previously-loaded source is retained: reload it.
     ReArm,
-    /// Nothing is loaded and nothing to re-arm (cold/empty) - do nothing.
+    /// Nothing is loaded and nothing to re-arm (cold/empty): do nothing.
     Ignore,
 }
 
@@ -104,7 +104,7 @@ pub(super) fn queued_seek_survives(
 }
 
 /// The queued seek names where the listener asked to be, the auto-resume only where they left
-/// off. Every reader of the pair answers here, so none can disagree with the one consuming it.
+/// off. Every reader of the pair answers here; none can disagree with the one consuming it.
 pub(super) fn resolve_start_position(queued: Option<f64>, auto_resume: Option<f64>) -> Option<f64> {
     queued.or(auto_resume)
 }
@@ -138,7 +138,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     /// Queue a seek issued while no bypass decoder is live, tagged with the track it
-    /// targets so the upcoming load can tell whether it still applies. Reports whether the
+    /// targets, letting the upcoming load tell whether it still applies. Reports whether the
     /// seek was kept: a dropped one is owed an answer; nothing will make it come true.
     #[cfg(target_os = "windows")]
     fn queue_user_seek(&mut self, time: f64) -> bool {

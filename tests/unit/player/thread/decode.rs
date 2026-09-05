@@ -167,7 +167,7 @@ fn a_pause_hands_back_only_what_the_ring_did_not_take() {
     let mut logged = true;
     let samples: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
-    // Nothing reads the ring, so the push stops at slot 4 whatever the pause's timing.
+    // Nothing reads the ring: the push stops at slot 4 whatever the pause's timing.
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(20));
         let _ = tx.send(DecodeCommand::Pause);
@@ -204,7 +204,7 @@ fn a_refused_seek_pushes_the_rest_through() {
     let mut logged = true;
     let mut seeks = 0;
 
-    // A refusal leaves the reader on these samples, so they are still the ones owed: the run
+    // A refusal leaves the reader on these samples, and they are still the ones owed: the run
     // carries on instead of reporting an interruption its caller would drop them on.
     let run = push_until_settled(
         &[0.5f32; 8],
@@ -243,7 +243,7 @@ fn a_refused_seek_resumes_where_the_push_stopped() {
         let _ = tx.send(DecodeCommand::Seek(3.0, 1));
     });
 
-    // The ring is full when the seek lands, so the refusal is paired with a reader that
+    // The ring is full when the seek lands; the refusal is paired with a reader that
     // empties it, which is what the output is doing while a seek is refused.
     let run = push_until_settled(
         &samples,
@@ -320,10 +320,10 @@ fn a_stop_ends_the_run() {
 
 // --- Driving the real decode_loop ---
 //
-// The loop opens with a symphonia probe, so exercising it needs bytes symphonia will genuinely
+// The loop opens with a symphonia probe: exercising it needs bytes symphonia will genuinely
 // demux and decode. RIFF/WAVE carrying PCM S16LE is the cheapest such container: a 44-byte
 // header, no checksum anywhere along the path, and `PcmDecoder` reads S16LE through untouched,
-// so the values a fixture writes are the values that reach the ring. It is available because
+// and the values a fixture writes are the values that reach the ring. It is available because
 // `Cargo.toml` leaves symphonia's default features on, and those carry `wav` and `pcm`; were
 // that to change, these tests fail at the probe rather than quietly testing nothing.
 
@@ -614,8 +614,8 @@ fn a_buffer_cancelled_mid_stream_reports_a_stop() {
 #[test]
 fn a_pause_mid_packet_delivers_every_sample_across_the_resume() {
     // The defect: the per-packet push dropped whatever the ring had not taken when a pause
-    // landed, and the reader had already moved past that packet, so the samples were gone for
-    // the track. Rates match here, so nothing stands between the container and the ring.
+    // landed, and the reader had already moved past that packet, leaving the samples gone for
+    // the track. Rates match here: nothing stands between the container and the ring.
     const RATE: u32 = 44_100;
     const FRAMES: usize = 2_500;
     const RING: usize = 512;
@@ -624,7 +624,7 @@ fn a_pause_mid_packet_delivers_every_sample_across_the_resume() {
     let mut received: Vec<f32> = Vec::new();
 
     decoding.send(DecodeCommand::Resume);
-    // A packet holds 1152 frames and nothing drains the ring, so the first push fills it and
+    // A packet holds 1152 frames and nothing drains the ring; the first push fills it and
     // can go no further. The pause is therefore taken by the push, at that offset, rather than
     // by the command loop: `push_samples` reads the channel before it looks at free slots.
     decoding.wait_until_decoded(RING as u64);
@@ -648,7 +648,7 @@ fn a_seek_taken_during_a_pause_does_not_splice_the_carried_tail_back_in() {
     const RATE: u32 = 44_100;
     const FRAMES: usize = 2_500;
     const RING: usize = 512;
-    // WAV packetises in blocks of 1152 frames and snaps a seek down onto that grid, so a target
+    // WAV packetises in blocks of 1152 frames and snaps a seek down onto that grid: a target
     // inside the second block lands exactly on frame 1152.
     let inside_second_block = 1_500.0 / f64::from(RATE);
 
@@ -684,7 +684,7 @@ fn a_refused_seek_while_resuming_a_carried_tail_still_delivers_it() {
     const FRAMES: usize = 800;
     let fixture = wav_s16_mono(SOURCE_RATE, &ramp(FRAMES));
 
-    // The resampler makes the output values its own, so the reference is the same fixture run
+    // The resampler makes the output values its own; the reference is the same fixture run
     // through the same rates without interruption.
     let mut baseline: Vec<f32> = Vec::new();
     let mut uninterrupted = Decoding::start(fixture.clone(), 8_192, OUTPUT_RATE);
@@ -702,12 +702,12 @@ fn a_refused_seek_while_resuming_a_carried_tail_still_delivers_it() {
     let mut received: Vec<f32> = Vec::new();
 
     decoding.send(DecodeCommand::Resume);
-    // Half the flush fits, so the push stalls and the pause lands on it: the remainder becomes
+    // Half the flush fits. The push stalls and the pause lands on it: the remainder becomes
     // the tail the park loop holds.
     decoding.wait_until_decoded(ring as u64);
     decoding.send(DecodeCommand::Pause);
     // Queued in this order, the resume starts the tail's push and its first channel read takes
-    // the seek, so the refusal is answered at offset 0 of the tail rather than at a guessed
+    // the seek; the refusal is answered at offset 0 of the tail rather than at a guessed
     // moment. Past the end of an 800-frame track, the seek cannot land.
     decoding.send(DecodeCommand::Resume);
     decoding.send(DecodeCommand::Seek(60.0, 2));
@@ -757,7 +757,7 @@ fn a_refused_seek_while_parked_does_not_announce_a_second_completion() {
 fn every_dispatched_seek_is_answered_once_under_its_own_generation() {
     // Not a defect this pins but a contract: six places in the loop take a `Seek` off the
     // channel, and an answer that never arrives leaves the player's seek flag set for good.
-    // Two of them reach `do_decode_seek` by different routes, so both are driven here: one
+    // Two of them reach `do_decode_seek` by different routes, and both are driven here: one
     // through the interrupt closure of a push, one through the command loop's direct call.
     const RATE: u32 = 44_100;
     const FRAMES: usize = 2_500;
@@ -769,7 +769,7 @@ fn every_dispatched_seek_is_answered_once_under_its_own_generation() {
     let mut received: Vec<f32> = Vec::new();
 
     decoding.send(DecodeCommand::Resume);
-    // Stalled on a full ring, the push is what reads the channel, so this seek goes through its
+    // Stalled on a full ring, the push is what reads the channel: this seek goes through its
     // closure. The pause behind it then parks the loop on its blocking read, which is what
     // leaves the next seek to the command loop instead.
     decoding.wait_until_decoded(RING as u64);

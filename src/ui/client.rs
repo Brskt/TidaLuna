@@ -579,6 +579,9 @@ wrap_load_handler! {
                 } else {
                     PageState::App
                 });
+                // Reached on every aggregate load completion, subframes included, but inert after
+                // the first run in a given document: `bundle_script` carries its own sentinel
+                // (see app_bootstrap.rs).
                 exec_js_on_frame(&frame, &self.bundle_script);
 
                 // After post-login SPA navigation to app, signal JS to re-run init().

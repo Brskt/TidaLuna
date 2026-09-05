@@ -218,7 +218,7 @@ enum PushRun {
 }
 
 /// Pushes a whole buffer and owns the retain-or-drop rule its callers kept diverging on: a
-/// refused seek leaves the reader on these samples, so the rest still goes through; a moved
+/// refused seek leaves the reader on these samples and the rest still goes through; a moved
 /// one makes them the old position's; a pause owes them back. Seeking arrives as a closure so
 /// the rule can be exercised without a container to demux.
 fn push_until_settled(
