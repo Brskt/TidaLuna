@@ -122,6 +122,56 @@ fn the_harness_notices_a_broken_sandbox() {
     );
 }
 
+/// Both canaries above corrupt a gate the sweep reaches by ENUMERATING the host's existing
+/// members. Neither says anything about the class that arrives as an ADDITION keyed by a name off
+/// the wire, and that blind spot was measured: with the member lookup below made ordinary, a
+/// planted function ran with a victim plugin's real call arguments and returned its own value as
+/// the call's result, while both harnesses reported a clean run. This is the canary for the two
+/// oracles written against that class, and it has to be separate because the sweep's enumerating
+/// pass structurally cannot arm a name that exists on no prototype until a plugin puts it there.
+#[test]
+fn the_harness_notices_a_borrowed_name() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let host = root.join("frontend/scripts/native-host.cjs");
+    let bun = bun_path(&root);
+    let source = std::fs::read_to_string(&host).expect("cannot read the host script");
+
+    // Two reads of a container the caller supplies, on two different wire fields. Anchored on
+    // the reads themselves so a rename fails here rather than skipping the check.
+    let sites: [(&str, &str, &str); 2] = [
+        (
+            "the called member",
+            "var member = ownRead(mod, fnName);",
+            "var member = mod[fnName]; // canary: ordinary lookup, not an own read",
+        ),
+        (
+            "a write-stream option",
+            "out[key] = ownRead(opts, key);",
+            "out[key] = opts[key]; // canary: ordinary read, not an own read",
+        ),
+    ];
+
+    let dir = tempfile::tempdir().expect("cannot create a scratch dir");
+    for (what, anchor, replacement) in sites {
+        assert!(
+            source.contains(anchor),
+            "the canary's anchor for {what} is gone - point it at the current read"
+        );
+        let broken_host = dir
+            .path()
+            .join(format!("borrowed-{}.cjs", what.replace(' ', "-")));
+        std::fs::write(&broken_host, source.replacen(anchor, replacement, 1))
+            .expect("cannot write the broken host");
+
+        let (sweep_ok, sweep_report) = run_harness(&bun, &adversary_path(&root), &broken_host);
+        assert!(
+            !sweep_ok,
+            "the adversary sweep passed against a host reading {what} off the shared prototype, \
+             so a name planted by one plugin reaches another one unseen:\n{sweep_report}"
+        );
+    }
+}
+
 /// The canary above only proves the harnesses notice a gate that wrongly GRANTS. It says nothing
 /// about the opposite shape (a gate that throws where it used to answer), and that blind spot
 /// was real: the sweep scored every thrown oracle as a pass, so three separate typo-class
