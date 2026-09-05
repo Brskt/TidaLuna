@@ -11,7 +11,7 @@ export { unloadSet, type LunaUnload, type LunaUnloads, type NullishLunaUnloads }
 
 export { Messager, Tracer } from "./trace";
 
-export { modules, reduxStore, initModules } from "./modules";
+export { modules, defineHostModule, reduxStore, initModules } from "./modules";
 
 export * from "./LunaPlugin";
 export * from "./ReactiveStore";

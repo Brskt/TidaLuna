@@ -9,6 +9,29 @@ import * as oby from "oby";
 
 export const modules: Record<string, any> = {};
 
+/**
+ * Install a module the HOST owns, in a slot no plugin can take.
+ *
+ * Plugin code reaches this registry as `window.luna.core.modules`, and `transpile.rs` lowers
+ * every `@luna/*` import to a live lookup through it, resolved when that plugin runs. A writable
+ * slot therefore lets the first plugin to load answer for a module every later one imports;
+ * `__lunaLibFor` is the sharp case, handing each plugin the capability its own IPC travels with.
+ *
+ * Pinned, not frozen: `Object.freeze(modules)` would also block the host's own later writes and
+ * the slots plugins take under their own names. For the same reason the core-plugin names
+ * (`@luna/lib`, `@luna/lib.native`, `@luna/ui`, `@luna/dev`, `@luna/linux`) must NOT come through
+ * here, `LunaPlugin` owning those slots. `into` defaults to the live registry, where a pin
+ * outlives the page.
+ */
+export function defineHostModule(name: string, value: any, into: Record<string, any> = modules): void {
+	Object.defineProperty(into, name, {
+		value,
+		writable: false,
+		configurable: false,
+		enumerable: true,
+	});
+}
+
 // Define a global require function to use modules for cjs imports bundled with esbuild
 window.require = <NodeJS.Require>((moduleName: string) => {
 	if (modules.hasOwnProperty(moduleName)) return modules[moduleName];

@@ -339,7 +339,12 @@ const init = async () => {
         });
     }
 
-    modules["@luna/core"] = LunaCore;
+    // Pinned: it is the second link of the chain a plugin's `@luna/lib` import is lowered to
+    // (`luna.core.modules["__lunaLibFor"]`), and the accessor in front of it only forwards
+    // here. Left writable, replacing THIS slot bypassed the pin on `__lunaLibFor` entirely.
+    // `@luna/lib` below stays an ordinary slot: it is a core-plugin name, and `LunaPlugin`
+    // writes and deletes it.
+    defineHostModule("@luna/core", LunaCore);
     modules["@luna/lib"] = LunaLib;
     modules["@inrixia/helpers"] = InrixiaHelpers;
     modules["@luna/lib.native"] = {
