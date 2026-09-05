@@ -46,8 +46,9 @@ pub(super) async fn download_update(version: String, cancel: CancellationToken) 
             crate::vprintln!("[UPDATER] Download failed for v{version}: {e}");
             cleanup_staging();
             state.reset_to_idle();
-            let msg = e.to_string().replace('\'', "\\'");
-            crate::app_state::emit_ipc_event_with_args("updater.error", &[&msg]);
+            // Handed over unescaped: `emit_ipc_event_with_args` encodes every argument, and
+            // a caller that escapes first is escaping what the encoder then escapes again.
+            crate::app_state::emit_ipc_event_with_args("updater.error", &[&e.to_string()]);
         }
     }
 }
