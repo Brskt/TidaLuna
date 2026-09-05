@@ -21,7 +21,7 @@ export * from "./SettingsTransfer";
 import "./window.core";
 
 import { initTidalInternals, seedTidalConfig } from "./exposeTidalInternals";
-import { initModules } from "./modules";
+import { initModules, publishReduxStore } from "./modules";
 
 /**
  * Discover TIDAL internals (Redux store via React Fiber) and initialize
@@ -29,6 +29,11 @@ import { initModules } from "./modules";
  */
 export async function initCore(): Promise<void> {
 	const { reduxStore } = await initTidalInternals();
+	// Before the seed, not after it: seedTidalConfig fetches and scans every asset the page has
+	// loaded and carries no timeout of its own, and the first load of a cold start lands inside
+	// that gap. A load that lands there names no track, and an unnamed length is refused rather
+	// than published. The track then plays to its end with no duration in the OS controls.
+	publishReduxStore(reduxStore);
 	await seedTidalConfig();
 	initModules(reduxStore);
 }

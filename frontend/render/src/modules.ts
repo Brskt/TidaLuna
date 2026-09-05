@@ -40,7 +40,7 @@ window.require = <NodeJS.Require>((moduleName: string) => {
 window.require.cache = modules;
 window.require.main = undefined;
 
-// TidaLunar: reduxStore is assigned by initModules() after webpack/Redux discovery.
+// TidaLunar: published by publishReduxStore() as soon as discovery hands the store over.
 export let reduxStore: Store;
 let _resolveStoreReady: () => void;
 export const storeReady: Promise<void> = new Promise((r) => { _resolveStoreReady = r; });
@@ -95,10 +95,21 @@ function resolveHostDomClient(): any | undefined {
 }
 
 /**
+ * Publishes the binding every reader of the store goes through, separately from the module
+ * registry below: the two become knowable at very different times. Discovery already patches
+ * dispatch, so the store is in use before this returns, and withholding the binding cost the one
+ * reader that cannot wait: the SDK's load delegate names the track it is loading and runs before
+ * the registry exists, leaving that load's measured length unpublishable for the track's life.
+ */
+export function publishReduxStore(store: Store): void {
+	reduxStore = store;
+}
+
+/**
  * Must be called after initTidalInternals() has populated tidalModules.
  */
 export function initModules(store: Store): void {
-	reduxStore = store;
+	publishReduxStore(store);
 	_resolveStoreReady();
 
 	// React and its renderer must come from the SAME copy. react-dom writes the hook
