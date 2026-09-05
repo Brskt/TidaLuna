@@ -90,7 +90,13 @@ impl SpeakerBridge {
             // frontend's: the receiver's metadata task records this same id.
             let media_id = media_info.track_id();
             return with_state(|state| {
-                match state.player.load_dash(url, segments, format, media_id) {
+                match state.player.load_dash(
+                    url,
+                    segments,
+                    format,
+                    media_id,
+                    crate::player::LoadOrigin::Connect,
+                ) {
                     Ok(()) => true,
                     Err(e) => {
                         crate::verr!("[connect::bridge] Player DASH load error: {}", e);
@@ -111,15 +117,21 @@ impl SpeakerBridge {
             .to_string();
 
         let media_id = media_info.track_id();
-        with_state(
-            |state| match state.player.load_and_play(url, format, key, media_id) {
+        with_state(|state| {
+            match state.player.load_and_play(
+                url,
+                format,
+                key,
+                media_id,
+                crate::player::LoadOrigin::Connect,
+            ) {
                 Ok(()) => true,
                 Err(e) => {
                     crate::verr!("[connect::bridge] Player load error: {}", e);
                     false
                 }
-            },
-        )
+            }
+        })
         .unwrap_or(false)
     }
 
@@ -146,7 +158,12 @@ impl SpeakerBridge {
     }
 
     pub fn stop(&self) {
-        with_state(|state| Self::send_transport("stop", state.player.stop()));
+        with_state(|state| {
+            Self::send_transport(
+                "stop",
+                state.player.stop(crate::player::LoadOrigin::Connect),
+            )
+        });
     }
 
     /// Seek to position in milliseconds.

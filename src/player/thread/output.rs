@@ -1,7 +1,10 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::Resampler;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU8, AtomicU32, AtomicU64,
+    Ordering::{Relaxed, Release},
+};
+use std::sync::{Arc, Mutex};
 
 use crate::player::AudioDevice;
 
@@ -107,6 +110,14 @@ pub(super) fn resolved_device_name(device_id: &str) -> Option<String> {
 
 // --- OpenedStream ---
 
+/// The incoming track's ring plus the fade length, handed to the callback when a
+/// crossfade arms. `None` outside a crossfade, which is the state that keeps the
+/// output path arithmetically identical to a build without this feature.
+pub(super) struct CrossfadeSlot {
+    pub consumer: rtrb::Consumer<f32>,
+    pub len_samples: usize,
+}
+
 pub(super) struct OpenedStream {
     pub stream: cpal::Stream,
     pub producer: rtrb::Producer<f32>,
@@ -117,6 +128,64 @@ pub(super) struct OpenedStream {
     pub mute_ack: Arc<AtomicBool>,
     pub stream_error: Arc<AtomicU8>,
     pub played_samples: Arc<AtomicU64>,
+    /// Shared with the callback for the whole life of the stream. `attach` offers a slot
+    /// (`Some` = new, NEVER "cancel": one cell for both made every fade release itself the tick
+    /// after adoption), `cancel` is the one-shot that drops an adopted one, and `done` packs
+    /// generation and origin sample in one word, so a fresh generation can never be read beside
+    /// a stale origin.
+    pub xfade: CrossfadeLink,
+}
+
+/// The three handles the control thread and the audio callback share to run a
+/// fade. Grouped because they are only ever meaningful together: an offer, the
+/// retraction of an adopted one, and the completion word.
+#[derive(Clone)]
+pub(super) struct CrossfadeLink {
+    pub attach: Arc<Mutex<Option<CrossfadeSlot>>>,
+    pub cancel: Arc<AtomicBool>,
+    /// Set by the player thread once the OUTGOING decoder has actually reached its
+    /// end. The callback cannot tell an empty ring from a stalled one, and swapping
+    /// on emptiness alone would retire a decoder that still had audio to produce.
+    pub out_eof: Arc<AtomicBool>,
+    /// Set by the player thread once the INCOMING decoder can produce no more. The callback
+    /// sees only ring occupancy, which is mute about cause, and "late" and "over" call for
+    /// opposite answers: waiting out a late ring costs a moment of the fade, waiting out a
+    /// finished one holds the outgoing track open against silence to the end of the envelope.
+    pub in_eof: Arc<AtomicBool>,
+    /// Published when a fade completes: the generation in the high 16 bits, and in the low 48
+    /// how many samples of the INCOMING track were drained. One word, so a fresh generation can
+    /// never be read beside a stale origin.
+    ///
+    /// It counts the incoming drain specifically, because `played_samples` is a lifetime total
+    /// that would report the outgoing track's end position for the whole of the new track, and
+    /// the nominal fade length over-reports whenever the incoming ring was starved.
+    pub done: Arc<AtomicU64>,
+}
+
+impl CrossfadeLink {
+    fn new() -> Self {
+        Self {
+            attach: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            out_eof: Arc::new(AtomicBool::new(false)),
+            in_eof: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+/// Split a value published in `OpenedStream::xfade_done` into `(generation, origin)`.
+/// Generation 0 means no fade has completed on this stream yet.
+#[inline]
+pub(super) fn unpack_xfade_done(word: u64) -> (u16, u64) {
+    (((word >> 48) & 0xFFFF) as u16, word & 0xFFFF_FFFF_FFFF)
+}
+
+/// Inverse of [`unpack_xfade_done`]. The origin saturates at 48 bits, which is
+/// centuries of samples at any real rate.
+#[inline]
+pub(super) fn pack_xfade_done(cur_gen: u16, origin: u64) -> u64 {
+    ((cur_gen as u64) << 48) | (origin & 0xFFFF_FFFF_FFFF)
 }
 
 // --- Audio format probing ---
@@ -175,6 +244,32 @@ pub(super) fn probe_audio_format(
 
 // --- cpal callback ---
 
+/// Scratch the mixer works in per pass, in samples. cpal declines to bound the length it hands
+/// a callback (`StreamTrait::buffer_size` is documented as an estimate, and WASAPI recomputes it
+/// on every call), so the mixer fixes its own size and slices the callback buffer to match,
+/// keeping the real-time path free of a resize. A cost knob rather than a correctness one:
+/// passes are chained, and any value mixes the same samples.
+pub(super) const MIX_QUANTUM: usize = 8192;
+
+/// Copy up to `dst.len()` samples out of `c`, returning how many were available.
+/// The tail is zeroed: a starved ring contributes exact silence to a mix.
+fn drain_into(c: &mut rtrb::Consumer<f32>, dst: &mut [f32]) -> usize {
+    let to_read = c.slots().min(dst.len());
+    if to_read > 0
+        && let Ok(chunk) = c.read_chunk(to_read)
+    {
+        let (s1, s2) = chunk.as_slices();
+        let split = s1.len();
+        dst[..split].copy_from_slice(s1);
+        dst[split..to_read].copy_from_slice(&s2[..to_read - split]);
+        chunk.commit_all();
+    }
+    for s in dst[to_read..].iter_mut() {
+        *s = 0.0;
+    }
+    to_read
+}
+
 fn build_cpal_callback(
     mut consumer: rtrb::Consumer<f32>,
     volume: Arc<AtomicU32>,
@@ -182,15 +277,30 @@ fn build_cpal_callback(
     muted: Arc<AtomicBool>,
     mute_ack: Arc<AtomicBool>,
     played_samples: Arc<AtomicU64>,
+    xfade: CrossfadeLink,
 ) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) + Send + 'static {
     let mut local_gen: u32 = 0;
+    let mut slot: Option<CrossfadeSlot> = None;
+    let mut fade_pos: usize = 0;
+    // One rescale per fade. `M` shrinks as the tail is drained; recomputing it every
+    // tick would stretch the ending forever instead of reaching it.
+    let mut fade_rescaled = false;
+    let mut xfade_gen: u16 = 0;
+    // What the incoming track has actually been given to the device during the
+    // overlap. This, not the stream total, is the new track's position at the swap.
+    let mut xfade_in_played: u64 = 0;
+    // Sized here, once. `Box<[f32]>` has no `resize`; nothing on the real-time path
+    // can allocate however long a buffer a later tick arrives with. `MIX_QUANTUM` carries
+    // the reason the size does not track `data.len()`.
+    let mut scratch_out: Box<[f32]> = vec![0.0; MIX_QUANTUM].into_boxed_slice();
+    let mut scratch_in: Box<[f32]> = vec![0.0; MIX_QUANTUM].into_boxed_slice();
+    // `consumer` is borrowed per use, never once at the top: a completed fade
+    // reassigns it, and a borrow spanning the body would not compile.
     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        let c = &mut consumer;
-
         if muted.load(Relaxed) {
-            let n = c.slots();
+            let n = consumer.slots();
             if n > 0
-                && let Ok(chunk) = c.read_chunk(n)
+                && let Ok(chunk) = consumer.read_chunk(n)
             {
                 chunk.commit_all();
             }
@@ -204,40 +314,145 @@ fn build_cpal_callback(
         // Seek gen changed - drain stale samples from before the seek
         let cur_gen = seek_gen.load(Relaxed);
         if cur_gen != local_gen {
-            let n = c.slots();
+            let n = consumer.slots();
             if n > 0
-                && let Ok(chunk) = c.read_chunk(n)
+                && let Ok(chunk) = consumer.read_chunk(n)
             {
                 chunk.commit_all();
             }
             local_gen = cur_gen;
         }
 
-        let v = f32::from_bits(volume.load(Relaxed));
-        let to_read = c.slots().min(data.len());
-        if to_read > 0
-            && let Ok(chunk) = c.read_chunk(to_read)
-        {
-            let (s1, s2) = chunk.as_slices();
-            let split = s1.len();
-            for (dst, src) in data[..split].iter_mut().zip(s1.iter()) {
-                *dst = *src * v;
-            }
-            for (dst, src) in data[split..to_read].iter_mut().zip(s2.iter()) {
-                *dst = *src * v;
-            }
-            chunk.commit_all();
-            played_samples.fetch_add(to_read as u64, Relaxed);
+        // Cancellation is drained BEFORE adoption, and that order is the contract. The
+        // flag is a level, not an event: nothing in it names the fade it was raised for,
+        // so adopting first let a cancel no tick had drained destroy the NEXT fade. A seek
+        // parks the flag for its whole duration while the control thread unmutes and
+        // re-arms in the same breath. Draining first can only retire a slot adopted on an
+        // EARLIER tick, and the swap stays unconditional so the flag never survives it.
+        if xfade.cancel.swap(false, Relaxed) {
+            slot = None;
+            fade_pos = 0;
+            fade_rescaled = false;
+            xfade_in_played = 0;
         }
-        for s in data[to_read..].iter_mut() {
-            *s = 0.0;
+        // Adopt an offered slot. `try_lock` keeps the real-time path free of
+        // blocking: a missed tick delays adoption by one buffer, nothing more.
+        // Taking it leaves the cell `None`, which from here on means only "nothing
+        // new", never "cancel". Cancellation has its own flag above, because one
+        // cell serving both made every fade release itself one tick after adoption.
+        if let Ok(mut attach) = xfade.attach.try_lock()
+            && attach.is_some()
+        {
+            slot = attach.take();
+            fade_pos = 0;
+            fade_rescaled = false;
+            xfade_in_played = 0;
+        }
+
+        let v = f32::from_bits(volume.load(Relaxed));
+
+        // Copied out to keep no borrow of `slot` alive across the swap below.
+        let Some(mut len_samples) = slot.as_ref().map(|s| s.len_samples) else {
+            let to_read = consumer.slots().min(data.len());
+            if to_read > 0
+                && let Ok(chunk) = consumer.read_chunk(to_read)
+            {
+                let (s1, s2) = chunk.as_slices();
+                let split = s1.len();
+                for (dst, src) in data[..split].iter_mut().zip(s1.iter()) {
+                    *dst = *src * v;
+                }
+                for (dst, src) in data[split..to_read].iter_mut().zip(s2.iter()) {
+                    *dst = *src * v;
+                }
+                chunk.commit_all();
+                played_samples.fetch_add(to_read as u64, Relaxed);
+            }
+            for s in data[to_read..].iter_mut() {
+                *s = 0.0;
+            }
+            return;
+        };
+
+        // One pass per `MIX_QUANTUM` of the buffer: the scratch never has to match it.
+        // `mix_frames` derives every sample's gain from the absolute `fade_pos + i` and
+        // returns the position it reached, which is what makes a chained sequence of
+        // passes give the same samples as one pass over the whole buffer.
+        for chunk in data.chunks_mut(MIX_QUANTUM) {
+            let n = chunk.len();
+            let out_n = drain_into(&mut consumer, &mut scratch_out[..n]);
+            let in_n = match slot.as_mut() {
+                Some(active) => drain_into(&mut active.consumer, &mut scratch_in[..n]),
+                None => 0,
+            };
+            xfade_in_played += in_n as u64;
+
+            // A fade that outruns its incoming track finishes on the samples that remain
+            // rather than mixing silence. `fade_pos` advances by the pass length whether or
+            // not the incoming ring delivered, so without this the envelope runs out over
+            // nothing, leaving a hole where the new track should be at full volume. The
+            // arithmetic lives in `refit_fade`, pure and tested; only two facts come from
+            // here: where the envelope stands, and how much incoming audio will ever arrive.
+            if !fade_rescaled
+                && xfade.in_eof.load(Relaxed)
+                && let Some(active) = slot.as_mut()
+            {
+                fade_rescaled = true;
+                let available = in_n + active.consumer.slots();
+                if let Some((pos, len)) =
+                    crate::player::crossfade::refit_fade(fade_pos, len_samples, available)
+                {
+                    active.len_samples = len;
+                    len_samples = len;
+                    fade_pos = pos;
+                }
+            }
+
+            fade_pos = crate::player::crossfade::mix_frames(
+                chunk,
+                &scratch_out[..out_n],
+                &scratch_in[..in_n],
+                fade_pos,
+                len_samples,
+                v,
+            );
+            played_samples.fetch_add(out_n as u64, Relaxed);
+        }
+        // Three conditions, not one. `fade_pos` alone retires the outgoing ring
+        // while it still holds decoded audio nobody heard. Emptiness alone cannot
+        // tell "finished" from "stalled mid-download", and would retire a decoder
+        // with more of the track to give. Together they can only DELAY the swap,
+        // never truncate: a stall extends the fade instead of cutting it short.
+        if fade_pos >= len_samples && consumer.slots() == 0 && xfade.out_eof.load(Relaxed) {
+            // The incoming ring becomes the primary one HERE, inside the callback
+            // that owns both. The control thread cannot do it: this closure owns
+            // `consumer` by move. Only the track identity is left for the player.
+            if let Some(done) = slot.take() {
+                consumer = done.consumer;
+            }
+            // Rebase the clock in the tick that swaps, the only place that knows where the
+            // swap fell: the control thread reads `done` up to a poll later, when the counter
+            // holds the outgoing total plus whatever the promoted ring has since delivered,
+            // two quantities no reader can tell apart. The `Release` below publishes this
+            // store, and `commands.rs` reads `done` with `Acquire`, so a reader that sees this
+            // generation sees this clock.
+            played_samples.store(xfade_in_played, Relaxed);
+            fade_pos = 0;
+            fade_rescaled = false;
+            xfade_gen = xfade_gen.wrapping_add(1).max(1);
+            // Release: the player thread must not observe this generation beside a
+            // stale origin.
+            xfade
+                .done
+                .store(pack_xfade_done(xfade_gen, xfade_in_played), Release);
+            xfade_in_played = 0;
         }
     }
 }
 
 /// Choose a CPAL output buffer size.
 ///
-/// On Linux (ALSA/PipeWire) the `Default` period can land around 10-20 ms,
+/// On Linux (ALSA/PipeWire) the `Default` period can land at 10-20 ms,
 /// which underruns easily under VM scheduling jitter. We query the device's
 /// supported range and pick the power of two nearest to 100 ms, clamped into
 /// that range. On other platforms, or when the device does not advertise a
@@ -280,6 +495,8 @@ fn open_with_config(
     let ring_size = config.sample_rate as usize * config.channels as usize * 2;
     let (producer, consumer) = rtrb::RingBuffer::new(ring_size);
 
+    let xfade = CrossfadeLink::new();
+
     let cb = build_cpal_callback(
         consumer,
         volume.clone(),
@@ -287,6 +504,7 @@ fn open_with_config(
         muted.clone(),
         mute_ack.clone(),
         played_samples.clone(),
+        xfade.clone(),
     );
     let err_flag = stream_error.clone();
     let stream = device.build_output_stream(
@@ -320,7 +538,35 @@ fn open_with_config(
         mute_ack: mute_ack.clone(),
         stream_error: stream_error.clone(),
         played_samples: played_samples.clone(),
+        xfade,
     })
+}
+
+/// Whether the output stream is pinned to the device's own rate for the life of the
+/// device, instead of being reopened at each track's rate.
+///
+/// True where the device's reported default IS the rate the audio server runs: WASAPI shared
+/// mode returns the endpoint's mix format, CoreAudio the device's live stream format. False on
+/// Linux, where cpal reaches the device through pipewire-alsa's `default` PCM, whose hardcoded
+/// [1, 384000] range is unrelated to the graph's clock and resolves to 48000: aiming at that
+/// would stack our conversion on PipeWire's instead of replacing it.
+pub(crate) const ENGINE_RATE_IS_PINNED: bool =
+    cfg!(any(target_os = "windows", target_os = "macos"));
+
+/// The two configurations to try, in order. The second is the fallback: the caller
+/// still opens when a device refuses its own advertised default. `pinned` is read off
+/// `ENGINE_RATE_IS_PINNED` by the caller rather than here, keeping both orderings
+/// testable on any host.
+pub(super) fn attempt_order(
+    source: (u32, u16),
+    device_default: (u32, u16),
+    pinned: bool,
+) -> [(u32, u16); 2] {
+    if pinned {
+        [device_default, source]
+    } else {
+        [source, device_default]
+    }
 }
 
 pub(super) fn open_output_stream(
@@ -338,63 +584,61 @@ pub(super) fn open_output_stream(
     let dev_name = output_device_name(device).unwrap_or_else(|| "<unknown>".to_string());
     crate::vprintln!("[CPAL]   Device: {}", dev_name);
 
-    // Attempt 1: source rate (no software resampling needed)
-    let config = cpal::StreamConfig {
-        channels: source_channels,
-        sample_rate: source_rate,
-        buffer_size: preferred_buffer_size(device, source_rate),
-    };
-    if let Ok(opened) = open_with_config(
-        device,
-        &config,
-        volume,
-        &seek_gen,
-        &muted,
-        &mute_ack,
-        &stream_error,
-        &played_samples,
-    ) {
-        crate::vprintln!(
-            "[CPAL]   Opened at source rate: {}Hz/{}ch",
-            source_rate,
-            source_channels
-        );
-        return Some(opened);
-    }
-
-    // Attempt 2: device default (will need rubato resampling)
-    let default = device.default_output_config().ok()?;
-    let ar = default.sample_rate();
-    let ac = default.channels();
-    let cfg = cpal::StreamConfig {
-        channels: ac,
-        sample_rate: ar,
-        buffer_size: preferred_buffer_size(device, ar),
+    // Read late, never cached: on macOS the device's nominal rate is a shared, mutable
+    // setting another application can change between the query and the open.
+    let default = device.default_output_config().ok();
+    let source = (source_rate, source_channels);
+    let candidates = match default {
+        Some(ref d) => attempt_order(
+            source,
+            (d.sample_rate(), d.channels()),
+            ENGINE_RATE_IS_PINNED,
+        ),
+        None => [source, source],
     };
 
-    crate::vprintln!(
-        "[CPAL]   Source rate {}Hz unsupported, using device default: {}Hz/{}ch",
-        source_rate,
-        ar,
-        ac
-    );
-
-    match open_with_config(
-        device,
-        &cfg,
-        volume,
-        &seek_gen,
-        &muted,
-        &mute_ack,
-        &stream_error,
-        &played_samples,
-    ) {
-        Ok(opened) => Some(opened),
-        Err(e) => {
-            crate::vprintln!("[ERROR]  Failed to open cpal stream: {e}");
-            None
+    let mut last_err = None;
+    for (i, &(rate, channels)) in candidates.iter().enumerate() {
+        if i == 1 && candidates[0] == candidates[1] {
+            break;
+        }
+        let config = cpal::StreamConfig {
+            channels,
+            sample_rate: rate,
+            buffer_size: preferred_buffer_size(device, rate),
+        };
+        match open_with_config(
+            device,
+            &config,
+            volume,
+            &seek_gen,
+            &muted,
+            &mute_ack,
+            &stream_error,
+            &played_samples,
+        ) {
+            Ok(opened) => {
+                if (rate, channels) == source {
+                    crate::vprintln!("[CPAL]   Opened at source rate: {rate}Hz/{channels}ch");
+                } else {
+                    crate::vprintln!(
+                        "[CPAL]   Opened at device rate: {rate}Hz/{channels}ch (source {}Hz, resampling here)",
+                        source_rate
+                    );
+                }
+                return Some(opened);
+            }
+            Err(e) => {
+                crate::vprintln!("[CPAL]   Rejected {rate}Hz/{channels}ch: {e}");
+                last_err = Some(e);
+            }
         }
     }
+
+    if let Some(e) = last_err {
+        crate::vprintln!("[ERROR]  Failed to open cpal stream: {e}");
+    }
+    None
 }
 
 // --- AudioPipeline ---

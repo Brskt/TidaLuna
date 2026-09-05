@@ -6,12 +6,20 @@ mod playback;
 
 use super::buffer::RamBuffer;
 use super::resume::ResumeStore;
-use super::{LOAD_SEQ, MediaFormatSnapshot, PlayerCommand, PlayerEvent};
+use super::{MediaFormatSnapshot, PlayerCommand, PlayerEvent, current_gen};
+use output::CrossfadeLink;
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
 use std::sync::mpsc;
 use std::time::Duration;
+
+// Alone in its own group so this note stays attached to it: rustfmt sorts a contiguous run of
+// imports and leaves a leading comment where it was. Gated, because all three uses sit inside
+// `cfg(windows)` blocks and ungated it reads as an unused import on Linux, where clippy runs
+// with `-D warnings`; it was dropped once for exactly that reason, breaking only the Windows
+// build, the sole platform whose compiler can see those call sites.
+#[cfg(target_os = "windows")]
+use std::sync::atomic::Ordering::Relaxed;
 
 #[cfg(target_os = "windows")]
 use super::asio::host::AsioHandle;
@@ -38,6 +46,39 @@ const EXCLUSIVE_PAUSE_RELEASE: std::time::Duration = std::time::Duration::from_s
 #[cfg(target_os = "windows")]
 const ASIO_IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The incoming track during a fade. Held in ONE `Option` rather than doubling
+/// every per-track field, and with its OWN event channel: the shared
+/// `decode_event_rx` carries no stream tag; a second producer on it would make
+/// every event ambiguous.
+pub(super) struct CrossfadeState {
+    cmd_tx: mpsc::Sender<DecodeCommand>,
+    /// Kept, not dropped. Without it the promoted decoder can never report
+    /// `SeekComplete` (pinning `seeking` forever and leaving cpal muted) nor
+    /// `Finished` (leaving the track with no completion path).
+    event_rx: mpsc::Receiver<DecodeEvent>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    reader_cancel: Arc<AtomicBool>,
+    decoded: Arc<AtomicU64>,
+    /// The incoming track and the load generation it was validated under, as ONE value handed
+    /// over already paired by `peek_next_track`, so there is no second read to race. Held as two
+    /// fields, the track was validated at the top of `arm_crossfade` and the generation sampled
+    /// again at the bottom: a load minting one in between stamped this track with a generation
+    /// belonging to a different one, which every replay guard passes. Promotion publishes the
+    /// pair untouched, a stale stamp refusing the replay, which is the safe direction.
+    next: crate::state::RetainedTrack,
+    buffer: RamBuffer,
+    /// Probed at arm time and carried; promotion rebases the clock and the
+    /// format badge without a second probe. Both must keep describing the outgoing
+    /// track until the swap is final.
+    duration: f64,
+    media_format: Option<MediaFormatSnapshot>,
+    /// The incoming track reached its end DURING the overlap, i.e. it is shorter
+    /// than the fade. Its `Finished` is consumed by the fade's own drain, and
+    /// promotion has to replay what that event would have done: complete the track
+    /// and store its ciphertext.
+    incoming_finished: bool,
+}
+
 enum DecodeCommand {
     /// Target seconds plus the identity minted for this dispatch, echoed back untouched.
     Seek(f64, u32),
@@ -51,6 +92,16 @@ enum DecodeEvent {
     Finished,
     /// Decode error (non-fatal, logged).
     Error(String),
+    /// Bytes stopped arriving and never came back within `RamBuffer::read`'s own budget (six
+    /// cycles of a five second wait). Distinct from `Error`, which drops the cache entry and
+    /// moves the queue on, where a dead network is neither the track's fault nor a reason to
+    /// skip it. Distinct from `Finished` because announcing it as finished makes TIDAL advance.
+    NetworkStalled,
+    /// The read ended because someone asked it to (a retired reader, or a cancelled buffer).
+    /// Distinct from `Error`, which drops the cache entry and raises a media error: a stop the
+    /// control thread asked for has nothing to announce and nothing to destroy, the bytes being
+    /// good. Distinct from `Finished` because announcing a stop as finished makes TIDAL advance.
+    Stopped,
     /// The answer to one dispatched seek. `position` travels with the event because
     /// reading it back off `decoded_samples` at drain time is racy: ordinary decoding
     /// advances that same counter. By the time the player drains the ack it has moved past
@@ -92,7 +143,7 @@ pub(super) struct PlayerThread<F> {
     // Track state
     current_buffer: Option<RamBuffer>,
     current_track_id: Option<String>,
-    /// The frontend's id for the committed track, kept beside the canonical one so a
+    /// The frontend's id for the committed track, kept beside the canonical one: a
     /// measurement taken here can name the track the frontend will announce it under.
     current_product_id: Option<String>,
     current_format: String,
@@ -106,12 +157,12 @@ pub(super) struct PlayerThread<F> {
     idle_state: crate::player::PlaybackState,
     // Whether a same-track re-assert (ReassertResume) should resume: handle_stop
     // sets it to the pre-stop is_playing, a user pause clears it (handle_pause).
-    // So a user-paused track stays paused on re-assert; a quality-swap's stop->load->play
+    // A user-paused track stays paused on re-assert; a quality-swap's stop->load->play
     // (was playing) still resumes. A re-assert whose load carries the user's
     // play-intent resumes regardless (ReassertResume { want_play }).
     resume_on_reassert: bool,
-    // A play that arrived before the track finished loading, tagged with the
-    // LOAD_SEQ generation it was meant for. Applied once that load reaches the
+    // A play that arrived before the track finished loading, tagged with the load
+    // generation it was meant for. Applied once that load reaches the
     // ready state: a play racing ahead of the async load is not dropped, and
     // never applied to a track the user has since skipped past.
     pending_play: Option<u32>,
@@ -120,6 +171,30 @@ pub(super) struct PlayerThread<F> {
     // (a load is coming) rather than re-arm the retained source.
     loading_gen: Option<u32>,
     current_duration: f64,
+    /// Crossfade overlap in seconds, zero when the feature is off. Consulted by
+    /// the arming check in `poll_playback` on every tick: a change takes effect
+    /// at the next transition; a fade already running keeps the length it armed
+    /// with rather than changing mid-ramp.
+    crossfade_secs: u8,
+    /// The handles shared with the live cpal callback to run a fade. `None` until
+    /// a cpal stream is open, and replaced wholesale whenever one is.
+    cpal_xfade: Option<CrossfadeLink>,
+    /// Last fade generation this thread has already promoted. The callback bumps
+    /// its own counter; a difference is what says "a fade finished".
+    xfade_seen_gen: u16,
+    /// Url of a staged track a fade already refused. The arming predicate stays
+    /// true for the rest of a track once it trips. Without this, a refusal whose
+    /// reason cannot change (a differing sample rate, say) is re-evaluated on every
+    /// poll tick until the track ends.
+    xfade_refused_url: Option<String>,
+    /// Url of a staged track a fade is waiting on rather than refusing. Distinct from the field
+    /// above, which stops the retry, where this one only stops it from saying so twenty times:
+    /// a fade that cannot arm yet must keep trying, and the poll runs four times a second for
+    /// the whole tail of a track.
+    xfade_waiting_url: Option<String>,
+    /// The incoming track while a crossfade runs. `None` at every other moment,
+    /// which is what keeps the rest of this struct single-track.
+    pending_crossfade: Option<CrossfadeState>,
     // Format of the committed track as last emitted (None for ASIO/exclusive
     // loads, which skip the shared probe); re-sent on ReassertResume.
     last_media_format: Option<MediaFormatSnapshot>,
@@ -306,6 +381,20 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pending_play: None,
             loading_gen: None,
             current_duration: 0.0,
+            // The switch and the duration collapse into one number here: off is zero,
+            // which every downstream check already treats as "no fade". Read through the
+            // OnceLock rather than `boot_settings()`, which panics when the settings were
+            // never loaded, as in every unit test that builds a player thread.
+            crossfade_secs: crate::state::BOOT_SETTINGS
+                .get()
+                .filter(|boot| boot.crossfade_enabled)
+                .map(|boot| boot.crossfade_secs)
+                .unwrap_or(0),
+            cpal_xfade: None,
+            xfade_seen_gen: 0,
+            xfade_refused_url: None,
+            xfade_waiting_url: None,
+            pending_crossfade: None,
             last_media_format: None,
             current_seq: 0,
             decoded_samples: Arc::new(AtomicU64::new(0)),
@@ -396,6 +485,39 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             .committed_track
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = track;
+    }
+
+    /// Install the buffer of the track becoming current, and retire the two mirrors
+    /// that still describe the old one.
+    ///
+    /// `buffer_stalled` mirrors a flag living on the buffer OBJECT, and `xfade_refused_url`
+    /// records a fade refusal decided for the track being replaced. Both are then read as if
+    /// they described whatever is current now. `handle_load` retired them by hand and
+    /// `promote_crossfade` did not, one checklist in two places that has already cost this
+    /// feature three waves of omissions; a single owner for the swap is what stops the fourth.
+    ///
+    /// Every shared-mode path that makes a DIFFERENT track current comes through here. The
+    /// Windows bypass paths install their own buffer without it, and may: neither mirror is
+    /// live there, `poll_playback` skipping the stall check outright in exclusive and ASIO mode
+    /// and `arm_crossfade` refusing to arm at all. Nor do the paths that reinstall a CLONE of
+    /// the current buffer (a device rebuild, an exclusive or ASIO respawn): same track, same
+    /// shared state, both mirrors still correct.
+    pub(super) fn set_current_buffer(&mut self, buffer: crate::player::buffer::RamBuffer) {
+        // A buffer that stops being current has nobody left to feed, and only the buffer that
+        // IS current is ever read for its ciphertext. Both of today's callers already stop it
+        // before arriving here, so what this adds is the invariant rather than the stop: the
+        // swap has one owner. Guarded on stream identity because the device rebuild and the
+        // exclusive and ASIO respawns reinstall a CLONE of the buffer already current, where
+        // cancelling would kill the download of the track still playing.
+        if let Some(previous) = self.current_buffer.take()
+            && !previous.is_same_stream(&buffer)
+        {
+            previous.cancel_download();
+        }
+        self.current_buffer = Some(buffer);
+        self.buffer_stalled = false;
+        self.xfade_refused_url = None;
+        self.xfade_waiting_url = None;
     }
 
     pub fn run(&mut self) {
@@ -505,7 +627,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Applied only while `track_id` still names the committed track (see the field
                 // docs on `ReassertResume`). Erasing instead of refreshing would cost a
                 // quality-swapped track its name, and a generation cannot stand in for the id
-                // match: the newer load bumps `LOAD_SEQ` before this command is minted.
+                // match: the newer load mints its generation before this command is minted.
                 let names_committed = self.current_track_id.as_deref() == Some(track_id.as_str());
                 if !names_committed {
                     crate::vprintln!(
@@ -562,7 +684,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Superseded load (stop() keeps its task alive; abort is
                 // cooperative): checked at processing time, like handle_load's
                 // stale-Load gate; it also covers send/process races.
-                if load_gen != LOAD_SEQ.load(Relaxed) {
+                if load_gen != current_gen() {
                     crate::vprintln!("[LOAD #{load_gen}] stale LoadFailed, ignoring");
                     return;
                 }

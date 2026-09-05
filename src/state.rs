@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tokio::sync::Mutex as TokioMutex;
 
 /// Chromium version CEF wraps, `MAJOR.MINOR.BUILD.PATCH`. This is not the `cef` crate
 /// version: the crate tracks CEF releases, which wrap their own Chromium. One owner keeps
@@ -53,8 +52,8 @@ pub struct TrackInfo {
 }
 
 /// Equality answers "is this the same source", which is what preload matching asks, and the id
-/// has no part in that. It must not: the preload delegate strips identity before Rust sees it,
-/// so a preloaded copy carries `None` while the load that comes to claim it carries the real id.
+/// has no part in that. It must not: the preload delegate strips identity before Rust sees it;
+/// a preloaded copy carries `None` while the load that comes to claim it carries the real id.
 /// Comparing ids here would make every gapless preload hit miss.
 impl PartialEq for TrackInfo {
     fn eq(&self, other: &Self) -> bool {
@@ -75,7 +74,29 @@ pub struct TrackMetadata {
 pub static CURRENT_METADATA: LazyLock<Arc<Mutex<Option<TrackMetadata>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
-pub static CURRENT_TRACK: LazyLock<Arc<Mutex<Option<TrackInfo>>>> =
+/// A retained source together with the load generation it was published under.
+///
+/// The pairing is the whole point. The generation and this slot are two separate writes, and a
+/// reader taking them one at a time can hold a stale track beside a fresh generation that every
+/// freshness guard in the player passes, since they all test the generation alone. The replay it
+/// authorises then overwrites a newer load: `Player::rearm` skips the identity guard
+/// `Player::load` applies, and `load_with_policy` is unconditional, aborting that load's task and
+/// cancelling its download. One slot makes the pair coherent by construction.
+///
+/// `load_gen` is what this slot's own publication was stamped with, never what a later reader
+/// happens to see. The generation being monotone, "still equal to the stamp" is strictly stronger
+/// than "equal to whatever was read a moment ago".
+///
+/// It stays out of `TrackInfo`, whose hand-written `PartialEq` already has to exclude
+/// `product_id`: a second excluded field, in the struct whose equality decides every preload hit,
+/// is how that trap bites twice instead of once.
+#[derive(Clone, Debug)]
+pub struct RetainedTrack {
+    pub track: TrackInfo,
+    pub load_gen: u32,
+}
+
+pub static CURRENT_TRACK: LazyLock<Arc<Mutex<Option<RetainedTrack>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 /// Shared client tuning (UA, timeouts, pooling, HTTP/2, TLS) minus the cookie
@@ -157,29 +178,21 @@ pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build
 /// silent server can hold open, while `HTTP_CLIENT` also serves `plugin.fetch`.
 pub static HTTP_CLIENT_PRELOAD: LazyLock<reqwest::Client> = LazyLock::new(build_media_client);
 
-#[derive(Debug)]
 pub struct PreloadedTrack {
     pub track: TrackInfo,
-    pub data: Vec<u8>,
-    /// The CDN's ciphertext for `data`, carried for a preload hit to still
-    /// populate the disk cache (which stores ciphertext, not playable audio).
-    pub ciphertext: Option<(tempfile::NamedTempFile, u64)>,
+    /// The decoded bytes AND the CDN's ciphertext, both living in the buffer's own shared
+    /// state. Held as a `RamBuffer` rather than a loose `Vec<u8>` plus a non-`Clone` tempfile,
+    /// so a caller can take a cheap second reader to inspect the track without consuming it:
+    /// handed out separately, an inspection either copied the whole payload or dropped the
+    /// ciphertext, and a dropped one silently costs the track its disk-cache entry.
+    pub buffer: crate::player::buffer::RamBuffer,
 }
 
-#[derive(Debug)]
-pub struct PreloadState {
-    pub task: Option<tokio::task::JoinHandle<()>>,
-    pub data: Option<PreloadedTrack>,
-    pub next_track: Option<TrackInfo>,
-}
-
-pub static PRELOAD_STATE: LazyLock<TokioMutex<PreloadState>> = LazyLock::new(|| {
-    TokioMutex::new(PreloadState {
-        task: None,
-        data: None,
-        next_track: None,
-    })
-});
+// `PreloadState` and its `PRELOAD_STATE` static live in `crate::audio::preload`, beside the
+// only code that may write them: every field is private, and Rust grants that access to the
+// defining module alone. Keeping the type here would have meant either public fields (the
+// shape that produced the defects) or splitting each transition from the reasoning that
+// justifies it.
 
 pub static GOVERNOR: LazyLock<crate::audio::bandwidth::GovernorHandle> =
     LazyLock::new(crate::audio::bandwidth::spawn_governor);
@@ -247,3 +260,62 @@ pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = Lazy
     };
     Mutex::new(cache)
 });
+
+/// The exclusion every test that touches [`CURRENT_TRACK`] has to hold, and the fixture that
+/// holds it for them.
+///
+/// The slot is one global for the whole test binary and libtest runs several threads wide, so a
+/// test that publishes a track and then asserts on it races every other test that clears the same
+/// slot. Not a theory: it made the ASIO re-arm test fail on Windows while `--test-threads=1`
+/// passed 728 of 728. The lock is held by the FIXTURE rather than taken by each test, so a test
+/// cannot forget a lock it never has to mention: the only way to touch the slot is to construct
+/// one of these.
+#[cfg(test)]
+pub(crate) mod current_track_fixture {
+    /// Poison is recovered, never propagated: one failing assertion must not turn every later
+    /// test red for a reason that is not its own.
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Lock ORDER where a test holds both: `PRELOAD_TESTS` first, this one second. Taking
+    /// them the other way round in a future test deadlocks against
+    /// `a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it`, the one
+    /// test that holds both today.
+    pub(crate) struct CurrentTrackSlot {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CurrentTrackSlot {
+        /// The slot empty, for a test that needs no track published.
+        pub(crate) fn clear() -> Self {
+            let slot = Self {
+                _lock: SLOT.lock().unwrap_or_else(|e| e.into_inner()),
+            };
+            *super::CURRENT_TRACK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            slot
+        }
+
+        /// The slot holding a published track, for a test that needs one to exist rather than
+        /// to be absent. Same exclusion, opposite starting state.
+        pub(crate) fn holding(retained: super::RetainedTrack) -> Self {
+            let slot = Self {
+                _lock: SLOT.lock().unwrap_or_else(|e| e.into_inner()),
+            };
+            *super::CURRENT_TRACK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(retained);
+            slot
+        }
+    }
+
+    /// Restores the slot even when the test panics, keeping a failure from leaking into
+    /// whichever test the harness runs next.
+    impl Drop for CurrentTrackSlot {
+        fn drop(&mut self) {
+            *super::CURRENT_TRACK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+}

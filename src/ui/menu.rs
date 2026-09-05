@@ -129,7 +129,7 @@ wrap_menu_model_delegate! {
                 }
                 MenuCommand::Stop => {
                     with_state(|state| {
-                        let _ = state.player.stop();
+                        let _ = state.player.stop(crate::player::LoadOrigin::Local);
                     });
                 }
                 MenuCommand::Exit => {

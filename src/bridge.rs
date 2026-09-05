@@ -52,6 +52,7 @@ impl PlayerBridgeEvent {
     pub fn media_format(
         codec: &'static str,
         sample_rate: u32,
+        output_sample_rate: u32,
         bit_depth: Option<u32>,
         channels: u16,
         bytes: u64,
@@ -62,6 +63,7 @@ impl PlayerBridgeEvent {
             v: serde_json::json!({
                 "codec": codec,
                 "sampleRate": sample_rate,
+                "outputSampleRate": output_sample_rate,
                 "bitDepth": bit_depth,
                 "channels": channels,
                 "bytes": bytes,

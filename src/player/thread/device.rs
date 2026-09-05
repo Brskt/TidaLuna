@@ -80,6 +80,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// parked switch back to ASIO would never respawn the handle).
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     pub(super) fn apply_device_switch(&mut self, id: String, mode: OutputMode) {
+        // The fade's ring is attached to the stream about to be torn down.
+        self.cancel_crossfade();
         #[cfg(target_os = "windows")]
         {
             // Non-replayable source (DASH nulls CURRENT_TRACK): the bypass switches below can't
@@ -225,14 +227,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.seeking = false;
                     self.seek_target = None;
                     crate::vprintln!("[ASIO] spawn failed; re-arming shared");
-                    let track = crate::state::CURRENT_TRACK
+                    let retained = crate::state::CURRENT_TRACK
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .clone();
-                    if let Some(track) = track {
+                    if let Some(retained) = retained {
                         (self.callback)(PlayerEvent::ReplayRequest {
-                            track,
-                            expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                            track: retained.track,
+                            expected_gen: retained.load_gen,
                             position,
                             play: was_playing,
                         });
@@ -269,15 +271,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.pending_play = None;
                 self.seeking = false;
                 self.seek_target = None;
-                let track = crate::state::CURRENT_TRACK
+                let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 crate::vprintln!("[AUDIO] Switched to ASIO output");
-                if let Some(track) = track {
+                if let Some(retained) = retained {
                     (self.callback)(PlayerEvent::ReplayRequest {
-                        track,
-                        expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                        track: retained.track,
+                        expected_gen: retained.load_gen,
                         position,
                         play: was_playing,
                     });
@@ -384,15 +386,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.pending_play = None;
                 self.seeking = false;
                 self.seek_target = None;
-                let track = crate::state::CURRENT_TRACK
+                let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
-                if let Some(track) = track {
+                if let Some(retained) = retained {
                     (self.callback)(PlayerEvent::ReplayRequest {
-                        track,
-                        expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                        track: retained.track,
+                        expected_gen: retained.load_gen,
                         position,
                         play: was_playing,
                     });
@@ -420,14 +422,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // resume_store only if no TimeUpdate arrived (it floors sub-1s and
                 // can return a stale prior-session offset). Track from CURRENT_TRACK
                 // since a polled Stopped may have nulled current_track_id.
-                let track = crate::state::CURRENT_TRACK
+                let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 let position = self.last_exclusive_pos.or_else(|| {
-                    track.as_ref().and_then(|t| {
+                    retained.as_ref().and_then(|r| {
                         self.resume_store
-                            .get(&crate::player::canonical_track_id(&t.url))
+                            .get(&crate::player::canonical_track_id(&r.track.url))
                     })
                 });
 
@@ -458,10 +460,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.seeking = false;
                 self.seek_target = None;
                 crate::vprintln!("[AUDIO] Switched back to shared mode");
-                if let Some(track) = track {
+                if let Some(retained) = retained {
                     (self.callback)(PlayerEvent::ReplayRequest {
-                        track,
-                        expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                        track: retained.track,
+                        expected_gen: retained.load_gen,
                         position,
                         play: was_playing,
                     });
@@ -494,14 +496,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.current_device_id = Some(id);
 
                 // Prefer the live ASIO position (floor-free); fall back to resume_store.
-                let track = crate::state::CURRENT_TRACK
+                let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 let position = self.last_asio_pos.or_else(|| {
-                    track.as_ref().and_then(|t| {
+                    retained.as_ref().and_then(|r| {
                         self.resume_store
-                            .get(&crate::player::canonical_track_id(&t.url))
+                            .get(&crate::player::canonical_track_id(&r.track.url))
                     })
                 });
 
@@ -531,10 +533,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.seeking = false;
                 self.seek_target = None;
                 crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
-                if let Some(track) = track {
+                if let Some(retained) = retained {
                     (self.callback)(PlayerEvent::ReplayRequest {
-                        track,
-                        expected_gen: crate::player::LOAD_SEQ.load(Relaxed),
+                        track: retained.track,
+                        expected_gen: retained.load_gen,
                         position,
                         play: was_playing,
                     });
@@ -608,9 +610,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.cpal_mute_ack = Some(opened.mute_ack);
         self.cpal_stream_error = Some(opened.stream_error);
         self.played_samples = opened.played_samples;
+        self.cpal_xfade = Some(opened.xfade);
+        self.xfade_seen_gen = 0;
 
         self.sample_rate = actual_rate;
         self.channels = actual_channels;
+        // Only `output_sample_rate` can go stale here: the file's own `sample_rate` in
+        // the stored snapshot is fixed at probe time, but the stream this rebuild just
+        // opened may now run at a different rate than when the snapshot was taken.
+        if let Some(fmt) = self.last_media_format.as_mut() {
+            fmt.output_sample_rate = actual_rate;
+        }
         self.decoded_samples.store(0, Relaxed);
         self.played_samples.store(0, Relaxed);
 

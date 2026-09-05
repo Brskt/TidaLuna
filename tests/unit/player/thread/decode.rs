@@ -27,6 +27,25 @@ fn ring(capacity: usize) -> (rtrb::Producer<f32>, rtrb::Consumer<f32>) {
     rtrb::RingBuffer::new(capacity)
 }
 
+/// What the thread said, in words. `DecodeEvent` carries no `Debug`, and a failure reporting a
+/// count alone cannot say which answer arrived instead of the expected one.
+fn describe(events: &mpsc::Receiver<DecodeEvent>) -> Vec<String> {
+    events
+        .try_iter()
+        .map(|event| match event {
+            DecodeEvent::Finished => "Finished".to_string(),
+            DecodeEvent::Error(e) => format!("Error({e})"),
+            DecodeEvent::NetworkStalled => "NetworkStalled".to_string(),
+            DecodeEvent::Stopped => "Stopped".to_string(),
+            DecodeEvent::SeekComplete {
+                gen_id, refused, ..
+            } => {
+                format!("SeekComplete({gen_id}, refused: {refused})")
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn a_push_with_room_and_no_commands_drains() {
     let (mut producer, consumer) = ring(64);
@@ -416,6 +435,12 @@ impl Decoding {
                     gen_id, refused, ..
                 } => self.acks.push((gen_id, refused)),
                 DecodeEvent::Error(e) => panic!("the decode thread reported: {e}"),
+                DecodeEvent::NetworkStalled => {
+                    panic!("the decode thread stalled: these fixtures serve complete buffers")
+                }
+                DecodeEvent::Stopped => {
+                    panic!("the decode thread stopped: nothing retires these fixtures' reader")
+                }
             }
         }
     }
@@ -465,6 +490,125 @@ impl Decoding {
         }
         self.take_events();
     }
+}
+
+/// A stop is not a failure, and the handler for `Error` cannot tell the two apart: it drops the
+/// track's cache entry and reports the file unreadable. Both stops are the control thread's own
+/// doing; both owe the same answer: one event, naming what ended.
+///
+/// The error's kind cannot carry that answer. `Other` is a vocabulary shared with symphonia,
+/// which mints its own inside the Vorbis bit reader, and `Interrupted` is out of the question:
+/// `read_buf_exact` retries it without limit, which spins this thread at full CPU and hangs
+/// whoever joins it.
+#[test]
+fn a_reader_retired_during_the_probe_reports_a_stop() {
+    let (buffer, _writer) = RamBuffer::new_for_test(1024);
+    let retire = Arc::new(AtomicBool::new(false));
+    let (producer, _ring) = ring(64);
+    let (_cmd_tx, cmd_rx) = mpsc::channel();
+    let (event_tx, events) = mpsc::channel();
+
+    let thread = spawn_decode_thread(DecodeThreadConfig {
+        buffer: buffer.clone(),
+        producer,
+        decoded_samples: Arc::new(AtomicU64::new(0)),
+        cmd_rx,
+        event_tx,
+        output_rate: 44_100,
+        output_channels: 1,
+        seek_gen: Arc::new(AtomicU32::new(0)),
+        reader_cancel: Arc::clone(&retire),
+    })
+    .expect("the OS gives this test its decode thread");
+
+    // Let the probe reach its first read and park there. Retiring the reader before it parks
+    // would prove nothing about what a parked reader comes back with, which is the whole
+    // window a dying fade retires this reader in.
+    std::thread::sleep(Duration::from_millis(50));
+    retire.store(true, Relaxed);
+    buffer.wake_readers();
+    thread.join().expect("the decode thread must not panic");
+
+    // Joined: this is everything it ever said, and an absence can be stated rather than
+    // waited for.
+    let reported = describe(&events);
+    assert_eq!(
+        reported,
+        ["Stopped"],
+        "a reader retired mid-probe owes one Stopped, not a probe failure that costs the track \
+         its cache entry"
+    );
+}
+
+/// The other stop, at the other site: a reader parked at the download frontier inside
+/// `next_packet`, woken by a cancel of the whole buffer. Reported as a packet error it announced
+/// `Error` AND `Finished` (the first drops the cache entry, the second is exactly what makes
+/// TIDAL advance) for a track that was decoding perfectly a moment earlier.
+#[test]
+fn a_buffer_cancelled_mid_stream_reports_a_stop() {
+    const RATE: u32 = 44_100;
+
+    const PROMISED: usize = 4_096;
+    const WRITTEN: usize = 2_048;
+
+    // Two lengths, and they have to disagree in exactly one direction. The WAV header promises
+    // more frames than are written, which is what sends the demuxer past the frontier to park
+    // instead of reporting a clean end of stream. What the BUFFER declares, though, is only what
+    // landed: the riff reader is handed `byte_len` and seeks by it; a buffer claiming bytes
+    // that have not arrived parks it during init, before a single packet is decoded.
+    let full = wav_s16_mono(RATE, &ramp(PROMISED));
+    let landed = &full[..44 + WRITTEN * 2];
+    let (buffer, writer) = RamBuffer::new_for_test(landed.len() as u64);
+    assert!(
+        writer.write_counted(landed),
+        "the fixture's bytes have to land"
+    );
+
+    let decoded = Arc::new(AtomicU64::new(0));
+    let (producer, _ring) = ring(WRITTEN * 2);
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (event_tx, events) = mpsc::channel();
+
+    let thread = spawn_decode_thread(DecodeThreadConfig {
+        buffer: buffer.clone(),
+        producer,
+        decoded_samples: Arc::clone(&decoded),
+        cmd_rx,
+        event_tx,
+        output_rate: RATE,
+        output_channels: 1,
+        seek_gen: Arc::new(AtomicU32::new(0)),
+        reader_cancel: Arc::new(AtomicBool::new(false)),
+    })
+    .expect("the OS gives this test its decode thread");
+
+    // The loop starts paused: nothing decodes until this lands.
+    cmd_tx
+        .send(DecodeCommand::Resume)
+        .expect("the decode thread is gone");
+
+    // Wait on the counter the thread shares rather than on the clock: the park has to come
+    // after real decoding, or this would be the probe's read again and not `next_packet`'s.
+    let started = Instant::now();
+    while decoded.load(Relaxed) == 0 {
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the decoder never delivered a sample from the chunk that was written, and said {:?}",
+            describe(&events)
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    buffer.cancel();
+    thread.join().expect("the decode thread must not panic");
+
+    let reported = describe(&events);
+    assert_eq!(
+        reported,
+        ["Stopped"],
+        "a cancelled buffer owes one Stopped, and above all no Finished: announcing a stop as a \
+         finished track is what advances the queue"
+    );
 }
 
 #[test]

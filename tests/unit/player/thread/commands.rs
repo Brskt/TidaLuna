@@ -5,7 +5,8 @@
 #[cfg(target_os = "windows")]
 use super::queued_seek_survives;
 use super::{
-    LoadRequest, PlayAction, ResumePolicy, decide_play, resolve_start_position, settle_load,
+    IncomingFailure, LoadRequest, PlayAction, ResumePolicy, decide_play, resolve_start_position,
+    settle_load,
 };
 #[cfg(target_os = "windows")]
 use crate::player::asio::host::{AsioEvent, AsioHandle};
@@ -185,13 +186,17 @@ fn last_duration_track(events: &Spy) -> Option<Option<String>> {
 /// nothing opens an audio endpoint.
 #[tokio::test]
 async fn an_announced_length_names_the_track_its_load_carried() {
+    // Held for the reason `load_state_tests` states: this samples the process-wide generation
+    // and `handle_load` reads it again; a mint from another test landing between the two
+    // makes the load read as stale and ignored.
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
     let delivered = h.player.handle_load(
         LoadRequest {
             buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
-            load_gen: crate::player::LOAD_SEQ.load(Relaxed),
+            load_gen: crate::player::current_gen(),
             seq: 7,
             track_id: "track-1".to_string(),
             product_id: Some("120002099".to_string()),
@@ -221,6 +226,11 @@ async fn an_announced_length_names_the_track_its_load_carried() {
 /// re-assert minted before the failure resume a pipeline built from the buffer this load cancelled.
 #[tokio::test]
 async fn a_failed_load_leaves_no_track_behind() {
+    // Same reason as its siblings, and this one hid the race well: a stale generation returns
+    // false from the guard at the top of `handle_load`; the first assertion below still
+    // passed (for a reason that has nothing to do with three bytes failing to probe), and
+    // only the flag the deeper path would have cleared gave it away.
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     assert!(h.player.has_track, "the harness starts on a live track");
@@ -228,7 +238,7 @@ async fn a_failed_load_leaves_no_track_behind() {
     let delivered = h.player.handle_load(
         LoadRequest {
             buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
-            load_gen: crate::player::LOAD_SEQ.load(Relaxed),
+            load_gen: crate::player::current_gen(),
             seq: 3,
             track_id: "track-2".to_string(),
             product_id: None,
@@ -326,33 +336,37 @@ async fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
     );
 }
 
+use crate::state::current_track_fixture::CurrentTrackSlot;
+
 /// A re-armable track in the process-wide slot, for one test. A device switch refuses a live
-/// track it cannot replay; dropping restores the slot even when the test panics.
+/// track it cannot replay.
+///
+/// A thin naming of [`CurrentTrackSlot::holding`]: the exclusion and the restore-on-drop come
+/// from there, this only says which track a replay-authorising slot holds.
 #[cfg(target_os = "windows")]
-struct ReplayableTrack;
+struct ReplayableTrack {
+    // Named and underscored rather than a tuple field: the slot is held for its Drop, never
+    // read, and `dead_code` refuses an unread tuple field.
+    _slot: CurrentTrackSlot,
+}
 
 #[cfg(target_os = "windows")]
 impl ReplayableTrack {
     fn set(url: &str) -> Self {
-        *crate::state::CURRENT_TRACK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(crate::state::TrackInfo {
-            url: url.to_string(),
-            key: String::new(),
-            format: "flac".to_string(),
-            // Replayability turns on the credential and the format, never the id.
-            product_id: None,
-        });
-        Self
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for ReplayableTrack {
-    fn drop(&mut self) {
-        *crate::state::CURRENT_TRACK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        Self {
+            _slot: CurrentTrackSlot::holding(crate::state::RetainedTrack {
+                track: crate::state::TrackInfo {
+                    url: url.to_string(),
+                    key: String::new(),
+                    format: "flac".to_string(),
+                    // Replayability turns on the credential and the format, never the id.
+                    product_id: None,
+                },
+                // Stamped as a freshly published source would be: a replay this fixture
+                // authorises is one the flush-side guard would also let through.
+                load_gen: crate::player::current_gen(),
+            }),
+        }
     }
 }
 
@@ -899,6 +913,9 @@ async fn an_exclusive_seek_pins_and_announces_only_once_dispatched() {
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn a_bypass_load_announces_that_nothing_plays_yet() {
+    // Same reason as its siblings: the generation sampled below has to still be current when
+    // `handle_load` re-reads it, or the branch under test is never reached at all.
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
@@ -909,7 +926,7 @@ async fn a_bypass_load_announces_that_nothing_plays_yet() {
     let delivered = h.player.handle_load(
         LoadRequest {
             buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
-            load_gen: crate::player::LOAD_SEQ.load(Relaxed),
+            load_gen: crate::player::current_gen(),
             seq: 1,
             track_id: "track-1".to_string(),
             product_id: None,
@@ -1467,4 +1484,630 @@ async fn the_live_streams_asio_rate_refusal_still_falls_back_to_shared() {
         Some("track-1"),
         "the refused track was left free to re-engage ASIO and refuse again"
     );
+}
+
+/// A player mid-fade: the outgoing track is playing and the incoming one is armed.
+/// The returned receiver keeps the incoming decoder's command channel alive.
+fn arm_for_promotion(h: &mut Harness, incoming_secs: f64) -> mpsc::Receiver<DecodeCommand> {
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (_event_tx, event_rx) = mpsc::channel();
+    h.player.current_duration = 200.0;
+    h.player.sample_rate = 44_100;
+    h.player.channels = 2;
+    // Where the outgoing track had got to: a large cumulative count, which is
+    // exactly what must NOT become the incoming track's position.
+    h.player.played_samples.store(44_100 * 2 * 195, Relaxed);
+    h.player.pending_crossfade = Some(crate::player::thread::CrossfadeState {
+        cmd_tx,
+        event_rx,
+        handle: None,
+        reader_cancel: Arc::new(AtomicBool::new(false)),
+        decoded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        next: crate::state::RetainedTrack {
+            track: crate::state::TrackInfo {
+                url: "https://example.invalid/incoming".to_string(),
+                key: String::new(),
+                format: "flac".to_string(),
+                product_id: Some("incoming-product".to_string()),
+            },
+            load_gen: crate::player::current_gen(),
+        },
+        buffer: crate::player::buffer::RamBuffer::from_complete(vec![0u8; 64]),
+        duration: incoming_secs,
+        media_format: None,
+        incoming_finished: false,
+    });
+    cmd_rx
+}
+
+/// A promotion is not a load: it publishes the generation its fade was ARMED under, carried on
+/// the fade's own state rather than read from the counter at promotion time.
+///
+/// Re-reading it there races the bump on the IPC thread: a load starting during the overlap
+/// would stamp ITS generation onto the track this promotion makes current, and the flush-side
+/// replay guard tests exactly that stamp, replaying the wrong track and aborting the newer load.
+#[tokio::test]
+async fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+
+    // A generation this test owns: a concurrent test moving the process-wide counter cannot
+    // decide the outcome. Deliberately not the counter's current value: the gap between the two
+    // is the entire difference between carrying the stamp and re-reading it.
+    let armed_gen = crate::player::current_gen().wrapping_add(1_000);
+    h.player
+        .pending_crossfade
+        .as_mut()
+        .expect("the fade is armed")
+        .next
+        .load_gen = armed_gen;
+
+    h.player.promote_crossfade(44_100 * 2 * 6);
+
+    let retained = crate::state::CURRENT_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .expect("a promotion publishes the incoming track");
+    assert_eq!(
+        retained.track.url, "https://example.invalid/incoming",
+        "the promotion published the wrong track"
+    );
+    assert_eq!(
+        retained.load_gen, armed_gen,
+        "the promoted track carries a generation that is not its own, so a replay guard reading \
+         it cannot tell this track from the load that superseded it"
+    );
+}
+
+/// TIDAL's `handleAutomaticTransitionToPreloadedMediaProduct` awaits `mediaduration` and then
+/// `mediastate: active` before it moves its own UI, so `completed` alone makes it enter that
+/// handler and wait forever while every surface keeps naming the outgoing track. The duration
+/// looks redundant because it drives no OS metadata; deleting it on that reasoning is the
+/// regression this pins.
+#[tokio::test]
+async fn a_promotion_publishes_the_three_events_the_sdk_waits_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+
+    h.player.promote_crossfade(44_100 * 2 * 6);
+
+    let events = h.events.lock().unwrap();
+    let seen: Vec<&PlayerEvent> = events
+        .iter()
+        .filter(|ev| {
+            matches!(
+                ev,
+                PlayerEvent::CrossfadePromoted(..)
+                    | PlayerEvent::Duration(..)
+                    | PlayerEvent::StateChange(..)
+            )
+        })
+        .collect();
+
+    assert!(
+        matches!(seen.first(), Some(PlayerEvent::CrossfadePromoted(..))),
+        "the promotion announces itself first, got {seen:?}"
+    );
+    match seen.get(1) {
+        Some(PlayerEvent::Duration(secs, _, id)) => {
+            assert!(
+                (*secs - 246.0).abs() < 1e-6,
+                "the duration must be the INCOMING track's, got {secs}"
+            );
+            assert_eq!(id.as_deref(), Some("incoming-product"));
+        }
+        other => panic!("the SDK awaits mediaduration second, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            seen.get(2),
+            Some(PlayerEvent::StateChange(PlaybackState::Active, _))
+        ),
+        "the SDK awaits mediastate:active third, got {:?}",
+        seen.get(2)
+    );
+}
+
+/// The SDK's automatic-transition handler is the one transition that never assigns its own
+/// `currentTime`. The position the promotion reports IS the SDK's position, and it has to be
+/// EMITTED before the three events: emitted first it is already pending when `completed` forces
+/// the flush, instead of waiting out a 24 ms debounce and a 250 ms throttle. Emission order is
+/// not batch order, `take_flush_batch` appending the position BEHIND the queued events, which is
+/// the order the SDK needs. This test pins the emission order only.
+#[tokio::test]
+async fn a_promotion_emits_the_incoming_position_before_the_transition_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+
+    // Six seconds of the incoming track were drained during the overlap, and the
+    // swapping tick left that on the clock. Priming it is what the position report
+    // reads: the promotion no longer writes the clock, and without this the fixture's
+    // outgoing total is what would be reported.
+    h.player.played_samples.store(44_100 * 2 * 6, Relaxed);
+    h.player.promote_crossfade(44_100 * 2 * 6);
+
+    let events = h.events.lock().unwrap();
+    let promoted = events
+        .iter()
+        .position(|ev| matches!(ev, PlayerEvent::CrossfadePromoted(..)))
+        .expect("the promotion must announce itself");
+    let time = events
+        .iter()
+        .position(|ev| matches!(ev, PlayerEvent::TimeUpdate(..)))
+        .expect("the promotion must report the incoming track's position");
+    assert!(
+        time < promoted,
+        "the position has to lead the transition, got {events:?}"
+    );
+    match &events[time] {
+        PlayerEvent::TimeUpdate(secs, _) => assert!(
+            (*secs - 6.0).abs() < 1e-6,
+            "the position must be the INCOMING track's overlap drain, got {secs}"
+        ),
+        other => panic!("expected a position report, got {other:?}"),
+    }
+}
+
+/// Arming is not the transition. A skip, a seek, a device switch or the incoming decoder failing
+/// all cancel a fade, and the outgoing track then plays to its real end, where the completion
+/// path looks for the staged next track: consumed at arm time it was already gone, and playback
+/// stopped dead with the queue intact. It is spent at promotion instead.
+///
+/// This pins the second half only. That the ARMING no longer spends it cannot be driven from
+/// here, `arm_crossfade` needing a real staged preload and an open device.
+#[tokio::test]
+async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    let staged = crate::state::TrackInfo {
+        url: "https://example.invalid/incoming".to_string(),
+        key: String::new(),
+        format: "flac".to_string(),
+        product_id: Some("incoming-product".to_string()),
+    };
+    crate::audio::preload::PRELOAD_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .stage_for_test(staged.clone());
+
+    h.player.cancel_crossfade();
+
+    assert!(
+        crate::audio::preload::PRELOAD_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .staged_next()
+            .is_some(),
+        "a cancelled fade took the queue's next track with it: the hard cut has nothing to advance to"
+    );
+
+    // The same fade, this time carried to its promotion.
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    h.player.promote_crossfade(44_100 * 2 * 6);
+
+    assert!(
+        crate::audio::preload::PRELOAD_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .staged_next()
+            .is_none(),
+        "the promoted track is current now, so its staged record must be spent"
+    );
+}
+
+/// A fade the callback has already finished cannot be cancelled. It swaps its consumer and
+/// stamps `done` inside one audio tick, and the player thread reads that stamp in its poll,
+/// which runs AFTER the commands of the same pass. A stop, a seek or a skip landing in that
+/// window retired the incoming decoder feeding the ring the device had just been handed:
+/// silence with no producer left, no watchdog behind it, and a UI still naming the outgoing
+/// track. Had the poll run first the fade would have promoted; both orderings must agree.
+#[tokio::test]
+async fn a_cancellation_promotes_a_fade_the_callback_already_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    // What the callback leaves behind when it completes a fade on its own clock.
+    h.player.cpal_xfade = Some(crate::player::thread::output::CrossfadeLink {
+        attach: Arc::new(Mutex::new(None)),
+        cancel: Arc::new(AtomicBool::new(false)),
+        out_eof: Arc::new(AtomicBool::new(false)),
+        in_eof: Arc::new(AtomicBool::new(false)),
+        done: Arc::new(std::sync::atomic::AtomicU64::new(
+            crate::player::thread::output::pack_xfade_done(1, 44_100 * 2 * 6),
+        )),
+    });
+
+    h.player.cancel_crossfade();
+
+    assert!(
+        h.player.pending_crossfade.is_none(),
+        "the fade is spent either way; what differs is which track survives it"
+    );
+    let events = h.events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::CrossfadePromoted(..))),
+        "a finished fade must promote, not cancel, got {events:?}"
+    );
+}
+
+/// A Load the generation gate discards must leave a live fade alone. Tearing it down first
+/// retracts the attach slot and stops the incoming decoder, and nothing legitimate follows to
+/// justify it: a generation can be minted and then die to an HTTP error (`ctx.fail_load`), and
+/// neither `LoadFailed` nor `EmitMaxConnections` cancels a fade. The discarded Load is then the
+/// sole cause of the loss, and the outgoing gain snaps back mid-ramp.
+#[tokio::test]
+async fn a_stale_load_leaves_a_live_fade_armed() {
+    // Held for the reason its siblings state: `handle_load` reads the process-wide generation.
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+
+    // A generation already retired. Mints only move the counter forward; this one stays
+    // stale whatever else the suite does between here and the gate.
+    let superseded = crate::player::current_gen().wrapping_sub(1);
+
+    let delivered = h.player.handle_load(
+        LoadRequest {
+            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+            load_gen: superseded,
+            seq: 11,
+            track_id: "track-superseded".to_string(),
+            product_id: Some("superseded-product".to_string()),
+            resume_policy: ResumePolicy::Restart,
+            load_start: std::time::Instant::now(),
+            cached: true,
+            format: "flac".to_string(),
+        },
+        false,
+    );
+
+    assert!(!delivered, "a stale Load must not deliver a track");
+    assert!(
+        h.player.pending_crossfade.is_some(),
+        "a Load the gate discards tore the fade down on its way out"
+    );
+}
+
+/// The refusal memo names the track a fade was already refused for, and `arm_crossfade` is its
+/// only reader: it exists to keep the refused decision from being re-run four times a second
+/// for the rest of a track's tail. A Load that changes nothing supersedes no refusal: clearing
+/// it there buys back the work the memo was written to avoid.
+#[tokio::test]
+async fn a_stale_load_keeps_the_refusal_it_did_not_supersede() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let refused = "https://example.invalid/refused";
+    h.player.xfade_refused_url = Some(refused.to_string());
+
+    let superseded = crate::player::current_gen().wrapping_sub(1);
+
+    h.player.handle_load(
+        LoadRequest {
+            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+            load_gen: superseded,
+            seq: 12,
+            track_id: "track-superseded".to_string(),
+            product_id: None,
+            resume_policy: ResumePolicy::Restart,
+            load_start: std::time::Instant::now(),
+            cached: true,
+            format: "flac".to_string(),
+        },
+        false,
+    );
+
+    assert_eq!(
+        h.player.xfade_refused_url.as_deref(),
+        Some(refused),
+        "a Load the gate discards forgot a refusal it never superseded"
+    );
+}
+
+/// Arming polls four times a second for the whole tail of every track, and each tick asks the
+/// cache whether the next track is on disk. `MenuCommand::ClearCache` holds that same mutex for
+/// its entire `remove_dir_all`, deliberately, to keep the wipe atomic against
+/// `store_finished_ciphertext`'s unlocked writes: waiting for it here parks the player control
+/// thread for the whole wipe.
+#[tokio::test]
+async fn a_busy_cache_never_parks_the_arming_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(dir.path());
+    let track = crate::state::TrackInfo {
+        url: "https://example.invalid/cached.flac".to_string(),
+        key: String::new(),
+        format: "flac".to_string(),
+        product_id: None,
+    };
+
+    // What a wipe looks like from here: the mutex held by someone else for a while.
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let wiper = std::thread::spawn(move || {
+        let _held = crate::state::AUDIO_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    });
+    locked_rx.recv().unwrap();
+
+    let asked_at = std::time::Instant::now();
+    let answer = h.player.read_cached_track(&track);
+    let waited = asked_at.elapsed();
+
+    assert!(
+        answer.is_none(),
+        "a busy cache has not answered, and anything but a miss here would be a guess"
+    );
+    assert!(
+        waited < std::time::Duration::from_millis(100),
+        "the arming tick waited {waited:?} on the wipe: that is the transport frozen"
+    );
+    wiper.join().unwrap();
+}
+
+/// What the callback leaves behind when it completes a fade on its own clock.
+fn finished_fade_link() -> crate::player::thread::output::CrossfadeLink {
+    crate::player::thread::output::CrossfadeLink {
+        attach: Arc::new(Mutex::new(None)),
+        cancel: Arc::new(AtomicBool::new(false)),
+        out_eof: Arc::new(AtomicBool::new(false)),
+        in_eof: Arc::new(AtomicBool::new(false)),
+        done: Arc::new(std::sync::atomic::AtomicU64::new(
+            crate::player::thread::output::pack_xfade_done(1, 44_100 * 2 * 6),
+        )),
+    }
+}
+
+/// The listener changing their mind and the incoming track dying are two different
+/// cancellations, and a fade the callback has already finished is where they part. The promotion
+/// is forced either way, but here the track promoted is the one whose decode thread has just
+/// returned. Nothing else can ever report it: `Finished` never comes from a thread that exited,
+/// and the drain the completion path waits on never arrives. Left unsettled, the UI names that
+/// track Active over permanent silence, with no error and no skip.
+#[tokio::test]
+async fn a_promoted_fade_settles_the_incoming_track_that_died() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    h.player.cpal_xfade = Some(finished_fade_link());
+
+    let must_settle = h
+        .player
+        .cancel_crossfade_after_incoming_failure(IncomingFailure::NetworkStalled);
+
+    assert!(
+        must_settle,
+        "the fade promoted the track that just died, so the caller has to settle it"
+    );
+    assert!(
+        h.player.decode_cmd_tx.is_none(),
+        "the channel behind the promoted track is dead: left Some, a later seek arms a guard nothing can clear"
+    );
+    assert!(
+        h.player
+            .committed_track
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none(),
+        "a committed track names a decoder that has exited"
+    );
+    {
+        let events = h.events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev, PlayerEvent::NetworkLost)),
+            "a stalled incoming track that got promoted must still report the loss, got {events:?}"
+        );
+    }
+
+    // The same forced promotion, reached by a listener changing their mind instead. The
+    // staged bytes are good: there is nothing to settle and nothing to report.
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    h.player.cpal_xfade = Some(finished_fade_link());
+
+    h.player.cancel_crossfade();
+
+    let events = h.events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::NetworkLost)),
+        "a skip is not a failure: promoting for one must report nothing, got {events:?}"
+    );
+}
+
+/// The outgoing counter stopped 2.0s short of the end while a fade was running, the drain check
+/// read that as a finished track, and the teardown dropped the cpal stream BOTH tracks played
+/// through. The counter cannot describe a fade (`fade_pos` advances on the callback's clock,
+/// `played_samples` only on what the outgoing ring supplied): a fade is left to its own promotion.
+#[tokio::test]
+async fn a_stalled_counter_does_not_complete_a_track_that_is_still_fading() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    // The outgoing decoder has finished and the counter has stopped moving: exactly
+    // the state the drain check completes a track on.
+    h.player.pending_complete = true;
+    h.player.last_played_snapshot = h.player.played_samples.load(Relaxed);
+
+    h.player.poll_playback();
+
+    assert!(
+        h.player.pending_crossfade.is_some(),
+        "the fade was torn down by the outgoing track's counter"
+    );
+    assert!(h.player.has_track, "the pipeline was dismantled mid-fade");
+    let events = h.events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::StateChange(PlaybackState::Completed, _))),
+        "the track was announced completed while its fade was still running: {events:?}"
+    );
+}
+
+/// The overlap is bounded by what remained of the OUTGOING track and never by the
+/// incoming track's own length, and `state.duration` is only a probe estimate: a
+/// container that undercounts its frames drains more than it declared. The periodic
+/// emitter clamps for this reason; the promotion's own report has to as well, or
+/// the bar jumps past the end of a track that just started.
+#[tokio::test]
+async fn a_promotion_never_reports_a_position_past_the_incoming_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    // A five-second incoming track, six seconds of it drained during the overlap.
+    let _incoming_cmds = arm_for_promotion(&mut h, 5.0);
+    // The clock the swapping tick left behind. Without it the fixture's outgoing
+    // total is what gets clamped, and the assertion would pass on saturation instead
+    // of on the overlap it means to describe.
+    h.player.played_samples.store(44_100 * 2 * 6, Relaxed);
+
+    h.player.promote_crossfade(44_100 * 2 * 6);
+
+    let events = h.events.lock().unwrap();
+    let reported = events
+        .iter()
+        .find_map(|ev| match ev {
+            PlayerEvent::TimeUpdate(secs, _) => Some(*secs),
+            _ => None,
+        })
+        .expect("the promotion must report the incoming track's position");
+    assert!(
+        (reported - 5.0).abs() < 1e-6,
+        "the report must be clamped to the incoming duration, got {reported}"
+    );
+}
+
+/// A swap only happens once the outgoing decoder has reported `Finished`, which also sets
+/// `pending_complete`. Carried onto the incoming track it suppresses every resume-store write for
+/// it and turns two stalled poll ticks into a false completion. The clock is the other half and
+/// NOT this thread's to move: the callback rebased it in the tick that swapped and has credited
+/// the promoted ring since, so a store here can only throw that interval away. Both halves are
+/// checked against the state a real fade leaves behind.
+#[tokio::test]
+async fn a_promotion_keeps_the_clock_the_swap_set_and_clears_the_completion_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    // What a real fade leaves behind: the outgoing track finished.
+    h.player.pending_complete = true;
+    h.player.last_played_snapshot = 44_100 * 2 * 195;
+
+    // And what the callback leaves behind: the base it set at the swap, with one
+    // poll's worth of the promoted ring already on top. The fixture's outgoing total
+    // is overwritten here exactly as the swapping tick overwrites it.
+    let in_played = 44_100 * 2 * 6;
+    let after_swap = 44_100 * 2;
+    h.player
+        .played_samples
+        .store(in_played + after_swap, Relaxed);
+
+    h.player.promote_crossfade(in_played);
+
+    assert_eq!(
+        h.player.played_samples.load(Relaxed),
+        in_played + after_swap,
+        "the promotion moved a clock it does not own, discarding the second of audio \
+         the callback played between the swap and this poll"
+    );
+    assert!(
+        (h.player.current_duration - 246.0).abs() < 1e-6,
+        "the duration still described the outgoing track"
+    );
+    assert!(
+        !h.player.pending_complete,
+        "the outgoing track's completion was inherited by the incoming one"
+    );
+    assert_eq!(h.player.last_played_snapshot, 0);
+    assert!(
+        h.player.pending_crossfade.is_none(),
+        "the fade must be retired by its own promotion"
+    );
+}
+
+/// The two mirrors that describe the buffer being REPLACED, and that only `handle_load` used to
+/// retire: `buffer_stalled` mirrors a flag living on the buffer object, read against the incoming
+/// buffer by an edge detector still holding the outgoing value, and `xfade_refused_url` is a
+/// refusal decided for the track the promotion just retired.
+#[tokio::test]
+async fn a_promotion_retires_the_mirrors_that_described_the_outgoing_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    h.player.buffer_stalled = true;
+    h.player.xfade_refused_url = Some("https://example.invalid/refused".to_string());
+
+    h.player.promote_crossfade(44_100 * 2 * 6);
+
+    assert!(
+        !h.player.buffer_stalled,
+        "the stall mirror still described the outgoing buffer, which the swap replaced"
+    );
+    assert!(
+        h.player.xfade_refused_url.is_none(),
+        "the promoted track inherited a refusal decided for the track it replaced"
+    );
+}
+
+/// The badge reported the file's rate while the stream could be running at another, already true
+/// before the engine-rate change and simply invisible. The snapshot now carries both.
+///
+/// Coverage note: this hand-builds the snapshot and injects it into
+/// `pending_crossfade.media_format`, proving only that `promote_crossfade` forwards both fields
+/// without swapping them. `handle_load`'s own construction site opens a real device and cannot
+/// run in this harness.
+#[tokio::test]
+async fn a_promotion_reports_both_the_file_rate_and_the_output_rate() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    h.player.sample_rate = 192_000;
+    h.player.pending_crossfade.as_mut().unwrap().media_format =
+        Some(crate::player::MediaFormatSnapshot {
+            codec: "flac",
+            sample_rate: 96_000,
+            output_sample_rate: 192_000,
+            bit_depth: Some(24),
+            channels: 2,
+            bytes: 100,
+        });
+
+    h.player.promote_crossfade(44_100 * 2 * 6);
+
+    let events = h.events.lock().unwrap();
+    let found = events.iter().any(|ev| {
+        matches!(
+            ev,
+            PlayerEvent::MediaFormat {
+                sample_rate: 96_000,
+                output_sample_rate: 192_000,
+                ..
+            }
+        )
+    });
+    assert!(found, "both rates must reach the renderer, got {events:?}");
 }

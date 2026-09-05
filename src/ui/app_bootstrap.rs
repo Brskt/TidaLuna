@@ -363,6 +363,18 @@ wrap_browser_process_handler! {
             let window_maximized = crate::state::boot_settings().window_maximized;
             let console = crate::state::boot_settings().console;
 
+            let crossfade_enabled = crate::state::boot_settings().crossfade_enabled;
+            let crossfade_secs = crate::state::boot_settings().crossfade_secs;
+            // The governor sizes what a preload may draw through a shut gate from this,
+            // because a fade needs its own seconds of the incoming track and the gate is
+            // shut for most of a track whose download is paced at real time. Seeded here
+            // rather than in `PlayerThread::new`: that runs in unit tests with no tokio
+            // runtime, and touching `GOVERNOR` there would build its task on a thread
+            // that has none.
+            crate::state::GOVERNOR
+                .buffer_progress()
+                .set_crossfade_secs(if crossfade_enabled { crossfade_secs } else { 0 });
+
             // Join the boot-token reconcile: the restored session must be in
             // AppState before the page can consume it. An unusable blob arms a
             // one-shot renderer purge (NEEDS_BOOT_BLOB_PURGE), not an init-script
@@ -379,6 +391,8 @@ window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
 window.__TIDALUNAR_ASIO__ = {asio};
 window.__TIDALUNAR_EXCLUSIVE__ = {exclusive};
 window.__TIDALUNAR_CONSOLE__ = {console};
+window.__TIDALUNAR_CROSSFADE_ENABLED__ = {crossfade_enabled};
+window.__TIDALUNAR_CROSSFADE_SECS__ = {crossfade_secs};
 window.__TIDALUNAR_PERF__ = {perf};
 window.__TIDALUNAR_WINDOW_STATE__ = {{
     isMaximized: {window_maximized},

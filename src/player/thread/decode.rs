@@ -310,6 +310,20 @@ fn decode_loop(cfg: DecodeThreadConfig) {
         match symphonia::default::get_probe().probe(&hint, mss, format_opts, metadata_opts) {
             Ok(f) => f,
             Err(e) => {
+                // A stop lands here too: a fade whose decoder dies before it started retires
+                // exactly this reader, and announced as a probe failure it took the track's
+                // cache entry down and raised a media error for a track that was readable.
+                // Both channels are asked because the probe has two exits: a reader it already
+                // chose re-raises the read's error, where the marker scan discards it and only
+                // the state still knows.
+                if requested_stop(&e).is_some()
+                    || stop_state.is_cancelled()
+                    || reader_cancel.load(Relaxed)
+                {
+                    crate::vprintln!("[DECODE] Stopped while probing");
+                    let _ = event_tx.send(DecodeEvent::Stopped);
+                    return;
+                }
                 let _ = event_tx.send(DecodeEvent::Error(format!("probe failed: {e}")));
                 return;
             }
@@ -599,6 +613,30 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                 continue;
             }
             Err(e) => {
+                // Asked for. Nothing here has failed and nothing needs announcing. The
+                // handler for `Error` drops the track's cache entry, and the bytes behind a
+                // stop are good; guessing wrong here costs a re-download of a track that
+                // decoded perfectly, and a media error the listener never earned.
+                if let Some(stop) = requested_stop(&e) {
+                    crate::vprintln!("[DECODE] Stopped: {stop}");
+                    let _ = event_tx.send(DecodeEvent::Stopped);
+                    return;
+                }
+                // A dead network says so two ways: the READER gave up after thirty seconds
+                // (`TimedOut`), or the WRITER gave up first and stored its failure
+                // (`ConnectionAborted`). On a pulled cable the writer always wins that race,
+                // eight reconnects with backoff against thirty seconds, so listening for the
+                // timeout alone surfaced a cut network as "unexpected error (NPO03)".
+                if let symphonia::core::errors::Error::IoError(ref io) = e
+                    && matches!(
+                        io.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::ConnectionAborted
+                    )
+                {
+                    crate::vprintln!("[DECODE] Network stalled: {e}");
+                    let _ = event_tx.send(DecodeEvent::NetworkStalled);
+                    return;
+                }
                 let _ = event_tx.send(DecodeEvent::Error(format!("packet error: {e}")));
                 let _ = event_tx.send(DecodeEvent::Finished);
                 return;

@@ -31,7 +31,7 @@ fn handle_session_clear() {
     let parked = with_state(|state| {
         // Stop the native player; it runs independent of the renderer: a
         // session clear alone won't halt audio on logout.
-        let _ = state.player.stop();
+        let _ = state.player.stop(crate::player::LoadOrigin::Local);
         state.pending_player_events.clear();
         state.pending_time_update = None;
         state.captured_token.clear();

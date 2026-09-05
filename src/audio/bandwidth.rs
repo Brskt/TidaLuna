@@ -27,6 +27,17 @@ pub struct BufferProgress {
     /// Set by handle_seek to pause preload during seeks.
     /// Governor reads this and applies a preload cooldown (no rate boost).
     seek_preload_pause: AtomicBool,
+    /// The crossfade setting in seconds, mirrored here because it is what decides how
+    /// much a preload must be allowed through a shut gate. Zero when the feature is off,
+    /// and then the allowance is the probe head alone. Not per-track state. `reset`
+    /// leaves it alone.
+    crossfade_secs: AtomicU64,
+    /// Bumped every time the counters above begin describing a DIFFERENT track.
+    ///
+    /// Inferred before from `total_len` returning to zero, which only a load passes through:
+    /// a crossfade promotion rewrites the totals in place, from one track's length straight to
+    /// the next, so an allowance the outgoing track had spent stayed spent for the incoming one.
+    track_gen: AtomicU64,
 }
 
 impl BufferProgress {
@@ -36,6 +47,37 @@ impl BufferProgress {
 
     pub fn set_playback_active(&self, active: bool) {
         self.playback_active.store(active, Relaxed);
+    }
+
+    pub fn set_crossfade_secs(&self, secs: u8) {
+        self.crossfade_secs.store(secs as u64, Relaxed);
+    }
+
+    /// Announce that the counters now describe a different track. Every path that makes
+    /// one current owes this call, whether it zeroes the counters first or overwrites
+    /// them where they stand.
+    pub fn begin_track(&self) {
+        self.track_gen.fetch_add(1, Relaxed);
+    }
+
+    fn track_gen(&self) -> u64 {
+        self.track_gen.load(Relaxed)
+    }
+
+    /// Bytes a preload may draw through a shut gate for the current track.
+    ///
+    /// Sized to the fade rather than to the probe head: the head only has to make the buffer
+    /// readable, where the FADE has to be audible, and under the head-sized allowance a 74.9 MB
+    /// track buffered 1.7 MB in the nine seconds it had, giving 4.21s of a six second fade. The
+    /// playing track's bitrate stands in for the incoming one's, unknown until it is probed;
+    /// when they differ the fade shortens rather than breaks.
+    fn head_allowance(&self) -> u64 {
+        let secs = self.crossfade_secs.load(Relaxed);
+        let bitrate = self.bitrate_bps.load(Relaxed);
+        if secs == 0 || bitrate == 0 {
+            return PRELOAD_HEAD_ALLOWANCE;
+        }
+        PRELOAD_HEAD_ALLOWANCE.max(secs.saturating_mul(bitrate))
     }
 
     /// Request the boosted playback rate. The reader is waiting on bytes a Range restart has
@@ -82,6 +124,9 @@ impl BufferProgress {
         self.playback_active.store(false, Relaxed);
         self.seek_boost.store(false, Relaxed);
         self.seek_preload_pause.store(false, Relaxed);
+        // A reset only ever precedes a new track, and the counters it zeroes are the
+        // same ones the generation guards.
+        self.begin_track();
     }
 }
 
@@ -199,6 +244,25 @@ impl PreloadGate {
     }
 }
 
+/// What a tick owes the preload queue.
+///
+/// Three independent facts decide it (a boost, the gate, a seek's cooldown), read in one place
+/// because a chained `if` cannot express that: the second arm only re-tests what tells it apart
+/// from the first, reads as though it tested them all, and the input it drops is invisible.
+enum PreloadServe {
+    /// A boost holds the link: playback is either starving or recovering a seek, and it gets
+    /// the whole of it.
+    Nothing,
+    /// Playback is comfortably ahead and no seek is settling. Drain the queue at the preload
+    /// bucket's own pace.
+    Everything,
+    /// The gate is shut, or a seek's cooldown is still running. Neither withholds the fade's
+    /// own bytes: `head_allowance` sizes them, and the cooldown has nothing left to protect by
+    /// the time it could withhold them: every serve arm already stands down for the boost,
+    /// which is what covers the window a seek makes the listener wait through.
+    FadeHead,
+}
+
 const TICK_MS: u64 = 25;
 const PRELOAD_RATE: f64 = 500_000.0; // 500 KB/s
 const PRELOAD_BURST: f64 = 32_000.0; // 32 KB
@@ -262,7 +326,21 @@ struct GovernorState {
     tick_count: u32,
     starvation_since: Option<Instant>,
     playback_throttled: bool,
+    /// The track generation the per-track state below belongs to.
+    track_gen: u64,
+    /// Bytes granted to the preload queue THROUGH a shut gate, for the current track.
+    ///
+    /// The gate pauses preloading whenever playback is under a second ahead, and a playback
+    /// download paced at real time keeps it there for the whole track, so a crossfade was handed
+    /// exactly zero bytes and never armed. The allowance is `head_allowance`, the fade's own
+    /// seconds of audio once per track; everything past it still waits for the gate.
+    preload_head_granted: u64,
 }
+
+/// The floor of the allowance above, used when the crossfade is off or the bitrate is
+/// not known yet. Twice `HEAD_TARGET_BYTES` in `audio::preload`; a staged head lands
+/// with margin rather than exactly on the limit.
+const PRELOAD_HEAD_ALLOWANCE: u64 = 128 * 1024;
 
 impl GovernorState {
     fn new() -> Self {
@@ -275,6 +353,8 @@ impl GovernorState {
             gate: PreloadGate::Active,
             boost_start: None,
             preload_cooldown_until: None,
+            track_gen: 0,
+            preload_head_granted: 0,
             saved_rate: rate,
             saved_burst: burst,
             last_bitrate: 0,
@@ -313,15 +393,38 @@ impl GovernorState {
         if bp.total_len.load(Relaxed) == 0 {
             self.preload_cooldown_until = None;
         }
-        if self.gate == PreloadGate::Active
-            && self.boost_start.is_none()
-            && !self.is_preload_cooldown_active()
-        {
-            serve_queue(
-                &mut self.preload_queue,
-                &mut self.preload_bucket,
-                &mut self.preload_bytes,
-            );
+        // One head per track. Keyed on the track's own generation, never inferred from the
+        // totals returning to zero: only a load passes through zero, and a crossfade
+        // promotion overwrites them where they stand, which left the incoming track
+        // carrying an allowance the outgoing one had already spent.
+        let track_gen = bp.track_gen();
+        if track_gen != self.track_gen {
+            self.track_gen = track_gen;
+            self.preload_head_granted = 0;
+        }
+        match self.preload_serve() {
+            PreloadServe::Nothing => {}
+            PreloadServe::Everything => {
+                serve_queue(
+                    &mut self.preload_queue,
+                    &mut self.preload_bucket,
+                    &mut self.preload_bytes,
+                );
+            }
+            PreloadServe::FadeHead => {
+                // Served on EVERY tick, spent allowance included. Only the server can see
+                // whether the front request already started, so gating the call put that
+                // policy in two places and the half able to finish a part-paid request was
+                // the half that stopped running. A request left unanswered holds the head of
+                // the queue and stalls every preload behind it for the rest of the track.
+                let allowance = bp.head_allowance();
+                self.preload_head_granted += serve_queue_capped(
+                    &mut self.preload_queue,
+                    &mut self.preload_bucket,
+                    &mut self.preload_bytes,
+                    allowance.saturating_sub(self.preload_head_granted),
+                );
+            }
         }
         self.emit_metrics(bp);
     }
@@ -488,6 +591,18 @@ impl GovernorState {
             .is_some_and(|t| Instant::now() < t)
     }
 
+    /// The whole preload policy, in one total decision. Both servers ask it rather than
+    /// re-deriving it: the two cannot drift, and neither can act on a subset of the inputs.
+    fn preload_serve(&self) -> PreloadServe {
+        if self.boost_start.is_some() {
+            return PreloadServe::Nothing;
+        }
+        if self.gate == PreloadGate::Active && !self.is_preload_cooldown_active() {
+            return PreloadServe::Everything;
+        }
+        PreloadServe::FadeHead
+    }
+
     fn enter_boost(&mut self, bitrate: u64) {
         let (boost_rate, boost_burst, _) = boost_params(bitrate);
         if self.boost_start.is_none() {
@@ -624,10 +739,10 @@ async fn governor_loop(mut rx: mpsc::Receiver<TokenRequest>, bp: Arc<BufferProgr
                         }
                         TrafficClass::Preload => {
                             state.preload_queue.push_back(r);
-                            if state.gate == PreloadGate::Active
-                                && state.boost_start.is_none()
-                                && !state.is_preload_cooldown_active()
-                            {
+                            // Only the unthrottled answer is worth giving on arrival. The
+                            // metered one spends a budget the tick keeps; it is left to the
+                            // tick (at most `TICK_MS` away) rather than accounted for twice.
+                            if matches!(state.preload_serve(), PreloadServe::Everything) {
                                 state.preload_bucket.refill();
                                 serve_queue(
                                     &mut state.preload_queue,
@@ -648,8 +763,45 @@ async fn governor_loop(mut rx: mpsc::Receiver<TokenRequest>, bp: Arc<BufferProgr
     }
 }
 
-/// Try to grant tokens to queued requests.
-/// Oversized chunks (> burst) are consumed in multiple passes across ticks.
+/// Serve the preload queue against a hard byte budget, for the head a crossfade needs while the
+/// gate is shut. Returns the bytes actually granted, which the caller counts against the
+/// allowance. Same rules as `serve_queue` otherwise: oversized chunks span several ticks, a
+/// dropped request is discarded rather than paid for, and an empty bucket ends the pass.
+fn serve_queue_capped(
+    queue: &mut VecDeque<TokenRequest>,
+    bucket: &mut TokenBucket,
+    bytes_acc: &mut u64,
+    budget: u64,
+) -> u64 {
+    let mut granted = 0u64;
+    while let Some(front) = queue.front_mut() {
+        if front.reply.is_closed() {
+            queue.pop_front();
+            continue;
+        }
+        // The budget decides WHICH requests are served, never what fraction of one: a reply
+        // only goes out at `remaining == 0`, so a request cut off part-paid leaves its caller
+        // parked on bytes it was charged for, holding the head of the queue. Started requests
+        // are driven to the end, overshooting the budget by at most one 16-64 KB chunk.
+        let already_started = front.remaining < front.bytes;
+        if !already_started && granted >= budget {
+            break;
+        }
+        let bite = (front.remaining as f64).min(bucket.burst) as u32;
+        if bite == 0 || !bucket.try_consume(bite) {
+            break;
+        }
+        front.remaining -= bite;
+        granted += bite as u64;
+        if front.remaining == 0 {
+            let req = queue.pop_front().unwrap();
+            *bytes_acc += req.bytes as u64;
+            let _ = req.reply.send(());
+        }
+    }
+    granted
+}
+
 fn serve_queue(queue: &mut VecDeque<TokenRequest>, bucket: &mut TokenBucket, bytes_acc: &mut u64) {
     while let Some(front) = queue.front_mut() {
         // A dropped `acquire()` future (seek cancelling the `select!`, `cancel_preload`

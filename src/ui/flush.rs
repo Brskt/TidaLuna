@@ -170,6 +170,25 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     should_flush = false;
                 }
             }
+            // Everything the Completed arm below does, minus the auto-load: the
+            // incoming track is already playing, having been faded in over the
+            // outgoing one. Starting it again here would restart it from zero.
+            PlayerEvent::CrossfadePromoted(seq, ref track_id) => {
+                crate::vprintln!("[BRIDGE] CrossfadePromoted seq={seq} track={track_id:?}");
+                // The renderer needs `completed`: it is what makes TIDAL's SDK enter
+                // its automatic-transition handler, which then awaits the duration
+                // and the active state that follow this event.
+                //
+                // The OS media controls are deliberately NOT told anything. Nothing
+                // stopped (the incoming track has been audible for seconds), and
+                // reporting Stopped here made the taskbar and the lock screen blink
+                // through a stop the listener never experienced. The `Active` that
+                // follows sets them, correctly, to Playing.
+                state.pending_player_events.push(PlayerBridgeEvent::state(
+                    PlaybackState::Completed.as_str(),
+                    seq,
+                ));
+            }
             PlayerEvent::StateChange(st, seq) => {
                 crate::vprintln!("[BRIDGE] StateChange: \"{}\" seq={}", st.as_str(), seq);
 
@@ -184,11 +203,15 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                             // published nor kept; the track ran its whole life with no
                             // duration in the OS controls. Self-load streams (DASH, and
                             // non-FLAC BTS) advance in the renderer and tag their own load.
+                            // This advance is the renderer's own queue moving. It names
+                            // itself as such: the record it just took was staged by that same
+                            // queue, and taking it already proved the queue is the one driving.
                             if let Err(e) = player.load_and_play(
                                 next.url,
                                 next.format,
                                 next.key,
                                 next.product_id,
+                                crate::player::LoadOrigin::Local,
                             ) {
                                 crate::vprintln!("[AUTO]   Failed to load next track: {e}");
                             }
@@ -248,6 +271,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             PlayerEvent::MediaFormat {
                 codec,
                 sample_rate,
+                output_sample_rate,
                 bit_depth,
                 channels,
                 bytes,
@@ -257,6 +281,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .push(PlayerBridgeEvent::media_format(
                         codec,
                         sample_rate,
+                        output_sample_rate,
                         bit_depth,
                         channels,
                         bytes,
@@ -265,6 +290,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     let format_json = serde_json::json!({
                         "codec": codec,
                         "sampleRate": sample_rate,
+                        "outputSampleRate": output_sample_rate,
                         "bitDepth": bit_depth,
                         "channels": channels,
                         "bytes": bytes,
@@ -312,13 +338,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                 play,
             } => {
                 // Reload the captured source at `position`, playing per `play`.
-                // Re-check the generation: skip if a newer load/stop bumped
-                // LOAD_SEQ since, else re-arming would abort that newer load.
+                // Re-check the generation: skip if a newer load/stop minted one
+                // since, else re-arming would abort that newer load.
                 let player = state.player.clone();
                 crate::state::rt_handle().spawn(async move {
-                    if crate::player::LOAD_SEQ.load(std::sync::atomic::Ordering::Relaxed)
-                        != expected_gen
-                    {
+                    if crate::player::current_gen() != expected_gen {
                         crate::vprintln!(
                             "[REPLAY] re-arm skipped: superseded by a newer load/stop"
                         );
