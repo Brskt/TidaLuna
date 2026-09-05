@@ -2,10 +2,27 @@
 
 use super::*;
 
+/// Fill CEF's dispatch table before the first `cef_*` call in this file.
+///
+/// macOS resolves the framework at launch rather than linking it; every `cef_*` entry point
+/// is a trampoline through a pointer that `cef_load_library` writes. The production process
+/// does that in `main`; a test binary has no `main`, so calling one first jumps to address
+/// zero, surfacing as `KERN_INVALID_ADDRESS at 0x0`.
+#[cfg(target_os = "macos")]
+fn ensure_cef_loaded() {
+    crate::platform::cef_loader::ensure_framework_loaded();
+}
+
+/// Windows points the OS loader at `bin/cef` and Linux leans on an rpath: the table is
+/// filled before the first instruction of the process either way.
+#[cfg(not(target_os = "macos"))]
+fn ensure_cef_loaded() {}
+
 /// The regression this guards is a dismissed dialog reporting no selection at all, which
 /// `showSaveDialog` then reported to the plugin as `canceled`.
 #[test]
 fn a_borrowed_list_is_read_through_the_raw_pointer() {
+    ensure_cef_loaded();
     let mut owned = CefStringList::new();
     owned.append("/music/song.flac");
 

@@ -65,6 +65,26 @@ fn framework_path(exe_dir: &Path, is_helper: bool) -> PathBuf {
     exe_dir.join(resolver).join(FRAMEWORK_BINARY)
 }
 
+/// Where the framework sits in a tree that was built but never bundled.
+///
+/// The hops above describe the inside of a `.app`. `cargo run` and every test binary live
+/// under `target/` and have none of that layout; they had no way to find the framework at
+/// all, and the first `cef_*` call jumped through a null dispatch entry.
+///
+/// The path is baked at compile time by `build.rs`, out of the metadata `cef-dll-sys`
+/// publishes, because the framework's real home carries that crate's build-script hash and
+/// changes on every rebuild: there is nothing stable to search for at runtime.
+fn build_tree_framework_path() -> Option<PathBuf> {
+    #[cfg(has_cef_build_dir)]
+    {
+        Some(Path::new(env!("CEF_BUILD_FRAMEWORK_DIR")).join(FRAMEWORK_BINARY))
+    }
+    #[cfg(not(has_cef_build_dir))]
+    {
+        None
+    }
+}
+
 /// Where the sandbox library sits, seen from a subprocess. The main process never
 /// opens it, so only the helper hop exists.
 fn sandbox_dylib_path(exe_dir: &Path) -> PathBuf {
@@ -143,13 +163,20 @@ fn load_framework(exe_dir: &Path, is_helper: bool) {
 
     // canonicalize() doubles as the existence check and strips the `..` hops, which
     // keeps the failure message readable.
+    //
+    // The bundle is tried FIRST and wins wherever it exists: a shipped app never reaches
+    // for a path baked by the machine that built it. The fallback answers only for the trees
+    // that have no bundle at all.
     let framework = match candidate.canonicalize() {
         Ok(path) => path,
-        Err(e) => {
-            crate::verr!("[CEF]    No framework at {}: {e}", candidate.display());
-            crate::verr!("[CEF]    The .app bundle is incomplete; unpack the release again.");
-            std::process::exit(1);
-        }
+        Err(e) => match build_tree_framework_path().and_then(|p| p.canonicalize().ok()) {
+            Some(path) => path,
+            None => {
+                crate::verr!("[CEF]    No framework at {}: {e}", candidate.display());
+                crate::verr!("[CEF]    The .app bundle is incomplete; unpack the release again.");
+                std::process::exit(1);
+            }
+        },
     };
 
     let Ok(path) = CString::new(framework.as_os_str().as_bytes()) else {
@@ -182,6 +209,18 @@ fn load_framework(exe_dir: &Path, is_helper: bool) {
 /// is from `--type=`. The returned guard is `Some` only in a subprocess, and the
 /// caller has to hold it for the rest of the process.
 pub(crate) fn bootstrap() -> Option<SandboxGuard> {
+    let exe_dir = running_exe_dir();
+    let is_helper = is_helper_process(std::env::args_os());
+    let guard = is_helper.then(|| enter_sandbox(&exe_dir));
+    ensure_framework_loaded();
+    guard
+}
+
+/// The directory holding the running executable, or the end of the process.
+///
+/// Both callers need it before any `cef_*` exists to report with, which is why the failures
+/// terminate here rather than travel back as a `Result` nobody could act on.
+fn running_exe_dir() -> PathBuf {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
@@ -189,18 +228,28 @@ pub(crate) fn bootstrap() -> Option<SandboxGuard> {
             std::process::exit(1);
         }
     };
-    let Some(exe_dir) = exe.parent() else {
-        crate::verr!(
-            "[CEF]    Executable {} has no parent directory.",
-            exe.display()
-        );
-        std::process::exit(1);
-    };
+    match exe.parent() {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            crate::verr!(
+                "[CEF]    Executable {} has no parent directory.",
+                exe.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
 
-    let is_helper = is_helper_process(std::env::args_os());
-    let guard = is_helper.then(|| enter_sandbox(exe_dir));
-    load_framework(exe_dir, is_helper);
-    guard
+/// Fill CEF's dispatch table once per process, whoever asks.
+///
+/// `bootstrap()` is the production caller and runs exactly once, from `main`. A test binary
+/// has no `main`; each test that reaches a `cef_*` call asks here instead, and they must
+/// not stack `cef::load_library` calls on one another, hence the `Once`.
+pub(crate) fn ensure_framework_loaded() {
+    static LOADED: std::sync::Once = std::sync::Once::new();
+    LOADED.call_once(|| {
+        load_framework(&running_exe_dir(), is_helper_process(std::env::args_os()));
+    });
 }
 
 #[cfg(test)]

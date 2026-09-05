@@ -75,6 +75,27 @@ fn main() {
         );
     }
 
+    // macOS resolves the framework at launch instead of linking it; something has to hand
+    // the loader a path. Inside the shipped `.app` that path is bundle-relative and always
+    // right; nothing outside a bundle has that layout (not `cargo run`, not any test binary),
+    // and the framework's real home carries a build-script hash that changes on every rebuild,
+    // which is why it cannot be searched for at runtime. `cef-dll-sys` publishes it, resolved
+    // by the very build that produced this binary: bake it in and let the loader fall back to it.
+    println!("cargo:rustc-check-cfg=cfg(has_cef_build_dir)");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        match env::var("DEP_CEF_DLL_WRAPPER_CEF_DIR") {
+            Ok(cef_dir) => {
+                println!("cargo:rustc-env=CEF_BUILD_FRAMEWORK_DIR={cef_dir}");
+                println!("cargo:rustc-cfg=has_cef_build_dir");
+            }
+            // Not fatal: a bundled build never reads it. Said out loud because a developer
+            // running the tests without it gets a null dispatch table and a bare SIGSEGV.
+            Err(e) => println!(
+                "cargo:warning=DEP_CEF_DLL_WRAPPER_CEF_DIR is unavailable ({e}), so anything run outside the .app will not find the CEF framework"
+            ),
+        }
+    }
+
     // CEF lives in bin/cef/: libcef.dll is delay-loaded to let AddDllDirectory run before
     // the first call. Emitted here rather than as a target-wide rustflag, which also
     // reached xtask and updater; neither imports libcef, and the linker said so (LNK4199).

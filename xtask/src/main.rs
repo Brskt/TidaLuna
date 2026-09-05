@@ -244,7 +244,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     // 5. Platform-specific bundling
     let bin_dir = bundle_dir.join("bin");
     if cfg!(target_os = "macos") {
-        bundle_macos(EXE_NAME, &target_dir, &cef_dir, &bundle_dir)?;
+        bundle_macos(EXE_NAME, project_root, &target_dir, &cef_dir, &bundle_dir)?;
     } else {
         // Linux/Windows: structured layout
         // Root: exe + updater + manifest
@@ -589,10 +589,11 @@ fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
 ///         tidalunar Helper (Renderer).app/
 ///         tidalunar Helper (Plugin).app/
 ///         tidalunar Helper (Alerts).app/
-///       Resources/
+///       Resources/tidaluna.icns
 ///       Info.plist
 fn bundle_macos(
     exe_name: &str,
+    project_root: &Path,
     target_dir: &Path,
     cef_dir: &Path,
     bundle_dir: &Path,
@@ -623,6 +624,18 @@ fn bundle_macos(
     let fw_dst = frameworks_dir.join(framework);
     copy_dir_recursive(&fw_src, &fw_dst)?;
     println!("  Copied {framework}");
+
+    // Bundle icon, read by Finder, Spotlight and the Dock while the app is not
+    // running: no runtime code can stand in for it. Absent it, the .app ships
+    // with the generic placeholder, hence the hard failure over a silent skip.
+    let icon_name = "tidaluna.icns";
+    let icon_src = project_root.join(icon_name);
+    if !icon_src.is_file() {
+        return Err(format!("missing app icon: {}", icon_src.display()));
+    }
+    fs::copy(&icon_src, resources_dir.join(icon_name))
+        .map_err(|e| format!("copy app icon: {e}"))?;
+    println!("  Copied {icon_name}");
 
     // Write main Info.plist
     write_info_plist(&contents, exe_name, &version, false)?;
@@ -669,6 +682,15 @@ fn write_info_plist(
         ""
     };
 
+    // Helpers are LSUIElement, surfacing in neither Dock nor Finder, and need
+    // no bundle icon. CFBundleIconFile names a file in Resources/, unlike
+    // CFBundleIconName which would want an actool-compiled asset catalog.
+    let icon_file = if is_helper {
+        ""
+    } else {
+        "\n    <key>CFBundleIconFile</key>\n    <string>tidaluna.icns</string>"
+    };
+
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -691,7 +713,7 @@ fn write_info_plist(
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>{ui_element}
+    <true/>{ui_element}{icon_file}
 </dict>
 </plist>
 "#
