@@ -126,14 +126,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             self.asio_release_at = Some(std::time::Instant::now() + super::ASIO_IDLE_RELEASE);
         }
-        // Cached bytes that will not decode must not stay indexed: every later play would
-        // fail the same way, and the load path just refreshed their LRU position.
+        // Cached bytes that will not decode must not stay indexed: every later play would fail
+        // the same way, and the load path just refreshed their LRU position. Handed over rather
+        // than done here, this being the control thread where a cache wipe holds the lock for
+        // its whole duration. The ONLY retirement for a bypass decoder's failure: its
+        // `DecodeFailed` never reaches the arm that drains the shared channel.
         if self.is_cached
             && let Some(tid) = self.current_track_id.clone()
-            && let Ok(mut cache) = crate::state::AUDIO_CACHE.lock()
-            && cache.drop_entry(&tid) == crate::player::cache::DropOutcome::Dropped
         {
-            crate::vprintln!("[CACHE]  Dropped after a decode failure: {tid}");
+            crate::player::cache::AudioCache::drop_entry_detached(tid);
         }
         (self.callback)(PlayerEvent::MediaError {
             error,
@@ -1031,15 +1032,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         outgoing_reached_end = true;
                         crate::vprintln!("[DECODE] Error: {e}");
                         // Cached bytes that will not decode must not stay indexed: the load
-                        // path already refreshed their LRU position: nothing else would
-                        // ever retire them and every later play would fail the same way.
-                        // Re-downloading one good track is the cheap side of that trade.
+                        // path already refreshed their LRU position, so nothing else would
+                        // retire them and every later play would fail the same way. Handed
+                        // over rather than done here, this being the control thread where a
+                        // cache wipe holds the lock for its whole duration.
                         if self.is_cached
                             && let Some(tid) = self.current_track_id.clone()
-                            && let Ok(mut cache) = crate::state::AUDIO_CACHE.lock()
-                            && cache.drop_entry(&tid) == crate::player::cache::DropOutcome::Dropped
                         {
-                            crate::vprintln!("[CACHE]  Dropped after a decode failure: {tid}");
+                            crate::player::cache::AudioCache::drop_entry_detached(tid);
                         }
                         (self.callback)(PlayerEvent::MediaError {
                             error: e,

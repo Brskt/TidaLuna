@@ -383,6 +383,31 @@ impl AudioCache {
         });
     }
 
+    /// Retire an entry from a thread that must not wait for the cache lock.
+    ///
+    /// Both decode-failure sites run on the player control thread, which cannot afford this
+    /// mutex: `clear()` holds it for its whole `remove_dir_all`, deliberately, and an inline
+    /// drop parks the transport for as long as a wipe takes. Skipping is not open to them
+    /// either, nothing else retiring an entry whose header sniffs fine and whose bitstream does
+    /// not decode: every successful read touches `last_access`, so a failing entry keeps
+    /// re-arming its own recency and eviction never reaches it. Late is correct here, never is
+    /// not.
+    ///
+    /// Detached like a store, and nothing races it: a re-store of this id lands only on
+    /// `DecodeEvent::Finished`, once a whole track has downloaded and decoded again, against a
+    /// drop that takes microseconds.
+    pub fn drop_entry_detached(track_id: String) {
+        std::thread::spawn(move || {
+            let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
+                crate::vprintln!("[CACHE]  Lock poisoned, entry left indexed: {track_id}");
+                return;
+            };
+            if cache.drop_entry(&track_id) == DropOutcome::Dropped {
+                crate::vprintln!("[CACHE]  Dropped after a decode failure: {track_id}");
+            }
+        });
+    }
+
     /// How far an overflow eviction drains, never a per-entry size limit. Eviction starts
     /// only once `current_size` passes `max_bytes`; this is just the hysteresis floor.
     fn eviction_target(&self) -> u64 {

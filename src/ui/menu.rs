@@ -109,11 +109,17 @@ wrap_menu_model_delegate! {
                     eval_js("window.location.href = '/logout';");
                 }
                 MenuCommand::ClearCache => {
-                    if let Ok(mut cache) = crate::state::AUDIO_CACHE.lock()
-                        && let Err(e) = cache.clear()
-                    {
-                        crate::vprintln!("[CACHE]  Clear failed: {e}");
-                    }
+                    // Handed off rather than run here: this delegate is called on the UI
+                    // thread, and the wipe walks a sharded tree the cap lets reach two
+                    // gigabytes, under the global cache lock for its whole duration. Nothing
+                    // reads the outcome: the menu closes without waiting on the disk.
+                    crate::state::rt_handle().spawn_blocking(|| {
+                        if let Ok(mut cache) = crate::state::AUDIO_CACHE.lock()
+                            && let Err(e) = cache.clear()
+                        {
+                            crate::vprintln!("[CACHE]  Clear failed: {e}");
+                        }
+                    });
                 }
                 MenuCommand::OpenData => {
                     open_in_os(crate::state::cache_data_dir());

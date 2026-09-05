@@ -39,7 +39,12 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             let x = msg.args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let y = msg.args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
-            let cache_label = if let Ok(cache) = crate::state::AUDIO_CACHE.lock() {
+            // Tried, not awaited: a clear in flight holds this mutex for the whole wipe, and
+            // that hold is deliberate, keeping the wipe atomic against the unlocked
+            // writes `store_finished_ciphertext` performs. Waiting here would put the freeze
+            // back on the UI thread by the back door. The size is a label. The existing
+            // fallback below is the right answer when the lock is busy.
+            let cache_label = if let Ok(cache) = crate::state::AUDIO_CACHE.try_lock() {
                 let mb = cache.total_size() as f64 / (1024.0 * 1024.0);
                 format!("Clear Cache ({mb:.0} MB)")
             } else {
