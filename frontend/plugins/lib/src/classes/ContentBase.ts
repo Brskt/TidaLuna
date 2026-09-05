@@ -3,6 +3,7 @@ import type { IArtistCredit } from "musicbrainz-api";
 
 import { BoundedCache } from "@luna/core";
 
+import { SingleFlight } from "../helpers/SingleFlight";
 import * as redux from "../redux";
 import type { Artist } from "./Artist";
 
@@ -31,6 +32,13 @@ export class ContentBase {
 			console.log(`[@luna/lib.ContentBase] evicted "${key}" - _instances at cap ${ContentBase._instances.size}`);
 	});
 
+	/**
+	 * Keyed as `_instances` is, and it exists because `_instances` only fills once a lookup
+	 * RESOLVES: between the ask and the answer every caller used to start a lookup of its own.
+	 * Needs no bound, an entry living exactly as long as the work it names.
+	 */
+	private static readonly _inFlight = new SingleFlight<ContentBase | undefined>();
+
 	private static instanceKey(contentType: ContentType, itemId: redux.ItemId): string {
 		return `${contentType}:${itemId}`;
 	}
@@ -55,13 +63,24 @@ export class ContentBase {
 		const existing = this._instances.get(key);
 		if (existing !== undefined) return existing as I;
 
+		// Joined rather than started when one is already running: the answer this lookup would
+		// produce is on its way, and asking again only makes the server produce it twice.
+		return (await this._inFlight.run(key, () => this.runLookup(key, contentType, itemId, generator))) as I | undefined;
+	}
+
+	private static async runLookup<K extends ContentType, C extends ContentClass<K>, I extends InstanceType<C>>(
+		key: string,
+		contentType: K,
+		itemId: redux.ItemId,
+		generator: (contentItem?: ContentItem<K>) => MaybePromise<I | undefined>,
+	): Promise<ContentBase | undefined> {
 		const contentClass = await generator(this.getItemFromStore(contentType, itemId));
-		if (contentClass === undefined) return;
+		if (contentClass === undefined) return undefined;
 
 		// A concurrent fromStore for the same key may have cached an instance during the await;
 		// if so return that winner and drop ours (avoids overwriting/disposing a live instance).
 		const winner = this._instances.get(key);
-		if (winner !== undefined) return winner as I;
+		if (winner !== undefined) return winner;
 
 		this._instances.set(key, contentClass as ContentBase);
 		return contentClass;

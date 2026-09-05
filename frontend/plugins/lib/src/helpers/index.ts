@@ -6,4 +6,5 @@ export * from "./parseDate";
 export * from "./RateGate";
 export * from "./safeTimeout";
 export * from "./sameItemId";
+export * from "./SingleFlight";
 export * from "./downloadObject";
