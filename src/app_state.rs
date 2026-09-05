@@ -298,22 +298,42 @@ pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
         // ShellExecuteW, not `cmd /C start`: the latter treats `&` in a URL query
         // string as a command separator, truncating links like `?a=1&token=2`.
         use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::UI::Shell::ShellExecuteW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
         let file: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
-        let verb: Vec<u16> = "open\0".encode_utf16().collect();
-        // SAFETY: verb/file are null-terminated UTF-16; the unused pointers are null,
-        // which ShellExecuteW documents as "no parameters / default directory".
-        unsafe {
-            ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                file.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                SW_SHOWNORMAL,
-            );
-        }
+        // On its own thread, unlike the `spawn` calls below. Those return once a child is
+        // launched; this one resolves a file association and can hand the work to a COM shell
+        // extension, which is unbounded. Most callers here are UI-thread menu items and link
+        // clicks, and the window must not stop repainting while the shell thinks.
+        std::thread::Builder::new()
+            .name("shell-open".into())
+            .spawn(move || {
+                use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+                use windows_sys::Win32::UI::Shell::ShellExecuteW;
+                use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+                // A shell extension may be COM-based; this thread has to be initialized
+                // before the call. STA, as the ASIO path does; S_FALSE says the thread already
+                // was, which is equally usable.
+                let hr =
+                    unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+                if hr < 0 {
+                    crate::verr!("[SHELL]  CoInitializeEx failed ({hr:#x}), target not opened");
+                    return;
+                }
+                let verb: Vec<u16> = "open\0".encode_utf16().collect();
+                // SAFETY: verb/file are null-terminated UTF-16; the unused pointers are null,
+                // which ShellExecuteW documents as "no parameters / default directory".
+                unsafe {
+                    ShellExecuteW(
+                        std::ptr::null_mut(),
+                        verb.as_ptr(),
+                        file.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        SW_SHOWNORMAL,
+                    );
+                }
+            })
+            .map_err(|e| crate::verr!("[SHELL]  Could not spawn the shell-open thread: {e}"))
+            .ok();
     }
     #[cfg(target_os = "linux")]
     {
