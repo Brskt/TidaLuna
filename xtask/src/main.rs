@@ -841,7 +841,7 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     };
     let bun_dst = bundle_dir.join(bun_name);
 
-    const BUN_VERSION: &str = "1.4.0";
+    const BUN_VERSION: &str = "1.4.2";
 
     // Cache dir persists across builds (dist/ is cleaned each time)
     let cache_dir = project_root()?.join(".cache").join("bun");
@@ -1344,10 +1344,10 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
         .join("tidalunar.nsi");
 
     // Pre-compress the payload OUTSIDE makensis. makensis' builtin LZMA is
-    // single-threaded and uses an outdated codec with no executable filter; on
-    // the CEF payload that measured ~14% larger and ~2x slower than 7-Zip's
-    // multithreaded LZMA2. So we build the solid .7z here and have the installer
-    // extract it at run time via the bundled official 7zr.exe (see tidalunar.nsi).
+    // single-threaded and uses an outdated codec with no executable filter; on the
+    // CEF payload it came out both larger and slower than 7-Zip's multithreaded
+    // LZMA2. We build the solid .7z here and have the installer extract it at run
+    // time via the bundled official 7zr.exe (see tidalunar.nsi).
     fn resolve_7z() -> Option<PathBuf> {
         for cand in ["7z", "7za"] {
             if Command::new(cand).output().is_ok() {
