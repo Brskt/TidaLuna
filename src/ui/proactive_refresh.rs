@@ -213,9 +213,7 @@ async fn do_refresh(refresh_token: String, client_id: String, req_scope: String)
             // returns no new one. Both arms of the fallback are then gone and the
             // generation would carry no refresh token at all.
             if ts.current.is_durable() {
-                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
-                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
-                }
+                crate::platform::secure_store::save_queued(&data_dir, ts);
             } else {
                 crate::vprintln!(
                     "[AUTH]   Refresh landed with no refresh token - stored credential kept"

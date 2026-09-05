@@ -520,9 +520,7 @@ fn process_token_response_with(
             // it, handing TIDAL an empty refresh token verbatim. The access
             // token above serves this session from memory either way.
             if ts.current.is_durable() {
-                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
-                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
-                }
+                crate::platform::secure_store::save_queued(&data_dir, ts);
             } else {
                 crate::vprintln!(
                     "[AUTH]   Exchange carried no refresh token - stored credential kept"

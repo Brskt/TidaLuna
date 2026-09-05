@@ -613,9 +613,7 @@ fn proxy_transform_token_body_with(
             // token cannot re-establish a session and must not replace one on
             // disk that can. Both sites share this AppState and both apply it.
             if ts.current.is_durable() {
-                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
-                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
-                }
+                crate::platform::secure_store::save_queued(&data_dir, ts);
             } else {
                 crate::vprintln!(
                     "[AUTH]   Exchange carried no refresh token - stored credential kept"

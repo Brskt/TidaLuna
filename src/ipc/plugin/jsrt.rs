@@ -49,9 +49,9 @@ fn handle_session_clear() {
     // Allow the next login to trigger its one-shot cold-boot reload.
     crate::ui::POST_LOGIN_RELOADED.store(false, std::sync::atomic::Ordering::SeqCst);
     let data_dir = crate::state::cache_data_dir();
-    if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
-        crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");
-    }
+    // Queued on the same channel as the saves: an erase that overtook a save still in flight
+    // would hand the credential back to the next launch after the user logged out.
+    crate::platform::secure_store::delete_queued(&data_dir);
     crate::app_state::eval_js(JS_PURGE_SDK_BLOB);
     super::reset_pkce_scrub();
     crate::vprintln!("[AUTH]   Cleared captured token + token state + SDK auth blob");
@@ -77,9 +77,9 @@ fn handle_session_hard_reset() {
         state.token_state = None;
     });
     let data_dir = crate::state::cache_data_dir();
-    if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
-        crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");
-    }
+    // Queued on the same channel as the saves: an erase that overtook a save still in flight
+    // would hand the credential back to the next launch after the user logged out.
+    crate::platform::secure_store::delete_queued(&data_dir);
     super::reset_pkce_scrub();
     crate::vprintln!("[AUTH]   Cleared captured token + token state");
 

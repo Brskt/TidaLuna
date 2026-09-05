@@ -868,6 +868,11 @@ wrap_request_handler! {
                 crate::ui::crash_dialog::CRASH_DIALOG_OPEN
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 if action == crate::ui::crash_dialog::CrashAction::Quit {
+                    // Exiting here skips the drain that follows the message loop, and queued
+                    // settings writes die with the process. This runs on a tokio task, never
+                    // the actor's own thread; waiting on it is safe.
+                    crate::state::db().flush();
+                    crate::platform::secure_store::flush();
                     std::process::exit(0);
                 }
                 if action == crate::ui::crash_dialog::CrashAction::OpenFolder
