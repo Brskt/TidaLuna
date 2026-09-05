@@ -2,6 +2,8 @@ import { type Tracer } from "@luna/core";
 
 import { memoize, memoizeArgless, Semaphore, sleep, statusOK, type Memoized, type VoidLike } from "@inrixia/helpers";
 
+import { RateGate } from "../../helpers/RateGate";
+
 import type { TApiTrack, TApiTracks } from "./types/Tracks";
 
 import { tidalFetch } from "../../../../../src/ipc";
@@ -25,6 +27,19 @@ export class TidalApi {
 		const store = redux.store.getState();
 		return `countryCode=${store.session.countryCode}&deviceType=DESKTOP&locale=${store.settings.language}`;
 	});
+	/**
+	 * One budget for every request this library causes TIDAL to serve, direct or dispatched.
+	 *
+	 * A list view asks for dozens of rows at once, each costing a load, a fallback and a
+	 * playbackinfo; held behind one gate they leave evenly spaced instead of as a burst, and the
+	 * work is ours rather than the listener's.
+	 *
+	 * Twelve a second sits between the two costs it is bounded by: below it a long scroll takes
+	 * minutes (three hundred rows is six hundred requests), and above it buys nothing, the gate
+	 * serving newest first so what is on screen is out inside a tenth of a second either way.
+	 */
+	public static readonly rateGate = new RateGate(12);
+
 	public static fetch = memoize(async <T>(url: string): Promise<T | undefined> => {
 		// Routes through Rust via tidal.fetch IPC - the OAuth token is injected
 		// server-side and never exposed to JavaScript.
@@ -32,6 +47,8 @@ export class TidalApi {
 		if (!cid) throw new Error("TidalApi.fetch called before session is ready (no clientId)");
 		let retry = true;
 		while (true) {
+			// Inside the loop: a retry is a second request and spends a second slot.
+			await this.rateGate.pass();
 			const res = await tidalFetch(url, { headers: { "x-tidal-token": cid } });
 			if (statusOK(res.status)) return res.json<T>();
 			if (res.status === 403 || res.status === 404) return undefined;

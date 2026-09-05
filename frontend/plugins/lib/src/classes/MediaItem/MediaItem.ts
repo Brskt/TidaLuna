@@ -46,25 +46,47 @@ export class MediaItem extends ContentBase {
 			if (message?.message === "The content is no longer available") return true;
 		});
 		try {
-			const { mediaItem } = await redux.interceptActionResp(
-				() => redux.actions["content/LOAD_SINGLE_MEDIA_ITEM"]({ id: itemId, itemType: contentType }),
-				unloads,
-				["content/LOAD_SINGLE_MEDIA_ITEM_SUCCESS"],
-				["content/LOAD_SINGLE_MEDIA_ITEM_FAIL"],
-			);
-			return mediaItem;
-		} catch (e) {
-			// Redux dispatch may not produce SUCCESS/FAIL (wrong payload shape under Vite/Rollup).
-			// Fall back to direct API fetch for tracks only.
-			if (String(e).includes("TIMEOUT") && contentType === "track") {
-				const track = await TidalApi.track(itemId);
-				if (track === undefined) return undefined;
-				return { type: contentType, item: track } as redux.MediaItem;
+			// Taken FIRST when it exists, because naming a replacement is TIDAL saying this id is
+			// no longer served: asking for it anyway buys a guaranteed deadline and then a
+			// refused fetch. ONE hop, never a chain: a pair of stubs naming each other is a
+			// shape this cannot rule out, and a loop costs more than a missing tag.
+			const standIn = redux.replacementTrackId(redux.store.getState(), itemId);
+			if (standIn !== undefined) {
+				const served = await this.loadMediaItem(standIn, contentType);
+				if (served !== undefined) return served;
 			}
-			throw e;
+			return await this.loadMediaItem(itemId, contentType);
 		} finally {
 			clearWarnCatch();
 		}
+	}
+
+	/** Resolve exactly the id asked for, from the store if TIDAL has it and the network if not. */
+	private static async loadMediaItem(itemId: redux.ItemId, contentType: redux.ContentType) {
+		// Asked for, then read out of the store, NOT waited for as an action. TIDAL answers
+		// this load from a saga, and a saga's `put` cannot reach an interceptor hung off the
+		// `dispatch` property (see `awaitStoreValue`); waiting on
+		// `LOAD_SINGLE_MEDIA_ITEM_SUCCESS` spent the whole timeout on every call, and did it
+		// holding a lock shared by every other lookup, which is what made a list of misses
+		// resolve one item per timeout. The load itself was never the problem: it runs, and
+		// its own reducer writes the item here.
+		// Through the same gate as a direct fetch: this dispatch makes TIDAL fetch on our
+		// behalf: it spends from the same budget rather than slipping past it.
+		await TidalApi.rateGate.pass();
+		redux.actions["content/LOAD_SINGLE_MEDIA_ITEM"]({
+			id: itemId,
+			itemType: contentType,
+		});
+		const mediaItem = await redux.awaitStoreValue((state) => state.content.mediaItems[itemId as keyof redux.Content["mediaItems"]], unloads);
+		if (mediaItem !== undefined) return mediaItem;
+
+		// The deadline passed with nothing written, which a track unavailable in this
+		// account's region reaches on every call. Only a track has a single-item endpoint to
+		// ask directly; a video has none and has nowhere else to go.
+		if (contentType !== "track") return undefined;
+		const track = await TidalApi.track(itemId);
+		if (track === undefined) return undefined;
+		return { type: contentType, item: track } as redux.MediaItem;
 	}
 
 	// #region Static Construction
