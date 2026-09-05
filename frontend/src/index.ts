@@ -113,6 +113,27 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
     if (!Array.isArray(events)) return;
     const bridge = window.NativePlayerComponent;
     if (!bridge || typeof bridge.trigger !== "function") return;
+    // A batch carrying a track change carries the new track's first position behind
+    // it. That position is the one report the 250ms throttle must not drop: the
+    // window it would wait out was armed by the OUTGOING track's last tick. Left
+    // alone, the bar keeps rendering the old position under the new track. Armed
+    // before the loop rather than from the "completed" arm; the order of the two in
+    // the batch does not matter. Same carve-out load() and SEEK already take,
+    // applied to the transition, which goes through neither.
+    //
+    // Both halves are required. Arming on "completed" alone leaks: a natural track
+    // end in exclusive or ASIO output sends the state with no position beside it,
+    // and the flag would then sit armed until some unrelated later report spent it.
+    let _hasTransition = false;
+    let _hasTime = false;
+    for (const e of events) {
+        if (!e || typeof e !== "object") continue;
+        if (e.t === "time") _hasTime = true;
+        else if (e.t === "state" && e.v === "completed") _hasTransition = true;
+    }
+    if (_hasTransition && _hasTime) {
+        _forceTimeDispatch = true;
+    }
     for (const event of events) {
         if (!event || typeof event !== "object") continue;
         const type = event.t;
