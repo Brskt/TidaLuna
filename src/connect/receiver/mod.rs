@@ -327,6 +327,24 @@ async fn routing_loop(
                         let _ = has_next_media;
                         playback_ctrl.on_playback_completed(engine_gen).await;
                     }
+                    BridgeEvent::CrossfadeTransitioned { ref track_id, engine_gen } => {
+                        crate::vprintln!("[connect::bridge] <- CrossfadeTransitioned {:?} (gen={})", track_id, engine_gen);
+                        // Adopted here, in one turn of this loop. The promoted track is already
+                        // audible: the receiver has nothing to load and nothing to wait for,
+                        // and while this arm runs, no other arm is polled. A `next` from the
+                        // phone therefore cannot be served against a half-applied promotion,
+                        // stepping from the outgoing track and restarting the one already playing.
+                        playback_ctrl.on_crossfade_transitioned(engine_gen, track_id.as_deref());
+                        if let Some((media_info, media_seq_no)) = queue_mgr.adopt_promoted(track_id.as_deref()) {
+                            crate::vprintln!("[connect::receiver] AdoptMedia: {} (seq={})", media_info.item_id, media_seq_no);
+                            playback_ctrl.adopt_media(media_info.clone(), media_seq_no).await;
+                            // The local UI follows the same track change the controller is told about.
+                            emit_receiver_metadata(&media_info);
+                        }
+                        // The one part of an adoption that still reaches the network. It runs
+                        // only once the state above is settled.
+                        queue_mgr.maybe_extend_queue_window().await;
+                    }
                     BridgeEvent::PlaybackError { ref status_code, engine_gen } => {
                         crate::vprintln!("[connect::bridge] <- PlaybackError {} (gen={})", status_code, engine_gen);
                         playback_ctrl.on_playback_error(status_code, engine_gen).await;

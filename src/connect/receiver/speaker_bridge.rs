@@ -20,6 +20,19 @@ pub(crate) enum BridgeEvent {
         has_next_media: bool,
         engine_gen: u64,
     },
+    /// A local crossfade finished and the next track is already playing, seconds in. It reads
+    /// like a completion and is the opposite of one: a completion asks the controller to
+    /// prepare what comes next, where this one reports something it must not prepare again.
+    /// Routed as a completion, the reload it triggers is audible: the track that just faded
+    /// in stops and restarts from zero.
+    ///
+    /// Carries the track promoted, for the same reason `DurationMeasured` carries one: without
+    /// it the receiver has to infer what moved from its own queue index, and the length the
+    /// player measures in the same breath has nothing to be judged against.
+    CrossfadeTransitioned {
+        track_id: Option<String>,
+        engine_gen: u64,
+    },
     PlaybackError {
         status_code: String,
         engine_gen: u64,
