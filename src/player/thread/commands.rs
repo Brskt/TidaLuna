@@ -1094,10 +1094,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Stopped or Paused the previous track left behind.
         self.idle_state = PlaybackState::Ready;
 
+        // `product` is on this line because the raw `player.load` args are redacted; an
+        // absent id (which costs this track its length for good) is otherwise unobservable.
         crate::vprintln!(
-            "[LOAD #{load_gen}] handle_load enter | cached={} | track={}",
+            "[LOAD #{load_gen}] handle_load enter | cached={} | track={} | product={:?}",
             cached,
-            short_id(&track_id, 60)
+            short_id(&track_id, 60),
+            self.current_product_id.as_deref()
         );
         let handle_start = std::time::Instant::now();
 
