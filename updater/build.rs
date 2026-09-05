@@ -1,4 +1,8 @@
 fn main() {
+    // The icon lives outside this package; cargo's whole-package default never
+    // covered it. This is the only external input: the manifest below is inline.
+    println!("cargo:rerun-if-changed=../tidaluna.ico");
+
     #[cfg(target_os = "windows")]
     {
         let mut res = winres::WindowsResource::new();

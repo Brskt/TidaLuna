@@ -118,4 +118,6 @@ fn main() {
         res.compile().expect("Failed to compile Windows resources");
     }
     println!("cargo:rerun-if-changed=tidalunar.exe.manifest");
+    // winres reads the icon outside rustc's dep graph; nothing tracks it for us.
+    println!("cargo:rerun-if-changed=tidaluna.ico");
 }
