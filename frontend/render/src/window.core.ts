@@ -28,6 +28,17 @@ Object.defineProperty(window.luna, "native", {
 	enumerable: true,
 	configurable: false,
 });
+// The accessors above are non-configurable, but the object carrying them was not. `luna` is an
+// ordinary property of `window` (bootstrap.ts); `window.luna = {...}` replaced the lot. That
+// matters because a plugin's `@luna/lib` import is lowered to a live lookup starting here, and
+// the capability it is called with is that plugin's own. Owning this object hands the first
+// plugin to run the identity of every plugin loaded after it.
+Object.defineProperty(window, "luna", {
+	value: window.luna,
+	writable: false,
+	configurable: false,
+	enumerable: true,
+});
 declare global {
 	interface Window {
 		luna: {
