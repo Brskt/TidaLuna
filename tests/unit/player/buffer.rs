@@ -3,20 +3,20 @@
 //! `#[tokio::test]` throughout, as in `thread/commands.rs`: the Range-restart arm site asks
 //! the governor for the boosted rate, and `GOVERNOR`'s `LazyLock` init calls `tokio::spawn`.
 //! A plain `#[test]` that reaches it panics for want of a reactor and leaves the static
-//! poisoned for every later test in the binary, so the blast radius of getting this wrong is
+//! poisoned for every later test in the binary: the blast radius of getting this wrong is
 //! the whole suite, not this file.
 
 use super::*;
 use std::io::{Read, Seek};
 
 /// A reader starved at the download frontier parks inside `read`, where it answers no command.
-/// Whoever joins that thread waits with it, so retiring the reader has to end the wait on the
+/// Whoever joins that thread waits with it; retiring the reader has to end the wait on the
 /// signal rather than on the read's own 5s timeout, which is the margin measured here.
 #[tokio::test]
 async fn a_retired_reader_stops_waiting_on_the_signal_not_the_timeout() {
     // Held for the test: dropping the writer cancels the whole buffer, which would end the
     // wait for a different reason than the one under test.
-    let (buffer, _writer) = RamBuffer::new(1024);
+    let (buffer, _writer) = RamBuffer::new_for_test(1024);
     let cancel = Arc::new(AtomicBool::new(false));
     let mut reader = buffer.clone().with_reader_cancel(cancel.clone());
 
@@ -35,19 +35,23 @@ async fn a_retired_reader_stops_waiting_on_the_signal_not_the_timeout() {
     let waited = signalled_at.elapsed();
 
     let err = outcome.expect_err("a retired reader reports instead of returning bytes");
-    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::Other,
+        "never Interrupted: symphonia's read_buf_exact retries that kind forever"
+    );
     assert!(
         waited < std::time::Duration::from_secs(2),
         "woke on its own timeout rather than on the signal: waited {waited:?}"
     );
 }
 
-/// `cancel()` has no undo, and every read after it reports Interrupted. A finished buffer that
+/// `cancel()` has no undo, and every read after it fails. A finished buffer that
 /// was cancelled reads no better than an empty one: the case this predicate promises
 /// its callers it has ruled out, and the one a failed load leaves sitting in `current_buffer`.
 #[tokio::test]
 async fn a_cancelled_buffer_is_not_reusable_even_once_complete() {
-    let (buffer, writer) = RamBuffer::new(4);
+    let (buffer, writer) = RamBuffer::new_for_test(4);
     let _ = writer.write_counted(b"data");
     writer.finish();
     assert!(
@@ -59,7 +63,7 @@ async fn a_cancelled_buffer_is_not_reusable_even_once_complete() {
 
     assert!(
         !buffer.is_reusable(),
-        "a decoder handed this buffer would report Interrupted on its first read"
+        "a decoder handed this buffer would fail on its first read"
     );
 }
 
@@ -67,7 +71,7 @@ async fn a_cancelled_buffer_is_not_reusable_even_once_complete() {
 /// decoder on the same bytes. Cancelling the buffer instead would take those bytes with it.
 #[tokio::test]
 async fn retiring_one_reader_leaves_the_buffer_readable_by_the_next() {
-    let (buffer, writer) = RamBuffer::new(4);
+    let (buffer, writer) = RamBuffer::new_for_test(4);
     let cancel = Arc::new(AtomicBool::new(false));
     let retired = buffer.clone().with_reader_cancel(cancel.clone());
     cancel.store(true, Relaxed);
@@ -100,10 +104,10 @@ async fn a_read_far_past_the_frontier_arms_a_range_restart() {
     // lands on a runtime-less thread, panics, and poisons the static for the whole binary.
     let _ = &*crate::state::GOVERNOR;
 
-    let (buffer, writer) = RamBuffer::new(1024 * 1024);
+    let (buffer, writer) = RamBuffer::new_for_test(1024 * 1024);
     let _ = writer.write_counted(&[0u8; 1024]);
     let mut reader = buffer.clone();
-    // Past the written frontier by more than the lookahead the buffer waits through, so the
+    // Past the written frontier by more than the lookahead the buffer waits through: the
     // read asks for a restart instead of sitting on the download catching up.
     reader
         .seek(std::io::SeekFrom::Start(1024 + 64 * 1024))

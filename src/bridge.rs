@@ -93,6 +93,17 @@ impl PlayerBridgeEvent {
         }
     }
 
+    /// Not a passthrough event: the renderer answers it with the same five-step refusal
+    /// the undecodable-profile branch uses, because a raw `mediaerror` alone loses the
+    /// one-second STALLED race TIDAL arms on every autoplay load.
+    pub fn network_lost() -> Self {
+        Self {
+            t: "medianetworklost",
+            seq: None,
+            v: serde_json::Value::Null,
+        }
+    }
+
     pub fn volume(value: f64) -> Self {
         Self {
             t: "volume",

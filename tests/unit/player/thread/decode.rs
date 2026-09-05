@@ -3,6 +3,15 @@
 //! once is checkable without a device or a media stream. `push_until_settled` takes its seek
 //! as a closure for the same reason, which is what lets these tests state what a refused seek
 //! owes without a container to demux.
+//!
+//! The decode loop starts PAUSED, and that default carries weight: rebuilding the pipeline on a
+//! device change while the listener is paused sends no resume at all (`device.rs`, under
+//! `if was_playing`), and the seek it does send leaves `paused` alone: the new thread's silence
+//! rests on the default and nothing else. A test driving a real decode thread owes it a
+//! `DecodeCommand::Resume`, and the probe runs before the command loop, which is why one needing
+//! only the probe passes without ever starting the decoder. The logs will not say so: `LOG_LEVEL`
+//! rests at zero and only `init_env_floor` raises it from `LOGS`, called from the first line of
+//! `fn main()`, which no test runs. Watch `decoded_samples` and the event channel instead.
 
 use super::{
     DecodeCommand, DecodeEvent, DecodeThreadConfig, PushInterrupt, PushOutcome, PushRun,
@@ -10,7 +19,7 @@ use super::{
 };
 use crate::player::buffer::RamBuffer;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -381,7 +390,7 @@ impl Decoding {
     }
 
     /// Waits on the counter the decode thread shares with the ring, never on the clock: probe
-    /// and decoder init take a variable time, so a sleep would guess where a command lands.
+    /// and decoder init take a variable time: a sleep would guess where a command lands.
     fn wait_until_decoded(&self, target: u64) {
         let started = Instant::now();
         while self.decoded.load(Relaxed) < target {
@@ -416,7 +425,7 @@ impl Decoding {
     }
 
     /// Drains until the track is announced done. Completion is the only signal that says no
-    /// sample is still owed, so a test that stopped at a sample count would pass on a truncated
+    /// sample is still owed; a test that stopped at a sample count would pass on a truncated
     /// track.
     fn drain_until_complete(&mut self, into: &mut Vec<f32>) {
         let started = Instant::now();
@@ -446,7 +455,7 @@ impl Decoding {
     }
 
     /// Stops the thread, joins it, then takes whatever it emitted on the way out. A joined
-    /// thread cannot announce anything more, so counts read after this are final: that is what
+    /// thread cannot announce anything more, and counts read after this are final: that is what
     /// lets a test state an absence instead of waiting for one and hoping the wait was long
     /// enough, which on a loaded machine it would not be.
     fn stop(&mut self) {

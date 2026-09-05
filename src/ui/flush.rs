@@ -295,6 +295,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::max_connections());
             }
+            PlayerEvent::NetworkLost => {
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::network_lost());
+            }
             PlayerEvent::VolumeSync(v) => {
                 state
                     .pending_player_events

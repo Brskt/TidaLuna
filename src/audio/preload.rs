@@ -1,6 +1,6 @@
 use crate::audio::bandwidth::TrafficClass;
 use crate::audio::decrypt::FlacDecryptor;
-use crate::player::buffer::RamBufferWriter;
+use crate::player::buffer::{DownloadFailure, RamBufferWriter};
 use crate::state::{GOVERNOR, HTTP_CLIENT_PRELOAD, PRELOAD_STATE, PreloadedTrack, TrackInfo};
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -241,8 +241,10 @@ pub fn start_download(
     url: String,
     key: String,
     writer: RamBufferWriter,
-    cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    // Taken from the buffer rather than passed in: the buffer is what gets handed from a
+    // staged track to the one being listened to, and the token has to travel with it.
+    let cancel = writer.cancel_token();
     // On cancel, dropping the inner future drops the stream + writer, which closes
     // the HTTP connection and frees the buffer at once.
     tokio::spawn(async move {
@@ -366,7 +368,10 @@ async fn download_stream(
         match FlacDecryptor::new(&key) {
             Ok(d) => Some(d),
             Err(e) => {
-                writer.finish_with_error(format!("decrypt init failed: {e}"));
+                writer.finish_with_error(
+                    DownloadFailure::Source,
+                    format!("decrypt init failed: {e}"),
+                );
                 return;
             }
         }
@@ -435,7 +440,10 @@ async fn download_stream(
                             crate::vprintln3!(
                                 "[STREAM] DOWNLOAD DIED: range request failed at byte {target} | restarts={range_restarts}: {e}"
                             );
-                            writer.finish_with_error(format!("range request failed: {e}"));
+                            writer.finish_with_error(
+                                DownloadFailure::Network,
+                                format!("range request failed: {e}"),
+                            );
                             return;
                         }
                     }
@@ -470,7 +478,10 @@ async fn download_stream(
                 crate::vprintln3!(
                     "[STREAM] DOWNLOAD DIED: range status {status} at byte {target} | restarts={range_restarts}"
                 );
-                writer.finish_with_error(format!("range request status: {status}"));
+                writer.finish_with_error(
+                    DownloadFailure::Source,
+                    format!("range request status: {status}"),
+                );
                 return;
             }
         };
@@ -572,7 +583,10 @@ async fn download_stream(
                             }
                         }
                         Err(e) => {
-                            writer.finish_with_error(format!("decrypt error: {e}"));
+                            writer.finish_with_error(
+                                DownloadFailure::Source,
+                                format!("decrypt error: {e}"),
+                            );
                             return;
                         }
                     }
@@ -595,9 +609,10 @@ async fn download_stream(
                             crate::vprintln3!(
                                 "[STREAM] DOWNLOAD DIED: {MAX_RECONNECTS} reconnects exhausted at byte {offset} | restarts={range_restarts}"
                             );
-                            writer.finish_with_error(format!(
-                                "network error after {MAX_RECONNECTS} reconnects: {e}"
-                            ));
+                            writer.finish_with_error(
+                                DownloadFailure::Network,
+                                format!("network error after {MAX_RECONNECTS} reconnects: {e}"),
+                            );
                             return;
                         }
                         let backoff =
@@ -655,8 +670,10 @@ async fn download_stream(
                                     "[STREAM] DOWNLOAD DIED: reconnect status {} at byte {offset}",
                                     r.status()
                                 );
-                                writer
-                                    .finish_with_error(format!("reconnect status: {}", r.status()));
+                                writer.finish_with_error(
+                                    DownloadFailure::Source,
+                                    format!("reconnect status: {}", r.status()),
+                                );
                                 return;
                             }
                             Err(send_err) => {

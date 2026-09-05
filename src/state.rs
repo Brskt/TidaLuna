@@ -109,15 +109,12 @@ fn build_http_client() -> reqwest::Client {
 /// The clients that stream an encrypted media body, which is the only traffic here with an
 /// unbounded await on a body that a silent server can hold open forever.
 ///
-/// A whole-request timeout is the wrong shape: one body is a whole track. `read_timeout` is the
-/// right one. Its clock is created inside `poll_frame` and torn down on every delivered frame,
-/// so the stretch the governor spends not polling between chunks costs no budget at all. It
-/// also bounds the wait for response headers, through a separate one-shot deadline, which is
-/// what ends a server that accepts the connection and then answers nothing.
-///
-/// 15s clears the 8s connect budget above with room for a cold CDN edge's TTFB. Deliberately not
-/// on `base_client_builder`: the plugin egress clients layer on that one, and a plugin's chosen
-/// destination may answer at whatever cadence it likes.
+/// A whole-request timeout is the wrong shape, one body being a whole track. `read_timeout`'s
+/// clock is created inside `poll_frame` and torn down on every delivered frame, so the stretch
+/// the governor spends not polling costs no budget, and its separate one-shot deadline ends a
+/// server that accepts the connection and then answers nothing. 15s clears the 8s connect budget
+/// with room for a cold CDN edge's TTFB. Deliberately not on `base_client_builder`: the plugin
+/// egress clients layer on that one, and a plugin's destination may answer at any cadence.
 fn build_media_client() -> reqwest::Client {
     base_client_builder()
         .cookie_store(true)

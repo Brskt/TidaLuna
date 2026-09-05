@@ -1,6 +1,6 @@
 use super::output::AudioPipeline;
 use super::{DecodeCommand, DecodeEvent};
-use crate::player::buffer::RamBuffer;
+use crate::player::buffer::{RamBuffer, ReadStop};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
@@ -265,6 +265,17 @@ fn seek_closure<'a, 'c>(
     move |time, gen_id| do_decode_seek(time, gen_id, format, decoder, pipeline, ctx)
 }
 
+/// Which deliberate stop ended a read, if that is what ended it. Asked of the error's payload
+/// rather than of its kind, because `ErrorKind::Other` is a shared vocabulary: the buffer keeps
+/// every real failure out of it by naming discipline alone, and symphonia mints its own `Other`
+/// inside the Vorbis bit reader. The payload is put there by the site that knew why.
+fn requested_stop(e: &symphonia::core::errors::Error) -> Option<ReadStop> {
+    match e {
+        symphonia::core::errors::Error::IoError(io) => ReadStop::from_io(io),
+        _ => None,
+    }
+}
+
 fn decode_loop(cfg: DecodeThreadConfig) {
     let DecodeThreadConfig {
         buffer,
@@ -275,11 +286,19 @@ fn decode_loop(cfg: DecodeThreadConfig) {
         output_rate,
         output_channels,
         seek_gen,
-        // The spawner already bound it to `buffer`; the loop meets it as a read that
-        // returns Interrupted, never as a flag it polls.
-        reader_cancel: _,
+        // Bound rather than dropped, because at one site the loop does have to poll it. A read
+        // that fails names its stop in the error's payload, which is the precise answer and the
+        // one `next_packet` is handed, but symphonia's probe scans for a format marker with
+        // `while let Ok(byte) = mss.read_byte()` and discards that error, reporting a missing
+        // format reader instead. A stop during the probe is recognisable only from the state it
+        // was posted to.
+        reader_cancel,
     } = cfg;
     crate::vprintln!("[DECODE] Thread started, probing format...");
+    // Cloned before the buffer is boxed into the stream, which consumes it. Cancelling the
+    // whole buffer has no reader-side view otherwise, and the probe is where that view is the
+    // only one left.
+    let stop_state = buffer.clone();
     let mss = MediaSourceStream::new(Box::new(buffer), Default::default());
 
     let hint = Hint::new();

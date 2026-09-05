@@ -12,6 +12,7 @@ import { createTidalConnectController, createRemoteDesktopController, setupConne
 import { createNativePlayerComponent } from "./controllers/player";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
+import { refusePlayback } from "./refuse-playback";
 import { initWindowControls } from "./ui/window-controls";
 import { invokeIpc, sendIpc, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
@@ -179,7 +180,17 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             }
         }
         const mapped = SEQ_EVENTS[type];
-        if (mapped) {
+        if (type === "medianetworklost") {
+            // Not a passthrough: a raw `mediaerror` loses TIDAL's one-second STALLED
+            // race, leaving the spinner turning over a player that will never resume.
+            // Rust has already waited thirty seconds for the bytes; this is the answer
+            // to their never arriving, and it must not advance the queue.
+            refusePlayback(
+                "tidalunar_network_lost",
+                "no bytes for 30s",
+                "TidaLunar cannot play music without an internet connection. Please try again when you're connected.",
+            );
+        } else if (mapped) {
             bridge.trigger(mapped, event.v, event.seq);
         } else if (PASSTHROUGH_EVENTS.has(type)) {
             bridge.trigger(type, event.v);

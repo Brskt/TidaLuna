@@ -15,7 +15,7 @@ use crate::audio::preload;
 use crate::state::{
     AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, GOVERNOR, HTTP_CLIENT_PLAYBACK, TrackInfo,
 };
-use buffer::RamBuffer;
+use buffer::{DownloadOwner, HeadStatus, RamBuffer};
 use futures_util::stream::{self, StreamExt};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc;
@@ -207,6 +207,10 @@ pub enum PlayerEvent {
         code: MediaErrorCode,
     },
     MaxConnectionsReached,
+    /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the
+    /// player and raises TIDAL's own error banner; never advances the queue, and never
+    /// touches the cache: the file was fine, the connection was not.
+    NetworkLost,
     /// Re-arm a retained source into the shared pipeline: flush.rs reloads `track`
     /// at the generation snapshot (skipped if a newer load/stop superseded it),
     /// seeks to `position` (None = start), and auto-plays per `play`. Emitted on a
@@ -877,15 +881,13 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         format_bytes(total_len)
     );
 
-    let (buffer, writer) = RamBuffer::new(total_len);
+    // The load's own token becomes the buffer's, rather than a second one beside it: the
+    // next load reaches this download through the player's slot, a buffer swap reaches it
+    // through the buffer, and both arrive at the same token.
+    let (buffer, writer) =
+        RamBuffer::new(total_len, DownloadOwner::Playback, ctx.cancel_token.clone());
 
-    preload::start_download(
-        resp,
-        url.to_string(),
-        key.to_string(),
-        writer,
-        ctx.cancel_token.clone(),
-    );
+    preload::start_download(resp, url.to_string(), key.to_string(), writer);
 
     // Pre-buffer 64KB before handing to decoder
     const PRE_BUFFER_TARGET: u64 = 64 * 1024;
@@ -899,8 +901,22 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
             buffer.cancel();
             return;
         }
-        if buffer.written() >= PRE_BUFFER_TARGET {
-            break;
+        match buffer.head_status(PRE_BUFFER_TARGET) {
+            HeadStatus::Landed => break,
+            // Published all the same, and that is deliberate: the buffer carries the failure,
+            // `RamBuffer::read` hands it to the decode thread on the first read before any
+            // range check, and the listener gets a media error out of it. Refusing to publish
+            // would swallow the only report of the failure there is. Only the waiting was
+            // ever wrong here: only the waiting ends.
+            HeadStatus::Ended(_) => {
+                crate::vprintln!(
+                    "[LOAD #{load_gen}] download ended at {}KB/{}KB, publishing what landed",
+                    buffer.written() / 1024,
+                    PRE_BUFFER_TARGET / 1024
+                );
+                break;
+            }
+            HeadStatus::Filling => {}
         }
         let remaining = prebuf_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {

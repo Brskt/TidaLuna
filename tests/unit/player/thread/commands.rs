@@ -685,7 +685,7 @@ async fn stopping_the_decoder_retires_its_reader() {
     let mut h = harness(dir.path());
     // Held for the test: dropping the writer cancels the buffer, which would free the reader
     // for a different reason than the one under test.
-    let (buffer, _writer) = crate::player::buffer::RamBuffer::new(1024);
+    let (buffer, _writer) = crate::player::buffer::RamBuffer::new_for_test(1024);
     let cancel = Arc::new(AtomicBool::new(false));
     let mut reader = buffer.clone().with_reader_cancel(cancel.clone());
     h.player.current_buffer = Some(buffer);
@@ -710,7 +710,8 @@ async fn stopping_the_decoder_retires_its_reader() {
         outcome
             .expect_err("a retired reader reports instead of returning bytes")
             .kind(),
-        std::io::ErrorKind::Interrupted
+        std::io::ErrorKind::Other,
+        "never Interrupted: symphonia's read_buf_exact retries that kind forever"
     );
 }
 
