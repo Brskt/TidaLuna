@@ -220,11 +220,16 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             crate::vprintln!("[UPDATER] Auto-check set to {enabled}");
         }
         "updater.set_channel" => {
-            // save_update_channel normalizes anything but "dev" to "stable".
+            // save_update_channel normalizes anything but "dev" to "stable", and
+            // `from_setting` maps the same string the same way. The value handed to the
+            // updater is the one a later check will be compared against; the two
+            // normalizations have to agree.
             let channel = msg.arg(0).to_string();
-            crate::state::db().call_settings(move |conn| {
+            let now = crate::updater::UpdateChannel::from_setting(&channel);
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_update_channel(conn, &channel);
             });
+            crate::updater::channel_changed(now);
             crate::vprintln!("[UPDATER] Channel set to {}", msg.arg(0));
         }
         "settings.set_log_level" => {
