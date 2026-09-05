@@ -72,7 +72,7 @@ impl DbActor {
     ///
     /// Panics if called from the db-actor thread itself (re-entrancy would
     /// deadlock: the thread blocks waiting for its own response).
-    fn call<F, R>(&self, f: F) -> R
+    pub fn call<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut Connection, &mut Connection) -> R + Send + 'static,
         R: Send + 'static,
@@ -88,6 +88,49 @@ impl DbActor {
             }))
             .expect("db-actor thread is dead");
         resp_rx.recv().expect("db-actor thread is dead")
+    }
+
+    /// Queue a closure on the actor thread without waiting for its result.
+    ///
+    /// Submission order is execution order: one bounded channel feeds one thread. That is what a
+    /// caller on the CEF UI thread needs, where [`call`](DbActor::call) freezes rendering and
+    /// input for the whole round trip; a handler owing the renderer an answer invokes its IPC
+    /// callback from inside the closure. Bounded, so a caller that outruns the actor by 64
+    /// operations waits: dropping a write would lose it silently.
+    pub fn post<F>(&self, f: F)
+    where
+        F: FnOnce(&mut Connection, &mut Connection) + Send + 'static,
+    {
+        if self.tx.send(Box::new(f)).is_err() {
+            // Nothing awaits a post; this log is the only place the loss can surface.
+            crate::verr!("[DB]     Queued operation dropped: the db-actor thread is dead");
+        }
+    }
+
+    /// Block until every operation queued before this call has finished.
+    ///
+    /// The actor drains in order: a zero-capacity rendezvous queued behind them answers
+    /// only once they are done. Quit paths need it: [`post`](DbActor::post) lets the caller
+    /// move on before the write reaches disk, and process exit drops whatever is still queued.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from the db-actor thread itself, which would wait on its own reply.
+    pub fn flush(&self) {
+        assert!(
+            std::thread::current().id() != self.actor_thread_id,
+            "DbActor::flush() invoked from the db-actor thread - this would deadlock"
+        );
+        let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
+        if self
+            .tx
+            .send(Box::new(move |_, _| {
+                let _ = done_tx.send(());
+            }))
+            .is_ok()
+        {
+            let _ = done_rx.recv();
+        }
     }
 
     /// Execute a closure with the `plugins.db` connection.
@@ -108,3 +151,7 @@ impl DbActor {
         self.call(move |_, sc| f(sc))
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/db_tests.rs"]
+mod db_tests;

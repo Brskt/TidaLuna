@@ -141,7 +141,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         "settings.close_to_tray" => {
             crate::vprintln!("[TRAY]   IPC settings.close_to_tray received");
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_close_to_tray(conn, enabled);
             });
             if enabled {
@@ -154,7 +154,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                     state.close_to_tray = created;
                 });
                 if !created {
-                    crate::state::db().call_settings(|conn| {
+                    crate::state::db().post(|_, conn| {
                         crate::settings::save_close_to_tray(conn, false);
                     });
                     crate::app_state::eval_js(
@@ -175,7 +175,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         #[cfg(target_os = "windows")]
         "settings.volume_sync" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_volume_sync(conn, enabled);
             });
             crate::app_state::with_state(|state| {
@@ -188,7 +188,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             // Persist the ASIO toggle (the mode switch itself rides on `player.devices.set`;
             // this only saves the preference, re-seeded into the frontend on next boot).
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_asio(conn, enabled);
             });
             crate::vprintln!("[PLAYER] ASIO mode persisted: {enabled}");
@@ -198,7 +198,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             // Persist the exclusive-WASAPI toggle (the mode switch rides on
             // `player.devices.set`; this only saves the preference, re-seeded on next boot).
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_exclusive(conn, enabled);
             });
             crate::vprintln!("[PLAYER] Exclusive WASAPI mode persisted: {enabled}");
@@ -214,7 +214,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         }
         "updater.set_auto_check" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_update_auto_check(conn, enabled);
             });
             crate::vprintln!("[UPDATER] Auto-check set to {enabled}");
@@ -234,7 +234,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0)
                 .min(crate::logging::MAX_LOG_LEVEL as u64) as u8;
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_log_level(conn, level);
             });
             crate::logging::set_log_level(level);
@@ -248,7 +248,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         }
         "settings.set_console" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_console(conn, enabled);
             });
             crate::vprintln!("[LOGGING] Console window set to {enabled} (applies on restart)");
