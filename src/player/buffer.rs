@@ -27,6 +27,23 @@ struct Inner {
     ciphertext: Option<(tempfile::NamedTempFile, u64)>,
 }
 
+impl Inner {
+    /// The whole announced file, from offset zero, with no failure.
+    ///
+    /// Written once and shared by the three consumers below, because `finished` alone does not
+    /// answer this: `finish()` says the STREAM ended, not that the file arrived, and an HTTP/2
+    /// `RST_STREAM` with `NO_ERROR` mid-body or a reconnect answered `416` both end a short
+    /// transfer with no error set. Kept whole through that, a truncated track is indexed in the
+    /// disk cache as complete and served as valid. `>=` rather than `==`, a body longer than
+    /// announced being a different complaint that must never make a complete file look partial.
+    fn is_whole(&self) -> bool {
+        self.finished
+            && self.error.is_none()
+            && self.base_offset == 0
+            && self.data.len() as u64 >= self.total_len
+    }
+}
+
 /// Shared state between readers, writers, and the async download loop.
 struct SharedState {
     inner: Mutex<Inner>,
@@ -174,13 +191,9 @@ impl RamBuffer {
     pub fn is_reusable(&self) -> bool {
         let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         // A cancel outlives the download it stopped and there is no un-cancel: every later
-        // read reports Interrupted; a finished buffer that was cancelled reads no better
-        // than an empty one.
-        !inner.cancelled
-            && inner.finished
-            && inner.error.is_none()
-            && inner.base_offset == 0
-            && !inner.data.is_empty()
+        // read fails; a finished buffer that was cancelled reads no better than an empty
+        // one.
+        inner.is_whole() && !inner.cancelled && !inner.data.is_empty()
     }
 
     pub fn total_len(&self) -> u64 {
@@ -189,12 +202,11 @@ impl RamBuffer {
     }
 
     /// Take the ciphertext staging file the download parked at EOF. Gated on the same
-    /// completeness as `is_complete()`: a partial or Range-restarted download never
-    /// yields one. No size check; `CipherSink::finish` refuses an empty sink, and none
-    /// ever reaches the buffer.
+    /// completeness as `is_complete()`: a partial, short or Range-restarted download never
+    /// yields one; the caller cannot index as whole what arrived in part.
     pub fn take_ciphertext(&self) -> Option<(tempfile::NamedTempFile, u64)> {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.finished && inner.error.is_none() && inner.base_offset == 0 {
+        if inner.is_whole() {
             inner.ciphertext.take()
         } else {
             None
@@ -367,7 +379,7 @@ impl Read for RamBuffer {
                 if starved_cycles >= STALL_CYCLES {
                     // Only this reader is told. Setting `error` or `cancelled` would outlive the
                     // stall: three paths in `device.rs` respawn a decoder on this same buffer,
-                    // two of them without consulting `is_reusable()`, so a shared flag would turn
+                    // two of them without consulting `is_reusable()`; a shared flag would turn
                     // an ordinary device switch into a dead track. Leaving `Inner` untouched lets
                     // a later respawn read on normally if the writer was alive after all.
                     crate::verr!(
