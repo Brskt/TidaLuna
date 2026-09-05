@@ -163,7 +163,17 @@ fn lower_import(decl: &ImportDeclaration) -> String {
 
     let module =
         serde_json::to_string(decl.source.value.as_str()).unwrap_or_else(|_| "\"\"".to_string());
-    let modules_ref = format!("luna?.core?.modules?.[{module}]");
+    // `@luna/lib` resolves to a copy bound to THIS plugin, not the shared object. The lib's own
+    // `invoke` closes over the app bundle's scope; a shadow injected into the plugin's wrapper
+    // cannot reach it, which is why the channels that act on the caller's identity kept arriving
+    // with none, and why `registerNative` read its identity off an argument instead. This lowering
+    // is the one step that runs once per plugin with that plugin's capability in scope: the
+    // binding is made here rather than anywhere the lib itself could reach.
+    let modules_ref = if decl.source.value.as_str() == "@luna/lib" {
+        "luna?.core?.modules?.[\"__lunaLibFor\"]?.(__cap)".to_string()
+    } else {
+        format!("luna?.core?.modules?.[{module}]")
+    };
 
     let mut statements: Vec<String> = Vec::new();
     let mut named: Vec<String> = Vec::new();

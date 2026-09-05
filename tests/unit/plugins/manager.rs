@@ -37,6 +37,55 @@ fn random_nonce_decodes_le_bytes() {
     assert_eq!(n, Some(1));
 }
 
+/// What a `registerNative` claim is checked against. Keyed by url, because that is the unique
+/// half: two plugins may declare the same manifest name, and keyed by the name the second to load
+/// would take the entry and leave the first unable to register anything at all.
+#[test]
+fn the_name_a_url_declared_is_what_answers_for_it() {
+    let mut mgr = PluginManager::new();
+    mgr.mark_loading("https://a.invalid/a.mjs", "Shared", 1, "cap-a", 0);
+    mgr.mark_loading("https://b.invalid/b.mjs", "Shared", 2, "cap-b", 0);
+
+    assert_eq!(mgr.name_for_url("https://a.invalid/a.mjs"), Some("Shared"));
+    assert_eq!(mgr.name_for_url("https://b.invalid/b.mjs"), Some("Shared"));
+    assert_eq!(mgr.name_for_url("https://c.invalid/c.mjs"), None);
+
+    // Uninstalled, the url answers for nothing: a later claim on its name must not be served from
+    // a plugin that is gone.
+    mgr.forget_plugin("https://a.invalid/a.mjs");
+    assert_eq!(mgr.name_for_url("https://a.invalid/a.mjs"), None);
+    assert_eq!(mgr.name_for_url("https://b.invalid/b.mjs"), Some("Shared"));
+}
+
+/// Ending a session names the loads it drops in the same breath as dropping them. Listing
+/// and retiring as two steps reopens the window the bulk form exists to close: the caller
+/// hands the lock back between them, and a plugin registering in that gap is in neither the
+/// list the caller cleans up nor the retirement. The injection it is about to post
+/// outlives the session with nothing left naming it.
+#[test]
+fn retiring_every_load_names_exactly_what_it_dropped() {
+    let mut mgr = PluginManager::new();
+    let id_a = mgr.mark_loading("https://a.invalid/a.mjs", "A", 1, "cap-a", 0);
+    let id_b = mgr.mark_loading("https://b.invalid/b.mjs", "B", 2, "cap-b", 0);
+
+    let retired = mgr.retire_all_loaded();
+
+    assert!(
+        mgr.loaded_loads().is_empty(),
+        "a load left behind survives the epoch bump that follows, and nothing else names it"
+    );
+    // The pair, not the url alone: a cleanup carrying no load id reaches past the session it
+    // is ending into whatever load became current after it.
+    assert!(
+        retired.contains(&("https://a.invalid/a.mjs".to_string(), id_a)),
+        "the first load went unnamed, got {retired:?}"
+    );
+    assert!(
+        retired.contains(&("https://b.invalid/b.mjs".to_string(), id_b)),
+        "the second load went unnamed, got {retired:?}"
+    );
+}
+
 #[test]
 fn test_mark_loading_returns_unique_load_id() {
     let mut mgr = PluginManager::new();

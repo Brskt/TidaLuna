@@ -3,9 +3,21 @@ import { invokeIpc, sendIpc, onIpcEvent } from "../ipc";
 export function setupIpcBridge() {
     const ipcRenderer = {
         invoke: (channel: string, ...args: any[]) => {
-            // Native module registration - forward to Rust which proxies to Node.js
+            // This bridge is shared by the whole page and carries no plugin identity, and Rust now
+            // acts on the caller's for this channel: an unattributed call is refused there. Said
+            // here instead, the refusal names the route that was taken: a plugin arrives on this
+            // object only when its `@luna/lib` import was not lowered per-plugin, which means a
+            // hand-edited bundle or one built before that lowering existed. A generic 403 from
+            // Rust would leave that indistinguishable from an expired capability.
             if (channel === "__Luna.registerNative") {
-                return invokeIpc(channel, ...args);
+                return Promise.reject(
+                    Object.assign(
+                        new Error(
+                            "registerNative reached the shared IPC bridge, which holds no plugin identity; rebuild the plugin with the current toolchain",
+                        ),
+                        { code: 403, channel },
+                    ),
+                );
             }
             return invokeIpc(channel, ...args);
         },

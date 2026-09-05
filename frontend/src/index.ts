@@ -14,11 +14,11 @@ import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
 import { refusePlayback } from "./refuse-playback";
 import { initWindowControls } from "./ui/window-controls";
-import { invokeIpc, sendIpc, isLoginCallback, onIpcEvent } from "./ipc";
+import { invokeIpc, invokeIpcAs, sendIpc, sendIpcAs, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
 
 // @luna/core and @luna/lib - safe to import after bootstrap
-import { initCore, modules, LunaPlugin } from "../render/src";
+import { defineHostModule, initCore, modules, LunaPlugin } from "../render/src";
 import * as LunaCore from "../render/src";
 import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
@@ -346,6 +346,27 @@ const init = async () => {
     // writes and deletes it.
     defineHostModule("@luna/core", LunaCore);
     modules["@luna/lib"] = LunaLib;
+    // The per-plugin copy of the lib. `src/plugins/transpile.rs` lowers a plugin's `@luna/lib`
+    // import to a call on this, passing the capability that plugin's wrapper holds, so the calls
+    // acting on the caller's identity travel with one. The shared object above cannot: every
+    // plugin reaches it, and an identity in there would belong to whoever asked first.
+    //
+    // A snapshot rather than a proxy, `LunaLib`'s exports being fixed at build time. Only the
+    // identity-bearing pair is rebound: `on`/`once`/`onOpenUrl` register listeners, which no
+    // caller's identity decides.
+    //
+    // Pinned, because it is called with the CALLER's capability: a plugin that replaced this
+    // factory would be handed the identity of every plugin importing `@luna/lib` after it, and
+    // could act as any of them on `plugin.storage.*`, `plugin.fetch` and
+    // `__Luna.registerNative`. Installed before `jsrt.load_plugins`, when no plugin has run yet.
+    defineHostModule("__lunaLibFor", (cap: string) => ({
+        ...LunaLib,
+        ipcRenderer: {
+            ...LunaLib.ipcRenderer,
+            invoke: (channel: string, ...args: any[]) => invokeIpcAs(cap, channel, ...args),
+            send: (channel: string, ...args: any[]) => sendIpcAs(cap, channel, ...args),
+        },
+    }));
     modules["@inrixia/helpers"] = InrixiaHelpers;
     modules["@luna/lib.native"] = {
         ...LibNative,

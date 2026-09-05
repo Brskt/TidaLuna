@@ -135,6 +135,25 @@ fn every_iife_parameter_still_receives_an_argument() {
     assert_eq!(params, args, "parameters and arguments must stay in step");
 }
 
+/// The upstream build tool inlines `__ipcRenderer.invoke("__Luna.registerNative", ...)` into a
+/// plugin's own bundle, against the bare name. A shadow here is therefore the only thing that can
+/// make that call carry an identity, and now that Rust refuses the channel unattributed, its
+/// absence would refuse every native plugin instead of only the ones impersonating another.
+#[test]
+fn the_ipc_bridge_is_shadowed_and_carries_the_capability() {
+    let result = wrap_plugin_code("test", "", 0, 0, "CAP-TOKEN");
+    assert!(
+        result.contains("var __ipcRenderer = {"),
+        "the bare identifier the inlined call uses is not shadowed"
+    );
+    // The identity rides the envelope, taken from the closure parameter, the same way the fetch
+    // and storage shims above do it rather than by reaching for a global.
+    assert!(result.contains("cap: __cap"));
+    // Listener registration acts on no caller's identity and keeps forwarding; `on` still
+    // returns the unsubscribe the page's object hands back.
+    assert!(result.contains("window.__ipcRenderer"));
+}
+
 #[test]
 fn the_capability_is_escaped_like_the_plugin_id() {
     let result = wrap_plugin_code("test", "", 0, 0, "it's");

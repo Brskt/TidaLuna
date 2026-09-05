@@ -22,16 +22,22 @@ const sharedListeners: Record<string, Array<(...args: any[]) => void>> =
 // runs before any plugin, since it is what asks Rust to load them.
 const cefQuery = window.cefQuery;
 
-// Unattributed on purpose: `@luna/lib` imports these, and plugin code reaches the lib through
-// `window.luna.lib`; a capability here would be handed to whoever asked. Attributed calls are
-// built in the per-plugin wrapper (`src/plugins/wrapper.rs`), the only scope holding one.
-export const sendIpc = (channel: string, ...args: any[]) => {
+// The capability is a PARAMETER here, never a value this module captures: plugin code reaches this
+// scope through `window.luna.lib`; one stored here would be readable by whoever asked. Passing it
+// in means only a caller that already holds one can send an attributed call, and the scopes that
+// hold one are the per-plugin wrapper (`src/plugins/wrapper.rs`) and the per-plugin `@luna/lib` copy
+// bound by `src/plugins/transpile.rs`.
+export const sendIpcAs = (cap: string | undefined, channel: string, ...args: any[]) => {
     cefQuery({
-        request: JSON.stringify({ channel, args }),
+        // An absent `cap` is dropped by JSON.stringify, which is what leaves an unattributed call
+        // shaped exactly as it was before there were attributed ones.
+        request: JSON.stringify({ channel, args, cap }),
         onSuccess: () => {},
         onFailure: (code: number, msg: string) => console.error("[IPC] FAIL:", channel, code, msg),
     });
 };
+
+export const sendIpc = (channel: string, ...args: any[]) => sendIpcAs(undefined, channel, ...args);
 
 // Diagnostic `player.dbg` IPC, gated on the Rust log level mirrored into
 // `window.__TIDALUNAR_LOG_LEVEL__` (>= 2 matches vprintln2!). Below that the message
@@ -42,11 +48,11 @@ export const sendDbgIpc = (...args: any[]) => {
 
 let invokeCounter = 0;
 
-export const invokeIpc = (channel: string, ...args: any[]): Promise<any> => {
+export const invokeIpcAs = (cap: string | undefined, channel: string, ...args: any[]): Promise<any> => {
     return new Promise((resolve, reject) => {
         const id = `${++invokeCounter}`;
         cefQuery({
-            request: JSON.stringify({ channel, args, id }),
+            request: JSON.stringify({ channel, args, id, cap }),
             onSuccess: (response: string) => {
                 try {
                     resolve(JSON.parse(response));
@@ -60,6 +66,9 @@ export const invokeIpc = (channel: string, ...args: any[]): Promise<any> => {
         });
     });
 };
+
+export const invokeIpc = (channel: string, ...args: any[]): Promise<any> =>
+    invokeIpcAs(undefined, channel, ...args);
 
 export const onIpcEvent = (channel: string, callback: (...args: any[]) => void): (() => void) => {
     if (!sharedListeners[channel]) sharedListeners[channel] = [];
