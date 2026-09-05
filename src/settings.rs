@@ -247,10 +247,24 @@ pub(crate) fn load_crossfade_enabled(conn: &mut Connection) -> bool {
     get_bool(conn, "player.crossfade_enabled", false)
 }
 
+pub(crate) fn save_crossfade_enabled(conn: &mut Connection, enabled: bool) {
+    set(conn, "player.crossfade_enabled", &enabled.to_string());
+}
+
 /// Crossfade overlap in seconds. Clamped on read as well as on write: a value
 /// edited into the database by hand must not reach the audio path out of range.
 pub(crate) fn load_crossfade_secs(conn: &mut Connection) -> u8 {
     get_u8(conn, "player.crossfade_secs", 0).min(crate::player::crossfade::MAX_CROSSFADE_SECS)
+}
+
+pub(crate) fn save_crossfade_secs(conn: &mut Connection, secs: u8) {
+    set(
+        conn,
+        "player.crossfade_secs",
+        &secs
+            .min(crate::player::crossfade::MAX_CROSSFADE_SECS)
+            .to_string(),
+    );
 }
 
 pub(crate) fn load_console(conn: &mut Connection) -> bool {
@@ -325,3 +339,7 @@ pub(crate) fn save_update_skip_version(conn: &mut Connection, version: &str) {
 #[cfg(test)]
 #[path = "../tests/unit/settings/logging_settings_tests.rs"]
 mod logging_settings_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/settings/crossfade_settings_tests.rs"]
+mod crossfade_settings_tests;

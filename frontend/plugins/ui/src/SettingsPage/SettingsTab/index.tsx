@@ -6,6 +6,7 @@ import { LunaSettings } from "../../components";
 import { LunaPlugin } from "@luna/core";
 import { LunaPluginSettings } from "../PluginsTab/LunaPluginSettings";
 import { LunaConnectSettings } from "./LunaConnectSettings";
+import { LunaCrossfadeSettings } from "./LunaCrossfadeSettings";
 import { LunaFeatureFlags } from "./LunaFeatureFlags";
 import { LunaLoggingSettings } from "./LunaLoggingSettings";
 import { LunaSettingsTransfer } from "./LunaSettingsTransfer";
@@ -25,6 +26,7 @@ export const SettingsTab = React.memo(() => {
 			<LunaUpdateSettings />
 			<LunaConnectSettings />
 			<LunaVolumeSyncSettings />
+			<LunaCrossfadeSettings />
 			<LunaSettingsTransfer />
 			<LunaFeatureFlags />
 			<LunaLoggingSettings />

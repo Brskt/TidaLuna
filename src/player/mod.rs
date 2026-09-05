@@ -476,6 +476,10 @@ enum PlayerCommand {
     EmitMaxConnections,
     #[cfg(target_os = "windows")]
     SetVolumeSync(bool),
+    /// Crossfade overlap in seconds, zero for off. The switch and the slider
+    /// collapse into one number here: every downstream check already reads zero
+    /// as "no fade".
+    SetCrossfadeSecs(u8),
 }
 
 pub struct Player {
@@ -1602,6 +1606,10 @@ impl Player {
     #[cfg(target_os = "windows")]
     pub fn set_volume_sync(&self, enabled: bool) -> anyhow::Result<()> {
         self.send_cmd(PlayerCommand::SetVolumeSync(enabled))
+    }
+
+    pub fn set_crossfade_secs(&self, secs: u8) -> anyhow::Result<()> {
+        self.send_cmd(PlayerCommand::SetCrossfadeSecs(secs))
     }
 
     pub fn get_audio_devices(&self, req_id: Option<String>) -> anyhow::Result<()> {

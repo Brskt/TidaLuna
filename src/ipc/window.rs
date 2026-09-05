@@ -253,6 +253,41 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             });
             crate::vprintln!("[LOGGING] Console window set to {enabled} (applies on restart)");
         }
+        // Not Windows-gated: crossfade rides the shared cpal path, which every
+        // platform uses. The exclusive and ASIO backends ignore it.
+        // One channel carrying BOTH values, because what the player needs is a
+        // function of the two: zero seconds when the switch is off. Separate
+        // channels could not compute it without reading back whichever value did
+        // not just change.
+        "settings.set_crossfade" => {
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
+            // The contract is whole seconds, 0 to 12, and the UI refuses anything
+            // else. This is the last line, not the enforcement: read as f64 because
+            // `as_u64` is syntactic and rejects 6.0 as readily as 6.5, whose
+            // fallback would store "off" while the UI still showed a duration.
+            // Rounding an out-of-contract value beats silently disabling the
+            // feature.
+            let secs = msg
+                .args
+                .get(1)
+                .and_then(|v| v.as_f64())
+                .filter(|s| s.is_finite() && *s >= 0.0)
+                .map(|s| {
+                    s.round()
+                        .min(crate::player::crossfade::MAX_CROSSFADE_SECS as f64)
+                        as u8
+                })
+                .unwrap_or(0);
+            crate::state::db().post(move |_, conn| {
+                crate::settings::save_crossfade_enabled(conn, enabled);
+                crate::settings::save_crossfade_secs(conn, secs);
+            });
+            let effective = if enabled { secs } else { 0 };
+            crate::app_state::with_state(|state| {
+                let _ = state.player.set_crossfade_secs(effective);
+            });
+            crate::vprintln!("[PLAYER] Crossfade {enabled}, {secs}s (effective {effective}s)");
+        }
         "settings.open_logs_dir" => {
             let dir = crate::state::cache_data_dir().join("logs");
             let _ = std::fs::create_dir_all(&dir);
