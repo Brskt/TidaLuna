@@ -34,11 +34,17 @@ export const interceptActionResp = async <RESAT extends ActionType, REJAT extend
 	const rejTimeout = new Promise<never>((_, rej) =>
 		safeTimeout(_unloads, () => rej(`[interceptActionResp.TIMEOUT] ${JSON.stringify([resActionTypes, rejActionTypes])}`), timeoutMs),
 	);
-	// We dont worry about removing from _unloads as all unloads here are idempotent
+	// Handed to the caller's set for a plugin unloading mid-flight to reach them. Calling
+	// one twice is harmless (every unload here is idempotent), but the caller's set is the
+	// plugin's own and is drained once, at teardown; they are withdrawn when the race ends
+	// rather than kept for the rest of the session.
 	if (unloads !== null) {
 		for (const unload of _unloads) unloads.add(unload);
 	}
-	const promise = Promise.race([...resPromises, ...rejPromises, rejTimeout]).finally(() => unloadSet(_unloads));
+	const promise = Promise.race([...resPromises, ...rejPromises, rejTimeout]).finally(() => {
+		if (unloads !== null) for (const unload of _unloads) unloads.delete(unload);
+		return unloadSet(_unloads);
+	});
 	// Queue our action to the eventLoop
 	setTimeout(trigger);
 	return promise as Promise<RES>;
