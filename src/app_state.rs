@@ -179,8 +179,18 @@ impl AppState {
     }
 }
 
-// SAFETY: holds non-Send CEF/OS handles (Browser, OsMediaControls, ThumbBar);
-// Send is sound only because these are touched solely on the CEF UI thread.
+// SAFETY: `thumbbar` (Windows only) holds raw `ITaskbarList3` pointers and a
+// `Cell`, and it is the sole field that is not already `Send`. Sound because the
+// taskbar object is created and used solely on the CEF UI thread. Gated to
+// Windows on purpose: elsewhere the auto-impl carries `AppState`, and a field that
+// stops being `Send` fails the build rather than being absorbed here.
+//
+// Nothing else here constrains threading: `browser` is a `RefGuard`, souvlaki's
+// `MediaControls` wraps agile WinRT objects or a channel and a `JoinHandle`, and
+// `BrowserSideCallback` is declared `Send + Sync`. Work that only calls `eval_js` or answers
+// an IPC callback may therefore run off the UI thread, `Frame::execute_java_script` reposting
+// itself onto it.
+#[cfg(target_os = "windows")]
 unsafe impl Send for AppState {}
 
 pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
