@@ -15,6 +15,7 @@ import { currentSettingsTab, LunaPage } from "./SettingsPage";
 import { storeUrls } from "./SettingsPage/PluginStoreTab";
 import { fetchReleases } from "./SettingsPage/SettingsTab/LunaClientUpdate";
 import { UpdateToast } from "./components/UpdateToast";
+import { wireUpdater } from "./updater/store";
 
 import { setupDeviceDialogToggles } from "./DeviceDialogToggles";
 
@@ -71,7 +72,11 @@ ipcRenderer.onOpenUrl(unloads, (reqUrl) => {
 	if (url.pathname.startsWith("//settings")) settingsPage.open();
 });
 
-// Mount update toast (always visible, listens for updater.available IPC)
+// One attachment to the backend's updater events for every surface that shows them: the
+// toast here and the settings tab, which mount and unmount independently.
+wireUpdater(unloads);
+
+// Mount update toast (always visible, driven by the shared updater state)
 const toastRoot = document.createElement("div");
 toastRoot.id = "luna-update-toast";
 document.body.appendChild(toastRoot);
@@ -80,7 +85,7 @@ const toastReactRoot = createRoot(toastRoot);
 unloads.add(() => toastReactRoot.unmount());
 toastReactRoot.render(
 	<ThemeProvider theme={lunaMuiTheme}>
-		<UpdateToast unloads={unloads} />
+		<UpdateToast />
 	</ThemeProvider>,
 );
 

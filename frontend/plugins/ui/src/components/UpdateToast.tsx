@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useState } from "react";
 
 import { ipcRenderer } from "@luna/lib";
-import type { LunaUnloads } from "@luna/core";
-import type { UpdateInfo, UpdaterPhase } from "../types/updater";
+import { dismissKey, eventForDownloadFailure, eventForDownloadReply } from "../updater/state";
+import { pushUpdaterEvent, useUpdaterState } from "../updater/store";
 
 function formatSize(bytes: number): string {
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -64,61 +64,28 @@ const btnBase: React.CSSProperties = {
 	padding: "7px 14px",
 };
 
-export const UpdateToast: React.FC<{ unloads: LunaUnloads }> = ({ unloads }) => {
-	const [info, setInfo] = useState<UpdateInfo | null>(null);
-	const [phase, setPhase] = useState<UpdaterPhase>("available");
-	const [errorMsg, setErrorMsg] = useState<string>("");
-	const infoRef = useRef<UpdateInfo | null>(null);
-
-	useEffect(() => {
-		infoRef.current = info;
-	}, [info]);
-
-	useEffect(() => {
-		ipcRenderer.invoke("updater.status").then((status: any) => {
-			if (status?.state === "Ready" && status?.version) {
-				setInfo({ version: status.version, download_size: 0 });
-				setPhase("ready");
-			} else if (status?.last_info) {
-				setInfo(status.last_info);
-				setPhase("available");
-			}
-		}).catch(() => {});
-	}, []);
-
-	useEffect(() => {
-		const unsubAvail = ipcRenderer.on(unloads, "updater.available", (data: UpdateInfo) => {
-			setInfo(data);
-			setPhase("available");
-		});
-		const unsubReady = ipcRenderer.on(unloads, "updater.ready", (version: string) => {
-			if (!infoRef.current) {
-				setInfo({ version, download_size: 0 });
-			}
-			setPhase("ready");
-		});
-		const unsubError = ipcRenderer.on(unloads, "updater.error", (msg: string) => {
-			setErrorMsg(msg);
-			setPhase("error");
-		});
-		const unsubCancel = ipcRenderer.on(unloads, "updater.cancelled", () => {
-			setPhase("available");
-		});
-		return () => {
-			unsubAvail?.();
-			unsubReady?.();
-			unsubError?.();
-			unsubCancel?.();
-		};
-	}, [unloads]);
+export const UpdateToast: React.FC = () => {
+	const state = useUpdaterState();
+	const { info, phase, errorMsg } = state;
+	// Dismissal is this surface's own business, not the backend's: the settings page shows
+	// the same update and must not lose it because the toast was closed. Keyed by `dismissKey`
+	// rather than by the version alone: the next release raises the toast again while a
+	// re-announced one stays down, and a failure that never had an offer still has something to
+	// be put down by.
+	const [dismissed, setDismissed] = useState<string | null>(null);
 
 	const handleDownload = useCallback(async () => {
 		if (!info) return;
-		setPhase("downloading");
+		// The one phase the backend never announces. The renderer records it, and records
+		// it where every surface reads it, not where only this one does.
+		pushUpdaterEvent({ kind: "downloading" });
 		try {
-			await ipcRenderer.invoke("updater.download", info.version);
-		} catch {
-			// Error will come via updater.error event
+			const reply = await ipcRenderer.invoke("updater.download", info.version);
+			const event = eventForDownloadReply(reply, info.version);
+			if (event) pushUpdaterEvent(event);
+		} catch (err) {
+			const event = eventForDownloadFailure(err);
+			if (event) pushUpdaterEvent(event);
 		}
 	}, [info]);
 
@@ -126,21 +93,33 @@ export const UpdateToast: React.FC<{ unloads: LunaUnloads }> = ({ unloads }) => 
 		ipcRenderer.send("updater.cancel");
 	}, []);
 
+	// The toast stays up. Dismissing here read as though the restart had already happened,
+	// but this is a request, and the app is still running until the updater child actually
+	// starts. When it does not, `updater.error` arrives to a component that has rendered
+	// nothing since the click, and the user is left with an update that silently never
+	// applied. Dismissal belongs to Skip and Close, which the user chooses.
+	//
+	// The phase is left to the backend's `updater.applying`, which it emits whether it claims
+	// this apply or refuses it as one already in flight. Painting it optimistically here is
+	// what hid that refusal from the surface that asked for it.
 	const handleRestart = useCallback(() => {
 		if (info) ipcRenderer.send("updater.apply", info.version);
-		setInfo(null);
 	}, [info]);
 
 	const handleSkip = useCallback(() => {
 		if (info) ipcRenderer.send("updater.dismiss", info.version);
-		setInfo(null);
-	}, [info]);
+		setDismissed(dismissKey(state));
+	}, [info, state]);
 
 	const handleClose = useCallback(() => {
-		setInfo(null);
-	}, []);
+		setDismissed(dismissKey(state));
+	}, [state]);
 
-	if (!info) return null;
+	// Silent only when the record holds nothing at all. Keying this on the offer instead is
+	// what took the toast down for the length of a download whose version the renderer had
+	// not learned, and the only Cancel control went down with it.
+	if (phase === "idle") return null;
+	if (dismissKey(state) === dismissed) return null;
 
 	return (
 		<div style={containerStyle}>
@@ -151,7 +130,11 @@ export const UpdateToast: React.FC<{ unloads: LunaUnloads }> = ({ unloads }) => 
 						<polyline points="7 10 12 15 17 10" />
 						<line x1="12" y1="15" x2="12" y2="3" />
 					</svg>
-					{phase === "ready" ? "Ready to restart" : `TidaLunar v${info.version} available`}
+					{phase === "ready" || phase === "applying"
+						? "Ready to restart"
+						: info
+							? `TidaLunar v${info.version} available`
+							: "Update failed"}
 				</div>
 				<button
 					onClick={handleClose}
@@ -161,10 +144,11 @@ export const UpdateToast: React.FC<{ unloads: LunaUnloads }> = ({ unloads }) => 
 				</button>
 			</div>
 			<div style={subtitleStyle}>
-				{phase === "available" && `Download size: ${formatSize(info.download_size)}`}
+				{phase === "available" && info && `Download size: ${formatSize(info.download_size)}`}
 				{phase === "downloading" && "Downloading update..."}
 				{phase === "ready" && "Update downloaded and ready to install."}
-				{phase === "error" && (errorMsg || "Download failed")}
+				{phase === "applying" && "Applying update..."}
+				{phase === "error" && errorMsg}
 			</div>
 			<div style={btnRowStyle}>
 				{phase === "available" && (
@@ -187,7 +171,12 @@ export const UpdateToast: React.FC<{ unloads: LunaUnloads }> = ({ unloads }) => 
 						Apply &amp; Restart
 					</button>
 				)}
-				{phase === "error" && (
+				{phase === "applying" && (
+					<button disabled style={{ ...btnBase, background: "#333", cursor: "default" }}>
+						Restarting...
+					</button>
+				)}
+				{phase === "error" && info && (
 					<button onClick={handleDownload} style={{ ...btnBase, background: "#eb1e32" }}>
 						Retry
 					</button>
