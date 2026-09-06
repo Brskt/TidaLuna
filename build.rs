@@ -1,8 +1,39 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const BUN_MISSING: &str = "bun not found - install it from https://bun.sh, or set TIDALUNAR_BUN \
+                           to its full path. An IDE that spawns cargo sources no shell rc file: \
+                           the PATH entry bun's installer writes there is invisible to this build.";
+
+/// Where `bun` lives, in the order it is commonly installed.
+///
+/// PATH alone misses the commonest case: bun's installer exports the directory
+/// from a shell rc file, which an IDE spawning cargo directly never reads.
+/// `$BUN_INSTALL/bin`, defaulting to `~/.bun/bin`, is bun's own documented home.
+fn resolve_bun() -> Option<PathBuf> {
+    if let Some(explicit) = env::var_os("TIDALUNAR_BUN")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        return Some(explicit);
+    }
+    if Command::new("bun").arg("--version").output().is_ok() {
+        return Some(PathBuf::from("bun"));
+    }
+    let root = env::var_os("BUN_INSTALL").map(PathBuf::from).or_else(|| {
+        env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(|home| Path::new(&home).join(".bun"))
+    })?;
+    let candidate = root
+        .join("bin")
+        .join(if cfg!(windows) { "bun.exe" } else { "bun" });
+    candidate.is_file().then_some(candidate)
+}
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=TIDALUNAR_BUN");
+    println!("cargo:rerun-if-env-changed=BUN_INSTALL");
     println!("cargo:rerun-if-changed=frontend/src");
     println!("cargo:rerun-if-changed=frontend/package.json");
     println!("cargo:rerun-if-changed=frontend/plugins");
@@ -18,7 +49,7 @@ fn main() {
     // Skip bun install if node_modules exists (avoids Bun segfault on Windows via 9P)
     let node_modules = frontend_dir.join("node_modules");
     if !node_modules.exists() {
-        let status = Command::new("bun")
+        let status = Command::new(resolve_bun().expect(BUN_MISSING))
             .args(["install"])
             .current_dir(frontend_dir)
             .status()
@@ -33,7 +64,7 @@ fn main() {
     if cfg!(target_os = "windows") && bundle_path.exists() {
         eprintln!("Windows: skipping bun scripts (using pre-built outputs)");
     } else {
-        let status = Command::new("bun")
+        let status = Command::new(resolve_bun().expect(BUN_MISSING))
             .args(["esbuild.config.ts"])
             .current_dir(frontend_dir)
             .status()
