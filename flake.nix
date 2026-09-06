@@ -41,6 +41,8 @@
         }
       );
 
-      formatter = forAllSystems (system: (pkgsFor system).nixfmt);
+      # The tree wrapper, not bare nixfmt: `nix fmt` passes no arguments, and
+      # nixfmt then fails on an empty stdin.
+      formatter = forAllSystems (system: (pkgsFor system).nixfmt-tree);
     };
 }
