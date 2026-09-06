@@ -739,7 +739,7 @@ jobs:
       # builds then self-identify correctly. cargo set-version updates Cargo.toml and
       # the lockfile coherently; [skip ci] avoids a run whose only diff is the
       # bump.
-      - name: Bump Cargo.toml to the released version
+      - name: Bump the repo and the Nix package to the released version
         if: needs.version.outputs.kind == 'promote'
         env:
           VERSION: ${{ needs.version.outputs.version }}
@@ -747,6 +747,19 @@ jobs:
           git fetch origin lunar-cef
           git checkout lunar-cef
           cargo set-version --package tidalunar "$VERSION"
+          # nix/package.nix names a version only once its tarball exists. The
+          # hashes come from release-assets/, which the checkout leaves alone.
+          sed -i "s|^  version = \".*\";|  version = \"$VERSION\";|" nix/package.nix
+          grep -Fq "version = \"$VERSION\";" nix/package.nix
+          for pair in x86_64-linux:amd64 aarch64-linux:arm64; do
+            tarball="release-assets/tidalunar_${VERSION}_linux_${pair#*:}.tar.gz"
+            [ -f "$tarball" ] || { echo "::error::missing $tarball"; exit 1; }
+            sri="sha256-$(openssl dgst -sha256 -binary "$tarball" | base64 -w0)"
+            # Addressed to the arch's own block: the two hashes cannot swap.
+            sed -i "/\"${pair%:*}\" = {/,/};/ s|hash = \"sha256-[^\"]*\";|hash = \"$sri\";|" nix/package.nix
+            # Matched whole, since a truncated `sha256-` would be a prefix of any hash.
+            grep -Fq "hash = \"$sri\";" nix/package.nix
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "Bump version to $VERSION [skip ci]"
