@@ -468,13 +468,31 @@ jobs:
   # ---------------------------------------------------------------------------
 
   nix-check:
-    runs-on: ubuntu-latest
+    # One runner per system: `nix flake check` omits whatever the machine cannot
+    # build, leaving aarch64-linux unverified under a lone Linux runner, the
+    # arm64 release hash with it. The darwin pair idles until `systems` names it.
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest # x86_64-linux
+          - ubuntu-24.04-arm # aarch64-linux
+          - macos-latest # aarch64-darwin
+          - macos-26-intel # x86_64-darwin
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      # One runner is enough: formatting does not depend on the platform.
+      - name: Formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          nix fmt
+          git diff --exit-code
 
       # Validates the flake (eval all outputs, build the currently-pinned
       # release package + devShell). Guards against nixpkgs drift / flake typos;
