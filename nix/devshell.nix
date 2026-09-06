@@ -1,4 +1,6 @@
 {
+  lib,
+  stdenv,
   mkShell,
   rustc,
   cargo,
@@ -27,7 +29,8 @@ mkShell {
     ninja
     pkg-config
   ];
-  buildInputs = [
+  # alsa-lib does not exist for darwin at all; the rest are equally Linux-only.
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
     alsa-lib
     dbus
     libxkbcommon

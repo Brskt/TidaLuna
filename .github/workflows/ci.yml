@@ -468,37 +468,49 @@ jobs:
   # ---------------------------------------------------------------------------
 
   nix-check:
-    # One runner per system: `nix flake check` omits whatever the machine cannot
-    # build, leaving aarch64-linux unverified under a lone Linux runner, the
-    # arm64 release hash with it. The darwin pair idles until `systems` names it.
+    # One leg per system the flake declares. Intel macOS rides an Apple Silicon
+    # runner: Determinate stopped installing Nix on Intel hosts, and the daemon
+    # builds x86_64-darwin through Rosetta 2 instead.
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest # x86_64-linux
-          - ubuntu-24.04-arm # aarch64-linux
-          - macos-latest # aarch64-darwin
-          - macos-26-intel # x86_64-darwin
-    runs-on: ${{ matrix.os }}
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-latest
+          - system: x86_64-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          # extra-platforms is a daemon setting, set at install rather than patched in after.
+          extra-conf: ${{ matrix.system == 'x86_64-darwin' && 'extra-platforms = x86_64-darwin' || '' }}
+
+      # Present on GitHub's arm64 images, promised by no published manifest.
+      - name: Rosetta
+        if: matrix.system == 'x86_64-darwin'
+        run: arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
 
       # One runner is enough: formatting does not depend on the platform.
       - name: Formatting
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.system == 'x86_64-linux'
         run: |
           nix fmt
           git diff --exit-code
 
       # Validates the flake (eval all outputs, build the currently-pinned
-      # release package + devShell). Guards against nixpkgs drift / flake typos;
-      # it checks the last released version, not the one being released.
+      # release package + devShell). `nix flake check` checks exactly the system
+      # named by `system`; without the flag every leg would check the runner's own.
       - name: Flake check
-        run: nix flake check -L
+        run: nix flake check -L --option system ${{ matrix.system }}
 
   # ---------------------------------------------------------------------------
   # Check
