@@ -40,7 +40,7 @@ impl TokenGeneration {
     /// expiry handed to the web SDK is a milliseconds one: its OAuth parser
     /// stores `Date.now() + expires_in * 1000`, and its freshness check compares
     /// against `Date.now() + 60000`. Seconds are smaller by a factor of a
-    /// thousand, so a token passed in them reads as long expired however much
+    /// thousand: a token passed in them reads as long expired however much
     /// life it has left. Both paths that reach the SDK come through here, which
     /// is the point: they used to disagree.
     pub(crate) fn access_expires_ms(&self) -> u64 {
@@ -61,11 +61,6 @@ pub(crate) enum StoreError {
     Corrupt,
 }
 
-pub(crate) fn save(data_dir: &Path, state: &StoredTokenState) -> Result<(), StoreError> {
-    let json = serde_json::to_vec(state).map_err(|_| StoreError::Corrupt)?;
-    save_platform(data_dir, &json)
-}
-
 pub(crate) fn load(data_dir: &Path) -> Result<Option<StoredTokenState>, StoreError> {
     let Some(json) = load_platform(data_dir)? else {
         return Ok(None);
@@ -75,8 +70,91 @@ pub(crate) fn load(data_dir: &Path) -> Result<Option<StoredTokenState>, StoreErr
         .map_err(|_| StoreError::Corrupt)
 }
 
-pub(crate) fn delete(data_dir: &Path) -> Result<(), StoreError> {
-    delete_platform(data_dir)
+/// What the writer thread replays onto the backing store, in the order it was queued.
+enum StoreOp {
+    Save(Vec<u8>),
+    Delete,
+    /// A rendezvous queued behind the pending writes: whoever sent it learns they have all
+    /// reached the disk. Same shape as `DbActor::flush`, for the same reason.
+    Flush(std::sync::mpsc::SyncSender<()>),
+}
+
+static STORE_WRITER: std::sync::OnceLock<std::sync::mpsc::SyncSender<StoreOp>> =
+    std::sync::OnceLock::new();
+
+/// The one thread allowed to touch the credential store, started on first use.
+///
+/// `data_dir` is fixed for the process: capturing the first caller's copy is safe.
+fn store_writer(data_dir: &Path) -> &'static std::sync::mpsc::SyncSender<StoreOp> {
+    STORE_WRITER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StoreOp>(16);
+        let dir = data_dir.to_owned();
+        std::thread::Builder::new()
+            .name("secure-store".into())
+            .spawn(move || {
+                while let Ok(op) = rx.recv() {
+                    let outcome = match op {
+                        StoreOp::Save(json) => save_platform(&dir, &json),
+                        StoreOp::Delete => delete_platform(&dir),
+                        StoreOp::Flush(done) => {
+                            let _ = done.send(());
+                            continue;
+                        }
+                    };
+                    if let Err(e) = outcome {
+                        // Ungated: nothing awaits a queued write, and this is the only place
+                        // its failure can surface.
+                        crate::verr!("[AUTH]   Credential store write failed: {e:?}");
+                    }
+                }
+            })
+            .expect("failed to spawn secure-store thread");
+        tx
+    })
+}
+
+/// Queue a credential write rather than performing it here.
+///
+/// Three writers race for this store: CEF's IO thread through the token filter, and two tokio
+/// tasks. What used to order them was the `AppState` mutex held across the write itself, making
+/// a process-wide lock span an fsync. Callers now mint their generation and queue it under that
+/// same lock, and one thread replays mint order onto the disk with the lock long released.
+/// [`delete_queued`] shares the channel on purpose: a logout that erased the store while an
+/// older save sat queued would put the credential back after the user left.
+pub(crate) fn save_queued(data_dir: &Path, state: &StoredTokenState) {
+    let json = match serde_json::to_vec(state) {
+        Ok(json) => json,
+        Err(e) => {
+            crate::verr!("[AUTH]   Credential state could not be encoded, not saved: {e}");
+            return;
+        }
+    };
+    if store_writer(data_dir).send(StoreOp::Save(json)).is_err() {
+        crate::verr!("[AUTH]   Credential save dropped: the secure-store thread is dead");
+    }
+}
+
+/// Queue a credential erase. Ordered against [`save_queued`]; see its note.
+pub(crate) fn delete_queued(data_dir: &Path) {
+    if store_writer(data_dir).send(StoreOp::Delete).is_err() {
+        crate::verr!("[AUTH]   Credential erase dropped: the secure-store thread is dead");
+    }
+}
+
+/// Wait until every write queued so far has reached the disk.
+///
+/// The writes are queued, the thread performing them is detached, and process exit waits for
+/// neither: a login or logout followed by a quick quit loses its write. A lost save costs a
+/// re-login; a lost erase is worse, the next launch restoring the session the user just left.
+/// Does nothing if no write was ever queued, the writer thread starting on first use.
+pub(crate) fn flush() {
+    let Some(tx) = STORE_WRITER.get() else {
+        return;
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    if tx.send(StoreOp::Flush(done_tx)).is_ok() {
+        let _ = done_rx.recv();
+    }
 }
 
 // --- Windows: DPAPI ---

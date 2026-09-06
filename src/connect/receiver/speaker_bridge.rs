@@ -20,6 +20,19 @@ pub(crate) enum BridgeEvent {
         has_next_media: bool,
         engine_gen: u64,
     },
+    /// A local crossfade finished and the next track is already playing, seconds in. It reads
+    /// like a completion and is the opposite of one: a completion asks the controller to
+    /// prepare what comes next, where this one reports something it must not prepare again.
+    /// Routed as a completion, the reload it triggers is audible: the track that just faded
+    /// in stops and restarts from zero.
+    ///
+    /// Carries the track promoted, for the same reason `DurationMeasured` carries one: without
+    /// it the receiver has to infer what moved from its own queue index, and the length the
+    /// player measures in the same breath has nothing to be judged against.
+    CrossfadeTransitioned {
+        track_id: Option<String>,
+        engine_gen: u64,
+    },
     PlaybackError {
         status_code: String,
         engine_gen: u64,
@@ -90,7 +103,13 @@ impl SpeakerBridge {
             // frontend's: the receiver's metadata task records this same id.
             let media_id = media_info.track_id();
             return with_state(|state| {
-                match state.player.load_dash(url, segments, format, media_id) {
+                match state.player.load_dash(
+                    url,
+                    segments,
+                    format,
+                    media_id,
+                    crate::player::LoadOrigin::Connect,
+                ) {
                     Ok(()) => true,
                     Err(e) => {
                         crate::verr!("[connect::bridge] Player DASH load error: {}", e);
@@ -111,15 +130,21 @@ impl SpeakerBridge {
             .to_string();
 
         let media_id = media_info.track_id();
-        with_state(
-            |state| match state.player.load_and_play(url, format, key, media_id) {
+        with_state(|state| {
+            match state.player.load_and_play(
+                url,
+                format,
+                key,
+                media_id,
+                crate::player::LoadOrigin::Connect,
+            ) {
                 Ok(()) => true,
                 Err(e) => {
                     crate::verr!("[connect::bridge] Player load error: {}", e);
                     false
                 }
-            },
-        )
+            }
+        })
         .unwrap_or(false)
     }
 
@@ -146,7 +171,12 @@ impl SpeakerBridge {
     }
 
     pub fn stop(&self) {
-        with_state(|state| Self::send_transport("stop", state.player.stop()));
+        with_state(|state| {
+            Self::send_transport(
+                "stop",
+                state.player.stop(crate::player::LoadOrigin::Connect),
+            )
+        });
     }
 
     /// Seek to position in milliseconds.

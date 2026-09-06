@@ -244,7 +244,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     // 5. Platform-specific bundling
     let bin_dir = bundle_dir.join("bin");
     if cfg!(target_os = "macos") {
-        bundle_macos(EXE_NAME, &target_dir, &cef_dir, &bundle_dir)?;
+        bundle_macos(EXE_NAME, project_root, &target_dir, &cef_dir, &bundle_dir)?;
     } else {
         // Linux/Windows: structured layout
         // Root: exe + updater + manifest
@@ -589,10 +589,11 @@ fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
 ///         tidalunar Helper (Renderer).app/
 ///         tidalunar Helper (Plugin).app/
 ///         tidalunar Helper (Alerts).app/
-///       Resources/
+///       Resources/tidaluna.icns
 ///       Info.plist
 fn bundle_macos(
     exe_name: &str,
+    project_root: &Path,
     target_dir: &Path,
     cef_dir: &Path,
     bundle_dir: &Path,
@@ -623,6 +624,18 @@ fn bundle_macos(
     let fw_dst = frameworks_dir.join(framework);
     copy_dir_recursive(&fw_src, &fw_dst)?;
     println!("  Copied {framework}");
+
+    // Bundle icon, read by Finder, Spotlight and the Dock while the app is not
+    // running: no runtime code can stand in for it. Absent it, the .app ships
+    // with the generic placeholder, hence the hard failure over a silent skip.
+    let icon_name = "tidaluna.icns";
+    let icon_src = project_root.join(icon_name);
+    if !icon_src.is_file() {
+        return Err(format!("missing app icon: {}", icon_src.display()));
+    }
+    fs::copy(&icon_src, resources_dir.join(icon_name))
+        .map_err(|e| format!("copy app icon: {e}"))?;
+    println!("  Copied {icon_name}");
 
     // Write main Info.plist
     write_info_plist(&contents, exe_name, &version, false)?;
@@ -669,6 +682,15 @@ fn write_info_plist(
         ""
     };
 
+    // Helpers are LSUIElement, surfacing in neither Dock nor Finder, and need
+    // no bundle icon. CFBundleIconFile names a file in Resources/, unlike
+    // CFBundleIconName which would want an actool-compiled asset catalog.
+    let icon_file = if is_helper {
+        ""
+    } else {
+        "\n    <key>CFBundleIconFile</key>\n    <string>tidaluna.icns</string>"
+    };
+
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -691,7 +713,7 @@ fn write_info_plist(
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>{ui_element}
+    <true/>{ui_element}{icon_file}
 </dict>
 </plist>
 "#
@@ -819,7 +841,7 @@ fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     };
     let bun_dst = bundle_dir.join(bun_name);
 
-    const BUN_VERSION: &str = "1.4.0";
+    const BUN_VERSION: &str = "1.4.2";
 
     // Cache dir persists across builds (dist/ is cleaned each time)
     let cache_dir = project_root()?.join(".cache").join("bun");
@@ -1322,10 +1344,10 @@ fn package_windows_nsis(arch: &str) -> Result<(), String> {
         .join("tidalunar.nsi");
 
     // Pre-compress the payload OUTSIDE makensis. makensis' builtin LZMA is
-    // single-threaded and uses an outdated codec with no executable filter; on
-    // the CEF payload that measured ~14% larger and ~2x slower than 7-Zip's
-    // multithreaded LZMA2. So we build the solid .7z here and have the installer
-    // extract it at run time via the bundled official 7zr.exe (see tidalunar.nsi).
+    // single-threaded and uses an outdated codec with no executable filter; on the
+    // CEF payload it came out both larger and slower than 7-Zip's multithreaded
+    // LZMA2. We build the solid .7z here and have the installer extract it at run
+    // time via the bundled official 7zr.exe (see tidalunar.nsi).
     fn resolve_7z() -> Option<PathBuf> {
         for cand in ["7z", "7za"] {
             if Command::new(cand).output().is_ok() {

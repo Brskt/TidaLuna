@@ -3,7 +3,7 @@ import type { IRecording, ITrack } from "musicbrainz-api";
 
 import { ftch, ReactiveStore, type LunaUnload, type LunaUnloads, type Tracer } from "@luna/core";
 
-import { getPlaybackInfo, parseDate, type PlaybackInfo } from "../../helpers";
+import { getPlaybackInfo, parseDate, sameItemId, type PlaybackInfo } from "../../helpers";
 import { libTrace, unloads } from "../../index.safe";
 import * as redux from "../../redux";
 import { Album } from "../Album";
@@ -46,25 +46,47 @@ export class MediaItem extends ContentBase {
 			if (message?.message === "The content is no longer available") return true;
 		});
 		try {
-			const { mediaItem } = await redux.interceptActionResp(
-				() => redux.actions["content/LOAD_SINGLE_MEDIA_ITEM"]({ id: itemId, itemType: contentType }),
-				unloads,
-				["content/LOAD_SINGLE_MEDIA_ITEM_SUCCESS"],
-				["content/LOAD_SINGLE_MEDIA_ITEM_FAIL"],
-			);
-			return mediaItem;
-		} catch (e) {
-			// Redux dispatch may not produce SUCCESS/FAIL (wrong payload shape under Vite/Rollup).
-			// Fall back to direct API fetch for tracks only.
-			if (String(e).includes("TIMEOUT") && contentType === "track") {
-				const track = await TidalApi.track(itemId);
-				if (track === undefined) return undefined;
-				return { type: contentType, item: track } as redux.MediaItem;
+			// Taken FIRST when it exists, because naming a replacement is TIDAL saying this id is
+			// no longer served: asking for it anyway buys a guaranteed deadline and then a
+			// refused fetch. ONE hop, never a chain: a pair of stubs naming each other is a
+			// shape this cannot rule out, and a loop costs more than a missing tag.
+			const standIn = redux.replacementTrackId(redux.store.getState(), itemId);
+			if (standIn !== undefined) {
+				const served = await this.loadMediaItem(standIn, contentType);
+				if (served !== undefined) return served;
 			}
-			throw e;
+			return await this.loadMediaItem(itemId, contentType);
 		} finally {
 			clearWarnCatch();
 		}
+	}
+
+	/** Resolve exactly the id asked for, from the store if TIDAL has it and the network if not. */
+	private static async loadMediaItem(itemId: redux.ItemId, contentType: redux.ContentType) {
+		// Asked for, then read out of the store, NOT waited for as an action. TIDAL answers
+		// this load from a saga, and a saga's `put` cannot reach an interceptor hung off the
+		// `dispatch` property (see `awaitStoreValue`); waiting on
+		// `LOAD_SINGLE_MEDIA_ITEM_SUCCESS` spent the whole timeout on every call, and did it
+		// holding a lock shared by every other lookup, which is what made a list of misses
+		// resolve one item per timeout. The load itself was never the problem: it runs, and
+		// its own reducer writes the item here.
+		// Through the same gate as a direct fetch: this dispatch makes TIDAL fetch on our
+		// behalf: it spends from the same budget rather than slipping past it.
+		await TidalApi.rateGate.pass();
+		redux.actions["content/LOAD_SINGLE_MEDIA_ITEM"]({
+			id: itemId,
+			itemType: contentType,
+		});
+		const mediaItem = await redux.awaitStoreValue((state) => state.content.mediaItems[itemId as keyof redux.Content["mediaItems"]], unloads);
+		if (mediaItem !== undefined) return mediaItem;
+
+		// The deadline passed with nothing written, which a track unavailable in this
+		// account's region reaches on every call. Only a track has a single-item endpoint to
+		// ask directly; a video has none and has nowhere else to go.
+		if (contentType !== "track") return undefined;
+		const track = await TidalApi.track(itemId);
+		if (track === undefined) return undefined;
+		return { type: contentType, item: track } as redux.MediaItem;
 	}
 
 	// #region Static Construction
@@ -146,7 +168,7 @@ export class MediaItem extends ContentBase {
 					this._supportsSpatialAudio = playbackContext.actualAudioMode !== "STEREO";
 				}
 
-			await emit(mediaItem, mediaItem.trace.err.withContext("mediaProductTransition.runListeners"));
+				await emit(mediaItem, mediaItem.trace.err.withContext("mediaProductTransition.runListeners"));
 			}),
 		),
 	);
@@ -184,6 +206,24 @@ export class MediaItem extends ContentBase {
 		this.trace = MediaItem.trace.withSource(`[${this.tidalItem.title ?? id}]`).trace;
 	}
 
+	/**
+	 * The id to ASK the API with, which is not always the id this row is called by.
+	 *
+	 * `id` names the row: what the playlist holds, what caches key on, what the DOM is tagged
+	 * with, and it must never move. But a track TIDAL drops from the catalogue leaves that id
+	 * naming a resource it will not serve and hands back a replacement, so every later request
+	 * built from `id` is answered with a 403 for a row the listener can play. Taken off the item
+	 * actually served rather than tracked beside it, the two cannot drift apart.
+	 */
+	public get servedId(): redux.ItemId {
+		return this.tidalItem.id ?? this.id;
+	}
+
+	/** True for `id` and for the id TIDAL serves under it, which a replaced row needs both of. */
+	public answersTo(itemId: redux.ItemId | undefined): boolean {
+		return sameItemId(itemId, this.id) || sameItemId(itemId, this.servedId);
+	}
+
 	public play() {
 		return PlayState.play(this.id);
 	}
@@ -193,7 +233,7 @@ export class MediaItem extends ContentBase {
 	 * Is idempotent so can be called multiple times without causing re-fetch.
 	 */
 	public fetchTidalMediaItem: () => Promise<void> = memoizeArgless(async () => {
-		const tidalItem = await TidalApi.track(this.id);
+		const tidalItem = await TidalApi.track(this.servedId);
 		if (tidalItem !== undefined) (<redux.Track>this.tidalItem) = tidalItem;
 	});
 
@@ -282,7 +322,7 @@ export class MediaItem extends ContentBase {
 		for await (const isrc of this.isrcs()) return isrc;
 	});
 
-	public lyrics: () => Promise<redux.Lyrics | undefined> = memoize(() => TidalApi.lyrics(this.id));
+	public lyrics: () => Promise<redux.Lyrics | undefined> = memoize(() => TidalApi.lyrics(this.servedId));
 
 	public title: () => Promise<string> = memoize(async () => {
 		const brainzItem = await this.brainzItem();
@@ -414,7 +454,7 @@ export class MediaItem extends ContentBase {
 	public playbackInfo: (audioQuality?: redux.AudioQuality) => Promise<PlaybackInfo | undefined> = memoize(
 		async (audioQuality?: redux.AudioQuality) => {
 			audioQuality ??= Quality.Max.audioQuality;
-			const playbackInfo = await getPlaybackInfo(this.id, audioQuality);
+			const playbackInfo = await getPlaybackInfo(this.servedId, audioQuality);
 			if (!playbackInfo) return undefined;
 			const [_, emitFormat] = this.formatEmitters[audioQuality] ?? [];
 			this.cache.format ??= {};
@@ -458,7 +498,9 @@ export class MediaItem extends ContentBase {
 	// #endregion
 
 	// #region Format
-	private readonly formatEmitters: { [K in redux.AudioQuality]?: [onEvent: AddReceiver<MediaFormat>, emitEvent: Emit<MediaFormat>] } = {};
+	private readonly formatEmitters: {
+		[K in redux.AudioQuality]?: [onEvent: AddReceiver<MediaFormat>, emitEvent: Emit<MediaFormat>];
+	} = {};
 	public withFormat(unloads: LunaUnloads, audioQuality: redux.AudioQuality, listener: (format: MediaFormat) => void): LunaUnload {
 		const [onFormat] = (this.formatEmitters[audioQuality] ??= registerEmitter<MediaFormat>());
 		// Pin this instance while a subscriber is attached so eviction can never orphan the emitter
@@ -496,109 +538,115 @@ export class MediaItem extends ContentBase {
 			unpin();
 		};
 	}
-	public updateFormat: (audioQuality?: redux.AudioQuality, force?: true) => Promise<MediaFormat | undefined> = asyncDebounce(async (audioQuality, force) => {
-		this.cache.format ??= {};
-		const requestedQuality = audioQuality;
-		audioQuality ??= Quality.Max.audioQuality;
-		let format = (this.cache.format[audioQuality] ??= {});
+	public updateFormat: (audioQuality?: redux.AudioQuality, force?: true) => Promise<MediaFormat | undefined> = asyncDebounce(
+		async (audioQuality, force) => {
+			this.cache.format ??= {};
+			const requestedQuality = audioQuality;
+			audioQuality ??= Quality.Max.audioQuality;
+			let format = (this.cache.format[audioQuality] ??= {});
 
-		if (format.bitrate !== undefined && format.sampleRate !== undefined && force !== true) {
-			return format;
-		}
-		// If we already have sampleRate + bytes but still no bitrate, compute it now and return.
-		// If we have sampleRate but no bytes, only retry for the current track (HEAD may have failed).
-		if (format.sampleRate !== undefined && force !== true) {
-			if (format.bytes !== undefined && format.duration) {
-				format.bitrate = (format.bytes / format.duration) * 8;
+			if (format.bitrate !== undefined && format.sampleRate !== undefined && force !== true) {
 				return format;
 			}
-			const isCurrentTrack = String((window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId) === String(this.id);
-			if (!isCurrentTrack && format.codec !== undefined) return format;
-		}
-
-		const playbackInfo = await this.playbackInfo(audioQuality);
-		// Re-read format from cache - playbackInfo() replaces the cache entry with a new object,
-		// so the local `format` reference captured above would be stale.
-		format = (this.cache.format[audioQuality] ??= {});
-		if (!playbackInfo) {
-			// TidaLunar fallback: desktop.tidal.com/v1/playbackinfo returns 403 with web tokens.
-			// Use format data from the Rust player bridge (mediaformat event) - only valid
-			// for the currently playing track (the bridge emits one global mediaformat per load).
-			const currentProductId = (window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId;
-			if (currentProductId !== undefined && String(currentProductId) !== String(this.id)) return undefined;
-			let bf = (window as any).__LUNAR_MEDIA_FORMAT__;
-			if (!bf?.sampleRate) {
-				// Bridge data not yet available (new track just loaded) - wait up to 5s
-				const waited = await Promise.race([
-					(window as any).__LUNAR_AWAIT_MEDIA_FORMAT__?.(),
-					new Promise<null>(r => setTimeout(() => r(null), 5000)),
-				]);
-				bf = waited ?? (window as any).__LUNAR_MEDIA_FORMAT__;
-				if (!bf?.sampleRate) return undefined;
+			// If we already have sampleRate + bytes but still no bitrate, compute it now and return.
+			// If we have sampleRate but no bytes, only retry for the current track (HEAD may have failed).
+			if (format.sampleRate !== undefined && force !== true) {
+				if (format.bytes !== undefined && format.duration) {
+					format.bitrate = (format.bytes / format.duration) * 8;
+					return format;
+				}
+				// `answersTo`, because what plays under a replaced row is the id TIDAL served, not
+				// the one the row is called by: compared against `id` alone, such a row never
+				// recognises itself as the current track and stops retrying exactly when it could
+				// have succeeded.
+				const isCurrentTrack = this.answersTo((window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId);
+				if (!isCurrentTrack && format.codec !== undefined) return format;
 			}
-			format.sampleRate = bf.sampleRate;
-			format.bitDepth = bf.bitDepth || undefined;
-			format.codec = bf.codec?.toLowerCase();
-			format.bytes = bf.bytes || undefined;
+
+			const playbackInfo = await this.playbackInfo(audioQuality);
+			// Re-read format from cache: playbackInfo() replaces the cache entry with a new object,
+			// and the local `format` reference captured above would be stale.
+			format = this.cache.format[audioQuality] ??= {};
+			if (!playbackInfo) {
+				// TidaLunar fallback: desktop.tidal.com/v1/playbackinfo returns 403 with web tokens.
+				// Use format data from the Rust player bridge (mediaformat event), only valid
+				// for the currently playing track (the bridge emits one global mediaformat per load).
+				const currentProductId = (window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId;
+				if (currentProductId !== undefined && !this.answersTo(currentProductId)) return undefined;
+				let bf = (window as any).__LUNAR_MEDIA_FORMAT__;
+				if (!bf?.sampleRate) {
+					// Bridge data not yet available (new track just loaded): wait up to 5s
+					const waited = await Promise.race([
+						(window as any).__LUNAR_AWAIT_MEDIA_FORMAT__?.(),
+						new Promise<null>((r) => setTimeout(() => r(null), 5000)),
+					]);
+					bf = waited ?? (window as any).__LUNAR_MEDIA_FORMAT__;
+					if (!bf?.sampleRate) return undefined;
+				}
+				format.sampleRate = bf.sampleRate;
+				format.bitDepth = bf.bitDepth || undefined;
+				format.codec = bf.codec?.toLowerCase();
+				format.bytes = bf.bytes || undefined;
+				format.duration = this.duration;
+				if (format.bytes && format.duration) format.bitrate = (format.bytes / format.duration) * 8;
+				// Emit to all registered audioQuality keys, to notify every subscriber
+				for (const key of Object.keys(this.formatEmitters) as redux.AudioQuality[]) {
+					const [_, emit] = this.formatEmitters[key]!;
+					emit(format, this.trace.err.withContext("updateFormat.bridgeFallback"));
+					this.cache.format![key] = format;
+				}
+				return format;
+			}
 			format.duration = this.duration;
-			if (format.bytes && format.duration) format.bitrate = (format.bytes / format.duration) * 8;
-			// Emit to all registered audioQuality keys so every subscriber gets notified
-			for (const key of Object.keys(this.formatEmitters) as redux.AudioQuality[]) {
-				const [_, emit] = this.formatEmitters[key]!;
-				emit(format, this.trace.err.withContext("updateFormat.bridgeFallback"));
-				this.cache.format![key] = format;
+
+			if (format.bitDepth === undefined || format.sampleRate === undefined || format.duration === undefined || format.bytes === undefined) {
+				const { format: streamFormat, bytes } = await parseStreamFormat(playbackInfo);
+				format.bytes = bytes ?? (await getStreamBytes(playbackInfo));
+				format.bitDepth = streamFormat.bitsPerSample || format.bitDepth;
+				format.sampleRate = streamFormat.sampleRate || format.sampleRate;
+				format.duration = streamFormat.duration ?? format.duration;
+				format.codec = streamFormat.codec?.toLowerCase() ?? format.codec;
+				// Complement with DASH manifest data if available
+				if (playbackInfo.manifestMimeType === "application/dash+xml") {
+					format.bitrate = playbackInfo.manifest.bandwidth ?? format.bitrate;
+					format.sampleRate = playbackInfo.manifest.sampleRate ?? format.sampleRate;
+				}
+			} else {
+				format.bytes = (await getStreamBytes(playbackInfo)) ?? format.bytes;
 			}
+
+			// For BTS (FLAC), bytes are only available from the Rust player bridge for the currently playing track.
+			// The bridge data may not have arrived yet (reset on load): wait up to 5s if needed.
+			if (format.bytes === undefined && this.answersTo((window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId)) {
+				let bf = (window as any).__LUNAR_MEDIA_FORMAT__;
+				if (!bf?.bytes) {
+					const waited = await Promise.race([
+						(window as any).__LUNAR_AWAIT_MEDIA_FORMAT__?.(),
+						new Promise<null>((r) => setTimeout(() => r(null), 5000)),
+					]);
+					bf = waited ?? (window as any).__LUNAR_MEDIA_FORMAT__;
+				}
+				if (bf?.bytes) format.bytes = bf.bytes;
+			}
+
+			format.bitrate ??= !!format.bytes && !!format.duration ? (format.bytes / format.duration) * 8 : undefined;
+
+			// Also store format under actual audio quality for cache lookup (handles Atmos/Sony360 fallback)
+			if (playbackInfo.audioQuality !== audioQuality) {
+				this.cache.format[playbackInfo.audioQuality] = format;
+			}
+
+			const [_, emitFormat] = this.formatEmitters[playbackInfo.audioQuality] ?? [];
+			emitFormat?.(format, this.trace.err.withContext("updateFormat.emitFormat"));
+
+			// Emit to originally requested quality if different
+			if (requestedQuality && requestedQuality !== playbackInfo.audioQuality) {
+				const [_, emitRequested] = this.formatEmitters[requestedQuality] ?? [];
+				emitRequested?.(format, this.trace.err.withContext("updateFormat.emitFormat.requested"));
+			}
+
 			return format;
-		}
-		format.duration = this.duration;
-
-		if (format.bitDepth === undefined || format.sampleRate === undefined || format.duration === undefined || format.bytes === undefined) {
-			const { format: streamFormat, bytes } = await parseStreamFormat(playbackInfo);
-			format.bytes = bytes ?? (await getStreamBytes(playbackInfo));
-			format.bitDepth = streamFormat.bitsPerSample || format.bitDepth;
-			format.sampleRate = streamFormat.sampleRate || format.sampleRate;
-			format.duration = streamFormat.duration ?? format.duration;
-			format.codec = streamFormat.codec?.toLowerCase() ?? format.codec;
-			// Complement with DASH manifest data if available
-			if (playbackInfo.manifestMimeType === "application/dash+xml") {
-				format.bitrate = playbackInfo.manifest.bandwidth ?? format.bitrate;
-				format.sampleRate = playbackInfo.manifest.sampleRate ?? format.sampleRate;
-			}
-		} else {
-			format.bytes = (await getStreamBytes(playbackInfo)) ?? format.bytes;
-		}
-
-		// For BTS (FLAC), bytes are only available from the Rust player bridge for the currently playing track.
-		// The bridge data may not have arrived yet (reset on load), so wait up to 5s if needed.
-		if (format.bytes === undefined && String((window as any).__LUNAR_CURRENT_PRODUCT_ID__ ?? PlayState.playbackContext?.actualProductId) === String(this.id)) {
-			let bf = (window as any).__LUNAR_MEDIA_FORMAT__;
-			if (!bf?.bytes) {
-				const waited = await Promise.race([
-					(window as any).__LUNAR_AWAIT_MEDIA_FORMAT__?.(),
-					new Promise<null>(r => setTimeout(() => r(null), 5000)),
-				]);
-				bf = waited ?? (window as any).__LUNAR_MEDIA_FORMAT__;
-			}
-			if (bf?.bytes) format.bytes = bf.bytes;
-		}
-
-		format.bitrate ??= !!format.bytes && !!format.duration ? (format.bytes / format.duration) * 8 : undefined;
-
-		// Also store format under actual audio quality for cache lookup (handles Atmos/Sony360 fallback)
-		if (playbackInfo.audioQuality !== audioQuality) {
-			this.cache.format[playbackInfo.audioQuality] = format;
-		}
-
-		const [_, emitFormat] = this.formatEmitters[playbackInfo.audioQuality] ?? [];
-		emitFormat?.(format, this.trace.err.withContext("updateFormat.emitFormat"));
-
-		// Emit to originally requested quality if different
-		if (requestedQuality && requestedQuality !== playbackInfo.audioQuality) {
-			const [_, emitRequested] = this.formatEmitters[requestedQuality] ?? [];
-			emitRequested?.(format, this.trace.err.withContext("updateFormat.emitFormat.requested"));
-		}
-
-		return format;
-	});
+		},
+	);
 	// #endregion
 }

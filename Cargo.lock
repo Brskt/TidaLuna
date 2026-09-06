@@ -4846,6 +4846,7 @@ dependencies = [
  "base64 0.23.1",
  "cbc",
  "cef",
+ "cef-dll-sys",
  "cpal",
  "ctr",
  "dash-mpd",

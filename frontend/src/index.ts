@@ -12,12 +12,13 @@ import { createTidalConnectController, createRemoteDesktopController, setupConne
 import { createNativePlayerComponent } from "./controllers/player";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
+import { refusePlayback } from "./refuse-playback";
 import { initWindowControls } from "./ui/window-controls";
-import { invokeIpc, sendIpc, isLoginCallback, onIpcEvent } from "./ipc";
+import { invokeIpc, invokeIpcAs, sendIpc, sendIpcAs, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
 
 // @luna/core and @luna/lib - safe to import after bootstrap
-import { initCore, modules, LunaPlugin } from "../render/src";
+import { defineHostModule, initCore, modules, LunaPlugin } from "../render/src";
 import * as LunaCore from "../render/src";
 import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
@@ -112,6 +113,27 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
     if (!Array.isArray(events)) return;
     const bridge = window.NativePlayerComponent;
     if (!bridge || typeof bridge.trigger !== "function") return;
+    // A batch carrying a track change carries the new track's first position behind
+    // it. That position is the one report the 250ms throttle must not drop: the
+    // window it would wait out was armed by the OUTGOING track's last tick. Left
+    // alone, the bar keeps rendering the old position under the new track. Armed
+    // before the loop rather than from the "completed" arm; the order of the two in
+    // the batch does not matter. Same carve-out load() and SEEK already take,
+    // applied to the transition, which goes through neither.
+    //
+    // Both halves are required. Arming on "completed" alone leaks: a natural track
+    // end in exclusive or ASIO output sends the state with no position beside it,
+    // and the flag would then sit armed until some unrelated later report spent it.
+    let _hasTransition = false;
+    let _hasTime = false;
+    for (const e of events) {
+        if (!e || typeof e !== "object") continue;
+        if (e.t === "time") _hasTime = true;
+        else if (e.t === "state" && e.v === "completed") _hasTransition = true;
+    }
+    if (_hasTransition && _hasTime) {
+        _forceTimeDispatch = true;
+    }
     for (const event of events) {
         if (!event || typeof event !== "object") continue;
         const type = event.t;
@@ -179,7 +201,17 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             }
         }
         const mapped = SEQ_EVENTS[type];
-        if (mapped) {
+        if (type === "medianetworklost") {
+            // Not a passthrough: a raw `mediaerror` loses TIDAL's one-second STALLED
+            // race, leaving the spinner turning over a player that will never resume.
+            // Rust has already waited thirty seconds for the bytes; this is the answer
+            // to their never arriving, and it must not advance the queue.
+            refusePlayback(
+                "tidalunar_network_lost",
+                "no bytes for 30s",
+                "TidaLunar cannot play music without an internet connection. Please try again when you're connected.",
+            );
+        } else if (mapped) {
             bridge.trigger(mapped, event.v, event.seq);
         } else if (PASSTHROUGH_EVENTS.has(type)) {
             bridge.trigger(type, event.v);
@@ -307,8 +339,34 @@ const init = async () => {
         });
     }
 
-    modules["@luna/core"] = LunaCore;
+    // Pinned: it is the second link of the chain a plugin's `@luna/lib` import is lowered to
+    // (`luna.core.modules["__lunaLibFor"]`), and the accessor in front of it only forwards
+    // here. Left writable, replacing THIS slot bypassed the pin on `__lunaLibFor` entirely.
+    // `@luna/lib` below stays an ordinary slot: it is a core-plugin name, and `LunaPlugin`
+    // writes and deletes it.
+    defineHostModule("@luna/core", LunaCore);
     modules["@luna/lib"] = LunaLib;
+    // The per-plugin copy of the lib. `src/plugins/transpile.rs` lowers a plugin's `@luna/lib`
+    // import to a call on this, passing the capability that plugin's wrapper holds, so the calls
+    // acting on the caller's identity travel with one. The shared object above cannot: every
+    // plugin reaches it, and an identity in there would belong to whoever asked first.
+    //
+    // A snapshot rather than a proxy, `LunaLib`'s exports being fixed at build time. Only the
+    // identity-bearing pair is rebound: `on`/`once`/`onOpenUrl` register listeners, which no
+    // caller's identity decides.
+    //
+    // Pinned, because it is called with the CALLER's capability: a plugin that replaced this
+    // factory would be handed the identity of every plugin importing `@luna/lib` after it, and
+    // could act as any of them on `plugin.storage.*`, `plugin.fetch` and
+    // `__Luna.registerNative`. Installed before `jsrt.load_plugins`, when no plugin has run yet.
+    defineHostModule("__lunaLibFor", (cap: string) => ({
+        ...LunaLib,
+        ipcRenderer: {
+            ...LunaLib.ipcRenderer,
+            invoke: (channel: string, ...args: any[]) => invokeIpcAs(cap, channel, ...args),
+            send: (channel: string, ...args: any[]) => sendIpcAs(cap, channel, ...args),
+        },
+    }));
     modules["@inrixia/helpers"] = InrixiaHelpers;
     modules["@luna/lib.native"] = {
         ...LibNative,

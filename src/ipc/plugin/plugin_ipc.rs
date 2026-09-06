@@ -35,7 +35,18 @@ pub(super) fn handle_plugin_fetch(
         }
     }
 
-    dispatch_authenticated_fetch(plugin_id, url, &opts_json, query_id, callback, None);
+    // The capability travels on for the credential check. Attribution alone cannot make it:
+    // a plugin unloading after a logout is still legitimately itself, which is why the
+    // capability outlives the unload at all; what it must not still buy is a live token.
+    dispatch_authenticated_fetch(
+        plugin_id,
+        url,
+        &opts_json,
+        query_id,
+        callback,
+        None,
+        msg.cap.as_deref(),
+    );
 }
 
 /// Authenticated fetch restricted to TIDAL API hosts.
@@ -70,9 +81,13 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, query_id: i64, callback: IpcC
         query_id,
         callback,
         Some(token),
+        None,
     );
 }
 
+/// `capability`, when present, is checked against the current session before the token is
+/// handed over. `None` means the caller is the core bundle, which holds no capability and
+/// already validated its own token.
 fn dispatch_authenticated_fetch(
     plugin_id: String,
     url: String,
@@ -80,11 +95,37 @@ fn dispatch_authenticated_fetch(
     query_id: i64,
     callback: IpcCallback,
     pre_validated_token: Option<String>,
+    capability: Option<&str>,
 ) {
     let opts: crate::plugins::fetch::FetchOpts =
         serde_json::from_str(opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
-    let token = pre_validated_token
-        .unwrap_or_else(|| with_state(|state| state.captured_token.clone()).unwrap_or_default());
+    let token = match pre_validated_token {
+        Some(token) => Some(token),
+        // The comparison and the credential read share one lock deliberately: a session change
+        // landing between them would hand out the very token the comparison exists to refuse.
+        // Same shape as the guards at the token mint sites, and for the same reason.
+        None => with_state(|state| match capability {
+            Some(cap)
+                if state.plugin_manager.capability_epoch(cap) != Some(state.session_epoch) =>
+            {
+                None
+            }
+            _ => Some(state.captured_token.clone()),
+        })
+        .flatten(),
+    };
+    let Some(token) = token else {
+        // A capability minted under a session the user has left. The plugin holding it was
+        // injected as that session ended, and nothing tracks it any more. This is the last
+        // place that can refuse it the credential.
+        crate::vprintln!("[PLUGIN:FETCH] REFUSED '{plugin_id}': capability outlived its session");
+        ipc_callback_err(
+            &callback,
+            403,
+            "plugin.fetch: capability belongs to a past session",
+        );
+        return;
+    };
     with_state(|state| {
         state.pending_ipc_callbacks.insert(query_id, callback);
     });
@@ -181,7 +222,6 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         .and_then(|v| v.get("name")?.as_str().map(String::from))
         .unwrap_or_default();
 
-    // Helper to revert DB enable on failure
     async fn revert_enable(url: &str) {
         let revert_url = url.to_string();
         let _ = tokio::task::spawn_blocking(move || {
@@ -191,44 +231,25 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         .await;
     }
 
-    // 2. Mark loading. The ack nonce and the caller capability are generated off the AppState
-    // lock; an entropy failure fails the load instead of panicking under the guard.
-    let (Some(nonce), Some(capability)) = (
-        crate::plugins::manager::random_nonce(),
-        crate::plugins::manager::random_capability(),
-    ) else {
-        revert_enable(&url).await;
-        return Err("RNG unavailable".to_string());
-    };
-    let load_id = with_state(|state| {
-        state
-            .plugin_manager
-            .mark_loading(&url, &plugin_name, nonce, &capability)
-    })
-    .unwrap_or(0);
-
-    // 3. Transpile + wrap (load_id + nonce injected into wrapper for ack)
-    let js = match crate::plugins::PluginManager::transpile_and_wrap(
-        &url,
-        &code,
-        load_id,
-        nonce,
-        &capability,
-    ) {
-        Ok(js) => js,
-        Err(e) => {
-            with_state(|state| state.plugin_manager.mark_unloaded(&url));
+    // 2. Mark loading, transpile and dispatch, through the one owner of that sequence. The
+    // epoch is read here, before any of it: it names the session this activation belongs to,
+    // and `inject_plugin` re-reads it after the dispatch to decide whether the code may stay.
+    // Transpiling is real CPU work holding no lock, and a logout lands on another thread.
+    let epoch = with_state(|state| state.session_epoch).unwrap_or_default();
+    let load_id = match super::inject::inject_plugin(&url, &plugin_name, &code, epoch) {
+        super::inject::Injected::Live { load_id } => load_id,
+        // Every failure below has already marked the plugin unloaded. What is left is what only
+        // an enable owes: undoing the `enabled` flag this call set a few lines up.
+        outcome => {
             revert_enable(&url).await;
-            return Err(format!("Failed to prepare: {e}"));
+            return Err(match outcome {
+                super::inject::Injected::RngUnavailable => "RNG unavailable".to_string(),
+                super::inject::Injected::TranspileFailed(e) => format!("Failed to prepare: {e}"),
+                super::inject::Injected::NoFrame => "No renderer frame available".to_string(),
+                _ => "Session ended during activation".to_string(),
+            });
         }
     };
-
-    // 4. Dispatch to renderer
-    if !eval_js(&js) {
-        with_state(|state| state.plugin_manager.mark_unloaded(&url));
-        revert_enable(&url).await;
-        return Err("No renderer frame available".to_string());
-    }
 
     // 5. Persistent flag: code was dispatched - critical for cleanup guard correctness.
     //    If this fails, revert the activation: better a failed enable than an inconsistent flag.
@@ -245,9 +266,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
                 "[PLUGIN] Failed to persist ever_dispatched for '{}' - reverting activation",
                 url
             );
-            let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&url);
-            eval_js(&cleanup_js);
-            with_state(|state| state.plugin_manager.mark_unloaded(&url));
+            super::inject::undo_injection(&url, load_id);
             revert_enable(&url).await;
             return Err("Failed to persist dispatch flag".to_string());
         }
@@ -258,13 +277,16 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         let timeout_url = url.clone();
         crate::state::rt_handle().spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let still_loading = with_state(|state| {
-                state.plugin_manager.is_loaded(&timeout_url)
-                    && !state.plugin_manager.is_ready(&timeout_url)
-                    && state.plugin_manager.current_load_id(&timeout_url) == Some(load_id)
+            // Tested and removed under one borrow, for the same reason as the startup
+            // watchdog: the ready ack this waits for can arrive between a separate read and
+            // removal, and the cleanup below would then undo a load that had just succeeded.
+            let abandoned = with_state(|state| {
+                state
+                    .plugin_manager
+                    .abandon_if_still_loading(&timeout_url, load_id)
             })
             .unwrap_or(false);
-            if still_loading {
+            if abandoned {
                 crate::vprintln!(
                     "[PLUGIN] Timeout: '{}' never sent ready ack (gen={}) - marking failed",
                     timeout_url,
@@ -272,7 +294,6 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
                 );
                 let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&timeout_url);
                 eval_js(&cleanup_js);
-                with_state(|state| state.plugin_manager.mark_unloaded(&timeout_url));
                 let url_disable = timeout_url.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     crate::state::db().call_plugins(move |pc| {
@@ -330,12 +351,23 @@ async fn do_plugin_disable(url: String) -> Result<(), String> {
         .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }?;
 
-    // 2. Unload from renderer (best-effort)
+    // 2. Read the load this disable is ending, as late as possible: the DB round trip above
+    // is a real await, and an enable racing it has already replaced the load by the time we
+    // return. Captured at entry, this would name a load that no longer exists and the removal
+    // below would reach past it into the newer one, the ghost this whole pairing prevents.
+    let Some(load_id) = with_state(|state| state.plugin_manager.current_load_id(&url)).flatten()
+    else {
+        // Nothing loaded under this url any more: an enable's own failure path or a logout
+        // sweep already retired it. The DB row is disabled, which is all this call owed.
+        return Ok(());
+    };
+
+    // 3. Unload from renderer (best-effort)
     let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&url);
     eval_js(&cleanup_js);
 
-    // 3. Bookkeeping AFTER dispatch
-    with_state(|state| state.plugin_manager.mark_unloaded(&url));
+    // 4. Bookkeeping AFTER dispatch, naming the load read above.
+    with_state(|state| state.plugin_manager.retire_load(&url, load_id));
 
     Ok(())
 }
@@ -356,24 +388,23 @@ pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
     // Gate: on a cold boot the real OAuth token still lives in TIDAL's SDK until
     // the proactive refresh rotates it to opaque nonces. Park the reply until the
     // gate opens (refresh done or 5s safety timeout); plugins can't read it.
-    let parked = with_state(|state| {
-        if state.proactive_refresh_done {
-            return false;
-        }
-        state.plugin_load_waiters.push(callback.clone());
-        true
+    // Parked first, then requested. Parking is what makes a second caller join the pass already
+    // running instead of starting its own over the same plugins, and it is the only way its
+    // answer can arrive: the pass, not this handler, replies.
+    let gate_closed = with_state(|state| {
+        let epoch = state.session_epoch;
+        state.plugin_load_waiters.push((epoch, callback.clone()));
+        !state.proactive_refresh_done
     })
     .unwrap_or(false);
 
-    if parked {
+    if gate_closed {
         crate::vprintln!("[PLUGIN] Deferring plugin load until proactive refresh completes");
         super::jsrt::arm_gate_timeout();
         return;
     }
 
-    super::jsrt::purge_sdk_auth_blob_if_needed();
-    super::jsrt::do_load_plugins_inline();
-    ipc_callback_ok(&callback, "true");
+    super::jsrt::request_plugin_load();
 }
 
 /// Check for code changes without modifying the DB. Returns `{ hash: "..." }` or error.
@@ -446,9 +477,17 @@ pub(super) fn handle_plugin_db(
         return;
     }
 
-    // Result is (json_response, what the uninstall cleanup must clear)
-    let result: Result<(String, Option<CleanupScope>), String> =
-        db.call_plugins(move |pc| match channel.as_str() {
+    let uninstall_target = msg.arg(0).to_string();
+
+    // Posted rather than called: this arrives on the CEF UI thread, where waiting on the actor
+    // freezes rendering and input for the whole round trip. The actor answers the renderer from
+    // its own thread, the callback marshalling back to the UI thread by itself. Both connections
+    // are taken at once; the uninstall cleanup below needs no second, re-entrant round trip.
+    db.post(move |pc, sc| {
+        // Result is (json_response, what the uninstall cleanup must clear). Wrapped in a closure
+        // to let the arms below answer with `return Err(...)`: the enclosing closure owes the
+        // actor nothing, and a bare return there would abandon the reply the renderer waits on.
+        let result: Result<(String, Option<CleanupScope>), String> = (|| match channel.as_str() {
             "plugin.list" => {
                 let plugins = crate::plugins::store::list(pc);
                 Ok((
@@ -546,45 +585,53 @@ pub(super) fn handle_plugin_db(
                     .map_err(|e| e.to_string())
             }
             _ => Err(format!("Unknown plugin channel: {}", channel)),
-        });
+        })();
 
-    // Clear native trust decisions for whatever the handler said was uninstalled.
-    if let Ok((_, Some(ref scope))) = result {
-        // Every prefix below follows one convention: empty owns everything.
-        let (db_name, trust_prefix, module_prefix, gone) = match scope {
-            // SQL LIKE wildcard, then the empty prefixes the in-memory clears read as "all".
-            CleanupScope::All => ("%".to_string(), String::new(), String::new(), String::new()),
-            // Delimit with "/" to avoid prefix collisions (e.g. "foo" matching "foobar/...")
-            CleanupScope::Plugin(name) => (
-                name.clone(),
-                format!("{name}/"),
-                name.clone(),
-                msg.arg(0).to_string(),
-            ),
-        };
-        crate::state::db().call_settings(move |conn| {
-            let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &db_name);
-        });
-        super::native::clear_pending_trust(&trust_prefix);
-        // The DB trust rows are gone above; the channel tokens that would still reach those
-        // modules must go with them.
-        super::native::clear_native_channels(&module_prefix);
-        // And the capability, for the same reason. Not done on disable, where the plugin's own unload
-        // handler still runs and still needs to be attributable, but uninstall is terminal. A
-        // leftover renderer closure must stop writing storage as a plugin that no longer exists.
-        with_state(|state| state.plugin_manager.revoke_capabilities(&gone));
-        // Also updates the manager's loaded-state: this handler is authoritative rather than relying
-        // on callers having disabled first (which is what `registerNative`'s in-flight check reads).
-        // Idempotent; today's JS always disables already, closing the gap only for a future caller.
-        if !gone.is_empty() {
-            with_state(|state| state.plugin_manager.mark_unloaded(&gone));
+        // Clear native trust decisions for whatever the handler said was uninstalled.
+        if let Ok((_, Some(ref scope))) = result {
+            // Every prefix below follows one convention: empty owns everything.
+            let (db_name, trust_prefix, module_prefix, gone) = match scope {
+                // SQL LIKE wildcard, then the empty prefixes the in-memory clears read as "all".
+                CleanupScope::All => {
+                    ("%".to_string(), String::new(), String::new(), String::new())
+                }
+                // Delimit with "/" to avoid prefix collisions (e.g. "foo" matching "foobar/...")
+                CleanupScope::Plugin(name) => (
+                    name.clone(),
+                    format!("{name}/"),
+                    name.clone(),
+                    uninstall_target.clone(),
+                ),
+            };
+            // The settings connection is already in hand here. A second `call_settings` would
+            // re-enter the actor from the actor's own thread, which its re-entrancy assert
+            // refuses precisely because it would wait on a reply only this thread can produce.
+            let _ = crate::native_runtime::trust::clear_trust_by_plugin(sc, &db_name);
+            super::native::clear_pending_trust(&trust_prefix);
+            // The DB trust rows are gone above; the channel tokens that would still reach those
+            // modules must go with them.
+            super::native::clear_native_channels(&module_prefix);
+            // And the capability, for the same reason. Not done on disable, where the plugin's own unload
+            // handler still runs and still needs to be attributable, but uninstall is terminal. A
+            // leftover renderer closure must stop writing storage as a plugin that no longer exists.
+            with_state(|state| state.plugin_manager.revoke_capabilities(&gone));
+            // Also updates the manager's loaded-state: this handler is authoritative rather than relying
+            // on callers having disabled first (which is what `registerNative`'s in-flight check reads).
+            // Idempotent; today's JS always disables already, closing the gap only for a future caller.
+            if !gone.is_empty() {
+                // Unconditional here, and only here. The DB row is gone: there is no load left
+                // to name and nothing to re-disable. A removal that lost a race to a concurrent
+                // enable would strand an entry for a plugin no path can ever reach again, worse
+                // than the race it would avoid.
+                with_state(|state| state.plugin_manager.forget_plugin(&gone));
+            }
         }
-    }
 
-    match result {
-        Ok((json, _)) => ipc_callback_ok(&callback, &json),
-        Err(e) => ipc_callback_err(&callback, 500, &e),
-    }
+        match result {
+            Ok((json, _)) => ipc_callback_ok(&callback, &json),
+            Err(e) => ipc_callback_err(&callback, 500, &e),
+        }
+    });
 }
 
 fn fnv_hash_str(s: &str) -> String {
@@ -757,9 +804,16 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
 
     // Clear native trust on (re)install: updated code re-prompts.
     let trust_name = info.name.clone();
-    crate::state::db().call_settings(move |conn| {
-        let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &trust_name);
-    });
+    // Awaited, not posted: the install is only safe to report once the old grants are gone.
+    // A crash in that window would leave updated code holding trust granted to the previous
+    // bytes. Handed to the blocking pool: no tokio worker sits on the actor.
+    tokio::task::spawn_blocking(move || {
+        crate::state::db().call_settings(move |conn| {
+            let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &trust_name);
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
     Ok(info)
 }

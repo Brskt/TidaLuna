@@ -9,6 +9,29 @@ import * as oby from "oby";
 
 export const modules: Record<string, any> = {};
 
+/**
+ * Install a module the HOST owns, in a slot no plugin can take.
+ *
+ * Plugin code reaches this registry as `window.luna.core.modules`, and `transpile.rs` lowers
+ * every `@luna/*` import to a live lookup through it, resolved when that plugin runs. A writable
+ * slot therefore lets the first plugin to load answer for a module every later one imports;
+ * `__lunaLibFor` is the sharp case, handing each plugin the capability its own IPC travels with.
+ *
+ * Pinned, not frozen: `Object.freeze(modules)` would also block the host's own later writes and
+ * the slots plugins take under their own names. For the same reason the core-plugin names
+ * (`@luna/lib`, `@luna/lib.native`, `@luna/ui`, `@luna/dev`, `@luna/linux`) must NOT come through
+ * here, `LunaPlugin` owning those slots. `into` defaults to the live registry, where a pin
+ * outlives the page.
+ */
+export function defineHostModule(name: string, value: any, into: Record<string, any> = modules): void {
+	Object.defineProperty(into, name, {
+		value,
+		writable: false,
+		configurable: false,
+		enumerable: true,
+	});
+}
+
 // Define a global require function to use modules for cjs imports bundled with esbuild
 window.require = <NodeJS.Require>((moduleName: string) => {
 	if (modules.hasOwnProperty(moduleName)) return modules[moduleName];
@@ -17,7 +40,7 @@ window.require = <NodeJS.Require>((moduleName: string) => {
 window.require.cache = modules;
 window.require.main = undefined;
 
-// TidaLunar: reduxStore is assigned by initModules() after webpack/Redux discovery.
+// TidaLunar: published by publishReduxStore() as soon as discovery hands the store over.
 export let reduxStore: Store;
 let _resolveStoreReady: () => void;
 export const storeReady: Promise<void> = new Promise((r) => { _resolveStoreReady = r; });
@@ -26,7 +49,7 @@ export const storeReady: Promise<void> = new Promise((r) => { _resolveStoreReady
 // filter) so plugins share the host React. TIDAL's Vite output wraps React /
 // ReactDOM / jsx-runtime as CJS modules: the chunk's named exports are lazy-loader
 // functions (their source contains `{exports:{}` and `.exports`) and the real API
-// only appears after calling one. So validate the captured object directly first,
+// only appears after calling one. Validate the captured object directly first,
 // then invoke each lazy loader and validate its result (cf. upstream resolveCjsModule).
 // Undefined when the host offers nothing valid; the caller decides what that costs.
 function resolveHost<T>(id: string, valid: (m: any) => boolean): T | undefined {
@@ -72,10 +95,21 @@ function resolveHostDomClient(): any | undefined {
 }
 
 /**
+ * Publishes the binding every reader of the store goes through, separately from the module
+ * registry below: the two become knowable at very different times. Discovery already patches
+ * dispatch, so the store is in use before this returns, and withholding the binding cost the one
+ * reader that cannot wait: the SDK's load delegate names the track it is loading and runs before
+ * the registry exists, leaving that load's measured length unpublishable for the track's life.
+ */
+export function publishReduxStore(store: Store): void {
+	reduxStore = store;
+}
+
+/**
  * Must be called after initTidalInternals() has populated tidalModules.
  */
 export function initModules(store: Store): void {
-	reduxStore = store;
+	publishReduxStore(store);
 	_resolveStoreReady();
 
 	// React and its renderer must come from the SAME copy. react-dom writes the hook

@@ -9,8 +9,8 @@ mod verify;
 
 pub(crate) use check::trigger_update_check;
 pub(crate) use handlers::{
-    handle_updater_apply, handle_updater_cancel, handle_updater_check, handle_updater_dismiss,
-    handle_updater_download, handle_updater_status,
+    channel_changed, handle_updater_apply, handle_updater_cancel, handle_updater_check,
+    handle_updater_dismiss, handle_updater_download, handle_updater_status,
 };
 pub(crate) use recovery::recover_interrupted_update;
 

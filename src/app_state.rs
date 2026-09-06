@@ -104,8 +104,18 @@ pub(crate) struct AppState {
     // rotated to opaque nonces in TIDAL's SDK. Default true (warm boot / no
     // session); a cold boot with a pending refresh closes it.
     pub(crate) proactive_refresh_done: bool,
-    // Plugin-load requests parked while the gate is closed; replied on drain.
-    pub(crate) plugin_load_waiters: Vec<IpcCallback>,
+    // Plugin-load requests parked behind the gate or behind a running pass, each tagged with the
+    // session epoch it was made under; answered when a pass of that same epoch settles.
+    pub(crate) plugin_load_waiters: Vec<(u64, IpcCallback)>,
+    // Set to the epoch of the load pass currently running off the UI thread. One at a time: two
+    // concurrent passes inject every enabled plugin twice into the same frame, and only one of
+    // the two can ever have its ready ack accepted.
+    pub(crate) plugin_load_in_flight: Option<u64>,
+    // Bumped on every session change, and on nothing else. Work started under an older epoch
+    // describes a session the user has left: a plugin-load pass must answer nobody who asked
+    // after the change, and a token minted before it must not be committed at all (in memory
+    // or to disk) because `captured_token` is the live authorization, not a draft.
+    pub(crate) session_epoch: u64,
     pub(crate) last_client_id: String,
     pub(crate) connect: Option<crate::connect::ConnectManager>,
 }
@@ -124,16 +134,63 @@ fn settle_recorded_duration(
     Some(measured)
 }
 
+/// What a session that has just ended was still holding, for the caller to settle outside
+/// the lock: an `eval_js` reaches the renderer and a parked callback answers an IPC
+/// request, and neither belongs under the state mutex.
+#[derive(Default)]
+pub(crate) struct EndedSession {
+    /// The plugins the ended session had live in the page.
+    pub(crate) loaded: Vec<(String, u64)>,
+    /// The load requests it parked, to be answered rather than left hanging across the
+    /// logout/login transition.
+    pub(crate) waiters: Vec<(u64, IpcCallback)>,
+}
+
 impl AppState {
     /// The one way `media_duration` is written, and it never empties: a payload that carries
     /// no length is not evidence that the last measured one was wrong.
     pub(crate) fn record_measured_duration(&mut self, measured: MeasuredDuration) {
         self.media_duration = settle_recorded_duration(self.media_duration.take(), measured);
     }
+
+    /// End the session now in progress, and name everything it was still holding.
+    ///
+    /// One critical section, because the pieces only hold together taken at once. A load pass
+    /// runs off the UI thread: retiring the plugins first and bumping after leaves a window
+    /// where a pass registers too late for the sweep and reads the epoch too early to be
+    /// stopped by it, so the injection lands in a session the user has left with nothing naming
+    /// it. Clearing the token later leaves the matching window the other way, where
+    /// `handle_jsrt_load_plugins` still sees a credential and starts a pass under the NEW epoch.
+    pub(crate) fn end_session(&mut self) -> EndedSession {
+        // Named and dropped in one call, rather than as each cleanup is dispatched: what
+        // makes the bump below safe is that no entry survives it, and a retire interleaved
+        // with an `eval_js` would hand the lock back between the two.
+        let loaded = self.plugin_manager.retire_all_loaded();
+        // A pass still running belongs to the session being cleared. Bumping stops it at its
+        // next plugin and keeps its result from ever answering a request made from here on,
+        // which would report the departed session's plugin set as the new one's.
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self.captured_token.clear();
+        self.token_state = None;
+        EndedSession {
+            loaded,
+            waiters: std::mem::take(&mut self.plugin_load_waiters),
+        }
+    }
 }
 
-// SAFETY: holds non-Send CEF/OS handles (Browser, OsMediaControls, ThumbBar);
-// Send is sound only because these are touched solely on the CEF UI thread.
+// SAFETY: `thumbbar` (Windows only) holds raw `ITaskbarList3` pointers and a
+// `Cell`, and it is the sole field that is not already `Send`. Sound because the
+// taskbar object is created and used solely on the CEF UI thread. Gated to
+// Windows on purpose: elsewhere the auto-impl carries `AppState`, and a field that
+// stops being `Send` fails the build rather than being absorbed here.
+//
+// Nothing else here constrains threading: `browser` is a `RefGuard`, souvlaki's
+// `MediaControls` wraps agile WinRT objects or a channel and a `JoinHandle`, and
+// `BrowserSideCallback` is declared `Send + Sync`. Work that only calls `eval_js` or answers
+// an IPC callback may therefore run off the UI thread, `Frame::execute_java_script` reposting
+// itself onto it.
+#[cfg(target_os = "windows")]
 unsafe impl Send for AppState {}
 
 pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
@@ -241,22 +298,42 @@ pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
         // ShellExecuteW, not `cmd /C start`: the latter treats `&` in a URL query
         // string as a command separator, truncating links like `?a=1&token=2`.
         use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::UI::Shell::ShellExecuteW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
         let file: Vec<u16> = target.encode_wide().chain(std::iter::once(0)).collect();
-        let verb: Vec<u16> = "open\0".encode_utf16().collect();
-        // SAFETY: verb/file are null-terminated UTF-16; the unused pointers are null,
-        // which ShellExecuteW documents as "no parameters / default directory".
-        unsafe {
-            ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                file.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                SW_SHOWNORMAL,
-            );
-        }
+        // On its own thread, unlike the `spawn` calls below. Those return once a child is
+        // launched; this one resolves a file association and can hand the work to a COM shell
+        // extension, which is unbounded. Most callers here are UI-thread menu items and link
+        // clicks, and the window must not stop repainting while the shell thinks.
+        std::thread::Builder::new()
+            .name("shell-open".into())
+            .spawn(move || {
+                use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+                use windows_sys::Win32::UI::Shell::ShellExecuteW;
+                use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+                // A shell extension may be COM-based; this thread has to be initialized
+                // before the call. STA, as the ASIO path does; S_FALSE says the thread already
+                // was, which is equally usable.
+                let hr =
+                    unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+                if hr < 0 {
+                    crate::verr!("[SHELL]  CoInitializeEx failed ({hr:#x}), target not opened");
+                    return;
+                }
+                let verb: Vec<u16> = "open\0".encode_utf16().collect();
+                // SAFETY: verb/file are null-terminated UTF-16; the unused pointers are null,
+                // which ShellExecuteW documents as "no parameters / default directory".
+                unsafe {
+                    ShellExecuteW(
+                        std::ptr::null_mut(),
+                        verb.as_ptr(),
+                        file.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        SW_SHOWNORMAL,
+                    );
+                }
+            })
+            .map_err(|e| crate::verr!("[SHELL]  Could not spawn the shell-open thread: {e}"))
+            .ok();
     }
     #[cfg(target_os = "linux")]
     {

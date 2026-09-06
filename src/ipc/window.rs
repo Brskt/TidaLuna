@@ -39,7 +39,12 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             let x = msg.args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let y = msg.args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
-            let cache_label = if let Ok(cache) = crate::state::AUDIO_CACHE.lock() {
+            // Tried, not awaited: a clear in flight holds this mutex for the whole wipe, and
+            // that hold is deliberate, keeping the wipe atomic against the unlocked
+            // writes `store_finished_ciphertext` performs. Waiting here would put the freeze
+            // back on the UI thread by the back door. The size is a label. The existing
+            // fallback below is the right answer when the lock is busy.
+            let cache_label = if let Ok(cache) = crate::state::AUDIO_CACHE.try_lock() {
                 let mb = cache.total_size() as f64 / (1024.0 * 1024.0);
                 format!("Clear Cache ({mb:.0} MB)")
             } else {
@@ -141,7 +146,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         "settings.close_to_tray" => {
             crate::vprintln!("[TRAY]   IPC settings.close_to_tray received");
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_close_to_tray(conn, enabled);
             });
             if enabled {
@@ -154,7 +159,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                     state.close_to_tray = created;
                 });
                 if !created {
-                    crate::state::db().call_settings(|conn| {
+                    crate::state::db().post(|_, conn| {
                         crate::settings::save_close_to_tray(conn, false);
                     });
                     crate::app_state::eval_js(
@@ -175,7 +180,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         #[cfg(target_os = "windows")]
         "settings.volume_sync" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_volume_sync(conn, enabled);
             });
             crate::app_state::with_state(|state| {
@@ -188,7 +193,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             // Persist the ASIO toggle (the mode switch itself rides on `player.devices.set`;
             // this only saves the preference, re-seeded into the frontend on next boot).
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_asio(conn, enabled);
             });
             crate::vprintln!("[PLAYER] ASIO mode persisted: {enabled}");
@@ -198,7 +203,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             // Persist the exclusive-WASAPI toggle (the mode switch rides on
             // `player.devices.set`; this only saves the preference, re-seeded on next boot).
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_exclusive(conn, enabled);
             });
             crate::vprintln!("[PLAYER] Exclusive WASAPI mode persisted: {enabled}");
@@ -214,17 +219,22 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         }
         "updater.set_auto_check" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_update_auto_check(conn, enabled);
             });
             crate::vprintln!("[UPDATER] Auto-check set to {enabled}");
         }
         "updater.set_channel" => {
-            // save_update_channel normalizes anything but "dev" to "stable".
+            // save_update_channel normalizes anything but "dev" to "stable", and
+            // `from_setting` maps the same string the same way. The value handed to the
+            // updater is the one a later check will be compared against; the two
+            // normalizations have to agree.
             let channel = msg.arg(0).to_string();
-            crate::state::db().call_settings(move |conn| {
+            let now = crate::updater::UpdateChannel::from_setting(&channel);
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_update_channel(conn, &channel);
             });
+            crate::updater::channel_changed(now);
             crate::vprintln!("[UPDATER] Channel set to {}", msg.arg(0));
         }
         "settings.set_log_level" => {
@@ -234,7 +244,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0)
                 .min(crate::logging::MAX_LOG_LEVEL as u64) as u8;
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_log_level(conn, level);
             });
             crate::logging::set_log_level(level);
@@ -248,10 +258,45 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         }
         "settings.set_console" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().call_settings(move |conn| {
+            crate::state::db().post(move |_, conn| {
                 crate::settings::save_console(conn, enabled);
             });
             crate::vprintln!("[LOGGING] Console window set to {enabled} (applies on restart)");
+        }
+        // Not Windows-gated: crossfade rides the shared cpal path, which every
+        // platform uses. The exclusive and ASIO backends ignore it.
+        // One channel carrying BOTH values, because what the player needs is a
+        // function of the two: zero seconds when the switch is off. Separate
+        // channels could not compute it without reading back whichever value did
+        // not just change.
+        "settings.set_crossfade" => {
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
+            // The contract is whole seconds, 0 to 12, and the UI refuses anything
+            // else. This is the last line, not the enforcement: read as f64 because
+            // `as_u64` is syntactic and rejects 6.0 as readily as 6.5, whose
+            // fallback would store "off" while the UI still showed a duration.
+            // Rounding an out-of-contract value beats silently disabling the
+            // feature.
+            let secs = msg
+                .args
+                .get(1)
+                .and_then(|v| v.as_f64())
+                .filter(|s| s.is_finite() && *s >= 0.0)
+                .map(|s| {
+                    s.round()
+                        .min(crate::player::crossfade::MAX_CROSSFADE_SECS as f64)
+                        as u8
+                })
+                .unwrap_or(0);
+            crate::state::db().post(move |_, conn| {
+                crate::settings::save_crossfade_enabled(conn, enabled);
+                crate::settings::save_crossfade_secs(conn, secs);
+            });
+            let effective = if enabled { secs } else { 0 };
+            crate::app_state::with_state(|state| {
+                let _ = state.player.set_crossfade_secs(effective);
+            });
+            crate::vprintln!("[PLAYER] Crossfade {enabled}, {secs}s (effective {effective}s)");
         }
         "settings.open_logs_dir" => {
             let dir = crate::state::cache_data_dir().join("logs");

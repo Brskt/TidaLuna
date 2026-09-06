@@ -109,8 +109,21 @@ pub(crate) fn forward(event: &PlayerEvent) {
                 state: ConnectPlayerState::Idle,
                 engine_gen,
             }),
-            _ => None,
+            // Connect's state set has no seeking, and the seek's own answer reaches the
+            // controller as the `TimeUpdate` that follows it.
+            PlaybackState::Seeking => None,
         },
+        // The phone has to learn the track changed. Swallowed by the wildcard below, it
+        // keeps naming the outgoing one. But it is NOT a completion: a completion means the
+        // player stopped and the controller owes it the next track, where here the next
+        // track is already playing. Sent as one, the controller prepared it again and the
+        // listener heard it restart from zero.
+        PlayerEvent::CrossfadePromoted(_seq, track_id) => {
+            Some(BridgeEvent::CrossfadeTransitioned {
+                track_id: track_id.clone(),
+                engine_gen,
+            })
+        }
         PlayerEvent::TimeUpdate(seconds, _seq) => {
             let ms = (*seconds * 1000.0) as u64;
             Some(BridgeEvent::ProgressUpdated {
@@ -132,10 +145,41 @@ pub(crate) fn forward(event: &PlayerEvent) {
                 engine_gen,
             })
         }
-        _ => None,
+        // A dead network stops the local player for good; the controller has to hear it
+        // or it goes on rendering a track that will never advance. Routed through the error
+        // arm rather than a `StatusUpdated`, because the receiver answers this one by
+        // settling to `Stopped` FIRST: a status alone leaves `PbState::Started` standing,
+        // and the status recomputed from it re-asserts `Playing` to the phone.
+        PlayerEvent::NetworkLost => Some(BridgeEvent::PlaybackError {
+            status_code: "network connection lost".to_string(),
+            engine_gen,
+        }),
+        // The guard above owns the real measurement; this is its zero sentinel.
+        PlayerEvent::Duration(..) => None,
+        // Local surfaces the controller does not render: it neither picks this speaker's
+        // output device nor shows its codec badge, and volume sync is this host's own
+        // digital gain.
+        PlayerEvent::AudioDevices(..)
+        | PlayerEvent::MediaFormat { .. }
+        | PlayerEvent::Version(..)
+        | PlayerEvent::VolumeSync(..) => None,
+        // An internal re-arm instruction, not a transport transition: whatever it re-arms
+        // to announces itself with its own `StateChange`.
+        PlayerEvent::ReplayRequest { .. } => None,
+        // The recoverable kinds re-arm playback and announce themselves through the
+        // `StateChange` that follows. `FormatNotSupported` does not, and whether the
+        // controller should hear that one is a question this arm does not answer.
+        PlayerEvent::DeviceError(..) => None,
+        // Emitted on an HTTP 429 during fetch. Unlike every other load failure it does not
+        // call `fail_load`: no `MediaError` settles behind it either.
+        PlayerEvent::MaxConnectionsReached => None,
     };
 
     if let Some(evt) = bridge_event {
         let _ = tx.try_send(evt);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/connect/bridge.rs"]
+mod tests;

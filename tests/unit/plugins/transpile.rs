@@ -81,12 +81,42 @@ fn export_default_named_function_keeps_declaration() {
 
 #[test]
 fn import_named_maps_to_modules() {
-    let js = lower(r#"import { storage, intercept } from "@luna/lib";console.log(1);"#);
-    assert!(js.contains(r#"luna?.core?.modules?.["@luna/lib"]"#));
+    let js = lower(r#"import { storage, intercept } from "m";console.log(1);"#);
+    assert!(js.contains(r#"luna?.core?.modules?.["m"]"#));
     assert!(js.contains("storage"));
     assert!(js.contains("intercept"));
     assert!(js.contains("console.log(1)"));
     assert!(!js.contains("import"));
+}
+
+/// `@luna/lib` is the exception, and the reason is identity. Its `ipcRenderer.invoke` closes over
+/// the app bundle's scope; a shadow injected into a plugin's wrapper cannot reach it, and the
+/// channels that act on the caller's identity used to arrive with none, which is how
+/// `registerNative` came to read the acting plugin off an argument. Lowering the import to a call
+/// carrying `__cap` is what makes the route attributable: this is the shape the Rust-side gate
+/// depends on.
+#[test]
+fn the_lib_import_is_bound_to_the_calling_plugins_capability() {
+    let js = lower(r#"import { ipcRenderer } from "@luna/lib";ipcRenderer.invoke("x");"#);
+    assert!(
+        js.contains(r#"luna?.core?.modules?.["__lunaLibFor"]?.(__cap)"#),
+        "the lib import must resolve to the per-plugin copy, not the shared object:\n{js}"
+    );
+    assert!(
+        !js.contains(r#"luna?.core?.modules?.["@luna/lib"]"#),
+        "the shared object carries no identity and must not be what a plugin gets:\n{js}"
+    );
+    assert!(js.contains("ipcRenderer"));
+    assert!(!js.contains("import"));
+}
+
+/// The rebinding is for that one specifier and nothing near it: a plugin importing the native half
+/// still gets the shared object, and nothing else changes shape.
+#[test]
+fn the_lib_rebinding_does_not_catch_its_neighbours() {
+    let js = lower(r#"import { x } from "@luna/lib.native";x();"#);
+    assert!(js.contains(r#"luna?.core?.modules?.["@luna/lib.native"]"#));
+    assert!(!js.contains("__lunaLibFor"));
 }
 
 #[test]

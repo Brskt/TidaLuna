@@ -25,33 +25,24 @@ pub(super) fn purge_sdk_auth_blob_if_needed() {
 fn handle_session_clear() {
     crate::vprintln!("[AUTH]   session_clear received");
 
-    // Unload all user plugins before clearing the session
-    unload_all_user_plugins();
-
-    let parked = with_state(|state| {
+    let ended = with_state(|state| {
         // Stop the native player; it runs independent of the renderer: a
         // session clear alone won't halt audio on logout.
-        let _ = state.player.stop();
+        let _ = state.player.stop(crate::player::LoadOrigin::Local);
         state.pending_player_events.clear();
         state.pending_time_update = None;
-        state.captured_token.clear();
-        state.token_state = None;
         // Re-open the plugin-load gate; the prior cold-boot refresh is moot now.
         state.proactive_refresh_done = true;
-        std::mem::take(&mut state.plugin_load_waiters)
+        state.end_session()
     })
     .unwrap_or_default();
-    // Settle any parked cold-boot load requests, letting the renderer's invokeIpc
-    // resolve rather than hang across the logout/login transition.
-    for cb in &parked {
-        super::ipc_callback_ok(cb, "true");
-    }
+    settle_ended_session(&ended);
     // Allow the next login to trigger its one-shot cold-boot reload.
     crate::ui::POST_LOGIN_RELOADED.store(false, std::sync::atomic::Ordering::SeqCst);
     let data_dir = crate::state::cache_data_dir();
-    if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
-        crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");
-    }
+    // Queued on the same channel as the saves: an erase that overtook a save still in flight
+    // would hand the credential back to the next launch after the user logged out.
+    crate::platform::secure_store::delete_queued(&data_dir);
     crate::app_state::eval_js(JS_PURGE_SDK_BLOB);
     super::reset_pkce_scrub();
     crate::vprintln!("[AUTH]   Cleared captured token + token state + SDK auth blob");
@@ -72,14 +63,15 @@ fn handle_session_hard_reset() {
     }
     crate::vprintln!("[AUTH]   hard_reset received");
 
-    with_state(|state| {
-        state.captured_token.clear();
-        state.token_state = None;
-    });
+    // The same transition as the soft clear, through the same owner: a pass in flight
+    // describes the session being destroyed, and the plugins it loaded outlive the storage
+    // wipe below unless something retires them.
+    let ended = with_state(|state| state.end_session()).unwrap_or_default();
+    settle_ended_session(&ended);
     let data_dir = crate::state::cache_data_dir();
-    if let Err(e) = crate::platform::secure_store::delete(&data_dir) {
-        crate::vprintln!("[AUTH]   Failed to delete secure store: {e:?}");
-    }
+    // Queued on the same channel as the saves: an erase that overtook a save still in flight
+    // would hand the credential back to the next launch after the user logged out.
+    crate::platform::secure_store::delete_queued(&data_dir);
     super::reset_pkce_scrub();
     crate::vprintln!("[AUTH]   Cleared captured token + token state");
 
@@ -146,7 +138,11 @@ cef::wrap_completion_callback! {
 
 /// Multi-pass plugin loading with dependency ordering and startup reconciliation.
 /// Used by both the fire-and-forget path and the request-response handler.
-pub(super) fn do_load_plugins_inline() {
+///
+/// Runs off the CEF UI thread, one pass at a time, under the session epoch it was dispatched
+/// with. It re-reads that epoch before touching each plugin: a logout runs on the UI thread and
+/// cannot stop this pass. The pass has to notice and stop itself.
+pub(super) fn do_load_plugins_inline(epoch: u64) {
     let db = crate::state::db();
 
     // 1. Dedup same-name plugins (legacy/corruption cleanup)
@@ -169,6 +165,14 @@ pub(super) fn do_load_plugins_inline() {
         let mut still_remaining = Vec::new();
 
         for p in remaining {
+            // Checked per plugin, not once per pass: `unload_all_user_plugins` sweeps the manager
+            // on the UI thread and has no way to interrupt this loop. Injecting after that sweep
+            // would resurrect a plugin into a session the user has already left, with nothing
+            // left behind to unload it again.
+            if with_state(|state| state.session_epoch) != Some(epoch) {
+                crate::vprintln!("[PLUGIN] Load pass abandoned: the session changed under it");
+                return;
+            }
             match crate::plugins::store::parse_luna_meta(&p.manifest) {
                 Err(msg) => {
                     crate::vprintln!("[PLUGIN] Skipping '{}': invalid manifest: {msg}", p.name);
@@ -182,72 +186,40 @@ pub(super) fn do_load_plugins_inline() {
                     let deps_satisfied = deps.iter().all(|d| loaded_names.contains(&d.name));
 
                     if deps_satisfied {
-                        let (Some(nonce), Some(capability)) = (
-                            crate::plugins::manager::random_nonce(),
-                            crate::plugins::manager::random_capability(),
-                        ) else {
-                            crate::vprintln!("[PLUGIN] RNG unavailable, skipping '{}'", p.name);
-                            with_state(|state| state.plugin_manager.mark_unloaded(&p.url));
-                            failed_urls.push(p.url);
-                            continue;
-                        };
-                        let load_id = with_state(|state| {
-                            state
-                                .plugin_manager
-                                .mark_loading(&p.url, &p.name, nonce, &capability)
-                        })
-                        .unwrap_or(0);
-                        match crate::plugins::PluginManager::transpile_and_wrap(
-                            &p.url,
-                            &p.code,
-                            load_id,
-                            nonce,
-                            &capability,
-                        ) {
-                            Ok(js) => {
-                                crate::vprintln!(
-                                    "[PLUGIN] Prepared '{}' ({} bytes, gen={})",
-                                    p.name,
-                                    js.len(),
-                                    load_id
-                                );
-                                let dispatched = eval_js(&js);
-                                if dispatched {
-                                    // Critical: persist ever_dispatched flag
-                                    let url_flag = p.url.clone();
-                                    let flag_ok = db.call_plugins(move |pc| {
-                                        crate::plugins::store::mark_ever_dispatched(pc, &url_flag)
-                                    });
-                                    if flag_ok.is_ok() {
-                                        dispatched_snapshot.push((p.url.clone(), load_id));
-                                        loaded_names.insert(p.name);
-                                        progress = true;
-                                    } else {
-                                        // Flag failed - revert to avoid inconsistent state
-                                        crate::vprintln!(
-                                            "[PLUGIN] Failed to persist ever_dispatched for '{}' - reverting",
-                                            p.name
-                                        );
-                                        let cleanup =
-                                            crate::plugins::PluginManager::generate_unload_js(
-                                                &p.url,
-                                            );
-                                        eval_js(&cleanup);
-                                        with_state(|state| {
-                                            state.plugin_manager.mark_unloaded(&p.url)
-                                        });
-                                        failed_urls.push(p.url);
-                                    }
+                        // Every failing outcome has already announced itself and marked the
+                        // plugin unloaded. What is left is what only this pass owes, and the
+                        // three duties are not interchangeable: a session that ended under an
+                        // injection is not a plugin that failed to load, and reconciling on it
+                        // would disable something nothing was wrong with.
+                        let outcome = super::inject::inject_plugin(&p.url, &p.name, &p.code, epoch);
+                        match outcome.pass_duty() {
+                            super::inject::PassDuty::Record { load_id } => {
+                                // Critical: persist ever_dispatched flag
+                                let url_flag = p.url.clone();
+                                let flag_ok = db.call_plugins(move |pc| {
+                                    crate::plugins::store::mark_ever_dispatched(pc, &url_flag)
+                                });
+                                if flag_ok.is_ok() {
+                                    dispatched_snapshot.push((p.url.clone(), load_id));
+                                    loaded_names.insert(p.name);
+                                    progress = true;
                                 } else {
-                                    crate::vprintln!("[PLUGIN] No renderer frame for '{}'", p.name);
-                                    with_state(|state| state.plugin_manager.mark_unloaded(&p.url));
+                                    // Flag failed; revert to avoid inconsistent state
+                                    crate::vprintln!(
+                                        "[PLUGIN] Failed to persist ever_dispatched for '{}', reverting",
+                                        p.name
+                                    );
+                                    super::inject::undo_injection(&p.url, load_id);
                                     failed_urls.push(p.url);
                                 }
                             }
-                            Err(e) => {
-                                crate::vprintln!("[PLUGIN] Failed to prepare '{}': {e}", p.name);
-                                with_state(|state| state.plugin_manager.mark_unloaded(&p.url));
-                                failed_urls.push(p.url);
+                            super::inject::PassDuty::Reconcile => failed_urls.push(p.url),
+                            super::inject::PassDuty::Abandon => {
+                                crate::vprintln!(
+                                    "[PLUGIN] Load pass abandoned: the session changed under '{}'",
+                                    p.name
+                                );
+                                return;
                             }
                         }
                     } else {
@@ -294,13 +266,14 @@ pub(super) fn do_load_plugins_inline() {
         crate::state::rt_handle().spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             for (url, load_id) in &dispatched_snapshot {
-                let still_loading = with_state(|state| {
-                    state.plugin_manager.is_loaded(url)
-                        && !state.plugin_manager.is_ready(url)
-                        && state.plugin_manager.current_load_id(url) == Some(*load_id)
+                // Tested and removed under one borrow. Read first and removed second, the ack
+                // this watchdog exists to wait for can land between the two, and the cleanup
+                // below would then tear down a plugin that had just succeeded.
+                let abandoned = with_state(|state| {
+                    state.plugin_manager.abandon_if_still_loading(url, *load_id)
                 })
                 .unwrap_or(false);
-                if still_loading {
+                if abandoned {
                     crate::vprintln!(
                         "[PLUGIN] Startup timeout: '{}' (gen={}) never ready - marking failed",
                         url,
@@ -308,7 +281,6 @@ pub(super) fn do_load_plugins_inline() {
                     );
                     let cleanup_js = crate::plugins::PluginManager::generate_unload_js(url);
                     eval_js(&cleanup_js);
-                    with_state(|state| state.plugin_manager.mark_unloaded(url));
                     let url_disable = url.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         crate::state::db().call_plugins(move |pc| {
@@ -356,26 +328,92 @@ wrap_task! {
     }
     impl Task {
         fn execute(&self) {
-            // Open the gate + take parked waiters under the lock, then DROP it
-            // before loading: do_load_plugins_inline re-locks AppState repeatedly.
-            let waiters = with_state(|state| {
+            // Opening the gate no longer runs the pass here. It only releases whoever is parked
+            // into the single-flight queue, which is also what a request arriving after the gate
+            // opened goes through. One path for both; neither can start a second pass.
+            let parked = with_state(|state| {
                 state.proactive_refresh_done = true;
-                std::mem::take(&mut state.plugin_load_waiters)
+                state.plugin_load_waiters.len()
             })
-            .unwrap_or_default();
-            if waiters.is_empty() {
+            .unwrap_or(0);
+            if parked == 0 {
                 return;
             }
-            crate::vprintln!(
-                "[PLUGIN] Gate open: draining {} parked load request(s)",
-                waiters.len()
-            );
-            purge_sdk_auth_blob_if_needed();
-            do_load_plugins_inline();
-            for cb in &waiters {
-                super::ipc_callback_ok(cb, "true");
-            }
+            crate::vprintln!("[PLUGIN] Gate open: releasing {parked} parked load request(s)");
+            request_plugin_load();
         }
+    }
+}
+
+/// Start a load pass unless one is already running.
+///
+/// The waiters list is the queue. A caller parks its callback, then calls this: whether it
+/// starts the pass or joins one already running, its answer arrives the same way, when a pass
+/// of its own epoch settles.
+pub(super) fn request_plugin_load() {
+    let start = with_state(|state| {
+        if state.plugin_load_in_flight.is_some() {
+            return None;
+        }
+        let epoch = state.session_epoch;
+        state.plugin_load_in_flight = Some(epoch);
+        Some(epoch)
+    })
+    .flatten();
+    if let Some(epoch) = start {
+        dispatch_plugin_load(epoch);
+    }
+}
+
+/// Run one pass off the UI thread, then settle it. Only ever called with the in-flight slot held.
+fn dispatch_plugin_load(epoch: u64) {
+    crate::state::rt_handle().spawn(async move {
+        purge_sdk_auth_blob_if_needed();
+        // The pass is a long stretch of blocking database work; it belongs on the blocking
+        // pool rather than a worker that other futures share.
+        if let Err(e) = tokio::task::spawn_blocking(move || do_load_plugins_inline(epoch)).await {
+            crate::verr!("[PLUGIN] Load pass did not run: {e}");
+        }
+        settle_plugin_load(epoch);
+    });
+}
+
+/// What a settling pass owes, in order: the waiters it may answer, the waiters it may not, and
+/// the epoch owed a pass of its own.
+type SettleSplit<T> = (Vec<(u64, T)>, Vec<(u64, T)>, Option<u64>);
+
+/// Split parked waiters into the ones a pass of `epoch` may answer and the ones it may not, and
+/// name the epoch owed a pass of its own.
+///
+/// Whoever asked after the session changed carries a newer tag: this pass read a plugin set they
+/// never saw, and the reply is a bare boolean that gives them no way to detect the substitution.
+/// Generic over the payload, to keep the rule testable without a live IPC callback.
+fn settle_split<T>(parked: Vec<(u64, T)>, epoch: u64) -> SettleSplit<T> {
+    let (answer, rest): (Vec<_>, Vec<_>) =
+        parked.into_iter().partition(|(parked, _)| *parked == epoch);
+    let next = rest.first().map(|(parked, _)| *parked);
+    (answer, rest, next)
+}
+
+/// Answer the waiters this pass ran for, then start another if a newer epoch is still waiting.
+fn settle_plugin_load(epoch: u64) {
+    let (answer, next) = with_state(|state| {
+        state.plugin_load_in_flight = None;
+        let (answer, rest, next) =
+            settle_split(std::mem::take(&mut state.plugin_load_waiters), epoch);
+        state.plugin_load_waiters = rest;
+        if let Some(next) = next {
+            state.plugin_load_in_flight = Some(next);
+        }
+        (answer, next)
+    })
+    .unwrap_or_default();
+
+    for (_, cb) in &answer {
+        super::ipc_callback_ok(cb, "true");
+    }
+    if let Some(next) = next {
+        dispatch_plugin_load(next);
     }
 }
 
@@ -441,22 +479,28 @@ pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
     }
 }
 
-/// Unload all user plugins (cleanup JS + mark_unloaded). Called on session_clear.
-fn unload_all_user_plugins() {
-    let loaded: Vec<String> =
-        with_state(|state| state.plugin_manager.loaded_urls()).unwrap_or_default();
-
-    if loaded.is_empty() {
-        return;
+/// Tell the page about a session the state has already ended: unload the plugins it had
+/// live, and answer the load requests it parked.
+///
+/// Both reach the renderer; both run once the lock is back. Nothing here can be raced by a load
+/// pass: the entries these names came from are retired, the epoch that admitted them is gone,
+/// and a pass arriving now is stopped by its own re-check.
+fn settle_ended_session(ended: &crate::app_state::EndedSession) {
+    if !ended.loaded.is_empty() {
+        crate::vprintln!(
+            "[PLUGIN] Unloading {} user plugin(s) (session ended)",
+            ended.loaded.len()
+        );
+        for (url, _) in &ended.loaded {
+            eval_js(&crate::plugins::PluginManager::generate_unload_js(url));
+        }
     }
-
-    crate::vprintln!(
-        "[PLUGIN] Unloading {} user plugin(s) (session clear)",
-        loaded.len()
-    );
-    for url in &loaded {
-        let cleanup_js = crate::plugins::PluginManager::generate_unload_js(url);
-        eval_js(&cleanup_js);
-        with_state(|state| state.plugin_manager.mark_unloaded(url));
+    // Letting the renderer's invokeIpc resolve rather than hang across the transition.
+    for (_, cb) in &ended.waiters {
+        super::ipc_callback_ok(cb, "true");
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/ipc/plugin/jsrt.rs"]
+mod jsrt_tests;

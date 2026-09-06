@@ -1,6 +1,6 @@
 use super::output::AudioPipeline;
 use super::{DecodeCommand, DecodeEvent};
-use crate::player::buffer::RamBuffer;
+use crate::player::buffer::{RamBuffer, ReadStop};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
@@ -218,7 +218,7 @@ enum PushRun {
 }
 
 /// Pushes a whole buffer and owns the retain-or-drop rule its callers kept diverging on: a
-/// refused seek leaves the reader on these samples, so the rest still goes through; a moved
+/// refused seek leaves the reader on these samples and the rest still goes through; a moved
 /// one makes them the old position's; a pause owes them back. Seeking arrives as a closure so
 /// the rule can be exercised without a container to demux.
 fn push_until_settled(
@@ -265,6 +265,17 @@ fn seek_closure<'a, 'c>(
     move |time, gen_id| do_decode_seek(time, gen_id, format, decoder, pipeline, ctx)
 }
 
+/// Which deliberate stop ended a read, if that is what ended it. Asked of the error's payload
+/// rather than of its kind, because `ErrorKind::Other` is a shared vocabulary: the buffer keeps
+/// every real failure out of it by naming discipline alone, and symphonia mints its own `Other`
+/// inside the Vorbis bit reader. The payload is put there by the site that knew why.
+fn requested_stop(e: &symphonia::core::errors::Error) -> Option<ReadStop> {
+    match e {
+        symphonia::core::errors::Error::IoError(io) => ReadStop::from_io(io),
+        _ => None,
+    }
+}
+
 fn decode_loop(cfg: DecodeThreadConfig) {
     let DecodeThreadConfig {
         buffer,
@@ -275,11 +286,19 @@ fn decode_loop(cfg: DecodeThreadConfig) {
         output_rate,
         output_channels,
         seek_gen,
-        // The spawner already bound it to `buffer`; the loop meets it as a read that
-        // returns Interrupted, never as a flag it polls.
-        reader_cancel: _,
+        // Bound rather than dropped, because at one site the loop does have to poll it. A read
+        // that fails names its stop in the error's payload, which is the precise answer and the
+        // one `next_packet` is handed, but symphonia's probe scans for a format marker with
+        // `while let Ok(byte) = mss.read_byte()` and discards that error, reporting a missing
+        // format reader instead. A stop during the probe is recognisable only from the state it
+        // was posted to.
+        reader_cancel,
     } = cfg;
     crate::vprintln!("[DECODE] Thread started, probing format...");
+    // Cloned before the buffer is boxed into the stream, which consumes it. Cancelling the
+    // whole buffer has no reader-side view otherwise, and the probe is where that view is the
+    // only one left.
+    let stop_state = buffer.clone();
     let mss = MediaSourceStream::new(Box::new(buffer), Default::default());
 
     let hint = Hint::new();
@@ -291,6 +310,20 @@ fn decode_loop(cfg: DecodeThreadConfig) {
         match symphonia::default::get_probe().probe(&hint, mss, format_opts, metadata_opts) {
             Ok(f) => f,
             Err(e) => {
+                // A stop lands here too: a fade whose decoder dies before it started retires
+                // exactly this reader, and announced as a probe failure it took the track's
+                // cache entry down and raised a media error for a track that was readable.
+                // Both channels are asked because the probe has two exits: a reader it already
+                // chose re-raises the read's error, where the marker scan discards it and only
+                // the state still knows.
+                if requested_stop(&e).is_some()
+                    || stop_state.is_cancelled()
+                    || reader_cancel.load(Relaxed)
+                {
+                    crate::vprintln!("[DECODE] Stopped while probing");
+                    let _ = event_tx.send(DecodeEvent::Stopped);
+                    return;
+                }
                 let _ = event_tx.send(DecodeEvent::Error(format!("probe failed: {e}")));
                 return;
             }
@@ -580,6 +613,30 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                 continue;
             }
             Err(e) => {
+                // Asked for. Nothing here has failed and nothing needs announcing. The
+                // handler for `Error` drops the track's cache entry, and the bytes behind a
+                // stop are good; guessing wrong here costs a re-download of a track that
+                // decoded perfectly, and a media error the listener never earned.
+                if let Some(stop) = requested_stop(&e) {
+                    crate::vprintln!("[DECODE] Stopped: {stop}");
+                    let _ = event_tx.send(DecodeEvent::Stopped);
+                    return;
+                }
+                // A dead network says so two ways: the READER gave up after thirty seconds
+                // (`TimedOut`), or the WRITER gave up first and stored its failure
+                // (`ConnectionAborted`). On a pulled cable the writer always wins that race,
+                // eight reconnects with backoff against thirty seconds, so listening for the
+                // timeout alone surfaced a cut network as "unexpected error (NPO03)".
+                if let symphonia::core::errors::Error::IoError(ref io) = e
+                    && matches!(
+                        io.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::ConnectionAborted
+                    )
+                {
+                    crate::vprintln!("[DECODE] Network stalled: {e}");
+                    let _ = event_tx.send(DecodeEvent::NetworkStalled);
+                    return;
+                }
                 let _ = event_tx.send(DecodeEvent::Error(format!("packet error: {e}")));
                 let _ = event_tx.send(DecodeEvent::Finished);
                 return;

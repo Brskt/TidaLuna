@@ -20,6 +20,35 @@ fn test_conn() -> Connection {
     conn
 }
 
+/// The two decode-failure sites run on the player control thread, which cannot wait for this
+/// mutex: `clear()` holds it for its whole `remove_dir_all`, deliberately. Handing the id over
+/// is what keeps the transport running: the caller returns at once and the drop lands whenever
+/// the lock frees. Skipping was never open to them: nothing else retires an entry whose header
+/// sniffs fine and whose bitstream does not decode.
+#[test]
+fn a_detached_drop_hands_over_without_waiting_for_the_cache() {
+    // What a wipe looks like from the control thread: the mutex held by someone else.
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let wiper = std::thread::spawn(move || {
+        let _held = crate::state::AUDIO_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    });
+    locked_rx.recv().unwrap();
+
+    let handed_over_at = std::time::Instant::now();
+    AudioCache::drop_entry_detached("no-such-track".to_string());
+    let waited = handed_over_at.elapsed();
+
+    assert!(
+        waited < std::time::Duration::from_millis(100),
+        "the control thread waited {waited:?} to hand over a drop: that is the transport frozen"
+    );
+    wiper.join().unwrap();
+}
+
 #[test]
 fn access_stamp_is_monotonic_across_clock_skew() {
     let conn = test_conn();

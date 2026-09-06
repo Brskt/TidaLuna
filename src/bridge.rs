@@ -52,6 +52,7 @@ impl PlayerBridgeEvent {
     pub fn media_format(
         codec: &'static str,
         sample_rate: u32,
+        output_sample_rate: u32,
         bit_depth: Option<u32>,
         channels: u16,
         bytes: u64,
@@ -62,6 +63,7 @@ impl PlayerBridgeEvent {
             v: serde_json::json!({
                 "codec": codec,
                 "sampleRate": sample_rate,
+                "outputSampleRate": output_sample_rate,
                 "bitDepth": bit_depth,
                 "channels": channels,
                 "bytes": bytes,
@@ -88,6 +90,17 @@ impl PlayerBridgeEvent {
     pub fn max_connections() -> Self {
         Self {
             t: "mediamaxconnectionsreached",
+            seq: None,
+            v: serde_json::Value::Null,
+        }
+    }
+
+    /// Not a passthrough event: the renderer answers it with the same five-step refusal
+    /// the undecodable-profile branch uses, because a raw `mediaerror` alone loses the
+    /// one-second STALLED race TIDAL arms on every autoplay load.
+    pub fn network_lost() -> Self {
+        Self {
+            t: "medianetworklost",
             seq: None,
             v: serde_json::Value::Null,
         }

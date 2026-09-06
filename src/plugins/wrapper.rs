@@ -185,6 +185,41 @@ var __idbKeyval = {
 };
 "#);
 
+    // --- Attributed IPC bridge ---
+    // The upstream build tool inlines `__ipcRenderer.invoke("__Luna.registerNative", ...)` straight
+    // into a plugin's bundle, against the bare identifier. Shadowed here so that call carries the
+    // capability this wrapper holds, which is the whole point: read off an argument instead, the
+    // acting plugin's identity was only ever checked for naming something that exists.
+    //
+    // Built on `__cq` like the shims above rather than by delegating, to keep the capability in
+    // this scope. Only the two methods acting on the caller's identity are rebound; the rest
+    // forward to the page's object, registering a listener acting on nobody's identity and
+    // forwarding keeping the unsubscribe those return.
+    js.push_str(
+        r#"
+var __ipcRenderer = {
+    invoke: function(channel) {
+        var args = Array.prototype.slice.call(arguments, 1);
+        return new Promise(function(resolve, reject) {
+            __cq({
+                request: JSON.stringify({ channel: channel, args: args, id: String(++__ipcRenderer.__seq), cap: __cap }),
+                onSuccess: function(raw) { try { resolve(JSON.parse(raw)); } catch(e) { resolve(raw); } },
+                onFailure: function(code, msg) { var err = new Error(msg); err.code = code; err.channel = channel; reject(err); }
+            });
+        });
+    },
+    send: function(channel) {
+        var args = Array.prototype.slice.call(arguments, 1);
+        __cq({ request: JSON.stringify({ channel: channel, args: args, cap: __cap }), onSuccess: function() {}, onFailure: function() {} });
+    },
+    on: function() { var r = window.__ipcRenderer; return r && r.on.apply(r, arguments); },
+    once: function() { var r = window.__ipcRenderer; return r && r.once.apply(r, arguments); },
+    onOpenUrl: function() { var r = window.__ipcRenderer; return r && r.onOpenUrl.apply(r, arguments); },
+    __seq: 0
+};
+"#,
+    );
+
     // --- Plugin unload tracking ---
     // Plugins register cleanup callbacks via onUnload().
     // Rust calls window.__pluginUnloads[pluginId]() to trigger cleanup.

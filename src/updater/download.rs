@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use tokio_util::bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 
-use super::types::{GhRelease, Manifest, UPDATER_STATE, UpdaterPhase};
+use super::types::{GhRelease, Manifest, UPDATER_STATE};
 use super::util::{exe_dir, fetch_gh_release, sha256_file};
 // Extraction is zip on Windows and tar.gz on Linux; anywhere else bails before
 // it needs to vet an entry's path.
@@ -27,10 +27,16 @@ pub(super) async fn download_update(version: String, cancel: CancellationToken) 
     let mut state = UPDATER_STATE.lock().await;
     match result {
         Ok(()) => {
-            state.phase = UpdaterPhase::Ready(version.clone());
-            state.reset_task();
-            crate::vprintln!("[UPDATER] Pre-download complete for v{version}");
-            crate::app_state::emit_ipc_event_with_args("updater.ready", &[&version]);
+            if state.finish_download(&version) {
+                crate::vprintln!("[UPDATER] Pre-download complete for v{version}");
+                crate::app_state::emit_ipc_event_with_args("updater.ready", &[&version]);
+            } else {
+                // Something ended this download while it ran: the version was dismissed, or
+                // the channel changed under it. Announcing it now would offer a version the
+                // state has already dropped, and the bytes it staged are nobody's.
+                crate::vprintln!("[UPDATER] v{version} is no longer wanted; dropping its staging");
+                cleanup_staging();
+            }
         }
         Err(_) if cancel.is_cancelled() => {
             crate::vprintln!("[UPDATER] Download cancelled for v{version}");
@@ -40,8 +46,9 @@ pub(super) async fn download_update(version: String, cancel: CancellationToken) 
             crate::vprintln!("[UPDATER] Download failed for v{version}: {e}");
             cleanup_staging();
             state.reset_to_idle();
-            let msg = e.to_string().replace('\'', "\\'");
-            crate::app_state::emit_ipc_event_with_args("updater.error", &[&msg]);
+            // Handed over unescaped: `emit_ipc_event_with_args` encodes every argument, and
+            // a caller that escapes first is escaping what the encoder then escapes again.
+            crate::app_state::emit_ipc_event_with_args("updater.error", &[&e.to_string()]);
         }
     }
 }

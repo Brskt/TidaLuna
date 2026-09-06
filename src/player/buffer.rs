@@ -1,9 +1,10 @@
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use symphonia::core::io::MediaSource;
+use tokio_util::sync::CancellationToken;
 
 const INITIAL_BUFFER_CAP: usize = 2 * 1024 * 1024; // 2 MB
 
@@ -13,18 +14,163 @@ const INITIAL_BUFFER_CAP: usize = 2 * 1024 * 1024; // 2 MB
 /// TTFB; keep it small enough that waiting never loses to restarting.
 const SEEK_LOOKAHEAD: u64 = 32 * 1024; // 32 KB
 
+/// Why a download gave up. Kept alongside the message because the two answers the
+/// reader owes are opposite: a dead connection raises the no-connection banner and
+/// holds the queue where it is, an unusable source reports a media error and lets the
+/// queue advance. Reported as one kind, they were indistinguishable, and every source
+/// failure borrowed the network's answer.
+#[derive(Clone, Copy)]
+pub enum DownloadFailure {
+    /// The connection is gone: a send that never left, or a reconnect budget spent.
+    Network,
+    /// The connection worked and its answer is unusable: a rejected status, a key that
+    /// does not decrypt. The same request would fail the same way.
+    Source,
+}
+
+/// Why a read stopped because someone asked. Carried INSIDE the error rather than encoded as its
+/// kind, because `ErrorKind` is shared with std and symphonia, which mints `Other` for two
+/// meanings of its own: a stop deduced from a kind is a guess, read off the payload it is a fact.
+///
+/// The kind stays `Other` all the same: `Interrupted` is the one kind symphonia's
+/// `read_buf_exact` retries without limit, and both stops here are latched, so every retry
+/// returns at once and spins the decode thread at full CPU.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReadStop {
+    /// The whole buffer was cancelled: no reader of it is served again.
+    StreamCancelled,
+    /// This reader alone was retired (a stale exclusive stream after a mode switch) while
+    /// the buffer goes on serving whoever else holds it.
+    ReaderRetired,
+}
+
+impl ReadStop {
+    /// Reads the stop back off an error a decoder caught, and owns that discrimination: no
+    /// consumer has to re-derive it from a kind.
+    pub fn from_io(err: &io::Error) -> Option<Self> {
+        err.get_ref()?.downcast_ref::<Self>().copied()
+    }
+}
+
+impl std::fmt::Display for ReadStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::StreamCancelled => "streaming cancelled",
+            Self::ReaderRetired => "reader retired",
+        })
+    }
+}
+
+impl std::error::Error for ReadStop {}
+
+/// Who a download belongs to, which settles the bandwidth class its bytes are charged to
+/// and where a reconnect looks for a credential.
+///
+/// A property of the BUFFER, not of the task filling it: a buffer staged ahead of the listener
+/// becomes the buffer of the track being listened to, still filling, and the answer changes with
+/// it. Held by value in the task it was captured from, it could not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DownloadOwner {
+    /// The track being listened to. It owns `CURRENT_TRACK`; a same-track re-assert can
+    /// re-sign this task's url underneath it, and every reconnect has to re-read it.
+    Playback,
+    /// A track staged ahead of the listener. It owns no such slot, and re-staging goes
+    /// through `cancel_preload`: a fresh url arrives with a fresh task.
+    Preload,
+}
+
+impl DownloadOwner {
+    fn as_bits(self) -> u8 {
+        match self {
+            Self::Playback => 0,
+            Self::Preload => 1,
+        }
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        match bits {
+            0 => Self::Playback,
+            _ => Self::Preload,
+        }
+    }
+}
+
+/// The download filling a streaming buffer: who owns it, and the one door that stops it.
+///
+/// Both live here rather than in a slot beside the buffer, because the buffer is what gets
+/// handed over: an external slot has to be kept in step with every handover, and the two that
+/// existed were not, adoption dropping the token and leaving a download nothing could stop.
+struct DownloadHandle {
+    owner: AtomicU8,
+    cancel: CancellationToken,
+}
+
+impl DownloadFailure {
+    /// The two kinds a reader can tell apart. `Other` stays reserved for the deliberate
+    /// stops above, which announce nothing.
+    fn kind(self) -> io::ErrorKind {
+        match self {
+            Self::Network => io::ErrorKind::ConnectionAborted,
+            Self::Source => io::ErrorKind::InvalidData,
+        }
+    }
+}
+
+impl std::fmt::Display for DownloadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Network => "connection gone",
+            Self::Source => "source unusable",
+        })
+    }
+}
+
+/// Where a wait for the first `target` bytes stands, as one answer.
+///
+/// A waiter needs two facts a byte count cannot carry, and needs them as one: whether the head
+/// is there, and if not whether the download can still deliver it. Asked separately they can
+/// disagree, a writer that lands its last chunk and then ends changing both between the reads.
+#[derive(Clone, Copy)]
+pub enum HeadStatus {
+    /// `target` bytes are present from offset zero: the head can be probed.
+    Landed,
+    /// Short of `target`, and the download that fills this buffer is still running.
+    Filling,
+    /// Short of `target`, and no further byte will ever arrive. Carries the failure where
+    /// there was one; a clean end under the announced length, and a writer that went away,
+    /// both report none.
+    Ended(Option<DownloadFailure>),
+}
+
 struct Inner {
     data: Vec<u8>,
     base_offset: u64,
     total_len: u64,
     finished: bool,
     cancelled: bool,
-    error: Option<String>,
+    error: Option<(DownloadFailure, String)>,
     restart_target: Option<u64>,
     /// Ciphertext staging file for the disk cache, with its byte count. The download
     /// loop owns it while streaming and parks it here only at EOF: no per-chunk
     /// write ever takes this lock.
     ciphertext: Option<(tempfile::NamedTempFile, u64)>,
+}
+
+impl Inner {
+    /// The whole announced file, from offset zero, with no failure.
+    ///
+    /// Written once and shared by the three consumers below, because `finished` alone does not
+    /// answer this: `finish()` says the STREAM ended, not that the file arrived, and an HTTP/2
+    /// `RST_STREAM` with `NO_ERROR` mid-body or a reconnect answered `416` both end a short
+    /// transfer with no error set. Kept whole through that, a truncated track is indexed in the
+    /// disk cache as complete and served as valid. `>=` rather than `==`, a body longer than
+    /// announced being a different complaint that must never make a complete file look partial.
+    fn is_whole(&self) -> bool {
+        self.finished
+            && self.error.is_none()
+            && self.base_offset == 0
+            && self.data.len() as u64 >= self.total_len
+    }
 }
 
 /// Shared state between readers, writers, and the async download loop.
@@ -40,6 +186,11 @@ struct SharedState {
     async_notify: tokio::sync::Notify,
     /// True while the read side is blocked waiting for data.
     stalled: AtomicBool,
+    /// The download filling this buffer. A buffer that arrived complete carries one that
+    /// is already cancelled rather than none at all: every accessor stays total, and a
+    /// download whose handle went missing cannot be mistaken for one that needs no
+    /// stopping, which is the shape the bug being fixed here had.
+    download: DownloadHandle,
 }
 
 /// A RAM buffer that supports streaming writes and blocking reads.
@@ -57,7 +208,7 @@ struct SharedState {
 pub struct RamBuffer {
     shared: Arc<SharedState>,
     cursor: u64, // reader's current position (absolute file offset)
-    // Per-reader stop: `read` returns Interrupted without touching the shared
+    // Per-reader stop: `read` fails for this reader alone, without touching the shared
     // `cancelled` (which retires every reader). Drops a stale exclusive reader on
     // a mode switch, stopping it from fighting the new shared reader.
     reader_cancel: Option<Arc<AtomicBool>>,
@@ -69,7 +220,15 @@ pub struct RamBufferWriter {
 }
 
 impl RamBuffer {
-    pub fn new(total_len: u64) -> (Self, RamBufferWriter) {
+    /// `owner` is who the download starts out belonging to; a staged track can be adopted
+    /// by playback later through [`RamBuffer::adopt_as_playback`]. `cancel` is supplied by
+    /// the caller rather than minted here, because the caller already holds a slot that
+    /// has to stop this same download: one token, however it is reached.
+    pub fn new(
+        total_len: u64,
+        owner: DownloadOwner,
+        cancel: CancellationToken,
+    ) -> (Self, RamBufferWriter) {
         let shared = Arc::new(SharedState {
             inner: Mutex::new(Inner {
                 data: Vec::with_capacity((total_len.min(INITIAL_BUFFER_CAP as u64)) as usize),
@@ -87,6 +246,10 @@ impl RamBuffer {
             read_cursor: AtomicU64::new(0),
             async_notify: tokio::sync::Notify::new(),
             stalled: AtomicBool::new(false),
+            download: DownloadHandle {
+                owner: AtomicU8::new(owner.as_bits()),
+                cancel,
+            },
         });
 
         let buffer = RamBuffer {
@@ -126,6 +289,16 @@ impl RamBuffer {
             read_cursor: AtomicU64::new(0),
             async_notify: tokio::sync::Notify::new(),
             stalled: AtomicBool::new(false),
+            // Complete on arrival: cancelled from the start, because there is no task to
+            // stop and nothing further will be written.
+            download: DownloadHandle {
+                owner: AtomicU8::new(DownloadOwner::Playback.as_bits()),
+                cancel: {
+                    let token = CancellationToken::new();
+                    token.cancel();
+                    token
+                },
+            },
         });
 
         RamBuffer {
@@ -135,9 +308,17 @@ impl RamBuffer {
         }
     }
 
-    /// Attach a per-reader stop signal: when set, this reader's `read` returns
-    /// Interrupted, leaving other readers untouched. This is what lets a buffer outlive
-    /// the decoder that was reading it, for the next decoder to pick up.
+    /// A streaming pair for tests about read, write and restart behaviour, where the
+    /// download's owner is not what is under test. Anything asserting on adoption builds
+    /// its pair through [`RamBuffer::new`] and says which owner it starts from.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(total_len: u64) -> (Self, RamBufferWriter) {
+        Self::new(total_len, DownloadOwner::Playback, CancellationToken::new())
+    }
+
+    /// Attach a per-reader stop signal: when set, this reader's `read` fails, leaving
+    /// other readers untouched. This is what lets a buffer outlive the decoder that was
+    /// reading it, for the next decoder to pick up.
     pub fn with_reader_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.reader_cancel = Some(cancel);
         self
@@ -155,12 +336,60 @@ impl RamBuffer {
         self.shared.cancelled_atomic.store(true, Relaxed);
         self.shared.cvar.notify_all();
         self.shared.async_notify.notify_one();
+        drop(inner);
+        // One door, not two. The flag alone is only observed between awaits, and the
+        // ciphertext flush is a blocking write of up to a megabyte that nothing races;
+        // the token drops the whole stream where it stands.
+        self.cancel_download();
+    }
+
+    /// Whether this buffer was cancelled, asked from the reading side. The decode thread needs
+    /// it where symphonia throws away the read error that would have named the stop: its probe
+    /// scans with `while let Ok(byte) = mss.read_byte()` and reports a missing format reader
+    /// instead of the failure it swallowed. Safe to ask after a read came back empty, that read
+    /// having taken the lock `cancel` holds while setting this.
+    pub fn is_cancelled(&self) -> bool {
+        self.shared.cancelled_atomic.load(Relaxed)
+    }
+
+    /// Stop the download filling this buffer, leaving what has already landed readable.
+    /// A buffer that arrived complete is already stopped.
+    pub fn cancel_download(&self) {
+        self.shared.download.cancel.cancel();
+    }
+
+    /// Hand the download filling this buffer over to playback. Called where a staged
+    /// track becomes the track being listened to, while its bytes are still arriving:
+    /// from here its traffic is the listener's, and a reconnect re-reads the credential
+    /// that `CURRENT_TRACK` now carries for it.
+    pub fn adopt_as_playback(&self) {
+        self.shared
+            .download
+            .owner
+            .store(DownloadOwner::Playback.as_bits(), Relaxed);
+    }
+
+    /// True when both handles name the same download. Distinguishes a genuine track
+    /// change from a rebuild that reinstalls a clone of the buffer already current.
+    pub fn is_same_stream(&self, other: &RamBuffer) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
     }
 
     /// Returns true if the entire file has been downloaded without error.
     pub fn is_complete(&self) -> bool {
         let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.finished && inner.error.is_none() && inner.base_offset == 0
+        inner.is_whole()
+    }
+
+    /// True once the download feeding this buffer has ended in failure.
+    ///
+    /// `is_complete` cannot answer this, folding a dead download in with one still arriving:
+    /// both are merely "not the whole file". A holder weighing whether a published attempt is
+    /// still worth anything needs the narrower fact by itself. `head_status` will not serve
+    /// either, answering `Landed` past its byte target whatever else is true.
+    pub fn has_failed(&self) -> bool {
+        let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.error.is_some()
     }
 
     /// Like `is_complete()` but also requires the data to still be in memory. A
@@ -174,13 +403,9 @@ impl RamBuffer {
     pub fn is_reusable(&self) -> bool {
         let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         // A cancel outlives the download it stopped and there is no un-cancel: every later
-        // read reports Interrupted; a finished buffer that was cancelled reads no better
-        // than an empty one.
-        !inner.cancelled
-            && inner.finished
-            && inner.error.is_none()
-            && inner.base_offset == 0
-            && !inner.data.is_empty()
+        // read fails; a finished buffer that was cancelled reads no better than an empty
+        // one.
+        inner.is_whole() && !inner.cancelled && !inner.data.is_empty()
     }
 
     pub fn total_len(&self) -> u64 {
@@ -189,12 +414,11 @@ impl RamBuffer {
     }
 
     /// Take the ciphertext staging file the download parked at EOF. Gated on the same
-    /// completeness as `is_complete()`: a partial or Range-restarted download never
-    /// yields one. No size check; `CipherSink::finish` refuses an empty sink, and none
-    /// ever reaches the buffer.
+    /// completeness as `is_complete()`: a partial, short or Range-restarted download never
+    /// yields one; the caller cannot index as whole what arrived in part.
     pub fn take_ciphertext(&self) -> Option<(tempfile::NamedTempFile, u64)> {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.finished && inner.error.is_none() && inner.base_offset == 0 {
+        if inner.is_whole() {
             inner.ciphertext.take()
         } else {
             None
@@ -203,6 +427,25 @@ impl RamBuffer {
 
     pub fn written(&self) -> u64 {
         self.shared.written.load(Relaxed)
+    }
+
+    /// Answer a head wait: are `target` bytes here, can they still come, or is it over?
+    ///
+    /// Both facts come out of ONE critical section, the way [`Read::read`] takes them, because
+    /// read as two `Relaxed` atomics they race: a writer that appends its last chunk and then
+    /// finishes, between the two loads, is seen as ended while short, and a head already in
+    /// hand gets refused. Bytes are decided before the end, the caller asking whether it can
+    /// probe rather than whether the download is alive. A `base_offset` past zero refuses
+    /// whatever `written` says: after a Range restart the head is no longer in `data`.
+    pub fn head_status(&self, target: u64) -> HeadStatus {
+        let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.base_offset == 0 && inner.data.len() as u64 >= target {
+            return HeadStatus::Landed;
+        }
+        if inner.finished || inner.cancelled {
+            return HeadStatus::Ended(inner.error.as_ref().map(|(cause, _)| *cause));
+        }
+        HeadStatus::Filling
     }
 
     /// Current read cursor position (absolute byte offset).
@@ -225,26 +468,24 @@ impl RamBuffer {
 impl Read for RamBuffer {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // Liveness is judged here rather than in the download task, because this is the only
-        // side that knows anyone is HARMED. The writer goes quiet for reasons that are entirely
-        // correct (parked after a partial EOF, or holding back while the governor withholds
-        // playback tokens), and a clock on the writer's own idleness cannot tell those from a
-        // dead server. Counted locally: a starved reader never leaves this call, so the count
-        // is per-wait by construction and a reader that gets even one byte starts over.
-        //
-        // Six cycles, matching the tolerance the product already shipped. The floor it has to
-        // clear is the download's own retry budget: eight reconnects backing off 250ms x attempt
-        // sums to 9s of sleep before the writer gives up and reports the failure itself.
+        // side that knows anyone is HARMED: the writer goes quiet for reasons that are entirely
+        // correct (parked after a partial EOF, or held back by the governor), and a clock on its
+        // idleness cannot tell those from a dead server. Counted locally, a starved reader never
+        // leaving this call. Six cycles, the floor being the download's own retry budget: eight
+        // reconnects backing off 250ms x attempt sums to 9s before the writer reports it itself.
         const STALL_CYCLES: u32 = 6;
         let mut starved_cycles: u32 = 0;
 
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         loop {
+            // Neither stop below may report `Interrupted`: symphonia's `read_buf_exact`
+            // retries that kind without limit, and both flags here are latched; every
+            // retry returns at once and spins the decode thread at full CPU inside
+            // `next_packet`. Whoever joins that thread (`cancel_crossfade` does, on the
+            // sequential control thread) then never gets it back.
             if inner.cancelled {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "streaming cancelled",
-                ));
+                return Err(io::Error::other(ReadStop::StreamCancelled));
             }
 
             // Retired reader (e.g. a stale exclusive stream after a mode switch):
@@ -252,11 +493,17 @@ impl Read for RamBuffer {
             if let Some(ref c) = self.reader_cancel
                 && c.load(Relaxed)
             {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "reader retired"));
+                return Err(io::Error::other(ReadStop::ReaderRetired));
             }
 
-            if let Some(ref err) = inner.error {
-                return Err(io::Error::other(err.clone()));
+            // Three ways out reach a reader from here, and the decoder owes each a different
+            // answer: the named `ReadStop` says nothing because someone asked for it,
+            // `ConnectionAborted` raises the no-connection banner and holds the queue, and
+            // `InvalidData` reports a media error and lets it advance. The download gives up
+            // for six reasons and only two are the network: reported as one kind, an expired
+            // url's 403 announced "no internet" over a healthy connection.
+            if let Some((cause, ref err)) = inner.error {
+                return Err(io::Error::new(cause.kind(), err.clone()));
             }
 
             let buf_start = inner.base_offset;
@@ -331,12 +578,11 @@ impl Read for RamBuffer {
                         inner.restart_target = Some(restart_pos);
                         drop(inner);
                         self.shared.async_notify.notify_one();
-                        // This reader is about to wait on a refetch from a cold offset, which
-                        // is what the boosted rate exists for. Asking here rather than at the
-                        // seek keeps it to the restarts that actually lack bytes.
-                        // Reads run on threads with no runtime, and GOVERNOR's init spawns a
-                        // task: `main.rs` forcing it at startup is what keeps this from being
-                        // the first touch. Tests reaching here need their own runtime.
+                        // This reader is about to wait on a refetch from a cold offset, what
+                        // the boosted rate exists for; asking here rather than at the seek
+                        // keeps it to the restarts that actually lack bytes. Reads run on
+                        // threads with no runtime and GOVERNOR's init spawns a task, so
+                        // `main.rs` forces it at startup and tests need their own runtime.
                         crate::state::GOVERNOR
                             .buffer_progress()
                             .request_seek_boost();
@@ -367,7 +613,7 @@ impl Read for RamBuffer {
                 if starved_cycles >= STALL_CYCLES {
                     // Only this reader is told. Setting `error` or `cancelled` would outlive the
                     // stall: three paths in `device.rs` respawn a decoder on this same buffer,
-                    // two of them without consulting `is_reusable()`, so a shared flag would turn
+                    // two of them without consulting `is_reusable()`; a shared flag would turn
                     // an ordinary device switch into a dead track. Leaving `Inner` untouched lets
                     // a later respawn read on normally if the writer was alive after all.
                     crate::verr!(
@@ -474,9 +720,11 @@ impl RamBufferWriter {
         self.shared.async_notify.notify_one();
     }
 
-    pub fn finish_with_error(&self, msg: String) {
+    /// End the download on a failure. `cause` decides what the listener is told: it
+    /// answers "is the connection gone", never "how bad does this look".
+    pub fn finish_with_error(&self, cause: DownloadFailure, msg: String) {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.error = Some(msg);
+        inner.error = Some((cause, msg));
         inner.finished = true;
         self.shared.cvar.notify_all();
         self.shared.async_notify.notify_one();
@@ -484,6 +732,20 @@ impl RamBufferWriter {
 
     pub fn is_cancelled(&self) -> bool {
         self.shared.cancelled_atomic.load(Relaxed)
+    }
+
+    /// Who the bytes being written belong to right now. Read per chunk and per reconnect
+    /// rather than captured at spawn: adoption changes the answer mid-download, and the
+    /// two decisions that follow from it (which bucket pays, which url reconnects) have
+    /// to change with it.
+    pub fn owner(&self) -> DownloadOwner {
+        DownloadOwner::from_bits(self.shared.download.owner.load(Relaxed))
+    }
+
+    /// The token stopping this download, for the task filling the buffer to be raced
+    /// against it from the outside.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.shared.download.cancel.clone()
     }
 
     /// Take the pending restart target (if any). Returns the absolute byte offset

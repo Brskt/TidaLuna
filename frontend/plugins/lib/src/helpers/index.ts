@@ -3,5 +3,8 @@ export * from "./getPlaybackInfo";
 export * from "./getPlaybackInfo.dasha.native";
 export * from "./observable";
 export * from "./parseDate";
+export * from "./RateGate";
 export * from "./safeTimeout";
+export * from "./sameItemId";
+export * from "./SingleFlight";
 export * from "./downloadObject";

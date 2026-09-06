@@ -117,7 +117,7 @@ pub(super) fn stop() {
 pub(super) fn set_always_on(msg: &IpcMessage) {
     let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
     set_receiver_enabled(enabled);
-    crate::state::db().call_settings(move |conn| {
+    crate::state::db().post(move |_, conn| {
         crate::settings::save_receiver_always_on(conn, enabled);
     });
     crate::vprintln!("[connect::ipc] Receiver always-on set to {}", enabled);

@@ -1,4 +1,5 @@
 mod download;
+mod inject;
 mod jsrt;
 mod lib_native;
 mod native;
@@ -98,7 +99,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
             proxy::handle_proxy_head_dispatch(&msg, query_id, callback);
         }
         "__Luna.registerNative" => {
-            native::handle_register_native(&msg, callback);
+            native::handle_register_native(&msg, &caller, callback);
         }
         "__Luna.clipboardWriteText" => {
             lib_native::handle_clipboard_write_text(&msg, callback);
@@ -158,12 +159,20 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
 }
 
 /// Channels whose handler acts on the caller's identity: serving one unattributed would mean
-/// acting on a name the caller chose. Only channels the wrapper's own shims reach can be listed, since
-/// those carry the capability. Anything through the shared `@luna/lib` arrives unattributed and is
-/// refused, `plugin.download` being the case in point. Matched exactly, not by prefix:
-/// `plugin.fetch_package` installs a plugin before one exists to hold a capability.
+/// acting on a name the caller chose.
+///
+/// A channel belongs here once every legitimate route to it carries the capability. The wrapper's
+/// own shims always did; `@luna/lib` did not, its `invoke` closing over the app bundle's scope
+/// rather than the calling plugin's, which is why `registerNative` took its identity from an
+/// argument for so long. It is listed now that `transpile::lower_import` binds that import to a
+/// per-plugin copy. A route still arriving unattributed is refused.
+///
+/// Matched exactly, not by prefix: `plugin.fetch_package` installs a plugin before one exists to
+/// hold a capability.
 fn is_plugin_attributed(channel: &str) -> bool {
-    channel.starts_with("plugin.storage.") || channel == "plugin.fetch"
+    channel.starts_with("plugin.storage.")
+        || channel == "plugin.fetch"
+        || channel == "__Luna.registerNative"
 }
 
 /// The failure code `player.parse_dash` answers `err` with.

@@ -24,6 +24,22 @@ struct NextMediaSlot {
     queue_gen: u64,
 }
 
+// ── Promotion the queue has not caught up with ───────────────────────
+
+/// The track a local crossfade moved to, held until the queue's `AdoptMedia` arrives.
+///
+/// The player names the promoted track and measures its length in the same breath, but the
+/// adoption that would install it travels three hops and an HTTP round trip behind. In that
+/// window `current_media` still names the outgoing track, so a measurement judged against it
+/// names the wrong one and the guard refusing stale figures drops the only length this track
+/// will ever get. `engine_gen` is stamped rather than cleared: a promotion belongs to the engine
+/// session that made it, and a session that ends leaves nothing behind to forget.
+struct PendingPromotion {
+    engine_gen: u64,
+    track_id: String,
+    measured_duration_ms: Option<u64>,
+}
+
 // ── PlaybackController ──────────────────────────────────────────────
 
 pub(crate) struct PlaybackController {
@@ -32,6 +48,7 @@ pub(crate) struct PlaybackController {
 
     current_media: Option<MediaInfo>,
     next_media: Option<NextMediaSlot>,
+    pending_promotion: Option<PendingPromotion>,
     media_seq_no: u32,
 
     /// Engine generation - incremented on every set_media/reset
@@ -59,6 +76,7 @@ impl PlaybackController {
             play_state: PbPlayState::Paused,
             current_media: None,
             next_media: None,
+            pending_promotion: None,
             media_seq_no: 0,
             engine_gen: 0,
             queue_gen: 0,
@@ -298,6 +316,17 @@ impl PlaybackController {
         if engine_gen != self.engine_gen {
             return;
         }
+        // A promotion already named the track it moved to, and the adoption that installs it
+        // is still in flight. A measurement naming that track belongs to the promotion, not to
+        // the track `current_media` still names: held here, the adoption applies it. Announcing
+        // it now would charge one track's length to another.
+        if let Some(pending) = self.pending_promotion.as_mut()
+            && pending.engine_gen == engine_gen
+            && crate::ipc::player::same_track(track_id, Some(pending.track_id.as_str()))
+        {
+            pending.measured_duration_ms = Some(duration_ms);
+            return;
+        }
         let corrected = {
             let Some(media) = self.current_media.as_mut() else {
                 return;
@@ -353,6 +382,76 @@ impl PlaybackController {
                 PlaybackInternalEvent::MediaCompleted { has_next: false },
             ))
             .await;
+    }
+
+    /// A local crossfade promoted the next track, which is already audible.
+    ///
+    /// The sibling of `on_playback_completed`, minus the only thing that would be wrong here:
+    /// preparing the track. The state stays whatever it was (the speaker never stopped) and the
+    /// queue moves its index without loading, or the next transition computes `idx + 1` from the
+    /// outgoing track and reloads the one already playing.
+    ///
+    /// `engine_gen` is read, never bumped: nothing about a local fade starts a new engine
+    /// session, and bumping it would strand every later event from this track as stale.
+    /// `track_id` names what was promoted, so that the length the player measures in the same
+    /// breath has something to be judged against before the adoption installs it.
+    ///
+    /// Records the promotion and returns; the caller adopts in the same turn. Handing the
+    /// adoption to the queue through an internal event put two loop checkpoints between the
+    /// promotion and the track becoming current, and a `next` landing in between stepped from
+    /// the outgoing track, restarting the one already audible.
+    pub fn on_crossfade_transitioned(&mut self, engine_gen: u64, track_id: Option<&str>) {
+        if engine_gen != self.engine_gen {
+            return;
+        }
+        // A promotion that cannot name its track holds nothing. `same_track` refuses two
+        // unidentified sides; an unnamed slot could only ever be matched by guessing, and a
+        // length charged to the wrong track is worse than a length not corrected.
+        self.pending_promotion = track_id.map(|id| PendingPromotion {
+            engine_gen,
+            track_id: id.to_string(),
+            measured_duration_ms: None,
+        });
+    }
+
+    /// Take the track the speaker moved to on its own as the current one, and tell the
+    /// controller. No `prepare`: it is already playing.
+    ///
+    /// A length measured back at promotion time is applied before the single
+    /// `NotifyMediaChanged` this sends. Correcting one afterwards costs a second message, and
+    /// a repeat the controller did not need is a repeat it might render.
+    pub async fn adopt_media(&mut self, mut media: MediaInfo, media_seq_no: u32) {
+        // Only a length measured for the track this adoption actually names belongs to it. An
+        // adoption naming a different item gets nothing (the outcome an unmatched measurement
+        // already produces), rather than one track's figure charged to another.
+        let engine_gen = self.engine_gen;
+        let measured = self
+            .pending_promotion
+            .take()
+            .filter(|promotion| {
+                promotion.engine_gen == engine_gen
+                    && crate::ipc::player::same_track(
+                        Some(promotion.track_id.as_str()),
+                        media.track_id().as_deref(),
+                    )
+            })
+            .and_then(|promotion| promotion.measured_duration_ms);
+        if let Some(duration_ms) = measured {
+            media
+                .metadata
+                .get_or_insert(MediaMetadata {
+                    title: None,
+                    album_title: None,
+                    artists: None,
+                    duration: None,
+                    images: None,
+                })
+                .duration = Some(duration_ms);
+        }
+        self.current_media = Some(media);
+        self.media_seq_no = media_seq_no;
+        self.current_duration_ms = measured.unwrap_or(0);
+        self.notify_media_changed().await;
     }
 
     /// Playback error.
@@ -412,8 +511,8 @@ impl PlaybackController {
 
     async fn notify_media_changed(&self) {
         if let Some(ref media) = self.current_media {
-            // Native parser expects all 7 fields as specific types.
-            // Ensure srcUrl (string) and customData (string) are never null.
+            // The native parser takes all 7 fields as fixed types: a null srcUrl or
+            // customData fails it.
             let mut broadcast_media = media.clone();
             if broadcast_media.src_url.is_none() {
                 broadcast_media.src_url = Some(String::new());

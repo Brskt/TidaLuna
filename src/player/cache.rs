@@ -328,6 +328,86 @@ impl AudioCache {
         Ok(())
     }
 
+    /// Take a completed ciphertext into the cache, off the calling thread.
+    ///
+    /// Three parts that have to stay together: resolve the path under a brief lock, write the
+    /// multi-megabyte file UNLOCKED so a concurrent lookup does not stall behind it, then index
+    /// and evict under a second short lock, discarding the write if a cache clear raced it.
+    /// Written out twice, the second copy is where one of the three gets forgotten. The caller
+    /// owes the checks this cannot make: that the download completed, and that no decoder
+    /// rejected these bytes.
+    pub fn store_ciphertext_detached(
+        track_id: String,
+        format: String,
+        staged: tempfile::NamedTempFile,
+        len: u64,
+    ) {
+        std::thread::spawn(move || {
+            let (path, store_gen) = {
+                let Ok(cache) = crate::state::AUDIO_CACHE.lock() else {
+                    crate::vprintln!("[CACHE]  Lock poisoned, skipping store");
+                    return;
+                };
+                (cache.file_path(&track_id), cache.generation())
+            };
+            if let Err(e) = Self::persist_file(&path, staged) {
+                crate::vprintln!("[CACHE]  Store failed (persist): {e}");
+                return;
+            }
+            let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
+                crate::vprintln!("[CACHE]  Lock poisoned, skipping index");
+                return;
+            };
+            match cache.record_if_current(&track_id, &format, len, store_gen) {
+                Ok(StoreOutcome::Kept) => crate::vprintln!(
+                    "[CACHE]  Stored: {} ({}, encrypted)",
+                    track_id,
+                    crate::player::format_bytes(len)
+                ),
+                // Reported with both sizes, ungated, by the cache itself.
+                Ok(StoreOutcome::TooLarge) => {}
+                // Ungated (disk held over the cap, no other channel), and retried
+                // only by a later eviction pass or store of this id.
+                Ok(StoreOutcome::TooLargeRetained) => crate::verr!(
+                    "[CACHE]  Oversized entry could not be removed, indexed at {}: {}",
+                    crate::player::format_bytes(len),
+                    track_id
+                ),
+                // Nothing was staged; nothing to report.
+                Ok(StoreOutcome::Disabled) => {}
+                Ok(StoreOutcome::ClearedMidWrite) => crate::vprintln!(
+                    "[CACHE]  Store discarded (cache cleared mid-write): {track_id}"
+                ),
+                Err(e) => crate::vprintln!("[CACHE]  Store failed (index): {e}"),
+            }
+        });
+    }
+
+    /// Retire an entry from a thread that must not wait for the cache lock.
+    ///
+    /// Both decode-failure sites run on the player control thread, which cannot afford this
+    /// mutex: `clear()` holds it for its whole `remove_dir_all`, deliberately, and an inline
+    /// drop parks the transport for as long as a wipe takes. Skipping is not open to them
+    /// either, nothing else retiring an entry whose header sniffs fine and whose bitstream does
+    /// not decode: every successful read touches `last_access`, so a failing entry keeps
+    /// re-arming its own recency and eviction never reaches it. Late is correct here, never is
+    /// not.
+    ///
+    /// Detached like a store, and nothing races it: a re-store of this id lands only on
+    /// `DecodeEvent::Finished`, once a whole track has downloaded and decoded again, against a
+    /// drop that takes microseconds.
+    pub fn drop_entry_detached(track_id: String) {
+        std::thread::spawn(move || {
+            let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
+                crate::vprintln!("[CACHE]  Lock poisoned, entry left indexed: {track_id}");
+                return;
+            };
+            if cache.drop_entry(&track_id) == DropOutcome::Dropped {
+                crate::vprintln!("[CACHE]  Dropped after a decode failure: {track_id}");
+            }
+        });
+    }
+
     /// How far an overflow eviction drains, never a per-entry size limit. Eviction starts
     /// only once `current_size` passes `max_bytes`; this is just the hysteresis floor.
     fn eviction_target(&self) -> u64 {

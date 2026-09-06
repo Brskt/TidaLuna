@@ -1,5 +1,5 @@
 use cef::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
@@ -103,6 +103,10 @@ wrap_resource_request_handler! {
         // Current hop targets the token endpoint; set per on_before_resource_load
         // entry; a redirect hop re-evaluates it, read at response-filter time.
         token_exchange: Arc<AtomicBool>,
+        // The session this exchange was issued under, read when the request leaves and
+        // carried to the response. This path has no Rust await to capture across (CEF
+        // drives it), and the request slot IS the capture point.
+        exchange_epoch: Arc<AtomicU64>,
     }
 
     impl ResourceRequestHandler {
@@ -125,6 +129,11 @@ wrap_resource_request_handler! {
                 if token_endpoint {
                     force_identity_encoding(req);
                     capture_client_id(req, &self.exchange_client_id);
+                    self.exchange_epoch.store(
+                        crate::app_state::with_state(|state| state.session_epoch)
+                            .unwrap_or_default(),
+                        Ordering::Release,
+                    );
                     inject_refresh_token(req, &url);
                 }
 
@@ -148,10 +157,15 @@ wrap_resource_request_handler! {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
+                let exchange_epoch = self.exchange_epoch.load(Ordering::Acquire);
                 Some(new_buffering_filter(
                     0,
                     Arc::new(move |body| {
-                        match process_token_response(&body, exchange_cid.as_deref()) {
+                        match process_token_response(
+                            &body,
+                            exchange_cid.as_deref(),
+                            exchange_epoch,
+                        ) {
                             ProcessResult::Modified(v) => FilterOutcome::Emit(v),
                             ProcessResult::Passthrough => FilterOutcome::Emit(body),
                             ProcessResult::Error => FilterOutcome::Drop,
@@ -397,17 +411,26 @@ fn resolve_generation_client_id(
     .to_string()
 }
 
-fn process_token_response(body: &[u8], exchange_client_id: Option<&str>) -> ProcessResult {
-    process_token_response_with(body, exchange_client_id, generate_opaque)
+fn process_token_response(
+    body: &[u8],
+    exchange_client_id: Option<&str>,
+    session_epoch: u64,
+) -> ProcessResult {
+    process_token_response_with(body, exchange_client_id, session_epoch, generate_opaque)
 }
 
 /// `exchange_client_id` is the client_id from the POST that produced this
 /// response (bound per request); `opaque` is the opaque-nonce generator,
 /// injected for testing. When it fails (RNG unavailable) with a real token
 /// present, we drop the response rather than emit the real token.
+///
+/// `session_epoch` is the session the POST was issued under. A logout can land between
+/// the request and its reply, and committing then would put the departed account's live
+/// bearer token back into `AppState`.
 fn process_token_response_with(
     body: &[u8],
     exchange_client_id: Option<&str>,
+    session_epoch: u64,
     opaque: impl Fn() -> Option<String>,
 ) -> ProcessResult {
     let Ok(json_str) = std::str::from_utf8(body) else {
@@ -463,7 +486,19 @@ fn process_token_response_with(
         .map(|s| s.split(' ').map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
-    crate::app_state::with_state(|state| {
+    // The check belongs inside the closure, atomic with the writes it guards; its answer has
+    // to leave it, because the body this function goes on to build is delivered to the SDK.
+    let committed = crate::app_state::with_state(|state| {
+        // The exchange belongs to the session it was issued under. If that session ended
+        // while the response was on the wire, none of the writes below may happen: the bump
+        // and this read are critical sections of the one `AppState` mutex. A commit
+        // running after a logout sees the newer epoch.
+        if state.session_epoch != session_epoch {
+            crate::vprintln!(
+                "[AUTH]   Token response answered for a session already left, dropped"
+            );
+            return false;
+        }
         let now_secs = now_unix_secs();
 
         let (real_rt, ort) = if let Some(ref rt) = refresh_token {
@@ -520,16 +555,25 @@ fn process_token_response_with(
             // it, handing TIDAL an empty refresh token verbatim. The access
             // token above serves this session from memory either way.
             if ts.current.is_durable() {
-                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
-                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
-                }
+                crate::platform::secure_store::save_queued(&data_dir, ts);
             } else {
                 crate::vprintln!(
                     "[AUTH]   Exchange carried no refresh token - stored credential kept"
                 );
             }
         }
-    });
+        true
+    })
+    .unwrap_or(false);
+
+    // Nothing registered means the opaque below would resolve to whichever session is
+    // current rather than to this response's token. Dropping the body fails this one
+    // exchange visibly instead of handing the SDK a credential for somebody else's session;
+    // an exchange that still belongs to the live session carries a matching epoch and never
+    // reaches here.
+    if !committed {
+        return ProcessResult::Error;
+    }
 
     crate::ipc::plugin::scrub_pkce_verifier();
 

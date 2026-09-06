@@ -1577,8 +1577,13 @@ function authorizedWriteStreamOpts(opts) {
         if (key === "encoding" && bareEncoding !== undefined) {
             out[key] = bareEncoding;
         } else if (carried && _ArrayPrototypeIndexOf(WRITE_STREAM_OPTS, key) !== -1) {
-            // A plugin `get` trap fires here, once, and it is this copy the engine receives.
-            out[key] = opts[key];
+            // A plugin `get` trap fires here, once, and it is this copy the engine receives:
+            // `ownRead` still reads through an OWN accessor: that stays true.
+            // Own-only because the paragraph above is only half the job. Saturating `out` keeps
+            // the ENGINE off Object.prototype; this read is the same hazard on the way IN, and
+            // an option its caller never passed (measured with `mode`) otherwise resolves
+            // to whatever another plugin left on the prototype every plugin shares.
+            out[key] = ownRead(opts, key);
         } else {
             out[key] = undefined;
         }

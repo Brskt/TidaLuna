@@ -1,5 +1,6 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
-import { proxyFail, setSelfLoad } from "../audio-proxy";
+import { setSelfLoad } from "../audio-proxy";
+import { refusePlayback } from "../refuse-playback";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 
 // `player.parse_dash` failure code for "no decoder here handles this codec", mirroring HTTP
@@ -117,36 +118,11 @@ export const createPlaybackController = () => {
                                     // Deliberately no `player.pause`. Answering "paused" to a
                                     // TIDAL that just asked to play reads as a failed start,
                                     // and it advances the queue; measured on two tracks.
-                                    proxyFail();
-                                    // `mediaerror` is the sanctioned channel and this component
-                                    // already speaks it: the SDK listens on us and reads
-                                    // `e.target.errorCode`. It raises `player/ERROR`, winning
-                                    // the one-second race TIDAL arms on every autoplay load.
-                                    // Losing that race writes SET_PLAYBACK_STATE("STALLED"),
-                                    // whose reducer forces the desired state back to PLAYING.
-                                    // The code sits outside TIDAL's three-key map on purpose;
-                                    // a mapped one raises a second banner beside ours.
-                                    (window.NativePlayerComponent as any)?.trigger?.("mediaerror", {
-                                        error: "stream codec not supported by this build",
-                                        errorCode: "tidalunar_undecodable_profile",
-                                    });
-                                    // TIDAL's own pairing for a failure on the current track.
-                                    // STOP is grouped with PAUSE in the reducer, never with
-                                    // SKIP_NEXT; IDLE clears a STALLED without touching intent.
-                                    store.dispatch({ type: "playbackControls/STOP" });
-                                    store.dispatch({
-                                        type: "playbackControls/SET_PLAYBACK_STATE",
-                                        payload: "IDLE",
-                                    });
-                                    store.dispatch({
-                                        type: "message/MESSAGE_ERROR",
-                                        payload: {
-                                            id: Date.now(),
-                                            category: "PLAYBACK",
-                                            severity: "ERROR",
-                                            message: "TidaLunar cannot play music below 320 kbps for the moment. Please change the quality in TIDAL's settings.",
-                                        },
-                                    });
+                                    refusePlayback(
+                                        "tidalunar_undecodable_profile",
+                                        "stream codec not supported by this build",
+                                        "TidaLunar cannot play music below 320 kbps for the moment. Please change the quality in TIDAL's settings.",
+                                    );
                                 }
                             }
 

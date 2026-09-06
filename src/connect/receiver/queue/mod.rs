@@ -294,6 +294,86 @@ impl QueueManager {
         }
     }
 
+    /// The speaker advanced on its own: the index has to follow without a load.
+    ///
+    /// The same step `advance_to_next` takes, wrap included: if that rule ever names the wrong
+    /// item because the two queues diverged, it does so on every natural end too. Leaving the
+    /// index behind is what breaks: the next skip or end computes `idx + 1` from the outgoing
+    /// track and reloads the one already playing.
+    ///
+    /// **Deliberately not `async`, and that is the whole fix.** Resolving the promotion and
+    /// installing it must happen inside one turn of the routing loop: a `next` landing in a gap
+    /// between them steps from the OUTGOING track, so a listener asking for the track after the
+    /// audible one gets that one restarted. A function that cannot await cannot open that gap,
+    /// and the compiler keeps the invariant a comment would only describe. Resolving a url is
+    /// what used to force the split, and an adoption never needed one: `SpeakerBridge::prepare`,
+    /// the only reader of a resolved url, is exactly what adopting skips.
+    ///
+    /// Returns the media to announce, or `None` when there is nothing to adopt.
+    pub fn adopt_promoted(&mut self, track_id: Option<&str>) -> Option<(MediaInfo, u32)> {
+        let idx = self.current_index?;
+        // Where the index says the speaker went. Right in the common case and a guess in every
+        // case: this window comes from the cloud queue, while the fade promoted off the
+        // renderer's own staged next, and no code couples the two registries.
+        let stepped = if idx + 1 < self.queue_items.len() {
+            Some(idx + 1)
+        } else if let Some(ref qi) = self.queue_info
+            && qi.repeat_mode == RepeatMode::All
+            && !self.queue_items.is_empty()
+        {
+            Some(0)
+        } else {
+            None
+        };
+
+        let next_idx = if let Some(id) = track_id {
+            // The promotion names what it moved to; the step is checked rather than trusted.
+            // Checked FIRST, before the window is searched: a queue holding the same track
+            // twice would otherwise resolve to the earlier copy even when the step was right.
+            let found = stepped
+                .filter(|i| {
+                    self.queue_items
+                        .get(*i)
+                        .is_some_and(|item| item.media_id == id)
+                })
+                .or_else(|| self.queue_items.iter().position(|item| item.media_id == id));
+            let Some(found) = found else {
+                // The speaker is playing something this queue does not contain. No index is
+                // correct; naming one would announce a track that is not playing. Publish
+                // nothing, and stop claiming a position. The hints are left naming the last
+                // track we did know, as the anchor a controller-driven resync re-centres on.
+                crate::verr!(
+                    "[connect::queue] Promoted track {} is not in the queue window; the speaker left the controller's queue",
+                    id
+                );
+                self.current_index = None;
+                return None;
+            };
+            found
+        } else {
+            // A promotion naming nothing carries nothing to check against. The step stands.
+            // Going inert here would lose ground against the behaviour this replaces, for a
+            // case no id can improve.
+            let Some(stepped) = stepped else {
+                crate::vprintln!("[connect::queue] End of queue, nothing to adopt");
+                return None;
+            };
+            stepped
+        };
+        self.current_index = Some(next_idx);
+        let (media, media_id, item_id) = {
+            let item = self.queue_items.get(next_idx)?;
+            (
+                queue_item_to_media_info(item),
+                item.media_id.clone(),
+                item.item_id.clone(),
+            )
+        };
+        self.current_media_id_hint = Some(media_id);
+        self.current_item_id_hint = Some(item_id);
+        Some((media, next_media_seq()))
+    }
+
     /// Advance from `idx` to the next track, wrapping with RepeatAll.
     async fn advance_to_next(&mut self, idx: usize) {
         let next_idx = idx + 1;
@@ -793,7 +873,11 @@ impl QueueManager {
         }
     }
 
-    async fn maybe_extend_queue_window(&mut self) {
+    /// Public for an adoption to run it AFTER installing the promoted track rather than as part
+    /// of installing it: this is the one part of the old adoption that still reaches the
+    /// network, and a command arriving while it runs must find the receiver's own state already
+    /// consistent, not half-applied.
+    pub async fn maybe_extend_queue_window(&mut self) {
         if let (Some(idx), Some(qi)) = (self.current_index, &self.queue_info) {
             let remaining = self.queue_items.len().saturating_sub(idx + 1);
             if remaining <= 2 {

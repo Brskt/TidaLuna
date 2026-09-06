@@ -107,11 +107,13 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         format,
                         product_id,
                     } => {
-                        if let Err(e) =
-                            state
-                                .player
-                                .load_dash(init_url, segment_urls, format, product_id)
-                        {
+                        if let Err(e) = state.player.load_dash(
+                            init_url,
+                            segment_urls,
+                            format,
+                            product_id,
+                            crate::player::LoadOrigin::Local,
+                        ) {
                             crate::vprintln!("[PLAYER] Failed to load DASH track: {}", e);
                         }
                         PlayerIpcEffects::default()
@@ -189,12 +191,14 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::Stop => {
-                        report_undelivered("stop", state.player.stop());
+                        report_undelivered(
+                            "stop",
+                            state.player.stop(crate::player::LoadOrigin::Local),
+                        );
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::Seek { time } => {
-                        let seq =
-                            crate::player::LOAD_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+                        let seq = crate::player::current_gen();
                         state.pending_time_update = Some((time, seq));
                         let batch = take_flush_batch(state);
                         report_undelivered("seek", state.player.seek(time));

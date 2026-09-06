@@ -1,6 +1,7 @@
 pub(crate) mod asio;
 pub(crate) mod buffer;
 pub(crate) mod cache;
+pub(crate) mod crossfade;
 pub(crate) mod dash;
 mod declick;
 pub(crate) mod ipc;
@@ -15,14 +16,101 @@ use crate::audio::preload;
 use crate::state::{
     AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, GOVERNOR, HTTP_CLIENT_PLAYBACK, TrackInfo,
 };
-use buffer::RamBuffer;
+use buffer::{DownloadOwner, HeadStatus, RamBuffer};
 use futures_util::stream::{self, StreamExt};
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicU32, AtomicU64,
+    Ordering::{AcqRel, Acquire, Relaxed},
+};
 use std::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) static LOAD_SEQ: AtomicU32 = AtomicU32::new(0);
+/// The current load's generation and the origin that minted it, in ONE word.
+///
+/// Generation in the high 32 bits, origin in the low 8: `pack_xfade_done`'s layout one module
+/// over, for its reason. Held in two atomics they were two separate writes, and two minters
+/// racing left the newest generation beside the other one's origin, so `next_is_current` read a
+/// Connect generation next to a Local origin and waved a renderer-staged track into a Connect
+/// session. Durably, too, nothing rewriting the pair until the next mint: one race cost the rest
+/// of the track.
+///
+/// Private on purpose, so the rule is never restated at a call site: a reader that wants the
+/// generation asks [`current_gen`], one that weighs both asks [`current_load`], and neither can
+/// sample half of a mint.
+static LOAD_STATE: AtomicU64 = AtomicU64::new(0);
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// Who issued the load that owns the current generation.
+///
+/// The generation says WHEN a load happened and never WHO asked for it, and all three entry
+/// points that mint one are reached from both origins. The staged "next" track answers to the
+/// renderer's own queue and to nothing else: promoted while another origin's load is current, it
+/// starts a track that queue chose and this one never did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LoadOrigin {
+    /// This host's own surfaces: the renderer's player delegate over the `player.*` IPC
+    /// channels, the completion-time advance and replay driven on its behalf, the OS media
+    /// keys, and a plugin. All of them answer to the renderer's queue.
+    Local,
+    /// The TIDAL Connect receiver, driving this speaker for a controller.
+    Connect,
+}
+
+/// Split a `LOAD_STATE` word into its generation and origin. An origin byte that is not
+/// `Connect` reads as `Local`: the initial value of an untouched process is this host's own.
+#[inline]
+fn unpack_load_state(word: u64) -> (u32, LoadOrigin) {
+    let origin = if word & 0xFF == LoadOrigin::Connect as u64 {
+        LoadOrigin::Connect
+    } else {
+        LoadOrigin::Local
+    };
+    ((word >> 32) as u32, origin)
+}
+
+/// Inverse of [`unpack_load_state`].
+#[inline]
+fn pack_load_state(cur_gen: u32, origin: LoadOrigin) -> u64 {
+    ((cur_gen as u64) << 32) | (origin as u64)
+}
+
+/// Mint the next load generation, naming who it belongs to.
+///
+/// One read-modify-write: the generation and its origin are published together or not at all.
+/// Concurrent minters are not hypothetical, `ui::flush` calling this from a spawned task holding
+/// no lock while the Connect receiver calls it inside the `AppState` lock. A loser of the
+/// exchange retries against the pair the winner installed.
+pub(crate) fn begin_load(origin: LoadOrigin) -> u32 {
+    let previous = LOAD_STATE
+        .fetch_update(AcqRel, Acquire, |word| {
+            Some(pack_load_state(
+                unpack_load_state(word).0.wrapping_add(1),
+                origin,
+            ))
+        })
+        .expect("the update closure returns Some for every word, so the exchange cannot give up");
+    unpack_load_state(previous).0.wrapping_add(1)
+}
+
+/// The current load's generation, for the readers that only ask "is this still my load?".
+pub(crate) fn current_gen() -> u32 {
+    unpack_load_state(LOAD_STATE.load(Acquire)).0
+}
+
+/// The current load's generation and origin, read as one.
+///
+/// `next_is_current` is the only reader that weighs both, and taking them one at a time is
+/// precisely what let a staged track pass for fresh under someone else's session.
+pub(crate) fn current_load() -> (u32, LoadOrigin) {
+    unpack_load_state(LOAD_STATE.load(Acquire))
+}
+
+/// Mint the next event generation. The one sequence space every `current_seq`
+/// comes from: a locally incremented number cannot be told apart from one the
+/// IPC thread minted concurrently for a genuine load or stop.
+pub(crate) fn next_event_seq() -> u32 {
+    EVENT_SEQ.fetch_add(1, Relaxed) + 1
+}
 #[cfg(target_os = "windows")]
 static EXCLUSIVE_STREAM_SEQ: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_os = "windows")]
@@ -121,11 +209,10 @@ impl MediaErrorCode {
 /// [`OutputMode`] below: the invariant lives in the type, not in whichever function happens
 /// to be its only consumer today.
 ///
-/// Not cosmetic. `player.volume` takes any JSON number and the frontend forwards Redux's
-/// value unclamped; any input whose `/ 100.0` quotient passes `f32::MAX` casts to
-/// `f32::INFINITY`, which the cpal callback then multiplies into every sample unbounded. A
-/// non-finite input sanitizes to silence, never to full scale, the wrong guess here having to
-/// be the quiet one.
+/// Not cosmetic: `player.volume` takes any JSON number and the frontend forwards Redux's value
+/// unclamped, so an input whose `/ 100.0` quotient passes `f32::MAX` casts to `f32::INFINITY`,
+/// which the cpal callback multiplies into every sample. A non-finite input sanitizes to
+/// silence, never to full scale, the wrong guess here having to be the quiet one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Volume(f64);
 
@@ -164,7 +251,12 @@ pub enum OutputMode {
 #[derive(Debug, Clone, Copy)]
 pub struct MediaFormatSnapshot {
     pub codec: &'static str,
+    /// The rate stored in the file.
     pub sample_rate: u32,
+    /// The rate the output stream is running at, which is what the listener hears. It
+    /// differs from `sample_rate` whenever the decoder conformed the track, and the
+    /// badge lied about that for as long as only the file's rate was reported.
+    pub output_sample_rate: u32,
     pub bit_depth: Option<u32>,
     pub channels: u16,
     pub bytes: u64,
@@ -175,6 +267,7 @@ impl MediaFormatSnapshot {
         PlayerEvent::MediaFormat {
             codec: self.codec,
             sample_rate: self.sample_rate,
+            output_sample_rate: self.output_sample_rate,
             bit_depth: self.bit_depth,
             channels: self.channels,
             bytes: self.bytes,
@@ -192,11 +285,21 @@ pub enum PlayerEvent {
     /// names no track is published under none.
     Duration(f64, u32, Option<String>),
     StateChange(PlaybackState, u32),
+    /// A crossfade finished and the incoming track is now the current one. Means
+    /// the same as `StateChange(Completed, seq)` to every consumer EXCEPT the
+    /// auto-load, which must not start a track that is already playing.
+    ///
+    /// The load's event generation, and the id of the track promoted. The id travels for the
+    /// same reason `Duration` carries one: a consumer that only learns "something was promoted"
+    /// infers WHAT from its own bookkeeping, leaving the length measured in the same breath
+    /// nothing to be judged against. `None` when the load carried no id.
+    CrossfadePromoted(u32, Option<String>),
     AudioDevices(Vec<AudioDevice>, Option<String>),
     DeviceError(DeviceErrorKind),
     MediaFormat {
         codec: &'static str,
         sample_rate: u32,
+        output_sample_rate: u32,
         bit_depth: Option<u32>,
         channels: u16,
         bytes: u64,
@@ -207,6 +310,10 @@ pub enum PlayerEvent {
         code: MediaErrorCode,
     },
     MaxConnectionsReached,
+    /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the
+    /// player and raises TIDAL's own error banner; never advances the queue, and never
+    /// touches the cache: the file was fine, the connection was not.
+    NetworkLost,
     /// Re-arm a retained source into the shared pipeline: flush.rs reloads `track`
     /// at the generation snapshot (skipped if a newer load/stop superseded it),
     /// seeks to `position` (None = start), and auto-plays per `play`. Emitted on a
@@ -266,7 +373,7 @@ struct LoadContext {
 
 impl LoadContext {
     fn is_stale(&self) -> bool {
-        LOAD_SEQ.load(Relaxed) != self.load_gen
+        current_gen() != self.load_gen
     }
 
     fn publish_load(&self, buffer: RamBuffer, cached: bool, track_id: String) {
@@ -368,6 +475,10 @@ enum PlayerCommand {
     EmitMaxConnections,
     #[cfg(target_os = "windows")]
     SetVolumeSync(bool),
+    /// Crossfade overlap in seconds, zero for off. The switch and the slider
+    /// collapse into one number here: every downstream check already reads zero
+    /// as "no fade".
+    SetCrossfadeSecs(u8),
 }
 
 pub struct Player {
@@ -439,15 +550,15 @@ pub(crate) fn canonical_track_id(url: &str) -> String {
     url.split('?').next().unwrap_or(url).to_string()
 }
 
-/// Refreshes the retained credential only if the retained track is still the one `canonical_url_id`
-/// names. Not redundant with the caller's guard: that reads `committed_track`, set once a load reaches
-/// the pipeline, while this record is written synchronously: the two legitimately disagree
-/// mid-load. A duplicate `load(A)` racing behind `load(B)` would otherwise stamp A's credential onto
-/// B's still-running download, which then dies silently at its next reconnect.
-///
-/// The rule this encodes: a write is authorised by the state it writes, never by another that lags it.
+/// Refreshes the retained credential only if the retained track is still the one
+/// `canonical_url_id` names. Not redundant with the caller's guard, which reads
+/// `committed_track`, set once a load reaches the pipeline, where this record is written
+/// synchronously: the two legitimately disagree mid-load, and a duplicate `load(A)` racing
+/// behind `load(B)` would stamp A's credential onto B's still-running download, killing it
+/// silently at its next reconnect. A write is authorised by the state it writes, never by
+/// another that lags it. `load_gen` is left alone: re-signing is not a new load.
 pub(crate) fn refresh_retained_credential(
-    retained: &mut Option<crate::state::TrackInfo>,
+    retained: &mut Option<crate::state::RetainedTrack>,
     canonical_url_id: &str,
     url: &str,
     key: &str,
@@ -455,6 +566,7 @@ pub(crate) fn refresh_retained_credential(
 ) {
     let Some(track) = retained
         .as_mut()
+        .map(|retained| &mut retained.track)
         .filter(|track| canonical_track_id(&track.url) == canonical_url_id)
     else {
         return;
@@ -476,18 +588,16 @@ fn retained_product_id(canonical_url_id: &str) -> Option<String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
+        .map(|retained| &retained.track)
         .filter(|track| canonical_track_id(&track.url) == canonical_url_id)
         .and_then(|track| track.product_id.clone())
 }
 
 /// The url a running download must fetch with, for the track it started for. The signed url is a
-/// credential, not identity: the SDK re-signs it every load and re-resolves it once its own 1h expiry
-/// lapses; a captured copy goes stale while the task legitimately runs on. Reconnects and range
-/// restarts read through here instead.
-///
-/// `None` means the task's track was replaced and it must stop. `load_with_policy` cancels the
-/// previous download first: an un-cancelled task always matches; this makes that invariant explicit
-/// rather than assumed.
+/// credential, not identity: the SDK re-signs it every load and re-resolves it once its 1h expiry
+/// lapses, so a captured copy goes stale while the task legitimately runs on, and reconnects and
+/// range restarts read through here instead. `None` means the task's track was replaced and it
+/// must stop, making explicit an invariant `load_with_policy` already keeps.
 pub(crate) fn refreshed_fetch_url(
     task_canonical_id: &str,
     retained: Option<&crate::state::TrackInfo>,
@@ -781,15 +891,33 @@ async fn try_preload_hit(ctx: &LoadContext, track: &TrackInfo, track_id: &str) -
                 "[LOAD #{}] stale after preload check, dropping",
                 ctx.load_gen
             );
+            // The take spent the record and adopted this download onto the playback queue;
+            // nothing else names it any more. Dropped without this it runs to the end of the
+            // file, competing for bandwidth with the track the listener actually skipped to.
+            preloaded.buffer.cancel_download();
             return LoadStep::Handled;
+        }
+        // Adopted is not the same as usable: the slot is filled the instant the download
+        // starts, and these bytes may still be in flight. The player thread probes this buffer
+        // with a blocking read: the wait belongs here, in this task, and not there.
+        if !preload::head_has_landed(&preloaded.buffer, || !ctx.is_stale()).await {
+            // Spent and unusable: the record is gone, and nothing else will stop this
+            // download. A stale load wanted nothing anyway; otherwise the ordinary path
+            // below opens the copy that will actually be listened to.
+            preloaded.buffer.cancel_download();
+            if ctx.is_stale() {
+                return LoadStep::Handled;
+            }
+            crate::vprintln!("[PRELOAD] Adopted copy never became playable, loading it afresh");
+            return LoadStep::Miss;
         }
         crate::vprintln!(
             "[PRELOAD] Hit: {} | check: {} | total: {}",
-            format_bytes(preloaded.data.len() as u64),
+            format_bytes(preloaded.buffer.total_len()),
             format_ms(preload_ms),
             format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)
         );
-        let buffer = RamBuffer::from_complete_with_ciphertext(preloaded.data, preloaded.ciphertext);
+        let buffer = preloaded.buffer;
         ctx.publish_load(buffer, false, track_id.to_string());
         return LoadStep::Handled;
     }
@@ -849,7 +977,10 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
             "[FETCH]  No Content-Length, full download... (TTFB: {})",
             format_ms(ttfb_ms)
         );
-        match preload::fetch_and_decrypt(url, key).await {
+        // Handed the response already open, not left to race a second one against it: a
+        // body nobody reads keeps an HTTP/1.1 connection held and unusable until it drops,
+        // and this one would not drop until the whole fallback download had finished.
+        match preload::fetch_and_decrypt(url, key, resp).await {
             Ok(fetched) => {
                 if ctx.is_stale() {
                     crate::vprintln!("[LOAD #{load_gen}] stale after full download, dropping");
@@ -877,15 +1008,13 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         format_bytes(total_len)
     );
 
-    let (buffer, writer) = RamBuffer::new(total_len);
+    // The load's own token becomes the buffer's, rather than a second one beside it: the
+    // next load reaches this download through the player's slot, a buffer swap reaches it
+    // through the buffer, and both arrive at the same token.
+    let (buffer, writer) =
+        RamBuffer::new(total_len, DownloadOwner::Playback, ctx.cancel_token.clone());
 
-    preload::start_download(
-        resp,
-        url.to_string(),
-        key.to_string(),
-        writer,
-        ctx.cancel_token.clone(),
-    );
+    preload::start_download(resp, url.to_string(), key.to_string(), writer);
 
     // Pre-buffer 64KB before handing to decoder
     const PRE_BUFFER_TARGET: u64 = 64 * 1024;
@@ -899,8 +1028,22 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
             buffer.cancel();
             return;
         }
-        if buffer.written() >= PRE_BUFFER_TARGET {
-            break;
+        match buffer.head_status(PRE_BUFFER_TARGET) {
+            HeadStatus::Landed => break,
+            // Published all the same, and that is deliberate: the buffer carries the failure,
+            // `RamBuffer::read` hands it to the decode thread on the first read before any
+            // range check, and the listener gets a media error out of it. Refusing to publish
+            // would swallow the only report of the failure there is. Only the waiting was
+            // ever wrong here: only the waiting ends.
+            HeadStatus::Ended(_) => {
+                crate::vprintln!(
+                    "[LOAD #{load_gen}] download ended at {}KB/{}KB, publishing what landed",
+                    buffer.written() / 1024,
+                    PRE_BUFFER_TARGET / 1024
+                );
+                break;
+            }
+            HeadStatus::Filling => {}
         }
         let remaining = prebuf_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -963,8 +1106,9 @@ impl Player {
         product_id: Option<String>,
         resume_policy: ResumePolicy,
         auto_play: bool,
+        origin: LoadOrigin,
     ) -> anyhow::Result<()> {
-        let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
+        let load_gen = begin_load(origin);
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
@@ -999,11 +1143,18 @@ impl Player {
 
         {
             let mut lock = CURRENT_TRACK.lock().unwrap_or_else(|e| e.into_inner());
-            *lock = Some(TrackInfo {
-                url: url.clone(),
-                format: format.clone(),
-                key: key.clone(),
-                product_id: product_id.clone(),
+            // Stamped with this load's own generation, taken above. The bump and this write are
+            // deliberately not adjacent (the abort, the download cancel and the governor reset
+            // sit between them); a reader that sampled the generation separately could see
+            // this load's generation while the slot still held the previous track.
+            *lock = Some(crate::state::RetainedTrack {
+                track: TrackInfo {
+                    url: url.clone(),
+                    format: format.clone(),
+                    key: key.clone(),
+                    product_id: product_id.clone(),
+                },
+                load_gen,
             });
         }
 
@@ -1031,6 +1182,13 @@ impl Player {
                 product_id: ctx.product_id.clone(),
             };
             let track_id = canonical_track_id(&url);
+
+            // The track being loaded stops being the "next" one here, whichever of
+            // the three branches below serves it. Only the preload-hit branch used
+            // to clear the staged record. A cache hit (which returns first, and
+            // is what a preload deliberately skips fetching for) left it naming the
+            // track that is now playing.
+            crate::audio::preload::clear_next_track_if_match(&track_id).await;
 
             if let LoadStep::Handled = try_cache_hit(&ctx, &track_id, &key).await {
                 return;
@@ -1090,6 +1248,7 @@ impl Player {
                     product_id,
                     ResumePolicy::Restart,
                     want_play,
+                    LoadOrigin::Local,
                 );
             }
             // Takes the new credential, keeps the play instance. The skip below correctly answers
@@ -1140,17 +1299,29 @@ impl Player {
             product_id,
             ResumePolicy::Disabled,
             want_play,
+            LoadOrigin::Local,
         )
     }
 
+    /// `origin` names who asked, because both callers of this reach it: the completion-time
+    /// advance on the renderer's behalf, and the Connect receiver on a controller's.
     pub fn load_and_play(
         &self,
         url: String,
         format: String,
         key: String,
         product_id: Option<String>,
+        origin: LoadOrigin,
     ) -> anyhow::Result<()> {
-        self.load_with_policy(url, format, key, product_id, ResumePolicy::Disabled, true)
+        self.load_with_policy(
+            url,
+            format,
+            key,
+            product_id,
+            ResumePolicy::Disabled,
+            true,
+            origin,
+        )
     }
 
     /// Load a DASH stream by fetching init + media segments and concatenating them.
@@ -1160,15 +1331,18 @@ impl Player {
         segment_urls: Vec<String>,
         format: String,
         product_id: Option<String>,
+        origin: LoadOrigin,
     ) -> anyhow::Result<()> {
         // The shared choke point. The IPC channel validates its own arguments, but the
         // Connect receiver reaches this function directly in Rust and handed it an empty
-        // list, which loads as a header-only fMP4 and "completes" in zero samples.
+        // list, which loads as a header-only fMP4 and "completes" in zero samples. Which of
+        // the two called is also why `origin` is a parameter and not something read here:
+        // this function cannot tell them apart, and the staged-next guard has to.
         if segment_urls.is_empty() {
             anyhow::bail!("load_dash: refusing an empty segment list");
         }
 
-        let load_gen = LOAD_SEQ.fetch_add(1, Relaxed) + 1;
+        let load_gen = begin_load(origin);
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
@@ -1200,7 +1374,7 @@ impl Player {
                 generation: load_gen,
             };
             let load_start = std::time::Instant::now();
-            let is_stale = || LOAD_SEQ.load(Relaxed) != load_gen;
+            let is_stale = || current_gen() != load_gen;
 
             crate::vprintln!("[DASH-LOAD #{load_gen}] fetching init segment...");
             let init_data = match HTTP_CLIENT_PLAYBACK.get(&init_url).send().await {
@@ -1354,6 +1528,7 @@ impl Player {
             product_id,
             Self::resume_policy_for(target_time),
             false,
+            LoadOrigin::Local,
         )
     }
 
@@ -1377,7 +1552,15 @@ impl Player {
             Some(t) => ResumePolicy::Explicit(t),
             None => ResumePolicy::Disabled,
         };
-        self.load_with_policy(url, format, key, product_id, policy, play)
+        self.load_with_policy(
+            url,
+            format,
+            key,
+            product_id,
+            policy,
+            play,
+            LoadOrigin::Local,
+        )
     }
 
     fn send_cmd(&self, cmd: PlayerCommand) -> anyhow::Result<()> {
@@ -1394,15 +1577,17 @@ impl Player {
         self.send_cmd(PlayerCommand::Pause)
     }
 
-    pub fn stop(&self) -> anyhow::Result<()> {
+    /// `origin` for the same reason the loads carry one: this bumps the generation too, and a
+    /// preload staged after a controller stopped the speaker answers that controller's session.
+    pub fn stop(&self, origin: LoadOrigin) -> anyhow::Result<()> {
         // Pause-retain, not teardown: the in-flight load task and its download are
-        // kept (the download rides its own download_cancel token, not LOAD_SEQ); a
-        // same-track re-assert resumes in place. The LOAD_SEQ bump invalidates any
+        // kept (the download rides its own download_cancel token, not the load
+        // generation); a same-track re-assert resumes in place. The mint invalidates any
         // still-pending auto-play Load/ReplayRequest (rejected by handle_load's
         // stale-gate and the flush.rs guard): playback cannot start after the stop;
         // it doesn't truncate the retained download, and a steady-state re-assert
         // resumes via Player::load, which bypasses both gates.
-        LOAD_SEQ.fetch_add(1, Relaxed);
+        begin_load(origin);
         let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
         self.send_cmd(PlayerCommand::Stop(event_seq))
     }
@@ -1420,6 +1605,10 @@ impl Player {
     #[cfg(target_os = "windows")]
     pub fn set_volume_sync(&self, enabled: bool) -> anyhow::Result<()> {
         self.send_cmd(PlayerCommand::SetVolumeSync(enabled))
+    }
+
+    pub fn set_crossfade_secs(&self, secs: u8) -> anyhow::Result<()> {
+        self.send_cmd(PlayerCommand::SetCrossfadeSecs(secs))
     }
 
     pub fn get_audio_devices(&self, req_id: Option<String>) -> anyhow::Result<()> {
@@ -1457,3 +1646,11 @@ mod volume_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/player/banner_tests.rs"]
 mod banner_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/prebuffer_tests.rs"]
+mod prebuffer_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/load_state_tests.rs"]
+mod load_state_tests;

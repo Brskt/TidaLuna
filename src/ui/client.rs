@@ -553,7 +553,7 @@ wrap_load_handler! {
                 // app root once to reproduce the known-good cold launch.
                 if prev == PageState::Login && !is_login {
                     with_state(|state| {
-                        let _ = state.player.stop();
+                        let _ = state.player.stop(crate::player::LoadOrigin::Local);
                         state.pending_player_events.clear();
                         state.pending_time_update = None;
                     });
@@ -571,7 +571,7 @@ wrap_load_handler! {
 
                 if prev != PageState::Initial && is_login {
                     with_state(|state| {
-                        let _ = state.player.stop();
+                        let _ = state.player.stop(crate::player::LoadOrigin::Local);
                     });
                 }
                 self.page_state.set(if is_login {
@@ -579,6 +579,9 @@ wrap_load_handler! {
                 } else {
                     PageState::App
                 });
+                // Reached on every aggregate load completion, subframes included, but inert after
+                // the first run in a given document: `bundle_script` carries its own sentinel
+                // (see app_bootstrap.rs).
                 exec_js_on_frame(&frame, &self.bundle_script);
 
                 // After post-login SPA navigation to app, signal JS to re-run init().
@@ -805,6 +808,7 @@ wrap_request_handler! {
                 Some(crate::ui::token_filter::TokenResourceHandler::new(
                     std::sync::Arc::new(std::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 ))
             } else if !crate::ui::nav::is_tidal_origin(&url) {
                 // Exfiltration guard: block sendBeacon to non-Tidal domains.
@@ -868,6 +872,11 @@ wrap_request_handler! {
                 crate::ui::crash_dialog::CRASH_DIALOG_OPEN
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 if action == crate::ui::crash_dialog::CrashAction::Quit {
+                    // Exiting here skips the drain that follows the message loop, and queued
+                    // settings writes die with the process. This runs on a tokio task, never
+                    // the actor's own thread; waiting on it is safe.
+                    crate::state::db().flush();
+                    crate::platform::secure_store::flush();
                     std::process::exit(0);
                 }
                 if action == crate::ui::crash_dialog::CrashAction::OpenFolder

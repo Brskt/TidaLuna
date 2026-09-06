@@ -10,7 +10,7 @@
 
 import { beforeEach, expect, test } from "bun:test";
 
-import { initModules, modules } from "../render/src/modules";
+import { defineHostModule, initModules, modules } from "../render/src/modules";
 
 const hostReact = { createElement: () => {}, useState: () => {} };
 const hostJsx = { jsx: () => {} };
@@ -32,6 +32,46 @@ beforeEach(() => {
 	for (const key of Object.keys(modules)) delete modules[key];
 	delete (globalThis as any).__lunaCreateRoot;
 	(window as any).__lunaHostModules = {};
+});
+
+// A plugin's `@luna/lib` import is lowered to a LIVE lookup through this registry, which it
+// reaches as `window.luna.core.modules`. While the slot was writable, the first plugin to run
+// could wrap `__lunaLibFor` and be handed the capability of every plugin importing the lib
+// after it, and then act as any of them on `plugin.storage.*`, `plugin.fetch` and
+// `__Luna.registerNative`.
+//
+// Its own registry, because a pin is permanent by construction and the cases above wipe the
+// live one between them.
+test("a pinned host slot cannot be taken by a plugin", () => {
+	const registry: Record<string, any> = {};
+	const real = () => "host";
+	defineHostModule("__lunaLibFor", real, registry);
+
+	// The three shapes the takeover had: assign over it, redefine it, remove it.
+	expect(() => {
+		registry.__lunaLibFor = () => "stolen";
+	}).toThrow();
+	expect(() =>
+		Object.defineProperty(registry, "__lunaLibFor", { value: () => "stolen" }),
+	).toThrow();
+	expect(() => {
+		delete registry.__lunaLibFor;
+	}).toThrow();
+
+	expect(registry.__lunaLibFor).toBe(real);
+});
+
+// The pin must not reach further than the host's own modules. `LunaPlugin` writes
+// `modules[this.name]` on load and deletes it on unload, and the core-plugin names
+// (`@luna/lib`, `@luna/lib.native`, `@luna/ui`, `@luna/dev`, `@luna/linux`) go through that
+// same path, and pinning one of those would break loading it.
+test("a plugin's own slot stays writable and removable", () => {
+	modules["@some/plugin"] = { exports: 1 };
+	modules["@some/plugin"] = { exports: 2 };
+	expect(modules["@some/plugin"]).toEqual({ exports: 2 });
+
+	delete modules["@some/plugin"];
+	expect(modules["@some/plugin"]).toBeUndefined();
 });
 
 test("uses the host trio when the host supplies all three", () => {

@@ -43,6 +43,11 @@ export const observe = <T extends Element = Element>(unloads: LunaUnloads, selec
 	const unload = () => {
 		observables.delete(entry);
 		if (observables.size === 0) observer.disconnect();
+		// Leaves the caller's set too, the way `registerEmitter`'s own unload does: that set is
+		// the plugin's own and is drained once, at teardown; an observation already stopped
+		// would otherwise be kept in it for the rest of the session. `observePromise` calls this
+		// on every resolution, and its callers open one per context menu.
+		unloads.delete(unload);
 	};
 	unloads.add(unload);
 	return unload;

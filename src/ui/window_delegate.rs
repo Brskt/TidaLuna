@@ -289,7 +289,7 @@ wrap_window_delegate! {
 
             // Quit path: stop audio now instead of waiting for process teardown.
             with_state(|state| {
-                let _ = state.player.stop();
+                let _ = state.player.stop(crate::player::LoadOrigin::Local);
             });
 
             let pending_ws = with_state(|state| state.pending_window_save.take()).flatten();

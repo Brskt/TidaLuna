@@ -48,6 +48,10 @@ export function intercept<T extends ActionType | ActionType[]>(
 			interceptors[actionType]?.delete(intercept);
 			if (interceptors[actionType]?.size === 0) delete interceptors[actionType];
 		}
+		// And leaves the caller's set, the way `registerEmitter`'s own unload does: an intercept
+		// already removed has nothing left to undo, and that set is the plugin's own, drained
+		// once, at teardown.
+		unloads?.delete(unIntercept);
 	};
 	unIntercept.source = `intercept${JSON.stringify(actionTypeArray)}`;
 

@@ -75,6 +75,20 @@ fn js_string_literal_escapes_line_and_paragraph_separators() {
 }
 
 #[test]
+fn js_string_literal_leaves_an_apostrophe_alone() {
+    // The literal is double-quoted; an apostrophe needs nothing done to it. A caller that
+    // escaped one first (`updater.error` did, from back when it built the statement itself
+    // with single quotes) hands the encoder a backslash, which the encoder then escapes as
+    // the character it is: the user reads "Run \'sudo apt upgrade tidalunar\'". Escaping
+    // belongs to the encoder alone, and this is the character that says so.
+    assert_eq!(
+        js_string_literal("Run 'apt upgrade'"),
+        r#""Run 'apt upgrade'""#
+    );
+    assert_eq!(js_string_literal(r"pre\'escaped"), r#""pre\\'escaped""#);
+}
+
+#[test]
 fn js_ipc_response_keeps_malicious_id_inside_one_string_literal() {
     // The audit payload tries to break out of both quote styles.
     let malicious = "x\");evil();//' or '";

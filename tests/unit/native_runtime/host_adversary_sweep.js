@@ -563,7 +563,7 @@
     // eight structurally different container shapes all leaked a victim's real call
     // arguments this way, and every one of them was invisible to a syntax-level check,
     // because what makes a container safe is its prototype at write time, not its spelling.
-    // So this asks the outcome instead: with a fresh accessor planted at the exact name a
+    // This asks the outcome instead: with a fresh accessor planted at the exact name a
     // real register/call carries, does the round-trip still answer correctly?
     // A NEVER-REUSED name per combination is load-bearing. A write that is NOT intercepted
     // leaves a real own property on the container, which then shadows the prototype for
@@ -639,6 +639,151 @@
         return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
     }
 
+    // ---- Bespoke: the CALLED MEMBER's name, the sibling axis of the one above. ------
+    // The poison above arms the plugin name; `cmd.fn` rides the same wire and reaches the
+    // member lookup. Same reason it escapes the enumerating sweep: a name a plugin plants
+    // exists on no prototype until it does. It earns its own oracle because the container
+    // differs: here it is the plugin's own `module.exports`, an object literal, and
+    // Object.prototype is the only reachable link. An ordinary lookup would run the
+    // planted function with the VICTIM's real arguments and hand back its return value as
+    // the call's own result. Measured: with the member read ordinary, both harnesses stayed
+    // green while that exact exchange succeeded.
+    async function bespokeCallNameIdentityPoison() {
+        var label = "a planted name at the CALLED member, during the real call";
+        if (typeof rl === "undefined" || !rl || typeof rl.emit !== "function") {
+            return { label: label, armed: false, poisonError: "no rl.emit available in this host", failedCount: 0 };
+        }
+        var protos = [
+            ["Object.prototype", Object.prototype],
+            ["Array.prototype", Array.prototype],
+            ["Function.prototype", Function.prototype],
+        ];
+        var failed = [];
+        var stamp = Date.now();
+        for (var pi = 0; pi < protos.length; pi++) {
+            var protoLabel = protos[pi][0];
+            var proto = protos[pi][1];
+            var pluginName = "adv-fnid-plugin-" + pi + "-" + stamp;
+            // Any name the module does not export will do, and a fresh one per combination
+            // for the same reason the poison above needs one: an unintercepted write leaves
+            // a real own property that would shadow the prototype for every later pass.
+            var forgedFnName = "adv-fnid-forged-" + pi + "-" + stamp;
+            var regId = "adv-fnidreg-" + pi + "-" + stamp;
+            var callId = "adv-fnidcall-" + pi + "-" + stamp;
+            var forgedCalled = false;
+            var forgedArgsSeen = null;
+            var writes = [];
+            var realWrite = hostStdout.write;
+            try {
+                Object.defineProperty(proto, forgedFnName, {
+                    configurable: true,
+                    writable: true,
+                    value: function() {
+                        forgedCalled = true;
+                        forgedArgsSeen = Array.prototype.slice.call(arguments);
+                        return "FORGED-RETURN-VALUE";
+                    },
+                });
+            } catch (e) {
+                failed[failed.length] = { name: "the harness must be able to plant at " + protoLabel,
+                    pass: false, detail: String(e && e.message) };
+                continue;
+            }
+            hostStdout.write = function(chunk) { writes[writes.length] = chunk; return true; };
+            try {
+                rl.emit("line", JSON.stringify({
+                    type: "register", id: regId, name: pluginName,
+                    code: "module.exports.probe = function(x) { return { echoed: x }; };",
+                    trust: {}, dataDir: null,
+                }));
+                await null; await null; await null;
+                rl.emit("line", JSON.stringify({
+                    type: "call", id: callId, name: pluginName, fn: forgedFnName, args: ["victim-secret-arg"],
+                }));
+                await null; await null; await null; await null;
+            } finally {
+                hostStdout.write = realWrite;
+                try { delete proto[forgedFnName]; } catch (_) {}
+            }
+            var call = null;
+            for (var wi = 0; wi < writes.length; wi++) {
+                try {
+                    var parsed = JSON.parse(writes[wi]);
+                    if (parsed && parsed.id === callId) call = parsed;
+                } catch (_) {}
+            }
+            var sawForgedResult = !!(call && call.result === "FORGED-RETURN-VALUE");
+            if (forgedCalled || sawForgedResult) {
+                failed[failed.length] = {
+                    name: "calling a member the module does not export must not run a name planted on " + protoLabel,
+                    pass: false,
+                    detail: "forgedCalled=" + forgedCalled + " argsSeen=" + H_JSONStringify(forgedArgsSeen)
+                        + " call=" + H_JSONStringify(call),
+                };
+            }
+        }
+        return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
+    }
+
+    // ---- Bespoke: a write-stream option its caller never passed. ------------------
+    // `authorizedWriteStreamOpts` saturates what it HANDS the engine precisely so no absent
+    // name resolves up the shared prototype, and then read the caller's own object
+    // ordinarily, which is the same hazard facing the other way. Measured on the real host:
+    // an EMPTY options object came back carrying mode 0o777. Nothing that enumerates
+    // pre-existing members can arm this, because these are names a caller may legitimately
+    // omit; the poison has to be an addition, and the read has to be driven for real.
+    function bespokeWriteStreamOptPoison() {
+        var label = "an allow-listed write-stream option planted on Object.prototype";
+        if (typeof authorizedWriteStreamOpts !== "function") {
+            return { label: label, armed: false,
+                poisonError: "authorizedWriteStreamOpts is not in scope", failedCount: 0 };
+        }
+        var failed = [];
+        var stamp = Date.now();
+        // One that sets permissions, one that decides truncate-vs-append, one that moves the
+        // write offset: three different ways to damage another plugin's file.
+        var names = ["mode", "flags", "start"];
+        for (var ni = 0; ni < names.length; ni++) {
+            var key = names[ni];
+            var sentinel = "adv-wsopt-" + key + "-" + stamp;
+            var got = null;
+            var threw = null;
+            try {
+                Object.defineProperty(Object.prototype, key, {
+                    configurable: true, writable: true, value: sentinel,
+                });
+            } catch (e) {
+                failed[failed.length] = { name: "the harness must be able to plant " + key,
+                    pass: false, detail: String(e && e.message) };
+                continue;
+            }
+            try { got = authorizedWriteStreamOpts({}); }
+            catch (e) { threw = String(e && e.message); }
+            finally { try { delete Object.prototype[key]; } catch (_) {} }
+            if (!got || got[key] === sentinel) {
+                failed[failed.length] = {
+                    name: "an option the caller never passed must not come from Object.prototype (" + key + ")",
+                    pass: false,
+                    detail: "got=" + H_JSONStringify(got) + " threw=" + threw,
+                };
+            }
+        }
+        // The other half, and it is what keeps the guard above from being a way to break
+        // every write stream: an option the caller DID pass still has to arrive.
+        var carried = null;
+        var carriedThrew = null;
+        try { carried = authorizedWriteStreamOpts({ mode: 384 }); }
+        catch (e) { carriedThrew = String(e && e.message); }
+        if (!carried || carried.mode !== 384) {
+            failed[failed.length] = {
+                name: "an option the caller did pass must still reach the engine",
+                pass: false,
+                detail: "carried=" + H_JSONStringify(carried) + " threw=" + carriedThrew,
+            };
+        }
+        return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
+    }
+
     // ---- Bespoke: the executor-capture attack (Promise), only visible if we ------
     // ---- actually drive ipcFetch's internal `new Promise` while it's poisoned. ----
     await (async function bespokePromiseExecutorCapture() {
@@ -694,6 +839,28 @@
     };
     if (identityResult.failedCount) {
         report.failures[report.failures.length] = { label: identityResult.label, failed: identityResult.failedOracles };
+    }
+
+    var callNameResult = await bespokeCallNameIdentityPoison();
+    report.totalPoisons++;
+    if (callNameResult.armed) report.armedCount++;
+    report.targets[report.targets.length] = {
+        label: callNameResult.label, armed: callNameResult.armed,
+        poisonError: callNameResult.poisonError, failedCount: callNameResult.failedCount,
+    };
+    if (callNameResult.failedCount) {
+        report.failures[report.failures.length] = { label: callNameResult.label, failed: callNameResult.failedOracles };
+    }
+
+    var writeOptResult = bespokeWriteStreamOptPoison();
+    report.totalPoisons++;
+    if (writeOptResult.armed) report.armedCount++;
+    report.targets[report.targets.length] = {
+        label: writeOptResult.label, armed: writeOptResult.armed,
+        poisonError: writeOptResult.poisonError, failedCount: writeOptResult.failedCount,
+    };
+    if (writeOptResult.failedCount) {
+        report.failures[report.failures.length] = { label: writeOptResult.label, failed: writeOptResult.failedOracles };
     }
 
     report.protoTargetCount = protoTargetCount;

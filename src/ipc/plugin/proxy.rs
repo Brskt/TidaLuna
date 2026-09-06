@@ -225,8 +225,8 @@ impl UpstreamBody {
 
     /// The token-endpoint rewrite is the one caller that must see the real body: it
     /// rewrites the token fields themselves. Its output is re-wrapped, keeping egress gated.
-    fn transform_token_body(self, status: u16) -> Self {
-        Self(proxy_transform_token_body(&self.0, status))
+    fn transform_token_body(self, status: u16, session_epoch: u64) -> Self {
+        Self(proxy_transform_token_body(&self.0, status, session_epoch))
     }
 
     /// Serializes the whole reply and scrubs it as one string. Headers can carry a token
@@ -343,6 +343,10 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
         }
     }
 
+    // Read before the round trip: it names the session this fetch answers for, and a token
+    // endpoint's reply commits credentials on the way back out.
+    let session_epoch = with_state(|state| state.session_epoch).unwrap_or_default();
+
     let result = req.send().await;
 
     match result {
@@ -411,7 +415,7 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
                 );
             }
             let body = if is_token_endpoint {
-                body.transform_token_body(status)
+                body.transform_token_body(status, session_epoch)
             } else {
                 body
             };
@@ -485,16 +489,26 @@ fn proxy_rewrite_refresh_body(body: &str) -> String {
         .join("&")
 }
 
-fn proxy_transform_token_body(body: &str, status: u16) -> String {
-    proxy_transform_token_body_with(body, status, crate::ui::token_filter::generate_opaque)
+fn proxy_transform_token_body(body: &str, status: u16, session_epoch: u64) -> String {
+    proxy_transform_token_body_with(
+        body,
+        status,
+        session_epoch,
+        crate::ui::token_filter::generate_opaque,
+    )
 }
 
 /// `opaque` is the opaque-nonce generator, injected for testing. When it fails
 /// (RNG unavailable) with a real token present, return an empty token body
 /// rather than the real token (the recipient is plugin JS).
+///
+/// `session_epoch` names the session the fetch was issued under. The reply can land after
+/// a logout, and committing it would hand the departed account's bearer token back to the
+/// live process.
 fn proxy_transform_token_body_with(
     body: &str,
     status: u16,
+    session_epoch: u64,
     opaque: impl Fn() -> Option<String>,
 ) -> String {
     let Ok(mut json) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -560,7 +574,20 @@ fn proxy_transform_token_body_with(
         .map(|s| s.split(' ').map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
+    // `None` is the refusal, not an empty nonce: the check has to sit inside the closure to
+    // stay atomic with the writes it guards. The body built after this call goes back to the
+    // plugin; the refusal has to travel out with it.
     let stored_opaque_rt = with_state(|state| {
+        // The session that issued this exchange may have ended while it was on the network.
+        // Nothing below may run then: `captured_token` is what the proxy injects as
+        // `Authorization: Bearer`. Committing would re-authenticate the live process as
+        // the departed account. The bump and this read share the one `AppState` mutex, which
+        // orders them. The plugin still receives an opaque token; it resolves to nothing,
+        // which is the correct answer for a session that is over.
+        if state.session_epoch != session_epoch {
+            crate::vprintln!("[AUTH]   Exchange answered for a session already left, dropped");
+            return None;
+        }
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -613,9 +640,7 @@ fn proxy_transform_token_body_with(
             // token cannot re-establish a session and must not replace one on
             // disk that can. Both sites share this AppState and both apply it.
             if ts.current.is_durable() {
-                if let Err(e) = crate::platform::secure_store::save(&data_dir, ts) {
-                    crate::vprintln!("[AUTH]   Failed to persist token state: {e:?}");
-                }
+                crate::platform::secure_store::save_queued(&data_dir, ts);
             } else {
                 crate::vprintln!(
                     "[AUTH]   Exchange carried no refresh token - stored credential kept"
@@ -625,9 +650,17 @@ fn proxy_transform_token_body_with(
 
         // Carry opaque_rt out under this lock: it stays paired with opaque_at
         // (a concurrent refresh can't swap token_state in the gap).
-        ort
+        Some(ort)
     })
-    .unwrap_or_default();
+    .flatten();
+
+    // Nothing registered means the opaque this would hand the plugin resolves to whichever
+    // session is current instead of to this exchange. Same fail-closed answer the RNG failure
+    // above gives, for the same reason: an empty body beats a credential that names the
+    // wrong account.
+    let Some(stored_opaque_rt) = stored_opaque_rt else {
+        return "{}".to_string();
+    };
 
     crate::ipc::plugin::scrub_pkce_verifier();
     crate::vprintln!(

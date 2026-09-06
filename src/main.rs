@@ -335,6 +335,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Gate open by default; cold boot closes it below when a refresh is due.
         proactive_refresh_done: true,
         plugin_load_waiters: Vec::new(),
+        plugin_load_in_flight: None,
+        session_epoch: 0,
         last_client_id: String::new(),
         connect: Some(crate::connect::ConnectManager::new()),
     })));
@@ -435,10 +437,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     run_message_loop();
 
+    // Settings writes are queued, not awaited; the renderer's acknowledgement outruns the
+    // disk. Drain before the teardown below rather than after it: a toggle flipped in the last
+    // moments must survive, and the exit budget spent on Connect is time the queue could be
+    // killed in.
+    crate::state::db().flush();
+    // Credentials answer to a second queue and a second thread; draining one leaves the
+    // other. A logout in the last moments has to reach the disk, or the next launch
+    // restores the session it ended.
+    crate::platform::secure_store::flush();
+
     // Stop audio, then tear Connect down on the short exit budget (the window is
     // already gone; a session-grade drain here would just look like a hang).
     let cm = app_state::with_state(|state| {
-        let _ = state.player.stop();
+        let _ = state.player.stop(crate::player::LoadOrigin::Local);
         state.connect.take()
     })
     .flatten();
