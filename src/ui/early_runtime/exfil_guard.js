@@ -10,7 +10,7 @@ Object.defineProperty(navigator, 'sendBeacon', {
     configurable: false
 });
 
-// --- HTMLImageElement.prototype.src: allowlist (tidal.com, gravatar, github, data/blob) ---
+// --- HTMLImageElement.prototype.src: allowlist (tidal.com, gravatar, github, the bot-check captcha, data/blob) ---
 var _origSrcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
 if (_origSrcDesc && _origSrcDesc.set) {
     Object.defineProperty(HTMLImageElement.prototype, 'src', {
@@ -21,6 +21,7 @@ if (_origSrcDesc && _origSrcDesc.set) {
                 && url.indexOf('gravatar.com') === -1
                 && url.indexOf('github.com') === -1
                 && url.indexOf('githubusercontent.com') === -1
+                && url.indexOf('captcha-delivery.com') === -1
                 && url.indexOf('data:') !== 0
                 && url.indexOf('blob:') !== 0) {
                 return;
