@@ -27,6 +27,8 @@ fn build_user_agent(os_token: &str) -> String {
 pub(crate) static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
     let os = if cfg!(target_os = "linux") {
         "X11; Linux x86_64"
+    } else if cfg!(target_os = "macos") {
+        "Macintosh; Intel Mac OS X 10_15_7"
     } else {
         "Windows NT 10.0; WOW64"
     };
