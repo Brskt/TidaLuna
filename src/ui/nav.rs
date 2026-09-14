@@ -146,6 +146,20 @@ pub(crate) fn is_token_endpoint(url: &RequestUrl) -> bool {
     (host == HOST_AUTH || host == HOST_LOGIN) && parsed.path().contains("oauth2/token")
 }
 
+/// May a credential-bearing proxy request go to this URL? Destination and transport both have to
+/// hold: `proxy.fetch` splices the real refresh token into a token-endpoint body and hands it to
+/// reqwest, which never travels through Blink, and nothing upgrades a plaintext scheme on the way
+/// out. An unparseable URL carries no transport to judge, and reqwest reads that same string with
+/// that same parser. Admission rests on the origin rule alone, pinned by
+/// `every_token_endpoint_host_is_also_a_tidal_origin`: a new auth host belongs there.
+pub(crate) fn is_secure_tidal_target(url: &RequestUrl) -> bool {
+    if !is_tidal_origin(url) {
+        return false;
+    }
+    url.parsed()
+        .is_some_and(|parsed| parsed.scheme() == "https")
+}
+
 /// TIDAL API hosts that receive the injected OAuth bearer. Single source of truth for
 /// `is_tidal_api`, `needs_auto_injection`, `should_rewrite_token`; the lists cannot drift.
 pub(crate) fn is_tidal_api_host(host: &str) -> bool {

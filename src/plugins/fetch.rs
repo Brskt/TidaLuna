@@ -121,11 +121,14 @@ pub(crate) async fn plugin_fetch(
 }
 
 /// Check if a URL points to Tidal's API (should receive the OAuth token).
+/// HTTPS is part of the answer, not a separate concern: a true verdict attaches the real
+/// access token, and this path runs from IPC straight into reqwest, never through Blink, so
+/// no mixed-content check would upgrade or refuse a plaintext scheme on the way out.
 pub(crate) fn is_tidal_api(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
-    crate::ui::nav::is_tidal_api_host(parsed.host_str().unwrap_or(""))
+    parsed.scheme() == "https" && crate::ui::nav::is_tidal_api_host(parsed.host_str().unwrap_or(""))
 }
 
 #[cfg(test)]

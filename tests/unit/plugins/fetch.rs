@@ -18,6 +18,16 @@ fn test_is_tidal_api() {
 }
 
 #[test]
+fn tidal_api_refuses_plaintext() {
+    // A true verdict attaches `state.captured_token`, the real access token, to the outgoing
+    // request. This path is IPC straight into reqwest, never Blink, so no mixed-content
+    // check upgrades or blocks it: plaintext would put the live credential on the wire.
+    assert!(!is_tidal_api("http://api.tidal.com/v1/tracks/12345"));
+    assert!(!is_tidal_api("http://listen.tidal.com/v1/tracks"));
+    assert!(!is_tidal_api("http://api.tidal.com:80/v1/tracks"));
+}
+
+#[test]
 fn test_parse_fetch_opts() {
     let json = r#"{"method":"POST","headers":{"Content-Type":"application/json"},"body":"{\"key\":\"val\"}"}"#;
     let opts: FetchOpts = serde_json::from_str(json).unwrap();

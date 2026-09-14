@@ -113,13 +113,17 @@ fn reject_non_tidal(
     channel: &str,
     callback: &IpcCallback,
 ) -> bool {
-    if !crate::ui::nav::is_tidal_origin(url) && !crate::ui::nav::is_token_endpoint(url) {
+    if !crate::ui::nav::is_secure_tidal_target(url) {
         crate::vprintln!(
-            "[PROXY]  REJECTED {} to non-Tidal URL: {}",
+            "[PROXY]  REJECTED {} to non-Tidal or plaintext URL: {}",
             channel,
             crate::util::truncate_str(&crate::util::redact_url_query(url.as_str()), 80)
         );
-        ipc_callback_err(callback, 403, &format!("{channel}: non-Tidal URL rejected"));
+        ipc_callback_err(
+            callback,
+            403,
+            &format!("{channel}: only https Tidal URLs are proxied"),
+        );
         return true;
     }
     false
