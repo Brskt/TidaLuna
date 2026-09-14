@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use time::{OffsetDateTime, UtcOffset};
 
@@ -134,10 +134,85 @@ pub fn vlog3(args: std::fmt::Arguments<'_>) {
     print_log(args);
 }
 
-/// A hard failure that has no other user-facing channel: never gated by `LOGS`,
-/// and it opens the sink itself: the trace survives at level 0.
+/// Burst and window for the ungated path, taken from the Linux kernel's own `___ratelimit`
+/// defaults (`DEFAULT_RATELIMIT_BURST`, `DEFAULT_RATELIMIT_INTERVAL`) rather than chosen here.
+const ERR_BURST: u32 = 10;
+const ERR_INTERVAL_MS: u64 = 5_000;
+
+/// The monotonic origin the budget measures against. A wall clock would let a system-time change
+/// re-arm the burst or freeze it.
+static PROCESS_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+
+/// The window's start and the budget left move together in one word. Split across two atomics
+/// they could not: two callers reading a spent budget both subtracted and wrapped the count past
+/// `u32::MAX`, and two finding the window expired both granted a write. Budget in the low 16 bits.
+const ERR_LEFT_BITS: u32 = 16;
+const ERR_LEFT_MASK: u64 = (1 << ERR_LEFT_BITS) - 1;
+const ERR_WINDOW_MASK: u64 = u64::MAX >> ERR_LEFT_BITS;
+const _: () = assert!(ERR_BURST as u64 <= ERR_LEFT_MASK);
+
+static ERR_STATE: AtomicU64 = AtomicU64::new(ERR_BURST as u64);
+static ERR_MISSED: AtomicU32 = AtomicU32::new(0);
+
+/// What the ungated path owes one caller. Three outcomes, so a named enum: the report is a write
+/// as well, but one that has to carry what the silence cost.
+enum ErrBudget {
+    Write,
+    /// First write past a window that had been spent, naming the lines it swallowed.
+    WroteAfterMissing(u32),
+    Drop,
+}
+
+/// The rule, kept free of IO so the budget can be exercised without a sink. Nothing but the
+/// flood's own next call past a spent window ever reports what it dropped, which is what makes a
+/// timer unnecessary.
+fn err_budget(now_ms: u64, state: &AtomicU64, missed: &AtomicU32) -> ErrBudget {
+    // Masking keeps a saturated clock from shifting into the budget's own bits.
+    let now_ms = now_ms & ERR_WINDOW_MASK;
+    // One compare-and-swap settles both halves: roll the window, or claim a unit from the one
+    // standing. `fetch_update` retries until it wins: whoever succeeds is the only caller to
+    // have acted on the value it read, which a load followed by a separate subtract cannot promise.
+    let claimed = state.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |packed| {
+        if now_ms.saturating_sub(packed >> ERR_LEFT_BITS) >= ERR_INTERVAL_MS {
+            return Some((now_ms << ERR_LEFT_BITS) | u64::from(ERR_BURST - 1));
+        }
+        // A plain decrement never borrows from the window, because the budget sits in the low bits.
+        if packed & ERR_LEFT_MASK > 0 {
+            return Some(packed - 1);
+        }
+        None
+    });
+    match claimed {
+        // The word this caller replaced says which of the two it did. Reading the pre-image beats
+        // a flag set inside the closure, which every retry would have to leave in step.
+        Ok(previous) if now_ms.saturating_sub(previous >> ERR_LEFT_BITS) >= ERR_INTERVAL_MS => {
+            ErrBudget::WroteAfterMissing(missed.swap(0, Ordering::Relaxed))
+        }
+        Ok(_) => ErrBudget::Write,
+        Err(_) => {
+            missed.fetch_add(1, Ordering::Relaxed);
+            ErrBudget::Drop
+        }
+    }
+}
+
+/// A hard failure with no other user-facing channel: never gated by `LOGS`, and it opens the sink
+/// itself, so the trace survives at level 0. Being ungated is also what lets an untrusted caller
+/// drive the disk at any level, and `console.log` rotates only at launch. The budget lives here
+/// because three call sites had hand-rolled a guard and the fourth forgot it.
 pub fn vlog_err(args: std::fmt::Arguments<'_>) {
+    let now_ms = u64::try_from(PROCESS_START.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let missed = match err_budget(now_ms, &ERR_STATE, &ERR_MISSED) {
+        ErrBudget::Drop => return,
+        ErrBudget::Write => 0,
+        ErrBudget::WroteAfterMissing(missed) => missed,
+    };
     ensure_file_sink();
+    if missed > 0 {
+        print_log(format_args!(
+            "[LOG]    {missed} hard failures went unwritten while the budget was spent"
+        ));
+    }
     print_log(args);
 }
 

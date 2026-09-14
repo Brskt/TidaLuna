@@ -18,6 +18,10 @@ struct LoggingState {
 impl LoggingState {
     fn acquire() -> Self {
         let _lock = LOGGING_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        // The ungated budget is process-wide, and every other test that trips a `verr!` spends
+        // from it. A test asserting on what reached the sink has to start from a full one.
+        ERR_STATE.store(u64::from(ERR_BURST), Ordering::Relaxed);
+        ERR_MISSED.store(0, Ordering::Relaxed);
         Self {
             _lock,
             level: log_level(),
@@ -58,6 +62,102 @@ fn hard_failures_write_at_level_zero_while_gated_logs_do_not() {
         !written.contains("gated-line-marker"),
         "a gated log must stay silent at level 0"
     );
+}
+
+/// `verr!` is never level-gated, so anything an untrusted caller can repeat reaches the disk at
+/// every level. The budget is what stands between a loop and the persistent log; its shape is the
+/// kernel's `___ratelimit`, where the flood's own next call past the window is what reports the
+/// drops and re-arms the burst.
+#[test]
+fn the_ungated_path_spends_a_burst_then_counts_what_it_drops() {
+    let state = AtomicU64::new(u64::from(ERR_BURST));
+    let missed = AtomicU32::new(0);
+
+    for _ in 0..ERR_BURST {
+        assert!(matches!(err_budget(0, &state, &missed), ErrBudget::Write));
+    }
+
+    for _ in 0..100 {
+        assert!(matches!(err_budget(0, &state, &missed), ErrBudget::Drop));
+    }
+    assert_eq!(missed.load(Ordering::Relaxed), 100);
+
+    assert!(matches!(
+        err_budget(ERR_INTERVAL_MS, &state, &missed),
+        ErrBudget::WroteAfterMissing(100)
+    ));
+    assert_eq!(
+        missed.load(Ordering::Relaxed),
+        0,
+        "the report clears what it reported"
+    );
+}
+
+/// A caller that trickles below the burst is never suppressed, however long it runs: each window
+/// it crosses re-arms the whole budget. Only a burst inside one window costs anything.
+#[test]
+fn a_slow_caller_never_spends_its_budget() {
+    let state = AtomicU64::new(u64::from(ERR_BURST));
+    let missed = AtomicU32::new(0);
+
+    for window in 0..50 {
+        let now = window * ERR_INTERVAL_MS;
+        assert!(matches!(
+            err_budget(now, &state, &missed),
+            ErrBudget::Write | ErrBudget::WroteAfterMissing(0)
+        ));
+    }
+    assert_eq!(missed.load(Ordering::Relaxed), 0);
+}
+
+/// `verr!` is reachable from CEF, request and audio threads at once, and the budget is what an
+/// untrusted caller races. Held as two atomics it leaked twice: a pair reading the last unit both
+/// subtracted and wrapped the cap away, a pair finding the window expired both took a write.
+/// Statistical, not deterministic: the compare-and-swap is what holds, this only guards it.
+#[test]
+fn a_contended_budget_never_grants_more_than_its_burst() {
+    const THREADS: u32 = 8;
+    const EACH: u32 = 500;
+    const ROUNDS: u32 = 20;
+
+    for _ in 0..ROUNDS {
+        let state = AtomicU64::new(u64::from(ERR_BURST));
+        let missed = AtomicU32::new(0);
+        let granted = AtomicU32::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    for _ in 0..EACH {
+                        // A fixed `now` keeps every call inside the one window under test, so any
+                        // grant past the burst is the race and not a legitimate re-arm.
+                        match err_budget(1, &state, &missed) {
+                            ErrBudget::Write | ErrBudget::WroteAfterMissing(_) => {
+                                granted.fetch_add(1, Ordering::Relaxed);
+                            }
+                            ErrBudget::Drop => {}
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            granted.load(Ordering::Relaxed),
+            ERR_BURST,
+            "the window granted more writes than its burst allows"
+        );
+        assert_eq!(
+            state.load(Ordering::Relaxed) & ERR_LEFT_MASK,
+            0,
+            "a wrapped budget reads as a huge remainder, not as a spent one"
+        );
+        assert_eq!(
+            missed.load(Ordering::Relaxed),
+            THREADS * EACH - ERR_BURST,
+            "every refused call owes the report a line"
+        );
+    }
 }
 
 #[test]
