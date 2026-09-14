@@ -874,7 +874,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// recovers immediately (the custom `deviceasio*` events aren't TIDAL-native, and the
     /// frontend won't re-arm). Mirrors the device.rs asio->shared switch. No-op without a track.
     #[cfg(target_os = "windows")]
-    fn rearm_shared_after_asio_failure(&mut self) {
+    pub(super) fn rearm_shared_after_asio_failure(&mut self) {
         let was_playing = self.is_playing;
         self.has_track = false;
         self.is_playing = false;
@@ -916,7 +916,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// fresh shared load at the live position; the current track keeps playing instead
     /// of stopping. Mirrors `rearm_shared_after_asio_failure`. No-op without a track.
     #[cfg(target_os = "windows")]
-    fn rearm_shared_after_exclusive_failure(&mut self) {
+    pub(super) fn rearm_shared_after_exclusive_failure(&mut self) {
         let was_playing = self.is_playing;
         self.has_track = false;
         self.is_playing = false;
@@ -925,6 +925,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.seeking = false;
         self.seek_target = None;
         self.exclusive_seek_tx = None;
+        // Left standing, the panic gate fires a second recovery on the tick a typed refusal
+        // already ran: `is_dead()` reports a clean exit exactly as it reports a panic. Safe to
+        // clear on this backend only, every exclusive refusal taking the render thread down.
+        // The ASIO twin keeps its id: no ASIO refusal ends its control thread.
+        self.current_exclusive_stream_id = None;
 
         // Prefer the live exclusive position (floor-free); fall back to resume_store.
         let retained = crate::state::CURRENT_TRACK

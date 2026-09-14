@@ -561,6 +561,47 @@ async fn a_release_settles_the_seek_it_strands() {
     );
 }
 
+/// Every exclusive refusal takes the render thread down with it, and `is_dead()` reports that
+/// clean exit exactly as it reports a panic. Leaving the adoption record standing let the panic
+/// gate recover a second time on the very tick the refusal already had, sending two replays that
+/// carry the same generation and disagree about whether to resume playing.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_exclusive_mode = true;
+    h.player.current_exclusive_stream_id = Some(7);
+
+    h.player.rearm_shared_after_exclusive_failure();
+
+    assert!(
+        h.player.current_exclusive_stream_id.is_none(),
+        "the panic gate reads this field: a stale Some makes it fire on a stream nobody owns"
+    );
+}
+
+/// The mirror image, pinned deliberately rather than left to look like an oversight. No ASIO
+/// refusal ends the control thread, so a stream adopted after one can be genuinely live; clearing
+/// the id here would make its `SeekSettled` fail `seek_ack_is_current` and the seek would never
+/// settle for the listener.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn an_asio_refusal_keeps_an_adoption_that_may_still_be_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_asio_mode = true;
+    h.player.current_asio_stream_id = Some(7);
+
+    h.player.rearm_shared_after_asio_failure();
+
+    assert_eq!(
+        h.player.current_asio_stream_id,
+        Some(7),
+        "the ASIO control thread survives its refusals; a newer stream may already be adopted"
+    );
+}
+
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
