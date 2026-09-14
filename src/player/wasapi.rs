@@ -1725,7 +1725,34 @@ fn render_thread_inner(
                     }
                     Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => break,
-                    _ => {} // Ignore other commands in idle
+                    // Play/Pause come from the command thread, not the decoder, and can arrive
+                    // before the probe-delayed StartStream they belong to. Idle is where that
+                    // race is certain: dropping them started a track after a pause request.
+                    Ok(ExclusiveCommand::Play { stream_id }) => {
+                        ctx.apply_play(&event_tx, stream_id)
+                    }
+                    Ok(ExclusiveCommand::Pause { stream_id }) => {
+                        if ctx.current_stream_id != Some(stream_id) {
+                            ctx.pending_transport = Some((stream_id, false));
+                        }
+                    }
+                    // Idle is where a startup death is EXPECTED to land: the decoder gave up
+                    // before the StartStream that would have left this state. Relaying it is
+                    // the whole point, so it sits above the dropped group rather than in it.
+                    Ok(ExclusiveCommand::StartupFailed {
+                        stream_id,
+                        error,
+                        cause,
+                    }) => ctx.handle_startup_failed(&event_tx, stream_id, error, cause),
+                    // The rest is decoder-sent AFTER its own StartStream (`StartupFailed` is
+                    // the sole one that precedes it, hence handled just above), so one
+                    // reaching idle names a stream already gone. Named rather than
+                    // wildcarded, so a new variant is triaged here instead of vanishing.
+                    Ok(ExclusiveCommand::PushPcm { .. })
+                    | Ok(ExclusiveCommand::EndStream { .. })
+                    | Ok(ExclusiveCommand::ResetForSeek { .. })
+                    | Ok(ExclusiveCommand::SeekFailed { .. })
+                    | Ok(ExclusiveCommand::DecodeFailed { .. }) => {}
                 }
                 stall.lap(handler);
             }
