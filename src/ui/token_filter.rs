@@ -92,6 +92,52 @@ wrap_resource_request_handler! {
     }
 }
 
+/// Wired into the browser, context and dialog dispatches alike, mirroring `store_proxy::intercept`.
+/// Every sink funnels here as one `RT_IMAGE` (`src`, `setAttribute`, `srcset`, `<picture>`, a CSS
+/// background, React's commit path), and a redirect hop re-enters the callback, covering an open
+/// redirect too. Never gated: a host dropped from the list would surface only as a missing image.
+pub(super) fn block_disallowed_image(
+    resource_type: ResourceType,
+    url: &RequestUrl,
+    surface: &str,
+) -> Option<ResourceRequestHandler> {
+    match image_verdict(resource_type, url) {
+        ImageVerdict::NotAnImage | ImageVerdict::Allowed => None,
+        ImageVerdict::Refused => {
+            crate::verr!(
+                "[EXFIL]  BLOCKED {surface} image to {}",
+                crate::util::refused_host(url.as_str())
+            );
+            Some(ExfilBlockHandler::new())
+        }
+    }
+}
+
+/// What the allowlist says about one request. Three outcomes, so a named enum: a bool would fold
+/// `NotAnImage` into `Allowed` and lose the distinction that matters here; the gate judges hosts,
+/// and it judges them for images alone. Matched exhaustively above: a fourth outcome cannot be
+/// added without deciding what the handler does with it.
+#[derive(Debug, PartialEq, Eq)]
+enum ImageVerdict {
+    NotAnImage,
+    Allowed,
+    Refused,
+}
+
+/// The rule, kept free of IO. The refusal it feeds ends in an ungated `verr!`, which opens the
+/// persistent log sink on first use; a test that called the handler would write to the real
+/// `console.log`; the decision has to be reachable on its own to be exercised at all.
+fn image_verdict(resource_type: ResourceType, url: &RequestUrl) -> ImageVerdict {
+    if resource_type != ResourceType::IMAGE {
+        return ImageVerdict::NotAnImage;
+    }
+    if crate::ui::nav::is_allowed_image_host(url) {
+        ImageVerdict::Allowed
+    } else {
+        ImageVerdict::Refused
+    }
+}
+
 wrap_resource_request_handler! {
     pub(super) struct TokenResourceHandler {
         // Per-request slot: the client_id from this exchange's POST body, set in

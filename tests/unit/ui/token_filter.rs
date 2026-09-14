@@ -194,3 +194,26 @@ fn resolve_no_previous_maps_everything_to_current() {
         "real_rt_new"
     );
 }
+
+/// The gate's rule, lifted off the handler so it can be exercised at all: the refusal branch ends
+/// in an ungated `verr!`, and calling that from a test opens the real `console.log`.
+#[test]
+fn image_verdict_refuses_only_a_disallowed_image() {
+    let evil = RequestUrl::new("https://evil.example/p.png".to_string());
+    let allowed = RequestUrl::new("https://resources.tidal.com/p.png".to_string());
+
+    assert_eq!(
+        image_verdict(ResourceType::IMAGE, &evil),
+        ImageVerdict::Refused
+    );
+    assert_eq!(
+        image_verdict(ResourceType::IMAGE, &allowed),
+        ImageVerdict::Allowed
+    );
+    // Every other resource type funnels through the same three dispatches; the gate must let
+    // them pass untouched rather than judge them by a rule written for images.
+    assert_eq!(
+        image_verdict(ResourceType::MAIN_FRAME, &evil),
+        ImageVerdict::NotAnImage
+    );
+}

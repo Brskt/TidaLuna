@@ -206,12 +206,31 @@ wrap_request_handler! {
             &self,
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
-            _request: Option<&mut Request>,
+            request: Option<&mut Request>,
             _is_navigation: ::std::os::raw::c_int,
             _is_download: ::std::os::raw::c_int,
             _request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
+            // The trust prompt interpolates an avatar URL straight out of a plugin's
+            // manifest, and this window's frame is a `data:` URL, which PageKind reads as
+            // External: no early runtime is injected here. This handler is the only layer
+            // that ever sees the request, so the gate has to live here or nowhere.
+            let url = crate::ui::nav::RequestUrl::new(
+                request
+                    .as_ref()
+                    .map(|r| crate::ui::token_filter::userfree_to_string(&r.url()))
+                    .unwrap_or_default(),
+            );
+            if let Some(req) = request.as_ref()
+                && let Some(h) = crate::ui::token_filter::block_disallowed_image(
+                    req.resource_type(),
+                    &url,
+                    "dialog",
+                )
+            {
+                return Some(h);
+            }
             None
         }
         // Isolation: a crash in the dialog's own renderer must not re-enter the

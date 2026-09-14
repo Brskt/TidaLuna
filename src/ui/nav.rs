@@ -160,6 +160,34 @@ pub(crate) fn is_secure_tidal_target(url: &RequestUrl) -> bool {
         .is_some_and(|parsed| parsed.scheme() == "https")
 }
 
+/// Hosts allowed to serve an image. A label-boundary suffix, never a substring:
+/// `eviltidal.com` and `tidal.com.evil.io` are registrable by anyone and both carry the
+/// allowed string. Single source of truth for the image gate, which the browser, context
+/// and dialog dispatches all consult; the lists cannot drift.
+const IMAGE_HOSTS: [&str; 5] = [
+    "tidal.com",
+    "gravatar.com",
+    "github.com",
+    "githubusercontent.com",
+    "captcha-delivery.com",
+];
+
+/// May this image load proceed? An unparseable URL is refused rather than trusted: it says
+/// nothing about where it points. Scheme is deliberately not inspected here; this keeps
+/// today's behaviour on that axis.
+pub(crate) fn is_allowed_image_host(url: &RequestUrl) -> bool {
+    let Some(parsed) = url.parsed() else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or("");
+    IMAGE_HOSTS.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
+}
+
 /// TIDAL API hosts that receive the injected OAuth bearer. Single source of truth for
 /// `is_tidal_api`, `needs_auto_injection`, `should_rewrite_token`; the lists cannot drift.
 pub(crate) fn is_tidal_api_host(host: &str) -> bool {

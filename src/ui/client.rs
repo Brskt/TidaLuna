@@ -809,6 +809,20 @@ wrap_request_handler! {
                 return Some(h);
             }
 
+            // Ahead of the token branch and outside the non-Tidal arm, matching `csp_filter` and
+            // `dialog`: `api.tidalhifi.com` and `event-collector.*.tidalhi.fi` clear
+            // `should_rewrite_token` without clearing `is_tidal_origin`, so from inside either
+            // arm this gate would never run for them.
+            if let Some(req) = _request.as_ref()
+                && let Some(h) = crate::ui::token_filter::block_disallowed_image(
+                    req.resource_type(),
+                    &url,
+                    "renderer",
+                )
+            {
+                return Some(h);
+            }
+
             if crate::ui::token_filter::should_rewrite_token(&url)
                 || crate::ui::nav::is_token_endpoint(&url)
             {

@@ -73,6 +73,63 @@ fn secure_tidal_target_still_refuses_a_foreign_host() {
     assert!(!is_secure_tidal_target(&u("not a url")));
 }
 
+#[test]
+fn allowed_image_host_takes_the_apex_and_its_subdomains() {
+    // resources.tidal.com serves every cover, avatars.githubusercontent.com every
+    // contributor face: exact-host matching would empty the UI.
+    assert!(is_allowed_image_host(&u("https://tidal.com/favicon.png")));
+    assert!(is_allowed_image_host(&u(
+        "https://resources.tidal.com/images/a/1280x1280.jpg"
+    )));
+    assert!(is_allowed_image_host(&u(
+        "https://avatars.githubusercontent.com/u/1?v=4"
+    )));
+    assert!(is_allowed_image_host(&u(
+        "https://images.captcha-delivery.com/challenge.png"
+    )));
+}
+
+#[test]
+fn allowed_image_host_refuses_a_registrable_look_alike() {
+    // Both carry the allowed string; the dot boundary is what separates them.
+    assert!(!is_allowed_image_host(&u("https://eviltidal.com/p.png")));
+    assert!(!is_allowed_image_host(&u(
+        "https://tidal.com.evil.io/p.png"
+    )));
+}
+
+#[test]
+fn allowed_image_host_refuses_an_allowed_name_carried_elsewhere_in_the_url() {
+    assert!(!is_allowed_image_host(&u(
+        "https://evil.example/p.png?ref=tidal.com"
+    )));
+    assert!(!is_allowed_image_host(&u(
+        "https://evil.example/tidal.com/p.png"
+    )));
+}
+
+/// TIDAL's own legacy API host and its telemetry collectors clear `should_rewrite_token` without
+/// clearing `is_tidal_origin`, which used to carry the whole dispatch past this rule. The shipped
+/// bundle serves no image from either (artwork comes from `images.tidal.com`/`resources.tidal.com`;
+/// telemetry posts by `fetch`, not by pixel), so the allowlist stays as arbitrated and the hoisted
+/// gate refuses them.
+#[test]
+fn allowed_image_host_refuses_tidals_legacy_api_and_telemetry_domains() {
+    assert!(!is_allowed_image_host(&u(
+        "https://api.tidalhifi.com/x.jpg"
+    )));
+    assert!(!is_allowed_image_host(&u(
+        "https://event-collector.eu.tidalhi.fi/x.gif"
+    )));
+}
+
+#[test]
+fn allowed_image_host_refuses_what_it_cannot_parse() {
+    // Fail closed: a string that will not parse says nothing about its target.
+    assert!(!is_allowed_image_host(&u("not a url")));
+    assert!(!is_allowed_image_host(&u("")));
+}
+
 /// `is_secure_tidal_target` admits on `is_tidal_origin` alone, which is only sound while every
 /// host `is_token_endpoint` recognises is itself a Tidal origin. That holds today because both
 /// constants end in `.tidal.com`, but `is_tidal_origin`'s suffix literal does not derive from
