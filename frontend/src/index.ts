@@ -75,7 +75,11 @@ const PASSTHROUGH_EVENTS = new Set([
     "deviceasiodrivernotfound", "deviceasioformatunsupported",
     "deviceasioinitfailed", "deviceasiorateunsupported",
     "deviceexclusiveformatunsupported",
+    "deviceasiobackenddied", "deviceexclusivebackenddied",
 ]);
+// Names Rust emits that this bridge drops on purpose. Listing them is what lets the arm at the
+// end of the dispatch treat every other unknown name as drift rather than as noise.
+const IGNORED_EVENTS = new Set(["volume"]);
 let _lastTimeDispatch = 0;
 let _forceTimeDispatch = false;
 // Let the load delegate (player.ts) bypass the 250ms time throttle for the
@@ -240,13 +244,24 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             if (
                 type === "deviceasiodrivernotfound" ||
                 type === "deviceasioformatunsupported" ||
-                type === "deviceasioinitfailed"
+                type === "deviceasioinitfailed" ||
+                // A dead control thread is the strongest case this branch exists for: whatever
+                // killed it is in the driver or the path reaching it, so a restart that re-seeds
+                // ASIO walks straight back into it. The exclusive twin is deliberately absent
+                // above, its own clear reading "the device cannot do exclusive", which a panic
+                // says nothing about.
+                type === "deviceasiobackenddied"
             ) {
                 // ASIO failed; Rust fell back to shared output. Clear the flag AND persist it,
                 // keeping a restart from re-seeding ASIO and re-entering the failing path.
                 (window as any).__TIDALUNAR_ASIO__ = false;
                 sendIpc("settings.asio", false);
             }
+        } else if (!IGNORED_EVENTS.has(type)) {
+            // A name Rust emits that nothing above claims is dropped without a trace, which is
+            // exactly how two backend-death events reached no listener at all. The updater's
+            // dispatch learned the same lesson and keeps a warn of its own for it.
+            console.warn(`[bridge] unhandled player event: ${type}`);
         }
     }
 };

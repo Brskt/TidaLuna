@@ -195,6 +195,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Settled after the loop, outside the handle borrow: the settle takes `&mut
             // self`, where the arms below only touch fields.
             let mut decode_failure: Option<(String, PacketFailure)> = None;
+            // Read before the drain and acted on after it, for the same borrow reason.
+            let backend_died = self.exclusive_handle.as_ref().is_some_and(|h| h.is_dead());
             if let Some(ref handle) = self.exclusive_handle {
                 for ev in handle.poll_events() {
                     match ev {
@@ -408,6 +410,30 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.settle_bypass_decode_failure(error, cause);
             }
 
+            // The render thread stopped without saying so. Reaching here means a panic,
+            // because every typed exit reports before returning: no error value, and no
+            // hook turns one into anything. Judged on `is_finished`, a FACT not a deadline:
+            // there is no healthy state it can misread, which is why polling it is safe
+            // where a timer would not be.
+            if backend_died && self.current_exclusive_stream_id.is_some() {
+                crate::verr!("[WASAPI] render thread died; re-arming shared");
+                // The decoder outlives it and would park forever: it throttles against
+                // `consumed`, which only the thread that just died advances. Cancelling
+                // first is what the idle release already owes and documents; skipping it
+                // leaks the thread AND its whole-track buffer.
+                if let Some(cancel) = self.exclusive_stream_cancel.take() {
+                    cancel.store(true, Relaxed);
+                    if let Some(ref buf) = self.current_buffer {
+                        buf.wake_readers();
+                    }
+                }
+                self.is_exclusive_mode = false;
+                (self.callback)(PlayerEvent::DeviceError(
+                    DeviceErrorKind::ExclusiveBackendDied,
+                ));
+                self.rearm_shared_after_exclusive_failure();
+            }
+
             if !self.is_exclusive_mode {
                 self.exclusive_handle = None;
             }
@@ -443,6 +469,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Settled after the loop, outside the handle borrow: the settle takes `&mut self`,
         // where the arms below only touch fields.
         let mut decode_failure: Option<(String, PacketFailure)> = None;
+        // Read before the drain and acted on after it, for the same borrow reason.
+        let backend_died = self.asio_handle.as_ref().is_some_and(|h| h.is_dead());
         if let Some(ref handle) = self.asio_handle {
             for ev in handle.poll_events() {
                 match ev {
@@ -683,6 +711,27 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         if let Some((error, cause)) = decode_failure {
             self.settle_bypass_decode_failure(error, cause);
+        }
+
+        // The control thread stopped without saying so: reaching here means a panic, every
+        // typed exit reporting before returning. `is_finished` is a FACT, not a deadline, and
+        // covers the two windows the watchdog cannot see (a death before `Active`, and one
+        // while paused). The real-time callback stays out of reach: `extern "system"` aborts.
+        if backend_died && self.current_asio_stream_id.is_some() {
+            crate::verr!("[ASIO] control thread died; re-arming shared");
+            // The decoder outlives it and would park forever against `consumed`, which
+            // only the thread that just died advances.
+            if let Some(cancel) = self.asio_stream_cancel.take() {
+                cancel.store(true, Relaxed);
+                if let Some(ref buf) = self.current_buffer {
+                    buf.wake_readers();
+                }
+            }
+            self.is_asio_mode = false;
+            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioBackendDied));
+            self.rearm_shared_after_asio_failure();
+            self.asio_handle = None;
+            return;
         }
 
         // Progress watchdog (a backstop): the clock reported Active but the position hasn't

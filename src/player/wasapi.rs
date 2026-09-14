@@ -639,6 +639,14 @@ impl ExclusiveHandle {
         let _ = self.cmd_tx.send(cmd);
     }
 
+    /// True once the render thread has stopped, whatever ended it. A FACT, not a timer:
+    /// there is no false trip to guard against, which is what makes polling it safe where
+    /// a deadline would not be. Reads the handle without taking it, leaving `shutdown` and
+    /// `Drop` free to join as before.
+    pub fn is_dead(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| t.is_finished())
+    }
+
     pub fn command_sender(&self) -> mpsc::Sender<ExclusiveCommand> {
         self.cmd_tx.clone()
     }

@@ -2595,6 +2595,15 @@ impl AsioHandle {
         let _ = self.cmd_tx.send(cmd);
     }
 
+    /// True once the control thread has stopped, whatever ended it. A FACT, not a timer:
+    /// polling it cannot misfire the way a deadline can. Reads the handle without
+    /// taking it, leaving `shutdown` and `Drop` free to park or join as before.
+    /// Does NOT cover the ASIO real-time callback: it is `extern "system"`, and a panic
+    /// there aborts the process before any supervisor could run.
+    pub(crate) fn is_dead(&self) -> bool {
+        self.thread.as_ref().is_some_and(|t| t.is_finished())
+    }
+
     pub(crate) fn command_sender(&self) -> mpsc::Sender<AsioCommand> {
         self.cmd_tx.clone()
     }

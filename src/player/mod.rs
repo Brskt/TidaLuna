@@ -169,6 +169,12 @@ pub enum DeviceErrorKind {
     AsioFormatUnsupported,
     AsioInitFailed,
     AsioRateUnsupported,
+    /// The backend thread itself stopped without saying so. Every typed failure below
+    /// reports before exiting; a PANIC produces no error value at all, and no hook turns
+    /// one into anything. Left unnoticed it stranded two threads: the render thread, and
+    /// the decoder parked against a `consumed` counter only that thread advances.
+    ExclusiveBackendDied,
+    AsioBackendDied,
 }
 
 impl DeviceErrorKind {
@@ -185,6 +191,8 @@ impl DeviceErrorKind {
             Self::AsioFormatUnsupported => "deviceasioformatunsupported",
             Self::AsioInitFailed => "deviceasioinitfailed",
             Self::AsioRateUnsupported => "deviceasiorateunsupported",
+            Self::ExclusiveBackendDied => "deviceexclusivebackenddied",
+            Self::AsioBackendDied => "deviceasiobackenddied",
         }
     }
 }
