@@ -269,6 +269,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 decode_failure = Some((error, cause));
                             }
                         }
+                        // The id is the only scope this one gets: the render could not supply
+                        // one, never having adopted the stream. The cause travels with it,
+                        // classified at the probe: that read goes through the streaming buffer,
+                        // which is the network path; a stall at track start is the same
+                        // `TimedOut` a stall mid-track raises.
+                        ExclusiveEvent::StartupFailed {
+                            stream_id,
+                            error,
+                            cause,
+                        } => {
+                            if self.current_exclusive_stream_id == Some(stream_id) {
+                                crate::vprintln!("[WASAPI] decoder never started: {error}");
+                                decode_failure = Some((error, cause));
+                            }
+                        }
                         ExclusiveEvent::StateChange(s) => {
                             // Transport states only. Completion arrives named, below: clearing
                             // the track is the one effect a superseded stream must never have,
@@ -512,6 +527,21 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     } => {
                         if self.current_asio_stream_id == Some(stream_id) {
                             crate::vprintln!("[ASIO] decoder died: {error}");
+                            decode_failure = Some((error, cause));
+                        }
+                    }
+                    // The id is the only scope this one gets: the control thread could not supply
+                    // one, never having adopted the stream. The cause travels with it, classified
+                    // at the probe: that read goes through the streaming buffer, which is the
+                    // network path; a stall at track start is the same `TimedOut` a stall
+                    // mid-track raises.
+                    AsioEvent::StartupFailed {
+                        stream_id,
+                        error,
+                        cause,
+                    } => {
+                        if self.current_asio_stream_id == Some(stream_id) {
+                            crate::vprintln!("[ASIO] decoder never started: {error}");
                             decode_failure = Some((error, cause));
                         }
                     }

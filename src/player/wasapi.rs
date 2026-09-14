@@ -61,9 +61,20 @@ pub(super) enum ExclusiveCommand {
     },
     /// The decoder thread died mid-stream. It is the one exit that signals nothing on its
     /// own, which left the player holding a seek channel whose receiver was already gone.
+    /// `cause` travels with it because the classification is only available here, where the
+    /// error is still typed: the text alone cannot be re-read for it further down.
     DecodeFailed {
         stream_id: u32,
         error: String,
+        cause: PacketFailure,
+    },
+    /// The decode thread died BEFORE adopting the stream, where `DecodeFailed` cannot reach:
+    /// that variant only travels after this stream's own `StartStream`, and the idle arm drops
+    /// it on that premise. Without this the failure left the transport at Ready, silent.
+    StartupFailed {
+        stream_id: u32,
+        error: String,
+        cause: PacketFailure,
     },
     /// Stream-scoped like PushPcm/EndStream (mirrors ASIO's Play/Pause): un-scoped, a
     /// premature Play (racing the decoder's probe) or a stale one from a superseded track
@@ -91,6 +102,7 @@ impl ExclusiveCommand {
             Self::ResetForSeek { .. } => "ResetForSeek",
             Self::SeekFailed { .. } => "SeekFailed",
             Self::DecodeFailed { .. } => "DecodeFailed",
+            Self::StartupFailed { .. } => "StartupFailed",
             Self::Play { .. } => "Play",
             Self::Pause { .. } => "Pause",
             Self::ReleaseDevice => "ReleaseDevice",
@@ -145,6 +157,15 @@ pub(super) enum ExclusiveEvent {
     DecodeFailed {
         stream_id: u32,
         error: String,
+        cause: PacketFailure,
+    },
+    /// The decoder died before adopting the stream. Carries a cause like `DecodeFailed`: the
+    /// probe reads the streaming buffer, which is the network path, so a stall at track start
+    /// raises `TimedOut` as one mid-track does. Classified before `format!` erases the type.
+    StartupFailed {
+        stream_id: u32,
+        error: String,
+        cause: PacketFailure,
     },
 }
 
@@ -240,6 +261,21 @@ where
     let mut hint = Hint::new();
     hint.with_extension("flac");
 
+    // These fail before the render adopts the stream, so nothing downstream hears them on their
+    // own: `DecodeFailed` is reserved for a stream already held. Silent when the spawn was
+    // superseded, a retirement being no failure. The cause is the caller's to supply, only the
+    // probe reading bytes and only it able to classify before `format!` erases the type.
+    let startup_failed = |error: String, cause: PacketFailure| -> String {
+        if !cancel.load(Relaxed) {
+            let _ = cmd_tx.send(ExclusiveCommand::StartupFailed {
+                stream_id,
+                error: error.clone(),
+                cause,
+            });
+        }
+        error
+    };
+
     let mut format_reader = symphonia::default::get_probe()
         .probe(
             &hint,
@@ -247,26 +283,38 @@ where
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(|e| format!("probe failed: {e}"))?;
+        // The one call here that touches bytes, and the only one that can name the connection.
+        .map_err(|e| startup_failed(format!("probe failed: {e}"), classify_packet_failure(&e)))?;
 
+    // Everything past the probe reads what it already holds: the bytes arrived and say
+    // something unusable, which is the source's fault however the connection behaved.
     let track = format_reader
         .tracks()
         .iter()
         .find(|t| matches!(&t.codec_params, Some(CodecParameters::Audio(_))))
-        .ok_or("no audio track")?
+        .ok_or_else(|| startup_failed("no audio track".to_string(), PacketFailure::Source))?
         .clone();
 
     let codec_params = match &track.codec_params {
         Some(CodecParameters::Audio(p)) => p,
-        _ => return Err("no audio track".to_string()),
+        _ => {
+            return Err(startup_failed(
+                "no audio track".to_string(),
+                PacketFailure::Source,
+            ));
+        }
     };
-    let sample_rate = codec_params.sample_rate.ok_or("no sample rate")?;
+    let sample_rate = codec_params
+        .sample_rate
+        .ok_or_else(|| startup_failed("no sample rate".to_string(), PacketFailure::Source))?;
     let channels = codec_params
         .channels
         .as_ref()
-        .ok_or("no channel info")?
+        .ok_or_else(|| startup_failed("no channel info".to_string(), PacketFailure::Source))?
         .count() as u32;
-    let bits_per_sample = codec_params.bits_per_sample.ok_or("no bits_per_sample")?;
+    let bits_per_sample = codec_params
+        .bits_per_sample
+        .ok_or_else(|| startup_failed("no bits_per_sample".to_string(), PacketFailure::Source))?;
     let n_frames = track.num_frames.unwrap_or(0);
     let duration_secs = if sample_rate > 0 && n_frames > 0 {
         n_frames as f64 / sample_rate as f64
@@ -1497,6 +1545,23 @@ impl RenderContext {
         });
     }
 
+    /// Relay a startup death to the player. Not stream-scoped here, unlike its sibling:
+    /// `current_stream_id` can only disagree on a stream never adopted, and that guard would
+    /// drop every one of these. The player stamped the id that matters, and scopes it there.
+    fn handle_startup_failed(
+        &self,
+        event_tx: &mpsc::Sender<ExclusiveEvent>,
+        stream_id: u32,
+        error: String,
+        cause: PacketFailure,
+    ) {
+        let _ = event_tx.send(ExclusiveEvent::StartupFailed {
+            stream_id,
+            error,
+            cause,
+        });
+    }
+
     /// Position backed by audible audio: clamped to the frames actually covered by
     /// buffered PCM, never reporting ahead of what can be heard on a forward seek into
     /// a still-downloading region. Every position this thread reports comes from here.
@@ -1746,6 +1811,11 @@ fn render_thread_inner(
                             error,
                             cause,
                         } => ctx.handle_decode_failed(&event_tx, stream_id, error, cause),
+                        ExclusiveCommand::StartupFailed {
+                            stream_id,
+                            error,
+                            cause,
+                        } => ctx.handle_startup_failed(&event_tx, stream_id, error, cause),
                         ExclusiveCommand::ReleaseDevice => ctx.release_device(),
                         ExclusiveCommand::Shutdown => {
                             ctx.stop_audio_client();
@@ -2149,6 +2219,11 @@ fn render_thread_inner(
                         error,
                         cause,
                     }) => ctx.handle_decode_failed(&event_tx, stream_id, error, cause),
+                    Ok(ExclusiveCommand::StartupFailed {
+                        stream_id,
+                        error,
+                        cause,
+                    }) => ctx.handle_startup_failed(&event_tx, stream_id, error, cause),
                     Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => {
                         ctx.stop_audio_client();

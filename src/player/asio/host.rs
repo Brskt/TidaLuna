@@ -1071,9 +1071,21 @@ pub(crate) enum AsioCommand {
     },
     /// The decoder thread died mid-stream. It is the one exit that signals nothing on its
     /// own, which left the player holding a seek channel whose receiver was already gone.
+    /// `cause` travels with it because the classification is only available here, where the
+    /// error is still typed: the text alone cannot be re-read for it further down.
     DecodeFailed {
         stream_id: u32,
         error: String,
+        cause: PacketFailure,
+    },
+    /// The decode thread died BEFORE adopting the stream. `DecodeFailed` cannot carry
+    /// it: that variant only ever travels after this stream's own `StartStream`. Without
+    /// this the failure reached nobody (the spawn's caller only logs, behind a gate that
+    /// is off by default), leaving the transport at Ready with nothing playing and no skip.
+    StartupFailed {
+        stream_id: u32,
+        error: String,
+        cause: PacketFailure,
     },
     Play {
         stream_id: u32,
@@ -1135,6 +1147,17 @@ pub(crate) enum AsioEvent {
     DecodeFailed {
         stream_id: u32,
         error: String,
+        cause: PacketFailure,
+    },
+    /// The decoder thread died before adopting the stream. Settled exactly like `DecodeFailed`,
+    /// and it carries the same cause for the same reason: the probe reads the streaming buffer,
+    /// which is the network path; a stall at track start raises `TimedOut` here just as it
+    /// does mid-track. Classified where the typed error still exists, since the `format!` below
+    /// leaves nothing to classify.
+    StartupFailed {
+        stream_id: u32,
+        error: String,
+        cause: PacketFailure,
     },
 }
 
@@ -1817,6 +1840,24 @@ impl ControlCtx {
         });
     }
 
+    /// Relay a startup death to the player. Deliberately NOT stream-scoped here, unlike
+    /// its sibling: `self.stream_id` can only disagree, because this stream was never
+    /// adopted, and reusing that guard would drop every one of these. The player holds the id that
+    /// matters; it stamped `current_asio_stream_id` before the spawn, and scopes it there.
+    fn handle_startup_failed(
+        &self,
+        event_tx: &mpsc::Sender<AsioEvent>,
+        stream_id: u32,
+        error: String,
+        cause: PacketFailure,
+    ) {
+        let _ = event_tx.send(AsioEvent::StartupFailed {
+            stream_id,
+            error,
+            cause,
+        });
+    }
+
     /// Baseline plus the frames the RT callback has actually played, clamped to the
     /// track duration. Every position this thread reports comes from here; the counters
     /// only move on a confirmed transition, making it truthful while paused too.
@@ -2180,6 +2221,11 @@ impl ControlCtx {
                 error,
                 cause,
             } => self.handle_decode_failed(event_tx, stream_id, error, cause),
+            AsioCommand::StartupFailed {
+                stream_id,
+                error,
+                cause,
+            } => self.handle_startup_failed(event_tx, stream_id, error, cause),
             AsioCommand::Play { stream_id } => {
                 // Stream-scoped, like PushPcm/EndStream/Completed: a stale Play from a
                 // superseded track (the stop->load->play storm) must not resume the wrong
@@ -2628,6 +2674,21 @@ pub(crate) fn stream_reader_to_asio(
     let mut hint = Hint::new();
     hint.with_extension("flac");
 
+    // These fail before the control thread adopts the stream, so nothing downstream hears them
+    // on their own: `DecodeFailed` is reserved for a stream already adopted. Silent when the
+    // spawn was superseded, a retirement being no failure. The cause is the caller's to supply,
+    // only the probe reading bytes and only it able to classify before `format!` erases the type.
+    let startup_failed = |error: String, cause: PacketFailure| -> String {
+        if !cancel.load(Ordering::Relaxed) {
+            let _ = cmd_tx.send(AsioCommand::StartupFailed {
+                stream_id,
+                error: error.clone(),
+                cause,
+            });
+        }
+        error
+    };
+
     let mut format_reader = symphonia::default::get_probe()
         .probe(
             &hint,
@@ -2635,24 +2696,34 @@ pub(crate) fn stream_reader_to_asio(
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(|e| format!("probe failed: {e}"))?;
+        // The one call here that touches bytes, and the only one that can name the connection.
+        .map_err(|e| startup_failed(format!("probe failed: {e}"), classify_packet_failure(&e)))?;
 
+    // Everything past the probe reads what it already holds: the bytes arrived and say
+    // something unusable, which is the source's fault however the connection behaved.
     let track = format_reader
         .tracks()
         .iter()
         .find(|t| matches!(&t.codec_params, Some(CodecParameters::Audio(_))))
-        .ok_or("no audio track")?
+        .ok_or_else(|| startup_failed("no audio track".to_string(), PacketFailure::Source))?
         .clone();
 
     let codec_params = match &track.codec_params {
         Some(CodecParameters::Audio(p)) => p,
-        _ => return Err("no audio track".to_string()),
+        _ => {
+            return Err(startup_failed(
+                "no audio track".to_string(),
+                PacketFailure::Source,
+            ));
+        }
     };
-    let sample_rate = codec_params.sample_rate.ok_or("no sample rate")?;
+    let sample_rate = codec_params
+        .sample_rate
+        .ok_or_else(|| startup_failed("no sample rate".to_string(), PacketFailure::Source))?;
     let channels = codec_params
         .channels
         .as_ref()
-        .ok_or("no channel info")?
+        .ok_or_else(|| startup_failed("no channel info".to_string(), PacketFailure::Source))?
         .count() as u32;
     let n_frames = track.num_frames.unwrap_or(0);
     let duration_secs = if sample_rate > 0 && n_frames > 0 {
