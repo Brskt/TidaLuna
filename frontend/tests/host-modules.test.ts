@@ -9,8 +9,9 @@
 // far away, as a bare TypeError inside a plugin calling the export that got dropped.
 
 import { beforeEach, expect, test } from "bun:test";
+import { fragmentSource, runFragment } from "./helpers/early-runtime";
 
-const source = await Bun.file(new URL("../../src/ui/early_runtime/host_modules.js", import.meta.url)).text();
+const source = await fragmentSource("host_modules");
 
 type Cap = (id: string, ns: Record<string, unknown>) => void;
 
@@ -19,7 +20,7 @@ type Cap = (id: string, ns: Record<string, unknown>) => void;
 function load(): Cap {
 	delete (window as any).__lunaHostModules;
 	delete (globalThis as any).__LUNA_CAP;
-	new Function(source)();
+	runFragment(source);
 	return (globalThis as any).__LUNA_CAP as Cap;
 }
 

@@ -7,8 +7,9 @@
 // CJS unwrap, for all three modules) and hands it over through `__lunaHostReady`.
 
 import { afterAll, beforeEach, expect, test } from "bun:test";
+import { fragmentSource, runFragment } from "./helpers/early-runtime";
 
-const source = await Bun.file(new URL("../../src/ui/early_runtime/cache_heal.js", import.meta.url)).text();
+const source = await fragmentSource("cache_heal");
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -54,7 +55,7 @@ function load(controller: boolean): Harness {
 		return 0;
 	};
 	try {
-		new Function(source)();
+		runFragment(source);
 	} finally {
 		(globalThis as any).setTimeout = realSetTimeout;
 	}
