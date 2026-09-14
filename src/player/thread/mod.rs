@@ -589,16 +589,34 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // Poll playback state
             self.poll_playback();
 
-            // Wait for next command
+            // Wait for next command. `recv_timeout` only paces this loop while a sender
+            // lives: once the last one drops it answers in nanoseconds, so discarding the
+            // error turns a 250ms poll into a busy-spin. `Player` holds a sender for its
+            // whole life: Disconnected means the player is gone and this thread is done.
+            // Same split `ControlCtx::run` already makes on its own `cmd_rx`.
             let timeout = if self.seeking {
                 Duration::from_millis(1)
             } else {
                 Duration::from_millis(250)
             };
-            if let Ok(cmd) = self.cmd_rx.recv_timeout(timeout) {
-                self.pending_cmds.push(cmd);
-                while let Ok(cmd) = self.cmd_rx.try_recv() {
+            match self.cmd_rx.recv_timeout(timeout) {
+                Ok(cmd) => {
                     self.pending_cmds.push(cmd);
+                    while let Ok(cmd) = self.cmd_rx.try_recv() {
+                        self.pending_cmds.push(cmd);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // Hand a live driver off unjoined, as the debounced idle release in
+                    // `poll_asio_events` does. Letting the field drop instead would call
+                    // `AsioHandle::drop`, whose join lasts as long as the driver wants.
+                    #[cfg(target_os = "windows")]
+                    if let Some(handle) = self.asio_handle.take() {
+                        self.asio_teardown = handle.shutdown();
+                    }
+                    crate::vprintln!("[PLAYER] command channel closed, thread exiting");
+                    return;
                 }
             }
         }
