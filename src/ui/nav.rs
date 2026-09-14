@@ -125,9 +125,11 @@ impl RequestUrl {
 /// Used by the exfiltration guard to distinguish Tidal traffic from external.
 pub(crate) fn is_tidal_origin(url: &RequestUrl) -> bool {
     let Some(parsed) = url.parsed() else {
-        // Unparseable but relative stays same-origin: proxy.fetch callers pass
-        // bare paths. Anything else stays external.
-        return url.as_str().starts_with('/');
+        // Unparseable but relative stays same-origin. A leading `//` is not that: it names a
+        // foreign host against the caller's scheme, and `starts_with('/')` alone reads it as a
+        // path. `fetch_proxy.js:57` draws the same line one hop earlier, on the JS side.
+        let raw = url.as_str();
+        return raw.starts_with('/') && !raw.starts_with("//");
     };
     let host = parsed.host_str().unwrap_or("");
     host == "tidal.com" || host.ends_with(".tidal.com")
