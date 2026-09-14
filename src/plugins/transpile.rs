@@ -27,8 +27,8 @@ pub fn transpile_ts(source: &str, filename: &str) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("Could not determine source type for {filename}"))?;
 
     let parsed = oxc::parser::Parser::new(&allocator, &stripped, source_type).parse();
-    if parsed.panicked {
-        anyhow::bail!("Parser panicked for {filename}");
+    if parsed.fatal_error {
+        anyhow::bail!("Unrecoverable parse error in {filename}");
     }
     if !parsed.diagnostics.is_empty() {
         let errors: Vec<String> = parsed.diagnostics.iter().map(|e| e.to_string()).collect();
@@ -66,8 +66,8 @@ fn lower_es_modules(source: &str, filename: &str) -> anyhow::Result<String> {
         .map_err(|_| anyhow::anyhow!("Could not determine source type for {filename}"))?;
 
     let parsed = oxc::parser::Parser::new(&allocator, source, source_type).parse();
-    if parsed.panicked {
-        anyhow::bail!("Parser panicked for {filename}");
+    if parsed.fatal_error {
+        anyhow::bail!("Unrecoverable parse error in {filename}");
     }
     if !parsed.diagnostics.is_empty() {
         let errors: Vec<String> = parsed.diagnostics.iter().map(|e| e.to_string()).collect();
