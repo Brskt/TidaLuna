@@ -442,9 +442,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // without a resume or track change, hand the exclusive device back, letting
             // other apps regain it. has_track=false + committed cleared makes the next play
             // re-arm (decide_play ReArm) or a same-track reload reopen (no idempotent
-            // skip); both reopen the client.
+            // skip); both reopen the client. `loading_gen` blocks an in-flight load, LoadStarted
+            // landing well before handle_load clears the timer. Re-read each tick rather than
+            // cleared at that transition, a hand-cleared deadline being the omission that opened
+            // this window; `LoadSettleGuard` drops on every load exit, so the term cannot stick.
             if self.is_exclusive_mode
                 && !self.is_playing
+                && self.loading_gen.is_none()
                 && let Some(at) = self.exclusive_release_at
                 && std::time::Instant::now() >= at
             {

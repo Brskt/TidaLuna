@@ -488,6 +488,40 @@ async fn a_bypass_network_loss_holds_the_queue_and_still_frees_the_device() {
     assert_eq!(last_state(&h.events), Some(PlaybackState::Stopped));
 }
 
+/// `LoadStarted` lands the moment a load begins, its `Load` only once the fetch resolves, and
+/// the pause debounce can elapse between the two. Firing there hands back a device the load is
+/// about to reopen and vacates the track slot that load is still filling.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_release_deadline_waits_for_an_in_flight_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_exclusive_mode = true;
+    h.player.is_playing = false;
+    h.player.exclusive_release_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+    h.player.loading_gen = Some(1);
+
+    h.player.poll_exclusive_events();
+
+    assert!(
+        h.player.exclusive_release_at.is_some(),
+        "an elapsed deadline is the load's to cancel, never this poll's"
+    );
+    assert!(
+        h.player.has_track,
+        "a load in flight still owns the track slot it is filling"
+    );
+
+    // The other half of the guard: the same elapsed deadline must still fire once no load is
+    // pending. Without this the test would pass just as well against a site that never releases.
+    h.player.loading_gen = None;
+    h.player.poll_exclusive_events();
+
+    assert!(h.player.exclusive_release_at.is_none());
+    assert!(!h.player.has_track);
+}
+
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
