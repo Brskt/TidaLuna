@@ -165,7 +165,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
         let mut still_remaining = Vec::new();
 
         for p in remaining {
-            // Checked per plugin, not once per pass: `unload_all_user_plugins` sweeps the manager
+            // Checked per plugin, not once per pass: `retire_all_loaded` sweeps the manager
             // on the UI thread and has no way to interrupt this loop. Injecting after that sweep
             // would resurrect a plugin into a session the user has already left, with nothing
             // left behind to unload it again.

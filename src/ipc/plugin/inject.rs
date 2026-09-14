@@ -132,7 +132,7 @@ pub(super) fn inject_plugin(url: &str, name: &str, code: &str, epoch: u64) -> In
     if !injection_still_current(epoch, with_state(|state| state.session_epoch)) {
         // The session ended while this was transpiling, and the sweep that ran meanwhile could
         // not touch this plugin: `mark_loading` had registered it before any code existed, and
-        // the cleanup it dispatched was a no-op while `mark_unloaded` then dropped the only
+        // the cleanup it dispatched was a no-op while `forget_plugin` then dropped the only
         // record of it. The injection just posted therefore lands in a session the user has
         // left, with nothing left to unload it.
         //
