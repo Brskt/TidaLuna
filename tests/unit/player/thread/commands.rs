@@ -522,6 +522,45 @@ async fn a_release_deadline_waits_for_an_in_flight_load() {
     assert!(!h.player.has_track);
 }
 
+/// The release un-adopts the stream, so the decoder's answer to a seek still in flight dies on
+/// the stream identity and never lifts the pin. Left standing it outlives the track: the bar
+/// stays frozen at the target and resume writes stay suppressed.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_release_settles_the_seek_it_strands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_exclusive_mode = true;
+    h.player.is_playing = false;
+    h.player.idle_state = PlaybackState::Paused;
+    h.player.seeking = true;
+    h.player.seek_target = Some(150.0);
+    h.player.seek_wall_start = Some(std::time::Instant::now());
+    h.player.exclusive_release_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+
+    h.player.poll_exclusive_events();
+
+    assert!(
+        !h.player.seeking,
+        "nothing survives the release to answer that seek"
+    );
+    assert_eq!(h.player.seek_target, None);
+    assert!(h.player.seek_wall_start.is_none());
+    assert_eq!(
+        last_state(&h.events),
+        Some(PlaybackState::Paused),
+        "handle_seek announced Seeking and its end is owed, release or not"
+    );
+    assert!(
+        h.events.lock().unwrap().iter().any(|ev| matches!(
+            ev,
+            PlayerEvent::TimeUpdate(t, _) if (*t - 150.0).abs() < f64::EPSILON
+        )),
+        "played_position_secs still reads pre-seek, so dropping the target walks the bar back"
+    );
+}
+
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {

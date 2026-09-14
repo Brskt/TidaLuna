@@ -101,10 +101,34 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 
+    /// The release un-adopts the stream, so an in-flight seek's ack dies on the identity check
+    /// and the pin outlives the track, which is why `stop_decode` clears this same trio when it
+    /// retires a decoder. The target is re-emitted rather than re-read: the seek never
+    /// converged, so `played_position_secs` still reports pre-seek.
+    #[cfg(target_os = "windows")]
+    fn settle_seek_on_release(&mut self) {
+        if !self.seeking {
+            return;
+        }
+        let position = self.effective_position();
+        self.seeking = false;
+        self.seek_target = None;
+        self.seek_wall_start = None;
+        (self.callback)(PlayerEvent::StateChange(
+            self.settled_state(),
+            self.current_seq,
+        ));
+        (self.callback)(PlayerEvent::TimeUpdate(position, self.current_seq));
+    }
+
     /// A bypass decoder died mid-stream: the SDK is told why and left on a terminal state.
     /// The resume point is deliberately kept, since the listener never reached the end.
+    ///
+    /// `cause` decides only two answers: a dead connection holds the queue and keeps the cached
+    /// bytes, an unusable source reports a media error and lets it advance. The rest (silencing
+    /// the backend, arming its release, clearing the seek pin) is owed either way.
     #[cfg(target_os = "windows")]
-    pub(super) fn settle_bypass_decode_failure(&mut self, error: String) {
+    pub(super) fn settle_bypass_decode_failure(&mut self, error: String, cause: PacketFailure) {
         // Silence the backend and arm its release. Clearing bookkeeping is half of what
         // `stop_decode()` does for the shared path; it also drops the cpal stream. Here the
         // ring still holds DECODE_AHEAD_SECS of audio, and no EndStream means no completion.
@@ -456,6 +480,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 if let Some(ref handle) = self.exclusive_handle {
                     handle.send(ExclusiveCommand::ReleaseDevice);
                 }
+                self.settle_seek_on_release();
                 self.has_track = false;
                 self.set_committed_track(None);
                 crate::vprintln!(
@@ -794,6 +819,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             if let Some(handle) = self.asio_handle.take() {
                 self.asio_teardown = handle.shutdown();
             }
+            self.settle_seek_on_release();
             self.has_track = false;
             self.set_committed_track(None);
             crate::vprintln!("[ASIO]   Released idle driver (other apps can use it)");
