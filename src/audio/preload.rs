@@ -114,8 +114,14 @@ async fn fetch_and_decrypt_inner(
                         }
                         Ok(r) => anyhow::bail!("reconnect status: {}", r.status()),
                         Err(send_err) => {
+                            // Two redactions on two values, as `net_fetch.rs` does: the url
+                            // names the edge that refused, with its signed query cut, while
+                            // the error's own copy of that url goes entirely. Logging the
+                            // error raw would put the credential back past the first cut.
                             crate::vprintln!(
-                                "[PRELOAD] reconnect attempt {reconnect_attempts} failed: {send_err}"
+                                "[PRELOAD] reconnect attempt {reconnect_attempts} to {} failed: {}",
+                                crate::util::redact_url_query(url),
+                                crate::util::network_error_text(send_err)
                             );
                             continue 'reconnect;
                         }
@@ -1202,12 +1208,13 @@ async fn download_stream(
                     match result {
                         Ok(r) => r,
                         Err(e) => {
+                            let text = crate::util::network_error_text(e);
                             crate::vprintln3!(
-                                "[STREAM] DOWNLOAD DIED: range request failed at byte {target} | restarts={range_restarts}: {e}"
+                                "[STREAM] DOWNLOAD DIED: range request failed at byte {target} | restarts={range_restarts}: {text}"
                             );
                             writer.finish_with_error(
                                 DownloadFailure::Network,
-                                format!("range request failed: {e}"),
+                                format!("range request failed: {text}"),
                             );
                             return;
                         }
@@ -1448,8 +1455,15 @@ async fn download_stream(
                                 return;
                             }
                             Err(send_err) => {
+                                // Same pair as the preload twin above. Worth naming here in
+                                // particular: this loop re-derives `fetch_url` every attempt,
+                                // so a re-signed credential can move the download to another
+                                // edge mid-reconnect, and the host is the only thing on the
+                                // line that would say so.
                                 crate::vprintln!(
-                                    "[STREAM] reconnect attempt {reconnect_attempts} failed: {send_err}"
+                                    "[STREAM] reconnect attempt {reconnect_attempts} to {} failed: {}",
+                                    crate::util::redact_url_query(&fetch_url),
+                                    crate::util::network_error_text(send_err)
                                 );
                                 continue 'reconnect;
                             }

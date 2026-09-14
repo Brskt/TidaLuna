@@ -194,18 +194,6 @@ fn status_for(e: &anyhow::Error) -> i32 {
     }
 }
 
-/// Bounded host only, never the full url: it is plugin-supplied and `verr!` is not gated. Logging it
-/// verbatim would let the renderer write unbounded text, escapes intact, into the persistent log.
-/// The host is what makes an unexpected regional CDN reportable.
-fn refused_host(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(parsed) => {
-            crate::util::truncate_str(parsed.host_str().unwrap_or("no host"), 64).to_string()
-        }
-        Err(_) => "unparseable url".to_string(),
-    }
-}
-
 async fn run(req: Request) -> anyhow::Result<()> {
     let dest = sanitized_destination(&req.path)?;
     // Auth and identity are matched, not spent; a failed fetch must not cost the user their answer.
@@ -490,7 +478,7 @@ async fn fetch_track(urls: &[String]) -> anyhow::Result<Vec<u8>> {
             // loop drive the disk from the renderer.
             crate::vprintln!(
                 "[DOWNLOAD] Refused a url outside the TIDAL media hosts: {}",
-                refused_host(url)
+                crate::util::refused_host(url)
             );
             return Err(Refused("download url is not a TIDAL media url").into());
         }

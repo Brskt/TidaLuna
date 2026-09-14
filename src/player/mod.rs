@@ -951,8 +951,12 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
             r
         }
         Err(e) => {
-            crate::vprintln!("[ERROR]  Request failed: {}", e);
-            ctx.fail_load(format!("request failed: {e}"), MediaErrorCode::NoSuchFile);
+            let text = crate::util::network_error_text(e);
+            crate::vprintln!("[ERROR]  Request failed: {text}");
+            ctx.fail_load(
+                format!("request failed: {text}"),
+                MediaErrorCode::NoSuchFile,
+            );
             return;
         }
     };
@@ -1073,9 +1077,14 @@ impl Player {
     {
         let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
 
+        // `DB.get()` rather than `db()`, whose accessor panics when no actor was installed, which
+        // is every unit test that builds a player. The fallback is not invented: `load_volume_sync`
+        // answers `true` for a settings row that does not exist yet, so a missing actor and a
+        // fresh install agree. Same trade `PlayerThread::new` makes for `crossfade_secs`.
         #[cfg(target_os = "windows")]
-        let volume_sync_enabled =
-            crate::state::db().call_settings(crate::settings::load_volume_sync);
+        let volume_sync_enabled = crate::state::DB
+            .get()
+            .is_none_or(|db| db.call_settings(crate::settings::load_volume_sync));
         #[cfg(not(target_os = "windows"))]
         let volume_sync_enabled = true;
 
@@ -1381,9 +1390,10 @@ impl Player {
                 Ok(r) if r.status().is_success() => match r.bytes().await {
                     Ok(b) => b.to_vec(),
                     Err(e) => {
-                        crate::vprintln!("[ERROR]  DASH init segment read failed: {e}");
+                        let text = crate::util::network_error_text(e);
+                        crate::vprintln!("[ERROR]  DASH init segment read failed: {text}");
                         let _ = cmd_tx.send(PlayerCommand::LoadFailed {
-                            error: format!("DASH init segment: {e}"),
+                            error: format!("DASH init segment: {text}"),
                             code: MediaErrorCode::NoSuchFile,
                             seq: event_seq,
                             load_gen,
@@ -1404,9 +1414,10 @@ impl Player {
                     return;
                 }
                 Err(e) => {
-                    crate::vprintln!("[ERROR]  DASH init segment request failed: {e}");
+                    let text = crate::util::network_error_text(e);
+                    crate::vprintln!("[ERROR]  DASH init segment request failed: {text}");
                     let _ = cmd_tx.send(PlayerCommand::LoadFailed {
-                        error: format!("DASH init request: {e}"),
+                        error: format!("DASH init request: {text}"),
                         code: MediaErrorCode::NoSuchFile,
                         seq: event_seq,
                         load_gen,
@@ -1440,12 +1451,17 @@ impl Player {
             let mut segments = stream::iter(segment_urls.into_iter().enumerate())
                 .map(|(i, url)| async move {
                     match HTTP_CLIENT_PLAYBACK.get(&url).send().await {
-                        Ok(r) if r.status().is_success() => r
-                            .bytes()
-                            .await
-                            .map_err(|e| format!("DASH segment {i} read: {e}")),
+                        Ok(r) if r.status().is_success() => r.bytes().await.map_err(|e| {
+                            format!(
+                                "DASH segment {i} read: {}",
+                                crate::util::network_error_text(e)
+                            )
+                        }),
                         Ok(r) => Err(format!("DASH segment {i} HTTP {}", r.status())),
-                        Err(e) => Err(format!("DASH segment {i} request: {e}")),
+                        Err(e) => Err(format!(
+                            "DASH segment {i} request: {}",
+                            crate::util::network_error_text(e)
+                        )),
                     }
                 })
                 .buffered(DASH_MAX_CONCURRENT);
@@ -1654,3 +1670,7 @@ mod prebuffer_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/player/load_state_tests.rs"]
 mod load_state_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/load_failure_text_tests.rs"]
+mod load_failure_text_tests;

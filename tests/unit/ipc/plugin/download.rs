@@ -424,22 +424,6 @@ fn ftyp_is_only_accepted_where_iso_bmff_puts_it() {
     assert!(!is_audio_container(&buried), "ftyp deeper in the body");
 }
 
-/// The url is plugin-supplied and `verr!` is never level-gated: logging it verbatim let a
-/// refused-call loop write attacker-chosen text (newlines, terminal escapes) into the persistent
-/// log at LOGS=0. Only the host is kept, and only bounded.
-#[test]
-fn a_refused_url_is_reduced_to_a_bounded_host_for_the_log() {
-    let forged = "https://evil.test/x\n2026-08-01 [AUTH] token=deadbeef";
-    let logged = refused_host(forged);
-    assert_eq!(logged, "evil.test");
-    assert!(!logged.contains('\n'));
-
-    let long = format!("https://{}.test/x", "a".repeat(300));
-    assert!(refused_host(&long).len() <= 64);
-
-    assert_eq!(refused_host("not a url"), "unparseable url");
-}
-
 /// A policy refusal is permanent. It must answer 403, not the 500 documented as worth a retry.
 /// reqwest stores the redirect-policy error as a source rather than as itself, and `downcast_ref`
 /// matches only the stored type; the classifier has to walk the chain.
