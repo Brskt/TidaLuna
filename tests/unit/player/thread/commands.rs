@@ -406,8 +406,10 @@ async fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
     h.player.is_exclusive_mode = true;
     h.player.resume_store.set("track-1", 42.0);
 
-    h.player
-        .settle_bypass_decode_failure("decode packet error: truncated frame".to_string());
+    h.player.settle_bypass_decode_failure(
+        "decode packet error: truncated frame".to_string(),
+        crate::player::packet_failure::PacketFailure::Source,
+    );
 
     assert!(
         h.player.exclusive_release_at.is_some(),
@@ -435,6 +437,55 @@ async fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
             .any(|ev| matches!(ev, PlayerEvent::MediaError { .. })),
         "a terminal state with no error leaves the SDK without a reason"
     );
+}
+
+/// The same death, blamed on the connection instead of the file. Every `mediaerror` code the SDK
+/// maps advances the queue, so reporting a stall as an unreadable file walks the listener past
+/// tracks they never heard. What must NOT change with the cause: the device is still handed back,
+/// the seek pin cleared, the resume point kept.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_bypass_network_loss_holds_the_queue_and_still_frees_the_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.is_exclusive_mode = true;
+    h.player.resume_store.set("track-1", 42.0);
+
+    h.player.settle_bypass_decode_failure(
+        "decode packet error: no data from the download for 30s".to_string(),
+        crate::player::packet_failure::PacketFailure::Network,
+    );
+
+    assert!(
+        h.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::NetworkLost)),
+        "a stall has to raise the no-connection banner, not blame the track"
+    );
+    assert!(
+        !h.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::MediaError { .. })),
+        "any code the SDK maps advances the queue, which a stall has not earned"
+    );
+    assert!(
+        h.player.exclusive_release_at.is_some(),
+        "the device is owed back whatever killed the decoder"
+    );
+    assert_eq!(
+        h.player.resume_store.get("track-1"),
+        Some(42.0),
+        "the listener never reached the end, and will retry this same track"
+    );
+    assert!(
+        h.player.exclusive_seek_tx.is_none(),
+        "the sender points at a receiver the dead decoder dropped"
+    );
+    assert_eq!(last_state(&h.events), Some(PlaybackState::Stopped));
 }
 
 #[cfg(target_os = "windows")]

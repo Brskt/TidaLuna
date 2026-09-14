@@ -40,6 +40,7 @@ use crate::player::declick::{
     DECLICK_FADE_MS, RESYNC_SILENCE_MS, fade_in_env, fade_out_env, fade_out_wait_ms, fade_scale,
     silence_frames,
 };
+use crate::player::packet_failure::{PacketFailure, classify_packet_failure};
 use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
 /// Stereo: TIDAL streams only stereo PCM, and ASIO4ALL exposes 2 output channels.
@@ -1804,11 +1805,16 @@ impl ControlCtx {
         event_tx: &mpsc::Sender<AsioEvent>,
         stream_id: u32,
         error: String,
+        cause: PacketFailure,
     ) {
         if self.stream_id != Some(stream_id) {
             return;
         }
-        let _ = event_tx.send(AsioEvent::DecodeFailed { stream_id, error });
+        let _ = event_tx.send(AsioEvent::DecodeFailed {
+            stream_id,
+            error,
+            cause,
+        });
     }
 
     /// Baseline plus the frames the RT callback has actually played, clamped to the
@@ -2169,9 +2175,11 @@ impl ControlCtx {
             AsioCommand::SeekFailed { stream_id, gen_id } => {
                 self.handle_seek_failed(event_tx, stream_id, gen_id)
             }
-            AsioCommand::DecodeFailed { stream_id, error } => {
-                self.handle_decode_failed(event_tx, stream_id, error)
-            }
+            AsioCommand::DecodeFailed {
+                stream_id,
+                error,
+                cause,
+            } => self.handle_decode_failed(event_tx, stream_id, error, cause),
             AsioCommand::Play { stream_id } => {
                 // Stream-scoped, like PushPcm/EndStream/Completed: a stale Play from a
                 // superseded track (the stop->load->play storm) must not resume the wrong
@@ -2724,9 +2732,26 @@ pub(crate) fn stream_reader_to_asio(
         }
     }
 
-    let mut decoder = symphonia::default::get_codecs()
+    // Past StartStream, the control thread already holds this stream and `DecodeFailed`
+    // is the right carrier. The progress watchdog would eventually notice and fall back to
+    // shared, but only after its two seconds of silence, and only here: the exclusive twin
+    // has no watchdog at all. Reporting at the source beats waiting for either.
+    let mut decoder = match symphonia::default::get_codecs()
         .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
-        .map_err(|e| format!("decoder creation failed: {e}"))?;
+    {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            let error = format!("decoder creation failed: {e}");
+            if !cancel.load(Ordering::Relaxed) {
+                let _ = cmd_tx.send(AsioCommand::DecodeFailed {
+                    stream_id,
+                    error: error.clone(),
+                    cause: PacketFailure::Source,
+                });
+            }
+            return Err(error);
+        }
+    };
 
     // Back-pressure target in interleaved samples (matching the ring): decoding
     // further ahead races the streaming download window and stalls the read.
@@ -2845,12 +2870,17 @@ pub(crate) fn stream_reader_to_asio(
                 if cancel.load(Ordering::Relaxed) {
                     return Ok(());
                 }
+                // Classified here and nowhere later: this is the last point the error is
+                // still typed, and a stall is indistinguishable from a bad frame once both
+                // are a String.
+                let cause = classify_packet_failure(&e);
                 let error = format!("decode packet error: {e}");
                 // Returning alone tells nobody: the caller only logs, and the player would
                 // keep a seek channel this thread is about to drop.
                 let _ = cmd_tx.send(AsioCommand::DecodeFailed {
                     stream_id,
                     error: error.clone(),
+                    cause,
                 });
                 return Err(error);
             }

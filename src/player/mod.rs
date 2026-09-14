@@ -5,6 +5,10 @@ pub(crate) mod crossfade;
 pub(crate) mod dash;
 mod declick;
 pub(crate) mod ipc;
+// Compiled where it serves and where it is tested: only the two Windows engines consult it,
+// but the classification is pure and its tests earn their place on every host.
+#[cfg(any(target_os = "windows", test))]
+mod packet_failure;
 mod resume;
 mod thread;
 #[cfg(target_os = "windows")]

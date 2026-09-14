@@ -21,6 +21,7 @@ use windows::Win32::System::Threading::{
 };
 
 use crate::player::declick::{RESYNC_SILENCE_MS, silence_frames};
+use crate::player::packet_failure::{PacketFailure, classify_packet_failure};
 use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
 // ---------------------------------------------------------------------------
@@ -361,9 +362,26 @@ where
         }
     }
 
-    let mut decoder = symphonia::default::get_codecs()
+    // Past StartStream, the render already holds this stream and `DecodeFailed` is the
+    // right carrier here. The idle arm's premise, that a decoder-sent command follows its
+    // own adoption, holds. Unreported this left the endpoint open on a stream that would
+    // never yield a sample; ASIO's progress watchdog catches that, exclusive has none.
+    let mut decoder = match symphonia::default::get_codecs()
         .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
-        .map_err(|e| format!("decoder creation failed: {e}"))?;
+    {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            let error = format!("decoder creation failed: {e}");
+            if !cancel.load(Relaxed) {
+                let _ = cmd_tx.send(ExclusiveCommand::DecodeFailed {
+                    stream_id,
+                    error: error.clone(),
+                    cause: PacketFailure::Source,
+                });
+            }
+            return Err(error);
+        }
+    };
 
     // Back-pressure target in unplayed PCM bytes (ASIO's is in samples):
     // unthrottled, a cached source decodes the whole track into RAM at once.
@@ -488,12 +506,17 @@ where
                 if cancel.load(Relaxed) {
                     return Ok(());
                 }
+                // Classified here and nowhere later: this is the last point the error is
+                // still typed, and a stall is indistinguishable from a bad frame once both
+                // are a String.
+                let cause = classify_packet_failure(&e);
                 let error = format!("decode packet error: {e}");
                 // Returning alone tells nobody: the caller only logs, and the player would
                 // keep a seek channel this thread is about to drop.
                 let _ = cmd_tx.send(ExclusiveCommand::DecodeFailed {
                     stream_id,
                     error: error.clone(),
+                    cause,
                 });
                 return Err(error);
             }
@@ -1462,11 +1485,16 @@ impl RenderContext {
         event_tx: &mpsc::Sender<ExclusiveEvent>,
         stream_id: u32,
         error: String,
+        cause: PacketFailure,
     ) {
         if self.current_stream_id != Some(stream_id) {
             return;
         }
-        let _ = event_tx.send(ExclusiveEvent::DecodeFailed { stream_id, error });
+        let _ = event_tx.send(ExclusiveEvent::DecodeFailed {
+            stream_id,
+            error,
+            cause,
+        });
     }
 
     /// Position backed by audible audio: clamped to the frames actually covered by
@@ -1713,9 +1741,11 @@ fn render_thread_inner(
                         ExclusiveCommand::SeekFailed { stream_id, gen_id } => {
                             ctx.handle_seek_failed(&event_tx, stream_id, gen_id)
                         }
-                        ExclusiveCommand::DecodeFailed { stream_id, error } => {
-                            ctx.handle_decode_failed(&event_tx, stream_id, error)
-                        }
+                        ExclusiveCommand::DecodeFailed {
+                            stream_id,
+                            error,
+                            cause,
+                        } => ctx.handle_decode_failed(&event_tx, stream_id, error, cause),
                         ExclusiveCommand::ReleaseDevice => ctx.release_device(),
                         ExclusiveCommand::Shutdown => {
                             ctx.stop_audio_client();
@@ -2114,9 +2144,11 @@ fn render_thread_inner(
                     Ok(ExclusiveCommand::SeekFailed { stream_id, gen_id }) => {
                         ctx.handle_seek_failed(&event_tx, stream_id, gen_id)
                     }
-                    Ok(ExclusiveCommand::DecodeFailed { stream_id, error }) => {
-                        ctx.handle_decode_failed(&event_tx, stream_id, error)
-                    }
+                    Ok(ExclusiveCommand::DecodeFailed {
+                        stream_id,
+                        error,
+                        cause,
+                    }) => ctx.handle_decode_failed(&event_tx, stream_id, error, cause),
                     Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => {
                         ctx.stop_audio_client();

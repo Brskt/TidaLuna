@@ -7,6 +7,8 @@ use std::sync::atomic::Ordering::Relaxed;
 #[cfg(target_os = "windows")]
 use crate::player::asio::host::{AsioCommand, AsioEvent};
 #[cfg(target_os = "windows")]
+use crate::player::packet_failure::PacketFailure;
+#[cfg(target_os = "windows")]
 use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
 
 /// Whether a fatal `DecodeEvent::Error` must be settled in place: the drain path
@@ -131,15 +133,27 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // than done here, this being the control thread where a cache wipe holds the lock for
         // its whole duration. The ONLY retirement for a bypass decoder's failure: its
         // `DecodeFailed` never reaches the arm that drains the shared channel.
-        if self.is_cached
+        // A stall is the case this must not touch: those bytes decoded fine until they
+        // stopped arriving, and evicting them would cost a re-download of a good file.
+        if cause == PacketFailure::Source
+            && self.is_cached
             && let Some(tid) = self.current_track_id.clone()
         {
             crate::player::cache::AudioCache::drop_entry_detached(tid);
         }
-        (self.callback)(PlayerEvent::MediaError {
-            error,
-            code: MediaErrorCode::UnreadableFile,
-        });
+        match cause {
+            // No `MediaError`: every code the SDK maps advances the queue, and a track whose
+            // bytes stopped arriving has not earned that. The text is already logged by the
+            // caller; what crosses to the SDK is the bare fact, as on the shared path.
+            PacketFailure::Network => {
+                crate::verr!("[BYPASS] Network lost, stopping the player");
+                (self.callback)(PlayerEvent::NetworkLost);
+            }
+            PacketFailure::Source => (self.callback)(PlayerEvent::MediaError {
+                error,
+                code: MediaErrorCode::UnreadableFile,
+            }),
+        }
         // The SDK's same-track recovery reload rebuilds instead of resuming a dead decoder.
         self.set_committed_track(None);
         self.has_track = false;
@@ -180,7 +194,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if self.is_exclusive_mode {
             // Settled after the loop, outside the handle borrow: the settle takes `&mut
             // self`, where the arms below only touch fields.
-            let mut decode_failure: Option<String> = None;
+            let mut decode_failure: Option<(String, PacketFailure)> = None;
             if let Some(ref handle) = self.exclusive_handle {
                 for ev in handle.poll_events() {
                     match ev {
@@ -245,10 +259,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.last_exclusive_pos = Some(report);
                             (self.callback)(PlayerEvent::TimeUpdate(report, self.current_seq));
                         }
-                        ExclusiveEvent::DecodeFailed { stream_id, error } => {
+                        ExclusiveEvent::DecodeFailed {
+                            stream_id,
+                            error,
+                            cause,
+                        } => {
                             if self.current_exclusive_stream_id == Some(stream_id) {
                                 crate::vprintln!("[WASAPI] decoder died: {error}");
-                                decode_failure = Some(error);
+                                decode_failure = Some((error, cause));
                             }
                         }
                         ExclusiveEvent::StateChange(s) => {
@@ -371,8 +389,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
             }
 
-            if let Some(error) = decode_failure {
-                self.settle_bypass_decode_failure(error);
+            if let Some((error, cause)) = decode_failure {
+                self.settle_bypass_decode_failure(error, cause);
             }
 
             if !self.is_exclusive_mode {
@@ -409,7 +427,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
         // Settled after the loop, outside the handle borrow: the settle takes `&mut self`,
         // where the arms below only touch fields.
-        let mut decode_failure: Option<String> = None;
+        let mut decode_failure: Option<(String, PacketFailure)> = None;
         if let Some(ref handle) = self.asio_handle {
             for ev in handle.poll_events() {
                 match ev {
@@ -487,10 +505,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         }
                         (self.callback)(PlayerEvent::TimeUpdate(report, self.current_seq));
                     }
-                    AsioEvent::DecodeFailed { stream_id, error } => {
+                    AsioEvent::DecodeFailed {
+                        stream_id,
+                        error,
+                        cause,
+                    } => {
                         if self.current_asio_stream_id == Some(stream_id) {
                             crate::vprintln!("[ASIO] decoder died: {error}");
-                            decode_failure = Some(error);
+                            decode_failure = Some((error, cause));
                         }
                     }
                     AsioEvent::StateChange(s) => {
@@ -629,8 +651,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
         }
 
-        if let Some(error) = decode_failure {
-            self.settle_bypass_decode_failure(error);
+        if let Some((error, cause)) = decode_failure {
+            self.settle_bypass_decode_failure(error, cause);
         }
 
         // Progress watchdog (a backstop): the clock reported Active but the position hasn't
