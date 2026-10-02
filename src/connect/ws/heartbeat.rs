@@ -25,8 +25,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use crate::connect::consts;
 
 /// Run the heartbeat loop until `alive` is cleared or the write channel
-/// closes. On a missed Pong, `alive` is set to `false`, `on_timeout` is
-/// awaited, and the loop exits.
+/// closes. On a missed Pong, or a queue the peer left full, `alive` is set
+/// to `false`, `on_timeout` is awaited, and the loop exits.
 pub(crate) async fn run<F, Fut>(
     write_tx: mpsc::Sender<WsMessage>,
     pong_received: Arc<AtomicBool>,
@@ -53,8 +53,16 @@ pub(crate) async fn run<F, Fut>(
         if !alive.load(Ordering::Relaxed) {
             break;
         }
-        if write_tx.send(WsMessage::Ping(vec![].into())).await.is_err() {
-            break;
+        match write_tx.try_send(WsMessage::Ping(vec![].into())) {
+            Ok(()) => {}
+            // A queue its writer left full belongs to a peer that stopped reading: waiting on it
+            // would hold this loop short of the verdict below.
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                alive.store(false, Ordering::Relaxed);
+                on_timeout().await;
+                break;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => break,
         }
         // Clear only after the Ping is enqueued: a failed send exits above
         // without arming the missed-Pong check.
