@@ -153,13 +153,15 @@ mod windows_impl {
         CreateFileW, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
     };
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
-        PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
+        PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        WaitNamedPipeW,
     };
     use windows_sys::Win32::System::Threading::{
         CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, GetCurrentProcess, INFINITE, OpenEventW,
         OpenProcessToken, SetEvent, WaitForSingleObject,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     use super::{AppLock, HandOff, LinkChannel, post_focus};
 
@@ -338,15 +340,47 @@ mod windows_impl {
             });
         }
 
-        // Another instance is running. Hand it whatever this launch carried.
-        // A link that cannot be delivered still deserves the window raised, the
-        // focus signal below running either way.
-        match url.map(|raw| send_link(&pipe_name, raw)) {
+        hand_off(url, &pipe_name, &focus_name);
+        // SAFETY: release our handle, letting the kernel reap the object on owner exit.
+        unsafe { CloseHandle(mutex) };
+        None
+    }
+
+    /// Hands the running instance whatever this launch carried. A link that lands
+    /// raises the window there; with no link, or one that did not land, the focus
+    /// signal raises it.
+    ///
+    /// The pipe is opened for every launch, link or not: its server is the one
+    /// process the kernel names, and this launch grants it the foreground. Windows
+    /// refuses a raise from a signal to a process nobody granted (the window stays
+    /// behind a flashing taskbar button); a launch started by the foreground
+    /// process may grant it, as Chromium's process finder does.
+    fn hand_off(url: Option<&str>, pipe_name: &[u16], focus_name: &[u16]) {
+        let pipe = match connect_link_pipe(pipe_name) {
+            Ok(pipe) => {
+                grant_foreground(pipe);
+                Ok(pipe)
+            }
+            Err(unanswered) => {
+                crate::verr!("[LOCK]   no foreground grant: {}", unanswered.reason());
+                Err(unanswered)
+            }
+        };
+        let handoff = match (url, pipe) {
+            (Some(raw), Ok(pipe)) if raw.len() <= MAX_LINK => Some(write_link(pipe, raw)),
+            (url, Ok(pipe)) => {
+                // No link, or one too long: closed unwritten, the far end's read
+                // fails and delivers nothing.
+                // SAFETY: our own client end, closed once.
+                unsafe { CloseHandle(pipe) };
+                url.map(|_| HandOff::TooLong)
+            }
+            (url, Err(unanswered)) => url.map(|_| unanswered),
+        };
+        match handoff {
             Some(HandOff::Landed) => {
                 crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
-                // SAFETY: release our handle, letting the kernel reap the object on owner exit.
-                unsafe { CloseHandle(mutex) };
-                return None;
+                return;
             }
             // Ungated, and this is the reason the channel has to be; this process
             // exits before the database opens and never learns the persisted
@@ -367,9 +401,6 @@ mod windows_impl {
                 CloseHandle(event);
             }
         }
-        // SAFETY: release our handle, letting the kernel reap the object on owner exit.
-        unsafe { CloseHandle(mutex) };
-        None
     }
 
     /// One connection at a time, serially. A deep link arrives on a click, not in
@@ -467,22 +498,18 @@ mod windows_impl {
         }
     }
 
-    /// Hands the link to the running instance, retrying only while the OS says
-    /// the answer could still change.
+    /// Retries only while the OS says the answer could still change.
     ///
     /// The retry is bounded by diagnosis rather than by patience: a busy pipe and
     /// an absent one are both transient and get the budget, anything else is
     /// answered once and reported. The previous single attempt lost the startup
     /// race outright.
-    fn send_link(pipe_name: &[u16], url: &str) -> HandOff {
-        if url.len() > MAX_LINK {
-            return HandOff::TooLong;
-        }
+    fn connect_link_pipe(pipe_name: &[u16]) -> Result<HANDLE, HandOff> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(LINK_HANDOFF_BUDGET_MS);
         loop {
             if let Some(pipe) = open_instance(pipe_name) {
-                return write_link(pipe, url);
+                return Ok(pipe);
             }
             // Why this attempt found nothing, kept only for the iteration that
             // runs out of budget.
@@ -502,11 +529,42 @@ mod windows_impl {
                     HandOff::NoListener
                 }
                 // Not a race, since another attempt cannot answer differently.
-                _ => return HandOff::Failed,
+                _ => return Err(HandOff::Failed),
             };
             if std::time::Instant::now() >= deadline {
-                return unanswered;
+                return Err(unanswered);
             }
+        }
+    }
+
+    /// Lets the process serving `pipe` take the foreground until the user's next
+    /// input elsewhere.
+    ///
+    /// The PID comes from the kernel, not the other end, and the grant reaches
+    /// exactly the process a link written here would (`ASFW_ANY` would hand it to
+    /// the whole session). Ungated for the reason the lost-link report is (see
+    /// `hand_off`).
+    fn grant_foreground(pipe: HANDLE) {
+        let mut pid: u32 = 0;
+        // SAFETY: a live client end of a named pipe; pid receives the server's id.
+        if unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) } == 0 {
+            crate::verr!(
+                "[LOCK]   no foreground grant: server pid unknown (gle={})",
+                // SAFETY: reads this thread's last error, just set by the call above.
+                unsafe { GetLastError() }
+            );
+            return;
+        }
+        // SAFETY: plain Win32 call on a process id; no memory is shared.
+        let ok = unsafe { AllowSetForegroundWindow(pid) };
+        if ok == 0 {
+            crate::verr!(
+                "[LOCK]   foreground grant to pid {pid} refused (gle={})",
+                // SAFETY: reads this thread's last error, just set by the call above.
+                unsafe { GetLastError() }
+            );
+        } else {
+            crate::verr!("[LOCK]   foreground granted to pid {pid}");
         }
     }
 
