@@ -15,8 +15,6 @@ const sharedListeners: Record<string, Array<(...args: any[]) => void>> =
     }
 };
 
-// --- Public API ---
-
 // Captured once. Re-reading window.cefQuery per call let the first plugin to run redirect every
 // later call, for every plugin, for the rest of the session. Safe by construction: the app bundle
 // runs before any plugin, since it is what asks Rust to load them.

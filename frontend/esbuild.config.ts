@@ -92,8 +92,7 @@ const mainBundle: BuildOptions = {
 	},
 };
 
-// ─── Phase 3: Standalone ESM modules ────────────────────────────────────
-// Independent modules used at runtime by plugins via window.require().
+// Phase 3, standalone ESM modules used at runtime by plugins via window.require().
 
 const CORE_EXTERNALS = [
 	"@inrixia/helpers",
@@ -143,9 +142,6 @@ const inrixiaHelpers: BuildOptions = {
 	platform: "neutral",
 	logLevel: "info",
 };
-
-// ─── Execute ────────────────────────────────────────────────────────────
-// Strict sequential order: Phase 1 → Phase 2 → Phase 3.
 
 await build([
 	lunaUiInline,

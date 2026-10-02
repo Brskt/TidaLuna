@@ -20,7 +20,7 @@
         rl.removeAllListeners("close");
     }
 
-    // ---- Harness-private pristine captures (must survive whatever we poison) -----
+    // Harness-private pristine captures: they must survive whatever we poison.
     var H_ObjectGetOwnPropertyNames = Object.getOwnPropertyNames;
     var H_ObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
     var H_ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
@@ -30,7 +30,6 @@
     var H_JSONParse = JSON.parse;
     var H_RealProxy = Proxy;
 
-    // ---- Oracle suite: cheap, in-process, run after EVERY poison ------------------
     // Deliberately blind to the fix's internal names (ipcLine/inertValue/isTrusted/
     // authorizedWriteStreamOpts/_RealPromise never appear below) so the same suite is
     // meaningful against a host that predates all of them. Where a test needs a Set,
@@ -340,7 +339,6 @@
         return results;
     }
 
-    // ---- Poison + restore machinery ----------------------------------------------
     function snapshot(owner, key) { return H_ObjectGetOwnPropertyDescriptor(owner, key); }
     function restore(owner, key, desc) {
         try {
@@ -399,7 +397,6 @@
         }
     }
 
-    // ---- Enumerate: six named prototypes, own string + symbol keys ---------------
     var PROTOS = [
         ["Object.prototype", Object.prototype],
         ["Array.prototype", Array.prototype],
@@ -431,7 +428,7 @@
         }
     }
 
-    // ---- toJSON additions (do not pre-exist on either prototype) ------------------
+    // toJSON additions: they do not pre-exist on either prototype.
     await (async function() {
         var descO = snapshot(Object.prototype, "toJSON");
         await testOneTarget("Object.prototype.toJSON (planted)", function(sentinel) {
@@ -451,7 +448,6 @@
         }, function() { restore(Array.prototype, "toJSON", descA); });
     })();
 
-    // ---- Global bindings: every own name on globalThis ----------------------------
     var globalNames = H_ObjectGetOwnPropertyNames(globalThis);
     var globalTargetCount = 0;
     for (var gi = 0; gi < globalNames.length; gi++) {
@@ -497,7 +493,6 @@
         })(globalNames[gi]);
     }
 
-    // ---- Bespoke: the real "call" IPC handler, args spread vs Reflect.apply -------
     // Drives the ACTUAL rl.on("line", ...) handler via a synthetic line event (not a
     // reimplementation of its logic), while Array.prototype[Symbol.iterator] is
     // poisoned to yield nothing, the exact shape `await member(...(args||[]))` sees
@@ -555,7 +550,6 @@
         };
     }
 
-    // ---- Bespoke: a poison at an ATTACKER-CHOSEN identity, not an existing member --
     // The sweep above enumerates each prototype's own members and corrupts them one at a
     // time, so it can only ever arm a name that already exists. The host's own containers
     // are keyed by the plugin NAME, which arrives on the wire and exists on no prototype
@@ -639,7 +633,6 @@
         return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
     }
 
-    // ---- Bespoke: the CALLED MEMBER's name, the sibling axis of the one above. ------
     // The poison above arms the plugin name; `cmd.fn` rides the same wire and reaches the
     // member lookup. Same reason it escapes the enumerating sweep: a name a plugin plants
     // exists on no prototype until it does. It earns its own oracle because the container
@@ -725,7 +718,6 @@
         return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
     }
 
-    // ---- Bespoke: a write-stream option its caller never passed. ------------------
     // `authorizedWriteStreamOpts` saturates what it HANDS the engine precisely so no absent
     // name resolves up the shared prototype, and then read the caller's own object
     // ordinarily, which is the same hazard facing the other way. Measured on the real host:
@@ -784,8 +776,8 @@
         return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
     }
 
-    // ---- Bespoke: the executor-capture attack (Promise), only visible if we ------
-    // ---- actually drive ipcFetch's internal `new Promise` while it's poisoned. ----
+    // The executor-capture attack (Promise), only visible if we actually drive ipcFetch's
+    // internal `new Promise` while it's poisoned.
     await (async function bespokePromiseExecutorCapture() {
         var originalPromise = globalThis.Promise;
         function EvilPromise(executor) {

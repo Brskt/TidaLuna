@@ -9,8 +9,6 @@ export const tidalModules: Record<string, object> = {};
 const POLL_INTERVAL = 100;
 const POLL_TIMEOUT = 30_000;
 
-// --- Redux store detection via React Fiber ---
-
 function isReduxStore(obj: any): boolean {
 	return (
 		obj != null &&
@@ -82,8 +80,6 @@ function findStoreViaReactFiber(): any | null {
 	}
 	return null;
 }
-
-// --- Dispatch interceptors ---
 
 // Queue navigation must never be frozen by an interceptor's cancel. A plugin like
 // RealMAX cancels MOVE_* to run an async max-quality lookup, which blocks the click

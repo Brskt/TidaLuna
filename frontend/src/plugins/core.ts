@@ -1,7 +1,6 @@
 // Module registry - maps module names (e.g. "@luna/core") to their exports
 export const modules: Record<string, any> = {};
 
-// --- Tracer: console wrapper with plugin name prefix ---
 // Called as a function: const { trace, errSignal } = Tracer("[PluginName]")
 
 export function Tracer(name: string): { trace: (...args: any[]) => void; errSignal: (...args: any[]) => void } {
@@ -12,7 +11,6 @@ export function Tracer(name: string): { trace: (...args: any[]) => void; errSign
     };
 }
 
-// --- StyleTag: managed <style> element ---
 // API matches TidaLuna: new StyleTag(name, unloads), .css setter, .remove()
 
 export class StyleTag {
@@ -34,14 +32,11 @@ export class StyleTag {
     }
 }
 
-// --- observe: minimal oby-compatible reactive shim ---
-
 export function observe<T>(initial: T): [() => T, (value: T) => void] {
     let current = initial;
     return [() => current, (value: T) => { current = value; }];
 }
 
-// --- unloadSet: execute all cleanup functions in a Set, then clear it ---
 // API matches TidaLuna: unloadSet(set) drains cleanup functions
 
 export function unloadSet(set: Set<() => void>): void {
@@ -51,7 +46,6 @@ export function unloadSet(set: Set<() => void>): void {
     set.clear();
 }
 
-// --- ftch: typed fetch wrapper ---
 // API matches TidaLuna: ftch.json<T>(url, options?), ftch.text(url, options?)
 
 export const ftch = {
@@ -67,7 +61,6 @@ export const ftch = {
     },
 };
 
-// --- Messager: toast notification system ---
 // Stub - logs to console. A real toast UI can be added later.
 
 export const Messager = {
@@ -78,8 +71,6 @@ export const Messager = {
         console.error("[luna:error]", ...args);
     },
 };
-
-// --- SettingsTransfer: stub for settings import/export ---
 
 export type ExportData = {
     timestamp: number;
@@ -100,8 +91,6 @@ export const SettingsTransfer = {
         console.warn("[luna:SettingsTransfer] restore() not yet implemented in TidaLunar");
     },
 };
-
-// --- Setup: expose window.luna and window.require ---
 
 export function setupCore() {
     const luna = {

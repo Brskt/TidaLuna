@@ -28,7 +28,6 @@ const realFs = require("fs");
 const pathMod = require("path");
 const { fileURLToPath } = require("url");
 
-// ── Module whitelist (pass through, no trust needed) ────────────────────
 const SAFE_MODULES = new Set([
     // Data/utility (no system or network access)
     "assert", "assert/strict", "buffer", "console", "constants", "crypto",
@@ -39,7 +38,6 @@ const SAFE_MODULES = new Set([
     "async_hooks", "perf_hooks",
 ]);
 
-// ── Permanently blocked modules (no trust possible) ─────────────────────
 // No trust dialog can unlock these. require() returns an inert stub
 // (FORBIDDEN_STUBS): dead-code requires can't kill a plugin; calls throw.
 const FORBIDDEN_MODULES = new Set([
@@ -49,7 +47,6 @@ const FORBIDDEN_MODULES = new Set([
     "bun:ffi", "bun:jsc", "bun:sqlite",
 ]);
 
-// ── Blocked modules (require explicit user trust) ───────────────────────
 // These provide filesystem/subprocess/system/network access - require explicit user trust.
 const BLOCKED_MODULES = new Set([
     "fs", "fs/promises", "os", "dgram",
@@ -58,7 +55,6 @@ const BLOCKED_MODULES = new Set([
     "net", "http", "https", "http2", "tls", "dns", "dns/promises",
 ]);
 
-// ── Pre-load safe + blocked modules: Bun internal closures capture refs ──
 // Must happen before any globalThis mutation. Lazy init (bindings, stream
 // internals) completes now with mutable prototypes; we freeze later.
 // Blocked modules are pre-loaded too for their exports to be frozen (prevents
@@ -93,7 +89,6 @@ function isBlocked(id) {
     return BLOCKED_MODULES.has(id) || BLOCKED_MODULES.has(canonicalize(id));
 }
 
-// ── Object statics, captured before anything can replace them ──────────
 // Ahead of the other host-private refs further down: the env builder below runs at
 // register time too, and `Object` is deliberately left unfrozen (freezePrimordials),
 // while restorePrototypes only ever restores PROTOTYPE descriptors. A plugin that
@@ -128,7 +123,6 @@ function ownProp(target, name, value) {
     });
 }
 
-// ── Mocked process (filtered env, no exit/kill/binding) ─────────────────
 const ALLOWED_ENV_KEYS = new Set([
     "TMPDIR", "TMP", "TEMP",
     "HOME", "USERPROFILE", "PATH", "APPDATA",
@@ -220,7 +214,6 @@ function endpointEnvFor(trustedModules, runtimeDir) {
     return makeMockedProcess({ XDG_RUNTIME_DIR: runtimeDir });
 }
 
-// ── Host-private refs (captured before globalThis hardening) ───────────
 // After this point, host code must use these - not the globals.
 var hostStdin = process.stdin;
 var hostStdout = process.stdout;
@@ -482,7 +475,6 @@ function safeErrorString(e) {
     }
 }
 
-// ── worker_threads shim (fail-closed allowlist, no Worker) ────────────
 // Exposes only communication/utility APIs. Worker constructor is blocked
 // to prevent spawning unsandboxed threads with full require access.
 var shimmedWorkerThreads = (function() {
@@ -500,8 +492,7 @@ var shimmedWorkerThreads = (function() {
     return _ObjectFreeze(shim);
 })();
 
-// ── Inert stubs for forbidden modules ─────────────────────────────────
-// Bundled deps require these as dead code they never run: socket.io-client
+// Bundled deps require forbidden modules as dead code they never run: socket.io-client
 // reaches child_process via xmlhttprequest-ssl, tty via debug, and throwing at
 // require killed plugins over unused code. Members throw on CALL, not on
 // property access: real code does require('child_process').spawn at top level.
@@ -636,7 +627,6 @@ function warnInertStub(pluginName, canonical) {
     } catch (_) {}
 }
 
-// ── Harden globalThis.process via Proxy ───────────────────────────────
 // Cannot fully replace - Bun's network modules need process.nextTick etc.
 // Proxy blocks dangerous properties while passing safe internals through.
 // process.binding() is filtered to only the names http/net/tls need at
@@ -691,7 +681,6 @@ function warnInertStub(pluginName, canonical) {
     });
 })();
 
-// ── Neutralize console (IPC spoofing prevention) ──────────────────────
 // console.log writes to stdout - the same fd as host IPC (JSON lines).
 // A plugin could forge IPC responses via console.log. Redirect all
 // console output to stderr only.
@@ -714,7 +703,6 @@ function warnInertStub(pluginName, canonical) {
     });
 })();
 
-// ── Neuter Async/Generator constructors ────────────────────────────────
 // Prevents import() bypass via (async function(){}).constructor("return await import('fs')")().
 // Function.prototype.constructor is NOT touched - breaks stream/events/util.
 ;(function neuterAsyncConstructors() {
@@ -730,7 +718,6 @@ function warnInertStub(pluginName, canonical) {
     });
 })();
 
-// ── Proxied require factory ─────────────────────────────────────────────
 function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, pluginProcess) {
     var moduleStub = null; // lazy, per plugin - see makeModuleStub
     // Asks the set, not the object. `trustedModules.has(id)` answers with whatever method
@@ -813,7 +800,6 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, plug
     };
 }
 
-// ── import() pre-check via Bun.Transpiler ───────────────────────────────
 var transpiler;
 try { transpiler = new Bun.Transpiler({ loader: "js" }); } catch (e) { /* fallback below */ }
 
@@ -831,7 +817,6 @@ function containsDynamicImport(code) {
     }
 }
 
-// ── Harden eval - scan for dynamic import() before delegating ─────────
 // eval("import('fs')") bypasses containsDynamicImport (AST scan of source)
 // because the import() is inside a string literal. This wrapper scans the
 // final runtime string. Runs on the evaluated string: concatenation
@@ -848,7 +833,6 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Harden Function constructor - scan for dynamic import() ───────────
 // new Function("return import('fs')")() and (function(){}).constructor("...")
 // bypass containsDynamicImport the same way as eval. Replace both
 // globalThis.Function and Function.prototype.constructor with a scanning
@@ -879,7 +863,6 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Harden globalThis.Bun - neuter dangerous methods in-place ─────────
 // Bun is non-configurable and can't be replaced; its writable methods
 // (spawn/file/write/...) ARE neutered below. Bun.fetch/Bun.env are
 // writable:false (can't neuter), but env is scrubbed at spawn and fetch
@@ -916,7 +899,6 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Block globalThis.require/module/exports - prevent proxy bypass ────
 ;(function hardenGlobalRequire() {
     _ArrayPrototypeForEach(["require", "module", "exports", "__dirname", "__filename"], function(prop) {
         _ObjectDefineProperty(globalThis, prop, {
@@ -926,7 +908,6 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Block fetch - native plugins must use require('http'/'https') with trust dialog ──
 ;(function hardenFetch() {
     _ObjectDefineProperty(globalThis, "fetch", {
         value: function() { throw new Error("[sandbox] fetch is not available - use require('http') or require('https')"); },
@@ -934,7 +915,6 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Block realm creators and dangerous network globals on globalThis ──
 ;(function hardenGlobals() {
     // Realm creators + WebSocket - no upstream plugin uses the browser WebSocket global
     // (DiscordRPC uses net IPC, ws-based plugins use require('ws') which goes through
@@ -954,7 +934,6 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Freeze primordials ────────────────────────────────────────────────
 // Prevents prototype pollution that could influence host logic.
 // Split: full-freeze safe constructors, prototype-only for risky ones.
 ;(function freezePrimordials() {
@@ -1032,7 +1011,6 @@ function containsDynamicImport(code) {
     });
 })();
 
-// ── Freeze module exports (safe + blocked) ────────────────────────────
 // Prevents plugins from mutating shared module exports to influence
 // host behavior or other plugins. Blocked modules are frozen too so
 // cross-plugin mutation is prevented when multiple plugins have trust.
@@ -1056,7 +1034,6 @@ function containsDynamicImport(code) {
     freezeSet(BLOCKED_MODULES);
 })();
 
-// ── IPC fetch (sanctioned egress: child -> Rust -> network) ───────────
 // Network-trusted plugins get this as their `fetch` shadow: emits net.fetch,
 // resolves a real Response from Rust's reply. Does NOT close Bun.fetch (OS-level).
 var pendingFetches = new Map();
@@ -1341,7 +1318,6 @@ function handleFetchResult(cmd) {
     }
 }
 
-// ── Eval wrapper ────────────────────────────────────────────────────────
 // Shadows dangerous globals as parameters set to undefined.
 // Parameter shadows are defense-in-depth - globalThis is hardened above.
 // "eval" and "Function" cannot be shadowed (strict mode / fundamental built-in).
@@ -1356,7 +1332,6 @@ const SHADOW_PARAMS = [
 ];
 const SHADOW_PARAMS_STR = SHADOW_PARAMS.join(",");
 
-// ── Prototype snapshot/restore (cross-plugin pollution guard) ──────────
 // Snapshot critical prototype descriptors at startup.
 // After each evalPlugin: restore modified descriptors to their original state.
 var _protoTracked = [
@@ -1406,12 +1381,10 @@ function evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess) {
     return m;
 }
 
-// ── Hash ────────────────────────────────────────────────────────────────
 function hashCode(code) {
     return createHash("sha256").update(code).digest("hex");
 }
 
-// ── Sandboxed fs ────────────────────────────────────────────────────────
 // Minimal fs facade restricted to plugin dataDir + dialog-granted paths.
 // Blocks symlink/link/readlink, delete hors dataDir, options.fd/fs. realpath answers
 // inside the sandbox, and for the IPC dirs of a plugin trusted to open an endpoint.
@@ -1931,7 +1904,6 @@ function makeSandboxedFsPromises(dataDirs, grants, ipcDirs) {
     };
 }
 
-// ── Per-plugin grant store ──────────────────────────────────────────────
 var grantStores = new Map();
 
 function getGrantStore(pluginName) {
@@ -1940,13 +1912,11 @@ function getGrantStore(pluginName) {
     return grantStores.get(pluginName);
 }
 
-// ── State ───────────────────────────────────────────────────────────────
 // Name -> exports, with no prototype: an accessor planted under a plugin's exact module
 // name swallowed the registration (the ack still reported the real exports) and then
 // answered every later call with the attacker's function, holding the real arguments.
 const modules = _ObjectCreate(null);
 
-// ── IPC ─────────────────────────────────────────────────────────────────
 // Reuse bootstrap readline if available, fall back to own instance for standalone dev usage.
 const rl = globalThis.__rl || readline.createInterface({ input: hostStdin });
 rl.on("close", () => hostExit(0));

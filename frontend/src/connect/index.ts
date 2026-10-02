@@ -29,7 +29,6 @@ type Store = {
 };
 
 export async function setupConnectEventListeners(store: Store) {
-    // ── Controller events -> Redux remotePlayback actions ─────────────
     onIpcEvent("connect.devices_received", (payload: DevicesReceivedPayload) => {
         store.dispatch({
             type: "remotePlayback/DEVICES_RECEIVED",
@@ -100,7 +99,6 @@ export async function setupConnectEventListeners(store: Store) {
         });
     });
 
-    // ── Receiver events ──────────────────────────────────────────────
     onIpcEvent("connect.receiver.session_state", (data: unknown) => {
         store.dispatch({
             type: "remotePlayback/remotePlaybackReceiver/STATE_CHANGED",
@@ -132,7 +130,6 @@ export async function setupConnectEventListeners(store: Store) {
         }
     });
 
-    // ── Bootstrap snapshot: fetch current state on setup ─────────────
     try {
         const state = (await invokeIpc("connect.get_state")) as ConnectStateSnapshot;
         if (state?.devices?.length) {

@@ -13,8 +13,6 @@ import { invokeIpc } from "../ipc";
 import { modules } from "./core";
 import { store as obyStore } from "oby";
 
-// --- Types matching TidaLuna's API ---
-
 export type LunaAuthor = {
     name: string;
     url: string;
@@ -58,7 +56,6 @@ type ModuleExports = {
     Settings?: any;
 };
 
-// --- Upstream registry reference ---
 // Set by loader.ts after import. Allows lifecycle methods to sync
 // both registries without a circular import on @luna/core.
 let _upstreamPlugins: Record<string, any> | null = null;
@@ -78,8 +75,6 @@ function syncUpstream(url: string, plugin: LunaPlugin | null) {
     }
     window.dispatchEvent(new Event("luna:plugins-updated"));
 }
-
-// --- LunaPlugin class ---
 
 export class LunaPlugin {
     // Static registry
@@ -108,8 +103,6 @@ export class LunaPlugin {
         this.name = this.store.package.name;
         this.url = this.store.url;
     }
-
-    // --- Getters / Setters ---
 
     get enabled(): boolean {
         return this.store.enabled;
@@ -174,8 +167,6 @@ export class LunaPlugin {
         return LunaPlugin.getInstalled().filter(p => p.dependsOn(pluginName));
     }
 
-    // --- Event listeners ---
-
     onSetEnabled(callback: (enabled: boolean) => void): () => void {
         this.enabledListeners.add(callback);
         return () => {
@@ -190,7 +181,6 @@ export class LunaPlugin {
         };
     }
 
-    // --- Lifecycle ---
     // All actions follow: update local state -> persist to Rust DB -> route to Rust -> notify UI
 
     async load(): Promise<void> {
@@ -346,7 +336,6 @@ export class LunaPlugin {
         this.dependants.add(plugin);
     }
 
-    // --- Settings extraction ---
     // Load plugin code in CEF (as blob URL) to extract the Settings React component.
     // Plugin .mjs files resolve deps via luna.core.modules (Quartz pattern) - no transform needed.
     // Side effects are reversed via the plugin's unloads Set after extraction.
@@ -406,8 +395,6 @@ export class LunaPlugin {
         }
     }
 
-    // --- Private: live reload polling ---
-
     private startReloadLoop(): void {
         if (this.reloadTimeout) return;
 
@@ -441,8 +428,6 @@ export class LunaPlugin {
             this.reloadTimeout = null;
         }
     }
-
-    // --- Static factory methods ---
 
     static fromPluginInfo(info: any): LunaPlugin {
         let pkg: PluginPackage;

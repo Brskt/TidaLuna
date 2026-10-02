@@ -11,8 +11,6 @@
  *   ContextMenu.onOpen(unloads, ({ contextMenu }) => button.show(contextMenu));
  */
 
-// --- ContextMenuButton ---
-
 class ContextMenuButton {
     private _element?: HTMLSpanElement;
     private _text = "";
@@ -74,8 +72,6 @@ class ContextMenuButton {
         return this._element;
     }
 }
-
-// --- ContextMenu ---
 
 type OnOpenData = { event?: any; contextMenu: Element };
 type OpenListener = {

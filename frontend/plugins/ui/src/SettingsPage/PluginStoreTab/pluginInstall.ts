@@ -13,8 +13,6 @@ type StorePackage = { plugins: string[] };
 
 const trace = Tracer("[@luna/ui][PluginInstall]", null).trace;
 
-// --- URL normalization ---
-
 const normalizeStoreUrl = (storeUrl: string) => storeUrl.replace(/\/store\.json$/i, "");
 const normalizePluginUrl = (pluginUrl: string) => pluginUrl.replace(/(\.mjs|\.json|\.mjs\.map)$/i, "");
 const isStoreAdded = (storeUrl: string) => storeUrls.includes(normalizeStoreUrl(storeUrl));
@@ -24,8 +22,6 @@ const getDependencyStoreUrl = (dependency: LunaPackageDependency, dependantPlugi
 	if (isFromDevStore(dependantPlugin) && dependency.devStoreUrl) return dependency.devStoreUrl;
 	return dependency.storeUrl;
 };
-
-// --- Name -> URL resolution ---
 
 const toPluginIdCandidates = (value: string): string[] => {
 	const trimmed = value.trim();
@@ -82,8 +78,6 @@ const resolvePluginUrlByName = async (storeUrl: string, pluginName: string): Pro
 	return;
 };
 
-// --- User confirmation prompts ---
-
 const ensureStoreForDependency = async ({ name, storeUrl }: LunaPackageDependency, dependantName: string) => {
 	const normalizedStoreUrl = normalizeStoreUrl(storeUrl);
 	if (isBuiltInDevStore(normalizedStoreUrl)) return true;
@@ -101,8 +95,6 @@ const confirmInstallDependency = async ({ name }: LunaPackageDependency, dependa
 	} catch { trace.msg.err(`Install cancelled: '${dependantName}' requires library '${name}'.`); return false; }
 	return true;
 };
-
-// --- Core install logic ---
 
 const installDependency = async (dependency: LunaPackageDependency, dependantPlugin: LunaPlugin, visited: Set<string>) => {
 	const dependencyStoreUrl = getDependencyStoreUrl(dependency, dependantPlugin);
@@ -123,8 +115,6 @@ const installDependency = async (dependency: LunaPackageDependency, dependantPlu
 	if (!didInstall) return;
 	return dependencyPlugin;
 };
-
-// --- Public API ---
 
 export const installPluginWithLibraries = async (plugin: LunaPlugin, visited = new Set<string>()) => {
 	if (visited.has(plugin.name)) return true;

@@ -117,7 +117,6 @@ const ASSERTIONS = `
     // of security assertions to wrap them would make the diff unreviewable.
     try {
 
-    // ── The policy decision itself, not just its effect ──────────────────
     t("net reaches an endpoint", reachesLocalEndpoint(new Set(["net"])), true);
     t("http reaches one too", reachesLocalEndpoint(new Set(["http"])), true);
     t("https as well", reachesLocalEndpoint(new Set(["https"])), true);
@@ -146,7 +145,6 @@ const ASSERTIONS = `
         t("the two forms really differ (the symlink is live)", F.aliasReal !== F.aliasLink, true);
     }
 
-    // ── The env door ─────────────────────────────────────────────────────
     var trustedEnv = endpointEnvFor(new Set(["net"]), F.runtimeDir).env;
     var plainEnv = endpointEnvFor(new Set(["fs"]), F.runtimeDir).env;
     t("endpoint trust carries the runtime dir", trustedEnv.XDG_RUNTIME_DIR, F.runtimeDir);
@@ -162,7 +160,6 @@ const ASSERTIONS = `
     t("and hasOwnProperty is not one of its keys",
         _ArrayPrototypeIndexOf(keysOf(trustedEnv), "hasOwnProperty"), -1);
 
-    // ── The facade, gated by the dir list alone ──────────────────────────
     var netTrusted = makeSandboxedFs([F.dataDir], grants, probeDirsFor(F.runtimeDir));
     var fsOnly = makeSandboxedFs([F.dataDir], grants, []);
     // Confined to the runtime dir only, to pin the bound the socket answer respects.
@@ -208,7 +205,6 @@ const ASSERTIONS = `
     t("native answers inside the sandbox", netTrusted.realpathSync.native(F.dataDir), F.dataDir);
     threw("native obeys the same gate", function() { fsOnly.realpathSync.native(TMP); }, "realpath denied");
 
-    // ── The real entry points, not only their helpers ────────────────────
     // Everything else in this file calls internal helpers directly. A plugin arrives through
     // proxiedRequire and through the hardened ambient globals, and neither was ever driven
     // here: a whole gate could have been deleted and nothing would have noticed.
@@ -253,7 +249,6 @@ const ASSERTIONS = `
     threw("the ambient fetch refuses and points at the trusted path",
         function() { globalThis.fetch("http://x"); }, "fetch is not available");
 
-    // ── Mutable globals: no gate may consult one at decision time ────────
     var body = [
         'module.exports.pollute = function(mode, arg) {',
         '  if (mode === "indexOf") Array.prototype.indexOf = function() { return 0; };',
