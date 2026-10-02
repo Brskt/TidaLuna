@@ -143,22 +143,42 @@ enum SeekOutcome {
     Refused,
 }
 
+/// Answer every generation one reader move stands for.
+///
+/// Each seek this move stands for gets one answer carrying its own generation, a folded one
+/// included, at the position reached. The player settles on the newest only (`seek_ack_gen`):
+/// folding never changes the answer it acts on.
+fn answer_seeks(
+    ctx: &DecodeContext,
+    gens: impl IntoIterator<Item = u32>,
+    position: f64,
+    refused: bool,
+) {
+    for gen_id in gens {
+        let _ = ctx.event_tx.send(DecodeEvent::SeekComplete {
+            gen_id,
+            position,
+            refused,
+        });
+    }
+}
+
 fn do_decode_seek(
     time: f64,
     gen_id: u32,
+    superseded: &[u32],
     format: &mut dyn symphonia::core::formats::FormatReader,
     decoder: &mut dyn AudioDecoder,
     pipeline: &mut Option<AudioPipeline>,
     ctx: &DecodeContext,
 ) -> SeekOutcome {
+    // Folded generations answer first, in dispatch order, and the surviving one last: the order
+    // the seeks were asked in, as without folding.
+    let answered = || superseded.iter().copied().chain(std::iter::once(gen_id));
     let seek_start = std::time::Instant::now();
     let Some(time_pos) = symphonia::core::units::Time::try_from_secs_f64(time) else {
         crate::vprintln!("[SEEK]   invalid seek target: {time}");
-        let _ = ctx.event_tx.send(DecodeEvent::SeekComplete {
-            gen_id,
-            position: undisturbed_position_secs(ctx),
-            refused: true,
-        });
+        answer_seeks(ctx, answered(), undisturbed_position_secs(ctx), true);
         return SeekOutcome::Refused;
     };
     let seek_to = SeekTo::Time {
@@ -177,11 +197,12 @@ fn do_decode_seek(
             let out_ts = actual_ts * ctx.output_rate as u64 / ctx.source_rate as u64;
             ctx.decoded_samples
                 .store(out_ts * ctx.output_channels as u64, Relaxed);
-            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete {
-                gen_id,
-                position: actual_ts as f64 / ctx.source_rate.max(1) as f64,
-                refused: false,
-            });
+            answer_seeks(
+                ctx,
+                answered(),
+                actual_ts as f64 / ctx.source_rate.max(1) as f64,
+                false,
+            );
             let seek_ms = seek_dur.as_secs_f64() * 1000.0;
             if seek_ms >= 1.0 {
                 crate::vprintln!("[SEEK]   decode: {:.0}ms (ts: {})", seek_ms, actual_ts);
@@ -195,11 +216,7 @@ fn do_decode_seek(
             SeekOutcome::Moved
         }
         Err(e) => {
-            let _ = ctx.event_tx.send(DecodeEvent::SeekComplete {
-                gen_id,
-                position: undisturbed_position_secs(ctx),
-                refused: true,
-            });
+            answer_seeks(ctx, answered(), undisturbed_position_secs(ctx), true);
             crate::vprintln!("[SEEK]   symphonia seek failed: {e}");
             SeekOutcome::Refused
         }
@@ -262,7 +279,9 @@ fn seek_closure<'a, 'c>(
     pipeline: &'a mut Option<AudioPipeline>,
     ctx: &'a DecodeContext<'c>,
 ) -> impl FnMut(f64, u32) -> SeekOutcome + 'a {
-    move |time, gen_id| do_decode_seek(time, gen_id, format, decoder, pipeline, ctx)
+    // No folded generations here: this seek was taken mid-push, one at a time, and whatever is
+    // queued behind it is read by the command loop, which folds its own bursts.
+    move |time, gen_id| do_decode_seek(time, gen_id, &[], format, decoder, pipeline, ctx)
 }
 
 /// Which deliberate stop ended a read, if that is what ended it. Asked of the error's payload
@@ -423,33 +442,53 @@ fn decode_loop(cfg: DecodeThreadConfig) {
     let mut first_push_logged = false;
 
     loop {
+        // A seek burst (a held arrow key, an unthrottled Connect peer) folds into one reader move
+        // to the last target: each earlier one would cost a full `format.seek()`, HTTP range
+        // restarts and their silence, for a position already left. The last seek is held until
+        // the channel runs dry, when nothing queued can supersede it; `do_decode_seek` still
+        // answers every folded generation.
+        let mut pending_seek: Option<(f64, u32)> = None;
+        let mut superseded: Vec<u32> = Vec::new();
+
         // Process commands - block when paused (zero CPU), poll when active.
         loop {
-            let cmd = if paused {
-                match cmd_rx.recv() {
-                    Ok(cmd) => cmd,
-                    Err(_) => return,
-                }
-            } else {
-                match cmd_rx.try_recv() {
-                    Ok(cmd) => cmd,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            let cmd = match cmd_rx.try_recv() {
+                Ok(cmd) => cmd,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Nothing left that could supersede it: settle the seek before parking on the
+                    // blocking read or leaving for the decode below.
+                    if let Some((time, gen_id)) = pending_seek.take() {
+                        // A carried tail is the old position's once the reader leaves it.
+                        if do_decode_seek(
+                            time,
+                            gen_id,
+                            &superseded,
+                            &mut *format,
+                            &mut *decoder,
+                            &mut pipeline,
+                            &decode_ctx,
+                        ) == SeekOutcome::Moved
+                        {
+                            carried_tail.clear();
+                        }
+                        superseded.clear();
+                        continue;
+                    }
+                    if paused {
+                        match cmd_rx.recv() {
+                            Ok(cmd) => cmd,
+                            Err(_) => return,
+                        }
+                    } else {
+                        break;
+                    }
                 }
             };
             match cmd {
                 DecodeCommand::Seek(time, gen_id) => {
-                    // A carried tail is the old position's once the reader leaves it.
-                    if do_decode_seek(
-                        time,
-                        gen_id,
-                        &mut *format,
-                        &mut *decoder,
-                        &mut pipeline,
-                        &decode_ctx,
-                    ) == SeekOutcome::Moved
-                    {
-                        carried_tail.clear();
+                    if let Some((_, folded)) = pending_seek.replace((time, gen_id)) {
+                        superseded.push(folded);
                     }
                 }
                 DecodeCommand::Pause => {
@@ -547,9 +586,12 @@ fn decode_loop(cfg: DecodeThreadConfig) {
                             // this stays parked to keep it. Pushing it here is not the
                             // alternative: arriving paused, it would spin on a ring the pause
                             // stopped draining.
+                            // No folding while parked: the first seek that moves the reader leaves
+                            // this loop, and the command loop folds whatever queued behind it.
                             if do_decode_seek(
                                 time,
                                 gen_id,
+                                &[],
                                 &mut *format,
                                 &mut *decoder,
                                 &mut pipeline,
