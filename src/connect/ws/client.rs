@@ -1,4 +1,4 @@
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -63,7 +63,7 @@ impl WsClient {
         // Write task: forward mpsc -> WS sink, exit on cancel.
         {
             let cancel = cancel.clone();
-            tokio::spawn(write_loop(write, write_rx, cancel));
+            tokio::spawn(super::writer::run(write, write_rx, cancel));
         }
 
         // Pong tracker for heartbeat
@@ -153,7 +153,7 @@ impl WsClient {
     /// Shutdown the connection. Sync, idempotent, Arc-compatible (`&self`).
     ///
     /// Flips `connected` (which the heartbeat observes as its alive flag),
-    /// cancels the shared token for `read_loop`/`write_loop` to exit their
+    /// cancels the shared token for `read_loop`/`writer::run` to exit their
     /// `select!` arms, and fails any pending request waiters. The three
     /// tasks unwind gracefully on their own; we no longer `abort()` them,
     /// leaving the WS stream a chance to close properly.
@@ -167,33 +167,6 @@ impl WsClient {
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
-}
-
-async fn write_loop(
-    mut write: futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        WsMessage,
-    >,
-    mut rx: mpsc::Receiver<WsMessage>,
-    cancel: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            msg = rx.recv() => match msg {
-                Some(m) => {
-                    if write.send(m).await.is_err() {
-                        break;
-                    }
-                }
-                None => break,
-            },
-        }
-    }
-    let _ = write.close().await;
 }
 
 async fn read_loop(
