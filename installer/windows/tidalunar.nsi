@@ -89,8 +89,11 @@ Function ${un}GetCurrentUserSid
 
   System::Call 'advapi32::ConvertSidToStringSidW(p r0, *p .r2) i .r5'
   IntCmp $5 0 sid_fail_freebuf
-  System::Call '*$2(&w${NSIS_MAX_STRLEN} .r9)'
+  ; lstrcpynW stops at the NUL. A struct read `*$2(&wN .r9)` copies all N wchars first, past the
+  ; end of this short buffer, and faults whenever the heap region ends within those bytes.
+  System::Call 'kernel32::lstrcpynW(w .r9, p r2, i ${NSIS_MAX_STRLEN})'
   System::Call 'kernel32::LocalFree(p r2)'
+  StrCmp $9 "" sid_fail_freebuf
   System::Free $1
   Pop $5
   Pop $4
