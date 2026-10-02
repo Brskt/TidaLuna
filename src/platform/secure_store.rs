@@ -157,8 +157,6 @@ pub(crate) fn flush() {
     }
 }
 
-// --- Windows: DPAPI ---
-
 #[cfg(target_os = "windows")]
 fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     use std::io::Write;
@@ -253,8 +251,6 @@ fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
     }
 }
 
-// --- macOS: Keychain ---
-
 #[cfg(target_os = "macos")]
 fn save_platform(_data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     security_framework::passwords::set_generic_password("com.tidaluna", "auth_state", plaintext)
@@ -279,8 +275,6 @@ fn delete_platform(_data_dir: &Path) -> Result<(), StoreError> {
     }
 }
 
-// --- Linux: 0600 file ---
-//
 // No Secret Service / keyring: it only ever protected against local OS-level
 // threats (other users, offline disk access), which are out of scope here, and
 // it forces a keyring-unlock password prompt on every fresh session. The token

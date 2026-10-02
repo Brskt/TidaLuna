@@ -7,9 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::UpdateChannel;
 
-// ---------------------------------------------------------------------------
 // Types (shared with the updater crate via identical definitions)
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Manifest {
@@ -79,10 +77,6 @@ pub(crate) struct UpdateInfo {
     pub version: String,
     pub download_size: u64,
 }
-
-// ---------------------------------------------------------------------------
-// Updater state machine
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", content = "version")]

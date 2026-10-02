@@ -111,10 +111,6 @@ fn fmt() -> Result<(), String> {
     run("cargo", &["fmt", "--all", "--", "--check"])
 }
 
-// ---------------------------------------------------------------------------
-// Manifest types
-// ---------------------------------------------------------------------------
-
 /// Minimum `SANDBOX_PROTOCOL_VERSION` the Linux .deb's system bootstrap must
 /// have for in-app updates produced by this xtask to be safe to apply.
 ///
@@ -142,10 +138,6 @@ struct FileEntry {
     sha256: String,
     size: u64,
 }
-
-// ---------------------------------------------------------------------------
-// bundle
-// ---------------------------------------------------------------------------
 
 fn bundle(flags: &[String]) -> Result<(), String> {
     const EXE_NAME: &str = if cfg!(target_os = "windows") {
@@ -283,10 +275,6 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Manifest generation
-// ---------------------------------------------------------------------------
-
 fn target_triple() -> String {
     let os = if cfg!(target_os = "windows") {
         "windows"
@@ -422,10 +410,6 @@ fn generate_manifest(bundle_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// generate-keypair
-// ---------------------------------------------------------------------------
-
 fn generate_keypair() -> Result<(), String> {
     let mut secret = [0u8; 32];
     getrandom::fill(&mut secret).map_err(|e| format!("getrandom failed: {e}"))?;
@@ -448,10 +432,6 @@ fn generate_keypair() -> Result<(), String> {
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// sign-manifest
-// ---------------------------------------------------------------------------
 
 fn sign_manifest() -> Result<(), String> {
     let key_b64 = std::env::var("UPDATE_SIGNING_KEY")
@@ -483,10 +463,6 @@ fn sign_manifest() -> Result<(), String> {
     println!("Signed manifest.json -> manifest.json.sig");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// build-updater
-// ---------------------------------------------------------------------------
 
 fn build_updater(flags: &[String]) -> Result<(), String> {
     let release = flags.iter().any(|f| f == "--release");
@@ -520,10 +496,6 @@ fn build_updater(flags: &[String]) -> Result<(), String> {
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// CEF directory finder
-// ---------------------------------------------------------------------------
 
 /// Find the CEF distribution directory inside target/release/build/cef-dll-sys-*/out/
 fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
@@ -571,10 +543,6 @@ fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
     }
     Err("CEF directory not found - run `cargo build --release` first".to_string())
 }
-
-// ---------------------------------------------------------------------------
-// macOS .app bundle
-// ---------------------------------------------------------------------------
 
 /// Create a macOS .app bundle with CEF framework and helper apps.
 ///
@@ -776,10 +744,6 @@ fn create_symlink(target: &Path, link: &Path) -> Result<(), String> {
 fn create_symlink(_target: &Path, _link: &Path) -> Result<(), String> {
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Linux / Windows helpers (flat bundle)
-// ---------------------------------------------------------------------------
 
 /// Link or copy files from CEF dir to bundle (skip .exe, .lib, directories, build files).
 /// Hard-link or copy a file, removing any existing destination first.
@@ -1050,10 +1014,6 @@ fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// package - Build a Windows NSIS installer from dist/
-// ---------------------------------------------------------------------------
 
 /// Map a semver string like `0.0.4-alpha` to a fixed-arity dotted-numeric form
 /// for installer/bundle metadata that rejects prerelease suffixes:

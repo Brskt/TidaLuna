@@ -26,8 +26,6 @@ pub(crate) static WM_TASKBAR_BUTTON_CREATED: LazyLock<u32> = LazyLock::new(|| {
     unsafe { RegisterWindowMessageW(name.as_ptr()) }
 });
 
-// ---- COM GUIDs ----
-
 const CLSID_TASKBAR_LIST: windows_sys::core::GUID = windows_sys::core::GUID {
     data1: 0x56FDF344,
     data2: 0xFD6D,
@@ -41,8 +39,6 @@ const IID_ITASKBAR_LIST3: windows_sys::core::GUID = windows_sys::core::GUID {
     data3: 0x4B86,
     data4: [0x90, 0xE9, 0x9E, 0x9F, 0x8A, 0x5E, 0xEF, 0xAF],
 };
-
-// ---- Raw COM vtable for ITaskbarList3 ----
 
 #[repr(C)]
 struct ITaskbarList3Vtbl {
@@ -83,20 +79,16 @@ struct ITaskbarList3Vtbl {
     set_thumbnail_clip: usize,
 }
 
-// ---- Button IDs ----
-
 const BTN_PREV: u32 = 0;
 const BTN_PLAY_PAUSE: u32 = 1;
 const BTN_NEXT: u32 = 2;
 
-// ---- THUMBBUTTON flags / masks (windows-sys uses flat constants) ----
+// THUMBBUTTON flags and masks (windows-sys uses flat constants).
 
 // THB_ICON = 0x2 - the hIcon field is valid
 const THB_ICON: i32 = 0x2;
 // THBF_ENABLED = 0x0
 const THBF_ENABLED: i32 = 0x0;
-
-// ---- 16×16 icon pixel data (BGRA, bottom-up) ----
 
 /// Set a white pixel with a given alpha (premultiplied BGRA).
 fn set_px(buf: &mut [u8; 16 * 16 * 4], row: u32, x: u32, alpha: u8) {
@@ -257,8 +249,6 @@ unsafe fn make_icon(draw: fn(&mut [u8; 16 * 16 * 4])) -> HICON {
         icon
     }
 }
-
-// ---- ThumbBar ----
 
 pub struct ThumbBar {
     taskbar: *mut c_void,

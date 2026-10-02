@@ -24,10 +24,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Version
-  # ---------------------------------------------------------------------------
-
   # Resolves the version this run builds and publishes.
   # - push: next dev build (latest public release, patch+1 keeping its phase
   #   label, then the next free .dev.N counter). The workflow-level concurrency
@@ -135,10 +131,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Next dev build: $version"
 
-  # ---------------------------------------------------------------------------
-  # Lint
-  # ---------------------------------------------------------------------------
-
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -195,10 +187,6 @@ jobs:
         run: cargo xtask clippy
       - name: Deny check
         run: cargo deny check advisories bans sources
-
-  # ---------------------------------------------------------------------------
-  # Build
-  # ---------------------------------------------------------------------------
 
   build:
     needs: version
@@ -463,10 +451,6 @@ jobs:
             target/installer/tidalunar_*.deb
             target/installer/tidalunar_*_linux_*.tar.gz
 
-  # ---------------------------------------------------------------------------
-  # Nix flake
-  # ---------------------------------------------------------------------------
-
   nix-check:
     # One leg per system the flake declares. Intel macOS rides an Apple Silicon
     # runner: Determinate stopped installing Nix on Intel hosts, and the daemon
@@ -512,10 +496,6 @@ jobs:
       - name: Flake check
         run: nix flake check -L --option system ${{ matrix.system }}
 
-  # ---------------------------------------------------------------------------
-  # Check
-  # ---------------------------------------------------------------------------
-
   check:
     if: always()
     needs:
@@ -528,10 +508,6 @@ jobs:
         uses: re-actors/alls-green@release/v1
         with:
           jobs: ${{ toJSON(needs) }}
-
-  # ---------------------------------------------------------------------------
-  # Release
-  # ---------------------------------------------------------------------------
 
   # Publishes every green push as a dev prerelease, and a workflow_dispatch as
   # the promoted public release (see the version job for how each is resolved).

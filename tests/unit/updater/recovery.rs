@@ -22,8 +22,6 @@ fn jfile(path: &str, backup: &str, is_new: bool) -> JournalFile {
     }
 }
 
-// --- Path-traversal guards (the security fix) ---
-
 #[test]
 fn pending_rollback_skips_path_traversal_delete() {
     let root = tempfile::tempdir().unwrap();
@@ -84,8 +82,6 @@ fn committed_cleanup_skips_backup_traversal_delete() {
         "traversal backup must not be deleted during cleanup"
     );
 }
-
-// --- Legitimate recovery still works ---
 
 #[test]
 fn pending_rollback_restores_safe_backup() {

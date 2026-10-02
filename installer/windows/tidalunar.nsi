@@ -41,7 +41,6 @@ VIAddVersionKey  "ProductVersion"  "${VERSION}"
 VIAddVersionKey  "CompanyName"     "Inrixia"
 VIAddVersionKey  "LegalCopyright"  "TidaLunar contributors. Licensed under Ms-PL."
 
-; --- MUI2 pages ----------------------------------------------------------
 !define MUI_ICON   "..\..\tidaluna.ico"
 !define MUI_UNICON "..\..\tidaluna.ico"
 
@@ -61,10 +60,8 @@ VIAddVersionKey  "LegalCopyright"  "TidaLunar contributors. Licensed under Ms-PL
 
 !insertmacro MUI_LANGUAGE "English"
 
-; -------------------------------------------------------------------------
 ; SID retrieval (fail-closed). Sets $9 = current user's SID string.
 ; Single source of truth for both install and uninstall via macro generation.
-; -------------------------------------------------------------------------
 !macro DefineGetCurrentUserSid un
 Function ${un}GetCurrentUserSid
   Push $0   ; process token / scratch
@@ -118,12 +115,10 @@ FunctionEnd
 !insertmacro DefineGetCurrentUserSid ""
 !insertmacro DefineGetCurrentUserSid "un."
 
-; -------------------------------------------------------------------------
 ; ProbeExclusive - verifies a path is not held write-exclusive by another
 ; process. Missing path = success (nothing to lock - relevant for fresh
 ; installs and for upgrades that drop legacy files).
 ; In:  $R0 = path. Out: $0 = 1 if writable-or-missing, 0 if locked.
-; -------------------------------------------------------------------------
 !macro DefineProbeExclusive un
 Function ${un}ProbeExclusive
   IfFileExists "$R0" probe_open probe_missing
@@ -145,23 +140,19 @@ FunctionEnd
 !insertmacro DefineProbeExclusive ""
 !insertmacro DefineProbeExclusive "un."
 
-; -------------------------------------------------------------------------
 ; ProbeOrRetry - macro that calls ProbeExclusive (with the right namespace
 ; prefix) and jumps to `retry` if the path is locked. Must live inside a
 ; function that has a `retry:` label and uses $R0 as the probe-target slot.
-; -------------------------------------------------------------------------
 !macro ProbeOrRetry un path
   StrCpy $R0 "${path}"
   Call ${un}ProbeExclusive
   StrCmp $0 0 retry
 !macroend
 
-; -------------------------------------------------------------------------
 ; WaitForHandleRelease - probe-and-wait loop covering the full file set
 ; that updater/src/main.rs:513-570 probes (six binaries × three layout
 ; variants for legacy + current install layouts).
 ; Aborts after 20 attempts × 500ms = ~10s if any probe is still locked.
-; -------------------------------------------------------------------------
 !macro DefineWaitForHandleRelease un
 Function ${un}WaitForHandleRelease
   StrCpy $R3 0
@@ -197,14 +188,12 @@ FunctionEnd
 !insertmacro DefineWaitForHandleRelease ""
 !insertmacro DefineWaitForHandleRelease "un."
 
-; -------------------------------------------------------------------------
 ; AcquireInstallMutex - acquire by ownership via WaitForSingleObject.
 ; Caller must have called Get(un.)CurrentUserSid first ($9 = SID).
 ; Labels are local to the calling function/section scope: the same macro
 ; can be inserted in both .onInit and Section "Uninstall" without conflict.
 ; Contention message is parameterised since install/uninstall phrase it
 ; differently.
-; -------------------------------------------------------------------------
 !macro AcquireInstallMutex contention_message
   mutex_acquire:
     System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Global\TidaLunarInstallLock-$9") p .r2'
@@ -225,11 +214,9 @@ FunctionEnd
   mutex_proceed:
 !macroend
 
-; =========================================================================
 ; .onInit - runs before any UI. Acquire mutex (fail-closed on SID lookup),
 ; verify and discard any pending updater journal that would otherwise
 ; interfere with this install.
-; =========================================================================
 Function .onInit
   Call GetCurrentUserSid                         ; sets $9 = SID, aborts on failure
   !insertmacro AcquireInstallMutex "Another TidaLunar installer or updater is running.$\nClick Retry once it finishes."
@@ -259,9 +246,6 @@ Function CreateDesktopShortcut
   CreateShortCut "$DESKTOP\TidaLunar.lnk" "$INSTDIR\tidalunar.exe" "" "$INSTDIR\tidalunar.exe" 0
 FunctionEnd
 
-; =========================================================================
-; Install Section
-; =========================================================================
 Section "TidaLunar" SecMain
   SectionIn RO
   SetOutPath $INSTDIR
@@ -408,9 +392,6 @@ Section "TidaLunar" SecMain
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 SectionEnd
 
-; =========================================================================
-; Uninstall Section
-; =========================================================================
 Var RemoveUserData
 
 Function un.onInit

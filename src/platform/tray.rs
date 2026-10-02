@@ -237,8 +237,6 @@ fn poll_events() {
     }
 }
 
-// --- CEF polling task ---
-
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn start_event_polling() {
     if POLLING_STARTED.swap(true, Ordering::SeqCst) {

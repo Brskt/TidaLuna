@@ -10,8 +10,6 @@ pub(crate) struct PluginInfo {
     pub installed: bool,
 }
 
-// --- Luna metadata types (library plugin support) ---
-
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct LunaMeta {
     #[serde(rename = "type")]
@@ -190,8 +188,6 @@ pub(crate) fn get_code(conn: &mut Connection, url: &str) -> Option<String> {
     )
     .ok()
 }
-
-// --- Dependency graph helpers ---
 
 /// Return names of installed plugins that depend on `plugin_name`.
 /// Fail-closed: if any installed manifest has an invalid `luna` field, returns Err

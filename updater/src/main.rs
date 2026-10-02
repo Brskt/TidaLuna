@@ -17,10 +17,8 @@ mod cleanup;
 #[cfg(target_os = "windows")]
 mod lock;
 
-// ---------------------------------------------------------------------------
 // Public key for update signature verification
 // Replace with actual key from `cargo xtask generate-keypair`
-// ---------------------------------------------------------------------------
 const UPDATE_PUBLIC_KEY: [u8; 32] = [
     104, 175, 158, 150, 215, 73, 36, 25, 193, 27, 127, 255, 238, 170, 136, 130, 171, 47, 180, 243,
     2, 222, 95, 197, 57, 244, 218, 25, 117, 200, 42, 57,
@@ -100,10 +98,6 @@ const ARCHIVE_SUFFIX: &str = {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Sandbox protocol gate (Linux .deb cross-track compatibility)
-// ---------------------------------------------------------------------------
-
 /// Read /usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION. `None` = file absent
 /// (not a packaged .deb install: tar.gz/dev, gate N/A); `Some(0)` = present but
 /// malformed. Mirrors src/updater/util.rs::read_system_sandbox_protocol; the
@@ -134,10 +128,6 @@ fn enforce_sandbox_protocol_gate(manifest: &Manifest) -> Result<(), anyhow::Erro
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Manifest {
@@ -201,10 +191,6 @@ struct GhAsset {
     browser_download_url: String,
 }
 
-// ---------------------------------------------------------------------------
-// Args
-// ---------------------------------------------------------------------------
-
 struct Args {
     pid: u32,
     version: String,
@@ -255,10 +241,6 @@ fn parse_args() -> Result<Args> {
         skip_download,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 
 fn main() {
     // Cleanup-stale bypasses run()'s mutex/relaunch/MessageBox path - the
@@ -653,10 +635,6 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// PID waiting
-// ---------------------------------------------------------------------------
-
 #[cfg(target_os = "windows")]
 fn wait_for_pid(pid: u32) -> Result<()> {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -701,10 +679,6 @@ fn wait_for_pid(pid: u32) -> Result<()> {
     bail!("timeout waiting for PID {pid} to exit");
 }
 
-// ---------------------------------------------------------------------------
-// Path safety
-// ---------------------------------------------------------------------------
-
 /// Reject absolute paths and directory-escape components (e.g. "..", prefix).
 /// Returns true only if `app_dir.join(rel)` resolves to a path under `app_dir`.
 pub(crate) fn is_safe_relative_path(rel: &str, app_dir: &Path) -> bool {
@@ -721,10 +695,6 @@ pub(crate) fn is_safe_relative_path(rel: &str, app_dir: &Path) -> bool {
     // Final check: canonicalize-free containment
     app_dir.join(rel).starts_with(app_dir)
 }
-
-// ---------------------------------------------------------------------------
-// File lock probing
-// ---------------------------------------------------------------------------
 
 fn probe_exclusive_access(app_dir: &Path) -> Result<()> {
     // Check the exe at root
@@ -837,10 +807,6 @@ fn try_exclusive_access(path: &Path) -> Result<bool> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// GitHub API
-// ---------------------------------------------------------------------------
-
 fn fetch_release(client: &reqwest::blocking::Client, version: &str) -> Result<GhRelease> {
     let url = format!(
         "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/{version}"
@@ -941,10 +907,6 @@ fn download_and_verify_manifest(
 
     Ok(manifest)
 }
-
-// ---------------------------------------------------------------------------
-// Download + extract
-// ---------------------------------------------------------------------------
 
 /// Hard ceiling on an update archive download. Far above any real release;
 /// bounds memory and disk if a tampered or misbehaving server streams an
@@ -1069,10 +1031,6 @@ fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Hashing
-// ---------------------------------------------------------------------------
-
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -1121,10 +1079,6 @@ fn verify_delta_base(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Journal
-// ---------------------------------------------------------------------------
-
 fn write_journal(path: &Path, journal: &Journal) -> Result<()> {
     let json = serde_json::to_string_pretty(journal).context("serialize journal")?;
     let mut file =
@@ -1133,10 +1087,6 @@ fn write_journal(path: &Path, journal: &Journal) -> Result<()> {
     file.sync_all()?; // fsync
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Cleanup and relaunch
-// ---------------------------------------------------------------------------
 
 fn cleanup(staging_dir: &Path, app_dir: &Path, files: &[JournalFile]) {
     // Remove .bak files
@@ -1172,10 +1122,6 @@ fn relaunch(app_dir: &Path) -> Result<()> {
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Error display
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
 fn show_error(msg: &str) {

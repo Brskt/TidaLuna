@@ -157,10 +157,6 @@ pub(super) fn meets_min_version(installed: &str, min_version: &str) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sandbox protocol gate (Linux .deb cross-track compatibility)
-// ---------------------------------------------------------------------------
-
 /// Path to the system bootstrap's protocol-version file, populated by the
 /// .deb's data.tar at install time. Track 2 (`apt upgrade tidalunar`) bumps
 /// this; Track 1 (in-app updater) reads it.

@@ -75,7 +75,6 @@ pub fn wrap_plugin_code(
     .unwrap_or_default();
     let escaped_ack = escape_js(&ack_request);
 
-    // --- Two-layer IIFE ---
     // Outer (sloppy mode): shadows `eval` and `Function` as parameters.
     // Captures Promise.prototype.then + cefQuery + nonce BEFORE plugin code runs.
     js.push_str("(function(eval, Function) {\n");
@@ -93,7 +92,6 @@ pub fn wrap_plugin_code(
     js.push_str("(async function(__pid, __cq, __gen, __cap, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq, __LUNAR_CAPTURED_TOKEN__, __TIDALUNAR_CREDENTIALS__, __LUNAR_SEND_IPC__, __LUNAR_INVOKE_IPC__, __LUNAR_IPC_LISTENERS__, __LUNAR_IPC_ON__, __LUNAR_IPC_EMIT__, __LUNAR_CONFIG__, __LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery) {\n");
     js.push_str("'use strict';\n");
 
-    // --- Controlled fetch ---
     // Routes all network requests through Rust via cefQuery.
     // Rust injects the OAuth token and can filter/audit URLs.
     js.push_str(r#"
@@ -137,7 +135,6 @@ var fetch = function(input, init) {
 fetch.__seq = 0;
 "#);
 
-    // --- Controlled storage ---
     // Per-plugin key/value storage backed by Rust SQLite via IPC.
     js.push_str(r#"
 var __idbKeyval = {
@@ -185,7 +182,6 @@ var __idbKeyval = {
 };
 "#);
 
-    // --- Attributed IPC bridge ---
     // The upstream build tool inlines `__ipcRenderer.invoke("__Luna.registerNative", ...)` straight
     // into a plugin's bundle, against the bare identifier. Shadowed here so that call carries the
     // capability this wrapper holds, which is the whole point: read off an argument instead, the
@@ -220,7 +216,6 @@ var __ipcRenderer = {
 "#,
     );
 
-    // --- Plugin unload tracking ---
     // Plugins register cleanup callbacks via onUnload().
     // Rust calls window.__pluginUnloads[pluginId]() to trigger cleanup.
     js.push_str(
@@ -238,14 +233,12 @@ window.__pluginUnloads[__pid] = function() {
 "#,
     );
 
-    // --- Plugin code ---
     js.push_str("\n// --- Plugin: ");
     js.push_str(&escaped_id);
     js.push_str(" ---\n");
     js.push_str(code);
     js.push('\n');
 
-    // --- Register exports on window ---
     // strip_esm_syntax converts `export{F as Settings, T as unloads}` to
     // `var __exports = {Settings: F, unloads: T}`. We register this on window
     // for extractSettings() to read without re-executing the plugin.
@@ -264,7 +257,6 @@ if (typeof __exports !== 'undefined') {
 "#,
     );
 
-    // --- Inner IIFE close ---
     // Arguments: pluginId, cefQuery ref, load_id, capability, then undefined for all shadowed
     // globals.
     // 10 original shadows (localStorage..importScripts, __pThen, __ackCq, __ackReq)
@@ -282,7 +274,6 @@ if (typeof __exports !== 'undefined') {
          , undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined)",
     );
 
-    // --- Plugin ready ack (anti-spoofing renforcé, NOT a full security boundary) ---
     // Sent via .then() in the OUTER scope after the async IIFE fully resolves.
     // Uses captured __pThen (original Promise.prototype.then), __ackCq (original cefQuery),
     // and __ackReq (pre-serialized by Rust). All three are shadowed to undefined in the
@@ -294,7 +285,6 @@ if (typeof __exports !== 'undefined') {
     js.push_str("__ackCq({ request: __ackReq, onSuccess: function(){}, onFailure: function(c,m){ console.error('[plugin:ready]',c,m); } });\n");
     js.push_str("});\n");
 
-    // --- Outer IIFE close ---
     // Passes undefined for eval and Function
     js.push_str("})(undefined, undefined);\n");
 
