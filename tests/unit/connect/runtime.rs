@@ -103,3 +103,23 @@ fn try_transition_refuses_terminal_overwrite() {
     assert!(!try_transition(&atom, TaskState::AbortRequested));
     assert_eq!(atom.load(Ordering::SeqCst), TaskState::PanicObserved as u8);
 }
+
+#[tokio::test]
+async fn a_dropped_group_cancels_and_aborts_its_tasks() {
+    let group = TaskGroup::new();
+    let token = group.cancel_token();
+    let (held, released) = tokio::sync::oneshot::channel::<()>();
+    group
+        .spawn("holder", async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        })
+        .unwrap();
+    drop(group);
+    let outcome = tokio::time::timeout(Duration::from_secs(1), released).await;
+    assert!(matches!(outcome, Ok(Err(_))), "the task outlived its group");
+    assert!(
+        token.is_cancelled(),
+        "the group's token was left uncancelled"
+    );
+}

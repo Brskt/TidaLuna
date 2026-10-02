@@ -3,8 +3,10 @@
 //! `TaskGroup` owns every async task spawned on behalf of the module and
 //! reports a classified outcome for each one at shutdown: completed, aborted,
 //! panicked, or still running past its deadline (for unabortable blocking
-//! work). This makes shutdown deterministic and observable: a crash in one
-//! subsystem cannot leave orphan tasks holding network sockets or locks.
+//! work). A group dropped without `shutdown`, its owner aborted or unwound by
+//! a panic, cancels its token and aborts its tasks, as a `JoinSet` does: a
+//! crash in one subsystem cannot leave orphan tasks holding network sockets
+//! or locks.
 
 // Panic reporting via JoinError::into_panic only works when the binary is
 // compiled with panic = "unwind"; panic = "abort" terminates the process
@@ -250,6 +252,18 @@ impl TaskGroup {
         }
 
         report
+    }
+}
+
+/// A group dropped without `shutdown` (its owner aborted) takes its tasks with it: detached,
+/// they would keep what they hold, a listener's port among it.
+impl Drop for TaskGroup {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        let records = self.records.get_mut().unwrap_or_else(|e| e.into_inner());
+        for record in records.values() {
+            record.abort.abort();
+        }
     }
 }
 
