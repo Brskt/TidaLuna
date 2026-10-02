@@ -1,5 +1,5 @@
 use md5::{Digest, Md5};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
 use std::sync::Arc;
 
 use crate::connect::consts;
@@ -34,6 +34,7 @@ impl MdnsAdvertiser {
     /// Create with its own daemon.
     pub fn new() -> anyhow::Result<Self> {
         let daemon = ServiceDaemon::new()?;
+        log_daemon_events(&daemon);
         Ok(Self {
             daemon: Arc::new(daemon),
             registered_fullname: None,
@@ -98,6 +99,52 @@ impl MdnsAdvertiser {
     /// by the advertiser; shutdown is the caller's responsibility.
     pub(crate) fn daemon(&self) -> Arc<ServiceDaemon> {
         self.daemon.clone()
+    }
+}
+
+/// Log what the daemon announces, on which addresses, and the failures of its own thread: its
+/// `monitor()` channel is the only place they surface. Subscribed before anything is registered:
+/// the daemon takes its commands in order and announces on the `register` one.
+fn log_daemon_events(daemon: &ServiceDaemon) {
+    let events = match daemon.monitor() {
+        Ok(events) => events,
+        Err(e) => {
+            crate::vprintln!("[connect::mdns] Daemon events unavailable: {}", e);
+            return;
+        }
+    };
+    // Ends once the daemon shuts down and drops its end of the channel.
+    let spawned = std::thread::Builder::new()
+        .name("mdns-events".into())
+        .spawn(move || {
+            while let Ok(event) = events.recv() {
+                match event {
+                    DaemonEvent::Announce(name, addrs) => {
+                        crate::vprintln!("[connect::mdns] Announced {} on {}", name, addrs)
+                    }
+                    DaemonEvent::Error(e) => {
+                        crate::vprintln!("[connect::mdns] Daemon error: {}", e)
+                    }
+                    DaemonEvent::NameChange(change) => crate::vprintln!(
+                        "[connect::mdns] Name conflict: {} renamed to {}",
+                        change.original,
+                        change.new_name
+                    ),
+                    DaemonEvent::IpAdd(ip) => {
+                        crate::vprintln2!("[connect::mdns] Interface address up: {}", ip)
+                    }
+                    DaemonEvent::IpDel(ip) => {
+                        crate::vprintln2!("[connect::mdns] Interface address gone: {}", ip)
+                    }
+                    DaemonEvent::Respond(intf) => {
+                        crate::vprintln3!("[connect::mdns] Answered a query on {}", intf)
+                    }
+                    other => crate::vprintln3!("[connect::mdns] Daemon event: {:?}", other),
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        crate::vprintln!("[connect::mdns] Daemon events not logged: {}", e);
     }
 }
 

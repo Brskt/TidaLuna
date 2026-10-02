@@ -167,6 +167,9 @@ async fn accept_loop(
                 continue;
             }
         };
+        // Without it, a phone that never reaches this socket and one stuck in the handshakes
+        // below leave the same silence.
+        crate::vprintln!("[connect::ws::server] TCP connection from {}", addr);
 
         let tls_stream = match tls_acceptor.accept(stream).await {
             Ok(s) => s,
@@ -179,6 +182,7 @@ async fn accept_loop(
                 continue;
             }
         };
+        crate::vprintln2!("[connect::ws::server] TLS handshake done with {}", addr);
 
         let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(MAX_WS_MESSAGE_BYTES))
