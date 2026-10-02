@@ -687,8 +687,6 @@ impl MediaSource for RamBuffer {
     }
 }
 
-// --- Writer API ---
-
 impl RamBufferWriter {
     /// Write decrypted data to the buffer. Returns true if data was accepted,
     /// false if discarded due to a pending restart.

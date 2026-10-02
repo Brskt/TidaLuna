@@ -24,10 +24,6 @@ use crate::player::declick::{RESYNC_SILENCE_MS, silence_frames};
 use crate::player::packet_failure::{PacketFailure, classify_packet_failure};
 use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 pub(super) enum ExclusiveCommand {
     StartStream {
         stream_id: u32,
@@ -201,10 +197,6 @@ pub(super) struct ExclusiveHandle {
     event_rx: mpsc::Receiver<ExclusiveEvent>,
     thread: Option<JoinHandle<()>>,
 }
-
-// ---------------------------------------------------------------------------
-// FLAC -> PCM decoding (symphonia)
-// ---------------------------------------------------------------------------
 
 fn append_interleaved_i32_as_pcm(samples: &[i32], bits_per_sample: u32, out: &mut Vec<u8>) {
     if bits_per_sample <= 16 {
@@ -613,10 +605,6 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// ExclusiveHandle - public API
-// ---------------------------------------------------------------------------
-
 impl ExclusiveHandle {
     /// Spawn the WASAPI render thread for the given device.
     /// `device_id` - wasapi device id string, or "default".
@@ -676,10 +664,6 @@ impl Drop for ExclusiveHandle {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Format negotiation helpers
-// ---------------------------------------------------------------------------
 
 fn negotiate_format(
     sample_rate: u32,
@@ -939,10 +923,6 @@ fn is_exclusive_mode_disabled_error(err_str: &str) -> bool {
         || err_str.contains("8889000E")
 }
 
-// ---------------------------------------------------------------------------
-// PCM conversion helpers
-// ---------------------------------------------------------------------------
-
 /// Convert source PCM bytes to the format expected by the WASAPI device.
 /// Source is always integer PCM at `src_bps` bits, output is at `dst_store_bits`/`dst_valid_bits`.
 fn convert_pcm_frame(
@@ -1040,10 +1020,6 @@ fn convert_pcm_frame(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Render thread
-// ---------------------------------------------------------------------------
 
 enum RenderState {
     Idle,

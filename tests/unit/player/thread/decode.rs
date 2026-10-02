@@ -318,8 +318,6 @@ fn a_stop_ends_the_run() {
     ));
 }
 
-// --- Driving the real decode_loop ---
-//
 // The loop opens with a symphonia probe: exercising it needs bytes symphonia will genuinely
 // demux and decode. RIFF/WAVE carrying PCM S16LE is the cheapest such container: a 44-byte
 // header, no checksum anywhere along the path, and `PcmDecoder` reads S16LE through untouched,

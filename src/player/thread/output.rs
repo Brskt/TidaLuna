@@ -14,8 +14,6 @@ pub(super) const STREAM_ERR_NONE: u8 = 0;
 pub(super) const STREAM_ERR_DEVICE_LOST: u8 = 1;
 pub(super) const STREAM_ERR_UNKNOWN: u8 = 2;
 
-// --- Helpers ---
-
 pub(super) fn format_sample_rate(rate: u32) -> String {
     if rate.is_multiple_of(1000) {
         format!("{} kHz", rate / 1000)
@@ -108,8 +106,6 @@ pub(super) fn resolved_device_name(device_id: &str) -> Option<String> {
     output_device_name(&resolve_device(Some(device_id))?)
 }
 
-// --- OpenedStream ---
-
 /// The incoming track's ring plus the fade length, handed to the callback when a
 /// crossfade arms. `None` outside a crossfade, which is the state that keeps the
 /// output path arithmetically identical to a build without this feature.
@@ -188,8 +184,6 @@ pub(super) fn pack_xfade_done(cur_gen: u16, origin: u64) -> u64 {
     ((cur_gen as u64) << 48) | (origin & 0xFFFF_FFFF_FFFF)
 }
 
-// --- Audio format probing ---
-
 pub(super) struct ProbeInfo {
     pub sample_rate: u32,
     pub channels: u16,
@@ -241,8 +235,6 @@ pub(super) fn probe_audio_format(
         codec: codec_name(params.codec),
     })
 }
-
-// --- cpal callback ---
 
 /// Scratch the mixer works in per pass, in samples. cpal declines to bound the length it hands
 /// a callback (`StreamTrait::buffer_size` is documented as an estimate, and WASAPI recomputes it
@@ -475,8 +467,6 @@ fn preferred_buffer_size(_device: &cpal::Device, _rate: u32) -> cpal::BufferSize
     cpal::BufferSize::Default
 }
 
-// --- open_output_stream ---
-
 /// Build a cpal output stream for one `StreamConfig` and wire it to a fresh ring
 /// buffer. The 5 control atomics are taken by `&Arc` and cloned in (a cpal
 /// callback owns what it captures, and each call needs its own consumer/callback);
@@ -640,8 +630,6 @@ pub(super) fn open_output_stream(
     }
     None
 }
-
-// --- AudioPipeline ---
 
 /// Source frames the resampler takes per call. Shared with the tests, which size their
 /// fixtures against it: a private literal would let the two drift apart in silence.

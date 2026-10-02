@@ -20,8 +20,6 @@ use windows_sys::Win32::System::Com::{
 };
 use windows_sys::core::GUID;
 
-// --- ASIO scalar typedefs ---------------------------------------------------
-
 /// `ASIOBool`: a C `long`, `ASIOTrue` = 1, `ASIOFalse` = 0.
 pub(crate) type AsioBool = i32;
 /// `ASIOError`: a C `long`.
@@ -44,7 +42,7 @@ pub(crate) fn asio_ok(err: AsioError) -> bool {
     err == ASE_OK
 }
 
-// --- 64-bit split types (Windows uses {hi, lo}, not a native i64) -----------
+// 64-bit split types: Windows uses {hi, lo}, not a native i64.
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -66,8 +64,6 @@ impl AsioSamples {
         ((self.hi as u64) << 32) | self.lo as u64
     }
 }
-
-// --- ASIO structs (exact `#[repr(C)]` layouts) ------------------------------
 
 #[repr(C)]
 pub(crate) struct AsioClockSource {
@@ -149,8 +145,6 @@ pub(crate) struct AsioTime {
     pub time_code: AsioTimeCode,
 }
 
-// --- the COM vtable ---------------------------------------------------------
-
 /// The `IUnknown` base, declared here to keep the whole vtable in terms of the
 /// windows-sys `GUID` (no cross-crate GUID mixing).
 #[repr(C)]
@@ -224,8 +218,6 @@ pub(crate) struct IAsioVtbl {
         unsafe extern "system" fn(this: *mut c_void, selector: i32, opt: *mut c_void) -> AsioError,
     pub output_ready: unsafe extern "system" fn(this: *mut c_void) -> AsioError,
 }
-
-// --- the driver handle ------------------------------------------------------
 
 /// An owned `IASIO` COM object. `Drop` releases the single reference
 /// `CoCreateInstance` handed us. ASIO loads one driver globally at a time, so

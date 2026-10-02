@@ -373,9 +373,7 @@ pub(crate) fn run_tone_test(info: &AsioDriverInfo) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Streaming path: decoded PCM -> lock-free ring -> ASIO RT callback
-// ---------------------------------------------------------------------------
 
 /// Consumer-side state for the RT callback: `bufferSwitch` pulls interleaved i32
 /// from the lock-free ring.
@@ -1027,14 +1025,12 @@ pub(crate) fn run_ring_tone_test(info: &AsioDriverInfo) {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The player-integrated AsioHandle.
 //
 // Mirrors `wasapi::ExclusiveHandle`. A control thread owns the `AsioDriver` and
 // the `rtrb::Producer<i32>`; the driver's RT `stream_buffer_switch` owns the
 // `Consumer` via `STREAM_CTX`. Decode threads feed audio as `AsioCommand::PushPcm`
 // (a cloneable mpsc) because rtrb is SPSC - the control thread is the sole writer.
-// ---------------------------------------------------------------------------
 
 /// Commands into the ASIO control thread. `PushPcm` carries interleaved i32
 /// (MSB-justified, from `copy_to_vec_interleaved::<i32>`) - the ring is i32, so
