@@ -6,8 +6,6 @@ use cef::*;
 use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// --- Win32 frameless subclass ---
-
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn frameless_subclass_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
@@ -81,8 +79,6 @@ unsafe extern "system" fn frameless_subclass_proc(
         }
     }
 }
-
-// --- Window Delegate ---
 
 fn load_init_window_state() -> crate::settings::WindowState {
     crate::state::db().call_settings(crate::settings::load_window_state)
@@ -315,8 +311,6 @@ wrap_window_delegate! {
     }
 }
 
-// --- Browser View Delegate ---
-
 wrap_browser_view_delegate! {
     pub(super) struct TidalBrowserViewDelegate {
         _p: u8,
@@ -328,8 +322,6 @@ wrap_browser_view_delegate! {
         }
     }
 }
-
-// --- Visibility re-assert on restore ---
 
 static WAS_MINIMIZED: AtomicBool = AtomicBool::new(false);
 
@@ -348,8 +340,6 @@ wrap_task! {
         }
     }
 }
-
-// --- Window Save Task ---
 
 fn schedule_window_save() {
     let mut task = WindowSaveTask::new(0);

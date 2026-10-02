@@ -8,8 +8,6 @@ use cef::*;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
-// --- Render Process Handler ---
-
 wrap_render_process_handler! {
     struct TidalRenderProcessHandler {
         router: Arc<RendererSideRouter>,
@@ -107,8 +105,6 @@ wrap_render_process_handler! {
         }
     }
 }
-
-// --- App ---
 
 const CEF_SWITCHES: &[&str] = &[
     "disable-background-networking",

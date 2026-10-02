@@ -234,8 +234,6 @@ pub(crate) fn show_file_dialog(
     rx
 }
 
-// --- Callback: receives the dismissal on the UI thread ---
-
 /// `IntoIterator` consumes the list and cloning is no way around it: a clone of the borrowed
 /// list CEF hands us becomes a variant `into_iter` reads as empty. The raw pointer round trip
 /// keeps it readable, and frees nothing, since only an owned list is freed.
@@ -257,8 +255,6 @@ wrap_run_file_dialog_callback! {
         }
     }
 }
-
-// --- Task: runs on the CEF UI thread, invokes run_file_dialog ---
 
 wrap_task! {
     struct FileDialogTask {

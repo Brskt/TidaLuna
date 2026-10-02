@@ -168,8 +168,6 @@ fn center_on_parent(_window: &mut Window, _dialog_w: i32, _dialog_h: i32) -> boo
     false
 }
 
-// --- Request handler: intercepts the dialog's custom-scheme button navigations ---
-
 wrap_request_handler! {
     struct DialogRequestHandler<R: Clone + Send + Sync + 'static> {
         core: Arc<DialogCore<R>>,
@@ -246,16 +244,12 @@ wrap_request_handler! {
     }
 }
 
-// --- Minimal life span handler ---
-
 wrap_life_span_handler! {
     struct DialogLifeSpanHandler {
         _p: u8,
     }
     impl LifeSpanHandler {}
 }
-
-// --- Client ---
 
 wrap_client! {
     struct DialogClient {
@@ -271,8 +265,6 @@ wrap_client! {
         }
     }
 }
-
-// --- Window delegate ---
 
 wrap_window_delegate! {
     struct DialogWindowDelegate<R: Clone + Send + Sync + 'static> {
@@ -354,8 +346,6 @@ wrap_browser_view_delegate! {
         }
     }
 }
-
-// --- Task to create the dialog on the CEF UI thread ---
 
 wrap_task! {
     struct ShowDialogTask<R: Clone + Send + Sync + 'static> {

@@ -209,8 +209,6 @@ pub(crate) fn tag_create_root(js: &str) -> String {
     js.to_string()
 }
 
-// --- Request handler that attaches the rewrite filter to TIDAL's chunks ---
-
 wrap_resource_request_handler! {
     pub(crate) struct CaptureRequestHandler;
 

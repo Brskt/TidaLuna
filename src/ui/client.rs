@@ -9,8 +9,6 @@ use cef::*;
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
-// --- IPC Query Handler (JS -> Rust via cefQuery) ---
-
 /// True unless the frame is `External` (untrusted origin). `cefQuery` reaches every
 /// frame: privileged channels are gated here in Rust, not by JS wrapper isolation.
 fn frame_is_trusted(frame: &Option<Frame>, memo: &Mutex<Option<(String, bool)>>) -> bool {
@@ -199,8 +197,6 @@ impl BrowserSideHandler for IpcQueryHandler {
     }
 }
 
-// --- Drag Handler ---
-
 wrap_drag_handler! {
     pub(super) struct TidalDragHandler {
         _p: u8,
@@ -218,8 +214,6 @@ wrap_drag_handler! {
         }
     }
 }
-
-// --- Download Handler ---
 
 wrap_download_handler! {
     pub(super) struct TidalDownloadHandler {
@@ -254,8 +248,6 @@ wrap_download_handler! {
     }
 }
 
-// --- Permission Handler ---
-
 wrap_permission_handler! {
     pub(super) struct TidalPermissionHandler {
         _p: u8,
@@ -289,8 +281,6 @@ wrap_permission_handler! {
         }
     }
 }
-
-// --- Client ---
 
 wrap_client! {
     pub(super) struct TidalClient {
@@ -361,8 +351,6 @@ fn open_external_in_os(url: &str) {
         );
     }
 }
-
-// --- Life Span Handler ---
 
 wrap_life_span_handler! {
     pub(super) struct TidalLifeSpanHandler {
@@ -449,8 +437,6 @@ wrap_life_span_handler! {
         }
     }
 }
-
-// --- Load Handler ---
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum PageState {
@@ -623,8 +609,6 @@ wrap_load_handler! {
         }
     }
 }
-
-// --- Request Handler ---
 
 fn render_crash_reason(status: TerminationStatus) -> &'static str {
     match status {
@@ -914,8 +898,6 @@ wrap_request_handler! {
         }
     }
 }
-
-// --- Display Handler ---
 
 wrap_display_handler! {
     pub(super) struct TidalDisplayHandler {

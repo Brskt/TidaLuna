@@ -118,8 +118,6 @@ button {{
     )
 }
 
-// --- Task to reload the main browser on the UI thread ---
-
 wrap_task! {
     pub(crate) struct ReloadMainTask {
         _p: u8,

@@ -7,7 +7,7 @@
 // commit path all walk past, and an iframe carrying no early runtime hands back a pristine
 // HTMLImageElement anyway. A copy here would only give the host list a second place to drift.
 
-// --- sendBeacon: TIDAL doesn't use it, block entirely ---
+// TIDAL never calls sendBeacon: blocked outright.
 Object.defineProperty(navigator, 'sendBeacon', {
     get: function() { return function() { return false; }; },
     set: function() {},
