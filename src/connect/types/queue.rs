@@ -59,8 +59,6 @@ pub(crate) enum QueueChangeReason {
     RefreshRequested,
 }
 
-// ── Queue item (from TIDAL queue API - irregular casing, explicit renames) ─
-
 /// Single item from the queue window response.
 /// Fields use snake_case in the TIDAL API (not camelCase), hence explicit renames.
 #[derive(Debug, Clone, Serialize, Deserialize)]

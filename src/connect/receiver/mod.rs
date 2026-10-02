@@ -134,8 +134,6 @@ impl ConnectReceiver {
     }
 }
 
-// ── Routing loop ─────────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 async fn routing_loop(
     mut client_comm: ClientCommunicator,

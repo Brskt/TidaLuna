@@ -4,16 +4,12 @@ use tokio::sync::mpsc;
 use crate::connect::consts;
 use crate::connect::types::SessionStatus;
 
-// ── State machine ────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReceiverSessionState {
     None,
     Active,
     Ended,
 }
-
-// ── Events emitted by the session manager ────────────────────────────
 
 pub(crate) enum SessionNotifyEvent {
     Broadcast(serde_json::Value),
@@ -31,8 +27,6 @@ pub(crate) enum SessionInternalEvent {
     ResourcesRevoked,
 }
 
-// ── Session data (mutable) ──────────────────────────────────────────
-
 struct SessionData {
     session_id: String,
     _app_id: String,
@@ -42,8 +36,6 @@ struct SessionData {
     status: SessionStatus,
     connected_sockets: HashSet<u32>,
 }
-
-// ── Receiver-side session manager ────────────────────────────────────
 
 pub(crate) struct ReceiverSession {
     state: ReceiverSessionState,
@@ -90,8 +82,6 @@ impl ReceiverSession {
             }
         }
     }
-
-    // ── Command handlers ─────────────────────────────────────────────
 
     async fn proc_start_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
         // If already active, end the old session first (suspended)
@@ -293,8 +283,6 @@ impl ReceiverSession {
             ))
             .await;
     }
-
-    // ── Internal ─────────────────────────────────────────────────────
 
     /// Transition to Ended state.
     /// If suspended=true, keep the session for possible resume.

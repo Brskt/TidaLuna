@@ -5,8 +5,6 @@ use crate::connect::types::{
     MediaInfo, MediaMetadata, PbPlayState, PbState, PlaybackNotification, PlayerState,
 };
 
-// ── Events emitted to clients and other services ─────────────────────
-
 pub(crate) enum PlaybackNotifyEvent {
     Broadcast(serde_json::Value),
     Internal(PlaybackInternalEvent),
@@ -15,8 +13,6 @@ pub(crate) enum PlaybackNotifyEvent {
 pub(crate) enum PlaybackInternalEvent {
     MediaCompleted { has_next: bool },
 }
-
-// ── Gapless next-media slot (with queue_gen for invalidation) ────────
 
 struct NextMediaSlot {
     media: MediaInfo,
@@ -39,8 +35,6 @@ struct PendingPromotion {
     track_id: String,
     measured_duration_ms: Option<u64>,
 }
-
-// ── PlaybackController ──────────────────────────────────────────────
 
 pub(crate) struct PlaybackController {
     state: PbState,
@@ -89,8 +83,6 @@ impl PlaybackController {
             last_progress_broadcast: std::time::Instant::now(),
         }
     }
-
-    // ── Commands from mobile clients ─────────────────────────────────
 
     /// Load a media item for playback.
     pub async fn set_media(&mut self, media_info: MediaInfo, media_seq_no: u32) {
@@ -243,8 +235,6 @@ impl PlaybackController {
     pub fn set_queue_gen(&mut self, new_gen: u64) {
         self.queue_gen = new_gen;
     }
-
-    // ── Callbacks from the player (via BridgeEvent) ──────────────────
 
     /// Player finished preparing (Ready state).
     pub async fn on_prepared(&mut self, engine_gen: u64) {
@@ -475,10 +465,6 @@ impl PlaybackController {
         self.state = PbState::Stopped;
         self.notify_player_status().await;
     }
-
-    // ── Queries ──────────────────────────────────────────────────────
-
-    // ── Notifications ────────────────────────────────────────────────
 
     async fn notify_player_status(&self) {
         let player_state = match (self.state, self.play_state) {

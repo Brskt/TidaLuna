@@ -19,8 +19,6 @@ pub(crate) use playback::{PbPlayState, PbState, PlaybackNotification, PlayerStat
 pub(crate) use queue::{QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode};
 pub(crate) use session::{SessionCommand, SessionNotification, SessionStatus};
 
-// ── Receiver config ──────────────────────────────────────────────────
-
 pub(crate) struct ReceiverConfig {
     pub ws_port: u16,
     pub friendly_name: String,

@@ -21,8 +21,6 @@ fn oauth_params(access: &str, refresh: &str) -> OAuthParameters {
     }
 }
 
-// ── resolve_auth_header ──────────────────────────────────────────
-
 #[test]
 fn resolve_auth_header_prefers_header_auth_literal() {
     // When `header_auth` is populated it is returned verbatim, even if
@@ -70,8 +68,6 @@ fn resolve_auth_header_empty_when_no_credentials() {
     let server = empty_server(None);
     assert_eq!(resolve_auth_header(&server), "");
 }
-
-// ── extract_oauth_params ─────────────────────────────────────────
 
 #[test]
 fn extract_oauth_params_prefers_outer() {
@@ -124,8 +120,6 @@ fn extract_oauth_params_returns_none_when_no_credentials() {
     assert!(extract_oauth_params(None).is_none());
 }
 
-// ── parse_oauth_error_code ───────────────────────────────────────
-
 #[test]
 fn parse_oauth_error_code_extracts_invalid_grant() {
     let body = br#"{"error":"invalid_grant","error_description":"Token revoked"}"#;
@@ -155,8 +149,6 @@ fn parse_oauth_error_code_returns_none_on_malformed_json() {
     assert!(parse_oauth_error_code(b"not json").is_none());
     assert!(parse_oauth_error_code(b"").is_none());
 }
-
-// ── is_trusted_server_url ────────────────────────────────────────
 
 #[test]
 fn trusted_server_url_requires_https_and_tidal_host() {

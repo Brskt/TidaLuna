@@ -20,8 +20,6 @@ use crate::connect::ws::client::WsClient;
 
 pub(super) const CMD_TIMEOUT: Duration = Duration::from_secs(10);
 
-// ── State lookups ────────────────────────────────────────────────────
-
 pub(super) fn get_controller_arc()
 -> Option<Arc<std::sync::Mutex<crate::connect::controller::TidalConnectController>>> {
     with_state(|state| {
@@ -72,8 +70,6 @@ pub(super) fn get_server_infos(quality: &str) -> Option<(ServerInfo, ServerInfo)
     .flatten()
 }
 
-// ── Device command dispatch ──────────────────────────────────────────
-
 pub(super) fn send_device_cmd_simple(command: &'static str, callback: IpcCallback) {
     send_device_cmd(serde_json::json!({"command": command}), callback);
 }
@@ -111,8 +107,6 @@ pub(super) fn send_device_cmd(cmd: serde_json::Value, callback: IpcCallback) {
             .failure(500, "No runtime");
     }
 }
-
-// ── Event forwarding (controller -> frontend) ─────────────────────────
 
 pub(super) fn forward_controller_notification(json: &serde_json::Value) {
     let cmd = json.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -162,7 +156,6 @@ pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent) {
     }
 }
 
-// ── CEF UI-thread posting ────────────────────────────────────────────
 // `emit_ipc_event*` calls `frame.execute_java_script`, which must run on
 // the CEF UI thread. Since connect events originate in tokio tasks, we
 // serialise the JS string and post it via `wrap_task!`/`post_task`.

@@ -20,8 +20,6 @@ use crate::connect::types::{
     MediaInfo, QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode, ServerInfo,
 };
 
-// ── State machine ────────────────────────────────────────────────────
-
 /// Internal state of the queue façade. Kept private to the module, and every
 /// transition goes through a `QueueManager` method: external callers can
 /// observe effects through `QueueNotifyEvent`, but cannot mutate state
@@ -34,8 +32,6 @@ enum QueueState {
     Moving,
     Loaded,
 }
-
-// ── Events emitted ───────────────────────────────────────────────────
 
 pub(crate) enum QueueNotifyEvent {
     Broadcast(serde_json::Value),
@@ -67,8 +63,6 @@ struct DeferredCommand {
 }
 
 const MAX_DEFERRED: usize = 32;
-
-// ── QueueManager ─────────────────────────────────────────────────────
 
 pub(crate) struct QueueManager {
     state: QueueState,
@@ -265,8 +259,6 @@ impl QueueManager {
         }
     }
 
-    // ── Internal callbacks ───────────────────────────────────────────
-
     /// PlaybackController signals track ended.
     pub async fn on_media_ended(&mut self) {
         if let Some(idx) = self.current_index {
@@ -448,13 +440,9 @@ impl QueueManager {
         }
     }
 
-    // ── Command handlers ─────────────────────────────────────────────
-
     // Command handlers (`proc_*`) live in `commands.rs` as a separate
     // `impl QueueManager` block to keep this file focused on the state
     // machine and orchestration.
-
-    // ── HTTP ─────────────────────────────────────────────────────────
 
     /// Clamp a peer-requested queue-window size; a malicious controller could
     /// otherwise request an enormous window.
@@ -710,8 +698,6 @@ impl QueueManager {
         Ok(())
     }
 
-    // ── Queue window processing ──────────────────────────────────────
-
     async fn process_queue_window_response(&mut self, response: serde_json::Value) {
         crate::vprintln!(
             "[connect::queue] Processing queue window: keys={:?}",
@@ -848,8 +834,6 @@ impl QueueManager {
         })
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────
-
     async fn bump_queue_gen(&mut self) {
         self.queue_gen += 1;
         let _ = self.notify_tx.try_send(QueueNotifyEvent::QueueGenBumped {
@@ -899,8 +883,6 @@ impl QueueManager {
         }
     }
 }
-
-// ── Free functions ───────────────────────────────────────────────────
 
 fn next_media_seq() -> u32 {
     static SEQ: AtomicU32 = AtomicU32::new(0);
