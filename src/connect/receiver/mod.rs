@@ -234,7 +234,6 @@ async fn routing_loop(
                         match internal {
                             SessionInternalEvent::SessionEnded => {
                                 playback_ctrl.reset().await;
-                                crate::connect::ipc::post_emit("connect.receiver.session_ended");
                             }
                             SessionInternalEvent::SessionStarted { session_id } => {
                                 crate::vprintln!("[connect::receiver] Session started: {}", session_id);

@@ -99,13 +99,6 @@ export async function setupConnectEventListeners(store: Store) {
         });
     });
 
-    onIpcEvent("connect.receiver.session_state", (data: unknown) => {
-        store.dispatch({
-            type: "remotePlayback/remotePlaybackReceiver/STATE_CHANGED",
-            payload: data,
-        });
-    });
-
     onIpcEvent("connect.receiver.media_changed", (data: ReceiverMediaChangedPayload) => {
         // Enrichment + DOM mutation lives in the middleware: the listener
         // stays a pure relay.
