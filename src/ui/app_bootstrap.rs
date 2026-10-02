@@ -196,6 +196,13 @@ const CEF_DISABLED_FEATURES: &[&str] = &[
     "OptimizationHints",
     "CalculateNativeWinOcclusion",
     "ImmersiveReadAnything",
+    // Not a capability we refuse: a check that misfires. Chromium 152's
+    // `kPreventCrossWorldServiceWorkerResourceReuse` compares `world_for_csp` with a bare `!=` in
+    // `Resource::CanReuse`, where null and `MainWorld()` are the same world, and every module TIDAL
+    // preloads is fetched twice (crrev 8254944). It guards isolated worlds, which this binary never
+    // creates (`disable-extensions`). DELETE once CEF is on a Chromium branched after 2026-08-19
+    // (the `AreSameWorld` fix); 153 branched before it.
+    "PreventCrossWorldServiceWorkerResourceReuse",
 ];
 
 const CEF_ENABLED_FEATURES: &[&str] = &["PartitionAllocMemoryReclaimer"];
