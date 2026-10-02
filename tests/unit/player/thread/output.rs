@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 /// the fade position, not of the buffer length.
 const CB_FRAMES: usize = 256;
 
+/// The outgoing track's count before a swap: far above any count a few callbacks could reach.
+const OUTGOING_PLAYED: u64 = 1_000_000;
+
 /// The callback ignores its timestamp argument entirely, but the signature demands
 /// one. Nothing here opens a device.
 fn callback_info() -> cpal::OutputCallbackInfo {
@@ -235,7 +238,7 @@ fn the_swap_rebases_the_clock_to_the_incoming_track_before_it_publishes() {
     // Where the outgoing track had got to. None of it belongs to the incoming one,
     // and starting from zero would hide the defect behind a coincidence: a single
     // pass credits an outgoing drain that happens to equal the incoming one.
-    played_samples.store(1_000_000, Relaxed);
+    played_samples.store(OUTGOING_PLAYED, Relaxed);
 
     let mut data = vec![0.0f32; CB_FRAMES];
     callback(&mut data, &callback_info());

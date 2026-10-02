@@ -18,6 +18,9 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+/// What the incoming track has played at a promotion, in samples.
+const SIX_SECONDS: u64 = 44_100 * 2 * 6;
+
 #[test]
 fn play_with_live_track_resumes() {
     assert_eq!(decide_play(true, None, false), PlayAction::Resume);
@@ -1709,7 +1712,7 @@ async fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
         .next
         .load_gen = armed_gen;
 
-    h.player.promote_crossfade(44_100 * 2 * 6);
+    h.player.promote_crossfade(SIX_SECONDS);
 
     let retained = crate::state::CURRENT_TRACK
         .lock()
@@ -1739,7 +1742,7 @@ async fn a_promotion_publishes_the_three_events_the_sdk_waits_on() {
     let mut h = harness(dir.path());
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
 
-    h.player.promote_crossfade(44_100 * 2 * 6);
+    h.player.promote_crossfade(SIX_SECONDS);
 
     let events = h.events.lock().unwrap();
     let seen: Vec<&PlayerEvent> = events
@@ -1795,8 +1798,8 @@ async fn a_promotion_emits_the_incoming_position_before_the_transition_events() 
     // swapping tick left that on the clock. Priming it is what the position report
     // reads: the promotion no longer writes the clock, and without this the fixture's
     // outgoing total is what would be reported.
-    h.player.played_samples.store(44_100 * 2 * 6, Relaxed);
-    h.player.promote_crossfade(44_100 * 2 * 6);
+    h.player.played_samples.store(SIX_SECONDS, Relaxed);
+    h.player.promote_crossfade(SIX_SECONDS);
 
     let events = h.events.lock().unwrap();
     let promoted = events
@@ -1859,7 +1862,7 @@ async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it
     // The same fade, this time carried to its promotion.
     let mut h = harness(dir.path());
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
-    h.player.promote_crossfade(44_100 * 2 * 6);
+    h.player.promote_crossfade(SIX_SECONDS);
 
     assert!(
         crate::audio::preload::PRELOAD_STATE
@@ -1890,7 +1893,7 @@ async fn a_cancellation_promotes_a_fade_the_callback_already_finished() {
         out_eof: Arc::new(AtomicBool::new(false)),
         in_eof: Arc::new(AtomicBool::new(false)),
         done: Arc::new(std::sync::atomic::AtomicU64::new(
-            crate::player::thread::output::pack_xfade_done(1, 44_100 * 2 * 6),
+            crate::player::thread::output::pack_xfade_done(1, SIX_SECONDS),
         )),
     });
 
@@ -2034,7 +2037,7 @@ fn finished_fade_link() -> crate::player::thread::output::CrossfadeLink {
         out_eof: Arc::new(AtomicBool::new(false)),
         in_eof: Arc::new(AtomicBool::new(false)),
         done: Arc::new(std::sync::atomic::AtomicU64::new(
-            crate::player::thread::output::pack_xfade_done(1, 44_100 * 2 * 6),
+            crate::player::thread::output::pack_xfade_done(1, SIX_SECONDS),
         )),
     }
 }
@@ -2146,9 +2149,9 @@ async fn a_promotion_never_reports_a_position_past_the_incoming_duration() {
     // The clock the swapping tick left behind. Without it the fixture's outgoing
     // total is what gets clamped, and the assertion would pass on saturation instead
     // of on the overlap it means to describe.
-    h.player.played_samples.store(44_100 * 2 * 6, Relaxed);
+    h.player.played_samples.store(SIX_SECONDS, Relaxed);
 
-    h.player.promote_crossfade(44_100 * 2 * 6);
+    h.player.promote_crossfade(SIX_SECONDS);
 
     let events = h.events.lock().unwrap();
     let reported = events
@@ -2183,7 +2186,7 @@ async fn a_promotion_keeps_the_clock_the_swap_set_and_clears_the_completion_stat
     // And what the callback leaves behind: the base it set at the swap, with one
     // poll's worth of the promoted ring already on top. The fixture's outgoing total
     // is overwritten here exactly as the swapping tick overwrites it.
-    let in_played = 44_100 * 2 * 6;
+    let in_played = SIX_SECONDS;
     let after_swap = 44_100 * 2;
     h.player
         .played_samples
@@ -2225,7 +2228,7 @@ async fn a_promotion_retires_the_mirrors_that_described_the_outgoing_buffer() {
     h.player.buffer_stalled = true;
     h.player.xfade_refused_url = Some("https://example.invalid/refused".to_string());
 
-    h.player.promote_crossfade(44_100 * 2 * 6);
+    h.player.promote_crossfade(SIX_SECONDS);
 
     assert!(
         !h.player.buffer_stalled,
@@ -2261,7 +2264,7 @@ async fn a_promotion_reports_both_the_file_rate_and_the_output_rate() {
             bytes: 100,
         });
 
-    h.player.promote_crossfade(44_100 * 2 * 6);
+    h.player.promote_crossfade(SIX_SECONDS);
 
     let events = h.events.lock().unwrap();
     let found = events.iter().any(|ev| {
