@@ -318,6 +318,26 @@ fn an_absurd_declared_duration_is_refused_before_it_allocates() {
 }
 
 #[test]
+fn an_amplified_template_is_refused_although_the_count_is_small() {
+    // 40 segments, each URL over a 32nd of the ceiling: past it whatever the ceiling is.
+    let padding = "p".repeat(MAX_SEGMENT_BYTES / 32);
+    let xml = mpd(
+        r#" mediaPresentationDuration="PT40S""#,
+        &period(
+            "",
+            &format!(
+                r#"<SegmentTemplate timescale="1" initialization="init.mp4" media="{padding}seg$Number$.mp4" startNumber="1" duration="1" />"#
+            ),
+        ),
+    );
+    let err = parse_dash_mpd(&xml).expect_err("an amplified template must be refused");
+    assert!(
+        err.to_string().contains("bytes of segment urls"),
+        "the byte ceiling must be what refuses this, not the count: {err}"
+    );
+}
+
+#[test]
 fn an_absurd_repeat_count_is_refused_before_it_allocates() {
     // @r is an xs:integer with no upper facet; i64::MAX is a legal manifest value.
     let xml = mpd(

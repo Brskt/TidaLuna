@@ -33,17 +33,40 @@ pub struct DashManifest {
 /// (`dash.initialSegmentLimit`, 1000); ExoPlayer, GPAC and ffmpeg's `dashdec` cap nothing.
 const MAX_SEGMENTS: usize = 50_000;
 
-/// Emit one segment URL, refusing to go past [`MAX_SEGMENTS`].
+/// What the expansion may claim in BYTES, which the count above does not bound.
+///
+/// `$Number$` copies the whole template, whose length nothing caps, into every URL:
+/// [`MAX_SEGMENTS`] copies of a long one reach gigabytes. No invariant bounds the output; the
+/// ceiling sits far above a real manifest (a four-minute track at four-second segments is
+/// sixty URLs).
+const MAX_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Emit one segment URL, refusing to go past [`MAX_SEGMENTS`] or [`MAX_SEGMENT_BYTES`].
 ///
 /// Enforced per push rather than against a count computed up front, the count itself being
 /// the hostile value: an `@r` of `i64::MAX` has to be rejected without ever reserving for it.
 /// Refusing beats truncating, a quietly short list being the failure this parser exists to
 /// stop producing.
-fn push_segment(urls: &mut Vec<String>, media_tpl: &str, number: u64) -> Result<()> {
+///
+/// `claimed` is the running byte total of the manifest's whole output, the scope the ceiling is on.
+fn push_segment(
+    urls: &mut Vec<String>,
+    claimed: &mut usize,
+    media_tpl: &str,
+    number: u64,
+) -> Result<()> {
     if urls.len() >= MAX_SEGMENTS {
         anyhow::bail!("DASH manifest expands past {MAX_SEGMENTS} segments; refusing it");
     }
-    urls.push(media_tpl.replace("$Number$", &number.to_string()));
+    let url = media_tpl.replace("$Number$", &number.to_string());
+    let total = claimed.saturating_add(url.len());
+    if total > MAX_SEGMENT_BYTES {
+        anyhow::bail!(
+            "DASH manifest expands past {MAX_SEGMENT_BYTES} bytes of segment urls; refusing it"
+        );
+    }
+    *claimed = total;
+    urls.push(url);
     Ok(())
 }
 
@@ -206,6 +229,7 @@ pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
     let seg_duration = inherited(levels, |t| t.duration);
 
     let mut segment_urls = Vec::new();
+    let mut claimed_bytes = 0usize;
     if let Some(timeline) = seg_timeline {
         // Converting the bound once keeps every comparison below in ticks.
         let total_ticks = total_secs.map(|s| pto.saturating_add((s * timescale) as u64));
@@ -246,7 +270,7 @@ pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
                 if end_number.is_some_and(|end| number > end) {
                     break;
                 }
-                push_segment(&mut segment_urls, &media_tpl, number)?;
+                push_segment(&mut segment_urls, &mut claimed_bytes, &media_tpl, number)?;
                 offset += 1;
                 cursor = cursor.saturating_add(s.d);
             }
@@ -262,7 +286,7 @@ pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
                 if end_number.is_some_and(|end| number > end) {
                     break;
                 }
-                push_segment(&mut segment_urls, &media_tpl, number)?;
+                push_segment(&mut segment_urls, &mut claimed_bytes, &media_tpl, number)?;
             }
         }
     }
