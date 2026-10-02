@@ -7,6 +7,10 @@ use crate::player::PlaybackState;
 
 pub(crate) struct OsMediaControls {
     controls: MediaControls,
+    /// What the OS was last told by `set_metadata`, held so an unchanged announcement can be
+    /// skipped. `None` until the first one lands, and only ever written after a successful call:
+    /// a failed one leaves the OS holding something else, which the next call must correct.
+    announced: Option<(String, String, Option<Duration>)>,
 }
 
 impl OsMediaControls {
@@ -56,7 +60,12 @@ impl OsMediaControls {
         }
 
         crate::vprintln!("[MEDIA]  Initialization complete");
-        Some(Self { controls })
+        // The placeholder above is deliberately not recorded: it is not a track, and leaving the
+        // memo empty means the first real announcement always reaches the OS.
+        Some(Self {
+            controls,
+            announced: None,
+        })
     }
 
     pub fn set_playback(&mut self, state: PlaybackState) {
@@ -87,6 +96,22 @@ impl OsMediaControls {
             .filter(|d| d.is_finite() && *d > 0.0)
             .map(Duration::from_secs_f64);
 
+        // Skipped when unchanged: the page re-announces a track on every reference change, and the
+        // flush's measured-duration settle and the Connect receiver announce on their own. Guarded
+        // here, the one place that knows what the OS holds, because souvlaki's Windows backend is
+        // synchronous WinRT/COM on the CEF UI thread. The normalised duration is compared: two
+        // lengths the filter above drops are one announcement.
+        let unchanged =
+            self.announced
+                .as_ref()
+                .is_some_and(|(had_title, had_artist, had_duration)| {
+                    had_title == title && had_artist == artist && *had_duration == duration
+                });
+        if unchanged {
+            crate::vprintln3!("[MEDIA]  set_metadata: unchanged, skipped");
+            return;
+        }
+
         crate::vprintln!(
             "[MEDIA]  set_metadata: title=\"{title}\", artist=\"{artist}\", duration={duration_secs:?}"
         );
@@ -99,7 +124,10 @@ impl OsMediaControls {
             duration,
         };
         match self.controls.set_metadata(metadata) {
-            Ok(()) => crate::vprintln!("[MEDIA]  set_metadata OK"),
+            Ok(()) => {
+                self.announced = Some((title.to_owned(), artist.to_owned(), duration));
+                crate::vprintln!("[MEDIA]  set_metadata OK");
+            }
             Err(e) => crate::vprintln!("[MEDIA]  set_metadata FAILED: {e}"),
         }
     }
