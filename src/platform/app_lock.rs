@@ -3,8 +3,9 @@
 //! The first instance takes an OS lock and listens; a later launch detects it,
 //! signals the running instance to raise its window, then exits before any shared
 //! state (DB, the SDK credential LevelDB, Connect sockets, CEF) is touched. Windows
-//! uses a SID-scoped named mutex + auto-reset event; Linux an abstract AF_UNIX
-//! datagram socket (bind = lock, datagram = signal).
+//! uses a named mutex + auto-reset event in a private namespace bounded by the
+//! user's SID; Linux an abstract AF_UNIX datagram socket (bind = lock, datagram
+//! = signal).
 
 // Reaches only the focus-signal path, which exists on the platforms that have a
 // guard to signal from.
@@ -53,6 +54,14 @@ enum HandOff {
     /// datagram socket has no busy state to observe.
     #[cfg(windows)]
     Busy,
+    /// The name answered, but another account holds it. Nothing was granted or
+    /// written.
+    #[cfg(windows)]
+    ForeignServer,
+    /// The name answered, but its owner could not be read, leaving nobody to vouch
+    /// for the server.
+    #[cfg(windows)]
+    UnattributedServer,
     /// The attempt itself broke: a write that failed, or a channel we could not
     /// even open.
     Failed,
@@ -68,8 +77,44 @@ impl HandOff {
             Self::NoListener => "nothing was listening",
             #[cfg(windows)]
             Self::Busy => "the listener stayed busy",
+            #[cfg(windows)]
+            Self::ForeignServer => "another account holds the channel",
+            #[cfg(windows)]
+            Self::UnattributedServer => "the channel's owner could not be read",
             Self::Failed => "the channel failed",
         }
+    }
+}
+
+/// Whose kernel object this is, the link pipe or the legacy lock, by the owner the
+/// kernel stamped on it. A name is a first-come claim any account can make; the
+/// owner is the one fact its creator cannot forge.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq)]
+enum ObjectOwner {
+    Ours,
+    /// Another account holds the name, kept for the log line.
+    Foreign(String),
+    /// The owner could not be read.
+    Unattributed,
+}
+
+/// The owners our own token stamps on what it creates: its user, and its default
+/// owner, which is BUILTIN\Administrators when the token is elevated.
+#[cfg(any(windows, test))]
+struct OwnIdentity {
+    user: String,
+    default_owner: String,
+}
+
+/// Exact equality on both sides' `ConvertSidToStringSidW` form: a SID that merely
+/// starts like ours is another account.
+#[cfg(any(windows, test))]
+fn classify_owner(owner: Option<&str>, own: &OwnIdentity) -> ObjectOwner {
+    match owner {
+        Some(sid) if sid == own.user || sid == own.default_owner => ObjectOwner::Ours,
+        Some(sid) => ObjectOwner::Foreign(sid.to_owned()),
+        None => ObjectOwner::Unattributed,
     }
 }
 
@@ -144,13 +189,22 @@ mod windows_impl {
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, FALSE, GENERIC_WRITE, GetLastError,
-        HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0,
+        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SUCCESS,
+        FALSE, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
     };
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_ATTRIBUTES, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+        TokenOwner, TokenUser,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile, WriteFile,
+        CreateFileW, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile,
+        SECURITY_ANONYMOUS, SECURITY_SQOS_PRESENT, WriteFile,
     };
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId,
@@ -158,15 +212,28 @@ mod windows_impl {
         WaitNamedPipeW,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, GetCurrentProcess, INFINITE, OpenEventW,
-        OpenProcessToken, SetEvent, WaitForSingleObject,
+        AddSIDToBoundaryDescriptor, ClosePrivateNamespace, CreateBoundaryDescriptorW, CreateEventW,
+        CreateMutexW, CreatePrivateNamespaceW, DeleteBoundaryDescriptor, EVENT_MODIFY_STATE,
+        GetCurrentProcess, INFINITE, OpenEventW, OpenPrivateNamespaceW, OpenProcessToken, SetEvent,
+        WaitForSingleObject,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
-    use super::{AppLock, HandOff, LinkChannel, post_focus};
+    use super::{
+        AppLock, HandOff, LinkChannel, ObjectOwner, OwnIdentity, classify_owner, post_focus,
+    };
 
-    const LOCK_PREFIX: &str = "Global\\TidaLunarAppLock-";
-    const FOCUS_PREFIX: &str = "Global\\TidaLunarAppFocus-";
+    /// The namespace the lock and the focus event live in, named by its boundary:
+    /// an alias is only this process's prefix for it, and two boundaries of one
+    /// name and SID are one namespace.
+    const NAMESPACE: &str = "TidaLunarApp";
+    pub(super) const LOCK_LEAF: &str = "Lock";
+    const FOCUS_LEAF: &str = "Focus";
+    /// Names earlier builds use. Any account can claim a `Global\` name, which
+    /// rules them out as the lock. Held anyway for an earlier build launched later
+    /// to find; probed to avoid starting beside one that runs.
+    const LEGACY_LOCK_PREFIX: &str = "Global\\TidaLunarAppLock-";
+    const LEGACY_FOCUS_PREFIX: &str = "Global\\TidaLunarAppFocus-";
     /// The event carries no data; a deep link needs its own channel. Named per
     /// SID like the other two, keeping one user's links out of another's session.
     const LINK_PIPE_PREFIX: &str = "\\\\.\\pipe\\TidaLunarAppLink-";
@@ -194,20 +261,135 @@ mod windows_impl {
     /// with nothing to wait on.
     const LINK_RETRY_PAUSE_MS: u64 = 50;
 
-    /// Releases the mutex on drop; a null handle (fail-open) is a no-op.
+    /// Releases the lock on drop; a null handle (fail-open) is a no-op. Also holds
+    /// the legacy mutex and the namespace, which drops after `drop` closes both.
     pub(super) struct MutexGuard {
         handle: HANDLE,
+        legacy: HANDLE,
+        _namespace: Option<UserNamespace>,
     }
 
     impl Drop for MutexGuard {
         fn drop(&mut self) {
-            // SAFETY: handle is null (no-op) or a live CreateMutexW handle we close once.
+            // SAFETY: each handle is null (no-op) or a live CreateMutexW handle we
+            // close once.
             unsafe {
-                if !self.handle.is_null() {
-                    CloseHandle(self.handle);
+                for handle in [self.handle, self.legacy] {
+                    if !handle.is_null() {
+                        CloseHandle(handle);
+                    }
                 }
             }
         }
+    }
+
+    /// A private namespace bounded by this account's SID, open while this value
+    /// lives. No other account can create it (its token lacks the SID) nor open it
+    /// (the descriptor grants only this account and SYSTEM). One per process: a
+    /// process that holds it cannot open it again (`ERROR_DUP_NAME`).
+    pub(super) struct UserNamespace {
+        handle: HANDLE,
+        descriptor: PSECURITY_DESCRIPTOR,
+    }
+
+    impl UserNamespace {
+        /// Create-or-open. The kernel refuses a boundary naming a SID absent from
+        /// our token. The descriptor grants the same `sid`, so the two cannot
+        /// disagree. The error is the failing call's, read before any clean-up.
+        pub(super) fn open(name: &str, sid: PSID) -> Result<Self, WIN32_ERROR> {
+            // SAFETY: reads this thread's last error, each call site right after
+            // the call that failed.
+            let last_error = || unsafe { GetLastError() };
+            let sid_text = sid_string(sid).ok_or_else(last_error)?;
+            let sddl = wide(&format!("D:P(A;;GA;;;{sid_text})(A;;GA;;;SY)"));
+            let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            // SAFETY: NUL-terminated SDDL; the call allocates the descriptor, which
+            // Drop or the failure path below frees.
+            if unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(last_error());
+            }
+            let name = wide(name);
+            // SAFETY: NUL-terminated name; the boundary is deleted before returning.
+            let mut boundary = unsafe { CreateBoundaryDescriptorW(name.as_ptr(), 0) };
+            let opened = if boundary.is_null() {
+                Err(last_error())
+            } else {
+                // SAFETY: a live boundary; `sid` points into a buffer the caller
+                // keeps alive.
+                let bounded = unsafe { AddSIDToBoundaryDescriptor(&mut boundary, sid) } != 0;
+                let handle = if bounded {
+                    create_or_open(&attributes_of(descriptor), boundary, &name)
+                } else {
+                    ptr::null_mut()
+                };
+                let opened = if handle.is_null() {
+                    Err(last_error())
+                } else {
+                    Ok(handle)
+                };
+                // SAFETY: the boundary created above, deleted once.
+                unsafe { DeleteBoundaryDescriptor(boundary) };
+                opened
+            };
+            opened
+                .map(|handle| Self { handle, descriptor })
+                .inspect_err(|_| {
+                    // SAFETY: the descriptor converted above, freed once.
+                    unsafe { LocalFree(descriptor.cast()) };
+                })
+        }
+
+        /// What every object in the namespace is created with, letting the
+        /// limited and elevated halves of one account open what either made.
+        pub(super) fn attributes(&self) -> SECURITY_ATTRIBUTES {
+            attributes_of(self.descriptor)
+        }
+    }
+
+    impl Drop for UserNamespace {
+        fn drop(&mut self) {
+            // SAFETY: our handle, closed once and not destroyed, so another
+            // holder's objects stay reachable; then the descriptor we allocated.
+            unsafe {
+                ClosePrivateNamespace(self.handle, 0);
+                LocalFree(self.descriptor.cast());
+            }
+        }
+    }
+
+    fn attributes_of(descriptor: PSECURITY_DESCRIPTOR) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: FALSE,
+        }
+    }
+
+    /// One retry covers a namespace its last holder closed between our create and
+    /// our open.
+    fn create_or_open(attributes: &SECURITY_ATTRIBUTES, boundary: HANDLE, name: &[u16]) -> HANDLE {
+        for _ in 0..2 {
+            // SAFETY: the attributes, boundary and name outlive the call.
+            let created = unsafe { CreatePrivateNamespaceW(attributes, boundary, name.as_ptr()) };
+            // SAFETY: reads this thread's last error, set by the call above.
+            if !created.is_null() || unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+                return created;
+            }
+            // SAFETY: as above.
+            let opened = unsafe { OpenPrivateNamespaceW(boundary, name.as_ptr()) };
+            if !opened.is_null() {
+                return opened;
+            }
+        }
+        ptr::null_mut()
     }
 
     struct SendHandle(HANDLE);
@@ -227,49 +409,25 @@ mod windows_impl {
         }
     }
 
-    fn wide(s: &str) -> Vec<u16> {
+    pub(super) fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Per-user SID string, used to scope the lock; `None` on failure (fail open).
-    fn current_user_sid() -> Option<String> {
-        // SAFETY: token-query sequence on our own process; every handle and the SID
-        // string allocation is released on each return path.
+    /// `leaf` inside the namespace `ns`, which `UserNamespace::open` registers
+    /// under its own name as the alias.
+    pub(super) fn in_namespace(ns: &str, leaf: &str) -> Vec<u16> {
+        wide(&format!("{ns}\\{leaf}"))
+    }
+
+    /// A SID in its string form, the one both sides of an owner check compare.
+    fn sid_string(sid: PSID) -> Option<String> {
+        // SAFETY: sid points into a buffer the caller keeps alive; the string
+        // allocation is released before returning.
         unsafe {
-            let mut token: HANDLE = ptr::null_mut();
-            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-                return None;
-            }
-
-            let mut needed: u32 = 0;
-            // Sizing call: returns FALSE, we only want `needed`.
-            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
-            if needed == 0 {
-                CloseHandle(token);
-                return None;
-            }
-
-            let mut buf = vec![0u8; needed as usize];
-            let ok = GetTokenInformation(
-                token,
-                TokenUser,
-                buf.as_mut_ptr().cast(),
-                needed,
-                &mut needed,
-            );
-            CloseHandle(token);
-            if ok == 0 {
-                return None;
-            }
-
-            let token_user = buf.as_ptr().cast::<TOKEN_USER>();
-            let sid = (*token_user).User.Sid;
-
             let mut sid_str: *mut u16 = ptr::null_mut();
             if ConvertSidToStringSidW(sid, &mut sid_str) == 0 {
                 return None;
             }
-
             let mut len = 0usize;
             while *sid_str.add(len) != 0 {
                 len += 1;
@@ -282,26 +440,160 @@ mod windows_impl {
         }
     }
 
+    /// One token information class, in a buffer sized by the sizing call.
+    fn token_info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Option<Vec<u8>> {
+        let mut needed: u32 = 0;
+        // SAFETY: a live token handle; the sizing call returns FALSE, we only want `needed`.
+        unsafe { GetTokenInformation(token, class, ptr::null_mut(), 0, &mut needed) };
+        if needed == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        // SAFETY: buf holds `needed` bytes and outlives the call.
+        let ok = unsafe {
+            GetTokenInformation(token, class, buf.as_mut_ptr().cast(), needed, &mut needed)
+        };
+        (ok != 0).then_some(buf)
+    }
+
+    /// Our token, queried once: its user, whose SID bounds the namespace and scopes
+    /// every name here, and the string forms of that user and of the owner the token
+    /// stamps on what it creates. `None` on failure (fail open).
+    pub(super) fn own_identity() -> Option<(OwnIdentity, OwnUser)> {
+        let mut token: HANDLE = ptr::null_mut();
+        // SAFETY: our own process token, queried then closed once.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return None;
+        }
+        let user = token_info(token, TokenUser);
+        let owner = token_info(token, TokenOwner);
+        // SAFETY: the token handle opened above, closed once.
+        unsafe { CloseHandle(token) };
+        let user = OwnUser(user?);
+        // SAFETY: a buffer GetTokenInformation(TokenOwner) filled, alive until the
+        // conversion returns. Read unaligned: a `Vec<u8>` promises no more.
+        let default_owner = sid_string(unsafe {
+            ptr::read_unaligned(owner?.as_ptr().cast::<TOKEN_OWNER>()).Owner
+        })?;
+        let identity = OwnIdentity {
+            user: sid_string(user.sid())?,
+            default_owner,
+        };
+        Some((identity, user))
+    }
+
+    /// Our token's `TOKEN_USER`. Only `own_identity` builds one, from a buffer the
+    /// kernel filled for that class.
+    pub(super) struct OwnUser(Vec<u8>);
+
+    impl OwnUser {
+        /// The SID inside, valid while `self` lives.
+        pub(super) fn sid(&self) -> PSID {
+            // SAFETY: `own_identity` is the only constructor, and it keeps only a
+            // buffer GetTokenInformation(TokenUser) filled. Read unaligned: a
+            // `Vec<u8>` promises no more.
+            unsafe {
+                ptr::read_unaligned(self.0.as_ptr().cast::<TOKEN_USER>())
+                    .User
+                    .Sid
+            }
+        }
+    }
+
+    /// What the holder of the lock makes of the legacy name.
+    #[derive(Debug)]
+    pub(super) enum Legacy {
+        /// Held: an earlier build launched now finds this instance.
+        Held(HANDLE),
+        /// An earlier build of ours holds it; this launch hands over to it.
+        EarlierBuild,
+        /// Held by another or unreadable owner, or not openable. The lock that
+        /// matters is ours.
+        Unavailable,
+    }
+
+    /// `name` is `LEGACY_LOCK_PREFIX` plus our SID.
+    pub(super) fn legacy_lock(name: &[u16], own: &OwnIdentity) -> Legacy {
+        // SAFETY: NUL-terminated name; an owned handle or null.
+        let mutex = unsafe { CreateMutexW(ptr::null(), FALSE, name.as_ptr()) };
+        if mutex.is_null() {
+            return Legacy::Unavailable;
+        }
+        // SAFETY: a live handle.
+        let wait = unsafe { WaitForSingleObject(mutex, 0) };
+        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            return Legacy::Held(mutex);
+        }
+        // An earlier build created it with its token's default owner, which
+        // `classify_owner` already accepts.
+        let earlier = wait == WAIT_TIMEOUT
+            && classify_owner(owner_sid(mutex).as_deref(), own) == ObjectOwner::Ours;
+        // SAFETY: our handle, closed once.
+        unsafe { CloseHandle(mutex) };
+        if earlier {
+            Legacy::EarlierBuild
+        } else {
+            Legacy::Unavailable
+        }
+    }
+
+    /// The owner the kernel keeps on the object behind `handle`. Needs READ_CONTROL,
+    /// which GENERIC_WRITE carries.
+    pub(super) fn owner_sid(handle: HANDLE) -> Option<String> {
+        let mut owner: PSID = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: a live handle; the descriptor is allocated by the call.
+        let rc = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        let sid = sid_string(owner);
+        // SAFETY: the descriptor `owner` points into, freed once after the conversion.
+        unsafe { LocalFree(descriptor.cast()) };
+        sid
+    }
+
     fn disabled() -> Option<AppLock> {
         Some(AppLock {
             _mutex: MutexGuard {
                 handle: ptr::null_mut(),
+                legacy: ptr::null_mut(),
+                _namespace: None,
             },
             link: LinkChannel::NotAttempted,
         })
     }
 
     pub(super) fn acquire_or_signal(url: Option<&str>) -> Option<AppLock> {
-        let Some(sid) = current_user_sid() else {
+        let Some((own, user)) = own_identity() else {
             crate::vprintln!("[LOCK]   SID lookup failed; single-instance guard disabled");
             return disabled();
         };
-        let lock_name = wide(&format!("{LOCK_PREFIX}{sid}"));
-        let focus_name = wide(&format!("{FOCUS_PREFIX}{sid}"));
-        let pipe_name = wide(&format!("{LINK_PIPE_PREFIX}{sid}"));
+        let namespace = match UserNamespace::open(NAMESPACE, user.sid()) {
+            Ok(namespace) => namespace,
+            Err(error) => {
+                crate::vprintln!("[LOCK]   private namespace unavailable: {error}");
+                return disabled();
+            }
+        };
+        let attributes = namespace.attributes();
+        let lock_name = in_namespace(NAMESPACE, LOCK_LEAF);
+        let focus_name = in_namespace(NAMESPACE, FOCUS_LEAF);
+        let pipe_name = wide(&format!("{LINK_PIPE_PREFIX}{}", own.user));
 
         // SAFETY: lock_name is NUL-terminated UTF-16; returns an owned handle or null.
-        let mutex = unsafe { CreateMutexW(ptr::null(), FALSE, lock_name.as_ptr()) };
+        let mutex = unsafe { CreateMutexW(&attributes, FALSE, lock_name.as_ptr()) };
         if mutex.is_null() {
             crate::vprintln!("[LOCK]   CreateMutexW failed: {}", unsafe {
                 GetLastError()
@@ -312,11 +604,33 @@ mod windows_impl {
         // SAFETY: mutex is a live handle; the wait is thread-safe.
         let wait = unsafe { WaitForSingleObject(mutex, 0) };
         if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            let legacy_name = wide(&format!("{LEGACY_LOCK_PREFIX}{}", own.user));
+            let legacy_focus = wide(&format!("{LEGACY_FOCUS_PREFIX}{}", own.user));
+            let legacy = match legacy_lock(&legacy_name, &own) {
+                Legacy::Held(handle) => handle,
+                Legacy::EarlierBuild => {
+                    hand_off(url, &pipe_name, &own, &legacy_focus);
+                    // SAFETY: our own lock, closed once, so the earlier build stays
+                    // the only instance.
+                    unsafe { CloseHandle(mutex) };
+                    return None;
+                }
+                Legacy::Unavailable => ptr::null_mut(),
+            };
             // First instance: own the lock and listen for focus signals.
             // SAFETY: focus_name is NUL-terminated UTF-16; auto-reset, owned handle.
-            let event = unsafe { CreateEventW(ptr::null(), FALSE, FALSE, focus_name.as_ptr()) };
+            let event = unsafe { CreateEventW(&attributes, FALSE, FALSE, focus_name.as_ptr()) };
             if !event.is_null() {
                 spawn_focus_listener(event);
+            }
+            // The event an earlier build signals once it finds the legacy lock held.
+            if !legacy.is_null() {
+                // SAFETY: NUL-terminated name; auto-reset, owned handle.
+                let event =
+                    unsafe { CreateEventW(ptr::null(), FALSE, FALSE, legacy_focus.as_ptr()) };
+                if !event.is_null() {
+                    spawn_focus_listener(event);
+                }
             }
             // The address exists before this function returns, letting a link
             // that arrives in the next instant find something to write to.
@@ -335,12 +649,16 @@ mod windows_impl {
                 None => LinkChannel::Unavailable,
             };
             return Some(AppLock {
-                _mutex: MutexGuard { handle: mutex },
+                _mutex: MutexGuard {
+                    handle: mutex,
+                    legacy,
+                    _namespace: Some(namespace),
+                },
                 link,
             });
         }
 
-        hand_off(url, &pipe_name, &focus_name);
+        hand_off(url, &pipe_name, &own, &focus_name);
         // SAFETY: release our handle, letting the kernel reap the object on owner exit.
         unsafe { CloseHandle(mutex) };
         None
@@ -355,8 +673,8 @@ mod windows_impl {
     /// refuses a raise from a signal to a process nobody granted (the window stays
     /// behind a flashing taskbar button); a launch started by the foreground
     /// process may grant it, as Chromium's process finder does.
-    fn hand_off(url: Option<&str>, pipe_name: &[u16], focus_name: &[u16]) {
-        let pipe = match connect_link_pipe(pipe_name) {
+    fn hand_off(url: Option<&str>, pipe_name: &[u16], own: &OwnIdentity, focus_name: &[u16]) {
+        let pipe = match connect_link_pipe(pipe_name, own) {
             Ok(pipe) => {
                 grant_foreground(pipe);
                 Ok(pipe)
@@ -429,7 +747,7 @@ mod windows_impl {
     }
 
     /// One server end of the link pipe, or `None` once the name is unusable.
-    fn create_instance(pipe_name: &[u16]) -> Option<HANDLE> {
+    pub(super) fn create_instance(pipe_name: &[u16]) -> Option<HANDLE> {
         // SAFETY: pipe_name is NUL-terminated UTF-16; returns an owned handle or
         // INVALID_HANDLE_VALUE.
         let pipe = unsafe {
@@ -454,7 +772,10 @@ mod windows_impl {
     }
 
     /// The client end of the link pipe, or `None` when no free instance answers.
-    fn open_instance(pipe_name: &[u16]) -> Option<HANDLE> {
+    ///
+    /// Anonymous: whoever serves the name gets no token of ours to impersonate, even
+    /// before `connect_link_pipe` has checked who that is.
+    pub(super) fn open_instance(pipe_name: &[u16]) -> Option<HANDLE> {
         // SAFETY: pipe_name is NUL-terminated UTF-16; returns an owned handle or
         // INVALID_HANDLE_VALUE when no free server end exists.
         let pipe = unsafe {
@@ -464,7 +785,7 @@ mod windows_impl {
                 FILE_SHARE_NONE,
                 ptr::null(),
                 OPEN_EXISTING,
-                0,
+                SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS,
                 ptr::null_mut(),
             )
         };
@@ -504,12 +825,30 @@ mod windows_impl {
     /// an absent one are both transient and get the budget, anything else is
     /// answered once and reported. The previous single attempt lost the startup
     /// race outright.
-    fn connect_link_pipe(pipe_name: &[u16]) -> Result<HANDLE, HandOff> {
+    ///
+    /// The one site a client handle is born, and the handle leaves it only once the
+    /// kernel names its server as ours: nothing is granted to, or written into, a name
+    /// another account claimed first. A foreign holder is not retried, since our own
+    /// server cannot coexist with it.
+    pub(super) fn connect_link_pipe(
+        pipe_name: &[u16],
+        own: &OwnIdentity,
+    ) -> Result<HANDLE, HandOff> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(LINK_HANDOFF_BUDGET_MS);
         loop {
             if let Some(pipe) = open_instance(pipe_name) {
-                return Ok(pipe);
+                let refused = match classify_owner(owner_sid(pipe).as_deref(), own) {
+                    ObjectOwner::Ours => return Ok(pipe),
+                    ObjectOwner::Foreign(sid) => {
+                        crate::vprintln!("[LOCK]   link pipe held by {sid}, refused");
+                        HandOff::ForeignServer
+                    }
+                    ObjectOwner::Unattributed => HandOff::UnattributedServer,
+                };
+                // SAFETY: our own client end, closed once and unwritten.
+                unsafe { CloseHandle(pipe) };
+                return Err(refused);
             }
             // Why this attempt found nothing, kept only for the iteration that
             // runs out of budget.
@@ -888,3 +1227,7 @@ mod linux_impl {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../../tests/unit/platform/app_lock.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/platform/app_lock_server.rs"]
+mod server_tests;
