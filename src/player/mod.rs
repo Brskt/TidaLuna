@@ -1686,3 +1686,7 @@ mod load_state_tests;
 #[cfg(test)]
 #[path = "../../tests/unit/player/load_failure_text_tests.rs"]
 mod load_failure_text_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/player/heap_probe.rs"]
+pub(crate) mod heap_probe;

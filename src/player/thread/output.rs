@@ -160,8 +160,13 @@ pub(super) struct CrossfadeLink {
 
 impl CrossfadeLink {
     fn new() -> Self {
+        let attach = Arc::new(Mutex::new(None));
+        // Locked once here, off the audio thread. On macOS std's `Mutex` is a pthread mutex
+        // boxed on its first lock, and the first locker would otherwise be the callback's
+        // `try_lock`, allocating on the real-time thread.
+        drop(attach.lock());
         Self {
-            attach: Arc::new(Mutex::new(None)),
+            attach,
             cancel: Arc::new(AtomicBool::new(false)),
             out_eof: Arc::new(AtomicBool::new(false)),
             in_eof: Arc::new(AtomicBool::new(false)),

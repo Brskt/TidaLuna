@@ -293,6 +293,82 @@ fn the_origin_never_bleeds_into_the_generation() {
     assert_eq!(origin, 0xFFFF_FFFF_FFFF);
 }
 
+#[test]
+fn the_heap_probe_sees_an_allocation_and_its_free() {
+    // The instrument's own control: a probe that counted nothing would pass every
+    // zero-allocation test below without looking.
+    let calls = crate::player::heap_probe::heap_calls_during(|| {
+        drop(std::hint::black_box(Box::new(7u64)));
+    });
+    assert_eq!(calls, 2, "one allocation and one free, counted {calls}");
+}
+
+#[test]
+fn the_first_tick_of_a_fresh_stream_touches_no_heap() {
+    // A stream's first tick is the first thing that ever runs on its audio thread; anything
+    // created lazily and touched first here is built on the real-time path. No
+    // fade is offered: an offer would lock the link off-thread first and hide exactly that.
+    let xfade = CrossfadeLink::new();
+    let mut callback = callback_over(&xfade, 1.0, CB_FRAMES * 4);
+    let mut data = vec![0.0f32; CB_FRAMES];
+
+    let calls = crate::player::heap_probe::heap_calls_during(|| {
+        callback(&mut data, &callback_info());
+    });
+
+    assert!(peak(&data) > 0.0, "the tick never played the outgoing ring");
+    assert_eq!(
+        calls, 0,
+        "the first tick called the allocator {calls} times"
+    );
+}
+
+#[test]
+fn a_fade_from_adoption_to_swap_touches_no_heap() {
+    // The whole life of a fade inside the callback: adoption, the mix, the swap that
+    // retires the outgoing consumer. Its producer stays alive, like the parked outgoing decoder's
+    // in the pipeline: retiring it frees nothing either.
+    let xfade = CrossfadeLink::new();
+    offer_fade_sized(&xfade, 1.0, CB_FRAMES * 2, CB_FRAMES * 4);
+    let mut callback = callback_over(&xfade, 1.0, CB_FRAMES * 2);
+    xfade.out_eof.store(true, Relaxed);
+    let mut data = vec![0.0f32; CB_FRAMES];
+
+    let calls = crate::player::heap_probe::heap_calls_during(|| {
+        for _ in 0..3 {
+            callback(&mut data, &callback_info());
+        }
+    });
+
+    assert!(
+        unpack_xfade_done(xfade.done.load(Relaxed)).0 > 0,
+        "the fade never swapped inside the probed ticks"
+    );
+    assert_eq!(calls, 0, "the fade called the allocator {calls} times");
+}
+
+#[test]
+fn a_cancelled_fade_touches_no_heap_while_its_producer_lives() {
+    // The cancel drain drops the adopted slot on the audio thread. With its producer
+    // alive that drop only flags the ring; the free belongs to whichever side lets go last.
+    let xfade = CrossfadeLink::new();
+    offer_fade(&xfade, 0.0, CB_FRAMES * 2);
+    let mut callback = callback_over(&xfade, 1.0, CB_FRAMES * 4);
+    let mut data = vec![0.0f32; CB_FRAMES];
+
+    let calls = crate::player::heap_probe::heap_calls_during(|| {
+        callback(&mut data, &callback_info());
+        xfade.cancel.store(true, Relaxed);
+        callback(&mut data, &callback_info());
+    });
+
+    assert!(
+        data.iter().all(|s| (*s - 1.0).abs() < f32::EPSILON),
+        "the cancel never retired the fade"
+    );
+    assert_eq!(calls, 0, "the cancel called the allocator {calls} times");
+}
+
 const SRC_RATE: u32 = 44_100;
 const OUT_RATE: u32 = 48_000;
 const TONE_HZ: f32 = 1_000.0;
