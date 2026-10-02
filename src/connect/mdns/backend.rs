@@ -48,10 +48,6 @@ pub trait MdnsBackend: Send + Sync {
     async fn shutdown(&self, deadline: Duration) -> ShutdownOutcome;
 }
 
-// ---------------------------------------------------------------------------
-// Production backend
-// ---------------------------------------------------------------------------
-
 /// Retry budget for `Error::Again` during shutdown attempts.
 const MAX_AGAIN_RETRIES: u32 = 8;
 /// Initial backoff between `Error::Again` retries. Grows up to `MAX_BACKOFF`.
@@ -163,10 +159,6 @@ async fn probe_already_stopped(daemon: &ServiceDaemon) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test backend
-// ---------------------------------------------------------------------------
-
 /// A scripted fake backend. Pushes are consumed in order: a single fake can
 /// serve multiple shutdown() calls with different scripted outcomes.
 #[cfg(test)]
@@ -221,10 +213,6 @@ impl MdnsBackend for FakeMdnsBackend {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[path = "../../../tests/unit/connect/mdns/backend.rs"]

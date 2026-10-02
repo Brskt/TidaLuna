@@ -19,10 +19,6 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 
-// ---------------------------------------------------------------------------
-// Lifecycle state
-// ---------------------------------------------------------------------------
-
 /// Where a generation sits in its lifecycle.
 ///
 /// Currently only the terminal/non-terminal distinction is wired: `Active`
@@ -55,10 +51,6 @@ pub enum TerminationReason {
     Revoked,
 }
 
-// ---------------------------------------------------------------------------
-// Token bundle
-// ---------------------------------------------------------------------------
-
 /// Immutable snapshot of the authentication state. Stored behind an
 /// `ArcSwap`: reads are lock-free and writes are atomic.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,10 +69,6 @@ pub struct TokenState {
     pub status: GenerationStatus,
 }
 
-// ---------------------------------------------------------------------------
-// CAS errors
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum CASError {
     /// Another writer changed the state between the snapshot and the CAS.
@@ -91,10 +79,6 @@ pub enum CASError {
     /// generation is a protocol error; the caller must relogin.
     Terminated,
 }
-
-// ---------------------------------------------------------------------------
-// Store
-// ---------------------------------------------------------------------------
 
 /// Lock-free store for the current `TokenState`. All updates go through
 /// `compare_and_swap` (either directly or via a `RefreshGuard`); a
@@ -150,10 +134,6 @@ impl AuthStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Refresh guard
-// ---------------------------------------------------------------------------
-
 /// Helper that captures a snapshot at construction time and performs a CAS
 /// against that snapshot on `try_apply`. This is the pattern every refresh
 /// path should use:
@@ -188,10 +168,6 @@ impl<'a> RefreshGuard<'a> {
         self.store.compare_and_swap(&self.snapshot, new)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[path = "../../tests/unit/connect/token_state.rs"]

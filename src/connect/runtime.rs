@@ -25,10 +25,6 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-// ---------------------------------------------------------------------------
-// Task state
-// ---------------------------------------------------------------------------
-
 /// Lifecycle state of a single tracked task.
 ///
 /// Encoded as `u8` for atomic storage. Transitions are enforced through
@@ -99,10 +95,6 @@ fn try_transition(atom: &AtomicU8, to: TaskState) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Task record
-// ---------------------------------------------------------------------------
-
 struct TaskRecord {
     handle: JoinHandle<()>,
     abort: AbortHandle,
@@ -110,10 +102,6 @@ struct TaskRecord {
     /// inside the task.
     state: Arc<AtomicU8>,
 }
-
-// ---------------------------------------------------------------------------
-// Errors and report
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum SpawnError {
@@ -142,10 +130,6 @@ pub struct ShutdownReport {
     pub aborted: Vec<&'static str>,
     pub panicked: Vec<(&'static str, String)>,
 }
-
-// ---------------------------------------------------------------------------
-// TaskGroup
-// ---------------------------------------------------------------------------
 
 pub struct TaskGroup {
     tracker: TaskTracker,
@@ -275,10 +259,6 @@ impl Default for TaskGroup {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
@@ -288,10 +268,6 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
         "non-string panic payload".to_string()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[path = "../../tests/unit/connect/runtime.rs"]
