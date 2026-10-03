@@ -121,8 +121,19 @@ fn assert_no_credential(error: &str) {
 /// handler drop anything whose generation is no longer current. A mint from a parallel test
 /// would swallow the event under test and leave the poll to time out against a defect that
 /// was never there.
-async fn serialised() -> tokio::sync::MutexGuard<'static, ()> {
-    crate::audio::preload::tests::PRELOAD_TESTS.lock().await
+///
+/// `Player::load_dash` also publishes into `CURRENT_TRACK`, whose every other writer takes its
+/// fixture: taken here after `PRELOAD_TESTS`, as `state.rs` orders them, it keeps a parallel
+/// test's fade clear.
+async fn serialised() -> (
+    tokio::sync::MutexGuard<'static, ()>,
+    crate::state::current_track_fixture::CurrentTrackSlot,
+) {
+    let preload = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    (
+        preload,
+        crate::state::current_track_fixture::CurrentTrackSlot::clear(),
+    )
 }
 
 #[tokio::test]
