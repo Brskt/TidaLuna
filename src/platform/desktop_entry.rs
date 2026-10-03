@@ -14,7 +14,7 @@
 #![cfg(target_os = "linux")]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const ICON_DATA: &[u8] = include_bytes!("../../tidaluna.png");
 pub(crate) const WM_CLASS: &str = "tidalunar";
@@ -41,7 +41,7 @@ pub(crate) fn install() {
         return;
     }
 
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::state::user_home() else {
         return;
     };
     let Ok(exe) = std::env::current_exe() else {
@@ -49,14 +49,14 @@ pub(crate) fn install() {
     };
 
     if let Some(size) = parse_png_size(ICON_DATA) {
-        install_icon(&home, size);
+        install_icon(home, size);
     }
-    install_desktop_entry(&home, &exe);
+    install_desktop_entry(home, &exe);
 }
 
 /// Remove a user-level `.desktop` entry left by a prior unpackaged run.
 fn remove_stale_user_entry() {
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::state::user_home() {
         let stale = home
             .join(".local/share/applications")
             .join(format!("{WM_CLASS}.desktop"));

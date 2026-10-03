@@ -1,5 +1,5 @@
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Chromium version CEF wraps, `MAJOR.MINOR.BUILD.PATCH`. This is not the `cef` crate
@@ -196,23 +196,94 @@ pub struct PreloadedTrack {
 // shape that produced the defects) or splitting each transition from the reasoning that
 // justifies it.
 
+/// `env` when it names an absolute directory, else `fallback`'s answer when that does.
+///
+/// A relative directory is no directory at all here: it follows whatever the
+/// current directory is, and CEF refuses one outright, running its profile in
+/// memory.
+pub(crate) fn resolve_base(
+    env: Option<std::ffi::OsString>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    env.map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| fallback().filter(|dir| dir.is_absolute()))
+}
+
+/// The account's home directory, resolved once. `home_dir` reads `HOME` again,
+/// then the account database when `HOME` is unset or empty.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn user_home() -> Option<&'static Path> {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    HOME.get_or_init(|| resolve_base(std::env::var_os("HOME"), std::env::home_dir))
+        .as_deref()
+}
 pub static GOVERNOR: LazyLock<crate::audio::bandwidth::GovernorHandle> =
     LazyLock::new(crate::audio::bandwidth::spawn_governor);
 
+/// `LocalAppData` as the shell knows it, for a `LOCALAPPDATA` that is missing, empty or
+/// relative. `data_dir` reads the variable first because the data has always lived there.
+#[cfg(target_os = "windows")]
+fn known_local_app_data() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
+    };
+
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: the folder id is a static, a null token names the current user,
+    // and `raw` receives a string this function frees on either outcome, as the
+    // API requires.
+    let hr = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_LocalAppData,
+            KF_FLAG_DONT_VERIFY as u32,
+            std::ptr::null_mut(),
+            &mut raw,
+        )
+    };
+    let path = (hr >= 0 && !raw.is_null()).then(|| {
+        // SAFETY: on success `raw` is a NUL-terminated wide string the API owns
+        // until the free below.
+        let wide = unsafe {
+            let len = (0..).take_while(|&i| *raw.add(i) != 0).count();
+            std::slice::from_raw_parts(raw, len)
+        };
+        PathBuf::from(std::ffi::OsString::from_wide(wide))
+    });
+    // SAFETY: `raw` came from `SHGetKnownFolderPath`; freeing null is a no-op.
+    unsafe { CoTaskMemFree(raw.cast()) };
+    path
+}
+
+/// The folder this app keeps under each per-user base.
+const APP_DIR: &str = "tidalunar";
+
+/// Where this account's data lives, resolved once; `None` when no absolute
+/// directory can be named, and then `main` refuses to start.
+pub(crate) fn data_dir() -> Option<&'static Path> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            resolve_base(std::env::var_os("LOCALAPPDATA"), known_local_app_data)
+                .map(|base| base.join(APP_DIR))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            user_home().map(|home| home.join(".local").join("share").join(APP_DIR))
+        }
+    })
+    .as_deref()
+}
+
+/// The data directory. Every caller runs after `main` has refused to start
+/// without one; only the log sink asks earlier, through `data_dir`.
 pub fn cache_data_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(base).join("tidalunar")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(base)
-            .join(".local")
-            .join("share")
-            .join("tidalunar")
-    }
+    data_dir()
+        .expect("main refuses to start without a data directory")
+        .to_owned()
 }
 
 pub(crate) static RT_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> =
@@ -321,3 +392,7 @@ pub(crate) mod current_track_fixture {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/state_tests.rs"]
+mod state_tests;

@@ -54,6 +54,36 @@ fn attach_or_alloc_console() {
     }
 }
 
+/// Stops a launch with no absolute data directory, saying why, before any file is
+/// written.
+fn refuse_without_data_dir() -> ! {
+    #[cfg(target_os = "windows")]
+    const WHY: &str = "TidaLunar cannot find your local application data folder \
+        (LOCALAPPDATA), so it has nowhere to keep your session and settings.";
+    #[cfg(not(target_os = "windows"))]
+    const WHY: &str = "TidaLunar cannot find your home directory (HOME is unset or \
+        not an absolute path), so it has nowhere to keep your session and settings.";
+    crate::verr!("[BOOT]   {WHY}");
+    // A release build has no console: the dialog is where the user sees it.
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let text: Vec<u16> = WHY.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "TidaLunar".encode_utf16().chain(Some(0)).collect();
+        // SAFETY: both strings are NUL-terminated and outlive the call, and no
+        // owner window is named.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            )
+        };
+    }
+    std::process::exit(1);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Seed the live log level from the LOGS env var before anything can log.
     logging::init_env_floor();
@@ -143,6 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let switch = CefString::from("type");
     let is_browser = cmd_line.has_switch(Some(&switch)) != 1;
+
+    // Subprocesses inherit the environment the browser was resolved from.
+    if is_browser && state::data_dir().is_none() {
+        refuse_without_data_dir();
+    }
 
     #[cfg(target_os = "linux")]
     if is_browser {

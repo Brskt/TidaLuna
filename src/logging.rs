@@ -63,10 +63,14 @@ fn ensure_file_sink() {
     if guard.is_some() {
         return;
     }
+    // No data directory, no file: the line still reaches stderr, as `main`'s
+    // refusal does.
+    let Some(dir) = crate::state::data_dir() else {
+        return;
+    };
     // Create the data dir first: on a fresh profile this runs before main's own
     // create_dir_all, and OpenOptions won't create missing parents.
-    let dir = crate::state::cache_data_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::create_dir_all(dir);
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
