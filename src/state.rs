@@ -159,11 +159,27 @@ pub(crate) fn build_native_client(
         .expect("failed to build native HTTP client")
 }
 
-/// Build a client with a redirect policy of the caller's choosing, sharing the base tuning. Used by
-/// `plugin.download`, whose policy re-checks the host at every hop.
-pub(crate) fn build_client_with_redirect(redirect: reqwest::redirect::Policy) -> reqwest::Client {
+/// URLs one request may visit, the first included (`Attempt::previous` counts it). A redirect
+/// past the cap comes back as the 3xx response, for the caller's status check to reject.
+const MAX_REDIRECT_CHAIN: usize = 10;
+
+/// A client that re-checks `allowed` at every redirect hop and refuses with
+/// [`crate::util::Refused`]`(refusal)` the moment a hop leaves it. Checking the submitted URL alone
+/// would be bypassed by an open redirect on an allowed host. No cookie store.
+pub(crate) fn build_host_checked_client(
+    allowed: fn(&url::Url) -> bool,
+    refusal: &'static str,
+) -> reqwest::Client {
     base_client_builder()
-        .redirect(redirect)
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if !allowed(attempt.url()) {
+                return attempt.error(crate::util::Refused(refusal));
+            }
+            if attempt.previous().len() >= MAX_REDIRECT_CHAIN {
+                return attempt.stop();
+            }
+            attempt.follow()
+        }))
         .build()
         .expect("failed to build redirect-checked HTTP client")
 }

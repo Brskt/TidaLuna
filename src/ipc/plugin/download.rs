@@ -12,6 +12,7 @@
 use super::{IpcCallback, ipc_callback_err, ipc_callback_ok};
 use crate::app_state::IpcMessage;
 use crate::audio::flac_tags::{self, Picture};
+use crate::util::Refused;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use std::time::Duration;
@@ -101,15 +102,10 @@ fn redirect_allowed(url: &url::Url) -> bool {
 /// Downloads use their own client. The redirect policy stays off every other caller of
 /// `HTTP_CLIENT`.
 static DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    crate::state::build_client_with_redirect(reqwest::redirect::Policy::custom(|attempt| {
-        if !redirect_allowed(attempt.url()) {
-            return attempt.error(Refused("redirect left the allowed TIDAL hosts"));
-        }
-        if attempt.previous().len() >= 10 {
-            return attempt.stop();
-        }
-        attempt.follow()
-    }))
+    crate::state::build_host_checked_client(
+        redirect_allowed,
+        "redirect left the allowed TIDAL hosts",
+    )
 });
 
 #[derive(Deserialize)]
@@ -170,19 +166,6 @@ pub(super) fn handle_download(msg: &IpcMessage, callback: IpcCallback) {
         }
     });
 }
-
-/// A refusal this channel answers 403 with. A type, not a string match; a future refusal gets the
-/// right code without anyone remembering a list.
-#[derive(Debug)]
-struct Refused(&'static str);
-
-impl std::fmt::Display for Refused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl std::error::Error for Refused {}
 
 /// 403 for a permanent refusal, 500 for anything else. Walks the whole error chain: reqwest wraps the
 /// redirect policy's `Refused` as a source, and checking only the top answered 500 for a refusal.

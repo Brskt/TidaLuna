@@ -52,6 +52,20 @@ pub(crate) fn network_error_text(e: reqwest::Error) -> String {
     e.without_url().to_string()
 }
 
+/// A deliberate refusal as a type, not a message: a classifier finds it anywhere in an error
+/// chain, and a new refusal needs no list. `download::status_for` answers each with one status,
+/// whatever raised it.
+#[derive(Debug)]
+pub(crate) struct Refused(pub(crate) &'static str);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 /// True for a package-manager install (sets `TIDALUNAR_MANAGED_INSTALL`): read-only
 /// and self-managed. Skip the desktop self-install and the in-app updater.
 pub(crate) fn is_managed_install() -> bool {
