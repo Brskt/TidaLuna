@@ -14,6 +14,7 @@ import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
 import { refusePlayback } from "./refuse-playback";
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
+import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
 import { invokeIpc, invokeIpcAs, sendIpc, sendIpcAs, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
@@ -355,6 +356,8 @@ const init = async () => {
         });
     }
 
+    // A device TIDAL switches to while shaka is its active player never reaches the delegate.
+    followCommittedOutput(store);
     // A volume set here while TIDAL's player holds no stream (nothing played yet, the queue ended).
     followCommittedVolume(store);
 

@@ -1,6 +1,7 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
 import { setSelfLoad, isSelfLoad } from "../audio-proxy";
 import { applyVolume } from "../volume";
+import { selectDevice } from "../output-device";
 import type { AudioDevice } from "../types";
 
 export const createNativePlayerComponent = () => {
@@ -258,24 +259,7 @@ export const createNativePlayerComponent = () => {
                 sendIpc("player.recover", ...args);
             },
             releaseDevice: () => {},
-            selectDevice: (device: AudioDevice, mode: "shared" | "exclusive") => {
-                // ASIO is sticky (it has no TIDAL device mode): a TIDAL re-assert with
-                // "shared" (e.g. a track change) keeps ASIO running. But an explicit
-                // "exclusive" selection is the user switching modes; it WINS over the
-                // ASIO flag (clear it). Otherwise enabling exclusive while ASIO is on
-                // gets re-forced back to ASIO and never switches.
-                let effective: string;
-                if (mode === "exclusive") {
-                    if ((window as any).__TIDALUNAR_ASIO__ === true) {
-                        (window as any).__TIDALUNAR_ASIO__ = false;
-                        sendIpc("settings.asio", false);
-                    }
-                    effective = "exclusive";
-                } else {
-                    effective = (window as any).__TIDALUNAR_ASIO__ === true ? "asio" : "shared";
-                }
-                sendIpc("player.devices.set", device.id, effective);
-            },
+            selectDevice: (device: AudioDevice, mode: "shared" | "exclusive") => selectDevice(device.id, mode),
             selectSystemDevice: () => {
                 if ((window as any).__TIDALUNAR_ASIO__ === true) {
                     sendIpc("player.devices.set", "auto", "asio");
