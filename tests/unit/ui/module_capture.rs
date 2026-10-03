@@ -224,6 +224,16 @@ fn tap_splices_by_byte_across_multibyte_source() {
 }
 
 #[test]
+fn the_rewrite_epoch_hash_is_fnv1a_over_the_parts_joined() {
+    // The published FNV-1a 64 vector for "a": the constant is the algorithm it claims to be.
+    assert_eq!(fnv1a64(&["a"]), 0xaf63_dc4c_8601_ec8c);
+    // Parts hash as one string: splitting a file's text differently cannot move the epoch.
+    assert_eq!(fnv1a64(&["ab", "c"]), fnv1a64(&["a", "bc"]));
+    // Any byte of difference moves it, which is the whole contract with the service worker cache.
+    assert_ne!(fnv1a64(&["tap_saga_put"]), fnv1a64(&["tap_saga_pUt"]));
+}
+
+#[test]
 fn non_utf8_body_passes_through_unchanged() {
     // append_capture only handles &str; the filter's strict decode guards the
     // non-UTF-8 path, but a lone invalid byte through append_capture must not

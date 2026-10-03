@@ -10,13 +10,21 @@
     // Announced, never silent: this drops every cache the origin has, and its effect only
     // shows on the NEXT launch; a run that busts and a run that recovers are two different
     // logs. The reason travels with the call to keep one line for both callers.
+    // Resolves once the registrations and the caches are gone; null when there was nothing to
+    // bust, or it threw.
     function bust(reason) {
         try {
-            if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller || !window.caches) return;
+            if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller || !window.caches) return null;
             console.warn('[luna:heal] ' + reason + ' - dropping the service worker and its caches, the next launch refetches them');
-            navigator.serviceWorker.getRegistrations().then(function (rs) { rs.forEach(function (r) { r.unregister(); }); });
-            caches.keys().then(function (ks) { ks.forEach(function (k) { caches.delete(k); }); });
-        } catch (e) {}
+            return Promise.all([
+                navigator.serviceWorker.getRegistrations().then(function (rs) {
+                    return Promise.all(rs.map(function (r) { return r.unregister(); }));
+                }),
+                caches.keys().then(function (ks) {
+                    return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+                })
+            ]);
+        } catch (e) { return null; }
     }
 
     // 1) Stale CSP meta on a SW-served shell -> re-precache the stripped shell.
@@ -72,7 +80,30 @@
             && typeof globalThis.__lunaCreateRoot === 'function');
     }
 
-    function run() { cspHeal(); setTimeout(fallback, 35000); }
+    // 3) A rewrite changed since the worker filled its cache (`REWRITE_EPOCH`,
+    //    module_capture.rs). The epoch is recorded once the bust finished, and a failed one
+    //    retries. An uncontrolled page came from no cache: it records the epoch only on a
+    //    profile that holds none.
+    var EPOCH_KEY = '__luna_rewrite_epoch';
+    function epochHeal() {
+        try {
+            var current = self.__lunaRewriteEpoch;
+            if (!current) return;
+            var stored = localStorage.getItem(EPOCH_KEY);
+            if (stored === current) return;
+            if (!navigator.serviceWorker || !navigator.serviceWorker.controller) {
+                if (stored === null) localStorage.setItem(EPOCH_KEY, current);
+                return;
+            }
+            var done = bust('rewrites changed since the cache was filled');
+            if (done) done.then(
+                function () { localStorage.setItem(EPOCH_KEY, current); },
+                function (e) { console.warn('[luna:heal] the bust did not finish, the next launch retries it: ' + e); }
+            );
+        } catch (e) {}
+    }
+
+    function run() { cspHeal(); epochHeal(); setTimeout(fallback, 35000); }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
     else run();
 })();

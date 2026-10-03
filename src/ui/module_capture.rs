@@ -55,6 +55,34 @@ pub(crate) fn target_module_id(url: &RequestUrl) -> Option<&'static str> {
     }
 }
 
+/// Names the set of rewrites this binary applies to the assets TIDAL's service worker precaches.
+///
+/// Workbox refetches a precached chunk only when TIDAL bumps its revision, and until then the
+/// chunk keeps the shape its fetching binary gave it. `cache_heal.js` drops the worker once when
+/// this differs from the epoch the cache was filled under. Hashed from the rewriting sources
+/// below, it moves with every edit to them (a comment-only one costs a single refetch).
+pub(crate) const REWRITE_EPOCH: u64 = fnv1a64(&[
+    include_str!("module_capture.rs"),
+    include_str!("csp_filter.rs"),
+]);
+
+/// FNV-1a over the parts in order, as if they were one string.
+const fn fnv1a64(parts: &[&str]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut p = 0;
+    while p < parts.len() {
+        let bytes = parts[p].as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            hash ^= bytes[i] as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            i += 1;
+        }
+        p += 1;
+    }
+    hash
+}
+
 /// What rewrite a TIDAL chunk needs on its way to the renderer.
 #[derive(Clone, Copy)]
 pub(crate) enum ChunkRewrite {

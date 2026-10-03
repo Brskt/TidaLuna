@@ -437,11 +437,13 @@ document.title = "TidaLunar - A TIDAL client";
         document.addEventListener('DOMContentLoaded', inject);
     }}
 }})();
+self.__lunaRewriteEpoch="{rewrite_epoch:016x}";
 {cache_heal}"#,
                 ua_override = ua_override,
                 platform = platform,
                 close_to_tray = close_to_tray,
                 pkce_credentials_json = pkce_credentials_json,
+                rewrite_epoch = crate::ui::module_capture::REWRITE_EPOCH,
                 cache_heal = include_str!("early_runtime/cache_heal.js")
             );
 
