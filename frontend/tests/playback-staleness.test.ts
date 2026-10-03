@@ -4,7 +4,7 @@
 // after every suspension point. A rejection resumes the same way a resolution does, so the
 // catch has to re-check too: without it, track A's late failure acts on track B.
 
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 
 type Dispatch = { type: string; payload?: unknown };
 
@@ -56,6 +56,10 @@ beforeEach(() => {
 	rejectPbi = null;
 	resolvePbi = null;
 	(window as any).__LUNAR_CURRENT_PRODUCT_ID__ = undefined;
+});
+
+afterEach(() => {
+	state.playbackControls.playbackContext = {};
 });
 
 const contextOf = (calls: Dispatch[]) => calls.find((d) => d.type === "playbackControls/UPDATE_PLAYBACK_CONTEXT")?.payload as any;
@@ -126,4 +130,24 @@ test("a track after a video asks for its playback info and claims no video", asy
 
 	expect(pbiCalls).toEqual(["aud"]);
 	expect(contextOf(dispatched)?.actualVideoQuality).toBeNull();
+});
+
+test("a video after a track claims none of the track's audio fields", async () => {
+	// A 24/192 track followed by a video had the video announcing the track's audio fields.
+	// The previous context is SEEDED: no dispatch writes back to this store, so a track played
+	// first would leave `playbackContext` empty and the test passing whatever the code inherits.
+	state.playbackControls.playbackContext = {
+		actualAudioQuality: "HI_RES_LOSSLESS",
+		bitDepth: 24,
+		sampleRate: 192000,
+	};
+
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "vid", type: "video" });
+	await flush();
+
+	const ctx = contextOf(dispatched);
+	expect(ctx?.actualAudioQuality).toBeNull();
+	expect(ctx?.bitDepth).toBeNull();
+	expect(ctx?.sampleRate).toBeNull();
 });

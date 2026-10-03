@@ -138,7 +138,18 @@ export const createPlaybackController = () => {
                             }
 
                             const oldCtx = controls.playbackContext ?? {};
-                            const ctx = { ...oldCtx, actualProductId: productId, actualAudioQuality: actualQuality ?? oldCtx.actualAudioQuality, actualDuration: item.duration ?? oldCtx.actualDuration ?? 0, actualVideoQuality: isVideo ? VIDEO_QUALITY_UNRESOLVED : null, bitDepth: pbi?.bitDepth ?? oldCtx.bitDepth ?? null, sampleRate: pbi?.sampleRate ?? oldCtx.sampleRate ?? null };
+                            // Fields fall back to `oldCtx` until resolved, yet TIDAL's quality
+                            // menu reads them whatever the kind: a video inheriting them would
+                            // show the previous track's. Each kind sets every field.
+                            const ctx = {
+                                ...oldCtx,
+                                actualProductId: productId,
+                                actualDuration: item.duration ?? oldCtx.actualDuration ?? 0,
+                                actualVideoQuality: isVideo ? VIDEO_QUALITY_UNRESOLVED : null,
+                                actualAudioQuality: isVideo ? null : (actualQuality ?? oldCtx.actualAudioQuality),
+                                bitDepth: isVideo ? null : (pbi?.bitDepth ?? oldCtx.bitDepth ?? null),
+                                sampleRate: isVideo ? null : (pbi?.sampleRate ?? oldCtx.sampleRate ?? null),
+                            };
                             const oldMp = controls.mediaProduct ?? {};
                             const mp = { ...oldMp, productId, productType: item.type ?? "track" };
 
