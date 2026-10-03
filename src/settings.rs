@@ -8,6 +8,8 @@ const WINDOW_WIDTH: &str = "window.width";
 const WINDOW_HEIGHT: &str = "window.height";
 const WINDOW_MAXIMIZED: &str = "window.maximized";
 const WINDOW_CLOSE_TO_TRAY: &str = "window.close_to_tray";
+const PLAYER_VOLUME: &str = "player.volume";
+const PLAYER_VOLUME_UNMUTE: &str = "player.volume_unmute";
 const PLAYER_VOLUME_SYNC: &str = "player.volume_sync";
 const PLAYER_ASIO: &str = "player.asio";
 const PLAYER_EXCLUSIVE: &str = "player.exclusive";
@@ -206,6 +208,31 @@ pub(crate) fn save_asio(conn: &mut Connection, enabled: bool) {
     set(conn, PLAYER_ASIO, &enabled.to_string());
 }
 
+/// The level the output last played at and the one an unmute gives back, in percent, as
+/// `Player` keeps them for the next launch. `None` until a level was first set: the player then
+/// starts at full scale, and TIDAL's own saved level is restored when a page loads.
+pub(crate) fn load_output_level(conn: &mut Connection) -> Option<(f64, f64)> {
+    Some((
+        get_opt(conn, PLAYER_VOLUME)?,
+        get_opt(conn, PLAYER_VOLUME_UNMUTE)?,
+    ))
+}
+
+pub(crate) fn save_output_level(conn: &mut Connection, volume: f64, unmute: f64) {
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(e) => {
+            crate::vprintln!("[SETTINGS] Failed to begin transaction: {e}");
+            return;
+        }
+    };
+    set(&tx, PLAYER_VOLUME, &volume.to_string());
+    set(&tx, PLAYER_VOLUME_UNMUTE, &unmute.to_string());
+    if let Err(e) = tx.commit() {
+        crate::vprintln!("[SETTINGS] Failed to commit transaction: {e}");
+    }
+}
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn load_exclusive(conn: &mut Connection) -> bool {
     get_bool(conn, PLAYER_EXCLUSIVE, false)
@@ -384,3 +411,7 @@ mod crossfade_settings_tests;
 #[cfg(test)]
 #[path = "../tests/unit/settings/video_codec_settings_tests.rs"]
 mod video_codec_settings_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/settings/output_level_settings_tests.rs"]
+mod output_level_settings_tests;

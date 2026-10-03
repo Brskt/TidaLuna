@@ -200,6 +200,16 @@ test("a level set by an account with nothing saved is the one the next account t
 	expect({ rust: rust.volume, store: controls.volume }).toEqual({ rust: 30, store: 30 });
 });
 
+test("after a restart, the page of any account takes the level the last launch played", async () => {
+	for (const order of orders()) {
+		rust = new FakeRust();
+		rust.remote(30, 30);
+		savedBy = { bob: { mute: false, volume: 80, volumeUnmute: 80 } };
+		await load("bob", order, { sdk: true });
+		expect({ order: order.join(","), rust: rust.volume, store: controls.volume }).toEqual({ order: order.join(","), rust: 30, store: 30 });
+	}
+});
+
 test("a plugin's level on a first launch is the level the page then takes", async () => {
 	rust = new FakeRust();
 	savedBy = { alice: { mute: false, volume: 70, volumeUnmute: 70 } };

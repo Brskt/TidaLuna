@@ -6,8 +6,8 @@ export interface OutputLevelReport {
 	volume: number;
 	unmuteVolume: number;
 	mute: boolean;
-	// Someone chose this level: a page of any account, a controller, the OS mixer or a plugin.
-	// The page takes it, and TIDAL's saved level restores nothing over it.
+	// Someone chose this level: a page of any account, a controller, the OS mixer, a plugin or
+	// an earlier launch. The page takes it, and TIDAL's saved level restores nothing over it.
 	chosen: boolean;
 	// Bumped by every change, whoever made it, and by every page catching up.
 	seq: number;
@@ -94,8 +94,8 @@ export function adoptRustVolume(volume: number): void {
 //
 // TIDAL's SDK applies a level only while its active player holds a stream (not before anything
 // plays, nor after the queue ends). TIDAL still settles every local change (slider, keys, mute) in
-// the store and saves it, and Rust plays on without that stream (a Connect cast, the next track):
-// a change the SDK does not apply must still reach Rust, or it would play an older level. When
+// the store and saves it, and Rust keeps the level it plays for the next launch: a change the SDK
+// does not apply must still reach Rust, or that launch would restore an older level over it. When
 // the SDK does apply it, the forwarder drops the repeat. Rust's own reports are adopted before
 // they are dispatched, and never echo back.
 export function followCommittedVolume(store: {

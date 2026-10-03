@@ -122,17 +122,18 @@ pub(super) struct PlayerThread<F> {
     cpal_stream: Option<cpal::Stream>,
     volume: Arc<AtomicU32>, // f32 bits stored as u32
     // The app's authoritative volume (f32 bits): written by handle_set_volume on
-    // every user/echoed change, adopted from the session only at cold start (see
-    // volume_baseline_established). The sole seed source for the exclusive/ASIO
-    // digital gain, never a live GetMasterVolume() query, which can be a fresh 1.0.
+    // every user/echoed change, seeded with a restored level or else adopted from the
+    // session at cold start (see volume_baseline_established). The sole seed source for
+    // the exclusive/ASIO digital gain, never a live GetMasterVolume() query, which can
+    // be a fresh 1.0.
     #[cfg(target_os = "windows")]
     last_volume: Arc<AtomicU32>,
     // Digital gain for the exclusive WASAPI render (it bypasses the OS mixer).
     #[cfg(target_os = "windows")]
     exclusive_gain: Arc<AtomicU32>,
-    // True once a session-volume baseline has been adopted (cold start). After that
-    // we own the volume: re-inits assert last_volume into the (possibly fresh)
-    // session via SetMasterVolume instead of adopting its default-1.0 GetMasterVolume.
+    // True once a session baseline was adopted (cold start), or from the start when a level
+    // was restored. From then on, (re-)inits assert last_volume into the session rather than
+    // adopt its level.
     #[cfg(target_os = "windows")]
     volume_baseline_established: bool,
     // Decode thread
@@ -347,9 +348,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         cmd_rx: mpsc::Receiver<PlayerCommand>,
         callback: F,
         #[allow(unused_variables)] volume_sync_enabled: bool,
+        restored_level: Option<crate::player::Volume>,
         committed_track: Arc<std::sync::Mutex<Option<(String, String)>>>,
         governor: crate::audio::bandwidth::GovernorHandle,
     ) -> Option<Self> {
+        // The level an earlier launch left, full scale on a first launch.
+        let gain = restored_level.map_or(1.0, crate::player::Volume::as_gain);
         #[cfg(target_os = "windows")]
         let com_guard = match crate::platform::volume_sync::ComGuard::new() {
             Ok(g) => Some(g),
@@ -377,13 +381,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             cmd_rx,
             callback,
             cpal_stream: None,
-            volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            volume: Arc::new(AtomicU32::new(f32::to_bits(gain))),
             #[cfg(target_os = "windows")]
-            last_volume: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            last_volume: Arc::new(AtomicU32::new(f32::to_bits(gain))),
             #[cfg(target_os = "windows")]
-            exclusive_gain: Arc::new(AtomicU32::new(f32::to_bits(1.0))),
+            exclusive_gain: Arc::new(AtomicU32::new(f32::to_bits(gain))),
+            // A restored level is newer than the OS session's, which only sees the changes made
+            // while shared output synced it: it seeds the session instead of adopting it.
             #[cfg(target_os = "windows")]
-            volume_baseline_established: false,
+            volume_baseline_established: restored_level.is_some(),
             decode_cmd_tx: None,
             decode_event_rx: None,
             decode_handle: None,

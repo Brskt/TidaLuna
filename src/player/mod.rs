@@ -264,11 +264,11 @@ pub struct OutputLevel {
     audible: Volume,
     /// Bumped by every change, whoever made it, and by every page catching up with the level.
     seq: u64,
-    /// `seq` of the last change no page made (a Connect controller, the OS mixer) or of the last
-    /// page catching up, 0 before either. A page's own change leaves it
+    /// `seq` of the last change no page made (a Connect controller, the OS mixer, an earlier
+    /// launch) or of the last page catching up, 0 before either. A page's own change leaves it
     /// alone, or that page's next level, sent with an older report, would be refused.
     floor: u64,
-    /// Someone set this level: a controller, the OS mixer, a plugin or a page.
+    /// Someone set this level: an earlier launch, a controller, the OS mixer, a plugin or a page.
     /// Until then the output plays the thread's full scale, nobody's choice, and TIDAL's saved
     /// level is restored and seeds it.
     chosen: bool,
@@ -302,6 +302,18 @@ impl OutputLevel {
         floor: 0,
         chosen: false,
     };
+
+    /// The level an earlier launch left, as [`LevelStore`] saved it. Stamped as a change no page of
+    /// this launch has seen: a loading page takes it over TIDAL's, and a page level decided before
+    /// taking it in is refused, as after a controller's move.
+    fn restored(volume: Volume, audible: Volume) -> Self {
+        let mut level = Self::START;
+        if !audible.is_silent() {
+            level.audible = audible;
+        }
+        level.set(volume, LevelWriter::Remote);
+        level
+    }
 
     pub fn volume(self) -> Volume {
         self.volume
@@ -369,6 +381,41 @@ impl OutputLevel {
     fn unmute(&mut self) {
         self.volume = self.audible;
         self.stamp(LevelWriter::Remote);
+    }
+}
+
+/// Keeps [`OutputLevel`] across launches in `settings.db`, whoever set it. Written on every
+/// change: a killed launch never reaches the quit path's flush. A write still queued takes the
+/// newest level, not one write per step of a dragged slider or phone.
+struct LevelStore {
+    db: crate::db::DbActor,
+    /// The newest level no queued write has taken yet: `Some` exactly while one write is queued.
+    unsaved: std::sync::Arc<std::sync::Mutex<Option<OutputLevel>>>,
+}
+
+impl LevelStore {
+    /// Called under the `OutputLevel` lock, so levels arrive here in the order they were set.
+    fn save(&self, level: OutputLevel) {
+        if self
+            .unsaved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(level)
+            .is_some()
+        {
+            return;
+        }
+        let unsaved = std::sync::Arc::clone(&self.unsaved);
+        self.db.post(move |_, settings| {
+            let level = unsaved.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(level) = level {
+                crate::settings::save_output_level(
+                    settings,
+                    level.volume.as_percent(),
+                    level.audible.as_percent(),
+                );
+            }
+        });
     }
 }
 
@@ -644,6 +691,8 @@ pub struct Player {
     /// here, because this handle is the one place all writers pass through: the frontend's
     /// `player.volume`, a Connect receiver, and the OS mixer's reports.
     output_level: std::sync::Mutex<OutputLevel>,
+    /// `None` without a settings database, as in unit tests: the level then lasts one launch.
+    level_store: Option<LevelStore>,
     /// The one governor arbitrating this player's link between its playback and its preload.
     governor: GovernorHandle,
 }
@@ -1228,21 +1277,41 @@ impl Player {
     where
         F: Fn(PlayerEvent) + Send + 'static,
     {
+        // `DB.get()` rather than `db()`, whose accessor panics when no actor was installed, which
+        // is every unit test that builds a player.
+        Self::with_settings(callback, rt_handle, crate::state::DB.get().cloned())
+    }
+
+    pub(crate) fn with_settings<F>(
+        callback: F,
+        rt_handle: tokio::runtime::Handle,
+        settings: Option<crate::db::DbActor>,
+    ) -> anyhow::Result<Self>
+    where
+        F: Fn(PlayerEvent) + Send + 'static,
+    {
         let (cmd_tx, cmd_rx) = mpsc::channel::<PlayerCommand>();
 
-        // `DB.get()` rather than `db()`, whose accessor panics when no actor was installed, which
-        // is every unit test that builds a player. The fallback is not invented: `load_volume_sync`
-        // answers `true` for a settings row that does not exist yet, so a missing actor and a
-        // fresh install agree. Same trade `PlayerThread::new` makes for `crossfade_secs`.
+        // The fallback is not invented: `load_volume_sync` answers `true` for a settings row that
+        // does not exist yet, so a missing actor and a fresh install agree. Same trade
+        // `PlayerThread::new` makes for `crossfade_secs`.
         #[cfg(target_os = "windows")]
-        let volume_sync_enabled = crate::state::DB
-            .get()
+        let volume_sync_enabled = settings
+            .as_ref()
             .is_none_or(|db| db.call_settings(crate::settings::load_volume_sync));
         #[cfg(not(target_os = "windows"))]
         let volume_sync_enabled = true;
 
+        let restored = settings
+            .as_ref()
+            .and_then(|db| db.call_settings(crate::settings::load_output_level))
+            .map(|(volume, audible)| {
+                OutputLevel::restored(Volume::from_percent(volume), Volume::from_percent(audible))
+            });
+
         let committed_track = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
         let thread_committed = committed_track.clone();
+        let thread_level = restored.map(OutputLevel::volume);
         // On the runtime this player spawns its loads on, where the governor's task runs.
         let governor = {
             let _entered = rt_handle.enter();
@@ -1254,6 +1323,7 @@ impl Player {
                 cmd_rx,
                 callback,
                 volume_sync_enabled,
+                thread_level,
                 thread_committed,
                 thread_governor,
             ) {
@@ -1267,7 +1337,11 @@ impl Player {
             load_handle: std::sync::Mutex::new(None),
             download_cancel: std::sync::Mutex::new(None),
             committed_track,
-            output_level: std::sync::Mutex::new(OutputLevel::START),
+            output_level: std::sync::Mutex::new(restored.unwrap_or(OutputLevel::START)),
+            level_store: settings.map(|db| LevelStore {
+                db,
+                unsaved: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            }),
             governor,
         })
     }
@@ -1805,6 +1879,7 @@ impl Player {
         if !level.set_from_page(volume) {
             return Ok(());
         }
+        self.keep(*level);
         self.send_cmd(PlayerCommand::SetVolume(volume))
     }
 
@@ -1822,8 +1897,17 @@ impl Player {
         let volume = Volume::from_percent(volume);
         let mut level = self.output_level.lock().unwrap_or_else(|e| e.into_inner());
         level.set(volume, LevelWriter::Remote);
+        self.keep(*level);
         self.send_cmd(PlayerCommand::SetVolume(volume))?;
         Ok(*level)
+    }
+
+    /// Every writer of the level passes here with the lock still held, which keeps the saved
+    /// level the newest one: the next launch plays it, whoever set it.
+    fn keep(&self, level: OutputLevel) {
+        if let Some(store) = &self.level_store {
+            store.save(level);
+        }
     }
 
     /// Silences the output, or restores the last audible level it played. Returns what the
@@ -1836,6 +1920,7 @@ impl Player {
         } else {
             level.unmute();
         }
+        self.keep(*level);
         self.send_cmd(PlayerCommand::SetVolume(level.volume()))?;
         Ok(*level)
     }
@@ -1845,6 +1930,7 @@ impl Player {
     pub fn note_volume(&self, volume: f64) -> OutputLevel {
         let mut level = self.output_level.lock().unwrap_or_else(|e| e.into_inner());
         level.set(Volume::from_percent(volume), LevelWriter::Remote);
+        self.keep(*level);
         *level
     }
 

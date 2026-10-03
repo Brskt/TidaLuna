@@ -30,7 +30,7 @@ export class FakeRust {
 		return { volume: this.volume, unmuteVolume: this.unmuteVolume, mute: this.volume === 0, chosen: this.chosen, seq: this.seq };
 	}
 
-	// A Connect controller or the OS mixer.
+	// A Connect controller, the OS mixer, or the level an earlier launch left.
 	remote(volume: number, unmuteVolume: number): OutputLevelReport {
 		this.seq = ++seq;
 		this.floor = this.seq;

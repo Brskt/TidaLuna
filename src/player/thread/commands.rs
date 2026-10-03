@@ -2101,9 +2101,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         match crate::platform::volume_sync::VolumeSync::new(device_id, tx) {
             Ok(vs) => {
                 if self.volume_baseline_established {
-                    // Re-init (mode/device switch): assert our known level into the
-                    // (possibly fresh) session instead of adopting its GetMasterVolume --
-                    // a never-set session reports 1.0 by default (MS docs), which would
+                    // Re-init (mode/device switch), or a first init after a restored
+                    // level (`PlayerThread::new`): assert our known level into the
+                    // (possibly fresh) session instead of adopting its GetMasterVolume.
+                    // A never-set session reports 1.0 by default (MS docs), which would
                     // poison last_volume to full scale and blast the exclusive/ASIO gain.
                     let app_vol = f32::from_bits(self.last_volume.load(Relaxed));
                     if let Err(e) = vs.set(app_vol) {
