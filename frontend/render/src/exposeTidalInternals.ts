@@ -1,7 +1,7 @@
 // Runtime discovery of Redux store via React Fiber tree walk.
 // TIDAL uses Vite/Rollup - no webpack runtime, no module cache accessible.
 
-import { interceptors } from "./exposeTidalInternals.patchAction";
+import { interceptors, putInterceptors } from "./exposeTidalInternals.patchAction";
 
 // Best-effort module registry. Empty under Vite/Rollup - no module cache accessible.
 export const tidalModules: Record<string, object> = {};
@@ -94,7 +94,8 @@ const NON_BLOCKING_NAV: ReadonlySet<string> = new Set([
 	"playQueue/MOVE_PREVIOUS",
 ]);
 
-// Run one registry's interceptors over an action; true when one cancelled it.
+// Run one registry's interceptors over an action; true when one cancelled it. Shared by the
+// dispatch rail and the saga-put tap, so a cancel means the same on both.
 function runInterceptors(interceptorSet: Set<Function> | undefined, action: any): boolean {
 	if (!(interceptorSet?.size > 0)) return false;
 	const payload = action.payload !== undefined ? action.payload : action;
@@ -121,6 +122,32 @@ function patchDispatch(store: any): void {
 		if (action && action.type && runInterceptors(interceptors[action.type], action)) return { type: "NOOP" };
 		return originalDispatch(action);
 	};
+}
+
+// A saga's `put` reaches the store through the closure `applyMiddleware` hands each middleware,
+// never through the `dispatch` `patchDispatch` wraps. The Rust filter routes redux-saga's PUT
+// runner through a slot the early runtime pinned (`saga_put.js`); this installs the handler
+// behind it. It runs its own registry, `putInterceptors`: TIDAL's sagas put types its components
+// also dispatch, and some bridge `interceptors` send to Rust unguarded (SEEK, a self-load's PLAY).
+// A cancelled put answers `NOOP` and stays out of the store and every other saga's `take`, which
+// then never resumes.
+function installSagaPutTap(): void {
+	const install = (globalThis as any).__lunaSagaPutInstall;
+	if (typeof install !== "function") {
+		console.warn("[luna:redux] no saga put slot: the early runtime did not run here; saga-put interceptors are inert");
+		return;
+	}
+	const taken = install((action: any, dispatch: (action: any) => any) => {
+		if (action && action.type && runInterceptors(putInterceptors[action.type], action)) return { type: "NOOP" };
+		return dispatch(action);
+	});
+	if (!taken) {
+		console.warn("[luna:redux] saga put slot already taken; saga-put interceptors are inert");
+		return;
+	}
+	if (!(globalThis as any).__lunaSagaPutSeen()) {
+		console.warn("[luna:redux] no saga put has reached the tap: the store chunk rewrite did not match; saga-put interceptors are inert");
+	}
 }
 
 // TIDAL config constants (API keys, URLs, feature values) are scope-hoisted bundle
@@ -175,6 +202,7 @@ export async function initTidalInternals(): Promise<{ reduxStore: any }> {
 	}
 
 	patchDispatch(reduxStore);
+	installSagaPutTap();
 	exposeStateSlicesToModules(reduxStore);
 	publishLunarPlayer();
 

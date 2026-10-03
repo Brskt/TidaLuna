@@ -2,7 +2,7 @@
 // Re-exports all upstream APIs. Initialization is deferred via initCore().
 
 export { tidalModules, initTidalInternals, seedTidalConfig } from "./exposeTidalInternals";
-export { buildActions, interceptors } from "./exposeTidalInternals.patchAction";
+export { buildActions, interceptors, putInterceptors } from "./exposeTidalInternals.patchAction";
 
 export * as ftch from "./helpers/fetch";
 export { BoundedCache } from "./helpers/BoundedCache";

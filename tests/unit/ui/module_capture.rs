@@ -174,6 +174,56 @@ fn tag_splices_by_byte_across_multibyte_source() {
 }
 
 #[test]
+fn classifies_the_store_chunk_for_the_saga_tap() {
+    let u = |s: &str| RequestUrl::new(s.to_string());
+    assert!(matches!(
+        chunk_rewrite(&u("https://desktop.tidal.com/assets/store-DoF6ExYq.js")),
+        Some(ChunkRewrite::TapSagaPut)
+    ));
+    assert!(chunk_rewrite(&u("https://resources.tidal.com/assets/store-x.js")).is_none());
+}
+
+#[test]
+fn taps_the_put_runner_and_nothing_else() {
+    // redux-saga's PUT runner as captured from TIDAL's bundle, verbatim.
+    let src = "function Np(e,t,n){var r=t.channel,i=t.action,a=t.resolve;cp(function(){var t;\
+               try{t=(r?r.put:e.dispatch)(i)}catch(e){n(e,!0);return}a&&wd(t)?Op(t,n):n(t)})}";
+    let out = tap_saga_put(src);
+    assert!(out.contains(
+        "t=(r?r.put:(__lunaPutAction=>globalThis.__lunaSagaPut\
+         ?globalThis.__lunaSagaPut(__lunaPutAction,e.dispatch)\
+         :(0,e.dispatch)(__lunaPutAction)))(i)}catch(e)"
+    ));
+    assert_eq!(out.matches("__lunaSagaPut(").count(), 1);
+    assert!(out.starts_with("function Np(e,t,n){"));
+}
+
+#[test]
+fn tap_leaves_lookalikes_untouched() {
+    for src in [
+        // Two different channels: not the pick.
+        "t=(r?s.put:e.dispatch)(i)",
+        // The pick, never called.
+        "t=(r?r.put:e.dispatch);",
+        // Another property after the colon.
+        "t=(r?r.put:e.getState)(i)",
+        // An object literal key.
+        "var o={put:1,x:2};o.put:0",
+        "console.log(1);",
+    ] {
+        assert_eq!(tap_saga_put(src), src, "must not tap: {src}");
+    }
+}
+
+#[test]
+fn tap_splices_by_byte_across_multibyte_source() {
+    let src = "const s=\"héllo 日本語\";t=(r?r.put:e.dispatch)(i);";
+    let out = tap_saga_put(src);
+    assert!(out.contains("héllo 日本語"));
+    assert!(out.contains("(0,e.dispatch)(__lunaPutAction)))(i);"));
+}
+
+#[test]
 fn non_utf8_body_passes_through_unchanged() {
     // append_capture only handles &str; the filter's strict decode guards the
     // non-UTF-8 path, but a lone invalid byte through append_capture must not

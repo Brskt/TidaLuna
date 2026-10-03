@@ -49,6 +49,7 @@ wrap_render_process_handler! {
                             authHosts:[\"{login}\",\"{auth}\"]\
                         }};\
                         {host_modules}\
+                        {saga_put}\
                         {ipc}\
                         {token}\
                         {fetch}\
@@ -64,6 +65,7 @@ wrap_render_process_handler! {
                         api = nav::HOST_API,
                         redirect = nav::REDIRECT_URI,
                         host_modules = include_str!("early_runtime/host_modules.js"),
+                        saga_put = include_str!("early_runtime/saga_put.js"),
                         ipc = include_str!("early_runtime/ipc.js"),
                         token = include_str!("early_runtime/token_capture.js"),
                         fetch = include_str!("early_runtime/fetch_proxy.js"),

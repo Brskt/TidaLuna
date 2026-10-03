@@ -13,25 +13,37 @@ export type LunaInterceptors = {
 	[K in ActionType]?: Set<InterceptCallback<K>>;
 };
 
-import { interceptors, type LunaUnload, type LunaUnloads } from "@luna/core";
+import { interceptors, putInterceptors, type LunaUnload, type LunaUnloads } from "@luna/core";
+
+export type InterceptOptions = {
+	once?: boolean;
+	/**
+	 * Also see the action when a TIDAL saga `put`s it, which never goes through the hooked `dispatch`.
+	 * Off by default: TIDAL both puts and dispatches some types (PLAY, SEEK, SET_VOLUME), and this
+	 * would see each of those twice.
+	 */
+	sagaPuts?: boolean;
+};
 
 /**
  * Intercept a Redux action based on its `type`
  * @param actionType The ActionKey to intercept
  * @param cb Called when action is intercepted with action args, if returning true action is not dispatched (cancelled)
  * @param unloads Set of unload functions to add this to, can be null but only pass if you know what your doing
- * @param once If set true only intercepts once
+ * @param options `true` for once, or an {@link InterceptOptions}
  * @returns Function to call to unload/cancel the intercept
  */
-export function intercept<T extends ActionType>(actionType: T, unloads: LunaUnloads, cb: InterceptCallback<T>, once?: boolean): LunaUnload;
-export function intercept<T extends ActionType[]>(actionType: T, unloads: LunaUnloads, cb: InterceptCallback<T>, once?: boolean): LunaUnload;
+export function intercept<T extends ActionType>(actionType: T, unloads: LunaUnloads, cb: InterceptCallback<T>, options?: boolean | InterceptOptions): LunaUnload;
+export function intercept<T extends ActionType[]>(actionType: T, unloads: LunaUnloads, cb: InterceptCallback<T>, options?: boolean | InterceptOptions): LunaUnload;
 export function intercept<T extends ActionType | ActionType[]>(
 	actionTypes: T,
 	unloads: LunaUnloads,
 	cb: InterceptCallback<T>,
-	once?: boolean,
+	options?: boolean | InterceptOptions,
 ): LunaUnload {
 	const actionTypeArray: ActionType[] = Array.isArray(actionTypes) ? actionTypes : [actionTypes];
+	const once = typeof options === "boolean" ? options : options?.once;
+	const registries = typeof options === "object" && options.sagaPuts ? [interceptors, putInterceptors] : [interceptors];
 
 	// If once is true then call unIntercept immediately to only run once
 	const intercept = once
@@ -43,10 +55,12 @@ export function intercept<T extends ActionType | ActionType[]>(
 
 	// Wrap removing the callback from the interceptors in a unload function and return it
 	const unIntercept = () => {
-		for (const actionType of actionTypeArray) {
-			// ?. so that it doesn't throw if the interceptor was already removed
-			interceptors[actionType]?.delete(intercept);
-			if (interceptors[actionType]?.size === 0) delete interceptors[actionType];
+		for (const registry of registries) {
+			for (const actionType of actionTypeArray) {
+				// ?. so that it doesn't throw if the interceptor was already removed
+				registry[actionType]?.delete(intercept);
+				if (registry[actionType]?.size === 0) delete registry[actionType];
+			}
 		}
 		// And leaves the caller's set, the way `registerEmitter`'s own unload does: an intercept
 		// already removed has nothing left to undo, and that set is the plugin's own, drained
@@ -55,9 +69,11 @@ export function intercept<T extends ActionType | ActionType[]>(
 	};
 	unIntercept.source = `intercept${JSON.stringify(actionTypeArray)}`;
 
-	for (const actionType of actionTypeArray) {
-		interceptors[actionType] ??= new Set<InterceptCallback<T>>();
-		interceptors[actionType].add(intercept);
+	for (const registry of registries) {
+		for (const actionType of actionTypeArray) {
+			registry[actionType] ??= new Set<InterceptCallback<T>>();
+			registry[actionType].add(intercept);
+		}
 	}
 
 	unloads?.add(unIntercept);

@@ -13,6 +13,9 @@
 //! assignment itself makes evaluating the chunk bind the host's own root factory
 //! to a global (`tag_create_root`). Both rewrites are no-ops when their pattern
 //! is absent, and the renderer degrades on its own from there.
+//!
+//! `tap_saga_put` reaches what no export carries either, the one path a saga's `put` takes
+//! to the store. It is a no-op on a miss too.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -59,18 +62,25 @@ pub(crate) enum ChunkRewrite {
     Capture(&'static str),
     /// Entry chunk: tag the `createRoot` assignment, which no export carries.
     TagCreateRoot,
+    /// Vendored redux-saga: route its PUT runner through the host's tap.
+    TapSagaPut,
 }
 
 /// Classify a TIDAL asset URL, or `None` when the chunk is left untouched. The
 /// React-family names are tried first; `index-` is Vite's entry chunk, the only
-/// one that assigns `createRoot`.
+/// one that assigns `createRoot`, and `store-` the one that vendors redux-saga.
 pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
     if let Some(id) = target_module_id(url) {
         return Some(ChunkRewrite::Capture(id));
     }
-    asset_name(url)?
-        .starts_with("index-")
-        .then_some(ChunkRewrite::TagCreateRoot)
+    let name = asset_name(url)?;
+    if name.starts_with("index-") {
+        Some(ChunkRewrite::TagCreateRoot)
+    } else if name.starts_with("store-") {
+        Some(ChunkRewrite::TapSagaPut)
+    } else {
+        None
+    }
 }
 
 /// Append `globalThis.__LUNA_CAP(id, { <export>: <local>, ... })` capturing every
@@ -209,6 +219,83 @@ pub(crate) fn tag_create_root(js: &str) -> String {
     js.to_string()
 }
 
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Start of the identifier ending at `end` (`end` itself when there is none).
+fn ident_start(bytes: &[u8], end: usize) -> usize {
+    let mut start = end;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    start
+}
+
+/// End of the identifier starting at `start` (`start` itself when there is none).
+fn ident_end(bytes: &[u8], start: usize) -> usize {
+    let mut end = start;
+    while end < bytes.len() && is_ident_byte(bytes[end]) {
+        end += 1;
+    }
+    end
+}
+
+/// Route redux-saga's PUT effect through `globalThis.__lunaSagaPut` (why: `installSagaPutTap`,
+/// exposeTidalInternals.ts).
+///
+/// The runner is library code, `(r?r.put:e.dispatch)(i)`: the minifier renames its locals but
+/// not `.put` or `.dispatch`. Only the store arm is wrapped (a channel put is no store action),
+/// called unbound as the pick called it. The first match is taken; `js` comes back unchanged
+/// when there is none, and the host warns once no put ever arrived.
+pub(crate) fn tap_saga_put(js: &str) -> String {
+    const NEEDLE: &str = ".put:";
+    const CALL: &str = ".dispatch)(";
+    let bytes = js.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = js[from..].find(NEEDLE) {
+        let put = from + rel;
+        from = put + NEEDLE.len();
+        // `(` channel `?` channel `.put:`, both channels the same name.
+        let chan_start = ident_start(bytes, put);
+        if chan_start == put || chan_start < 2 || bytes[chan_start - 1] != b'?' {
+            continue;
+        }
+        let test_end = chan_start - 1;
+        let test_start = ident_start(bytes, test_end);
+        if test_start == test_end || test_start == 0 || bytes[test_start - 1] != b'(' {
+            continue;
+        }
+        if bytes[test_start..test_end] != bytes[chan_start..put] {
+            continue;
+        }
+        // `env` `.dispatch)(` action `)`.
+        let env_end = ident_end(bytes, from);
+        if env_end == from || !js[env_end..].starts_with(CALL) {
+            continue;
+        }
+        let action_start = env_end + CALL.len();
+        let action_end = ident_end(bytes, action_start);
+        if action_end == action_start || bytes.get(action_end) != Some(&b')') {
+            continue;
+        }
+        let chan = &js[chan_start..put];
+        let env = &js[from..env_end];
+        let action = &js[action_start..action_end];
+        let tapped = format!(
+            "({chan}?{chan}.put:(__lunaPutAction=>globalThis.__lunaSagaPut\
+             ?globalThis.__lunaSagaPut(__lunaPutAction,{env}.dispatch)\
+             :(0,{env}.dispatch)(__lunaPutAction)))({action})"
+        );
+        let mut out = String::with_capacity(js.len() + tapped.len());
+        out.push_str(&js[..test_start - 1]);
+        out.push_str(&tapped);
+        out.push_str(&js[action_end + 1..]);
+        return out;
+    }
+    js.to_string()
+}
+
 wrap_resource_request_handler! {
     pub(crate) struct CaptureRequestHandler;
 
@@ -251,11 +338,12 @@ wrap_resource_request_handler! {
                     .unwrap_or_default(),
             );
             let rewrite = chunk_rewrite(&url)?;
-            // The entry chunk is megabytes where a React chunk is kilobytes. This
-            // only sizes the first allocation: the buffer itself grows unbounded.
+            // The entry chunk is megabytes and a captured chunk kilobytes, the redux-saga one in
+            // between. This only sizes the first allocation: the buffer itself grows unbounded.
             let capacity = match rewrite {
                 ChunkRewrite::Capture(_) => 128 * 1024,
                 ChunkRewrite::TagCreateRoot => 2 * 1024 * 1024,
+                ChunkRewrite::TapSagaPut => 256 * 1024,
             };
             Some(new_buffering_filter(
                 capacity,
@@ -264,6 +352,7 @@ wrap_resource_request_handler! {
                         Ok(js) => match rewrite {
                             ChunkRewrite::Capture(id) => append_capture(js, id).into_bytes(),
                             ChunkRewrite::TagCreateRoot => tag_create_root(js).into_bytes(),
+                            ChunkRewrite::TapSagaPut => tap_saga_put(js).into_bytes(),
                         },
                         Err(_) => body,
                     })
