@@ -112,6 +112,18 @@ export interface MediaProduct {
 }
 // #endregion
 
+// #region Router
+// react-router's `To` and the navigate options its data router reads: TIDAL's router sagas pass both through untouched
+export type RouterTo = string | { pathname?: string; search?: string; hash?: string };
+export interface RouterNavigateOptions {
+	flushSync?: boolean;
+	preventScrollReset?: boolean;
+	relative?: "route" | "path";
+	replace?: boolean;
+	state?: unknown;
+}
+// #endregion
+
 export * from "./actionTypes";
 export interface ActionPayloads {
 	ADD_ARTISTS_TO_CATEGORY: {
@@ -1407,12 +1419,10 @@ export interface ActionPayloads {
 	// #region router
 	"router/GO_BACK": unknown;
 	"router/GO_FORWARD": unknown;
+	// A number is a history delta, which is how GO_BACK and GO_FORWARD arrive here
 	"router/NAVIGATE": {
-		to: {
-			pathname: string;
-			search: string;
-			replace: true;
-		};
+		options?: RouterNavigateOptions;
+		to: RouterTo | number;
 	};
 	"router/NAVIGATED": {
 		params: unknown;
@@ -1423,12 +1433,8 @@ export interface ActionPayloads {
 		openInNewWindow: boolean;
 		url: string;
 	};
-	"router/PUSH": {
-		pathname: string;
-		search: string;
-		replace: boolean;
-	};
-	"router/REPLACE": void;
+	"router/PUSH": RouterTo;
+	"router/REPLACE": RouterTo;
 	// #endregion
 
 	// #region search
