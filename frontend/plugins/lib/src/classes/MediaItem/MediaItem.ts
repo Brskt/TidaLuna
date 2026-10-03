@@ -73,9 +73,13 @@ export class MediaItem extends ContentBase {
 		// Through the same gate as a direct fetch: this dispatch makes TIDAL fetch on our
 		// behalf: it spends from the same budget rather than slipping past it.
 		await TidalApi.rateGate.pass();
+		// `failSilently` is TIDAL's switch for a load nobody watches: its API-error saga skips the
+		// missing-item toast (TIDAL passes it for its own playlist loads). The failure still lands
+		// as `LOAD_SINGLE_MEDIA_ITEM_FAIL`.
 		redux.actions["content/LOAD_SINGLE_MEDIA_ITEM"]({
 			id: itemId,
 			itemType: contentType,
+			fetchOptions: { failSilently: true },
 		});
 		const mediaItem = await redux.awaitStoreValue((state) => state.content.mediaItems[itemId as keyof redux.Content["mediaItems"]], unloads);
 		if (mediaItem !== undefined) return mediaItem;
