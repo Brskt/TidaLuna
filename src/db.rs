@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread::ThreadId;
+use std::sync::{Arc, mpsc};
+use std::thread::{JoinHandle, ThreadId};
 
 type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static>;
 
@@ -13,12 +13,36 @@ pub(crate) const QUEUE_CAPACITY: usize = 64;
 /// All SQLite operations go through [`call`](DbActor::call), which sends a
 /// closure to the dedicated thread and blocks until the result is ready.
 ///
-/// `DbActor` is `Clone + Send + Sync` - it only holds a channel sender and
-/// the actor thread ID (for re-entrancy detection).
+/// `DbActor` is `Clone + Send + Sync`: a channel sender, and the actor thread every clone shares.
 #[derive(Clone)]
 pub(crate) struct DbActor {
     tx: mpsc::SyncSender<BoxedFn>,
-    actor_thread_id: ThreadId,
+    // Declared after `tx`, which drops first: the join would otherwise wait on a loop this
+    // sender keeps open.
+    actor: Arc<ActorThread>,
+}
+
+/// The actor thread, joined when the last handle drops. Dropping the last one then means both
+/// connections are closed: the last close of a WAL database holds an exclusive lock while it
+/// checkpoints, and a reopen of the same files during that cleanup fails with `SQLITE_BUSY`
+/// (https://www.sqlite.org/wal.html, "Sometimes Queries Return SQLITE_BUSY In WAL Mode").
+struct ActorThread {
+    /// For re-entrancy detection: a call from this thread would wait on its own reply.
+    id: ThreadId,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for ActorThread {
+    fn drop(&mut self) {
+        // A closure on the actor thread may hold the last clone; joining there waits on itself.
+        if std::thread::current().id() == self.id {
+            return;
+        }
+        if let Some(handle) = self.handle.take() {
+            // A panicking closure already reported itself through the panic hook.
+            let _ = handle.join();
+        }
+    }
 }
 
 impl DbActor {
@@ -28,13 +52,12 @@ impl DbActor {
     /// Returns once both connections are open and schema is initialized.
     pub fn open(data_dir: &Path) -> rusqlite::Result<Self> {
         let (tx, rx) = mpsc::sync_channel::<BoxedFn>(QUEUE_CAPACITY);
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<ThreadId, rusqlite::Error>>(0);
+        let (init_tx, init_rx) = mpsc::sync_channel::<rusqlite::Result<()>>(0);
         let data_dir = data_dir.to_owned();
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("db-actor".into())
             .spawn(move || {
-                let thread_id = std::thread::current().id();
                 let result = (|| -> rusqlite::Result<(Connection, Connection)> {
                     let mut plugins_conn = Connection::open(data_dir.join("plugins.db"))?;
                     let mut settings_conn = Connection::open(data_dir.join("settings.db"))?;
@@ -45,7 +68,7 @@ impl DbActor {
 
                 let (mut plugins_conn, mut settings_conn) = match result {
                     Ok(conns) => {
-                        let _ = init_tx.send(Ok(thread_id));
+                        let _ = init_tx.send(Ok(()));
                         conns
                     }
                     Err(e) => {
@@ -60,11 +83,13 @@ impl DbActor {
             })
             .expect("failed to spawn db-actor thread");
 
-        let actor_thread_id = init_rx.recv().expect("db-actor init channel closed")?;
-        Ok(Self {
-            tx,
-            actor_thread_id,
-        })
+        // A failed open joins too: its half-open connections close before the error returns.
+        let actor = Arc::new(ActorThread {
+            id: handle.thread().id(),
+            handle: Some(handle),
+        });
+        init_rx.recv().expect("db-actor init channel closed")?;
+        Ok(Self { tx, actor })
     }
 
     /// Execute a closure on the database actor thread with both connections.
@@ -81,7 +106,7 @@ impl DbActor {
         R: Send + 'static,
     {
         assert!(
-            std::thread::current().id() != self.actor_thread_id,
+            std::thread::current().id() != self.actor.id,
             "DbActor::call() invoked from the db-actor thread - this would deadlock"
         );
         let (resp_tx, resp_rx) = mpsc::sync_channel::<R>(0);
@@ -121,7 +146,7 @@ impl DbActor {
     /// Panics if called from the db-actor thread itself, which would wait on its own reply.
     pub fn flush(&self) {
         assert!(
-            std::thread::current().id() != self.actor_thread_id,
+            std::thread::current().id() != self.actor.id,
             "DbActor::flush() invoked from the db-actor thread - this would deadlock"
         );
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
