@@ -86,8 +86,8 @@ pub static CURRENT_METADATA: LazyLock<Arc<Mutex<Option<TrackMetadata>>>> =
 /// cancelling its download. One slot makes the pair coherent by construction.
 ///
 /// `load_gen` is what this slot's own publication was stamped with, never what a later reader
-/// happens to see. The generation being monotone, "still equal to the stamp" is strictly stronger
-/// than "equal to whatever was read a moment ago".
+/// happens to see: "still equal to the stamp" means nothing minted since, which "equal to
+/// whatever was read a moment ago" cannot say.
 ///
 /// It stays out of `TrackInfo`, whose hand-written `PartialEq` already has to exclude
 /// `product_id`: a second excluded field, in the struct whose equality decides every preload hit,
@@ -98,8 +98,75 @@ pub struct RetainedTrack {
     pub load_gen: u32,
 }
 
-pub static CURRENT_TRACK: LazyLock<Arc<Mutex<Option<RetainedTrack>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(None)));
+/// Which load last published the listener's source. Compared for equality only: generations
+/// wrap.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Publication(u32);
+
+/// What a promotion did with the slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[must_use]
+pub enum PromotionVerdict {
+    /// Nothing was published since the fade armed: the promoted track is the source now.
+    Published,
+    /// A load published after the fade armed. It owns the slot, and whoever asked for it has
+    /// already left the track this fade was leaving.
+    Superseded,
+}
+
+/// The source the listener's pipeline plays or is being loaded onto, stamped with the load that
+/// published it. The stamp exists for the absence too: two DASH loads publish two absences, and
+/// only the stamp tells the newer one from the one a fade armed over.
+#[derive(Debug)]
+pub struct CurrentSource {
+    retained: Option<RetainedTrack>,
+    published: Publication,
+}
+
+impl CurrentSource {
+    const fn new() -> Self {
+        Self {
+            retained: None,
+            published: Publication(0),
+        }
+    }
+
+    pub fn retained(&self) -> Option<&RetainedTrack> {
+        self.retained.as_ref()
+    }
+
+    /// In place only: a credential refresh re-signs the source without replacing it.
+    pub fn retained_mut(&mut self) -> Option<&mut RetainedTrack> {
+        self.retained.as_mut()
+    }
+
+    pub fn publication(&self) -> Publication {
+        self.published
+    }
+
+    /// A load's publication, `None` for a source no replay can rebuild.
+    pub fn publish_load(&mut self, load_gen: u32, track: Option<TrackInfo>) {
+        self.retained = track.map(|track| RetainedTrack { track, load_gen });
+        self.published = Publication(load_gen);
+    }
+
+    /// A promotion replaces the source only if nothing was published since its fade armed. It
+    /// mints nothing and keeps the stamp: it is not a load.
+    pub fn publish_promotion(
+        &mut self,
+        next: &RetainedTrack,
+        armed_over: Publication,
+    ) -> PromotionVerdict {
+        if self.published != armed_over {
+            return PromotionVerdict::Superseded;
+        }
+        self.retained = Some(next.clone());
+        PromotionVerdict::Published
+    }
+}
+
+pub static CURRENT_TRACK: LazyLock<Arc<Mutex<CurrentSource>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(CurrentSource::new())));
 
 /// Shared client tuning (UA, timeouts, pooling, HTTP/2, TLS) minus the cookie
 /// configuration, which the global and per-plugin clients set differently.
@@ -375,9 +442,7 @@ pub(crate) mod current_track_fixture {
     static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Lock ORDER where a test holds both: `PRELOAD_TESTS` first, this one second. Taking
-    /// them the other way round in a future test deadlocks against
-    /// `a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it`, the one
-    /// test that holds both today.
+    /// them the other way round deadlocks against every test that already holds both.
     pub(crate) struct CurrentTrackSlot {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -390,7 +455,7 @@ pub(crate) mod current_track_fixture {
             };
             *super::CURRENT_TRACK
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+                .unwrap_or_else(|e| e.into_inner()) = super::CurrentSource::new();
             slot
         }
 
@@ -400,9 +465,10 @@ pub(crate) mod current_track_fixture {
             let slot = Self {
                 _lock: SLOT.lock().unwrap_or_else(|e| e.into_inner()),
             };
-            *super::CURRENT_TRACK
+            super::CURRENT_TRACK
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(retained);
+                .unwrap_or_else(|e| e.into_inner())
+                .publish_load(retained.load_gen, Some(retained.track));
             slot
         }
     }
@@ -413,7 +479,7 @@ pub(crate) mod current_track_fixture {
         fn drop(&mut self) {
             *super::CURRENT_TRACK
                 .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+                .unwrap_or_else(|e| e.into_inner()) = super::CurrentSource::new();
         }
     }
 }

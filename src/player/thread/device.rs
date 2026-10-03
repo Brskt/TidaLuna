@@ -92,6 +92,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 && crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
+                    .retained()
                     .is_none()
             {
                 crate::vprintln!("[AUDIO] Device switch skipped: non-replayable source active");
@@ -158,6 +159,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let replayable = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
+                    .retained()
                     .is_some();
                 if self.has_track && !replayable {
                     crate::vprintln!("[AUDIO] ASIO switch skipped: non-replayable source active");
@@ -230,7 +232,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     let retained = crate::state::CURRENT_TRACK
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .clone();
+                        .retained()
+                        .cloned();
                     if let Some(retained) = retained {
                         (self.callback)(PlayerEvent::ReplayRequest {
                             track: retained.track,
@@ -274,7 +277,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .clone();
+                    .retained()
+                    .cloned();
                 crate::vprintln!("[AUDIO] Switched to ASIO output");
                 if let Some(retained) = retained {
                     (self.callback)(PlayerEvent::ReplayRequest {
@@ -306,6 +310,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let replayable = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
+                    .retained()
                     .is_some();
                 if self.has_track && !replayable {
                     crate::vprintln!(
@@ -389,7 +394,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .clone();
+                    .retained()
+                    .cloned();
                 crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
                 if let Some(retained) = retained {
                     (self.callback)(PlayerEvent::ReplayRequest {
@@ -406,6 +412,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let replayable = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
+                    .retained()
                     .is_some();
                 if self.has_track && !replayable {
                     crate::vprintln!("[AUDIO] Shared switch skipped: non-replayable source active");
@@ -425,7 +432,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .clone();
+                    .retained()
+                    .cloned();
                 let position = self.last_exclusive_pos.or_else(|| {
                     retained.as_ref().and_then(|r| {
                         self.resume_store
@@ -474,6 +482,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let replayable = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
+                    .retained()
                     .is_some();
                 if self.has_track && !replayable {
                     crate::vprintln!("[AUDIO] Shared switch skipped: non-replayable source active");
@@ -499,7 +508,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 let retained = crate::state::CURRENT_TRACK
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .clone();
+                    .retained()
+                    .cloned();
                 let position = self.last_asio_pos.or_else(|| {
                     retained.as_ref().and_then(|r| {
                         self.resume_store

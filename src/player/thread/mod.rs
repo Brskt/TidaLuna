@@ -66,6 +66,8 @@ pub(super) struct CrossfadeState {
     /// belonging to a different one, which every replay guard passes. Promotion publishes the
     /// pair untouched, a stale stamp refusing the replay, which is the safe direction.
     next: crate::state::RetainedTrack,
+    /// The source publication this fade leaves. A load published since then owns the slot.
+    armed_over: crate::state::Publication,
     buffer: RamBuffer,
     /// Probed at arm time and carried; promotion rebases the clock and the
     /// format badge without a second probe. Both must keep describing the outgoing

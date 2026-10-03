@@ -294,6 +294,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let total_samples = (self.current_duration * per_second as f64) as u64;
         let remaining = total_samples.saturating_sub(self.played_samples.load(Relaxed));
 
+        // The publication this fade leaves, read BEFORE the staged record is validated. A load
+        // published after this read makes the promotion yield, the safe direction; read after
+        // the validation, a load published in between would pass for the one being left.
+        let armed_over = crate::state::CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .publication();
+
         // Where the next track's bytes come from. Two sources, not one: `start_preload` SKIPS
         // the fetch when the disk cache already holds the track, so asking the staged copy
         // alone meant a fade could never arm on a cached library. Validated on a BORROW before
@@ -490,6 +498,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             reader_cancel,
             decoded,
             next: crate::state::RetainedTrack { track, load_gen },
+            armed_over,
             buffer,
             duration,
             media_format,
@@ -597,9 +606,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // OUTGOING track, fails the identity check, and silently abandons the download feeding
         // the one that just became audible, discovered 30s later as a stall. Published as the
         // pair the fade was handed: a promotion is not a load and bumps nothing.
-        *crate::state::CURRENT_TRACK
+        let verdict = crate::state::CURRENT_TRACK
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(state.next.clone());
+            .unwrap_or_else(|e| e.into_inner())
+            .publish_promotion(&state.next, state.armed_over);
         // NOW the staged record is spent, because only now has the track it names
         // actually become current. `arm_crossfade` used to do this, and a fade that
         // was cancelled afterwards left the completion path with nothing to advance
@@ -607,6 +617,44 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // DIFFERENT track during the overlap keeps its bytes.
         crate::audio::preload::commit_peeked(&state.next.track);
 
+        if let Some(snapshot) = state.media_format {
+            self.last_media_format = Some(snapshot);
+        }
+        // A track shorter than the fade ended during the overlap, and the fade's drain consumed
+        // its `Finished`. Replay that here, now the track is current, or it never completes and
+        // never reaches the disk cache.
+        if state.incoming_finished {
+            self.store_finished_ciphertext();
+            self.pending_complete = true;
+            self.last_played_snapshot = self.played_samples.load(Relaxed).wrapping_sub(1);
+            crate::vprintln!("[XFADE] promoted track had already finished, awaiting its drain");
+        }
+
+        match verdict {
+            crate::state::PromotionVerdict::Published => {
+                self.announce_promotion(in_played, state.duration, state.media_format);
+            }
+            crate::state::PromotionVerdict::Superseded => {
+                crate::vprintln!(
+                    "[XFADE] promoted under a newer load; announcing it is that load's job"
+                );
+            }
+        }
+    }
+
+    /// What the SDK and Connect hear about a promotion. Withheld under a newer load: whoever
+    /// asked for it has already left the transition this `completed` would announce.
+    ///
+    /// Announced under the seq it inherits, never a fresh one. Every seq is minted by the load or
+    /// stop that owns it, on its requester's thread, before this thread handles that command;
+    /// minted here, a promotion would outrank a command already in flight, and the renderer drops
+    /// every event below the highest it has seen.
+    fn announce_promotion(
+        &mut self,
+        in_played: u64,
+        duration: f64,
+        media_format: Option<MediaFormatSnapshot>,
+    ) {
         crate::vprintln!(
             "[XFADE] promoted, the incoming track is now current ({in_played} samples in)"
         );
@@ -657,7 +705,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.current_product_id.clone(),
         ));
         (self.callback)(PlayerEvent::Duration(
-            state.duration,
+            duration,
             self.current_seq,
             self.current_product_id.clone(),
         ));
@@ -669,20 +717,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // The format badge is separate: it is also re-sent verbatim on a re-assert,
         // left alone it keeps describing the outgoing track's codec and bit
         // depth. The snapshot comes from the probe arming already paid for.
-        if let Some(snapshot) = state.media_format {
-            self.last_media_format = Some(snapshot);
+        if let Some(snapshot) = media_format {
             (self.callback)(snapshot.to_event());
-        }
-
-        // A track shorter than the fade reached its end during the overlap, and the
-        // fade's own drain consumed the `Finished` that would normally complete it
-        // and cache it. Replay both here, now that this track is the current one, or
-        // it never completes and never reaches the disk cache.
-        if state.incoming_finished {
-            self.store_finished_ciphertext();
-            self.pending_complete = true;
-            self.last_played_snapshot = self.played_samples.load(Relaxed).wrapping_sub(1);
-            crate::vprintln!("[XFADE] promoted track had already finished, awaiting its drain");
         }
     }
 
@@ -1498,7 +1534,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::state::CURRENT_TRACK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .clone()
+                .retained()
+                .cloned()
         } else {
             None
         };

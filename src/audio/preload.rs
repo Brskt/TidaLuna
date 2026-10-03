@@ -1122,7 +1122,7 @@ fn current_fetch_url(task_canonical_id: &str) -> Option<String> {
     let retained = crate::state::CURRENT_TRACK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    crate::player::refreshed_fetch_url(task_canonical_id, retained.as_ref().map(|r| &r.track))
+    crate::player::refreshed_fetch_url(task_canonical_id, retained.retained().map(|r| &r.track))
 }
 
 /// What a download's current owner settles: which queue governs its bytes, which pool it

@@ -573,14 +573,13 @@ pub(crate) fn canonical_track_id(url: &str) -> String {
 /// silently at its next reconnect. A write is authorised by the state it writes, never by
 /// another that lags it. `load_gen` is left alone: re-signing is not a new load.
 pub(crate) fn refresh_retained_credential(
-    retained: &mut Option<crate::state::RetainedTrack>,
+    retained: Option<&mut crate::state::RetainedTrack>,
     canonical_url_id: &str,
     url: &str,
     key: &str,
     product_id: Option<&str>,
 ) {
     let Some(track) = retained
-        .as_mut()
         .map(|retained| &mut retained.track)
         .filter(|track| canonical_track_id(&track.url) == canonical_url_id)
     else {
@@ -602,7 +601,7 @@ fn retained_product_id(canonical_url_id: &str) -> Option<String> {
     CURRENT_TRACK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
+        .retained()
         .map(|retained| &retained.track)
         .filter(|track| canonical_track_id(&track.url) == canonical_url_id)
         .and_then(|track| track.product_id.clone())
@@ -1191,15 +1190,15 @@ impl Player {
             // deliberately not adjacent (the abort, the download cancel and the governor reset
             // sit between them); a reader that sampled the generation separately could see
             // this load's generation while the slot still held the previous track.
-            *lock = Some(crate::state::RetainedTrack {
-                track: TrackInfo {
+            lock.publish_load(
+                load_gen,
+                Some(TrackInfo {
                     url: url.clone(),
                     format: format.clone(),
                     key: key.clone(),
                     product_id: product_id.clone(),
-                },
-                load_gen,
-            });
+                }),
+            );
         }
 
         let ctx = LoadContext {
@@ -1308,7 +1307,7 @@ impl Player {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 refresh_retained_credential(
-                    &mut retained,
+                    retained.retained_mut(),
                     &canonical_url_id,
                     &url,
                     &key,
@@ -1410,7 +1409,10 @@ impl Player {
 
         // DASH isn't replayable via load_and_play (segmented); clear the
         // retained source: a post-DASH play re-arms nothing, not a stale track.
-        *CURRENT_TRACK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .publish_load(load_gen, None);
 
         let cmd_tx = self.cmd_tx.clone();
         let handle = self.rt_handle.spawn(async move {

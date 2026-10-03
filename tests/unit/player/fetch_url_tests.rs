@@ -54,7 +54,7 @@ fn the_retained_credential_is_refreshed_for_its_own_track() {
     let mut retained = retained_at("https://cdn.test/mediatracks/abc?sig=OLD", 7);
 
     refresh_retained_credential(
-        &mut retained,
+        retained.as_mut(),
         "https://cdn.test/mediatracks/abc",
         "https://cdn.test/mediatracks/abc?sig=NEW",
         "key",
@@ -78,7 +78,7 @@ fn a_stale_load_cannot_overwrite_a_newer_tracks_credential() {
     let mut retained = retained_at("https://cdn.test/mediatracks/newer?sig=B", 7);
 
     refresh_retained_credential(
-        &mut retained,
+        retained.as_mut(),
         "https://cdn.test/mediatracks/older",
         "https://cdn.test/mediatracks/older?sig=A",
         "key-a",
@@ -99,7 +99,7 @@ fn the_retained_id_is_refreshed_alongside_the_credential() {
     let mut retained = retained_at("https://cdn.test/mediatracks/abc?sig=OLD", 7);
 
     refresh_retained_credential(
-        &mut retained,
+        retained.as_mut(),
         "https://cdn.test/mediatracks/abc",
         "https://cdn.test/mediatracks/abc?sig=NEW",
         "key",
@@ -129,7 +129,7 @@ fn a_load_without_an_id_leaves_the_retained_one_alone() {
     });
 
     refresh_retained_credential(
-        &mut retained,
+        retained.as_mut(),
         "https://cdn.test/mediatracks/abc",
         "https://cdn.test/mediatracks/abc?sig=NEW",
         "key",
@@ -156,7 +156,7 @@ fn a_credential_refresh_leaves_the_generation_where_it_was() {
     let mut retained = retained_at("https://cdn.test/mediatracks/abc?sig=OLD", 41);
 
     refresh_retained_credential(
-        &mut retained,
+        retained.as_mut(),
         "https://cdn.test/mediatracks/abc",
         "https://cdn.test/mediatracks/abc?sig=NEW",
         "key",

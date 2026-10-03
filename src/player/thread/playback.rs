@@ -882,7 +882,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let retained = crate::state::CURRENT_TRACK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .retained()
+            .cloned();
         let position = self.last_asio_pos.or_else(|| {
             retained.as_ref().and_then(|r| {
                 self.resume_store
@@ -929,7 +930,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let retained = crate::state::CURRENT_TRACK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .retained()
+            .cloned();
         let position = self.last_exclusive_pos.or_else(|| {
             retained.as_ref().and_then(|r| {
                 self.resume_store

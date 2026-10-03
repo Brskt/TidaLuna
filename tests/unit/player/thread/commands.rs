@@ -1686,6 +1686,11 @@ fn arm_for_promotion(h: &mut Harness, incoming_secs: f64) -> mpsc::Receiver<Deco
             },
             load_gen: crate::player::current_gen(),
         },
+        // What `arm_crossfade` reads before validating the staged record.
+        armed_over: crate::state::CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .publication(),
         buffer: crate::player::buffer::RamBuffer::from_complete(vec![0u8; 64]),
         duration: incoming_secs,
         media_format: None,
@@ -1723,7 +1728,8 @@ fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
     let retained = crate::state::CURRENT_TRACK
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone()
+        .retained()
+        .cloned()
         .expect("a promotion publishes the incoming track");
     assert_eq!(
         retained.track.url, "https://example.invalid/incoming",
@@ -2333,4 +2339,370 @@ fn a_promotion_reports_both_the_file_rate_and_the_output_rate() {
         )
     });
     assert!(found, "both rates must reach the renderer, got {events:?}");
+}
+
+const SKIPPED_TO_URL: &str = "https://example.invalid/skipped-to?sig=fresh";
+const SKIPPED_TO_ID: &str = "https://example.invalid/skipped-to";
+const INCOMING_URL: &str = "https://example.invalid/incoming";
+
+fn a_track_at(url: &str) -> crate::state::TrackInfo {
+    crate::state::TrackInfo {
+        url: url.to_string(),
+        key: String::new(),
+        format: "flac".to_string(),
+        product_id: Some("c-product".to_string()),
+    }
+}
+
+fn publish_source(load_gen: u32, track: Option<crate::state::TrackInfo>) {
+    crate::state::CURRENT_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .publish_load(load_gen, track);
+}
+
+fn published_source() -> Option<crate::state::RetainedTrack> {
+    crate::state::CURRENT_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retained()
+        .cloned()
+}
+
+/// The IPC thread's half of a load, long before the player thread sees it: `begin_load` mints the
+/// generation, then `load_with_policy` mints the event seq and publishes.
+fn load_c_on_the_ipc_thread() -> (u32, u32) {
+    let gen_c = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    let seq_c = crate::player::next_event_seq();
+    publish_source(gen_c, Some(a_track_at(SKIPPED_TO_URL)));
+    (gen_c, seq_c)
+}
+
+/// A link whose callback has already swapped the rings: the fade is finished, not yet promoted.
+fn swapped_link() -> crate::player::thread::output::CrossfadeLink {
+    crate::player::thread::output::CrossfadeLink {
+        attach: Arc::new(Mutex::new(None)),
+        cancel: Arc::new(AtomicBool::new(false)),
+        out_eof: Arc::new(AtomicBool::new(false)),
+        in_eof: Arc::new(AtomicBool::new(false)),
+        done: Arc::new(std::sync::atomic::AtomicU64::new(
+            crate::player::thread::output::pack_xfade_done(1, SIX_SECONDS),
+        )),
+    }
+}
+
+fn handle_load_of_c(h: &mut Harness, gen_c: u32, seq_c: u32) -> bool {
+    h.player.handle_load(
+        LoadRequest {
+            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+            load_gen: gen_c,
+            seq: seq_c,
+            track_id: SKIPPED_TO_ID.to_string(),
+            product_id: Some("c-product".to_string()),
+            resume_policy: ResumePolicy::Restart,
+            load_start: std::time::Instant::now(),
+            cached: true,
+            format: "flac".to_string(),
+        },
+        false,
+    )
+}
+
+fn assert_the_slot_names_c(gen_c: u32) {
+    let slot = published_source().expect("the slot is empty");
+    assert_eq!(
+        slot.track.url, SKIPPED_TO_URL,
+        "CURRENT_TRACK no longer names C"
+    );
+    assert_eq!(
+        slot.load_gen, gen_c,
+        "CURRENT_TRACK carries a stale generation"
+    );
+}
+
+/// The seqs the renderer's bridge orders by: it drops anything below the highest it has seen.
+fn max_emitted_seq(h: &Harness) -> Option<u32> {
+    h.events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|ev| match ev {
+            PlayerEvent::TimeUpdate(_, seq)
+            | PlayerEvent::StateChange(_, seq)
+            | PlayerEvent::CrossfadePromoted(seq, _)
+            | PlayerEvent::Duration(_, seq, _) => Some(*seq),
+            _ => None,
+        })
+        .max()
+}
+
+/// The swap lands between C's publication and `handle_load(C)`; the poll promotes first.
+#[tokio::test]
+async fn a_promotion_yields_the_slot_to_a_load_published_after_its_fade_armed() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+    h.player.cpal_xfade = Some(swapped_link());
+
+    let (gen_c, seq_c) = load_c_on_the_ipc_thread();
+    h.player.handle_load_started(gen_c);
+    assert!(h.player.reconcile_completed_crossfade());
+    handle_load_of_c(&mut h, gen_c, seq_c);
+    assert_the_slot_names_c(gen_c);
+}
+
+/// Same window, but `handle_load(C)` finds the fade finished and promotes inside its own teardown.
+#[tokio::test]
+async fn a_load_whose_teardown_promotes_keeps_the_slot_it_published() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+    h.player.cpal_xfade = Some(swapped_link());
+
+    let (gen_c, seq_c) = load_c_on_the_ipc_thread();
+    h.player.handle_load_started(gen_c);
+    handle_load_of_c(&mut h, gen_c, seq_c);
+    assert_the_slot_names_c(gen_c);
+}
+
+#[tokio::test]
+async fn a_promotion_under_a_newer_load_announces_nothing_that_outranks_it() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+    h.player.cpal_xfade = Some(swapped_link());
+
+    let (gen_c, seq_c) = load_c_on_the_ipc_thread();
+    h.player.handle_load_started(gen_c);
+    assert!(h.player.reconcile_completed_crossfade());
+    handle_load_of_c(&mut h, gen_c, seq_c);
+
+    let max = max_emitted_seq(&h);
+    assert_eq!(h.player.current_seq, seq_c);
+    assert!(
+        max.is_none_or(|m| m <= seq_c),
+        "an event carrying seq {max:?} outranks C's seq {seq_c}: the bridge drops every event C emits"
+    );
+}
+
+/// A stop mints a generation and publishes nothing: the promotion is still the newest source.
+#[tokio::test]
+async fn a_stop_during_the_fade_leaves_the_promotion_publishing() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let gen_a = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    publish_source(
+        gen_a,
+        Some(a_track_at("https://example.invalid/outgoing?sig=a")),
+    );
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+
+    let _gen_stop = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    h.player.promote_crossfade(SIX_SECONDS);
+
+    let slot = published_source().expect("the slot is empty");
+    assert_eq!(
+        slot.track.url, INCOMING_URL,
+        "a stop's mint suppressed the promotion's publish"
+    );
+}
+
+/// The staged record carries the stop's generation and the slot the outgoing load's: they differ,
+/// and still nothing newer was published.
+#[tokio::test]
+async fn a_stop_before_arming_leaves_the_promotion_publishing() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let gen_a = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    publish_source(
+        gen_a,
+        Some(a_track_at("https://example.invalid/outgoing?sig=a")),
+    );
+    let gen_stop = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+    assert_eq!(
+        h.player.pending_crossfade.as_ref().unwrap().next.load_gen,
+        gen_stop
+    );
+
+    h.player.promote_crossfade(SIX_SECONDS);
+
+    let slot = published_source().expect("the slot is empty");
+    assert_eq!(
+        slot.track.url, INCOMING_URL,
+        "the promotion yielded to a stop"
+    );
+    assert_eq!(slot.load_gen, gen_stop);
+}
+
+#[tokio::test]
+async fn a_second_absence_is_newer_than_the_first() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let gen_d1 = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    publish_source(gen_d1, None);
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+
+    let gen_d2 = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    publish_source(gen_d2, None);
+    h.player.promote_crossfade(SIX_SECONDS);
+
+    assert!(
+        published_source().is_none(),
+        "the promotion overwrote the newer DASH load's absence with {:?}",
+        published_source()
+    );
+}
+
+#[tokio::test]
+async fn a_fade_out_of_a_dash_track_publishes_the_promoted_one() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let gen_d1 = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    publish_source(gen_d1, None);
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+
+    h.player.promote_crossfade(SIX_SECONDS);
+
+    let slot = published_source().expect("the promotion out of DASH published nothing");
+    assert_eq!(slot.track.url, INCOMING_URL);
+}
+
+/// A restart of the outgoing track is a newer load of the SAME id: the track cannot tell it
+/// apart, the publication can.
+#[tokio::test]
+async fn a_restart_of_the_outgoing_track_during_the_fade_keeps_its_publication() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let gen_a = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    publish_source(
+        gen_a,
+        Some(a_track_at("https://example.invalid/outgoing?sig=a")),
+    );
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+
+    let gen_r = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    publish_source(
+        gen_r,
+        Some(a_track_at("https://example.invalid/outgoing?sig=r")),
+    );
+    h.player.promote_crossfade(SIX_SECONDS);
+
+    let slot = published_source().expect("the slot is empty");
+    assert_eq!(slot.track.url, "https://example.invalid/outgoing?sig=r");
+    assert_eq!(slot.load_gen, gen_r);
+}
+
+/// The two mints of a load through `load_with_policy`, its publication left out: the generation
+/// it takes from `begin_load`, then the event seq it takes from `next_event_seq`.
+fn mint_a_load_on_the_ipc_thread() -> (u32, u32) {
+    let load_gen = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    (load_gen, crate::player::next_event_seq())
+}
+
+/// A track playing under the seq its own load minted, with a fade to B finished by the callback
+/// and not yet adopted.
+fn a_finished_fade_out_of_a_loaded_track(h: &mut Harness) -> mpsc::Receiver<DecodeCommand> {
+    let (gen_a, seq_a) = mint_a_load_on_the_ipc_thread();
+    publish_source(
+        gen_a,
+        Some(a_track_at("https://example.invalid/outgoing?sig=a")),
+    );
+    h.player.current_seq = seq_a;
+    let incoming = arm_for_promotion(h, 246.0);
+    h.player.cpal_xfade = Some(swapped_link());
+    incoming
+}
+
+/// A stop landing between the swap and the next poll promotes inside its own teardown, announced
+/// but never above the stop's seq: the bridge would drop `Paused`, `Stopped` and every event of B.
+#[tokio::test]
+async fn a_stop_whose_teardown_promotes_still_settles_on_stopped() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming = a_finished_fade_out_of_a_loaded_track(&mut h);
+
+    // `Player::stop`: a generation and a seq, no publication.
+    let (_gen_stop, seq_stop) = mint_a_load_on_the_ipc_thread();
+    h.player.handle_stop(seq_stop);
+
+    let events = h.events.lock().unwrap().clone();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::CrossfadePromoted(..))),
+        "the finished fade must still be announced, got {events:?}"
+    );
+    let max = max_emitted_seq(&h);
+    assert!(
+        max.is_none_or(|m| m <= seq_stop),
+        "an event carrying seq {max:?} outranks the stop's seq {seq_stop}: the bridge drops Stopped, got {events:?}"
+    );
+    assert_eq!(h.player.current_seq, seq_stop);
+}
+
+/// `load_with_policy` mints C's seq, then works for a while before it publishes C. A poll landing
+/// in between sees nothing newer published and announces the promotion; under a seq of its own it
+/// would outrank C's, and the bridge would drop every event C emits.
+#[tokio::test]
+async fn a_promotion_before_a_load_publishes_does_not_outrank_its_seq() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming = a_finished_fade_out_of_a_loaded_track(&mut h);
+
+    let (gen_c, seq_c) = mint_a_load_on_the_ipc_thread();
+    assert!(h.player.reconcile_completed_crossfade());
+    publish_source(gen_c, Some(a_track_at(SKIPPED_TO_URL)));
+    h.player.handle_load_started(gen_c);
+    handle_load_of_c(&mut h, gen_c, seq_c);
+
+    let max = max_emitted_seq(&h);
+    assert_eq!(h.player.current_seq, seq_c);
+    assert!(
+        max.is_none_or(|m| m <= seq_c),
+        "an event carrying seq {max:?} outranks C's seq {seq_c}: the bridge drops every event C emits"
+    );
+}
+
+/// A promotion mints no seq: only the missing `completed` tells a superseded one apart.
+#[tokio::test]
+async fn a_superseded_promotion_announces_no_transition() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let _incoming = arm_for_promotion(&mut h, 246.0);
+    h.player.cpal_xfade = Some(swapped_link());
+
+    let (gen_c, _seq_c) = load_c_on_the_ipc_thread();
+    h.player.handle_load_started(gen_c);
+    assert!(h.player.reconcile_completed_crossfade());
+
+    let events = h.events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::CrossfadePromoted(..))),
+        "a superseded promotion announced its transition, got {events:?}"
+    );
 }
