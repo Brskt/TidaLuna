@@ -413,6 +413,16 @@ pub(crate) fn route_volume_restore(js: &str) -> String {
     js.to_string()
 }
 
+/// The filter below calls nothing else: what each variant does to a chunk is testable without a
+/// CEF response.
+pub(crate) fn rewrite_chunk(rewrite: ChunkRewrite, js: &str) -> String {
+    match rewrite {
+        ChunkRewrite::Capture(id) => append_capture(js, id),
+        ChunkRewrite::Entry => route_volume_restore(&tag_create_root(js)),
+        ChunkRewrite::TapSagaPut => tap_saga_put(js),
+    }
+}
+
 wrap_resource_request_handler! {
     pub(crate) struct CaptureRequestHandler;
 
@@ -466,13 +476,7 @@ wrap_resource_request_handler! {
                 capacity,
                 Arc::new(move |body| {
                     FilterOutcome::Emit(match std::str::from_utf8(&body) {
-                        Ok(js) => match rewrite {
-                            ChunkRewrite::Capture(id) => append_capture(js, id).into_bytes(),
-                            ChunkRewrite::Entry => {
-                                route_volume_restore(&tag_create_root(js)).into_bytes()
-                            }
-                            ChunkRewrite::TapSagaPut => tap_saga_put(js).into_bytes(),
-                        },
+                        Ok(js) => rewrite_chunk(rewrite, js).into_bytes(),
                         Err(_) => body,
                     })
                 }),

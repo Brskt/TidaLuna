@@ -304,6 +304,33 @@ fn the_route_splices_by_byte_across_multibyte_source() {
     assert!(out.contains("(Hd()));if(!e)return;"));
 }
 
+// What the filter does to each kind of chunk, through the one call it makes.
+
+#[test]
+fn the_entry_chunk_gets_both_of_its_rewrites() {
+    let src = format!("e.createRoot=function(e,t){{return 1}};{VOLUME_RESTORE}");
+    let out = rewrite_chunk(ChunkRewrite::Entry, &src);
+    assert!(out.contains("e.createRoot=globalThis.__lunaCreateRoot=function(e,t){"));
+    assert!(out.contains("(globalThis.__lunaRestoreVolume||(__lunaSaved=>__lunaSaved))(Hd())"));
+}
+
+#[test]
+fn the_store_chunk_gets_the_saga_tap() {
+    let out = rewrite_chunk(ChunkRewrite::TapSagaPut, "t=(r?r.put:e.dispatch)(i);");
+    assert!(out.contains("globalThis.__lunaSagaPut"));
+}
+
+#[test]
+fn a_captured_chunk_gets_its_exports_captured() {
+    let out = rewrite_chunk(
+        ChunkRewrite::Capture(SDK_OUTPUT_DEVICES),
+        "var g=1;export{g as outputDevices};",
+    );
+    assert!(out.ends_with(
+        r#"globalThis.__LUNA_CAP("@tidal-music/player/output-devices",{outputDevices: g});"#
+    ));
+}
+
 #[test]
 fn the_rewrite_epoch_hash_is_fnv1a_over_the_parts_joined() {
     // The published FNV-1a 64 vector for "a": the constant is the algorithm it claims to be.
