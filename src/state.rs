@@ -137,6 +137,8 @@ impl CurrentSource {
 
     /// In place only: a credential refresh re-signs the source without replacing it.
     pub fn retained_mut(&mut self) -> Option<&mut RetainedTrack> {
+        #[cfg(test)]
+        current_track_fixture::assert_held("retained_mut");
         self.retained.as_mut()
     }
 
@@ -146,6 +148,8 @@ impl CurrentSource {
 
     /// A load's publication, `None` for a source no replay can rebuild.
     pub fn publish_load(&mut self, load_gen: u32, track: Option<TrackInfo>) {
+        #[cfg(test)]
+        current_track_fixture::assert_held("publish_load");
         self.retained = track.map(|track| RetainedTrack { track, load_gen });
         self.published = Publication(load_gen);
     }
@@ -157,6 +161,8 @@ impl CurrentSource {
         next: &RetainedTrack,
         armed_over: Publication,
     ) -> PromotionVerdict {
+        #[cfg(test)]
+        current_track_fixture::assert_held("publish_promotion");
         if self.published != armed_over {
             return PromotionVerdict::Superseded;
         }
@@ -441,6 +447,23 @@ pub(crate) mod current_track_fixture {
     /// test red for a reason that is not its own.
     static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    thread_local! {
+        /// Whether this thread holds `SLOT`. The guard is `!Send`, so a holder never moves off
+        /// the thread that took it.
+        static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Fails a write to the slot from a thread holding no fixture, at once and in any run: the
+    /// race it would open shows only in parallel runs, and seldom. Assumes a test's writes run on
+    /// the test's own thread; a write a test drives from another thread has none of the marker.
+    #[track_caller]
+    pub(super) fn assert_held(write: &str) {
+        assert!(
+            HELD.get(),
+            "{write} on CURRENT_TRACK without a CurrentTrackSlot held by this thread"
+        );
+    }
+
     /// Lock ORDER where a test holds both: `PRELOAD_TESTS` first, this one second. Taking
     /// them the other way round deadlocks against every test that already holds both.
     pub(crate) struct CurrentTrackSlot {
@@ -448,11 +471,17 @@ pub(crate) mod current_track_fixture {
     }
 
     impl CurrentTrackSlot {
-        /// The slot empty, for a test that needs no track published.
-        pub(crate) fn clear() -> Self {
+        fn take() -> Self {
             let slot = Self {
                 _lock: SLOT.lock().unwrap_or_else(|e| e.into_inner()),
             };
+            HELD.set(true);
+            slot
+        }
+
+        /// The slot empty, for a test that needs no track published.
+        pub(crate) fn clear() -> Self {
+            let slot = Self::take();
             *super::CURRENT_TRACK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = super::CurrentSource::new();
@@ -462,9 +491,7 @@ pub(crate) mod current_track_fixture {
         /// The slot holding a published track, for a test that needs one to exist rather than
         /// to be absent. Same exclusion, opposite starting state.
         pub(crate) fn holding(retained: super::RetainedTrack) -> Self {
-            let slot = Self {
-                _lock: SLOT.lock().unwrap_or_else(|e| e.into_inner()),
-            };
+            let slot = Self::take();
             super::CURRENT_TRACK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -480,6 +507,7 @@ pub(crate) mod current_track_fixture {
             *super::CURRENT_TRACK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = super::CurrentSource::new();
+            HELD.set(false);
         }
     }
 }
