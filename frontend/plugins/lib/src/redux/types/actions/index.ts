@@ -1225,12 +1225,16 @@ export interface ActionPayloads {
 	"playbackControls/SEEK_FORWARDS": number | undefined;
 	"playbackControls/SET_DESIRED_PAUSE_STATE": void;
 	"playbackControls/SET_DURATION": number;
-	"playbackControls/SET_MUTE": boolean;
+	"playbackControls/SET_MUTE": {
+		mute: boolean;
+	};
 	"playbackControls/SET_PLAYBACK_STATE": PlaybackState;
 	"playbackControls/SET_VOLUME": {
 		volume: number;
 	};
-	"playbackControls/SET_VOLUME_UNMUTE": unknown;
+	"playbackControls/SET_VOLUME_UNMUTE": {
+		volume: number;
+	};
 	"playbackControls/SKIP_NEXT": void;
 	"playbackControls/SKIP_PREVIOUS": void;
 	"playbackControls/START_AT": number;
