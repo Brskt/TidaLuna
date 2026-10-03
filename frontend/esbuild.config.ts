@@ -1,9 +1,9 @@
 /**
  * Centralized esbuild configuration - single entry point for all frontend builds.
  *
- * Build order is strict and sequential:
- *   Phase 1: Inline plugins (luna-ui, luna-dev) - generates .ts string constants
- *   Phase 2: Main bundle (bundle.js) - imports the inline .ts from Phase 1
+ * Built one at a time, in this order:
+ *   Phase 1: Luna's plugins (luna-ui, luna-dev) as .mjs, baked in by luna_modules.rs
+ *   Phase 2: Main bundle (bundle.js)
  *   Phase 3: Standalone ESM modules (luna-core, luna-lib, oby, helpers)
  */
 import { type BuildOptions } from "esbuild";
@@ -41,8 +41,7 @@ const inlinePluginDefaults: Partial<BuildOptions> = {
 const uiOutfile = resolve(root, "plugins/ui/dist/luna-ui.mjs");
 const devOutfile = resolve(root, "plugins/dev/dist/luna-dev.mjs");
 
-// ─── Phase 1: Inline plugins ────────────────────────────────────────────
-// Must run BEFORE bundle.js - src/index.ts imports the generated inline .ts files.
+// Phase 1, Luna's plugins (luna-ui, luna-dev).
 
 // Merge RUNTIME_EXTERNALS with any luna.dependencies declared in plugin package.json files
 const uiExternals = [...new Set([...RUNTIME_EXTERNALS, ...getLunaDependencyExternals(resolve(root, "plugins/ui/package.json"))])];
@@ -73,8 +72,7 @@ const lunaDevInline: BuildOptions = {
 	logLevel: "info",
 };
 
-// ─── Phase 2: Main bundle ───────────────────────────────────────────────
-// Depends on Phase 1 - bundles src/index.ts which imports luna-ui-inline.ts and luna-dev-inline.ts.
+// Phase 2, main bundle (src/index.ts).
 
 const mainBundle: BuildOptions = {
 	...defaultBuildOptions,

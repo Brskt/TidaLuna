@@ -9,7 +9,7 @@ export const defaultBuildOptions: BuildOptions = {
 	target: "esnext",
 };
 
-/** Modules resolved at runtime via window.require() - shared by UI and dev inline builds. */
+/** Modules resolved at runtime via window.require(), shared by the luna-ui and luna-dev builds. */
 export const RUNTIME_EXTERNALS = [
 	"@luna/core",
 	"@luna/lib",
@@ -33,11 +33,6 @@ export const getLunaDependencyExternals = (packageJsonPath: string): string[] =>
 		.filter((n: unknown): n is string => typeof n === "string" && (n as string).length > 0);
 };
 
-/**
- * Execute esbuild configs **strictly sequentially**.
- * Order matters: inline plugins must be generated before bundle.js
- * because src/index.ts imports the inline .ts files.
- */
 export const build = async (configs: BuildOptions[]) => {
 	for (const config of configs) {
 		await esBuild(config);
