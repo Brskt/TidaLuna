@@ -747,7 +747,7 @@ wrap_request_handler! {
             _request: Option<&mut Request>,
             is_navigation: ::std::os::raw::c_int,
             is_download: ::std::os::raw::c_int,
-            _request_initiator: Option<&CefString>,
+            request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
             let url = crate::ui::nav::RequestUrl::new(
@@ -802,6 +802,7 @@ wrap_request_handler! {
                     req.resource_type(),
                     &url,
                     "renderer",
+                    request_initiator,
                 )
             {
                 return Some(h);

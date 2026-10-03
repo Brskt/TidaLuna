@@ -23,7 +23,7 @@ wrap_request_context_handler! {
             request: Option<&mut Request>,
             is_navigation: ::std::os::raw::c_int,
             is_download: ::std::os::raw::c_int,
-            _request_initiator: Option<&CefString>,
+            request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
             // The SW precache fetch is browser-less (is_navigation=0) and reaches
@@ -64,6 +64,7 @@ wrap_request_context_handler! {
                     req.resource_type(),
                     &url,
                     "service-worker",
+                    request_initiator,
                 )
             {
                 return Some(h);

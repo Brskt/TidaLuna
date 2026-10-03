@@ -207,7 +207,7 @@ wrap_request_handler! {
             request: Option<&mut Request>,
             _is_navigation: ::std::os::raw::c_int,
             _is_download: ::std::os::raw::c_int,
-            _request_initiator: Option<&CefString>,
+            request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
             // The trust prompt interpolates an avatar URL straight out of a plugin's
@@ -225,6 +225,7 @@ wrap_request_handler! {
                     req.resource_type(),
                     &url,
                     "dialog",
+                    request_initiator,
                 )
             {
                 return Some(h);

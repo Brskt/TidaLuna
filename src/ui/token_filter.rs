@@ -100,8 +100,9 @@ pub(super) fn block_disallowed_image(
     resource_type: ResourceType,
     url: &RequestUrl,
     surface: &str,
+    initiator: Option<&CefString>,
 ) -> Option<ResourceRequestHandler> {
-    match image_verdict(resource_type, url) {
+    match image_verdict(resource_type, url, initiator) {
         ImageVerdict::NotAnImage | ImageVerdict::Allowed => None,
         ImageVerdict::Refused => {
             crate::verr!(
@@ -111,6 +112,29 @@ pub(super) fn block_disallowed_image(
             Some(ExfilBlockHandler::new())
         }
     }
+}
+
+/// An internal browser surface fetching from its own origin. DevTools serves its bundled
+/// iconography from `devtools://devtools/...`, and the inspector is not the only such surface:
+/// CEF builds Picture-in-Picture the same way, on the opener's request context, so neither can
+/// be given a context of its own and both arrive here.
+///
+/// Both halves are load-bearing. The scheme test excludes web content outright: Chromium fills
+/// the initiator from the initiating document, and a page cannot claim a non-web origin. The
+/// origin match then stops an open inspector from reaching a host it was merely steered at, so
+/// the plugin-supplied avatar the trust dialog loads over https stays judged by the allowlist.
+fn is_internal_self_load(url: &RequestUrl, initiator: Option<&CefString>) -> bool {
+    let Some(parsed) = url.parsed() else {
+        return false;
+    };
+    let scheme = parsed.scheme();
+    if scheme == "http" || scheme == "https" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    initiator.is_some_and(|i| i.to_string() == format!("{scheme}://{host}"))
 }
 
 /// What the allowlist says about one request. Three outcomes, so a named enum: a bool would fold
@@ -127,11 +151,15 @@ enum ImageVerdict {
 /// The rule, kept free of IO. The refusal it feeds ends in an ungated `verr!`, which opens the
 /// persistent log sink on first use; a test that called the handler would write to the real
 /// `console.log`; the decision has to be reachable on its own to be exercised at all.
-fn image_verdict(resource_type: ResourceType, url: &RequestUrl) -> ImageVerdict {
+fn image_verdict(
+    resource_type: ResourceType,
+    url: &RequestUrl,
+    initiator: Option<&CefString>,
+) -> ImageVerdict {
     if resource_type != ResourceType::IMAGE {
         return ImageVerdict::NotAnImage;
     }
-    if crate::ui::nav::is_allowed_image_host(url) {
+    if is_internal_self_load(url, initiator) || crate::ui::nav::is_allowed_image_host(url) {
         ImageVerdict::Allowed
     } else {
         ImageVerdict::Refused

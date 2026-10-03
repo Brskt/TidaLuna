@@ -203,17 +203,45 @@ fn image_verdict_refuses_only_a_disallowed_image() {
     let allowed = RequestUrl::new("https://resources.tidal.com/p.png".to_string());
 
     assert_eq!(
-        image_verdict(ResourceType::IMAGE, &evil),
+        image_verdict(ResourceType::IMAGE, &evil, None),
         ImageVerdict::Refused
     );
     assert_eq!(
-        image_verdict(ResourceType::IMAGE, &allowed),
+        image_verdict(ResourceType::IMAGE, &allowed, None),
         ImageVerdict::Allowed
     );
     // Every other resource type funnels through the same three dispatches; the gate must let
     // them pass untouched rather than judge them by a rule written for images.
     assert_eq!(
-        image_verdict(ResourceType::MAIN_FRAME, &evil),
+        image_verdict(ResourceType::MAIN_FRAME, &evil, None),
         ImageVerdict::NotAnImage
+    );
+}
+
+#[test]
+fn image_verdict_admits_only_an_internal_surface_loading_itself() {
+    let devtools = RequestUrl::new("devtools://devtools/bundled/i.svg".to_string());
+    let elsewhere = RequestUrl::new("https://evil.example/p.png".to_string());
+    let own = CefString::from("devtools://devtools");
+
+    assert_eq!(
+        image_verdict(ResourceType::IMAGE, &devtools, Some(&own)),
+        ImageVerdict::Allowed
+    );
+    assert_eq!(
+        image_verdict(ResourceType::IMAGE, &elsewhere, Some(&own)),
+        ImageVerdict::Refused
+    );
+    let page = CefString::from("https://desktop.tidal.com");
+    assert_eq!(
+        image_verdict(ResourceType::IMAGE, &devtools, Some(&page)),
+        ImageVerdict::Refused
+    );
+    // The trust dialog's avatar over https: an https initiator earns no self-load pass.
+    let avatar = RequestUrl::new("https://evil.example/a.png".to_string());
+    let dialog = CefString::from("https://evil.example");
+    assert_eq!(
+        image_verdict(ResourceType::IMAGE, &avatar, Some(&dialog)),
+        ImageVerdict::Refused
     );
 }
