@@ -39,16 +39,16 @@ fn secs_clamp_to_the_maximum_on_write_and_on_read() {
     save_crossfade_secs(&mut conn, 99);
     assert_eq!(load_crossfade_secs(&mut conn), 12);
     // Nor can a value hand-edited into the database escape it.
-    set(&conn, "player.crossfade_secs", "250");
+    set(&conn, PLAYER_CROSSFADE_SECS, "250");
     assert_eq!(load_crossfade_secs(&mut conn), 12);
 }
 
 #[test]
 fn an_unparseable_stored_value_falls_back_to_off() {
     let mut conn = mem_conn();
-    set(&conn, "player.crossfade_secs", "six");
+    set(&conn, PLAYER_CROSSFADE_SECS, "six");
     assert_eq!(load_crossfade_secs(&mut conn), 0);
-    set(&conn, "player.crossfade_enabled", "yes-please");
+    set(&conn, PLAYER_CROSSFADE_ENABLED, "yes-please");
     assert!(!load_crossfade_enabled(&mut conn));
 }
 

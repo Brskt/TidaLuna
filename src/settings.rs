@@ -1,5 +1,25 @@
 use rusqlite::{Connection, params};
 
+// Every settings key, written once: a load and its save cannot disagree on a name, and a test
+// that stores a raw row names the same key the loader reads.
+const WINDOW_X: &str = "window.x";
+const WINDOW_Y: &str = "window.y";
+const WINDOW_WIDTH: &str = "window.width";
+const WINDOW_HEIGHT: &str = "window.height";
+const WINDOW_MAXIMIZED: &str = "window.maximized";
+const WINDOW_CLOSE_TO_TRAY: &str = "window.close_to_tray";
+const PLAYER_VOLUME_SYNC: &str = "player.volume_sync";
+const PLAYER_ASIO: &str = "player.asio";
+const PLAYER_EXCLUSIVE: &str = "player.exclusive";
+const PLAYER_CROSSFADE_ENABLED: &str = "player.crossfade_enabled";
+const PLAYER_CROSSFADE_SECS: &str = "player.crossfade_secs";
+const UPDATER_AUTO_CHECK: &str = "updater.auto_check";
+const UPDATER_CHANNEL: &str = "updater.channel";
+const UPDATER_SKIP_VERSION: &str = "updater.skip_version";
+const CONNECT_RECEIVER_ALWAYS_ON: &str = "connect.receiver_always_on";
+const LOGGING_LEVEL: &str = "logging.level";
+const LOGGING_CONSOLE: &str = "logging.console";
+
 #[derive(Debug, Clone)]
 pub struct WindowState {
     pub x: i32,
@@ -61,6 +81,11 @@ fn set(conn: &Connection, key: &str, value: &str) {
 /// Read a settings value parsed as `T`, falling back to `default` when the key is
 /// absent or unparseable.
 fn get_parsed<T: std::str::FromStr>(conn: &Connection, key: &str, default: T) -> T {
+    get_opt(conn, key).unwrap_or(default)
+}
+
+/// A settings value parsed as `T`, `None` when the key is absent or unparseable.
+fn get_opt<T: std::str::FromStr>(conn: &Connection, key: &str) -> Option<T> {
     conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
         params![key],
@@ -68,7 +93,6 @@ fn get_parsed<T: std::str::FromStr>(conn: &Connection, key: &str, default: T) ->
     )
     .ok()
     .and_then(|s| s.parse().ok())
-    .unwrap_or(default)
 }
 
 fn get_bool(conn: &Connection, key: &str, default: bool) -> bool {
@@ -81,16 +105,22 @@ fn get_u8(conn: &Connection, key: &str, default: u8) -> u8 {
 
 pub(crate) fn load_window_state(conn: &mut Connection) -> WindowState {
     let mut ws = WindowState::default();
-    let mut stmt = match conn.prepare(
-        "SELECT key, value FROM settings WHERE key IN ('window.x', 'window.y', 'window.width', 'window.height', 'window.maximized')",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::vprintln!("[SETTINGS] Failed to load window state: {e}");
-            return ws;
-        }
-    };
-    let rows = match stmt.query_map([], |row| {
+    let mut stmt =
+        match conn.prepare("SELECT key, value FROM settings WHERE key IN (?1, ?2, ?3, ?4, ?5)") {
+            Ok(s) => s,
+            Err(e) => {
+                crate::vprintln!("[SETTINGS] Failed to load window state: {e}");
+                return ws;
+            }
+        };
+    let keys = params![
+        WINDOW_X,
+        WINDOW_Y,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        WINDOW_MAXIMIZED
+    ];
+    let rows = match stmt.query_map(keys, |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     }) {
         Ok(r) => r,
@@ -102,27 +132,27 @@ pub(crate) fn load_window_state(conn: &mut Connection) -> WindowState {
     for row in rows.flatten() {
         let (key, value) = row;
         match key.as_str() {
-            "window.x" => {
+            WINDOW_X => {
                 if let Ok(v) = value.parse() {
                     ws.x = v;
                 }
             }
-            "window.y" => {
+            WINDOW_Y => {
                 if let Ok(v) = value.parse() {
                     ws.y = v;
                 }
             }
-            "window.width" => {
+            WINDOW_WIDTH => {
                 if let Ok(v) = value.parse() {
                     ws.width = v;
                 }
             }
-            "window.height" => {
+            WINDOW_HEIGHT => {
                 if let Ok(v) = value.parse() {
                     ws.height = v;
                 }
             }
-            "window.maximized" => {
+            WINDOW_MAXIMIZED => {
                 if let Ok(v) = value.parse() {
                     ws.maximized = v;
                 }
@@ -141,76 +171,70 @@ pub(crate) fn save_window_state(conn: &mut Connection, state: &WindowState) {
             return;
         }
     };
-    set(&tx, "window.x", &state.x.to_string());
-    set(&tx, "window.y", &state.y.to_string());
-    set(&tx, "window.width", &state.width.to_string());
-    set(&tx, "window.height", &state.height.to_string());
-    set(&tx, "window.maximized", &state.maximized.to_string());
+    set(&tx, WINDOW_X, &state.x.to_string());
+    set(&tx, WINDOW_Y, &state.y.to_string());
+    set(&tx, WINDOW_WIDTH, &state.width.to_string());
+    set(&tx, WINDOW_HEIGHT, &state.height.to_string());
+    set(&tx, WINDOW_MAXIMIZED, &state.maximized.to_string());
     if let Err(e) = tx.commit() {
         crate::vprintln!("[SETTINGS] Failed to commit transaction: {e}");
     }
 }
 
 pub(crate) fn save_maximized(conn: &mut Connection, maximized: bool) {
-    set(conn, "window.maximized", &maximized.to_string());
+    set(conn, WINDOW_MAXIMIZED, &maximized.to_string());
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn load_volume_sync(conn: &mut Connection) -> bool {
-    get_bool(conn, "player.volume_sync", true)
+    get_bool(conn, PLAYER_VOLUME_SYNC, true)
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn save_volume_sync(conn: &mut Connection, enabled: bool) {
-    set(conn, "player.volume_sync", &enabled.to_string());
+    set(conn, PLAYER_VOLUME_SYNC, &enabled.to_string());
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn load_asio(conn: &mut Connection) -> bool {
-    get_bool(conn, "player.asio", false)
+    get_bool(conn, PLAYER_ASIO, false)
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn save_asio(conn: &mut Connection, enabled: bool) {
-    set(conn, "player.asio", &enabled.to_string());
+    set(conn, PLAYER_ASIO, &enabled.to_string());
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn load_exclusive(conn: &mut Connection) -> bool {
-    get_bool(conn, "player.exclusive", false)
+    get_bool(conn, PLAYER_EXCLUSIVE, false)
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn save_exclusive(conn: &mut Connection, enabled: bool) {
-    set(conn, "player.exclusive", &enabled.to_string());
+    set(conn, PLAYER_EXCLUSIVE, &enabled.to_string());
 }
 
 pub(crate) fn load_close_to_tray(conn: &mut Connection) -> bool {
-    get_bool(conn, "window.close_to_tray", false)
+    get_bool(conn, WINDOW_CLOSE_TO_TRAY, false)
 }
 
 pub(crate) fn save_close_to_tray(conn: &mut Connection, enabled: bool) {
-    set(conn, "window.close_to_tray", &enabled.to_string());
+    set(conn, WINDOW_CLOSE_TO_TRAY, &enabled.to_string());
 }
 
 pub(crate) fn load_update_auto_check(conn: &mut Connection) -> bool {
-    get_bool(conn, "updater.auto_check", true)
+    get_bool(conn, UPDATER_AUTO_CHECK, true)
 }
 
 pub(crate) fn save_update_auto_check(conn: &mut Connection, enabled: bool) {
-    set(conn, "updater.auto_check", &enabled.to_string());
+    set(conn, UPDATER_AUTO_CHECK, &enabled.to_string());
 }
 
 /// Update channel: "stable" (published releases only) or "dev" (the CI's
 /// per-push prereleases too). Any other stored value reads as "stable".
 pub(crate) fn load_update_channel(conn: &mut Connection) -> String {
-    let value = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'updater.channel'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_default();
+    let value: String = get_opt(conn, UPDATER_CHANNEL).unwrap_or_default();
     if value == "dev" {
         value
     } else {
@@ -220,47 +244,47 @@ pub(crate) fn load_update_channel(conn: &mut Connection) -> String {
 
 pub(crate) fn save_update_channel(conn: &mut Connection, channel: &str) {
     let channel = if channel == "dev" { "dev" } else { "stable" };
-    set(conn, "updater.channel", channel);
+    set(conn, UPDATER_CHANNEL, channel);
 }
 
 pub(crate) fn load_receiver_always_on(conn: &mut Connection) -> bool {
-    get_bool(conn, "connect.receiver_always_on", true)
+    get_bool(conn, CONNECT_RECEIVER_ALWAYS_ON, true)
 }
 
 pub(crate) fn save_receiver_always_on(conn: &mut Connection, enabled: bool) {
-    set(conn, "connect.receiver_always_on", &enabled.to_string());
+    set(conn, CONNECT_RECEIVER_ALWAYS_ON, &enabled.to_string());
 }
 
 pub(crate) fn load_log_level(conn: &mut Connection) -> u8 {
-    get_u8(conn, "logging.level", 0).min(crate::logging::MAX_LOG_LEVEL)
+    get_u8(conn, LOGGING_LEVEL, 0).min(crate::logging::MAX_LOG_LEVEL)
 }
 
 pub(crate) fn save_log_level(conn: &mut Connection, level: u8) {
     set(
         conn,
-        "logging.level",
+        LOGGING_LEVEL,
         &level.min(crate::logging::MAX_LOG_LEVEL).to_string(),
     );
 }
 
 pub(crate) fn load_crossfade_enabled(conn: &mut Connection) -> bool {
-    get_bool(conn, "player.crossfade_enabled", false)
+    get_bool(conn, PLAYER_CROSSFADE_ENABLED, false)
 }
 
 pub(crate) fn save_crossfade_enabled(conn: &mut Connection, enabled: bool) {
-    set(conn, "player.crossfade_enabled", &enabled.to_string());
+    set(conn, PLAYER_CROSSFADE_ENABLED, &enabled.to_string());
 }
 
 /// Crossfade overlap in seconds. Clamped on read as well as on write: a value
 /// edited into the database by hand must not reach the audio path out of range.
 pub(crate) fn load_crossfade_secs(conn: &mut Connection) -> u8 {
-    get_u8(conn, "player.crossfade_secs", 0).min(crate::player::crossfade::MAX_CROSSFADE_SECS)
+    get_u8(conn, PLAYER_CROSSFADE_SECS, 0).min(crate::player::crossfade::MAX_CROSSFADE_SECS)
 }
 
 pub(crate) fn save_crossfade_secs(conn: &mut Connection, secs: u8) {
     set(
         conn,
-        "player.crossfade_secs",
+        PLAYER_CROSSFADE_SECS,
         &secs
             .min(crate::player::crossfade::MAX_CROSSFADE_SECS)
             .to_string(),
@@ -268,11 +292,11 @@ pub(crate) fn save_crossfade_secs(conn: &mut Connection, secs: u8) {
 }
 
 pub(crate) fn load_console(conn: &mut Connection) -> bool {
-    get_bool(conn, "logging.console", false)
+    get_bool(conn, LOGGING_CONSOLE, false)
 }
 
 pub(crate) fn save_console(conn: &mut Connection, enabled: bool) {
-    set(conn, "logging.console", &enabled.to_string());
+    set(conn, LOGGING_CONSOLE, &enabled.to_string());
 }
 
 /// Settings the window bootstrap needs, batched into one db read, loading
@@ -324,16 +348,11 @@ pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
 }
 
 pub(crate) fn load_update_skip_version(conn: &mut Connection) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM settings WHERE key = 'updater.skip_version'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
+    get_opt(conn, UPDATER_SKIP_VERSION)
 }
 
 pub(crate) fn save_update_skip_version(conn: &mut Connection, version: &str) {
-    set(conn, "updater.skip_version", version);
+    set(conn, UPDATER_SKIP_VERSION, version);
 }
 
 #[cfg(test)]

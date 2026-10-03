@@ -12,28 +12,28 @@ fn mem_conn() -> Connection {
 #[test]
 fn get_u8_returns_default_when_absent() {
     let conn = mem_conn();
-    assert_eq!(get_u8(&conn, "logging.level", 0), 0);
-    assert_eq!(get_u8(&conn, "logging.level", 2), 2);
+    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 0), 0);
+    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 2), 2);
 }
 
 #[test]
 fn get_u8_parses_stored_value() {
     let conn = mem_conn();
-    set(&conn, "logging.level", "2");
-    assert_eq!(get_u8(&conn, "logging.level", 0), 2);
+    set(&conn, LOGGING_LEVEL, "2");
+    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 0), 2);
 }
 
 #[test]
 fn get_u8_falls_back_on_unparseable() {
     let conn = mem_conn();
-    set(&conn, "logging.level", "not-a-number");
-    assert_eq!(get_u8(&conn, "logging.level", 1), 1);
+    set(&conn, LOGGING_LEVEL, "not-a-number");
+    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 1), 1);
 }
 
 #[test]
 fn load_log_level_clamps_to_three() {
     let mut conn = mem_conn();
-    set(&conn, "logging.level", "99");
+    set(&conn, LOGGING_LEVEL, "99");
     assert_eq!(load_log_level(&mut conn), 3);
 }
 
