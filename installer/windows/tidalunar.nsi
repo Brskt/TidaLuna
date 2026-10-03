@@ -202,7 +202,15 @@ FunctionEnd
 ; boundary bars other accounts from creating it, its descriptor (us + SYSTEM)
 ; from opening it. Built once, before the retry label, and left open until exit.
 ; Must match NAMESPACE in updater/src/lock.rs.
+;
+; Earlier installers, uninstallers and updaters lock LEGACY_INSTALL_LOCK plus the
+; SID, and an in-app update never replaces Uninstall.exe: once the namespace lock
+; is ours, that name is taken too, for an earlier build to find, and an earlier
+; build of this account holding it is contention. Any account can claim a Global\
+; name: a failed create, or a holder whose owner is neither our user nor our
+; token's default owner, does not block. Must match LEGACY_PREFIX in updater/src/lock.rs.
 !define INSTALL_NAMESPACE "TidaLunarInstall"
+!define LEGACY_INSTALL_LOCK "Global\TidaLunarInstallLock-"
 ; The SECURITY_ATTRIBUTES below is DWORD + pointer + BOOL with no padding, which
 ; holds only for the 32-bit stub xtask builds.
 !if ${NSIS_PTR_SIZE} != 4
@@ -234,14 +242,62 @@ FunctionEnd
     Abort
   mutex_try_wait:
     System::Call 'kernel32::WaitForSingleObject(p r2, i 0) i .r3'
-    IntCmp $3 0   mutex_proceed                  ; WAIT_OBJECT_0
-    IntCmp $3 128 mutex_proceed                  ; WAIT_ABANDONED
+    IntCmp $3 0   mutex_legacy                   ; WAIT_OBJECT_0
+    IntCmp $3 128 mutex_legacy                   ; WAIT_ABANDONED
     System::Call 'kernel32::CloseHandle(p r2)'
     StrCpy $2 0
+  mutex_contended:
     MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
       "${contention_message}" \
       /SD IDCANCEL IDRETRY mutex_acquire
     Abort
+  ; Our descriptor lets a limited earlier build open what an elevated run creates.
+  ; Null for an object we may not open or of another type: proceed.
+  mutex_legacy:
+    System::Call 'kernel32::CreateMutexW(p r8, i 0, w "${LEGACY_INSTALL_LOCK}$9") p .R1'
+    IntCmp $R1 0 mutex_proceed
+    System::Call 'kernel32::WaitForSingleObject(p R1, i 0) i .r3'
+    IntCmp $3 0   mutex_proceed                  ; held until exit, like $2
+    IntCmp $3 128 mutex_proceed
+    StrCpy $R2 0                                 ; 1 once the holder's owner is ours
+    IntCmp $3 258 0 mutex_legacy_close mutex_legacy_close   ; WAIT_TIMEOUT
+    ; i 6 = SE_KERNEL_OBJECT, i 1 = OWNER_SECURITY_INFORMATION; $R4 points into $R5.
+    System::Call 'advapi32::GetSecurityInfo(p R1, i 6, i 1, *p .R4, p 0, p 0, p 0, *p .R5) i .r3'
+    IntCmp $3 0 0 mutex_legacy_close mutex_legacy_close
+    System::Call 'advapi32::EqualSid(p R4, p r7) i .r3'
+    IntCmp $3 0 0 mutex_legacy_ours mutex_legacy_ours
+    ; An earlier build run elevated stamps its token's default owner instead.
+    System::Call 'kernel32::GetCurrentProcess() p .r3'
+    System::Call 'advapi32::OpenProcessToken(p r3, i 8, *p .R6) i .r3'   ; i 8 = TOKEN_QUERY
+    IntCmp $3 0 mutex_legacy_owner_read
+    System::Call 'advapi32::GetTokenInformation(p R6, i 4, p 0, i 0, *i .r4)'   ; i 4 = TokenOwner
+    IntCmp $4 0 mutex_legacy_token_close
+    System::Alloc $4
+    Pop $R7
+    System::Call 'advapi32::GetTokenInformation(p R6, i 4, p R7, i r4, *i .r4) i .r3'
+    IntCmp $3 0 mutex_legacy_owner_free
+    System::Call '*$R7(p .r4)'                   ; TOKEN_OWNER's only field is its PSID
+    System::Call 'advapi32::EqualSid(p R4, p r4) i .r3'
+    IntCmp $3 0 mutex_legacy_owner_free
+    StrCpy $R2 1
+  mutex_legacy_owner_free:
+    System::Free $R7
+  mutex_legacy_token_close:
+    System::Call 'kernel32::CloseHandle(p R6)'
+    Goto mutex_legacy_owner_read
+  mutex_legacy_ours:
+    StrCpy $R2 1
+  mutex_legacy_owner_read:
+    System::Call 'kernel32::LocalFree(p R5)'
+  mutex_legacy_close:
+    System::Call 'kernel32::CloseHandle(p R1)'
+    StrCpy $R1 0
+    IntCmp $R2 1 0 mutex_proceed mutex_proceed
+    ; Owned by this thread, alive through the Retry box: released, not just closed.
+    System::Call 'kernel32::ReleaseMutex(p r2)'
+    System::Call 'kernel32::CloseHandle(p r2)'
+    StrCpy $2 0
+    Goto mutex_contended
   mutex_proceed:
 !macroend
 
@@ -251,7 +307,7 @@ FunctionEnd
 Function .onInit
   Call GetCurrentUserSid                         ; sets $9 = SID, aborts on failure
   !insertmacro AcquireInstallMutex "Another TidaLunar installer or updater is running.$\nClick Retry once it finishes."
-  ; $2 holds the owned mutex handle; OS releases on process exit.
+  ; $2 holds the owned mutex handle, $R1 the legacy one or 0; OS releases on process exit.
 
   ; Discard any incomplete updater transaction, keeping post-install recovery
   ; from undoing this install. Verified delete: Delete failure (AV held,
