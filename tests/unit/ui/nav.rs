@@ -7,6 +7,20 @@ fn u(s: &str) -> RequestUrl {
 }
 
 #[test]
+fn only_external_pages_are_untrusted() {
+    for kind in [
+        PageKind::DesktopApp,
+        PageKind::LoginPage,
+        PageKind::LoginCallback,
+        PageKind::AuthHost,
+        PageKind::TidalCallback,
+    ] {
+        assert!(kind.is_trusted(), "{kind:?}");
+    }
+    assert!(!PageKind::External.is_trusted());
+}
+
+#[test]
 fn tidal_origin_matches_the_apex_and_subdomains() {
     assert!(is_tidal_origin(&u("https://tidal.com/")));
     assert!(is_tidal_origin(&u("https://listen.tidal.com/v1/x")));

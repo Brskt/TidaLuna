@@ -27,7 +27,7 @@ fn trusted_via_memo(memo: &mut Option<(String, bool)>, url: String) -> bool {
     {
         return *verdict;
     }
-    let verdict = !matches!(PageKind::classify(&url), PageKind::External);
+    let verdict = PageKind::classify(&url).is_trusted();
     *memo = Some((url, verdict));
     verdict
 }
