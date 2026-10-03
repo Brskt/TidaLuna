@@ -1,13 +1,7 @@
 //! Tests for `src/settings.rs`, attached to it by `#[path]`.
 
+use super::fixture::mem_conn;
 use super::*;
-use rusqlite::Connection;
-
-fn mem_conn() -> Connection {
-    let mut conn = Connection::open_in_memory().unwrap();
-    init_schema(&mut conn).unwrap();
-    conn
-}
 
 #[test]
 fn get_u8_returns_default_when_absent() {

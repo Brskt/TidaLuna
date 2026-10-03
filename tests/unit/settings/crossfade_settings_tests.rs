@@ -1,13 +1,7 @@
 //! Tests for the crossfade settings in `src/settings.rs`, attached by `#[path]`.
 
+use super::fixture::mem_conn;
 use super::*;
-use rusqlite::Connection;
-
-fn mem_conn() -> Connection {
-    let mut conn = Connection::open_in_memory().unwrap();
-    init_schema(&mut conn).unwrap();
-    conn
-}
 
 #[test]
 fn crossfade_is_off_by_default() {

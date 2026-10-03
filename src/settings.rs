@@ -356,6 +356,10 @@ pub(crate) fn save_update_skip_version(conn: &mut Connection, version: &str) {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/settings/fixture.rs"]
+mod fixture;
+
+#[cfg(test)]
 #[path = "../tests/unit/settings/logging_settings_tests.rs"]
 mod logging_settings_tests;
 
