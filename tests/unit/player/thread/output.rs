@@ -222,6 +222,63 @@ fn a_buffer_that_changes_length_between_ticks_stays_one_continuous_fade() {
 }
 
 #[test]
+fn a_fade_does_not_swap_while_the_offer_lock_is_held() {
+    let xfade = CrossfadeLink::new();
+    // Two callbacks of fade against two of outgoing audio: the first tick adopts and mixes
+    // half, the second is the one that reaches all three swap conditions.
+    offer_fade_sized(&xfade, 1.0, CB_FRAMES * 2, CB_FRAMES * 4);
+    let (mut callback, played_samples) = callback_counting(&xfade, 1.0, CB_FRAMES * 2);
+    xfade.out_eof.store(true, Relaxed);
+    played_samples.store(OUTGOING_PLAYED, Relaxed);
+    let mut data = vec![0.0f32; CB_FRAMES];
+    callback(&mut data, &callback_info());
+
+    let held = xfade.attach.lock().unwrap();
+    callback(&mut data, &callback_info());
+    assert_eq!(
+        unpack_xfade_done(xfade.done.load(Relaxed)).0,
+        0,
+        "the fade swapped while the teardown held the guard"
+    );
+    assert!(
+        played_samples.load(Relaxed) >= OUTGOING_PLAYED,
+        "the clock was rebased by a swap that should not have happened"
+    );
+
+    drop(held);
+    callback(&mut data, &callback_info());
+    let (cur_gen, in_played) = unpack_xfade_done(xfade.done.load(Relaxed));
+    assert!(
+        cur_gen > 0,
+        "the fade never swapped once the guard was free"
+    );
+    assert_eq!(played_samples.load(Relaxed), in_played);
+}
+
+#[test]
+fn a_poisoned_offer_lock_still_adopts_and_swaps() {
+    let xfade = CrossfadeLink::new();
+    offer_fade_sized(&xfade, 1.0, CB_FRAMES, CB_FRAMES * 4);
+    let (mut callback, _played) = callback_counting(&xfade, 1.0, CB_FRAMES);
+    xfade.out_eof.store(true, Relaxed);
+    let attach = Arc::clone(&xfade.attach);
+    let _ = std::thread::spawn(move || {
+        let _guard = attach.lock().unwrap();
+        panic!("poisoning the offer lock on purpose");
+    })
+    .join();
+    assert!(xfade.attach.is_poisoned());
+
+    let mut data = vec![0.0f32; CB_FRAMES];
+    callback(&mut data, &callback_info());
+
+    assert!(
+        unpack_xfade_done(xfade.done.load(Relaxed)).0 > 0,
+        "a poisoned guard kept the fade from adopting or swapping"
+    );
+}
+
+#[test]
 fn the_swap_rebases_the_clock_to_the_incoming_track_before_it_publishes() {
     // The control thread reads `done` up to a poll later, and by then the counter
     // holds the outgoing total plus whatever the promoted ring has delivered since,

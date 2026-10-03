@@ -175,6 +175,20 @@ impl CrossfadeLink {
     }
 }
 
+/// The callback's only way into `attach`, and it never waits: a held lock is `None`, the tick goes
+/// on without it. Poison is recovered as it is everywhere else in the player; every state of the
+/// guarded `Option` is valid, and reading poison as "never" would leave an adopted fade unable to
+/// swap and `pending_crossfade` set for good.
+fn try_attach(
+    attach: &Mutex<Option<CrossfadeSlot>>,
+) -> Option<std::sync::MutexGuard<'_, Option<CrossfadeSlot>>> {
+    match attach.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 /// Split a value published in `OpenedStream::xfade_done` into `(generation, origin)`.
 /// Generation 0 means no fade has completed on this stream yet.
 #[inline]
@@ -337,13 +351,24 @@ fn build_cpal_callback(
         // Taking it leaves the cell `None`, which from here on means only "nothing
         // new", never "cancel". Cancellation has its own flag above, because one
         // cell serving both made every fade release itself one tick after adoption.
-        if let Ok(mut attach) = xfade.attach.try_lock()
-            && attach.is_some()
-        {
-            slot = attach.take();
-            fade_pos = 0;
-            fade_rescaled = false;
-            xfade_in_played = 0;
+        if let Some(mut attach) = try_attach(&xfade.attach) {
+            // Drained again, under the guard. A teardown and a re-arm can both land between
+            // the drain above and this lock, and the offer read here is then the NEW fade while
+            // the flag still names the old one: adopted unguarded, the next tick's drain would eat
+            // it and leave `pending_crossfade` set for good. The teardown raises the flag before it
+            // releases this guard, so here the flag is final.
+            if xfade.cancel.swap(false, Relaxed) {
+                slot = None;
+                fade_pos = 0;
+                fade_rescaled = false;
+                xfade_in_played = 0;
+            }
+            if attach.is_some() {
+                slot = attach.take();
+                fade_pos = 0;
+                fade_rescaled = false;
+                xfade_in_played = 0;
+            }
         }
 
         let v = f32::from_bits(volume.load(Relaxed));
@@ -420,7 +445,17 @@ fn build_cpal_callback(
         // tell "finished" from "stalled mid-download", and would retire a decoder
         // with more of the track to give. Together they can only DELAY the swap,
         // never truncate: a stall extends the fade instead of cutting it short.
-        if fade_pos >= len_samples && consumer.slots() == 0 && xfade.out_eof.load(Relaxed) {
+        //
+        // And under the offer guard, with no cancel raised. The teardown reads `done` under this
+        // same guard and raises `cancel` before releasing it, so it either finds this swap already
+        // published or has vetoed it; never a swap landing between its read and its kill, which
+        // would retire the decoder feeding the ring just promoted. A held guard skips one tick.
+        if fade_pos >= len_samples
+            && consumer.slots() == 0
+            && xfade.out_eof.load(Relaxed)
+            && let Some(_offer) = try_attach(&xfade.attach)
+            && !xfade.cancel.load(Relaxed)
+        {
             // The incoming ring becomes the primary one HERE, inside the callback
             // that owns both. The control thread cannot do it: this closure owns
             // `consumer` by move. Only the track identity is left for the player.

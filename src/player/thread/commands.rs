@@ -699,13 +699,23 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let Some(word) = self.cpal_xfade.as_ref().map(|x| x.done.load(Acquire)) else {
             return false;
         };
-        let (cur_gen, origin) = crate::player::thread::output::unpack_xfade_done(word);
-        if cur_gen == 0 || cur_gen == self.xfade_seen_gen {
+        let Some(completed) = self.fresh_completion(word) else {
             return false;
-        }
+        };
+        self.adopt_completion(completed);
+        true
+    }
+
+    /// The `(generation, origin)` in `word` if it names a fade nobody has acted on yet. A read
+    /// with no effect: the teardown takes it under the offer guard and acts after it.
+    fn fresh_completion(&self, word: u64) -> Option<(u16, u64)> {
+        let (cur_gen, origin) = crate::player::thread::output::unpack_xfade_done(word);
+        (cur_gen != 0 && cur_gen != self.xfade_seen_gen).then_some((cur_gen, origin))
+    }
+
+    fn adopt_completion(&mut self, (cur_gen, origin): (u16, u64)) {
         self.xfade_seen_gen = cur_gen;
         self.promote_crossfade(origin);
-        true
     }
 
     /// Drop the incoming track and detach it from the callback. The cleanup path for a
@@ -754,20 +764,35 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// A finished fade cannot be cancelled: the callback swapped its consumer, so retiring the
     /// incoming decoder would leave the device draining a ring nobody fills, with no watchdog
     /// behind it since the stall detector watches the healthy outgoing buffer.
+    ///
+    /// The verdict is taken under the offer guard, the one the callback swaps under. Read outside
+    /// it, the callback could finish the fade between the read and the kill below, which would
+    /// then retire the decoder feeding the ring just promoted. Only the read and the veto sit
+    /// inside the guard; both joins run after it drops.
     fn tear_down_crossfade(&mut self) -> bool {
-        if self.reconcile_completed_crossfade() {
+        let mut completed = None;
+        let mut retracted = None;
+        if let Some(xfade) = self.cpal_xfade.as_ref() {
+            let mut attach = xfade.attach.lock().unwrap_or_else(|e| e.into_inner());
+            completed = self.fresh_completion(xfade.done.load(Acquire));
+            if completed.is_none() && self.pending_crossfade.is_some() {
+                // Retract an offer the callback has not taken yet...
+                retracted = attach.take();
+                // ...and release one it already has. Two different states, two
+                // signals: `attach == None` alone cannot say which.
+                xfade.cancel.store(true, Relaxed);
+            }
+        }
+        // Outside the guard: a retracted ring whose producer already died is freed here, and the
+        // callback's `try_lock` must not meet that free.
+        drop(retracted);
+        if let Some(completed) = completed {
+            self.adopt_completion(completed);
             return true;
         }
         let Some(mut state) = self.pending_crossfade.take() else {
             return false;
         };
-        if let Some(xfade) = self.cpal_xfade.as_ref() {
-            // Retract an offer the callback has not taken yet...
-            *xfade.attach.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            // ...and release one it already has. Two different states, two
-            // signals: `attach == None` alone cannot say which.
-            xfade.cancel.store(true, Relaxed);
-        }
         let _ = state.cmd_tx.send(DecodeCommand::Stop);
         state.reader_cancel.store(true, Relaxed);
         state.buffer.wake_readers();

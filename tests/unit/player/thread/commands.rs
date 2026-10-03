@@ -1918,6 +1918,55 @@ fn a_cancellation_promotes_a_fade_the_callback_already_finished() {
     );
 }
 
+/// The helper stands in for the callback: it holds the offer guard, publishes `done`, and only
+/// then releases.
+#[test]
+fn a_teardown_waits_out_a_swap_in_progress_and_promotes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let _slot = CurrentTrackSlot::clear();
+    let mut h = harness(dir.path());
+    let incoming_cmds = arm_for_promotion(&mut h, 246.0);
+    let link = crate::player::thread::output::CrossfadeLink {
+        attach: Arc::new(Mutex::new(None)),
+        cancel: Arc::new(AtomicBool::new(false)),
+        out_eof: Arc::new(AtomicBool::new(false)),
+        in_eof: Arc::new(AtomicBool::new(false)),
+        done: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    };
+    h.player.cpal_xfade = Some(link.clone());
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let swapper = std::thread::spawn(move || {
+        let _guard = link.attach.lock().unwrap();
+        held_tx.send(()).unwrap();
+        // Long enough for a teardown reading outside the guard to read first, which is how this
+        // catches one. Under the guard the order is fixed however long this waits.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        link.done.store(
+            crate::player::thread::output::pack_xfade_done(1, SIX_SECONDS),
+            std::sync::atomic::Ordering::Release,
+        );
+    });
+    held_rx.recv().unwrap();
+
+    h.player.cancel_crossfade();
+    swapper.join().unwrap();
+
+    let events = h.events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, PlayerEvent::CrossfadePromoted(..))),
+        "a swap in progress must promote, not cancel, got {events:?}"
+    );
+    assert!(
+        !incoming_cmds
+            .try_iter()
+            .any(|cmd| matches!(cmd, DecodeCommand::Stop)),
+        "the decoder feeding the promoted ring was stopped"
+    );
+}
+
 /// A Load the generation gate discards must leave a live fade alone. Tearing it down first
 /// retracts the attach slot and stops the incoming decoder, and nothing legitimate follows to
 /// justify it: a generation can be minted and then die to an HTTP error (`ctx.fail_load`), and
