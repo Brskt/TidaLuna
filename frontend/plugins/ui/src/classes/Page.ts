@@ -94,10 +94,10 @@ export class Page {
 	}
 
 	open() {
-		redux.actions["router/PUSH"]({
-			pathname: "/not-found",
-			search: this.name,
-			replace: true,
-		});
+		const pathname = "/not-found";
+		const search = `?${this.name}`;
+		// Already on this page: another push would only stack a duplicate history entry
+		if (location.pathname === pathname && location.search === search) return;
+		redux.actions["router/PUSH"]({ pathname, search });
 	}
 }
