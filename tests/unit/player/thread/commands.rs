@@ -269,8 +269,8 @@ async fn a_failed_load_leaves_no_track_behind() {
 /// The re-assert is the one load path that never reaches `handle_load`; it is the only one that
 /// has to carry the id itself. Dropping it there left a gapless-advanced track nameless for the
 /// rest of its life, with every length it measured publishable under nothing.
-#[tokio::test]
-async fn a_re_assert_brings_the_track_its_load_named() {
+#[test]
+fn a_re_assert_brings_the_track_its_load_named() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.current_duration = 214.0;
@@ -295,8 +295,8 @@ async fn a_re_assert_brings_the_track_its_load_named() {
 
 /// A re-assert carrying no id refreshes nothing and erases nothing. A quality swap arrives that
 /// way, and blanking the name there is what stopped the swap from ever republishing its length.
-#[tokio::test]
-async fn a_re_assert_without_an_id_keeps_the_one_already_known() {
+#[test]
+fn a_re_assert_without_an_id_keeps_the_one_already_known() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.current_duration = 214.0;
@@ -318,8 +318,8 @@ async fn a_re_assert_without_an_id_keeps_the_one_already_known() {
 /// The re-assert is minted from a `committed_track` read on the caller's thread, and a load for
 /// another track can commit between the mint and the handling. Applying the id then would rename
 /// the arriving track after the one that just left, and every length it measures along with it.
-#[tokio::test]
-async fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
+#[test]
+fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.current_duration = 214.0;
@@ -379,8 +379,8 @@ impl ReplayableTrack {
     }
 }
 
-#[tokio::test]
-async fn a_seek_taken_while_paused_settles_without_a_resume() {
+#[test]
+fn a_seek_taken_while_paused_settles_without_a_resume() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -408,8 +408,8 @@ async fn a_seek_taken_while_paused_settles_without_a_resume() {
 }
 
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
+#[test]
+fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
@@ -453,8 +453,8 @@ async fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
 /// tracks they never heard. What must NOT change with the cause: the device is still handed back,
 /// the seek pin cleared, the resume point kept.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_bypass_network_loss_holds_the_queue_and_still_frees_the_device() {
+#[test]
+fn a_bypass_network_loss_holds_the_queue_and_still_frees_the_device() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
@@ -501,8 +501,8 @@ async fn a_bypass_network_loss_holds_the_queue_and_still_frees_the_device() {
 /// the pause debounce can elapse between the two. Firing there hands back a device the load is
 /// about to reopen and vacates the track slot that load is still filling.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_release_deadline_waits_for_an_in_flight_load() {
+#[test]
+fn a_release_deadline_waits_for_an_in_flight_load() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
@@ -535,8 +535,8 @@ async fn a_release_deadline_waits_for_an_in_flight_load() {
 /// the stream identity and never lifts the pin. Left standing it outlives the track: the bar
 /// stays frozen at the target and resume writes stay suppressed.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_release_settles_the_seek_it_strands() {
+#[test]
+fn a_release_settles_the_seek_it_strands() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
@@ -575,8 +575,8 @@ async fn a_release_settles_the_seek_it_strands() {
 /// gate recover a second time on the very tick the refusal already had, sending two replays that
 /// carry the same generation and disagree about whether to resume playing.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
+#[test]
+fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
@@ -595,8 +595,8 @@ async fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
 /// the id here would make its `SeekSettled` fail `seek_ack_is_current` and the seek would never
 /// settle for the listener.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn an_asio_refusal_keeps_an_adoption_that_may_still_be_live() {
+#[test]
+fn an_asio_refusal_keeps_an_adoption_that_may_still_be_live() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_asio_mode = true;
@@ -612,8 +612,8 @@ async fn an_asio_refusal_keeps_an_adoption_that_may_still_be_live() {
 }
 
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
+#[test]
+fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_asio_mode = true;
@@ -635,8 +635,8 @@ async fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() 
 /// A decode failure drops the track identity before the SDK's recovery reload. Queuing an
 /// untagged seek there would hand it to whichever track loads next.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_seek_with_no_track_to_tag_is_not_queued() {
+#[test]
+fn a_seek_with_no_track_to_tag_is_not_queued() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_asio_mode = true;
@@ -651,8 +651,8 @@ async fn a_seek_with_no_track_to_tag_is_not_queued() {
 /// Dropping the untagged seek is the deliberate half; the silence was not. With no tag the seek
 /// is gone; nothing will ever make the target the transport already took come true.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
+#[test]
+fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_asio_mode = true;
@@ -685,8 +685,8 @@ async fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
 
 /// Taking only the winner leaves the loser armed for the next read of that slot.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn taking_the_queued_seek_retires_the_auto_resume() {
+#[test]
+fn taking_the_queued_seek_retires_the_auto_resume() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.user_seek_override = Some(("track-1".to_string(), 10.0));
@@ -701,8 +701,8 @@ async fn taking_the_queued_seek_retires_the_auto_resume() {
 }
 
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn the_auto_resume_is_taken_when_no_seek_was_queued() {
+#[test]
+fn the_auto_resume_is_taken_when_no_seek_was_queued() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.pending_resume_seek = Some(45.0);
@@ -714,8 +714,8 @@ async fn the_auto_resume_is_taken_when_no_seek_was_queued() {
 /// The whole chain a queued seek has to survive, which nothing exercised in one piece: a
 /// parked switch, the shared fallback, a refusal, the reap, and the backend that spends it.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_queued_seek_survives_a_parked_switch_through_the_reap() {
+#[test]
+fn a_queued_seek_survives_a_parked_switch_through_the_reap() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_playing = false;
@@ -778,8 +778,8 @@ async fn a_queued_seek_survives_a_parked_switch_through_the_reap() {
 /// A load announces where it will open before the backend that consumes the pair is chosen.
 /// Reading only the auto-resume there told the bar 45s while the stream opened at 10s.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn the_announced_start_position_is_the_one_the_stream_opens_at() {
+#[test]
+fn the_announced_start_position_is_the_one_the_stream_opens_at() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.user_seek_override = Some(("track-1".to_string(), 10.0));
@@ -796,8 +796,8 @@ async fn the_announced_start_position_is_the_one_the_stream_opens_at() {
 /// A refused seek moved nothing, and decoding runs a ring ahead of the speakers. Persisting
 /// what the decoder reported would store that lead as if it had been heard, and rebasing the
 /// played counter on it would teleport the position by the same amount.
-#[tokio::test]
-async fn a_refused_seek_persists_what_was_played_not_what_was_decoded() {
+#[test]
+fn a_refused_seek_persists_what_was_played_not_what_was_decoded() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_playing = false;
@@ -827,8 +827,8 @@ async fn a_refused_seek_persists_what_was_played_not_what_was_decoded() {
 /// The tick that reports a landing returns early on a paused stream: the settle has to carry
 /// the position itself. Without it the bar keeps the target `handle_seek` announced, for as long
 /// as the pause lasts. Both bypass backends already answer this way.
-#[tokio::test]
-async fn a_seek_answered_while_paused_reports_the_landing() {
+#[test]
+fn a_seek_answered_while_paused_reports_the_landing() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_playing = false;
@@ -867,8 +867,8 @@ async fn a_seek_answered_while_paused_reports_the_landing() {
 /// `stop_decode` joins the decode thread on the player thread. A decoder parked in a starved
 /// read answers no command; the stop has to carry the retire signal, or the join waits with
 /// it. Asserting the flag before the join keeps a regression a failure rather than a hang.
-#[tokio::test]
-async fn stopping_the_decoder_retires_its_reader() {
+#[test]
+fn stopping_the_decoder_retires_its_reader() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     // Held for the test: dropping the writer cancels the buffer, which would free the reader
@@ -906,8 +906,8 @@ async fn stopping_the_decoder_retires_its_reader() {
 /// A failed load clears the flag every position emitter keys on; the fields describing that
 /// position have to fall with it. The seek answer is the shortest path to the consequence: it
 /// would otherwise carry the replaced track's position under the failed load's seq.
-#[tokio::test]
-async fn a_failed_load_leaves_no_position_from_the_track_it_replaced() {
+#[test]
+fn a_failed_load_leaves_no_position_from_the_track_it_replaced() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.sample_rate = 1;
@@ -943,8 +943,8 @@ async fn a_failed_load_leaves_no_position_from_the_track_it_replaced() {
 
 /// A pre-seek the reader refused moved nothing. Announcing the request at play time named a
 /// position playback never reached, and only the next periodic tick took it back.
-#[tokio::test]
-async fn a_refused_pre_seek_is_not_announced_as_the_start_position() {
+#[test]
+fn a_refused_pre_seek_is_not_announced_as_the_start_position() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_playing = false;
@@ -979,8 +979,8 @@ async fn a_refused_pre_seek_is_not_announced_as_the_start_position() {
 
 /// Two seeks in flight: `SeekComplete` used to carry no identity, and the stale first answer
 /// could settle the pin and persist its own position over the seek still being awaited.
-#[tokio::test]
-async fn a_superseded_seek_answer_settles_nothing() {
+#[test]
+fn a_superseded_seek_answer_settles_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     // Paused, where the periodic tick cannot quietly correct the stored position.
@@ -1027,8 +1027,8 @@ async fn a_superseded_seek_answer_settles_nothing() {
     );
 }
 
-#[tokio::test]
-async fn a_seek_settled_after_a_stop_keeps_the_stopped_state() {
+#[test]
+fn a_seek_settled_after_a_stop_keeps_the_stopped_state() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1053,8 +1053,8 @@ async fn a_seek_settled_after_a_stop_keeps_the_stopped_state() {
 /// Exclusive seeks used to sit outside the seek protocol entirely: no pin, no announcement.
 /// The render's pre-seek position walked the bar back, and the frontend had to guess.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn an_exclusive_seek_pins_and_announces_only_once_dispatched() {
+#[test]
+fn an_exclusive_seek_pins_and_announces_only_once_dispatched() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_exclusive_mode = true;
@@ -1123,8 +1123,8 @@ async fn a_bypass_load_announces_that_nothing_plays_yet() {
 /// ASIO dispatched its seeks without announcing them while exclusive and the shared path both
 /// did. The same drag showed a stalled transport on two backends and nothing on the third.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn an_asio_seek_pins_and_announces_only_once_dispatched() {
+#[test]
+fn an_asio_seek_pins_and_announces_only_once_dispatched() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_asio_mode = true;
@@ -1159,8 +1159,8 @@ async fn an_asio_seek_pins_and_announces_only_once_dispatched() {
 /// A park clears the seek channel with the handle. A Play landing in that window used to
 /// hand the UI the queued position as though a decoder had taken it.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_play_during_an_asio_park_reports_the_real_position() {
+#[test]
+fn a_play_during_an_asio_park_reports_the_real_position() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.is_asio_mode = true;
@@ -1195,8 +1195,8 @@ async fn a_play_during_an_asio_park_reports_the_real_position() {
     );
 }
 
-#[tokio::test]
-async fn a_seek_queued_behind_a_load_persists_nothing() {
+#[test]
+fn a_seek_queued_behind_a_load_persists_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1224,8 +1224,8 @@ async fn a_seek_queued_behind_a_load_persists_nothing() {
 /// frontend before the thread ever sees it; a refusal that says nothing leaves the bar on a
 /// position playback never reached, for as long as no load lands. The counter is set apart from
 /// the target, keeping the answer from being a constant.
-#[tokio::test]
-async fn a_seek_with_nothing_loaded_answers_with_the_played_position() {
+#[test]
+fn a_seek_with_nothing_loaded_answers_with_the_played_position() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.decode_cmd_tx = None;
@@ -1257,8 +1257,8 @@ async fn a_seek_with_nothing_loaded_answers_with_the_played_position() {
 /// The other way into the same branch: a fatal decode error nulled the sender while a newer load
 /// is still fetching. That load's own `handle_load` overwrites the queued target before any
 /// decoder reads it; the queue cannot be what answers the frontend here either.
-#[tokio::test]
-async fn a_seek_queued_behind_a_load_answers_the_optimistic_jump() {
+#[test]
+fn a_seek_queued_behind_a_load_answers_the_optimistic_jump() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.decode_cmd_tx = None;
@@ -1291,8 +1291,8 @@ async fn a_seek_queued_behind_a_load_answers_the_optimistic_jump() {
     );
 }
 
-#[tokio::test]
-async fn a_seek_onto_a_dead_pipeline_puts_the_real_position_back() {
+#[test]
+fn a_seek_onto_a_dead_pipeline_puts_the_real_position_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1333,8 +1333,8 @@ async fn a_seek_onto_a_dead_pipeline_puts_the_real_position_back() {
     );
 }
 
-#[tokio::test]
-async fn a_seek_settled_before_the_first_play_announces_ready() {
+#[test]
+fn a_seek_settled_before_the_first_play_announces_ready() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1359,8 +1359,8 @@ async fn a_seek_settled_before_the_first_play_announces_ready() {
     );
 }
 
-#[tokio::test]
-async fn a_seek_settled_after_a_pause_before_the_first_play_keeps_paused() {
+#[test]
+fn a_seek_settled_after_a_pause_before_the_first_play_keeps_paused() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1386,8 +1386,8 @@ async fn a_seek_settled_after_a_pause_before_the_first_play_keeps_paused() {
     );
 }
 
-#[tokio::test]
-async fn a_decode_error_while_paused_reaches_a_terminal_state() {
+#[test]
+fn a_decode_error_while_paused_reaches_a_terminal_state() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1410,8 +1410,8 @@ async fn a_decode_error_while_paused_reaches_a_terminal_state() {
     );
 }
 
-#[tokio::test]
-async fn a_seek_in_flight_holds_off_the_drain() {
+#[test]
+fn a_seek_in_flight_holds_off_the_drain() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1428,8 +1428,8 @@ async fn a_seek_in_flight_holds_off_the_drain() {
     );
 }
 
-#[tokio::test]
-async fn retiring_the_decoder_clears_a_pending_seek() {
+#[test]
+fn retiring_the_decoder_clears_a_pending_seek() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1442,8 +1442,8 @@ async fn retiring_the_decoder_clears_a_pending_seek() {
     assert_eq!(h.player.seek_target, None);
 }
 
-#[tokio::test]
-async fn a_fatal_error_during_a_seek_settles_instead_of_stranding_it() {
+#[test]
+fn a_fatal_error_during_a_seek_settles_instead_of_stranding_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1461,8 +1461,8 @@ async fn a_fatal_error_during_a_seek_settles_instead_of_stranding_it() {
     assert!(!h.player.has_track);
 }
 
-#[tokio::test]
-async fn a_seek_after_a_deferred_decode_error_still_lets_the_track_finish() {
+#[test]
+fn a_seek_after_a_deferred_decode_error_still_lets_the_track_finish() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1492,8 +1492,8 @@ async fn a_seek_after_a_deferred_decode_error_still_lets_the_track_finish() {
     );
 }
 
-#[tokio::test]
-async fn a_completed_track_leaves_no_decoder_behind() {
+#[test]
+fn a_completed_track_leaves_no_decoder_behind() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1510,8 +1510,8 @@ async fn a_completed_track_leaves_no_decoder_behind() {
     );
 }
 
-#[tokio::test]
-async fn a_seek_reviving_a_parked_decoder_disarms_the_pending_completion() {
+#[test]
+fn a_seek_reviving_a_parked_decoder_disarms_the_pending_completion() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1534,8 +1534,8 @@ async fn a_seek_reviving_a_parked_decoder_disarms_the_pending_completion() {
     );
 }
 
-#[tokio::test]
-async fn decode_reaching_eof_while_paused_keeps_the_resume_position() {
+#[test]
+fn decode_reaching_eof_while_paused_keeps_the_resume_position() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
 
@@ -1576,8 +1576,8 @@ fn asio_harness(
 /// thread down whichever stream it judged, and the re-arm is owed either way. No ASIO refusal
 /// does that, `finish_rebuild` and the reset give-up both leaving the control thread alive.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_superseded_asio_rate_refusal_leaves_the_live_track_alone() {
+#[test]
+fn a_superseded_asio_rate_refusal_leaves_the_live_track_alone() {
     let dir = tempfile::tempdir().unwrap();
     let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
 
@@ -1603,8 +1603,8 @@ async fn a_superseded_asio_rate_refusal_leaves_the_live_track_alone() {
 /// A format refusal is scoped for the same reason: its channel-count half reads the TRACK's
 /// channel count, and a superseded stream's verdict must not condemn the track that replaced it.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_superseded_asio_format_refusal_leaves_the_live_track_alone() {
+#[test]
+fn a_superseded_asio_format_refusal_leaves_the_live_track_alone() {
     let dir = tempfile::tempdir().unwrap();
     let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
 
@@ -1625,8 +1625,8 @@ async fn a_superseded_asio_format_refusal_leaves_the_live_track_alone() {
 
 /// The same refusal, named for the stream still live, keeps every effect it ever had.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn the_live_streams_asio_format_refusal_still_falls_back_to_shared() {
+#[test]
+fn the_live_streams_asio_format_refusal_still_falls_back_to_shared() {
     let dir = tempfile::tempdir().unwrap();
     let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
 
@@ -1641,8 +1641,8 @@ async fn the_live_streams_asio_format_refusal_still_falls_back_to_shared() {
 
 /// The same for a rate refusal, which also condemns the track against re-engaging ASIO.
 #[cfg(target_os = "windows")]
-#[tokio::test]
-async fn the_live_streams_asio_rate_refusal_still_falls_back_to_shared() {
+#[test]
+fn the_live_streams_asio_rate_refusal_still_falls_back_to_shared() {
     let dir = tempfile::tempdir().unwrap();
     let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
 
@@ -1700,8 +1700,8 @@ fn arm_for_promotion(h: &mut Harness, incoming_secs: f64) -> mpsc::Receiver<Deco
 /// Re-reading it there races the bump on the IPC thread: a load starting during the overlap
 /// would stamp ITS generation onto the track this promotion makes current, and the flush-side
 /// replay guard tests exactly that stamp, replaying the wrong track and aborting the newer load.
-#[tokio::test]
-async fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
+#[test]
+fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -1741,8 +1741,8 @@ async fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
 /// handler and wait forever while every surface keeps naming the outgoing track. The duration
 /// looks redundant because it drives no OS metadata; deleting it on that reasoning is the
 /// regression this pins.
-#[tokio::test]
-async fn a_promotion_publishes_the_three_events_the_sdk_waits_on() {
+#[test]
+fn a_promotion_publishes_the_three_events_the_sdk_waits_on() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -1793,8 +1793,8 @@ async fn a_promotion_publishes_the_three_events_the_sdk_waits_on() {
 /// the flush, instead of waiting out a 24 ms debounce and a 250 ms throttle. Emission order is
 /// not batch order, `take_flush_batch` appending the position BEHIND the queued events, which is
 /// the order the SDK needs. This test pins the emission order only.
-#[tokio::test]
-async fn a_promotion_emits_the_incoming_position_before_the_transition_events() {
+#[test]
+fn a_promotion_emits_the_incoming_position_before_the_transition_events() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -1886,8 +1886,8 @@ async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it
 /// window retired the incoming decoder feeding the ring the device had just been handed:
 /// silence with no producer left, no watchdog behind it, and a UI still naming the outgoing
 /// track. Had the poll run first the fade would have promoted; both orderings must agree.
-#[tokio::test]
-async fn a_cancellation_promotes_a_fade_the_callback_already_finished() {
+#[test]
+fn a_cancellation_promotes_a_fade_the_callback_already_finished() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -1998,8 +1998,8 @@ async fn a_stale_load_keeps_the_refusal_it_did_not_supersede() {
 /// its entire `remove_dir_all`, deliberately, to keep the wipe atomic against
 /// `store_finished_ciphertext`'s unlocked writes: waiting for it here parks the player control
 /// thread for the whole wipe.
-#[tokio::test]
-async fn a_busy_cache_never_parks_the_arming_tick() {
+#[test]
+fn a_busy_cache_never_parks_the_arming_tick() {
     let dir = tempfile::tempdir().unwrap();
     let h = harness(dir.path());
     let track = crate::state::TrackInfo {
@@ -2054,8 +2054,8 @@ fn finished_fade_link() -> crate::player::thread::output::CrossfadeLink {
 /// returned. Nothing else can ever report it: `Finished` never comes from a thread that exited,
 /// and the drain the completion path waits on never arrives. Left unsettled, the UI names that
 /// track Active over permanent silence, with no error and no skip.
-#[tokio::test]
-async fn a_promoted_fade_settles_the_incoming_track_that_died() {
+#[test]
+fn a_promoted_fade_settles_the_incoming_track_that_died() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -2113,8 +2113,8 @@ async fn a_promoted_fade_settles_the_incoming_track_that_died() {
 /// read that as a finished track, and the teardown dropped the cpal stream BOTH tracks played
 /// through. The counter cannot describe a fade (`fade_pos` advances on the callback's clock,
 /// `played_samples` only on what the outgoing ring supplied): a fade is left to its own promotion.
-#[tokio::test]
-async fn a_stalled_counter_does_not_complete_a_track_that_is_still_fading() {
+#[test]
+fn a_stalled_counter_does_not_complete_a_track_that_is_still_fading() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -2145,8 +2145,8 @@ async fn a_stalled_counter_does_not_complete_a_track_that_is_still_fading() {
 /// container that undercounts its frames drains more than it declared. The periodic
 /// emitter clamps for this reason; the promotion's own report has to as well, or
 /// the bar jumps past the end of a track that just started.
-#[tokio::test]
-async fn a_promotion_never_reports_a_position_past_the_incoming_duration() {
+#[test]
+fn a_promotion_never_reports_a_position_past_the_incoming_duration() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -2179,8 +2179,8 @@ async fn a_promotion_never_reports_a_position_past_the_incoming_duration() {
 /// NOT this thread's to move: the callback rebased it in the tick that swapped and has credited
 /// the promoted ring since, so a store here can only throw that interval away. Both halves are
 /// checked against the state a real fade leaves behind.
-#[tokio::test]
-async fn a_promotion_keeps_the_clock_the_swap_set_and_clears_the_completion_state() {
+#[test]
+fn a_promotion_keeps_the_clock_the_swap_set_and_clears_the_completion_state() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -2225,8 +2225,8 @@ async fn a_promotion_keeps_the_clock_the_swap_set_and_clears_the_completion_stat
 /// retire: `buffer_stalled` mirrors a flag living on the buffer object, read against the incoming
 /// buffer by an edge detector still holding the outgoing value, and `xfade_refused_url` is a
 /// refusal decided for the track the promotion just retired.
-#[tokio::test]
-async fn a_promotion_retires_the_mirrors_that_described_the_outgoing_buffer() {
+#[test]
+fn a_promotion_retires_the_mirrors_that_described_the_outgoing_buffer() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());
@@ -2253,8 +2253,8 @@ async fn a_promotion_retires_the_mirrors_that_described_the_outgoing_buffer() {
 /// `pending_crossfade.media_format`, proving only that `promote_crossfade` forwards both fields
 /// without swapping them. `handle_load`'s own construction site opens a real device and cannot
 /// run in this harness.
-#[tokio::test]
-async fn a_promotion_reports_both_the_file_rate_and_the_output_rate() {
+#[test]
+fn a_promotion_reports_both_the_file_rate_and_the_output_rate() {
     let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let mut h = harness(dir.path());

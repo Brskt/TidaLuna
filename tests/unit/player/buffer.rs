@@ -6,8 +6,8 @@ use std::io::{Read, Seek};
 /// A reader starved at the download frontier parks inside `read`, where it answers no command.
 /// Whoever joins that thread waits with it; retiring the reader has to end the wait on the
 /// signal rather than on the read's own 5s timeout, which is the margin measured here.
-#[tokio::test]
-async fn a_retired_reader_stops_waiting_on_the_signal_not_the_timeout() {
+#[test]
+fn a_retired_reader_stops_waiting_on_the_signal_not_the_timeout() {
     // Held for the test: dropping the writer cancels the whole buffer, which would end the
     // wait for a different reason than the one under test.
     let (buffer, _writer) = RamBuffer::new_for_test(1024);
@@ -43,8 +43,8 @@ async fn a_retired_reader_stops_waiting_on_the_signal_not_the_timeout() {
 /// `cancel()` has no undo, and every read after it fails. A finished buffer that
 /// was cancelled reads no better than an empty one: the case this predicate promises
 /// its callers it has ruled out, and the one a failed load leaves sitting in `current_buffer`.
-#[tokio::test]
-async fn a_cancelled_buffer_is_not_reusable_even_once_complete() {
+#[test]
+fn a_cancelled_buffer_is_not_reusable_even_once_complete() {
     let (buffer, writer) = RamBuffer::new_for_test(4);
     let _ = writer.write_counted(b"data");
     writer.finish();
@@ -63,8 +63,8 @@ async fn a_cancelled_buffer_is_not_reusable_even_once_complete() {
 
 /// Retirement is per-reader, which is what a device switch relies on when it respawns a
 /// decoder on the same bytes. Cancelling the buffer instead would take those bytes with it.
-#[tokio::test]
-async fn retiring_one_reader_leaves_the_buffer_readable_by_the_next() {
+#[test]
+fn retiring_one_reader_leaves_the_buffer_readable_by_the_next() {
     let (buffer, writer) = RamBuffer::new_for_test(4);
     let cancel = Arc::new(AtomicBool::new(false));
     let retired = buffer.clone().with_reader_cancel(cancel.clone());
@@ -87,8 +87,8 @@ async fn retiring_one_reader_leaves_the_buffer_readable_by_the_next() {
 }
 
 /// The arm site itself, which also asks the governor pacing this download to hurry.
-#[tokio::test]
-async fn a_read_far_past_the_frontier_arms_a_range_restart() {
+#[test]
+fn a_read_far_past_the_frontier_arms_a_range_restart() {
     let governor = GovernorHandle::ungoverned();
     let (buffer, writer) = RamBuffer::new(
         1024 * 1024,
@@ -281,8 +281,8 @@ fn a_stop_carries_which_stop_it_was() {
 /// spawned long before it. Held by value in that task, as it was, it could not change at
 /// all: a hi-res track adopted from a preload stayed pinned to the fixed preload rate,
 /// which sits below what it needs to play in real time.
-#[tokio::test]
-async fn adoption_moves_a_staged_download_to_playback() {
+#[test]
+fn adoption_moves_a_staged_download_to_playback() {
     let (buffer, writer) = RamBuffer::new(
         1024,
         DownloadOwner::Preload,
@@ -308,8 +308,8 @@ async fn adoption_moves_a_staged_download_to_playback() {
 /// The token lives in the buffer so that handing the buffer over hands the download over
 /// with it. Both adoption sites used to clear the only slot naming it, after which nothing
 /// could stop that download at all.
-#[tokio::test]
-async fn the_buffer_carries_the_token_that_stops_its_download() {
+#[test]
+fn the_buffer_carries_the_token_that_stops_its_download() {
     let token = tokio_util::sync::CancellationToken::new();
     let (buffer, writer) = RamBuffer::new(
         1024,
@@ -333,8 +333,8 @@ async fn the_buffer_carries_the_token_that_stops_its_download() {
 
 /// A complete buffer has no task filling it. Its handle answers as already stopped rather
 /// than as missing, which is what lets every caller treat the two the same.
-#[tokio::test]
-async fn a_complete_buffer_has_nothing_left_to_stop() {
+#[test]
+fn a_complete_buffer_has_nothing_left_to_stop() {
     let buffer = RamBuffer::from_complete(vec![0u8; 16]);
     buffer.cancel_download();
     assert!(
@@ -347,8 +347,8 @@ async fn a_complete_buffer_has_nothing_left_to_stop() {
 /// rebuild and the exclusive and ASIO respawns reinstall a CLONE of the one already
 /// current. Telling those apart is what keeps a rebuild from killing the download of the
 /// track still playing.
-#[tokio::test]
-async fn a_clone_is_not_a_different_stream() {
+#[test]
+fn a_clone_is_not_a_different_stream() {
     let (first, _writer) = RamBuffer::new_for_test(1024);
     let (second, _writer2) = RamBuffer::new_for_test(1024);
 
@@ -367,8 +367,8 @@ async fn a_clone_is_not_a_different_stream() {
 /// error set at all. Reading `finished` alone, the three consumers here each keep a truncated
 /// track: two hand it to the disk cache, where it is indexed as whole and served as valid on
 /// every later play, and the third replays it from RAM after a device switch.
-#[tokio::test]
-async fn a_body_that_ends_under_its_announced_length_is_not_a_whole_file() {
+#[test]
+fn a_body_that_ends_under_its_announced_length_is_not_a_whole_file() {
     let (short, writer) = RamBuffer::new_for_test(4096);
     writer.write_counted(&[1u8; 1024]);
     writer.set_ciphertext(
