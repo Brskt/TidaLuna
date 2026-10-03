@@ -219,6 +219,15 @@ fn image_verdict_refuses_only_a_disallowed_image() {
 }
 
 #[test]
+fn image_verdict_refuses_a_plaintext_image_on_an_allowed_host() {
+    let plaintext = RequestUrl::new("http://avatars.githubusercontent.com/u/1?v=4".to_string());
+    assert_eq!(
+        image_verdict(ResourceType::IMAGE, &plaintext, None),
+        ImageVerdict::Refused
+    );
+}
+
+#[test]
 fn image_verdict_admits_only_an_internal_surface_loading_itself() {
     let devtools = RequestUrl::new("devtools://devtools/bundled/i.svg".to_string());
     let elsewhere = RequestUrl::new("https://evil.example/p.png".to_string());

@@ -138,9 +138,9 @@ fn is_internal_self_load(url: &RequestUrl, initiator: Option<&CefString>) -> boo
 }
 
 /// What the allowlist says about one request. Three outcomes, so a named enum: a bool would fold
-/// `NotAnImage` into `Allowed` and lose the distinction that matters here; the gate judges hosts,
-/// and it judges them for images alone. Matched exhaustively above: a fourth outcome cannot be
-/// added without deciding what the handler does with it.
+/// `NotAnImage` into `Allowed` and lose the distinction that matters here; the gate judges where an
+/// image comes from, and it judges that for images alone. Matched exhaustively above: a fourth
+/// outcome cannot be added without deciding what the handler does with it.
 #[derive(Debug, PartialEq, Eq)]
 enum ImageVerdict {
     NotAnImage,
@@ -159,7 +159,7 @@ fn image_verdict(
     if resource_type != ResourceType::IMAGE {
         return ImageVerdict::NotAnImage;
     }
-    if is_internal_self_load(url, initiator) || crate::ui::nav::is_allowed_image_host(url) {
+    if is_internal_self_load(url, initiator) || crate::ui::nav::is_secure_image_target(url) {
         ImageVerdict::Allowed
     } else {
         ImageVerdict::Refused

@@ -178,9 +178,9 @@ const IMAGE_HOSTS: [&str; 5] = [
     "captcha-delivery.com",
 ];
 
-/// May this image load proceed? An unparseable URL is refused rather than trusted: it says
-/// nothing about where it points. Scheme is deliberately not inspected here; this keeps
-/// today's behaviour on that axis.
+/// An unparseable URL is refused rather than trusted: it says nothing about where it points.
+/// Destination only: the transport half is `is_secure_image_target`'s, the same split as
+/// `is_tidal_origin` and `is_secure_tidal_target`.
 pub(crate) fn is_allowed_image_host(url: &RequestUrl) -> bool {
     let Some(parsed) = url.parsed() else {
         return false;
@@ -192,6 +192,17 @@ pub(crate) fn is_allowed_image_host(url: &RequestUrl) -> bool {
                 .strip_suffix(domain)
                 .is_some_and(|rest| rest.ends_with('.'))
     })
+}
+
+/// Destination and transport both: a plaintext image on an allowed host is whatever the
+/// network in between makes it. Blink upgrades one on the app's own page first; the dialogs
+/// render in a `data:` document, whose opaque origin restricts no mixed content, and the trust
+/// prompt shows an avatar from a plugin manifest.
+pub(crate) fn is_secure_image_target(url: &RequestUrl) -> bool {
+    is_allowed_image_host(url)
+        && url
+            .parsed()
+            .is_some_and(|parsed| parsed.scheme() == "https")
 }
 
 /// TIDAL API hosts that receive the injected OAuth bearer. Single source of truth for

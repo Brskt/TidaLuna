@@ -19,6 +19,14 @@ pub(crate) fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Https only, whatever the resource type: the frame is a `data:` document, and Blink
+/// restricts mixed content only in an `https` one. The image gate judges images alone; this
+/// rule covers the other types a dialog could load.
+fn dialog_subresource_allowed(url: &crate::ui::nav::RequestUrl) -> bool {
+    url.parsed()
+        .is_some_and(|parsed| parsed.scheme() == "https")
+}
+
 /// Result-specific state shared by the dialog's request handler, window
 /// delegate, and UI-thread task. A single `Arc<DialogCore<R>>` reaches both the
 /// request handler (button click) and the window delegate (close-without-click).
@@ -205,7 +213,7 @@ wrap_request_handler! {
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
             request: Option<&mut Request>,
-            _is_navigation: ::std::os::raw::c_int,
+            is_navigation: ::std::os::raw::c_int,
             _is_download: ::std::os::raw::c_int,
             request_initiator: Option<&CefString>,
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
@@ -220,6 +228,14 @@ wrap_request_handler! {
                     .map(|r| crate::ui::token_filter::userfree_to_string(&r.url()))
                     .unwrap_or_default(),
             );
+            // Navigations are the buttons' schemes, which `on_before_browse` owns.
+            if is_navigation == 0 && !dialog_subresource_allowed(&url) {
+                crate::verr!(
+                    "[EXFIL]  BLOCKED dialog non-https request to {}",
+                    crate::util::refused_host(url.as_str())
+                );
+                return Some(crate::ui::token_filter::ExfilBlockHandler::new());
+            }
             if let Some(req) = request.as_ref()
                 && let Some(h) = crate::ui::token_filter::block_disallowed_image(
                     req.resource_type(),

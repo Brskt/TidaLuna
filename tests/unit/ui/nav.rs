@@ -137,6 +137,22 @@ fn allowed_image_host_refuses_tidals_legacy_api_and_telemetry_domains() {
     )));
 }
 
+/// Not every allowed host is HSTS-preloaded: the host alone cannot admit a plaintext URL.
+#[test]
+fn secure_image_target_needs_an_allowed_host_over_https() {
+    assert!(is_secure_image_target(&u(
+        "https://resources.tidal.com/images/a/1280x1280.jpg"
+    )));
+    assert!(!is_secure_image_target(&u(
+        "http://resources.tidal.com/images/a/1280x1280.jpg"
+    )));
+    assert!(!is_secure_image_target(&u(
+        "http://images.captcha-delivery.com/challenge.png"
+    )));
+    assert!(!is_secure_image_target(&u("https://evil.example/p.png")));
+    assert!(!is_secure_image_target(&u("not a url")));
+}
+
 #[test]
 fn allowed_image_host_refuses_what_it_cannot_parse() {
     // Fail closed: a string that will not parse says nothing about its target.
