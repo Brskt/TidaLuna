@@ -4,8 +4,8 @@
 //! signals the running instance to raise its window, then exits before any shared
 //! state (DB, the SDK credential LevelDB, Connect sockets, CEF) is touched. Windows
 //! uses a named mutex + auto-reset event in a private namespace bounded by the
-//! user's SID; Linux an abstract AF_UNIX datagram socket (bind = lock, datagram
-//! = signal).
+//! user's SID; Linux an flock on a file in the data directory, with an AF_UNIX
+//! datagram socket in a private directory as the signal.
 
 // Reaches only the focus-signal path, which exists on the platforms that have a
 // guard to signal from.
@@ -121,8 +121,8 @@ fn classify_owner(owner: Option<&str>, own: &OwnIdentity) -> ObjectOwner {
 /// What became of the pipe a clicked link travels on, for the instance that owns
 /// the lock.
 ///
-/// Windows only. Linux carries links on the lock socket itself, so it has no
-/// second address to lose, and macOS never launches a second process at all.
+/// Windows only. Linux reports its own channel's absence where it finds it, and
+/// macOS never launches a second process at all.
 #[cfg(windows)]
 enum LinkChannel {
     /// A listener holds the address; a link arriving now reaches the window.
@@ -142,7 +142,7 @@ pub(crate) struct AppLock {
     #[cfg(windows)]
     link: LinkChannel,
     #[cfg(target_os = "linux")]
-    _socket: Option<std::os::unix::net::UnixDatagram>,
+    _guard: Option<linux_impl::Guard>,
     #[cfg(not(any(windows, target_os = "linux")))]
     _unsupported: (),
 }
@@ -948,11 +948,14 @@ mod windows_impl {
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
+    use std::fs::{File, OpenOptions, TryLockError};
     use std::hash::Hasher;
     use std::io::ErrorKind;
     use std::os::fd::AsRawFd;
     use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::{SocketAddr, UnixDatagram};
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{AppLock, HandOff, post_focus};
@@ -960,13 +963,10 @@ mod linux_impl {
     /// Who sent a datagram, as the kernel reports it rather than as the payload
     /// claims.
     ///
-    /// The address is no barrier: `unix(7)` is explicit that an abstract socket
-    /// has no permission model, since neither the umask nor ownership affect its
-    /// reachability, and the name is a hash of a path that is not a secret.
-    /// Every process in the same network namespace can reach it, whoever owns it.
-    /// Windows reaches the same boundary without asking, its named pipe's default
-    /// descriptor granting writing to the creator's own account and only reading
-    /// to everyone else.
+    /// The channel's own socket sits in a directory no other account can enter,
+    /// but the legacy abstract name is still bound, and `unix(7)` is explicit that
+    /// an abstract socket has no permission model: every process in the same
+    /// network namespace can reach it, whoever owns it.
     #[derive(Debug, PartialEq)]
     pub(super) enum Sender {
         /// Credentials the kernel vouched for, naming this process's own user.
@@ -1087,64 +1087,350 @@ mod linux_impl {
     /// URL rule rather than navigating somewhere unintended.
     pub(super) const MAX_SIGNAL: usize = 4096;
 
-    /// Per-user abstract socket address (data-dir-scoped; auto-reclaimed on exit).
-    fn lock_addr() -> std::io::Result<SocketAddr> {
-        let data_dir = crate::state::cache_data_dir();
+    /// The lock is a file in the data directory it guards, so every launch that
+    /// would share the database takes the same lock, whatever its environment.
+    const LOCK_FILE: &str = "instance.lock";
+
+    /// Group and other bits a channel directory must not carry: its socket is
+    /// reachable by whoever can enter it.
+    pub(super) const CHANNEL_DIR_FORBIDDEN: u32 = 0o077;
+
+    /// The channel's directory inside the data directory, when the runtime one
+    /// is not private.
+    pub(super) const FALLBACK_DIR: &str = "run";
+
+    /// Owner read-write, plus the sticky bit the XDG spec names for a file of the
+    /// runtime directory that must survive its periodic clean-up.
+    pub(super) const CHANNEL_MODE: u32 = 0o1600;
+
+    fn data_dir_hash(data_dir: &Path) -> u64 {
         let mut hasher = fnv::FnvHasher::default();
         hasher.write(data_dir.to_string_lossy().as_bytes());
-        SocketAddr::from_abstract_name(format!("tidalunar-app-{:016x}", hasher.finish()))
+        hasher.finish()
+    }
+
+    /// Keyed on the data directory, like the lock: two data directories of one
+    /// account never share a channel.
+    pub(super) fn channel_name(data_dir: &Path) -> String {
+        format!("tidalunar-{:016x}.sock", data_dir_hash(data_dir))
+    }
+
+    /// The name earlier builds bind. No longer the lock (any account can hold an
+    /// abstract name), it stays bound for an earlier build launched now to find.
+    pub(super) fn legacy_addr(data_dir: &Path) -> std::io::Result<SocketAddr> {
+        SocketAddr::from_abstract_name(format!("tidalunar-app-{:016x}", data_dir_hash(data_dir)))
+    }
+
+    /// Why a directory cannot carry the lock or the channel.
+    #[derive(Debug, PartialEq)]
+    pub(super) enum DirRefusal {
+        Missing,
+        /// A file, or a symlink: what gets checked must be what gets used.
+        NotADirectory,
+        /// Owned by another uid, kept for the log line.
+        NotOurs(u32),
+        /// The mode, carrying a bit `forbidden` names.
+        OpenToOthers(u32),
+    }
+
+    /// A real directory, owned by `own`, with none of the `forbidden` bits.
+    ///
+    /// Checked on the path, not a descriptor: replacing the directory between
+    /// this check and the bind needs write access to its parent, which is ours
+    /// for `FALLBACK_DIR` and root's for `/run/user`.
+    pub(super) fn check_dir(path: &Path, own: u32, forbidden: u32) -> Result<(), DirRefusal> {
+        check_meta(std::fs::symlink_metadata(path), own, forbidden)
+    }
+
+    /// The data directory, owned by `own`, its mode unchecked: the database lives
+    /// there too, and a lock is no more private than it. It may be a symlink, as
+    /// when its owner moved it to another disk; what must be ours is where it
+    /// leads, and the link sits in a parent only its owner can change.
+    pub(super) fn check_data_dir(path: &Path, own: u32) -> Result<(), DirRefusal> {
+        check_meta(std::fs::metadata(path), own, 0)
+    }
+
+    fn check_meta(
+        meta: std::io::Result<std::fs::Metadata>,
+        own: u32,
+        forbidden: u32,
+    ) -> Result<(), DirRefusal> {
+        let meta = meta.map_err(|_| DirRefusal::Missing)?;
+        if !meta.file_type().is_dir() {
+            return Err(DirRefusal::NotADirectory);
+        }
+        if meta.uid() != own {
+            return Err(DirRefusal::NotOurs(meta.uid()));
+        }
+        let mode = meta.mode() & 0o7777;
+        if mode & forbidden != 0 {
+            return Err(DirRefusal::OpenToOthers(mode));
+        }
+        Ok(())
+    }
+
+    /// Where the channel's socket lives: the session's runtime directory when it
+    /// is as private as the XDG spec promises, else our own `FALLBACK_DIR` in the
+    /// data directory. `None` when neither is private.
+    pub(super) fn channel_dir(
+        data_dir: &Path,
+        runtime: Option<PathBuf>,
+        own: u32,
+    ) -> Option<PathBuf> {
+        if let Some(dir) = runtime.filter(|dir| dir.is_absolute())
+            && check_dir(&dir, own, CHANNEL_DIR_FORBIDDEN).is_ok()
+        {
+            return Some(dir);
+        }
+        let run = data_dir.join(FALLBACK_DIR);
+        match std::fs::DirBuilder::new().mode(0o700).create(&run) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+        check_dir(&run, own, CHANNEL_DIR_FORBIDDEN)
+            .is_ok()
+            .then_some(run)
+    }
+
+    /// The bound end of the channel, unlinked when the holder exits cleanly.
+    pub(super) struct Channel {
+        pub(super) socket: UnixDatagram,
+        pub(super) path: PathBuf,
+    }
+
+    impl Channel {
+        /// Only the lock holder binds, so a socket file already there is one a
+        /// holder that died left behind, and unlinking it cannot take a live one.
+        /// A channel exists only with `CHANNEL_MODE` set.
+        fn bind(path: PathBuf) -> std::io::Result<Self> {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            let channel = Self {
+                socket: UnixDatagram::bind(&path)?,
+                path,
+            };
+            // Built first, so a refused mode drops it and unlinks the socket.
+            std::fs::set_permissions(&channel.path, std::fs::Permissions::from_mode(CHANNEL_MODE))?;
+            Ok(channel)
+        }
+    }
+
+    impl Drop for Channel {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// What a launch finds for its data directory.
+    pub(super) enum Claim {
+        /// This process holds the lock. `channel` is the reason when none could
+        /// be bound: the lock still holds, but neither focus nor links can arrive.
+        Holder {
+            lock: File,
+            channel: Result<Channel, String>,
+        },
+        /// Another process of this account holds it, listening here; `None` when
+        /// no private directory could name its channel.
+        Held(Option<SocketAddr>),
+        /// The guard cannot stand, and says why.
+        Unguarded(String),
+    }
+
+    /// Takes the data directory's lock, or names the channel of whoever holds it.
+    pub(super) fn claim(data_dir: &Path, runtime: Option<PathBuf>, own: u32) -> Claim {
+        if std::fs::create_dir_all(data_dir).is_err() {
+            return Claim::Unguarded("the data directory cannot be created".into());
+        }
+        if let Err(refusal) = check_data_dir(data_dir, own) {
+            return Claim::Unguarded(format!("the data directory is refused ({refusal:?})"));
+        }
+        let Ok(lock) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(data_dir.join(LOCK_FILE))
+        else {
+            return Claim::Unguarded("the lock file cannot be opened".into());
+        };
+        let path = channel_dir(data_dir, runtime, own).map(|dir| dir.join(channel_name(data_dir)));
+        match lock.try_lock() {
+            Ok(()) => Claim::Holder {
+                lock,
+                channel: match path {
+                    Some(path) => Channel::bind(path)
+                        .map_err(|e| format!("the channel cannot be bound ({e})")),
+                    None => Err("no private directory for the channel".into()),
+                },
+            },
+            Err(TryLockError::WouldBlock) => {
+                Claim::Held(path.and_then(|path| SocketAddr::from_pathname(path).ok()))
+            }
+            Err(TryLockError::Error(_)) => {
+                Claim::Unguarded("the lock file cannot be locked".into())
+            }
+        }
+    }
+
+    /// `(hostname, pid)` from Chromium's `SingletonLock` symlink target,
+    /// `<hostname>-<pid>`. The hostname may itself hold dashes.
+    pub(super) fn parse_singleton_lock(target: &str) -> Option<(&str, u32)> {
+        let (host, pid) = target.rsplit_once('-')?;
+        if host.is_empty() {
+            return None;
+        }
+        Some((host, pid.parse().ok()?))
+    }
+
+    pub(super) fn hostname() -> Option<Vec<u8>> {
+        let mut name = [0u8; 256];
+        // SAFETY: the buffer is ours and its length is passed; gethostname writes
+        // at most that many bytes.
+        if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+            return None;
+        }
+        let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        Some(name[..len].to_vec())
+    }
+
+    /// An earlier build of ours runs on this data directory: CEF's `SingletonLock`
+    /// names a live process of this host and account, with our executable name.
+    /// Such a build takes no file lock; the symlink is its one attributable trace,
+    /// present once CEF is up. The path is its layout, whatever later builds use.
+    fn earlier_build_running(data_dir: &Path, own: u32) -> bool {
+        let Ok(target) = std::fs::read_link(data_dir.join("cef").join("SingletonLock")) else {
+            return false;
+        };
+        let Some((host, pid)) = target.to_str().and_then(parse_singleton_lock) else {
+            return false;
+        };
+        if hostname().as_deref() != Some(host.as_bytes()) {
+            return false;
+        }
+        let proc = PathBuf::from(format!("/proc/{pid}"));
+        let ours = std::fs::metadata(&proc).is_ok_and(|meta| meta.uid() == own);
+        let exe = std::fs::read_link(proc.join("exe")).ok();
+        let own_exe = std::env::current_exe().ok();
+        ours && exe.is_some()
+            && exe.as_deref().and_then(Path::file_name)
+                == own_exe.as_deref().and_then(Path::file_name)
+    }
+
+    /// Asks for the credentials of every datagram, then listens. A failed ask is
+    /// logged, not fatal: every datagram then arrives unattributed and is refused.
+    fn listen(socket: &UnixDatagram) {
+        if let Err(e) = enable_peer_credentials(socket) {
+            crate::vprintln!("[LOCK]   no peer credentials ({e}); signals will be refused");
+        }
+        if let Ok(listener) = socket.try_clone() {
+            spawn_focus_listener(listener);
+        }
+    }
+
+    /// What the holder of the lock makes of the legacy name.
+    pub(super) enum Legacy {
+        /// Bound: an earlier build launched now hands over to this instance.
+        Bound(UnixDatagram),
+        /// An earlier build of ours holds it and runs on this data directory;
+        /// this launch hands over to it instead of starting beside it.
+        EarlierBuild(SocketAddr),
+        /// Held by a process nobody can attribute, possibly another account's,
+        /// or no name at all. This instance holds the lock that matters.
+        Unavailable,
+    }
+
+    pub(super) fn legacy(data_dir: &Path, own: u32) -> Legacy {
+        let Ok(addr) = legacy_addr(data_dir) else {
+            return Legacy::Unavailable;
+        };
+        match UnixDatagram::bind_addr(&addr) {
+            Ok(socket) => Legacy::Bound(socket),
+            Err(e) if e.kind() == ErrorKind::AddrInUse && earlier_build_running(data_dir, own) => {
+                Legacy::EarlierBuild(addr)
+            }
+            Err(_) => Legacy::Unavailable,
+        }
+    }
+
+    /// Held for the process lifetime.
+    pub(crate) struct Guard {
+        _lock: File,
+        _channel: Option<Channel>,
+        _legacy: Option<UnixDatagram>,
     }
 
     pub(super) fn acquire_or_signal(url: Option<&str>) -> Option<AppLock> {
-        let Ok(addr) = lock_addr() else {
-            crate::vprintln!("[LOCK]   Could not build lock address; guard disabled");
-            return Some(AppLock { _socket: None });
-        };
-
-        match UnixDatagram::bind_addr(&addr) {
-            Ok(socket) => {
-                // Failing here is not fatal and not ignored either. With no
-                // credentials arriving, every datagram is unattributed, and an
-                // unattributed one is refused. The channel closes rather than
-                // carrying a payload it cannot attribute.
-                if let Err(e) = enable_peer_credentials(&socket) {
-                    crate::vprintln!("[LOCK]   no peer credentials ({e}); signals will be refused");
-                }
-                if let Ok(listener) = socket.try_clone() {
-                    spawn_focus_listener(listener);
+        let data_dir = crate::state::cache_data_dir();
+        let own = own_uid();
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        match claim(&data_dir, runtime, own) {
+            Claim::Holder { lock, channel } => {
+                let legacy_socket = match legacy(&data_dir, own) {
+                    Legacy::Bound(socket) => Some(socket),
+                    Legacy::EarlierBuild(addr) => {
+                        report_hand_off(url, &hand_over(&addr, url));
+                        return None;
+                    }
+                    Legacy::Unavailable => None,
+                };
+                let channel = channel
+                    .inspect_err(|reason| {
+                        crate::vprintln!("[LOCK]   {reason}; focus and links cannot arrive");
+                    })
+                    .ok();
+                for socket in channel
+                    .iter()
+                    .map(|c| &c.socket)
+                    .chain(legacy_socket.iter())
+                {
+                    listen(socket);
                 }
                 Some(AppLock {
-                    _socket: Some(socket),
+                    _guard: Some(Guard {
+                        _lock: lock,
+                        _channel: channel,
+                        _legacy: legacy_socket,
+                    }),
                 })
             }
-            Err(e) if e.kind() == ErrorKind::AddrInUse => {
-                let outcome = hand_over(&addr, url);
-                match (url, &outcome) {
-                    (Some(_), HandOff::Landed) => {
-                        crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
-                    }
-                    // Ungated, and this is why the channel has to be; this
-                    // process exits before the database opens and never learns
-                    // the persisted level, while a click answered by a window
-                    // that did not navigate leaves no other trace.
-                    (Some(_), lost) => crate::verr!(
-                        "[LOCK]   deep link not delivered ({}); focusing instead",
-                        lost.reason()
-                    ),
-                    (None, HandOff::Landed) => {
-                        crate::vprintln!("[LOCK]   Another instance is running; focusing it");
-                    }
-                    (None, lost) => crate::verr!(
-                        "[LOCK]   could not reach the running instance ({})",
-                        lost.reason()
-                    ),
-                }
+            Claim::Held(addr) => {
+                let outcome = match addr {
+                    Some(addr) => hand_over(&addr, url),
+                    None => HandOff::NoListener,
+                };
+                report_hand_off(url, &outcome);
                 None
             }
-            Err(e) => {
-                crate::vprintln!("[LOCK]   bind failed ({e}); guard disabled");
-                Some(AppLock { _socket: None })
+            Claim::Unguarded(reason) => {
+                crate::vprintln!("[LOCK]   {reason}; guard disabled");
+                Some(AppLock { _guard: None })
             }
+        }
+    }
+
+    fn report_hand_off(url: Option<&str>, outcome: &HandOff) {
+        match (url, outcome) {
+            (Some(_), HandOff::Landed) => {
+                crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
+            }
+            // Ungated: this process exits before reading the persisted log level,
+            // and a click whose link never opens leaves no other trace.
+            (Some(_), lost) => crate::verr!(
+                "[LOCK]   deep link not delivered ({}); focusing instead",
+                lost.reason()
+            ),
+            (None, HandOff::Landed) => {
+                crate::vprintln!("[LOCK]   Another instance is running; focusing it");
+            }
+            (None, lost) => crate::verr!(
+                "[LOCK]   could not reach the running instance ({})",
+                lost.reason()
+            ),
         }
     }
 
