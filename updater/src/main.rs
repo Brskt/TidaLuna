@@ -328,7 +328,7 @@ fn run_cleanup_stale() -> i32 {
 fn run() -> Result<()> {
     let args = parse_args()?;
 
-    // Cross-process install/update mutex. SID-scoped Global\ name; serialises
+    // Cross-process install/update mutex, in a namespace bounded by our SID; serialises
     // against an installer holding the same lock. RAII via Drop: released on
     // function return / process exit. Cleanup-mode bypasses this path entirely
     // (see fn main).

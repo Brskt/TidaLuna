@@ -197,9 +197,37 @@ FunctionEnd
 ; can be inserted in both .onInit and Section "Uninstall" without conflict.
 ; Contention message is parameterised since install/uninstall phrase it
 ; differently.
+;
+; The mutex lives in the updater's private namespace, INSTALL_NAMESPACE: its SID
+; boundary bars other accounts from creating it, its descriptor (us + SYSTEM)
+; from opening it. Built once, before the retry label, and left open until exit.
+; Must match NAMESPACE in updater/src/lock.rs.
+!define INSTALL_NAMESPACE "TidaLunarInstall"
+; The SECURITY_ATTRIBUTES below is DWORD + pointer + BOOL with no padding, which
+; holds only for the 32-bit stub xtask builds.
+!if ${NSIS_PTR_SIZE} != 4
+  !error "AcquireInstallMutex lays SECURITY_ATTRIBUTES out for a 32-bit stub"
+!endif
 !macro AcquireInstallMutex contention_message
+  System::Call 'advapi32::ConvertStringSidToSidW(w r9, *p .r7) i .r3'   ; $7 = our PSID
+  IntCmp $3 0 mutex_create_failed
+  System::Call 'advapi32::ConvertStringSecurityDescriptorToSecurityDescriptorW(w "D:P(A;;GA;;;$9)(A;;GA;;;SY)", i 1, *p .r6, p 0) i .r3'   ; i 1 = SDDL_REVISION_1
+  IntCmp $3 0 mutex_create_failed
+  System::Call '*(i 12, p r6, i 0) p .r8'                               ; $8 = SECURITY_ATTRIBUTES
+  System::Call 'kernel32::CreateBoundaryDescriptorW(w "${INSTALL_NAMESPACE}", i 0) p .r3'
+  IntCmp $3 0 mutex_create_failed
+  System::Call 'kernel32::AddSIDToBoundaryDescriptor(*p r3r3, p r7) i .r4'
+  IntCmp $4 0 mutex_create_failed
+  System::Call 'kernel32::CreatePrivateNamespaceW(p r8, p r3, w "${INSTALL_NAMESPACE}") p .r4 ?e'
+  Pop $5
+  IntCmp $4 0 0 mutex_namespace_ready mutex_namespace_ready
+  IntCmp $5 183 0 mutex_create_failed mutex_create_failed               ; ERROR_ALREADY_EXISTS
+  System::Call 'kernel32::OpenPrivateNamespaceW(p r3, w "${INSTALL_NAMESPACE}") p .r4'
+  IntCmp $4 0 mutex_create_failed
+  mutex_namespace_ready:
+  System::Call 'kernel32::DeleteBoundaryDescriptor(p r3)'
   mutex_acquire:
-    System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Global\TidaLunarInstallLock-$9") p .r2'
+    System::Call 'kernel32::CreateMutexW(p r8, i 0, w "${INSTALL_NAMESPACE}\Lock") p .r2'
     IntCmp $2 0 mutex_create_failed mutex_try_wait mutex_try_wait
   mutex_create_failed:
     MessageBox MB_OK|MB_ICONSTOP "Failed to create install lock. Aborting."
