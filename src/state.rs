@@ -322,7 +322,7 @@ pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = Lazy
         Err(e) => {
             crate::verr!("[CACHE]  Failed to open: {e}");
             // Fallback: a session cache in the OS temp dir.
-            let tmp = std::env::temp_dir().join("tidalunar");
+            let tmp = std::env::temp_dir().join(APP_DIR);
             crate::player::cache::AudioCache::open(&tmp).unwrap_or_else(|e| {
                 // Never panic here: a panicking init poisons the LazyLock for
                 // the process lifetime; every later touch would panic too.
