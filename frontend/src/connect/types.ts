@@ -6,6 +6,8 @@
 // forwarded verbatim to Redux (as an untyped payload on a typed action)
 // or ignored.
 
+import type { OutputLevelReport } from "../volume";
+
 export type PlayerState = "IDLE" | "BUFFERING" | "PAUSED" | "PLAYING";
 
 export type RepeatMode = "NONE" | "ONE" | "ALL";
@@ -87,14 +89,6 @@ export interface ReceiverMediaChangedPayload {
     };
 }
 
-export interface VolumeChangedPayload {
-    volume: number;
-}
-
-export interface MuteChangedPayload {
-    mute: boolean;
-}
-
 export interface ConnectStateSnapshot {
     devices?: MdnsDevice[];
     session?: {
@@ -106,6 +100,8 @@ export interface ConnectStateSnapshot {
     playerStatus?: PlayerStatusChangedPayload;
     isConnected?: boolean;
     receiverActive?: boolean;
+    /** The level Rust plays, which `connect.receiver.volume_changed`/`mute_changed` also carry. */
+    outputLevel?: OutputLevelReport;
 }
 
 export interface QueueLoadRequestData {

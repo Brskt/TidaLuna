@@ -281,20 +281,25 @@ async fn routing_loop(
                         playback_ctrl.set_next_media(media_info, media_seq_no).await;
                     }
                     QueueNotifyEvent::SetVolume { level } => {
-                        playback_ctrl.set_volume(level).await;
-                        // Notify frontend to update volume slider (Connect uses 0.0-1.0)
-                        let volume_pct = (level * 100.0).clamp(0.0, 100.0);
-                        crate::connect::ipc::post_emit_with_data(
-                            "connect.receiver.volume_changed",
-                            &serde_json::json!({ "volume": volume_pct }),
-                        );
+                        // The mirror gets the report of what the player applied: its count is
+                        // what lets the page's later levels be told apart from stale ones.
+                        if let Some(level) = playback_ctrl.set_volume(level) {
+                            crate::connect::ipc::post_emit_with_data(
+                                "connect.receiver.volume_changed",
+                                &level.report(),
+                            );
+                        }
                     }
                     QueueNotifyEvent::SetMute { mute } => {
-                        playback_ctrl.set_mute(mute).await;
-                        crate::connect::ipc::post_emit_with_data(
-                            "connect.receiver.mute_changed",
-                            &serde_json::json!({ "mute": mute }),
-                        );
+                        // The mirror gets the levels the player settled on, not the command: an
+                        // unmute restores a level only the player knows, and TIDAL's store would
+                        // otherwise pick its own.
+                        if let Some(level) = playback_ctrl.set_mute(mute) {
+                            crate::connect::ipc::post_emit_with_data(
+                                "connect.receiver.mute_changed",
+                                &level.report(),
+                            );
+                        }
                     }
                     QueueNotifyEvent::QueueGenBumped { queue_gen } => {
                         playback_ctrl.set_queue_gen(queue_gen);

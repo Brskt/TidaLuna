@@ -106,11 +106,13 @@ impl PlayerBridgeEvent {
         }
     }
 
-    pub fn volume(value: f64) -> Self {
+    /// The OS mixer moved the level: the whole report, whose count the page's later levels
+    /// must carry. `seq` stays the load generation's slot, which this event has none of.
+    pub fn volume(report: &crate::player::LevelReport) -> Self {
         Self {
             t: "volume",
             seq: None,
-            v: serde_json::json!(value),
+            v: serde_json::to_value(report).unwrap_or_default(),
         }
     }
 }

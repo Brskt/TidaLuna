@@ -46,6 +46,7 @@ pub(crate) fn handle_connect_invoke(msg: IpcMessage, callback: IpcCallback) {
 
     match sub.as_str() {
         "get_state" => state::get_state(callback),
+        "catch_up_level" => state::catch_up_level(callback),
 
         "controller.connect" => controller::connect(msg, callback),
         "controller.disconnect" => controller::disconnect(msg, callback),

@@ -100,7 +100,7 @@ fn classifies_the_entry_chunk_for_tagging() {
     let u = |s: &str| RequestUrl::new(s.to_string());
     assert!(matches!(
         chunk_rewrite(&u("https://desktop.tidal.com/assets/index-DnBBD1pK.js")),
-        Some(ChunkRewrite::TagCreateRoot)
+        Some(ChunkRewrite::Entry)
     ));
     // React-family names still win, and still carry their module id.
     assert!(matches!(
@@ -221,6 +221,60 @@ fn tap_splices_by_byte_across_multibyte_source() {
     let out = tap_saga_put(src);
     assert!(out.contains("héllo 日本語"));
     assert!(out.contains("(0,e.dispatch)(__lunaPutAction)))(i);"));
+}
+
+// TIDAL's saved-volume restore and the saga beside it, verbatim from the shipped bundle
+// (index-QBitWpxd.js).
+const VOLUME_RESTORE: &str = "function*JDe(){yield L(`BOOTSTRAP_DONE`);let e=yield z(Hd);\
+if(!e)return;let t=yield H(fp),n=yield H(em),r=yield H(hm);t!==e.mute&&(yield U(yi())),\
+n!==e.volume&&(yield U(Ai({volume:e.volume}))),r!==e.volumeUnmute&&(yield U(ca({volume:\
+e.volumeUnmute})))}";
+const PLAYER_RESTORE: &str = "function*YDe(){yield L(`BOOTSTRAP_DONE`);let e=yield z(wf);\
+if(!e||(yield H(Fg)))return;let t=yield H(Ah);if(t?.productId!==e.mediaId||t.productType!==\
+e.mediaType)return;let n=nD()-e.setTime;e.mediaTimestamp>=0&&(yield z(D6,t,{assetPosition:\
+e.mediaTimestamp,autoplay:e.currentlyPlaying&&n<15e3}))}";
+
+#[test]
+fn routes_the_saved_volume_read_and_nothing_else() {
+    let src = format!("{PLAYER_RESTORE}{VOLUME_RESTORE}function*XDe(){{}}");
+    let out = route_volume_restore(&src);
+    assert!(out.contains(
+        "let e=yield z(()=>(globalThis.__lunaRestoreVolume||(__lunaSaved=>__lunaSaved))(Hd()));\
+         if(!e)return;"
+    ));
+    assert_eq!(out.matches("__lunaRestoreVolume").count(), 1);
+    // The player-state restore takes the same action first and is left alone.
+    assert!(out.starts_with(PLAYER_RESTORE));
+    assert!(out.ends_with("e.volumeUnmute})))}function*XDe(){}"));
+}
+
+#[test]
+fn a_restore_that_reads_no_volume_is_left_alone() {
+    // The same take-read-guard opening, but the fields it reads are not the saved volume's.
+    let src = "function*A(){yield L(`BOOTSTRAP_DONE`);let e=yield z(q);if(!e)return;\
+               yield U(x({volume:e.level}))}function*B(){e.mute;e.volume;e.volumeUnmute}";
+    assert_eq!(route_volume_restore(src), src);
+    for src in [
+        PLAYER_RESTORE,
+        "console.log(`BOOTSTRAP_DONE`);",
+        "yield L(`BOOTSTRAP_DONE`)",
+    ] {
+        assert_eq!(route_volume_restore(src), src, "must not route: {src}");
+    }
+}
+
+#[test]
+fn the_route_matches_whichever_quote_the_minifier_picks() {
+    let src = VOLUME_RESTORE.replace('`', "\"");
+    assert!(route_volume_restore(&src).contains("(Hd()));if(!e)return;"));
+}
+
+#[test]
+fn the_route_splices_by_byte_across_multibyte_source() {
+    let src = format!("const s=\"héllo 日本語\";{VOLUME_RESTORE}");
+    let out = route_volume_restore(&src);
+    assert!(out.contains("héllo 日本語"));
+    assert!(out.contains("(Hd()));if(!e)return;"));
 }
 
 #[test]

@@ -15,7 +15,8 @@
 //! is absent, and the renderer degrades on its own from there.
 //!
 //! `tap_saga_put` reaches what no export carries either, the one path a saga's `put` takes
-//! to the store. It is a no-op on a miss too.
+//! to the store; `route_volume_restore`, on the entry chunk, hands the page-load choice between
+//! TIDAL's saved volume and Rust's level to the early runtime. Both are no-ops on a miss too.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -88,8 +89,9 @@ const fn fnv1a64(parts: &[&str]) -> u64 {
 pub(crate) enum ChunkRewrite {
     /// React-family chunk: append a capture of its exports under this module id.
     Capture(&'static str),
-    /// Entry chunk: tag the `createRoot` assignment, which no export carries.
-    TagCreateRoot,
+    /// Entry chunk: tag the `createRoot` assignment, which no export carries, and route the
+    /// saved-volume restore through the early runtime.
+    Entry,
     /// Vendored redux-saga: route its PUT runner through the host's tap.
     TapSagaPut,
 }
@@ -103,7 +105,7 @@ pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
     }
     let name = asset_name(url)?;
     if name.starts_with("index-") {
-        Some(ChunkRewrite::TagCreateRoot)
+        Some(ChunkRewrite::Entry)
     } else if name.starts_with("store-") {
         Some(ChunkRewrite::TapSagaPut)
     } else {
@@ -324,6 +326,83 @@ pub(crate) fn tap_saga_put(js: &str) -> String {
     js.to_string()
 }
 
+/// Route TIDAL's page-load volume restore through `globalThis.__lunaRestoreVolume`.
+///
+/// After `take(BOOTSTRAP_DONE)` one saga reads the account's saved level
+/// (`let e=yield call(read);if(!e)return;`) and puts back `e.mute`, `e.volume`, `e.volumeUnmute`
+/// where they differ from the store, which would undo the one level this install plays. The read
+/// is wrapped for the slot in `volume_restore.js`, which answers `null` once a level was chosen;
+/// the saga's own guard reads that as nothing saved. The match keys on the action type and the
+/// three fields, which the minifier keeps (the sibling saga that takes the same action first reads
+/// no `volumeUnmute`). With no slot the read passes through; `js` comes back unchanged on no match.
+pub(crate) fn route_volume_restore(js: &str) -> String {
+    const ACTION: &str = "BOOTSTRAP_DONE";
+    const TAKE_END: &str = ");let ";
+    const YIELD: &str = "=yield ";
+    const GUARD_END: &str = ")return;";
+    let bytes = js.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = js[from..].find(ACTION) {
+        let action = from + rel;
+        from = action + ACTION.len();
+        // The quote closing the action type, whichever one the minifier chose.
+        if !matches!(bytes.get(from), Some(b'`' | b'"' | b'\''))
+            || !js[from + 1..].starts_with(TAKE_END)
+        {
+            continue;
+        }
+        let saved_start = from + 1 + TAKE_END.len();
+        let saved_end = ident_end(bytes, saved_start);
+        if saved_end == saved_start || !js[saved_end..].starts_with(YIELD) {
+            continue;
+        }
+        let call_start = saved_end + YIELD.len();
+        let call_end = ident_end(bytes, call_start);
+        if call_end == call_start || bytes.get(call_end) != Some(&b'(') {
+            continue;
+        }
+        let read_start = call_end + 1;
+        let read_end = ident_end(bytes, read_start);
+        if read_end == read_start || bytes.get(read_end) != Some(&b')') {
+            continue;
+        }
+        let saved = &js[saved_start..saved_end];
+        let guard = format!(";if(!{saved}{GUARD_END}");
+        if !js[read_end + 1..].starts_with(&guard) {
+            continue;
+        }
+        // The rest of this saga, up to the next generator: the volume restore reads all three.
+        let body_start = read_end + 1 + guard.len();
+        let body_end = js[body_start..]
+            .find("function*")
+            .map_or(js.len(), |rel| body_start + rel);
+        let body = &js[body_start..body_end];
+        // A field, not the head of a longer one (`volume` in `volumeUnmute`) nor the tail of
+        // another name ending in the saved one.
+        let reads = |field: &str| {
+            let needle = format!("{saved}.{field}");
+            body.match_indices(&needle).any(|(at, _)| {
+                let before = at.checked_sub(1).and_then(|i| body.as_bytes().get(i));
+                let after = body.as_bytes().get(at + needle.len());
+                !before.is_some_and(|b| is_ident_byte(*b))
+                    && !after.is_some_and(|b| is_ident_byte(*b))
+            })
+        };
+        if !(reads("mute") && reads("volume") && reads("volumeUnmute")) {
+            continue;
+        }
+        let read = &js[read_start..read_end];
+        let routed =
+            format!("()=>(globalThis.__lunaRestoreVolume||(__lunaSaved=>__lunaSaved))({read}())");
+        let mut out = String::with_capacity(js.len() + routed.len());
+        out.push_str(&js[..read_start]);
+        out.push_str(&routed);
+        out.push_str(&js[read_end..]);
+        return out;
+    }
+    js.to_string()
+}
+
 wrap_resource_request_handler! {
     pub(crate) struct CaptureRequestHandler;
 
@@ -370,7 +449,7 @@ wrap_resource_request_handler! {
             // between. This only sizes the first allocation: the buffer itself grows unbounded.
             let capacity = match rewrite {
                 ChunkRewrite::Capture(_) => 128 * 1024,
-                ChunkRewrite::TagCreateRoot => 2 * 1024 * 1024,
+                ChunkRewrite::Entry => 2 * 1024 * 1024,
                 ChunkRewrite::TapSagaPut => 256 * 1024,
             };
             Some(new_buffering_filter(
@@ -379,7 +458,9 @@ wrap_resource_request_handler! {
                     FilterOutcome::Emit(match std::str::from_utf8(&body) {
                         Ok(js) => match rewrite {
                             ChunkRewrite::Capture(id) => append_capture(js, id).into_bytes(),
-                            ChunkRewrite::TagCreateRoot => tag_create_root(js).into_bytes(),
+                            ChunkRewrite::Entry => {
+                                route_volume_restore(&tag_create_root(js)).into_bytes()
+                            }
                             ChunkRewrite::TapSagaPut => tap_saga_put(js).into_bytes(),
                         },
                         Err(_) => body,

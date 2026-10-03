@@ -51,6 +51,7 @@ wrap_render_process_handler! {
                         {host_modules}\
                         {saga_put}\
                         {ipc}\
+                        {volume_restore}\
                         {token}\
                         {fetch}\
                         {open}\
@@ -67,6 +68,7 @@ wrap_render_process_handler! {
                         host_modules = include_str!("early_runtime/host_modules.js"),
                         saga_put = include_str!("early_runtime/saga_put.js"),
                         ipc = include_str!("early_runtime/ipc.js"),
+                        volume_restore = include_str!("early_runtime/volume_restore.js"),
                         token = include_str!("early_runtime/token_capture.js"),
                         fetch = include_str!("early_runtime/fetch_proxy.js"),
                         open = include_str!("early_runtime/window_open.js"),

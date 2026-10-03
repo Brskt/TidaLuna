@@ -5,19 +5,18 @@
 // call out to the TIDAL API and mutate the DOM lives in `middleware.ts`.
 
 import { invokeIpc, onIpcEvent } from "../ipc";
+import { isOutputLevelReport, mirrorRustLevel } from "../volume";
 import { handleReceiverMediaChanged } from "./middleware";
 import type {
     ConnectStateSnapshot,
     DevicesReceivedPayload,
     MediaChangedPayload,
-    MuteChangedPayload,
     PlayerStatusChangedPayload,
     QueueChangedPayload,
     ReceiverMediaChangedPayload,
     ServerErrorPayload,
     SessionEndedPayload,
     SessionStartedPayload,
-    VolumeChangedPayload,
 } from "./types";
 
 export { createTidalConnectController } from "./controller";
@@ -105,23 +104,14 @@ export async function setupConnectEventListeners(store: Store) {
         void handleReceiverMediaChanged(store, data);
     });
 
-    onIpcEvent("connect.receiver.volume_changed", (data: VolumeChangedPayload) => {
-        if (typeof data?.volume === "number") {
-            store.dispatch({
-                type: "playbackControls/SET_VOLUME",
-                payload: { volume: Math.round(data.volume) },
-            });
-        }
-    });
-
-    onIpcEvent("connect.receiver.mute_changed", (data: MuteChangedPayload) => {
-        if (typeof data?.mute === "boolean") {
-            store.dispatch({
-                type: "playbackControls/SET_MUTE",
-                payload: data.mute,
-            });
-        }
-    });
+    // Rust applies a controller's volume and mute itself: the receiver plays with or without a
+    // page. These relays only mirror it into TIDAL's store, adopted first (`mirrorRustLevel`) and
+    // never echoed back. A move no store saw is caught up at page load (`resyncOutputLevel`).
+    for (const channel of ["connect.receiver.volume_changed", "connect.receiver.mute_changed"]) {
+        onIpcEvent(channel, (report: unknown) => {
+            if (isOutputLevelReport(report)) mirrorRustLevel(store, report);
+        });
+    }
 
     try {
         const state = (await invokeIpc("connect.get_state")) as ConnectStateSnapshot;

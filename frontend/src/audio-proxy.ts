@@ -2,6 +2,7 @@
 // mirror our Rust player's state instead of failing (CEF has no MSE).
 
 import { sendIpc } from "./ipc";
+import { applyVolume } from "./volume";
 import { attachCoverCanvas, isCoverUrl } from "./video/cover-canvas";
 
 let _proxyElement: HTMLMediaElement | null = null;
@@ -167,6 +168,21 @@ for (const [prop, getter] of Object.entries({
 					origDesc.set!.call(this, v);
 				}
 			: undefined,
+		configurable: true,
+	});
+}
+
+// Shaka applies TIDAL's volume by writing `mediaElement.volume`, the same way it seeks through
+// `currentTime`. The write still lands on the element (shaka reads it back mid-crossfade); on a
+// proxied one it is also TIDAL applying a volume, which `applyVolume` turns into Rust's level.
+const volumeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume");
+if (volumeDesc?.set) {
+	Object.defineProperty(HTMLMediaElement.prototype, "volume", {
+		get: volumeDesc.get,
+		set(v: number) {
+			volumeDesc.set!.call(this, v);
+			if ((this as any)._lunarProxy) applyVolume();
+		},
 		configurable: true,
 	});
 }

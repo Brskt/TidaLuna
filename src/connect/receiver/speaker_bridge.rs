@@ -185,19 +185,29 @@ impl SpeakerBridge {
         with_state(|state| Self::send_transport("seek", state.player.seek(seconds)));
     }
 
-    /// Set volume. Connect uses 0.0-1.0, Player uses 0-100.
-    pub fn set_volume(&self, level: f64) {
+    /// Connect uses 0.0-1.0, Player uses 0-100. The level the output now plays at, `None` when
+    /// the command never reached the player.
+    pub fn set_volume(&self, level: f64) -> Option<crate::player::OutputLevel> {
         let volume = (level * 100.0).clamp(0.0, 100.0);
-        with_state(|state| Self::send_transport("setVolume", state.player.set_volume(volume)));
+        with_state(|state| match state.player.set_remote_volume(volume) {
+            Ok(level) => Some(level),
+            Err(e) => {
+                Self::send_transport("setVolume", Err(e));
+                None
+            }
+        })
+        .flatten()
     }
 
-    /// Mute by setting volume to 0 (Player has no native mute).
-    pub fn set_mute(&self, mute: bool, saved_level: f64) {
-        let volume = if mute {
-            0.0
-        } else {
-            (saved_level * 100.0).clamp(0.0, 100.0)
-        };
-        with_state(|state| Self::send_transport("setMute", state.player.set_volume(volume)));
+    /// The level the output now plays at, `None` when the command never reached the player.
+    pub fn set_mute(&self, mute: bool) -> Option<crate::player::OutputLevel> {
+        with_state(|state| match state.player.set_mute(mute) {
+            Ok(level) => Some(level),
+            Err(e) => {
+                Self::send_transport("setMute", Err(e));
+                None
+            }
+        })
+        .flatten()
     }
 }

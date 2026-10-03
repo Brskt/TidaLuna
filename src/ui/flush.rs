@@ -327,9 +327,10 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .push(PlayerBridgeEvent::network_lost());
             }
             PlayerEvent::VolumeSync(v) => {
+                let level = state.player.note_volume(v);
                 state
                     .pending_player_events
-                    .push(PlayerBridgeEvent::volume(v));
+                    .push(PlayerBridgeEvent::volume(&level.report()));
             }
             PlayerEvent::ReplayRequest {
                 track,

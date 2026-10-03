@@ -1,5 +1,6 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
 import { setSelfLoad, isSelfLoad } from "../audio-proxy";
+import { applyVolume } from "../volume";
 import type { AudioDevice } from "../types";
 
 export const createNativePlayerComponent = () => {
@@ -13,7 +14,6 @@ export const createNativePlayerComponent = () => {
     // converges. The first event to arrive here is already the truth.
     let seekTarget: number | null = null;
     let _time = 0;
-    let _lastVolume = -1;
     // Last mediaProduct.referenceId seen at load time. TIDAL mints a new referenceId
     // per play instance (spec: unique per MediaProduct instance); a change marks a
     // fresh play (restart at 0) vs a same-instance re-assert (keep position).
@@ -236,18 +236,7 @@ export const createNativePlayerComponent = () => {
                 activeEmitter?.emit?.("mediacurrenttime", { target: time });
                 sendIpc("player.seek", time);
             },
-            setVolume: (volume: number) => {
-                // The SDK applies a perceptual curve before calling setVolume,
-                // but we want the raw Redux value (0-100) for WASAPI session volume.
-                try {
-                    const { store } = require("../../plugins/lib/src/redux/store");
-                    const raw = store?.getState()?.playbackControls?.volume;
-                    if (raw !== undefined) volume = raw;
-                } catch (_) {}
-                if (volume === _lastVolume) return;
-                _lastVolume = volume;
-                sendIpc("player.volume", volume);
-            },
+            setVolume: (volume: number) => applyVolume(volume),
             preload: (url: string, streamFormat: string, encryptionKey: string = "") => {
                 // The delegate carries only the url triple, but the queue already names what
                 // plays next. For SDK-native tracks the advance runs in Rust and nothing
@@ -337,7 +326,6 @@ export const createNativePlayerComponent = () => {
     return {
         Player,
         activePlayer: playerHandle,
-        syncBridgeVolume: (v: number) => { _lastVolume = v; },
         // Deduped play/pause intent for SDK tracks, driven by the Redux
         // playbackControls/PLAY|PAUSE interceptors (see index.ts).
         setDesiredPlayback: (playing: boolean) => setDesired(playing),

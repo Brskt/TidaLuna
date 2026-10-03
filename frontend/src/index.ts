@@ -13,6 +13,7 @@ import { createNativePlayerComponent } from "./controllers/player";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
 import { refusePlayback } from "./refuse-playback";
+import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
 import { initWindowControls } from "./ui/window-controls";
 import { invokeIpc, invokeIpcAs, sendIpc, sendIpcAs, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
@@ -160,13 +161,11 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
         } else if (type === "duration") {
             proxySetDuration(event.v);
         } else if (type === "volume") {
+            // The OS mixer moved the level: mirrored as a controller's move is. A store not yet
+            // there misses it, and the page catches up with it once the store is found.
             try {
                 const { store } = require("../plugins/lib/src/redux/store");
-                (bridge as any).syncBridgeVolume?.(Math.round(event.v));
-                store.dispatch({
-                    type: "playbackControls/SET_VOLUME",
-                    payload: { volume: Math.round(event.v) },
-                });
+                if (isOutputLevelReport(event.v)) mirrorRustLevel(store, event.v);
             } catch (_) {}
         } else if (type === "state") {
             const playing = event.v === "active";
@@ -291,6 +290,13 @@ const init = async () => {
         return;
     }
     console.log("[luna] Core initialized - Redux store discovered, modules populated");
+    const { store } = require("../plugins/lib/src/redux/store");
+
+    // The level this install plays, which another account's page, a controller or the OS mixer
+    // may have set while no store could mirror it.
+    resyncOutputLevel(store).catch((e) =>
+        console.error("[luna] Output level resync failed:", e),
+    );
 
     // Hydrate close-to-tray from Rust-persisted value and expose setter for Rust
     {
@@ -342,17 +348,15 @@ const init = async () => {
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;
         });
-        // Volume: for self-loaded tracks (DASH/AAC) the SDK doesn't call setVolume;
-        // we forward Redux SET_VOLUME to Rust directly.
-        add("playbackControls/SET_VOLUME", (p: { volume: number }) => {
-            if (isSelfLoad()) sendIpc("player.volume", p.volume);
-        });
         add("settings/TOGGLE_CLOSE_TO_TRAY", () => {
             const { store } = require("../plugins/lib/src/redux/store");
             const current = store.getState().settings?.desktop?.closeToTray ?? false;
             sendIpc("settings.close_to_tray", !current);
         });
     }
+
+    // A volume set here while TIDAL's player holds no stream (nothing played yet, the queue ended).
+    followCommittedVolume(store);
 
     // Pinned: it is the second link of the chain a plugin's `@luna/lib` import is lowered to
     // (`luna.core.modules["__lunaLibFor"]`), and the accessor in front of it only forwards

@@ -56,9 +56,6 @@ pub(crate) struct PlaybackController {
     last_progress_ms: u64,
     current_duration_ms: u64,
 
-    /// Saved volume level for mute/unmute
-    saved_volume_level: f64,
-    muted: bool,
     /// Last time we broadcast progress (for throttling)
     last_progress_broadcast: std::time::Instant,
 }
@@ -78,8 +75,6 @@ impl PlaybackController {
             notify_tx,
             last_progress_ms: 0,
             current_duration_ms: 0,
-            saved_volume_level: 1.0,
-            muted: false,
             last_progress_broadcast: std::time::Instant::now(),
         }
     }
@@ -207,16 +202,15 @@ impl PlaybackController {
         self.bridge.seek(position_ms);
     }
 
-    pub async fn set_volume(&mut self, level: f64) {
-        self.saved_volume_level = level;
-        if !self.muted {
-            self.bridge.set_volume(level);
-        }
+    /// A level above zero also ends a mute, as it does on the controller's own screen.
+    pub fn set_volume(&self, level: f64) -> Option<crate::player::OutputLevel> {
+        self.bridge.set_volume(level)
     }
 
-    pub async fn set_mute(&mut self, mute: bool) {
-        self.muted = mute;
-        self.bridge.set_mute(mute, self.saved_volume_level);
+    /// The level an unmute restores is the player's, not ours: it is the last level the output
+    /// played, local changes included, which this controller never sees.
+    pub fn set_mute(&self, mute: bool) -> Option<crate::player::OutputLevel> {
+        self.bridge.set_mute(mute)
     }
 
     pub async fn reset(&mut self) {

@@ -187,7 +187,21 @@ fn parses_seek_and_volume_numeric_shapes() {
     );
     assert_eq!(
         parse_player_ipc("player.volume", &[json!(65.0)], None).unwrap(),
-        PlayerIpc::Volume { volume: 65.0 }
+        PlayerIpc::Volume {
+            volume: 65.0,
+            seen: None
+        }
+    );
+}
+
+#[test]
+fn a_volume_carries_the_report_the_page_had_seen() {
+    assert_eq!(
+        parse_player_ipc("player.volume", &[json!(65.0), json!(12)], None).unwrap(),
+        PlayerIpc::Volume {
+            volume: 65.0,
+            seen: Some(12)
+        }
     );
 }
 

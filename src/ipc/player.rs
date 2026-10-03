@@ -208,8 +208,8 @@ fn handle_player_ipc(msg: &IpcMessage) {
                             ..Default::default()
                         }
                     }
-                    PlayerIpc::Volume { volume } => {
-                        report_undelivered("volume", state.player.set_volume(volume));
+                    PlayerIpc::Volume { volume, seen } => {
+                        report_undelivered("volume", state.player.set_volume(volume, seen));
                         PlayerIpcEffects::default()
                     }
                     PlayerIpc::DevicesGet { request_id } => {

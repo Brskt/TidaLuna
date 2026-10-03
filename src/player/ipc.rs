@@ -46,6 +46,9 @@ pub(crate) enum PlayerIpc {
     },
     Volume {
         volume: f64,
+        /// The newest level report the page had taken in when it decided this one; absent
+        /// from a sender that keeps no count (a plugin).
+        seen: Option<u64>,
     },
     DevicesGet {
         request_id: Option<String>,
@@ -236,7 +239,10 @@ pub(crate) fn parse_player_ipc(
         "player.volume" => args
             .first()
             .and_then(|v| v.as_f64())
-            .map(|volume| PlayerIpc::Volume { volume })
+            .map(|volume| PlayerIpc::Volume {
+                volume,
+                seen: args.get(1).and_then(|v| v.as_u64()),
+            })
             .ok_or(PlayerIpcParseError::InvalidArgs("player.volume")),
         "player.devices.get" => Ok(PlayerIpc::DevicesGet {
             request_id: request_id.map(ToOwned::to_owned),
