@@ -234,8 +234,6 @@ pub(crate) fn user_home() -> Option<&'static Path> {
     HOME.get_or_init(|| resolve_base(std::env::var_os("HOME"), std::env::home_dir))
         .as_deref()
 }
-pub static GOVERNOR: LazyLock<crate::audio::bandwidth::GovernorHandle> =
-    LazyLock::new(crate::audio::bandwidth::spawn_governor);
 
 /// `LocalAppData` as the shell knows it, for a `LOCALAPPDATA` that is missing, empty or
 /// relative. `data_dir` reads the variable first because the data has always lived there.

@@ -564,7 +564,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             } else {
                 0
             };
-            let bp = crate::state::GOVERNOR.buffer_progress();
+            let bp = self.governor.buffer_progress();
             bp.bitrate_bps.store(bitrate_bps, Relaxed);
             bp.total_len.store(total_len, Relaxed);
             bp.written.store(buf.written(), Relaxed);
@@ -1185,9 +1185,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             if deferred_play {
                 self.pending_play = None;
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(true);
+                self.governor.buffer_progress().set_playback_active(true);
                 crate::vprintln!(
                     "[PLAY]   deferred play folded into ASIO start (load #{load_gen})"
                 );
@@ -1210,9 +1208,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             if deferred_play {
                 self.pending_play = None;
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(true);
+                self.governor.buffer_progress().set_playback_active(true);
                 crate::vprintln!(
                     "[PLAY]   deferred play folded into exclusive start (load #{load_gen})"
                 );
@@ -1401,7 +1397,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             0
         };
         {
-            let bp = crate::state::GOVERNOR.buffer_progress();
+            let bp = self.governor.buffer_progress();
             bp.bitrate_bps.store(bitrate_bps, Relaxed);
             bp.total_len.store(total_len, Relaxed);
             if let Some(ref buf) = self.current_buffer {
@@ -1591,9 +1587,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     crate::verr!("[ASIO]   play: handle released, waiting on the parked switch");
                 }
                 self.is_playing = true;
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(true);
+                self.governor.buffer_progress().set_playback_active(true);
                 return;
             }
         }
@@ -1642,17 +1636,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     }
                 }
                 self.is_playing = true;
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(true);
+                self.governor.buffer_progress().set_playback_active(true);
                 return;
             }
         }
 
         self.is_playing = true;
-        crate::state::GOVERNOR
-            .buffer_progress()
-            .set_playback_active(true);
+        self.governor.buffer_progress().set_playback_active(true);
         (self.callback)(PlayerEvent::StateChange(
             PlaybackState::Active,
             self.current_seq,
@@ -1740,9 +1730,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.asio_release_at =
                         Some(std::time::Instant::now() + super::ASIO_IDLE_RELEASE);
                 }
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(false);
+                self.governor.buffer_progress().set_playback_active(false);
                 self.resume_store.flush_if_due(true);
                 return;
             }
@@ -1771,9 +1759,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.exclusive_release_at =
                         Some(std::time::Instant::now() + super::EXCLUSIVE_PAUSE_RELEASE);
                 }
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(false);
+                self.governor.buffer_progress().set_playback_active(false);
                 self.resume_store.flush_if_due(true);
                 return;
             }
@@ -1790,9 +1776,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
 
         self.is_playing = false;
-        crate::state::GOVERNOR
-            .buffer_progress()
-            .set_playback_active(false);
+        self.governor.buffer_progress().set_playback_active(false);
         (self.callback)(PlayerEvent::StateChange(
             PlaybackState::Paused,
             self.current_seq,
@@ -1970,9 +1954,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.seeking = true;
             self.seek_target = Some(latest_time);
             self.seek_wall_start = Some(std::time::Instant::now());
-            crate::state::GOVERNOR
-                .buffer_progress()
-                .request_seek_preload_pause();
+            self.governor.buffer_progress().request_seek_preload_pause();
             if let Some(ref m) = self.cpal_muted {
                 m.store(true, Relaxed);
             }

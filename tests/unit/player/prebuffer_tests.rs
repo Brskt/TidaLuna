@@ -49,6 +49,7 @@ async fn a_download_that_dies_before_the_pre_buffer_target_still_publishes_at_on
         format: "flac".to_string(),
         product_id: None,
         cancel_token: CancellationToken::new(),
+        governor: crate::audio::bandwidth::GovernorHandle::ungoverned(),
     };
 
     let url = format!("http://127.0.0.1:{port}/track.flac");

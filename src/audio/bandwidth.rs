@@ -91,6 +91,12 @@ impl BufferProgress {
         self.seek_boost.swap(false, Relaxed)
     }
 
+    /// Whether a boost is pending, left for the governor to take.
+    #[cfg(test)]
+    pub(crate) fn seek_boost_pending(&self) -> bool {
+        self.seek_boost.load(Relaxed)
+    }
+
     /// Request a preload pause during seek (no rate boost, just cooldown).
     pub fn request_seek_preload_pause(&self) {
         self.seek_preload_pause.store(true, Relaxed);
@@ -168,6 +174,17 @@ impl GovernorHandle {
 
     pub fn reset_buffer_progress(&self) {
         self.buffer_progress.reset();
+    }
+
+    /// A handle with no task behind it: `acquire` returns at once, as it does once
+    /// a governor has died, and no loop consumes the progress it carries.
+    #[cfg(test)]
+    pub(crate) fn ungoverned() -> Self {
+        let (request_tx, _) = mpsc::channel::<TokenRequest>(1);
+        GovernorHandle {
+            request_tx,
+            buffer_progress: Arc::new(BufferProgress::new()),
+        }
     }
 }
 
@@ -295,6 +312,7 @@ const STARVATION_AHEAD_SECS: f64 = 1.0; // trigger when less than 1s buffered
 const STARVATION_DELAY_MS: u64 = 300; // must persist 300ms before boosting
 const STARVATION_AHEAD_FALLBACK: u64 = 128 * 1024; // 128 KB when bitrate unknown
 
+/// Needs an entered runtime, which the loop runs on until its last handle drops.
 pub fn spawn_governor() -> GovernorHandle {
     let (request_tx, request_rx) = mpsc::channel::<TokenRequest>(64);
     let buffer_progress = Arc::new(BufferProgress::new());

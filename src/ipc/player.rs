@@ -145,8 +145,9 @@ fn handle_player_ipc(msg: &IpcMessage) {
                             key,
                             product_id,
                         };
+                        let governor = state.player.governor().clone();
                         crate::state::rt_handle().spawn(async move {
-                            crate::audio::preload::start_preload(track).await;
+                            crate::audio::preload::start_preload(track, governor).await;
                         });
                         PlayerIpcEffects::default()
                     }

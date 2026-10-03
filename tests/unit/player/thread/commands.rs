@@ -121,7 +121,7 @@ fn a_queued_seek_outranks_an_auto_resume() {
 
 // The transport methods are plain `&mut self` functions. A test drives them directly:
 // no run loop, no audio device, no decode thread. The decode thread's reports arrive on a
-// channel the test owns. `#[tokio::test]` throughout, since GOVERNOR's init calls tokio::spawn.
+// channel the test owns, and the governor is one no other test writes to.
 
 type Callback = Box<dyn Fn(PlayerEvent) + Send>;
 type Spy = Arc<Mutex<Vec<PlayerEvent>>>;
@@ -144,8 +144,14 @@ fn harness(dir: &std::path::Path) -> Harness {
     let events: Spy = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     let callback: Callback = Box::new(move |ev| sink.lock().unwrap().push(ev));
-    let mut player = PlayerThread::new(cmd_rx, callback, false, Arc::new(Mutex::new(None)))
-        .expect("construction opens no device and cannot fail off Windows");
+    let mut player = PlayerThread::new(
+        cmd_rx,
+        callback,
+        false,
+        Arc::new(Mutex::new(None)),
+        crate::audio::bandwidth::GovernorHandle::ungoverned(),
+    )
+    .expect("construction opens no device and cannot fail off Windows");
 
     player.resume_store = ResumeStore::new(dir.join("resume_position.json"));
 

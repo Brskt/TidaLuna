@@ -1,10 +1,4 @@
 //! Tests for `src/player/buffer.rs`, attached to it by `#[path]`.
-//!
-//! `#[tokio::test]` throughout, as in `thread/commands.rs`: the Range-restart arm site asks
-//! the governor for the boosted rate, and `GOVERNOR`'s `LazyLock` init calls `tokio::spawn`.
-//! A plain `#[test]` that reaches it panics for want of a reactor and leaves the static
-//! poisoned for every later test in the binary: the blast radius of getting this wrong is
-//! the whole suite, not this file.
 
 use super::*;
 use std::io::{Read, Seek};
@@ -92,19 +86,16 @@ async fn retiring_one_reader_leaves_the_buffer_readable_by_the_next() {
     drop(retired);
 }
 
-/// The arm site itself, the one that now asks the governor to hurry. A cursor further ahead
-/// than the buffer is willing to wait through has to turn into a restart request, and reaching
-/// that decision must not blow up on the runtime-less thread a decoder actually reads from.
-/// Forcing `GOVERNOR` from here exercises exactly that.
+/// The arm site itself, which also asks the governor pacing this download to hurry.
 #[tokio::test]
 async fn a_read_far_past_the_frontier_arms_a_range_restart() {
-    // Force the governor's init from inside this test's runtime. The reader below is a raw
-    // `std::thread`, which does NOT inherit one (just like the decode thread in production,
-    // where `main.rs` does exactly this at startup). Without it the arm site's first touch
-    // lands on a runtime-less thread, panics, and poisons the static for the whole binary.
-    let _ = &*crate::state::GOVERNOR;
-
-    let (buffer, writer) = RamBuffer::new_for_test(1024 * 1024);
+    let governor = GovernorHandle::ungoverned();
+    let (buffer, writer) = RamBuffer::new(
+        1024 * 1024,
+        DownloadOwner::Playback,
+        CancellationToken::new(),
+        governor.clone(),
+    );
     let _ = writer.write_counted(&[0u8; 1024]);
     let mut reader = buffer.clone();
     // Past the written frontier by more than the lookahead the buffer waits through: the
@@ -124,14 +115,15 @@ async fn a_read_far_past_the_frontier_arms_a_range_restart() {
         writer.has_restart_pending(),
         "a cursor past the lookahead has to move the download, not wait for it"
     );
+    assert!(
+        governor.buffer_progress().seek_boost_pending(),
+        "the boost goes to the governor pacing this buffer's download"
+    );
 
-    // Release the parked reader, then insist on how it ended: the arm site forces GOVERNOR's
-    // init on this very thread, and a discarded join would hide that panic behind an assertion
-    // that passes anyway, since the request is posted before the governor is ever touched.
+    // Release the parked reader, then insist on how it ended: a discarded join would hide a
+    // panic on that thread behind assertions that pass anyway.
     buffer.cancel();
-    let outcome = reading
-        .join()
-        .expect("the reading thread must not panic: the arm site touches GOVERNOR");
+    let outcome = reading.join().expect("the reading thread must not panic");
     assert_eq!(
         outcome
             .expect_err("the cancel above ends the parked read")
@@ -295,6 +287,7 @@ async fn adoption_moves_a_staged_download_to_playback() {
         1024,
         DownloadOwner::Preload,
         tokio_util::sync::CancellationToken::new(),
+        GovernorHandle::ungoverned(),
     );
     assert_eq!(
         writer.owner(),
@@ -318,7 +311,12 @@ async fn adoption_moves_a_staged_download_to_playback() {
 #[tokio::test]
 async fn the_buffer_carries_the_token_that_stops_its_download() {
     let token = tokio_util::sync::CancellationToken::new();
-    let (buffer, writer) = RamBuffer::new(1024, DownloadOwner::Preload, token.clone());
+    let (buffer, writer) = RamBuffer::new(
+        1024,
+        DownloadOwner::Preload,
+        token.clone(),
+        GovernorHandle::ungoverned(),
+    );
 
     assert!(!writer.cancel_token().is_cancelled());
     buffer.cancel_download();

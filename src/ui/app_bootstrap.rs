@@ -394,15 +394,6 @@ wrap_browser_process_handler! {
             let crossfade_enabled = crate::state::boot_settings().crossfade_enabled;
             let crossfade_secs = crate::state::boot_settings().crossfade_secs;
             let video_codec = crate::state::boot_settings().video_codec_enabled;
-            // The governor sizes what a preload may draw through a shut gate from this,
-            // because a fade needs its own seconds of the incoming track and the gate is
-            // shut for most of a track whose download is paced at real time. Seeded here
-            // rather than in `PlayerThread::new`: that runs in unit tests with no tokio
-            // runtime, and touching `GOVERNOR` there would build its task on a thread
-            // that has none.
-            crate::state::GOVERNOR
-                .buffer_progress()
-                .set_crossfade_secs(if crossfade_enabled { crossfade_secs } else { 0 });
 
             // Join the boot-token reconcile: the restored session must be in
             // AppState before the page can consume it. An unusable blob arms a

@@ -140,6 +140,7 @@ async fn a_refused_connection_publishes_no_credential() {
         format: "flac".to_string(),
         product_id: None,
         cancel_token: CancellationToken::new(),
+        governor: crate::audio::bandwidth::GovernorHandle::ungoverned(),
     };
 
     // Port 1 refuses the connection, failing the request before a response exists.

@@ -1,7 +1,7 @@
-use crate::audio::bandwidth::TrafficClass;
+use crate::audio::bandwidth::{GovernorHandle, TrafficClass};
 use crate::audio::decrypt::FlacDecryptor;
 use crate::player::buffer::{DownloadFailure, DownloadOwner, HeadStatus, RamBufferWriter};
-use crate::state::{GOVERNOR, HTTP_CLIENT_PRELOAD, PreloadedTrack, RetainedTrack, TrackInfo};
+use crate::state::{HTTP_CLIENT_PRELOAD, PreloadedTrack, RetainedTrack, TrackInfo};
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -17,16 +17,17 @@ pub struct FetchedTrack {
     pub ciphertext: Option<(tempfile::NamedTempFile, u64)>,
 }
 
-/// `owner` decides which bucket pays; this path has no streaming buffer to carry it, and a load
-/// with no `Content-Length` falls back here too. `opened` is a response already in hand: issuing
-/// a second GET holds the first open with its body unread, and an HTTP/1.1 connection in that
-/// state is unusable until it drops.
+/// `owner` decides which bucket of `governor` pays; this path has no streaming buffer to carry
+/// either, and a load with no `Content-Length` falls back here too. `opened` is a response already
+/// in hand: issuing a second GET holds the first open with its body unread, and an HTTP/1.1
+/// connection in that state is unusable until it drops.
 async fn fetch_and_decrypt_inner(
     url: &str,
     key: &str,
     max_bytes: Option<usize>,
     owner: DownloadOwner,
     opened: Option<reqwest::Response>,
+    governor: &GovernorHandle,
 ) -> anyhow::Result<Option<FetchedTrack>> {
     let start = std::time::Instant::now();
     let resp = match opened {
@@ -133,7 +134,7 @@ async fn fetch_and_decrypt_inner(
 
         reconnect_attempts = 0; // received data; reset the retry budget
 
-        GOVERNOR
+        governor
             .acquire(owner.traffic_class(), chunk.len() as u32)
             .await;
 
@@ -193,8 +194,18 @@ pub async fn fetch_and_decrypt(
     url: &str,
     key: &str,
     opened: reqwest::Response,
+    governor: &GovernorHandle,
 ) -> anyhow::Result<FetchedTrack> {
-    match fetch_and_decrypt_inner(url, key, None, DownloadOwner::Playback, Some(opened)).await? {
+    match fetch_and_decrypt_inner(
+        url,
+        key,
+        None,
+        DownloadOwner::Playback,
+        Some(opened),
+        governor,
+    )
+    .await?
+    {
         Some(fetched) => Ok(fetched),
         None => anyhow::bail!("unexpected capped fetch in uncapped mode"),
     }
@@ -607,7 +618,14 @@ fn preload_state() -> std::sync::MutexGuard<'static, PreloadState> {
 ///
 /// This removes the size ceiling rather than raising it. Holding a whole track in RAM first
 /// meant 32 MB, two minutes forty-three of CD FLAC: the fade only worked on a cached library.
-async fn stage_streaming(track: &TrackInfo, attempt: u64) -> anyhow::Result<()> {
+///
+/// `governor` is the playback's own: the preload shares its link, and an adopted buffer keeps
+/// charging the same one.
+async fn stage_streaming(
+    track: &TrackInfo,
+    attempt: u64,
+    governor: &GovernorHandle,
+) -> anyhow::Result<()> {
     let resp = HTTP_CLIENT_PRELOAD.get(&track.url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("Upstream status: {}", resp.status());
@@ -626,6 +644,7 @@ async fn stage_streaming(track: &TrackInfo, attempt: u64) -> anyhow::Result<()> 
             Some(PRELOAD_MAX_BYTES),
             DownloadOwner::Preload,
             Some(resp),
+            governor,
         )
         .await?
         else {
@@ -648,8 +667,12 @@ async fn stage_streaming(track: &TrackInfo, attempt: u64) -> anyhow::Result<()> 
     }
 
     let cancel = CancellationToken::new();
-    let (buffer, writer) =
-        crate::player::buffer::RamBuffer::new(total_len, DownloadOwner::Preload, cancel.clone());
+    let (buffer, writer) = crate::player::buffer::RamBuffer::new(
+        total_len,
+        DownloadOwner::Preload,
+        cancel.clone(),
+        governor.clone(),
+    );
     // A clone kept for the window before the buffer is published: until then no other holder
     // exists, and a disposal has to reach this download somehow. Clearing it at adoption is
     // safe because the buffer carries the same token. Refused means this attempt lost its claim
@@ -746,7 +769,7 @@ async fn stage_streaming(track: &TrackInfo, attempt: u64) -> anyhow::Result<()> 
     Ok(())
 }
 
-pub async fn start_preload(track: TrackInfo) {
+pub async fn start_preload(track: TrackInfo, governor: GovernorHandle) {
     // Asking twice for the same track is a no-op, not a restart. The one producer re-enters
     // itself: the SDK's `next()` clears its re-entrancy flag through a call that never
     // suspends, awaits it anyway, and resumes without revalidating. A second call landing in
@@ -783,7 +806,7 @@ pub async fn start_preload(track: TrackInfo) {
         }
 
         crate::vprintln!("[PRELOAD] Starting preload for next track");
-        if let Err(e) = stage_streaming(&track, attempt).await {
+        if let Err(e) = stage_streaming(&track, attempt, &governor).await {
             crate::vprintln!("[PRELOAD] Failed: {}", e);
         }
     });
@@ -1306,10 +1329,10 @@ async fn download_stream(
                             }
                             continue 'outer;
                         }
-                        // Re-read per chunk: an adopted preload starts charging the
-                        // listener's bucket from the chunk after the handover, where the
+                        // The owner is re-read per chunk: an adopted preload starts charging
+                        // the listener's bucket from the chunk after the handover, where the
                         // fixed preload rate cannot keep a hi-res track fed.
-                        _ = GOVERNOR.acquire(writer.owner().traffic_class(), chunk.len() as u32) => {}
+                        _ = writer.governor().acquire(writer.owner().traffic_class(), chunk.len() as u32) => {}
                     }
 
                     decrypt_buf.clear();

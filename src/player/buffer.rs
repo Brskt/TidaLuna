@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use crate::audio::bandwidth::GovernorHandle;
 use symphonia::core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
 
@@ -103,6 +104,9 @@ impl DownloadOwner {
 struct DownloadHandle {
     owner: AtomicU8,
     cancel: CancellationToken,
+    /// The governor pacing the download, whose seek boost a far read asks for. `None` for a
+    /// buffer that arrived complete: no download, and `read` never arms a restart on it.
+    governor: Option<GovernorHandle>,
 }
 
 impl DownloadFailure {
@@ -217,17 +221,20 @@ pub struct RamBuffer {
 /// Write-side handle for the async download task.
 pub struct RamBufferWriter {
     shared: Arc<SharedState>,
+    governor: GovernorHandle,
 }
 
 impl RamBuffer {
     /// `owner` is who the download starts out belonging to; a staged track can be adopted
     /// by playback later through [`RamBuffer::adopt_as_playback`]. `cancel` is supplied by
     /// the caller rather than minted here, because the caller already holds a slot that
-    /// has to stop this same download: one token, however it is reached.
+    /// has to stop this same download: one token, however it is reached. `governor` paces
+    /// the link rather than the owner, so an adoption keeps it.
     pub fn new(
         total_len: u64,
         owner: DownloadOwner,
         cancel: CancellationToken,
+        governor: GovernorHandle,
     ) -> (Self, RamBufferWriter) {
         let shared = Arc::new(SharedState {
             inner: Mutex::new(Inner {
@@ -249,6 +256,7 @@ impl RamBuffer {
             download: DownloadHandle {
                 owner: AtomicU8::new(owner.as_bits()),
                 cancel,
+                governor: Some(governor.clone()),
             },
         });
 
@@ -257,7 +265,7 @@ impl RamBuffer {
             cursor: 0,
             reader_cancel: None,
         };
-        let writer = RamBufferWriter { shared };
+        let writer = RamBufferWriter { shared, governor };
         (buffer, writer)
     }
 
@@ -298,6 +306,7 @@ impl RamBuffer {
                     token.cancel();
                     token
                 },
+                governor: None,
             },
         });
 
@@ -313,7 +322,12 @@ impl RamBuffer {
     /// its pair through [`RamBuffer::new`] and says which owner it starts from.
     #[cfg(test)]
     pub(crate) fn new_for_test(total_len: u64) -> (Self, RamBufferWriter) {
-        Self::new(total_len, DownloadOwner::Playback, CancellationToken::new())
+        Self::new(
+            total_len,
+            DownloadOwner::Playback,
+            CancellationToken::new(),
+            GovernorHandle::ungoverned(),
+        )
     }
 
     /// Attach a per-reader stop signal: when set, this reader's `read` fails, leaving
@@ -580,12 +594,10 @@ impl Read for RamBuffer {
                         self.shared.async_notify.notify_one();
                         // This reader is about to wait on a refetch from a cold offset, what
                         // the boosted rate exists for; asking here rather than at the seek
-                        // keeps it to the restarts that actually lack bytes. Reads run on
-                        // threads with no runtime and GOVERNOR's init spawns a task, so
-                        // `main.rs` forces it at startup and tests need their own runtime.
-                        crate::state::GOVERNOR
-                            .buffer_progress()
-                            .request_seek_boost();
+                        // keeps it to the restarts that actually lack bytes.
+                        if let Some(governor) = &self.shared.download.governor {
+                            governor.buffer_progress().request_seek_boost();
+                        }
                         inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     }
                 }
@@ -738,6 +750,11 @@ impl RamBufferWriter {
     /// to change with it.
     pub fn owner(&self) -> DownloadOwner {
         DownloadOwner::from_bits(self.shared.download.owner.load(Relaxed))
+    }
+
+    /// The governor every chunk of this download waits on, whichever owner it has.
+    pub fn governor(&self) -> &GovernorHandle {
+        &self.governor
     }
 
     /// The token stopping this download, for the task filling the buffer to be raced

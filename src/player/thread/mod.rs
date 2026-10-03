@@ -336,6 +336,8 @@ pub(super) struct PlayerThread<F> {
     // Command coalescing
     pending_cmds: Vec<PlayerCommand>,
     coalesced_cmds: Vec<PlayerCommand>,
+    /// The player's governor. This thread only ever writes its progress.
+    governor: crate::audio::bandwidth::GovernorHandle,
 }
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
@@ -344,6 +346,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         callback: F,
         #[allow(unused_variables)] volume_sync_enabled: bool,
         committed_track: Arc<std::sync::Mutex<Option<(String, String)>>>,
+        governor: crate::audio::bandwidth::GovernorHandle,
     ) -> Option<Self> {
         #[cfg(target_os = "windows")]
         let com_guard = match crate::platform::volume_sync::ComGuard::new() {
@@ -353,6 +356,20 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 None
             }
         };
+
+        // Crossfade off collapses to zero, which every downstream check reads as "no fade".
+        // Read through the OnceLock: `boot_settings()` panics when settings were never loaded,
+        // as in every unit test.
+        let crossfade_secs = crate::state::BOOT_SETTINGS
+            .get()
+            .filter(|boot| boot.crossfade_enabled)
+            .map(|boot| boot.crossfade_secs)
+            .unwrap_or(0);
+        // The governor sizes what a preload may draw through a shut gate from it: a fade
+        // needs its own seconds of the incoming track.
+        governor
+            .buffer_progress()
+            .set_crossfade_secs(crossfade_secs);
 
         Some(Self {
             cmd_rx,
@@ -381,15 +398,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pending_play: None,
             loading_gen: None,
             current_duration: 0.0,
-            // The switch and the duration collapse into one number here: off is zero,
-            // which every downstream check already treats as "no fade". Read through the
-            // OnceLock rather than `boot_settings()`, which panics when the settings were
-            // never loaded, as in every unit test that builds a player thread.
-            crossfade_secs: crate::state::BOOT_SETTINGS
-                .get()
-                .filter(|boot| boot.crossfade_enabled)
-                .map(|boot| boot.crossfade_secs)
-                .unwrap_or(0),
+            crossfade_secs,
             cpal_xfade: None,
             xfade_seen_gen: 0,
             xfade_refused_url: None,
@@ -475,6 +484,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             version_emitted: false,
             pending_cmds: Vec::new(),
             coalesced_cmds: Vec::new(),
+            governor,
         })
     }
 
@@ -729,9 +739,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // The governor sizes what a preload may draw through a shut gate from
                 // this: a fade needs its own seconds of the incoming track, and the
                 // gate is shut for most of a track whose download is paced at real time.
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_crossfade_secs(secs);
+                self.governor.buffer_progress().set_crossfade_secs(secs);
                 crate::vprintln!("[XFADE] overlap set to {secs}s");
             }
         }

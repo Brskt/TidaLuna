@@ -1,6 +1,7 @@
 //! Tests for `src/audio/preload.rs`, attached to it by `#[path]`.
 
 use super::*;
+use crate::audio::bandwidth::spawn_governor;
 use crate::state::{PreloadedTrack, TrackInfo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// libtest runs the crate in one process, several threads wide, and `PRELOAD_STATE`
@@ -106,6 +107,7 @@ async fn a_claim_over_a_dead_download_restages_instead_of_restamping() {
         1_000_000,
         DownloadOwner::Preload,
         CancellationToken::new(),
+        GovernorHandle::ungoverned(),
     );
     assert!(
         preload_state().publish(first, &track, buffer),
@@ -167,6 +169,7 @@ async fn an_over_size_body_is_refused_from_its_announced_length() {
             // The refusal must decide on the header alone. The fetch opens its own
             // response rather than being handed one.
             None,
+            &GovernorHandle::ungoverned(),
         ),
     )
     .await
@@ -380,7 +383,7 @@ async fn a_head_that_never_arrives_stops_its_download() {
     let attempt = preload_state()
         .claim(&track, crate::player::current_gen())
         .expect("nothing is staged, so the claim is granted");
-    stage_streaming(&track, attempt)
+    stage_streaming(&track, attempt, &spawn_governor())
         .await
         .expect("a head that does not arrive is a refusal to stage, not a failed fetch");
 
@@ -448,7 +451,7 @@ async fn a_download_that_ends_before_its_head_gives_the_slot_back_at_once() {
         .expect("nothing is staged, so the claim is granted");
 
     let staged_at = std::time::Instant::now();
-    stage_streaming(&track, attempt)
+    stage_streaming(&track, attempt, &spawn_governor())
         .await
         .expect("a download that ended is a refusal to stage, not a failed fetch");
 
@@ -512,7 +515,7 @@ async fn a_load_adopts_a_staging_download_before_its_head_lands() {
     let staging = tokio::spawn({
         let track = track.clone();
         async move {
-            let _ = stage_streaming(&track, attempt).await;
+            let _ = stage_streaming(&track, attempt, &spawn_governor()).await;
         }
     });
 
@@ -695,6 +698,7 @@ async fn an_unfilled_buffer_serves_a_load_but_never_a_fade() {
         1_000_000,
         DownloadOwner::Preload,
         CancellationToken::new(),
+        GovernorHandle::ungoverned(),
     );
     assert!(
         preload_state().publish(attempt, &track, buffer),
@@ -731,6 +735,7 @@ async fn a_load_waits_for_the_head_before_the_player_thread_sees_the_buffer() {
         1_000_000,
         DownloadOwner::Preload,
         CancellationToken::new(),
+        GovernorHandle::ungoverned(),
     );
 
     // A load nobody is waiting for any more stops at once rather than spending the deadline.
@@ -778,6 +783,7 @@ async fn a_terminal_download_stops_the_head_wait_however_it_ended() {
             1_000_000,
             DownloadOwner::Preload,
             CancellationToken::new(),
+            GovernorHandle::ungoverned(),
         )
     };
 
@@ -835,6 +841,7 @@ async fn a_head_that_lands_as_its_download_ends_is_still_a_hit() {
         HEAD_TARGET_BYTES,
         DownloadOwner::Preload,
         CancellationToken::new(),
+        GovernorHandle::ungoverned(),
     );
     writer.write_counted(&vec![0u8; HEAD_TARGET_BYTES as usize]);
     writer.finish();
@@ -1040,10 +1047,6 @@ fn a_preload_resolves_its_url_without_the_retained_track() {
 async fn a_refused_range_restart_publishes_no_credential() {
     use std::io::{Read as _, Seek as _};
 
-    // Arming the restart runs `request_seek_boost` on the reading thread below, which has no
-    // runtime of its own. Force the LazyLock here, where one exists.
-    let _ = &*crate::state::GOVERNOR;
-
     // Answers a head, then stops talking: the download parks on `stream.next()`, which is the
     // state a restart interrupts. The length it announces never arrives.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1072,6 +1075,7 @@ async fn a_refused_range_restart_publishes_no_credential() {
         1_048_576,
         DownloadOwner::Preload,
         CancellationToken::new(),
+        GovernorHandle::ungoverned(),
     );
 
     // `download_stream` never issues the first request - it is handed one already open. The

@@ -16,10 +16,9 @@ mod throttle;
 #[cfg(target_os = "windows")]
 pub(crate) mod wasapi;
 
+use crate::audio::bandwidth::GovernorHandle;
 use crate::audio::preload;
-use crate::state::{
-    AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, GOVERNOR, HTTP_CLIENT_PLAYBACK, TrackInfo,
-};
+use crate::state::{AUDIO_CACHE, CURRENT_METADATA, CURRENT_TRACK, HTTP_CLIENT_PLAYBACK, TrackInfo};
 use buffer::{DownloadOwner, HeadStatus, RamBuffer};
 use futures_util::stream::{self, StreamExt};
 use std::sync::atomic::{
@@ -381,6 +380,8 @@ struct LoadContext {
     product_id: Option<String>,
     /// Cancelled when a newer load supersedes this one or on stop.
     cancel_token: CancellationToken,
+    /// The player's governor, for the download this load opens.
+    governor: GovernorHandle,
 }
 
 impl LoadContext {
@@ -508,6 +509,8 @@ pub struct Player {
     /// cannot falsely match and resume a stale pipeline. stop() is pause-retain, and
     /// this survives a stop and the following play() resumes it in place.
     committed_track: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    /// The one governor arbitrating this player's link between its playback and its preload.
+    governor: GovernorHandle,
 }
 
 pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
@@ -996,7 +999,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         // Handed the response already open, not left to race a second one against it: a
         // body nobody reads keeps an HTTP/1.1 connection held and unusable until it drops,
         // and this one would not drop until the whole fallback download had finished.
-        match preload::fetch_and_decrypt(url, key, resp).await {
+        match preload::fetch_and_decrypt(url, key, resp, &ctx.governor).await {
             Ok(fetched) => {
                 if ctx.is_stale() {
                     crate::vprintln!("[LOAD #{load_gen}] stale after full download, dropping");
@@ -1027,8 +1030,12 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
     // The load's own token becomes the buffer's, rather than a second one beside it: the
     // next load reaches this download through the player's slot, a buffer swap reaches it
     // through the buffer, and both arrive at the same token.
-    let (buffer, writer) =
-        RamBuffer::new(total_len, DownloadOwner::Playback, ctx.cancel_token.clone());
+    let (buffer, writer) = RamBuffer::new(
+        total_len,
+        DownloadOwner::Playback,
+        ctx.cancel_token.clone(),
+        ctx.governor.clone(),
+    );
 
     preload::start_download(resp, url.to_string(), key.to_string(), writer);
 
@@ -1102,10 +1109,20 @@ impl Player {
 
         let committed_track = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
         let thread_committed = committed_track.clone();
+        // On the runtime this player spawns its loads on, where the governor's task runs.
+        let governor = {
+            let _entered = rt_handle.enter();
+            crate::audio::bandwidth::spawn_governor()
+        };
+        let thread_governor = governor.clone();
         std::thread::spawn(move || {
-            if let Some(mut pt) =
-                thread::PlayerThread::new(cmd_rx, callback, volume_sync_enabled, thread_committed)
-            {
+            if let Some(mut pt) = thread::PlayerThread::new(
+                cmd_rx,
+                callback,
+                volume_sync_enabled,
+                thread_committed,
+                thread_governor,
+            ) {
                 pt.run();
             }
         });
@@ -1116,7 +1133,13 @@ impl Player {
             load_handle: std::sync::Mutex::new(None),
             download_cancel: std::sync::Mutex::new(None),
             committed_track,
+            governor,
         })
+    }
+
+    /// The governor a preload staged for this player shares with its playback.
+    pub fn governor(&self) -> &GovernorHandle {
+        &self.governor
     }
 
     fn load_with_policy(
@@ -1160,7 +1183,7 @@ impl Player {
 
         // Reset governor buffer progress: stale counters from the previous track
         // would otherwise throttle the new download.
-        GOVERNOR.reset_buffer_progress();
+        self.governor.reset_buffer_progress();
 
         {
             let mut lock = CURRENT_TRACK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1189,6 +1212,7 @@ impl Player {
             format: format.clone(),
             product_id,
             cancel_token,
+            governor: self.governor.clone(),
         };
 
         let handle = self.rt_handle.spawn(async move {
@@ -1382,7 +1406,7 @@ impl Player {
         {
             prev.abort();
         }
-        GOVERNOR.reset_buffer_progress();
+        self.governor.reset_buffer_progress();
 
         // DASH isn't replayable via load_and_play (segmented); clear the
         // retained source: a post-DASH play re-arms nothing, not a stale track.

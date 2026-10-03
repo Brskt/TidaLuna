@@ -189,9 +189,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.asio_seek_tx = None;
         self.current_track_id = None;
         self.idle_state = PlaybackState::Stopped;
-        crate::state::GOVERNOR
-            .buffer_progress()
-            .set_playback_active(false);
+        self.governor.buffer_progress().set_playback_active(false);
         (self.callback)(PlayerEvent::StateChange(
             PlaybackState::Stopped,
             self.current_seq,
@@ -340,9 +338,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 // dropped: clear the dead sender; a later
                                 // seek/play respawns a decoder.
                                 self.exclusive_seek_tx = None;
-                                crate::state::GOVERNOR
-                                    .buffer_progress()
-                                    .set_playback_active(false);
+                                self.governor.buffer_progress().set_playback_active(false);
                                 (self.callback)(PlayerEvent::StateChange(
                                     PlaybackState::Completed,
                                     self.current_seq,
@@ -636,9 +632,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             // Decoder exited (EndStream): clear the dead sender, and a
                             // later seek/play respawns a decoder.
                             self.asio_seek_tx = None;
-                            crate::state::GOVERNOR
-                                .buffer_progress()
-                                .set_playback_active(false);
+                            self.governor.buffer_progress().set_playback_active(false);
                             (self.callback)(PlayerEvent::StateChange(
                                 PlaybackState::Completed,
                                 self.current_seq,
@@ -971,7 +965,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if self.has_track
             && let Some(ref buf) = self.current_buffer
         {
-            let bp = crate::state::GOVERNOR.buffer_progress();
+            let bp = self.governor.buffer_progress();
             bp.written.store(buf.written(), Relaxed);
             bp.read_pos.store(buf.read_cursor(), Relaxed);
         }
@@ -1327,9 +1321,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.is_playing = false;
             self.current_track_id = None;
             self.current_duration = 0.0;
-            crate::state::GOVERNOR
-                .buffer_progress()
-                .set_playback_active(false);
+            self.governor.buffer_progress().set_playback_active(false);
             self.idle_state = PlaybackState::Stopped;
             (self.callback)(PlayerEvent::StateChange(
                 PlaybackState::Stopped,
@@ -1396,9 +1388,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.has_track = false;
                 self.is_playing = false;
                 self.current_track_id = None;
-                crate::state::GOVERNOR
-                    .buffer_progress()
-                    .set_playback_active(false);
+                self.governor.buffer_progress().set_playback_active(false);
                 self.current_duration = 0.0;
                 return;
             }

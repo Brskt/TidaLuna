@@ -341,12 +341,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set(rt_handle.clone())
         .expect("RT_HANDLE already initialized");
 
-    {
-        let _guard = rt.enter();
-        // GOVERNOR's init calls tokio::spawn, which needs the runtime entered.
-        let _ = &*crate::state::GOVERNOR;
-    }
-
     // Warm the audio cache in parallel with the rest of boot: eager init here
     // delayed first paint, and fully lazy would bill the SQLite open to the
     // first track load or menu open. A racing first use just blocks on the
