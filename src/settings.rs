@@ -12,7 +12,6 @@ const PLAYER_VOLUME: &str = "player.volume";
 const PLAYER_VOLUME_UNMUTE: &str = "player.volume_unmute";
 const PLAYER_VOLUME_SYNC: &str = "player.volume_sync";
 const PLAYER_ASIO: &str = "player.asio";
-const PLAYER_EXCLUSIVE: &str = "player.exclusive";
 const PLAYER_CROSSFADE_ENABLED: &str = "player.crossfade_enabled";
 const PLAYER_CROSSFADE_SECS: &str = "player.crossfade_secs";
 const UPDATER_AUTO_CHECK: &str = "updater.auto_check";
@@ -233,16 +232,6 @@ pub(crate) fn save_output_level(conn: &mut Connection, volume: f64, unmute: f64)
     }
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn load_exclusive(conn: &mut Connection) -> bool {
-    get_bool(conn, PLAYER_EXCLUSIVE, false)
-}
-
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn save_exclusive(conn: &mut Connection, enabled: bool) {
-    set(conn, PLAYER_EXCLUSIVE, &enabled.to_string());
-}
-
 pub(crate) fn load_close_to_tray(conn: &mut Connection) -> bool {
     get_bool(conn, WINDOW_CLOSE_TO_TRAY, false)
 }
@@ -349,7 +338,6 @@ pub(crate) struct BootSettings {
     pub(crate) receiver_always_on: bool,
     pub(crate) volume_sync: bool,
     pub(crate) asio: bool,
-    pub(crate) exclusive: bool,
     pub(crate) window_maximized: bool,
     pub(crate) log_level: u8,
     pub(crate) console: bool,
@@ -374,11 +362,6 @@ pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
         asio: load_asio(conn),
         #[cfg(not(target_os = "windows"))]
         asio: false,
-        // exclusive WASAPI is Windows-only; non-Windows keeps it off.
-        #[cfg(target_os = "windows")]
-        exclusive: load_exclusive(conn),
-        #[cfg(not(target_os = "windows"))]
-        exclusive: false,
         window_maximized: load_window_state(conn).maximized,
         log_level: load_log_level(conn),
         console: load_console(conn),

@@ -231,15 +231,12 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 // toggle stays stuck on (Rust falls back to shared). Re-select
                 // shared for activeDeviceMode to resync. NOT for the transient
                 // 'devicelocked' case: flipping it there would never re-arm
-                // exclusive once the device frees.
+                // exclusive once the device frees. TIDAL saves the mode it commits with the
+                // device, which is what a restart restores.
                 try {
                     const { store } = require("../plugins/lib/src/redux/store");
                     store.dispatch({ type: "player/SET_DEVICE_MODE", payload: "shared" });
                 } catch (_) {}
-                // Clear the persisted exclusive flag too: a restart doesn't re-seed
-                // exclusive and re-enter the failing path (mirrors the ASIO failure clear).
-                (window as any).__TIDALUNAR_EXCLUSIVE__ = false;
-                sendIpc("settings.exclusive", false);
             }
             if (
                 type === "deviceasiodrivernotfound" ||

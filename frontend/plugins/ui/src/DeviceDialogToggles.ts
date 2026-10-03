@@ -2,11 +2,9 @@ import { ipcRenderer, observe, redux } from "@luna/lib";
 
 // Output toggles in TIDAL's native device-settings dialog ([data-test="dialog-device-settings"]).
 //
-// EXCLUSIVE is driven entirely through TIDAL's OWN Redux (no DOM manipulation): we
-// subscribe to `player.activeDeviceMode` to persist the user's flip of the native
-// switch, and dispatch `player/SET_DEVICE_MODE` to reflect our persisted state back onto
-// it at boot. This is the proven pattern (Inrixia/luna-plugins PersistSettings) and
-// avoids fighting React's controlled switch.
+// EXCLUSIVE is TIDAL's own switch, on a chosen device only. TIDAL saves the mode with
+// that device (`selectedOutputDevice`) and restores both at boot. We only watch
+// `player.activeDeviceMode` in TIDAL's Redux, for exclusive turning on to clear ASIO.
 //
 // ASIO has no TIDAL Redux concept, so we inject ONE row cloned from the native card
 // (inherits TIDAL's exact styling) that we fully own. Mutual exclusion: enabling ASIO
@@ -62,8 +60,6 @@ function watchExclusiveMode(unloads: Set<() => void>): void {
 		if (mode === undefined || mode === lastMode) return;
 		lastMode = mode;
 		const exclusive = mode === "exclusive";
-		W.__TIDALUNAR_EXCLUSIVE__ = exclusive;
-		ipcRenderer.send("settings.exclusive", exclusive);
 		if (exclusive) {
 			// Mutual exclusion: exclusive just turned on, clear ASIO.
 			if (W.__TIDALUNAR_ASIO__ === true) {
@@ -80,13 +76,7 @@ function watchExclusiveMode(unloads: Set<() => void>): void {
 	try {
 		unloads.add(redux.store.subscribe(sync));
 	} catch {
-		// store not ready; the Rust-side sticky override still engages exclusive at boot.
-	}
-	// Restore the persisted exclusive preference onto TIDAL's native switch at boot.
-	if (W.__TIDALUNAR_EXCLUSIVE__ === true) {
-		try {
-			redux.actions["player/SET_DEVICE_MODE"]("exclusive");
-		} catch {}
+		// store not ready; the delegate's exclusive selectDevice still clears the ASIO flag.
 	}
 	sync();
 }
@@ -119,8 +109,7 @@ function injectAsioRow(section: Element): void {
 		W.__TIDALUNAR_ASIO__ = on;
 		ipcRenderer.send("settings.asio", on);
 		if (on) {
-			// Turn exclusive off via TIDAL's own Redux (clean; React re-renders the native
-			// switch). Our store subscription then clears __TIDALUNAR_EXCLUSIVE__.
+			// Turn exclusive off via TIDAL's own Redux, which re-renders the native switch.
 			try {
 				redux.actions["player/SET_DEVICE_MODE"]("shared");
 			} catch {}
