@@ -7,6 +7,10 @@ import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./medi
 // 415. Set in `src/ipc/plugin/mod.rs`; every other parse failure answers 400.
 const UNDECODABLE_PROFILE = 415;
 
+// `MediaItem.fromPlaybackContext` reads a null here as a track: a video needs a value, and nothing
+// on this surface resolves video quality.
+const VIDEO_QUALITY_UNRESOLVED = "UNKNOWN";
+
 export const createPlaybackController = () => {
     let delegate: any = null;
     let lastTransitionId = "";
@@ -55,6 +59,11 @@ export const createPlaybackController = () => {
                             const controls = store.getState().playbackControls;
                             if (!controls) return;
 
+                            // Videos come through this delegate too, and `desktop.tidal.com` has
+                            // no video playback info (`/v1/tracks/<videoId>/playbackinfo` answers
+                            // 500). Leaving `pbi` undefined also skips the self-load blocks below.
+                            const isVideo = item.type === "video";
+
                             // Get actual audio quality from playbackInfo API (same as TIDAL's SDK)
                             let actualQuality: string | undefined;
                             let pbi: any;
@@ -63,12 +72,14 @@ export const createPlaybackController = () => {
                                 const state = store.getState();
                                 const streamingQuality = state.settings?.quality?.streaming;
 
-                                pbi = await getPlaybackInfo(productId, streamingQuality);
-                                if (!pbi && streamingQuality) {
-                                    const trackItem = state.content?.mediaItems?.[productId]?.item ?? state.content?.tracks?.[productId];
-                                    const fallbackQuality = trackItem?.audioQuality;
-                                    if (fallbackQuality && fallbackQuality !== streamingQuality) {
-                                        pbi = await getPlaybackInfo(productId, fallbackQuality);
+                                if (!isVideo) {
+                                    pbi = await getPlaybackInfo(productId, streamingQuality);
+                                    if (!pbi && streamingQuality) {
+                                        const trackItem = state.content?.mediaItems?.[productId]?.item ?? state.content?.tracks?.[productId];
+                                        const fallbackQuality = trackItem?.audioQuality;
+                                        if (fallbackQuality && fallbackQuality !== streamingQuality) {
+                                            pbi = await getPlaybackInfo(productId, fallbackQuality);
+                                        }
                                     }
                                 }
                                 if (lastTransitionId !== productId) return; // stale after async
@@ -127,7 +138,7 @@ export const createPlaybackController = () => {
                             }
 
                             const oldCtx = controls.playbackContext ?? {};
-                            const ctx = { ...oldCtx, actualProductId: productId, actualAudioQuality: actualQuality ?? oldCtx.actualAudioQuality, actualDuration: item.duration ?? oldCtx.actualDuration ?? 0, actualVideoQuality: null, bitDepth: pbi?.bitDepth ?? oldCtx.bitDepth ?? null, sampleRate: pbi?.sampleRate ?? oldCtx.sampleRate ?? null };
+                            const ctx = { ...oldCtx, actualProductId: productId, actualAudioQuality: actualQuality ?? oldCtx.actualAudioQuality, actualDuration: item.duration ?? oldCtx.actualDuration ?? 0, actualVideoQuality: isVideo ? VIDEO_QUALITY_UNRESOLVED : null, bitDepth: pbi?.bitDepth ?? oldCtx.bitDepth ?? null, sampleRate: pbi?.sampleRate ?? oldCtx.sampleRate ?? null };
                             const oldMp = controls.mediaProduct ?? {};
                             const mp = { ...oldMp, productId, productType: item.type ?? "track" };
 

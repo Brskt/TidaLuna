@@ -11,6 +11,7 @@ type Dispatch = { type: string; payload?: unknown };
 let dispatched: Dispatch[] = [];
 let pbiCalls: string[] = [];
 let rejectPbi: ((reason: unknown) => void) | null = null;
+let resolvePbi: ((value: unknown) => void) | null = null;
 
 const state = {
 	playbackControls: { playbackContext: {}, mediaProduct: {} },
@@ -29,7 +30,8 @@ mock.module("../plugins/lib/src/redux/store", () => ({
 mock.module("../plugins/lib/src/helpers/getPlaybackInfo", () => ({
 	getPlaybackInfo: (id: string) => {
 		pbiCalls.push(id);
-		return new Promise((_, reject) => {
+		return new Promise((resolve, reject) => {
+			resolvePbi = resolve;
 			rejectPbi = reject;
 		});
 	},
@@ -52,8 +54,11 @@ beforeEach(() => {
 	dispatched = [];
 	pbiCalls = [];
 	rejectPbi = null;
+	resolvePbi = null;
 	(window as any).__LUNAR_CURRENT_PRODUCT_ID__ = undefined;
 });
+
+const contextOf = (calls: Dispatch[]) => calls.find((d) => d.type === "playbackControls/UPDATE_PLAYBACK_CONTEXT")?.payload as any;
 
 test("a late refusal from a superseded track leaves the current one alone", async () => {
 	// Track A is undecodable, but its playbackinfo only rejects after the listener has already
@@ -88,4 +93,37 @@ test("a refusal for the track that is still current is acted on", async () => {
 
 	expect(dispatched.filter((d) => d.type === "playbackControls/STOP")).toHaveLength(1);
 	expect(dispatched.filter((d) => d.type === "message/MESSAGE_ERROR")).toHaveLength(1);
+});
+
+test("a video is never asked for playback info", async () => {
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "vid", type: "video" });
+	await flush();
+
+	expect(pbiCalls).toEqual([]);
+});
+
+test("a video says it is one in the context it publishes", async () => {
+	// A null here made every consumer treat the video as a track, `fetchBestQuality` included.
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "vid", type: "video" });
+	await flush();
+
+	expect(contextOf(dispatched)).toBeDefined();
+	expect(contextOf(dispatched)?.actualVideoQuality).not.toBeNull();
+});
+
+test("a track after a video asks for its playback info and claims no video", async () => {
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "vid", type: "video" });
+	await flush();
+
+	dispatched = [];
+	controller.setCurrentMediaItem({ productId: "aud", type: "track" });
+	await flush();
+	resolvePbi?.({ audioQuality: "LOSSLESS" });
+	await flush();
+
+	expect(pbiCalls).toEqual(["aud"]);
+	expect(contextOf(dispatched)?.actualVideoQuality).toBeNull();
 });
