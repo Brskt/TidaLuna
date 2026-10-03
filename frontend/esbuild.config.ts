@@ -27,8 +27,8 @@ mkdirSync(resolve(root, "dist"), { recursive: true });
 mkdirSync(resolve(root, "plugins/ui/dist"), { recursive: true });
 mkdirSync(resolve(root, "plugins/dev/dist"), { recursive: true });
 
-// Shared plugin configs for inline builds
-const inlinePluginDefaults: Partial<BuildOptions> = {
+// Shared config for Luna's own plugin builds (Phase 1)
+const pluginDefaults: Partial<BuildOptions> = {
 	...defaultBuildOptions,
 	format: "esm",
 	platform: "browser",
@@ -47,8 +47,8 @@ const devOutfile = resolve(root, "plugins/dev/dist/luna-dev.mjs");
 const uiExternals = [...new Set([...RUNTIME_EXTERNALS, ...getLunaDependencyExternals(resolve(root, "plugins/ui/package.json"))])];
 const devExternals = [...new Set([...RUNTIME_EXTERNALS, ...getLunaDependencyExternals(resolve(root, "plugins/dev/package.json"))])];
 
-const lunaUiInline: BuildOptions = {
-	...inlinePluginDefaults,
+const lunaUi: BuildOptions = {
+	...pluginDefaults,
 	entryPoints: [resolve(root, "plugins/ui/src/index.tsx")],
 	outfile: uiOutfile,
 	alias: {
@@ -61,8 +61,8 @@ const lunaUiInline: BuildOptions = {
 	logLevel: "info",
 };
 
-const lunaDevInline: BuildOptions = {
-	...inlinePluginDefaults,
+const lunaDev: BuildOptions = {
+	...pluginDefaults,
 	entryPoints: [resolve(root, "plugins/dev/src/index.ts")],
 	outfile: devOutfile,
 	plugins: [
@@ -142,8 +142,8 @@ const inrixiaHelpers: BuildOptions = {
 };
 
 await build([
-	lunaUiInline,
-	lunaDevInline,
+	lunaUi,
+	lunaDev,
 	mainBundle,
 	lunaCore,
 	lunaLib,
