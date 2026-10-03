@@ -328,6 +328,17 @@ pub(crate) fn boot_settings() -> &'static crate::settings::BootSettings {
     BOOT_SETTINGS.get().expect("BootSettings not initialized")
 }
 
+/// The video-codec switch, read without the panic `boot_settings` carries.
+///
+/// Every unit test leaves `BOOT_SETTINGS` unset, and the absent case has a correct answer rather
+/// than a panic: no settings loaded means no codec, which keeps the artwork filter on.
+/// `player::thread` reads its crossfade fields through the `OnceLock` for the same reason.
+pub(crate) fn video_codec_enabled() -> bool {
+    BOOT_SETTINGS
+        .get()
+        .is_some_and(|boot| boot.video_codec_enabled)
+}
+
 pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = LazyLock::new(|| {
     let dir = cache_data_dir();
     let cache = match crate::player::cache::AudioCache::open(&dir) {

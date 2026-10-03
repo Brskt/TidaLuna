@@ -206,3 +206,41 @@ fn strips_only_json_on_the_openapi_host() {
     let plaintext = RequestUrl::new("http://openapi.tidal.com/v2/albums/1".to_owned());
     assert!(!should_strip(&plaintext, "application/json"));
 }
+
+#[test]
+fn the_filter_arms_on_the_gateway_while_the_codec_is_off() {
+    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
+    assert!(arms_artwork_filter(&url, false));
+}
+
+#[test]
+fn the_codec_switch_disarms_the_filter_on_the_same_url() {
+    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
+    assert!(!arms_artwork_filter(&url, true));
+}
+
+#[test]
+fn the_switch_cannot_arm_the_filter_on_another_host() {
+    let url = RequestUrl::new("https://listen.tidal.com/v2/albums/1".to_owned());
+    assert!(!arms_artwork_filter(&url, false));
+    assert!(!arms_artwork_filter(&url, true));
+}
+
+#[test]
+fn the_body_rule_strips_json_on_the_gateway_while_the_codec_is_off() {
+    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
+    assert!(strips_artwork_body(&url, "application/vnd.api+json", false));
+}
+
+#[test]
+fn the_codec_switch_lets_the_body_through_untouched() {
+    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
+    assert!(!strips_artwork_body(&url, "application/vnd.api+json", true));
+}
+
+#[test]
+fn a_non_json_body_is_left_alone_whatever_the_switch_says() {
+    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
+    assert!(!strips_artwork_body(&url, "image/jpeg", false));
+    assert!(!strips_artwork_body(&url, "image/jpeg", true));
+}

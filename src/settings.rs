@@ -19,6 +19,7 @@ const UPDATER_SKIP_VERSION: &str = "updater.skip_version";
 const CONNECT_RECEIVER_ALWAYS_ON: &str = "connect.receiver_always_on";
 const LOGGING_LEVEL: &str = "logging.level";
 const LOGGING_CONSOLE: &str = "logging.console";
+const VIDEO_CODEC_ENABLED: &str = "video.codec_enabled";
 
 #[derive(Debug, Clone)]
 pub struct WindowState {
@@ -299,6 +300,17 @@ pub(crate) fn save_console(conn: &mut Connection, enabled: bool) {
     set(conn, LOGGING_CONSOLE, &enabled.to_string());
 }
 
+/// Cisco's binary licence requires the user to be able to enable and disable the library
+/// (condition 2). Off by default: the library is a separate download to a host that is not
+/// TIDAL's, and nothing should reach for it before the user asks.
+pub(crate) fn load_video_codec_enabled(conn: &mut Connection) -> bool {
+    get_bool(conn, VIDEO_CODEC_ENABLED, false)
+}
+
+pub(crate) fn save_video_codec_enabled(conn: &mut Connection, enabled: bool) {
+    set(conn, VIDEO_CODEC_ENABLED, &enabled.to_string());
+}
+
 /// Settings the window bootstrap needs, batched into one db read, loading
 /// off the CEF UI thread in main() instead of blocking on_context_initialized.
 #[derive(Debug, Clone, Copy)]
@@ -316,6 +328,7 @@ pub(crate) struct BootSettings {
     pub(crate) console: bool,
     pub(crate) crossfade_enabled: bool,
     pub(crate) crossfade_secs: u8,
+    pub(crate) video_codec_enabled: bool,
 }
 
 pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
@@ -344,6 +357,7 @@ pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
         console: load_console(conn),
         crossfade_enabled: load_crossfade_enabled(conn),
         crossfade_secs: load_crossfade_secs(conn),
+        video_codec_enabled: load_video_codec_enabled(conn),
     }
 }
 
@@ -366,3 +380,7 @@ mod logging_settings_tests;
 #[cfg(test)]
 #[path = "../tests/unit/settings/crossfade_settings_tests.rs"]
 mod crossfade_settings_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/settings/video_codec_settings_tests.rs"]
+mod video_codec_settings_tests;

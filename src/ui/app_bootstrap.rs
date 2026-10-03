@@ -278,6 +278,26 @@ wrap_app! {
         fn render_process_handler(&self) -> Option<RenderProcessHandler> {
             Some(TidalRenderProcessHandler::new(self.renderer_router.clone()))
         }
+        fn on_register_custom_schemes(&self, registrar: Option<&mut SchemeRegistrar>) {
+            let Some(registrar) = registrar else { return };
+            // Runs in EVERY process before the browser/render split, which is why it lives on the
+            // one `App` `main` hands to `execute_process`. ORed as raw integers: the binding has
+            // no `BitOr`, and `add_custom_scheme` takes a `c_int`. STANDARD gives an origin
+            // (CORS_ENABLED needs one), FETCH_ENABLED lets the page `fetch` it; DISPLAY_ISOLATED
+            // and LOCAL would forbid the cross-origin access this scheme exists for.
+            let options = (SchemeOptions::STANDARD.get_raw()
+                | SchemeOptions::SECURE.get_raw()
+                | SchemeOptions::CORS_ENABLED.get_raw()
+                | SchemeOptions::FETCH_ENABLED.get_raw())
+                as ::std::os::raw::c_int;
+            let name = CefString::from(crate::ui::cover_scheme::COVER_SCHEME);
+            if registrar.add_custom_scheme(Some(&name), options) == 0 {
+                crate::verr!(
+                    "[VIDEO]   Registering the {} custom scheme failed",
+                    crate::ui::cover_scheme::COVER_SCHEME
+                );
+            }
+        }
     }
 }
 
@@ -287,6 +307,8 @@ wrap_browser_process_handler! {
     }
     impl BrowserProcessHandler {
         fn on_context_initialized(&self) {
+            crate::ui::cover_scheme::register();
+
             // CEF is up; the single-instance focus listener and a deep link may
             // now post UI tasks.
             crate::app_state::mark_context_ready();
@@ -371,6 +393,7 @@ wrap_browser_process_handler! {
 
             let crossfade_enabled = crate::state::boot_settings().crossfade_enabled;
             let crossfade_secs = crate::state::boot_settings().crossfade_secs;
+            let video_codec = crate::state::boot_settings().video_codec_enabled;
             // The governor sizes what a preload may draw through a shut gate from this,
             // because a fade needs its own seconds of the incoming track and the gate is
             // shut for most of a track whose download is paced at real time. Seeded here
@@ -397,6 +420,7 @@ window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
 window.__TIDALUNAR_ASIO__ = {asio};
 window.__TIDALUNAR_EXCLUSIVE__ = {exclusive};
 window.__TIDALUNAR_CONSOLE__ = {console};
+window.__TIDALUNAR_VIDEO_CODEC__ = {video_codec};
 window.__TIDALUNAR_CROSSFADE_ENABLED__ = {crossfade_enabled};
 window.__TIDALUNAR_CROSSFADE_SECS__ = {crossfade_secs};
 window.__TIDALUNAR_PERF__ = {perf};

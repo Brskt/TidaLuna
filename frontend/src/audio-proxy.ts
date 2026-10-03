@@ -2,6 +2,7 @@
 // mirror our Rust player's state instead of failing (CEF has no MSE).
 
 import { sendIpc } from "./ipc";
+import { attachCoverCanvas, isCoverUrl } from "./video/cover-canvas";
 
 let _proxyElement: HTMLMediaElement | null = null;
 let _proxyDuration = 0;
@@ -26,6 +27,14 @@ if (srcDesc) {
 	Object.defineProperty(HTMLMediaElement.prototype, "src", {
 		set(value: string) {
 			console.log("[audio-proxy] src SET:", typeof value === "string" ? value.slice(0, 80) : value, "isTidal:", shouldProxy(value));
+			// Covers bypass `shouldProxy`'s branch: it rebinds `_proxyElement`, `_proxyTime` and
+			// `_proxyPlaying` (the AUDIO player's mirror), and a cover there would replace the playing
+			// element and reset its time.
+			if (isCoverUrl(value)) {
+				srcDesc.set!.call(this, value);
+				attachCoverCanvas(this, value);
+				return;
+			}
 			if (shouldProxy(value)) {
 				(this as any)._lunarProxy = true;
 				(this as any)._lunarSrc = value;
@@ -106,6 +115,21 @@ HTMLMediaElement.prototype.pause = function () {
 const origLoad = HTMLMediaElement.prototype.load;
 HTMLMediaElement.prototype.load = function () {
 	if ((this as any)._lunarProxy) return;
+
+	// TIDAL puts an animated cover on a <source> child, never on the element, and the `src` setter
+	// never sees it. `load()` does: a reused element can only change cover through it (the spec
+	// ignores a changed `src` on a <source> already inserted). TIDAL calls it from an effect,
+	// after the commit, with the child and parent both in the document. Read the child's `src`:
+	// `srcset` is ignored on a media child, and `currentSrc` is still stale here.
+	const media = this as HTMLMediaElement;
+	const candidate = media.querySelector("source")?.src;
+	if (candidate && isCoverUrl(candidate)) {
+		// The native load still runs: a `<video>` that never loads has no intrinsic size, the frame
+		// falls back to 300x150 and the painted cover collapses with it. `attachCoverCanvas` only
+		// reads the element once, for the artwork frame it sits in.
+		attachCoverCanvas(media, candidate);
+	}
+
 	origLoad.call(this);
 };
 

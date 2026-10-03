@@ -20,6 +20,7 @@ mod state;
 mod ui;
 mod updater;
 mod util;
+mod video;
 
 use app_state::{APP_STATE, AppState};
 use cef::wrapper::message_router::{

@@ -2,6 +2,7 @@ import { sendIpc, sendDbgIpc } from "../ipc";
 import { setSelfLoad } from "../audio-proxy";
 import { refusePlayback } from "../refuse-playback";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
+import { setCurrentTrack } from "../video/cover-canvas";
 
 // `player.parse_dash` failure code for "no decoder here handles this codec", mirroring HTTP
 // 415. Set in `src/ipc/plugin/mod.rs`; every other parse failure answers 400.
@@ -36,6 +37,11 @@ export const createPlaybackController = () => {
         },
         setCurrentMediaItem: (item: any) => {
             if (item && typeof item === "object") {
+                // The one signal that fires for EVERY track, animated cover or not:
+                // `setCurrentTrack` hangs the cover's lifetime on it (see its doc). The still
+                // artwork rides along and is checked there.
+                setCurrentTrack(item);
+
                 // Send raw media item; metadata parsing/fallbacks are centralized in Rust.
                 sendIpc("player.metadata", item);
                 updateMetadata(item);

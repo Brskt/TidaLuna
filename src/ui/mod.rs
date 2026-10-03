@@ -3,6 +3,7 @@ pub(crate) mod app_window;
 pub(crate) mod artwork_filter;
 pub(crate) mod buffering_filter;
 mod client;
+pub(crate) mod cover_scheme;
 pub(crate) mod crash_dialog;
 pub(crate) mod csp_filter;
 pub(crate) mod deep_link;

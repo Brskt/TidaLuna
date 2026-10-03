@@ -207,10 +207,11 @@ fn strips_artwork(
     url: &crate::ui::nav::RequestUrl,
     headers: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
+    let enabled = crate::state::video_codec_enabled();
     headers
         .get("content-type")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|mime| crate::ui::artwork_filter::should_strip(url, mime))
+        .is_some_and(|mime| crate::ui::artwork_filter::strips_artwork_body(url, mime, enabled))
 }
 
 /// A response body as it came off the wire. An upstream error page can reflect a real OAuth

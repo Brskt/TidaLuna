@@ -16,7 +16,12 @@ zip = { version = "8.6.0", default-features = false, features = [
   "deflate-flate2-zlib-rs",
 ] }
 flate2 = "1.1.10"
+bzip2 = "0.6.1"
 tar = "0.4.46"
+openh264 = { version = "0.9.8", default-features = false, features = ["libloading"] }
+# Exact: CalVer, and a minor release may carry a [CHANGE] (breaking) entry; 2026.5.0 adds the
+# bitstream::h264 API cover.rs uses.
+shiguredo_mp4 = "=2026.5.0"
 
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
 [workspace.metadata.typos.default]
@@ -131,7 +136,13 @@ tokio = { version = "1.53.1", features = [
 tokio-util = { version = "0.7.19", features = ["rt"] }
 tracing = "0.1.44"
 url = "2.5.8"
+bzip2 = { workspace = true }
 zip = { workspace = true }
+openh264 = { workspace = true }
+# Direct only for the API trait codec::load_api calls, which openh264 does not re-export;
+# resolves to the crate openh264 pulls in, whose hashes.txt TARGETS copies.
+openh264-sys2 = { version = "0.9.8", default-features = false, features = ["libloading"] }
+shiguredo_mp4 = { workspace = true }
 
 # TIDAL Connect
 arc-swap = "1.9.2"

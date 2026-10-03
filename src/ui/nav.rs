@@ -50,7 +50,7 @@ impl PageKind {
     }
 
     /// The one trust rule for a requesting frame: every kind but `External` is TIDAL's own page
-    /// or our callback.
+    /// or our callback. Privileged IPC and the cover scheme both read it and cannot drift.
     pub(crate) fn is_trusted(self) -> bool {
         !matches!(self, Self::External)
     }

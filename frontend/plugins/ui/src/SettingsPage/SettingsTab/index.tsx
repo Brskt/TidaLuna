@@ -12,6 +12,7 @@ import { LunaLoggingSettings } from "./LunaLoggingSettings";
 import { LunaSettingsTransfer } from "./LunaSettingsTransfer";
 import { LunaUpdateSettings } from "./LunaUpdateSettings";
 import { LunaVersionInfo } from "./LunaVersionInfo";
+import { LunaVideoCodecSettings } from "./LunaVideoCodecSettings";
 import { LunaVolumeSyncSettings } from "./LunaVolumeSyncSettings";
 
 export const SettingsTab = React.memo(() => {
@@ -27,6 +28,7 @@ export const SettingsTab = React.memo(() => {
 			<LunaConnectSettings />
 			<LunaVolumeSyncSettings />
 			<LunaCrossfadeSettings />
+			<LunaVideoCodecSettings />
 			<LunaSettingsTransfer />
 			<LunaFeatureFlags />
 			<LunaLoggingSettings />
