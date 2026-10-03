@@ -2611,7 +2611,7 @@ async fn a_restart_of_the_outgoing_track_during_the_fade_keeps_its_publication()
 }
 
 /// The two mints of a load through `load_with_policy`, its publication left out: the generation
-/// it takes from `begin_load`, then the event seq it takes from `next_event_seq`.
+/// a `begin_load` caller hands it, then the event seq it takes from `next_event_seq`.
 fn mint_a_load_on_the_ipc_thread() -> (u32, u32) {
     let load_gen = crate::player::begin_load(crate::player::LoadOrigin::Local);
     (load_gen, crate::player::next_event_seq())

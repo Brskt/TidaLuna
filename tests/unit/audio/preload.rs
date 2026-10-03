@@ -612,7 +612,7 @@ async fn repeat_one_still_promotes_the_track_it_restaged() {
     }
 
     assert_eq!(
-        take_next_track().await.as_ref(),
+        take_next_track().await.map(|next| next.track).as_ref(),
         Some(&again),
         "nothing superseded it, so it still answers the load that is current"
     );

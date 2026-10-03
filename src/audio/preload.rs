@@ -438,7 +438,10 @@ impl PreloadState {
     /// Dropping it retires the whole attempt, not just the name. Clearing the name alone left
     /// the download that fed it running uncapped, competing for bandwidth with the track
     /// playing and holding its buffer until some unrelated later preload swept it.
-    fn take_next(&mut self) -> Option<TrackInfo> {
+    ///
+    /// The generation comes back with the track, as from `peek_next`: the advance mints on it,
+    /// and only if it is still current by then.
+    fn take_next(&mut self) -> Option<RetainedTrack> {
         if !self.next_is_current() {
             if self.next.is_some() {
                 crate::vprintln!(
@@ -448,7 +451,10 @@ impl PreloadState {
             }
             return None;
         }
-        self.next.take().map(|next| next.track)
+        self.next.take().map(|next| RetainedTrack {
+            track: next.track,
+            load_gen: next.load_gen,
+        })
     }
 
     fn peek_data(&self) -> Option<PeekedTrack> {
@@ -845,8 +851,9 @@ pub async fn cancel_preload() {
 /// Used by the auto-load logic after "completed" to know which track to load next.
 ///
 /// A record from a superseded load is dropped rather than returned: it named a queue nobody is
-/// playing, and promoting it starts a track the listener never chose.
-pub async fn take_next_track() -> Option<TrackInfo> {
+/// playing, and promoting it starts a track the listener never chose. The generation it was
+/// validated against travels with it, for [`crate::player::Player::advance`].
+pub async fn take_next_track() -> Option<RetainedTrack> {
     preload_state().take_next()
 }
 

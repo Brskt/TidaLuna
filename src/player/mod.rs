@@ -45,18 +45,28 @@ static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Who issued the load that owns the current generation.
 ///
-/// The generation says WHEN a load happened and never WHO asked for it, and all three entry
-/// points that mint one are reached from both origins. The staged "next" track answers to the
-/// renderer's own queue and to nothing else: promoted while another origin's load is current, it
-/// starts a track that queue chose and this one never did.
+/// The generation says WHEN a load happened and never WHO asked for it: loads of both origins
+/// mint from the same counter. The staged "next" track answers to the renderer's own queue and
+/// to nothing else: promoted while another origin's load is current, it starts a track that
+/// queue chose and this one never did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LoadOrigin {
     /// This host's own surfaces: the renderer's player delegate over the `player.*` IPC
-    /// channels, the completion-time advance and replay driven on its behalf, the OS media
-    /// keys, and a plugin. All of them answer to the renderer's queue.
+    /// channels, the completion-time advance driven on its behalf, the OS media keys, and a
+    /// plugin. All of them answer to the renderer's queue. A re-arm is neither origin: it leaves
+    /// the player with whoever owned it (`continue_load`).
     Local,
     /// The TIDAL Connect receiver, driving this speaker for a controller.
     Connect,
+}
+
+/// What a load that carries an earlier one on did (see [`continue_load`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Continuation {
+    /// Its load was still current: the new one is minted in the same owner's name.
+    Started,
+    /// A newer load or a stop minted since, and nothing was started over it.
+    Superseded,
 }
 
 /// Split a `LOAD_STATE` word into its generation and origin. An origin byte that is not
@@ -77,22 +87,35 @@ fn pack_load_state(cur_gen: u32, origin: LoadOrigin) -> u64 {
     ((cur_gen as u64) << 32) | (origin as u64)
 }
 
-/// Mint the next load generation, naming who it belongs to.
+/// Mint the next generation if `claim` accepts the load that is current, in the origin it
+/// names. `None` when it declines, and the word is left as it was.
 ///
-/// One read-modify-write: the generation and its origin are published together or not at all.
-/// Concurrent minters are not hypothetical, `ui::flush` calling this from a spawned task holding
-/// no lock while the Connect receiver calls it inside the `AppState` lock. A loser of the
-/// exchange retries against the pair the winner installed.
-pub(crate) fn begin_load(origin: LoadOrigin) -> u32 {
-    let previous = LOAD_STATE
+/// The decision, the generation and its origin land in one read-modify-write: `ui::flush` mints
+/// from a spawned task holding no lock while the Connect receiver mints inside the `AppState`
+/// lock, and a decision taken on a word read beforehand could act on a load already replaced.
+fn mint_if(claim: impl Fn(u32, LoadOrigin) -> Option<LoadOrigin>) -> Option<u32> {
+    LOAD_STATE
         .fetch_update(AcqRel, Acquire, |word| {
-            Some(pack_load_state(
-                unpack_load_state(word).0.wrapping_add(1),
-                origin,
-            ))
+            let (cur_gen, owner) = unpack_load_state(word);
+            claim(cur_gen, owner).map(|origin| pack_load_state(cur_gen.wrapping_add(1), origin))
         })
-        .expect("the update closure returns Some for every word, so the exchange cannot give up");
-    unpack_load_state(previous).0.wrapping_add(1)
+        .ok()
+        .map(|previous| unpack_load_state(previous).0.wrapping_add(1))
+}
+
+/// Mint the next load generation, naming who it belongs to.
+pub(crate) fn begin_load(origin: LoadOrigin) -> u32 {
+    mint_if(|_, _| Some(origin)).expect("a claim that accepts every load always mints")
+}
+
+/// Mint the generation that carries `expected_gen`'s load on, in its owner's name, or `None`
+/// once another load or a stop has minted since.
+///
+/// For a minter acting on a load it saw earlier, holding no lock (a re-arm, the completion-time
+/// advance). The check shares the mint's exchange, or a load would start over a stop or a session
+/// release landing in between.
+pub(crate) fn continue_load(expected_gen: u32) -> Option<u32> {
+    mint_if(|cur_gen, owner| (cur_gen == expected_gen).then_some(owner))
 }
 
 /// The current load's generation, for the readers that only ask "is this still my load?".
@@ -1351,6 +1374,8 @@ impl Player {
         &self.governor
     }
 
+    /// `load_gen` is minted by the caller, which is where it is decided whose load this is and
+    /// whether it may start at all.
     fn load_with_policy(
         &self,
         url: String,
@@ -1359,9 +1384,8 @@ impl Player {
         product_id: Option<String>,
         resume_policy: ResumePolicy,
         auto_play: bool,
-        origin: LoadOrigin,
+        load_gen: u32,
     ) -> anyhow::Result<()> {
-        let load_gen = begin_load(origin);
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
@@ -1396,10 +1420,9 @@ impl Player {
 
         {
             let mut lock = CURRENT_TRACK.lock().unwrap_or_else(|e| e.into_inner());
-            // Stamped with this load's own generation, taken above. The bump and this write are
-            // deliberately not adjacent (the abort, the download cancel and the governor reset
-            // sit between them); a reader that sampled the generation separately could see
-            // this load's generation while the slot still held the previous track.
+            // Stamped with the generation the caller minted, well before this write: a reader
+            // sampling the generation apart could see it while the slot still held the previous
+            // track.
             lock.publish_load(
                 load_gen,
                 Some(TrackInfo {
@@ -1502,7 +1525,7 @@ impl Player {
                     product_id,
                     ResumePolicy::Restart,
                     want_play,
-                    LoadOrigin::Local,
+                    begin_load(LoadOrigin::Local),
                 );
             }
             // Takes the new credential, keeps the play instance. The skip below correctly answers
@@ -1553,12 +1576,13 @@ impl Player {
             product_id,
             ResumePolicy::Disabled,
             want_play,
-            LoadOrigin::Local,
+            begin_load(LoadOrigin::Local),
         )
     }
 
-    /// `origin` names who asked, because both callers of this reach it: the completion-time
-    /// advance on the renderer's behalf, and the Connect receiver on a controller's.
+    /// A load over whatever plays, in `origin`'s name: the Connect receiver's, on a controller's
+    /// behalf. The renderer's completion-time advance carries its own load on instead
+    /// ([`Player::advance`]).
     pub fn load_and_play(
         &self,
         url: String,
@@ -1574,8 +1598,29 @@ impl Player {
             product_id,
             ResumePolicy::Disabled,
             true,
-            origin,
+            begin_load(origin),
         )
+    }
+
+    /// The completion-time advance: play the track staged as next, if the load it was staged
+    /// under is still the current one. Taking the record proved it (`next_is_current`), but this
+    /// runs in a spawned task holding no lock, and a controller's load can take the player between
+    /// the take and this mint.
+    pub fn advance(&self, next: crate::state::RetainedTrack) -> anyhow::Result<Continuation> {
+        let Some(load_gen) = continue_load(next.load_gen) else {
+            return Ok(Continuation::Superseded);
+        };
+        let track = next.track;
+        self.load_with_policy(
+            track.url,
+            track.format,
+            track.key,
+            track.product_id,
+            ResumePolicy::Disabled,
+            true,
+            load_gen,
+        )
+        .map(|_| Continuation::Started)
     }
 
     /// Load a DASH stream by fetching init + media segments and concatenating them.
@@ -1792,14 +1837,16 @@ impl Player {
             product_id,
             Self::resume_policy_for(target_time),
             false,
-            LoadOrigin::Local,
+            begin_load(LoadOrigin::Local),
         )
     }
 
     /// Re-arm the shared pipeline from a `ReplayRequest`: `Some(position)` seeks
     /// there (past the resume floor; below it starts from the beginning), `None`
     /// restarts; `play` auto-plays. Single entry point for the ReplayRequest
-    /// consumer, keeping the dispatch out of flush.rs.
+    /// consumer, keeping the dispatch out of flush.rs. `expected_gen` is the load being
+    /// re-armed: the same track again, in its owner's name, and only while nothing has minted
+    /// since. A re-arm over a newer load would abort it, and over a stop would undo it.
     pub fn rearm(
         &self,
         url: String,
@@ -1808,7 +1855,11 @@ impl Player {
         product_id: Option<String>,
         position: Option<f64>,
         play: bool,
-    ) -> anyhow::Result<()> {
+        expected_gen: u32,
+    ) -> anyhow::Result<Continuation> {
+        let Some(load_gen) = continue_load(expected_gen) else {
+            return Ok(Continuation::Superseded);
+        };
         // Honor the caller position directly (live re-arm target, not a
         // resume-store candidate): resume_policy_for would floor sub-1s to Auto
         // and seek a stale persisted offset. Explicit applies the floor itself.
@@ -1816,15 +1867,8 @@ impl Player {
             Some(t) => ResumePolicy::Explicit(t),
             None => ResumePolicy::Disabled,
         };
-        self.load_with_policy(
-            url,
-            format,
-            key,
-            product_id,
-            policy,
-            play,
-            LoadOrigin::Local,
-        )
+        self.load_with_policy(url, format, key, product_id, policy, play, load_gen)
+            .map(|_| Continuation::Started)
     }
 
     fn send_cmd(&self, cmd: PlayerCommand) -> anyhow::Result<()> {
@@ -1848,7 +1892,7 @@ impl Player {
         // kept (the download rides its own download_cancel token, not the load
         // generation); a same-track re-assert resumes in place. The mint invalidates any
         // still-pending auto-play Load/ReplayRequest (rejected by handle_load's
-        // stale-gate and the flush.rs guard): playback cannot start after the stop;
+        // stale-gate and the `continue_load` mint): playback cannot start after the stop;
         // it doesn't truncate the retained download, and a steady-state re-assert
         // resumes via Player::load, which bypasses both gates.
         begin_load(origin);

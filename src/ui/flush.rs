@@ -203,17 +203,18 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                             // published nor kept; the track ran its whole life with no
                             // duration in the OS controls. Self-load streams (DASH, and
                             // non-FLAC BTS) advance in the renderer and tag their own load.
-                            // This advance is the renderer's own queue moving. It names
-                            // itself as such: the record it just took was staged by that same
-                            // queue, and taking it already proved the queue is the one driving.
-                            if let Err(e) = player.load_and_play(
-                                next.url,
-                                next.format,
-                                next.key,
-                                next.product_id,
-                                crate::player::LoadOrigin::Local,
-                            ) {
-                                crate::vprintln!("[AUTO]   Failed to load next track: {e}");
+                            // The renderer's own queue moving on; `advance` re-checks at the mint
+                            // that the load the record was staged under still holds the player.
+                            match player.advance(next) {
+                                Ok(crate::player::Continuation::Started) => {}
+                                Ok(crate::player::Continuation::Superseded) => {
+                                    crate::vprintln!(
+                                        "[AUTO]   Next track dropped: a newer load or a stop took the player"
+                                    );
+                                }
+                                Err(e) => {
+                                    crate::vprintln!("[AUTO]   Failed to load next track: {e}");
+                                }
                             }
                         } else {
                             crate::vprintln!("[AUTO]   No preloaded next track");
@@ -338,27 +339,28 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                 position,
                 play,
             } => {
-                // Reload the captured source at `position`, playing per `play`.
-                // Re-check the generation: skip if a newer load/stop minted one
-                // since, else re-arming would abort that newer load.
+                // Skipped when a newer load or stop minted since: re-arming would abort that load
+                // or undo that stop. `rearm` decides it in the same exchange that mints.
                 let player = state.player.clone();
                 crate::state::rt_handle().spawn(async move {
-                    if crate::player::current_gen() != expected_gen {
-                        crate::vprintln!(
-                            "[REPLAY] re-arm skipped: superseded by a newer load/stop"
-                        );
-                        return;
-                    }
-                    crate::vprintln!("[REPLAY] re-arming retained source");
-                    if let Err(e) = player.rearm(
+                    match player.rearm(
                         track.url,
                         track.format,
                         track.key,
                         track.product_id,
                         position,
                         play,
+                        expected_gen,
                     ) {
-                        crate::vprintln!("[REPLAY] re-arm failed: {e}");
+                        Ok(crate::player::Continuation::Started) => {
+                            crate::vprintln!("[REPLAY] re-armed retained source");
+                        }
+                        Ok(crate::player::Continuation::Superseded) => {
+                            crate::vprintln!(
+                                "[REPLAY] re-arm skipped: superseded by a newer load/stop"
+                            );
+                        }
+                        Err(e) => crate::vprintln!("[REPLAY] re-arm failed: {e}"),
                     }
                 });
             }
