@@ -102,3 +102,38 @@ test("exclusive turning on clears ASIO, and that is all it sends", () => {
 	expect(W.__TIDALUNAR_ASIO__).toBe(false);
 	expect(ipcSent).toEqual([{ channel: "settings.asio", args: [false] }]);
 });
+
+test("turning ASIO off keeps Rust on the device the dialog is open on", () => {
+	// The gear, and so the dialog, only exists for a chosen device other than the system default.
+	state = { player: { ...initialPlayer(), activeDeviceId: "guid-b" } };
+	setupDeviceDialogToggles(new Set());
+	const dialog = openDialog();
+	flipAsio(dialog, true);
+	// ASIO turned exclusive off through TIDAL: the mode TIDAL holds is shared.
+	expect(dispatched).toEqual([{ type: "player/SET_DEVICE_MODE", payload: "shared" }]);
+	flipAsio(dialog, false);
+	expect(deviceSets()).toEqual([
+		["auto", "asio"],
+		["Headphones (B)", "shared"],
+	]);
+	expect(W.__TIDALUNAR_ASIO__).toBe(false);
+});
+
+test("turning ASIO off on a dialog left open over the system default sends the default", () => {
+	// A disconnect moves TIDAL to the system default under the open dialog (NPD01).
+	W.__TIDALUNAR_ASIO__ = true;
+	state = { player: { ...initialPlayer(), activeDeviceId: "guid-b" } };
+	setupDeviceDialogToggles(new Set());
+	const dialog = openDialog();
+	commit({ activeDeviceId: "default" });
+	flipAsio(dialog, false);
+	expect(deviceSets()).toEqual([["auto", "shared"]]);
+});
+
+test("turning ASIO off on a device only Chromium lists sends the default Rust falls back to", () => {
+	W.__TIDALUNAR_ASIO__ = true;
+	state = { player: { ...initialPlayer(), activeDeviceId: "guid-c" } };
+	setupDeviceDialogToggles(new Set());
+	flipAsio(openDialog(), false);
+	expect(deviceSets()).toEqual([["auto", "shared"]]);
+});

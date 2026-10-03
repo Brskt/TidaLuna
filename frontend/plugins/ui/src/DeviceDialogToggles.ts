@@ -115,7 +115,10 @@ function injectAsioRow(section: Element): void {
 			} catch {}
 			ipcRenderer.send("player.devices.set", "auto", "asio");
 		} else {
-			ipcRenderer.send("player.devices.set", "auto");
+			// Back to the device TIDAL holds, in its mode (the dialog opens on the committed device).
+			// A Chromium-only device, which Rust cannot open, falls back to the system default here.
+			const out = redux.committedOutput(redux.store.getState());
+			ipcRenderer.send("player.devices.set", out?.id ?? "auto", out?.mode ?? "shared");
 		}
 	});
 

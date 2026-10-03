@@ -43,11 +43,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 || super::output::resolved_device_name(&id).as_deref()
                     == self.current_output_name.as_deref())
         {
-            // Same physical device: no rebuild, even across an id-class flip. Our own
-            // ASIO-off toggle sends "auto" while TIDAL re-asserts the concrete device id;
-            // gating on `requested_is_default == output_is_default` would force a rebuild
-            // that raced effective_position() to a stale zero and restarted the track. Adopt the new
-            // id AND its follow-class, keeping a later default-device change handled.
+            // Same physical device: no rebuild, even across an id-class flip. A System
+            // Default pick sends "auto" for the device already open when that device is
+            // the OS default, and picking it back by name flips the class again; gating
+            // on `requested_is_default == output_is_default` would force a rebuild that
+            // raced effective_position() to a stale zero and restarted the track. Adopt the
+            // new id AND its follow-class, keeping a later default-device change handled.
             self.current_device_id = Some(id);
             self.output_is_default = requested_is_default;
             return;
