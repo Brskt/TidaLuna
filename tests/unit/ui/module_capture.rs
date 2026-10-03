@@ -184,6 +184,33 @@ fn classifies_the_store_chunk_for_the_saga_tap() {
 }
 
 #[test]
+fn captures_the_player_sdk_device_state() {
+    let u = |s: &str| RequestUrl::new(s.to_string());
+    assert!(matches!(
+        chunk_rewrite(&u(
+            "https://desktop.tidal.com/assets/output-devices-DLDX8cVL-CR1w6y0a.js"
+        )),
+        Some(ChunkRewrite::Capture(SDK_OUTPUT_DEVICES))
+    ));
+    assert!(
+        chunk_rewrite(&u(
+            "https://resources.tidal.com/assets/output-devices-DLDX8cVL.js"
+        ))
+        .is_none()
+    );
+    // TIDAL's chunk as captured: one class instance with private fields,
+    // exported through a specifier.
+    let src = "import{f as e,t}from\"./state-BujoNwcN-BX37F7Lj.js\";\
+               var g=new class{#e;#n=`shared`;set activeDevice(t){this.#e=t,this.#n=`shared`}\
+               get activeDevice(){return this.#e}get deviceMode(){return this.#n}};\
+               export{g as outputDevices};";
+    let out = append_capture(src, SDK_OUTPUT_DEVICES);
+    assert!(out.ends_with(
+        r#"globalThis.__LUNA_CAP("@tidal-music/player/output-devices",{outputDevices: g});"#
+    ));
+}
+
+#[test]
 fn taps_the_put_runner_and_nothing_else() {
     // redux-saga's PUT runner as captured from TIDAL's bundle, verbatim.
     let src = "function Np(e,t,n){var r=t.channel,i=t.action,a=t.resolve;cp(function(){var t;\

@@ -1,7 +1,7 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
 import { setSelfLoad, isSelfLoad } from "../audio-proxy";
 import { applyVolume } from "../volume";
-import { selectDevice } from "../output-device";
+import { deviceReleasedToShaka, selectDevice } from "../output-device";
 import type { AudioDevice } from "../types";
 
 export const createNativePlayerComponent = () => {
@@ -261,10 +261,14 @@ export const createNativePlayerComponent = () => {
             releaseDevice: () => {},
             selectDevice: (device: AudioDevice, mode: "shared" | "exclusive") => selectDevice(device.id, mode),
             selectSystemDevice: () => {
+                // Rust plays shaka's tracks too: releasing the lock keeps the device, shared.
+                // The system device itself takes no mode: TIDAL's native player asks for it with
+                // none, and its dialog offers exclusive only on a chosen device.
+                const released = deviceReleasedToShaka();
                 if ((window as any).__TIDALUNAR_ASIO__ === true) {
                     sendIpc("player.devices.set", "auto", "asio");
-                } else if ((window as any).__TIDALUNAR_EXCLUSIVE__ === true) {
-                    sendIpc("player.devices.set", "auto", "exclusive");
+                } else if (released !== null) {
+                    selectDevice(released, "shared");
                 } else {
                     sendIpc("player.devices.set", "auto");
                 }

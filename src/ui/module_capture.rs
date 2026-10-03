@@ -5,7 +5,9 @@
 //! normally: the call registers the live namespace, and plugins share the host
 //! React instance (correct hooks/context/elements). No script neutralization,
 //! no blob eval, no double-run; any parse/validation miss falls back to bundled
-//! React. Mirrors the buffering/dual-handler shape of `csp_filter`.
+//! React. Mirrors the buffering/dual-handler shape of `csp_filter`. The player
+//! SDK's `output-devices-*` chunk is captured the same way, for the host's own
+//! native-player delegate rather than for plugins.
 //!
 //! Export capture cannot reach everything. `createRoot` is assigned onto a CJS
 //! exports object inside the entry chunk, which exports nothing at all. No import
@@ -96,9 +98,15 @@ pub(crate) enum ChunkRewrite {
     TapSagaPut,
 }
 
+/// Module id the player SDK's `output-devices-*` chunk is captured under. Its one export is the
+/// `outputDevices` singleton the SDK decides device calls from; `frontend/src/output-device.ts`
+/// reads it under the same id.
+pub(crate) const SDK_OUTPUT_DEVICES: &str = "@tidal-music/player/output-devices";
+
 /// Classify a TIDAL asset URL, or `None` when the chunk is left untouched. The
 /// React-family names are tried first; `index-` is Vite's entry chunk, the only
-/// one that assigns `createRoot`, and `store-` the one that vendors redux-saga.
+/// one that assigns `createRoot`, `store-` the one that vendors redux-saga, and
+/// `output-devices-` the player SDK's device state.
 pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
     if let Some(id) = target_module_id(url) {
         return Some(ChunkRewrite::Capture(id));
@@ -106,6 +114,8 @@ pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
     let name = asset_name(url)?;
     if name.starts_with("index-") {
         Some(ChunkRewrite::Entry)
+    } else if name.starts_with("output-devices-") {
+        Some(ChunkRewrite::Capture(SDK_OUTPUT_DEVICES))
     } else if name.starts_with("store-") {
         Some(ChunkRewrite::TapSagaPut)
     } else {

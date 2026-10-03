@@ -29,6 +29,30 @@ export function selectDevice(id: string, mode: DeviceMode): void {
 	sendIpc("player.devices.set", id, effective);
 }
 
+// The module id the Rust filter captures the SDK's `output-devices-*` chunk under
+// (`module_capture.rs`): its one export is the `outputDevices` singleton the SDK decides from.
+export const SDK_OUTPUT_DEVICES = "@tidal-music/player/output-devices";
+
+let warnedUncaptured = false;
+
+// The device the SDK still holds when it asks its native player for the system device, or null
+// when that is the system device. `updateOutputDevice` asks only while the default is active;
+// `abandon()` asks on every hand-off to shaka in exclusive mode, whatever the device, to release
+// the lock. A held non-default device is therefore that release. The store cannot tell: on a
+// System Default pick it still names the old device until the SDK confirms the switch.
+export function deviceReleasedToShaka(): string | null {
+	const sdk = W.__lunaHostModules?.[SDK_OUTPUT_DEVICES]?.outputDevices;
+	if (!sdk) {
+		if (!warnedUncaptured) {
+			warnedUncaptured = true;
+			console.warn("[luna] SDK outputDevices not captured: a hand-off to shaka moves playback onto the default device");
+		}
+		return null;
+	}
+	const held: unknown = sdk.activeDevice?.nativeDeviceId;
+	return typeof held === "string" && held !== "default" ? held : null;
+}
+
 const keyOf = (out: CommittedOutput | null) => (out ? `${out.mode}:${out.id}` : null);
 
 // Sends Rust each change of the committed device made while a self-loaded track is Rust's.
