@@ -383,9 +383,10 @@ async fn a_head_that_never_arrives_stops_its_download() {
     let attempt = preload_state()
         .claim(&track, crate::player::current_gen())
         .expect("nothing is staged, so the claim is granted");
-    stage_streaming(&track, attempt, &spawn_governor())
+    let outcome = stage_streaming(&track, attempt, &spawn_governor())
         .await
         .expect("a head that does not arrive is a refusal to stage, not a failed fetch");
+    assert_eq!(outcome, StageOutcome::HeadTimedOut);
 
     let lock = PRELOAD_STATE.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
@@ -450,14 +451,14 @@ async fn a_download_that_ends_before_its_head_gives_the_slot_back_at_once() {
         .claim(&track, crate::player::current_gen())
         .expect("nothing is staged, so the claim is granted");
 
-    let staged_at = std::time::Instant::now();
-    stage_streaming(&track, attempt, &spawn_governor())
+    // The exit taken, not its duration: a clock here would also time the one-time IO of the
+    // process globals this test is often first to touch.
+    let outcome = stage_streaming(&track, attempt, &spawn_governor())
         .await
         .expect("a download that ended is a refusal to stage, not a failed fetch");
-
-    // Well under `HEAD_WAIT_TIMEOUT_MS`, and clear of the reconnect backoff below it.
-    assert!(
-        staged_at.elapsed() < std::time::Duration::from_secs(3),
+    assert_eq!(
+        outcome,
+        StageOutcome::Ended,
         "staging waited out its head deadline on a download that had already ended"
     );
 

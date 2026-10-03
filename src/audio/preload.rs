@@ -613,6 +613,24 @@ fn preload_state() -> std::sync::MutexGuard<'static, PreloadState> {
     PRELOAD_STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Where a staging attempt stopped. Each exit leaves the slot in its own state, and a test tells
+/// them apart by this value, not by how long the attempt took.
+#[derive(Debug, PartialEq, Eq)]
+enum StageOutcome {
+    /// Published: its head landed, or the whole-copy fetch brought the entire track.
+    Staged,
+    /// The whole-copy fetch passed `PRELOAD_MAX_BYTES`.
+    TooLarge,
+    /// The whole-copy fetch brought no bytes.
+    Empty,
+    /// Another holder retired this attempt first; the slot is theirs.
+    Superseded,
+    /// The download ended before its head arrived, and the slot went back at once.
+    Ended,
+    /// The head did not arrive within `HEAD_WAIT_TIMEOUT_MS`; the download was stopped.
+    HeadTimedOut,
+}
+
 /// Stage the next track as a stream: publish the buffer while it is still filling, the
 /// way the ordinary load path plays a track while downloading it.
 ///
@@ -625,7 +643,7 @@ async fn stage_streaming(
     track: &TrackInfo,
     attempt: u64,
     governor: &GovernorHandle,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<StageOutcome> {
     let resp = HTTP_CLIENT_PRELOAD.get(&track.url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("Upstream status: {}", resp.status());
@@ -648,14 +666,14 @@ async fn stage_streaming(
         )
         .await?
         else {
-            return Ok(());
+            return Ok(StageOutcome::TooLarge);
         };
         if fetched.data.is_empty() {
-            return Ok(());
+            return Ok(StageOutcome::Empty);
         }
         // Built once, here: the ciphertext lives inside the buffer's shared state from the
         // start and survives any number of cheap reader clones.
-        preload_state().publish(
+        let published = preload_state().publish(
             attempt,
             track,
             crate::player::buffer::RamBuffer::from_complete_with_ciphertext(
@@ -663,7 +681,11 @@ async fn stage_streaming(
                 fetched.ciphertext,
             ),
         );
-        return Ok(());
+        return Ok(if published {
+            StageOutcome::Staged
+        } else {
+            StageOutcome::Superseded
+        });
     }
 
     let cancel = CancellationToken::new();
@@ -679,7 +701,7 @@ async fn stage_streaming(
     // while the response was in flight, before `start_download`, so there is no download left
     // running.
     if !preload_state().arm_download(attempt, cancel.clone()) {
-        return Ok(());
+        return Ok(StageOutcome::Superseded);
     }
     start_download(resp, track.url.clone(), track.key.clone(), writer);
 
@@ -690,7 +712,7 @@ async fn stage_streaming(
     // cannot take an unfilled buffer are held back by `peek_data`'s own head check. Refused
     // means another attempt has already retired this one: nothing left to undo.
     if !preload_state().publish(attempt, track, buffer.clone()) {
-        return Ok(());
+        return Ok(StageOutcome::Superseded);
     }
 
     // Awaited HERE, in this async task, never on the player thread. A probe of a buffer
@@ -723,12 +745,12 @@ async fn stage_streaming(
                         format_bytes(head_target)
                     ),
                 }
-                return Ok(());
+                return Ok(StageOutcome::Ended);
             }
             HeadStatus::Filling => {}
         }
         if cancel.is_cancelled() {
-            return Ok(());
+            return Ok(StageOutcome::Superseded);
         }
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
@@ -751,7 +773,7 @@ async fn stage_streaming(
                 format_bytes(buffer.written()),
                 format_bytes(head_target)
             );
-            return Ok(());
+            return Ok(StageOutcome::HeadTimedOut);
         }
         let _ = tokio::time::timeout(left, buffer.notified()).await;
     }
@@ -766,7 +788,7 @@ async fn stage_streaming(
                 .as_millis() as u64
         )
     );
-    Ok(())
+    Ok(StageOutcome::Staged)
 }
 
 pub async fn start_preload(track: TrackInfo, governor: GovernorHandle) {
