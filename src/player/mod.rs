@@ -108,9 +108,9 @@ pub(crate) fn current_load() -> (u32, LoadOrigin) {
     unpack_load_state(LOAD_STATE.load(Acquire))
 }
 
-/// Mint the next event generation. The one sequence space every `current_seq`
-/// comes from: a locally incremented number cannot be told apart from one the
-/// IPC thread minted concurrently for a genuine load or stop.
+/// Mint the next event generation, for a load or a stop and nothing else. It is taken on the
+/// requester's thread, in the order the requests were made; the player thread only ever installs
+/// a seq one of them minted, so nothing it emits can outrank a command still in flight.
 pub(crate) fn next_event_seq() -> u32 {
     EVENT_SEQ.fetch_add(1, Relaxed) + 1
 }
@@ -1156,7 +1156,7 @@ impl Player {
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
-        let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
+        let event_seq = next_event_seq();
         crate::vprintln!("[LOAD #{load_gen}] start");
         print_track_banner(&format, product_id.as_deref());
 
@@ -1391,7 +1391,7 @@ impl Player {
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
-        let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
+        let event_seq = next_event_seq();
         crate::vprintln!(
             "[DASH-LOAD #{load_gen}] start - {} segments",
             segment_urls.len()
@@ -1640,7 +1640,7 @@ impl Player {
         // it doesn't truncate the retained download, and a steady-state re-assert
         // resumes via Player::load, which bypasses both gates.
         begin_load(origin);
-        let event_seq = EVENT_SEQ.fetch_add(1, Relaxed) + 1;
+        let event_seq = next_event_seq();
         self.send_cmd(PlayerCommand::Stop(event_seq))
     }
 

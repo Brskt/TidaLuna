@@ -607,9 +607,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // DIFFERENT track during the overlap keeps its bytes.
         crate::audio::preload::commit_peeked(&state.next.track);
 
-        // Drawn from the one global counter every other sequence number comes from,
-        // not incremented locally: two sequence spaces cannot be told apart.
-        self.current_seq = crate::player::next_event_seq();
         crate::vprintln!(
             "[XFADE] promoted, the incoming track is now current ({in_played} samples in)"
         );
