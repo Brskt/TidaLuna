@@ -5,6 +5,9 @@ use std::thread::ThreadId;
 
 type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static>;
 
+/// Operations the actor's channel holds before a sender waits.
+pub(crate) const QUEUE_CAPACITY: usize = 64;
+
 /// Handle to the database actor thread.
 ///
 /// All SQLite operations go through [`call`](DbActor::call), which sends a
@@ -24,7 +27,7 @@ impl DbActor {
     /// The actor thread owns `plugins.db` and `settings.db` connections.
     /// Returns once both connections are open and schema is initialized.
     pub fn open(data_dir: &Path) -> rusqlite::Result<Self> {
-        let (tx, rx) = mpsc::sync_channel::<BoxedFn>(64);
+        let (tx, rx) = mpsc::sync_channel::<BoxedFn>(QUEUE_CAPACITY);
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<ThreadId, rusqlite::Error>>(0);
         let data_dir = data_dir.to_owned();
 
@@ -95,8 +98,8 @@ impl DbActor {
     /// Submission order is execution order: one bounded channel feeds one thread. That is what a
     /// caller on the CEF UI thread needs, where [`call`](DbActor::call) freezes rendering and
     /// input for the whole round trip; a handler owing the renderer an answer invokes its IPC
-    /// callback from inside the closure. Bounded, so a caller that outruns the actor by 64
-    /// operations waits: dropping a write would lose it silently.
+    /// callback from inside the closure. Bounded, so a caller that outruns the actor by
+    /// [`QUEUE_CAPACITY`] operations waits: dropping a write would lose it silently.
     pub fn post<F>(&self, f: F)
     where
         F: FnOnce(&mut Connection, &mut Connection) + Send + 'static,
