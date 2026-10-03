@@ -94,31 +94,31 @@ const NON_BLOCKING_NAV: ReadonlySet<string> = new Set([
 	"playQueue/MOVE_PREVIOUS",
 ]);
 
+// Run one registry's interceptors over an action; true when one cancelled it.
+function runInterceptors(interceptorSet: Set<Function> | undefined, action: any): boolean {
+	if (!(interceptorSet?.size > 0)) return false;
+	const payload = action.payload !== undefined ? action.payload : action;
+	for (const interceptor of interceptorSet) {
+		try {
+			const result = interceptor(payload, action.type);
+			// A cancel (true) drops the action, except queue nav, which stays
+			// instant (the interceptor re-dispatches the quality swap afterward).
+			if (result === true && !NON_BLOCKING_NAV.has(action.type)) return true;
+			if (result instanceof Promise) result.catch((err: unknown) => console.error(`[luna:redux] Interceptor error for ${action.type}:`, err));
+		} catch (e) {
+			console.error(`[luna:redux] Interceptor error for ${action.type}:`, e);
+		}
+	}
+	return false;
+}
+
 function patchDispatch(store: any): void {
 	const originalDispatch = store.dispatch.bind(store);
 	// Unintercepted re-dispatch channel for redux.actions[type], so a plugin's
 	// cancel-then-redispatch can't re-enter and loop; mirrors upstream's unwrapped creator.
 	store.__lunaRawDispatch = originalDispatch;
 	store.dispatch = (action: any) => {
-		if (action && action.type) {
-			const interceptorSet = interceptors[action.type];
-			if (interceptorSet?.size > 0) {
-				const payload = action.payload !== undefined ? action.payload : action;
-				for (const interceptor of interceptorSet) {
-					try {
-						const result = (interceptor as Function)(payload, action.type);
-						// A cancel (true) drops the action, except queue nav, which stays
-						// instant (the interceptor re-dispatches the quality swap afterward).
-						if (result === true && !NON_BLOCKING_NAV.has(action.type)) {
-							return { type: "NOOP" };
-						}
-						if (result instanceof Promise) result.catch((err: unknown) => console.error(`[luna:redux] Interceptor error for ${action.type}:`, err));
-					} catch (e) {
-						console.error(`[luna:redux] Interceptor error for ${action.type}:`, e);
-					}
-				}
-			}
-		}
+		if (action && action.type && runInterceptors(interceptors[action.type], action)) return { type: "NOOP" };
 		return originalDispatch(action);
 	};
 }
