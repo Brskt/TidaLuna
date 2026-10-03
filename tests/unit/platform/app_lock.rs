@@ -260,9 +260,19 @@ fn listening(tag: &str) -> (SocketAddr, UnixDatagram) {
     (addr, socket)
 }
 
+/// A uid made up per run, never root and never the last one: `+ 1` is always another.
+fn made_up_uid() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let raw = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish() as u32;
+    raw.clamp(1, u32::MAX - 1)
+}
+
 #[test]
 fn a_datagram_from_our_own_user_is_ours_to_act_on() {
-    assert_eq!(classify(Some(1002), 1002), Sender::Ours);
+    let own = made_up_uid();
+    assert_eq!(classify(Some(own), own), Sender::Ours);
 }
 
 #[test]
@@ -270,8 +280,9 @@ fn a_datagram_from_another_user_is_not_ours() {
     // The reason this rule exists: an abstract socket has no permission model at
     // all, and this address is a hash of a path that is not a secret; any
     // process owned by any other local user can reach it.
-    assert_eq!(classify(Some(0), 1002), Sender::Foreign(0));
-    assert_eq!(classify(Some(1003), 1002), Sender::Foreign(1003));
+    let own = made_up_uid();
+    assert_eq!(classify(Some(0), own), Sender::Foreign(0));
+    assert_eq!(classify(Some(own + 1), own), Sender::Foreign(own + 1));
 }
 
 #[test]
@@ -279,7 +290,7 @@ fn a_datagram_the_kernel_did_not_vouch_for_is_not_ours() {
     // Not the same fact as a stranger, and just as unusable, since with no
     // credential there is nobody to attribute the datagram to. This is also what a failure
     // to enable credential passing looks like, which is why it refuses.
-    assert_eq!(classify(None, 1002), Sender::Unattributed);
+    assert_eq!(classify(None, made_up_uid()), Sender::Unattributed);
 }
 
 #[test]
