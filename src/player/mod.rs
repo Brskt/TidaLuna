@@ -239,6 +239,11 @@ impl Volume {
     pub fn as_percent(self) -> f64 {
         self.0
     }
+
+    /// The multiplier the output applies, within `0.0..=1.0`.
+    pub fn as_gain(self) -> f32 {
+        (self.0 / 100.0) as f32
+    }
 }
 
 /// The audio output backend a `player.devices.set` selects. The three modes are

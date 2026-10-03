@@ -29,8 +29,7 @@ fn a_large_finite_level_cannot_reach_infinity_at_the_cast() {
         "unsanitized, the cast saturates"
     );
 
-    let gain = (Volume::from_percent(raw).as_percent() / 100.0) as f32;
-    assert_eq!(gain, 1.0);
+    assert_eq!(Volume::from_percent(raw).as_gain(), 1.0);
 }
 
 #[test]
