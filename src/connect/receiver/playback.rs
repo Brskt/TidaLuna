@@ -222,7 +222,7 @@ impl PlaybackController {
         self.next_media = None;
         self.last_progress_ms = 0;
         self.current_duration_ms = 0;
-        self.bridge.stop();
+        self.bridge.release();
     }
 
     /// Called by QueueManager when queue_gen changes.

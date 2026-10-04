@@ -543,7 +543,7 @@ wrap_load_handler! {
                 // app root once to reproduce the known-good cold launch.
                 if prev == PageState::Login && !is_login {
                     with_state(|state| {
-                        let _ = state.player.stop(crate::player::LoadOrigin::Local);
+                        let _ = state.player.stop(crate::player::StopScope::OwnMusic);
                         state.pending_player_events.clear();
                         state.pending_time_update = None;
                     });
@@ -561,7 +561,7 @@ wrap_load_handler! {
 
                 if prev != PageState::Initial && is_login {
                     with_state(|state| {
-                        let _ = state.player.stop(crate::player::LoadOrigin::Local);
+                        let _ = state.player.stop(crate::player::StopScope::OwnMusic);
                     });
                 }
                 self.page_state.set(if is_login {

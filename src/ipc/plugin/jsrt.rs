@@ -27,8 +27,9 @@ fn handle_session_clear() {
 
     let ended = with_state(|state| {
         // Stop the native player; it runs independent of the renderer: a
-        // session clear alone won't halt audio on logout.
-        let _ = state.player.stop(crate::player::LoadOrigin::Local);
+        // session clear alone won't halt audio on logout. This account's music only: a cast
+        // runs on its controller's credentials and goes on without this login.
+        let _ = state.player.stop(crate::player::StopScope::OwnMusic);
         state.pending_player_events.clear();
         state.pending_time_update = None;
         // Re-open the plugin-load gate; the prior cold-boot refresh is moot now.

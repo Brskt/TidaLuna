@@ -191,7 +191,7 @@ fn dispatch_media_event(action: MediaAction) {
         MediaAction::Stop => {
             crate::vprintln!("[MEDIA]  Stop");
             crate::app_state::with_state(|state| {
-                let _ = state.player.stop(crate::player::LoadOrigin::Local);
+                let _ = state.player.stop(crate::player::StopScope::Playing);
             });
         }
     }

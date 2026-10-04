@@ -194,7 +194,9 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     PlayerIpc::Stop => {
                         report_undelivered(
                             "stop",
-                            state.player.stop(crate::player::LoadOrigin::Local),
+                            state.player.stop(crate::player::StopScope::As(
+                                crate::player::LoadOrigin::Local,
+                            )),
                         );
                         PlayerIpcEffects::default()
                     }

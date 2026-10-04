@@ -174,8 +174,19 @@ impl SpeakerBridge {
         with_state(|state| {
             Self::send_transport(
                 "stop",
-                state.player.stop(crate::player::LoadOrigin::Connect),
+                state.player.stop(crate::player::StopScope::As(
+                    crate::player::LoadOrigin::Connect,
+                )),
             )
+        });
+    }
+
+    /// Stop the cast, handing the player back to this host: the session that owned it is over.
+    /// A stop in Connect's name would leave the controller owning a player it no longer drives.
+    /// A session that never took the player stops nothing: the music playing is this host's own.
+    pub fn release(&self) {
+        with_state(|state| {
+            Self::send_transport("release", state.player.stop(crate::player::StopScope::Cast))
         });
     }
 

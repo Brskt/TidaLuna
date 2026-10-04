@@ -52,12 +52,46 @@ static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LoadOrigin {
     /// This host's own surfaces: the renderer's player delegate over the `player.*` IPC
-    /// channels, the completion-time advance driven on its behalf, the OS media keys, and a
-    /// plugin. All of them answer to the renderer's queue. A re-arm is neither origin: it leaves
-    /// the player with whoever owned it (`continue_load`).
+    /// channels, the completion-time advance driven on its behalf, and a plugin. All of them
+    /// answer to the renderer's queue. A re-arm and a stop from the OS controls are neither
+    /// origin: they leave the player with whoever owned it (`continue_load`, [`StopScope`]).
     Local,
     /// The TIDAL Connect receiver, driving this speaker for a controller.
     Connect,
+}
+
+/// Whose music a stop halts, and in whose name it leaves the player.
+///
+/// A stop mints a generation like a load, and with it who owns the player afterwards. Minted
+/// `Local` during a cast, it hands the player to the renderer, whose next load then replaces
+/// the controller's track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopScope {
+    /// In this origin's name, over whatever plays: the renderer's delegate and the controller's
+    /// own stop.
+    As(LoadOrigin),
+    /// Whatever plays, left with its owner: a Stop from the OS media controls or the tray, and
+    /// quitting. A transport command, as the controller's own is: it changes nobody's claim.
+    Playing,
+    /// This host's own music only: a page's session or document ending (logout, the login
+    /// transitions). A cast plays whether or not a page is loaded here, and a controller's
+    /// session runs on the controller's credentials, not this host's login.
+    OwnMusic,
+    /// A cast's music only, handing the player back to this host: the controller's session is
+    /// over. A session that never took the player leaves local music playing.
+    Cast,
+}
+
+impl StopScope {
+    /// The origin the stop mints in, given who owns the player, or `None` to leave it alone.
+    pub(crate) fn claim(self, owner: LoadOrigin) -> Option<LoadOrigin> {
+        match self {
+            StopScope::As(origin) => Some(origin),
+            StopScope::Playing => Some(owner),
+            StopScope::OwnMusic => (owner == LoadOrigin::Local).then_some(LoadOrigin::Local),
+            StopScope::Cast => (owner == LoadOrigin::Connect).then_some(LoadOrigin::Local),
+        }
+    }
 }
 
 /// What a load that carries an earlier one on did (see [`continue_load`]).
@@ -1885,9 +1919,10 @@ impl Player {
         self.send_cmd(PlayerCommand::Pause)
     }
 
-    /// `origin` for the same reason the loads carry one: this bumps the generation too, and a
-    /// preload staged after a controller stopped the speaker answers that controller's session.
-    pub fn stop(&self, origin: LoadOrigin) -> anyhow::Result<()> {
+    /// `scope` for the same reason the loads carry an origin: this bumps the generation too, and
+    /// a preload staged after a controller stopped the speaker answers that controller's session.
+    /// A scope that does not cover the music playing stops nothing.
+    pub fn stop(&self, scope: StopScope) -> anyhow::Result<()> {
         // Pause-retain, not teardown: the in-flight load task and its download are
         // kept (the download rides its own download_cancel token, not the load
         // generation); a same-track re-assert resumes in place. The mint invalidates any
@@ -1895,7 +1930,10 @@ impl Player {
         // stale-gate and the `continue_load` mint): playback cannot start after the stop;
         // it doesn't truncate the retained download, and a steady-state re-assert
         // resumes via Player::load, which bypasses both gates.
-        begin_load(origin);
+        if mint_if(|_, owner| scope.claim(owner)).is_none() {
+            crate::vprintln!("[PLAYER] {scope:?} stop: not this scope's music, left playing");
+            return Ok(());
+        }
         let event_seq = next_event_seq();
         self.send_cmd(PlayerCommand::Stop(event_seq))
     }

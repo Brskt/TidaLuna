@@ -6,7 +6,7 @@
 
 use super::fixture::silent_player;
 use super::{
-    Continuation, LoadOrigin, begin_load, continue_load, current_gen, current_load,
+    Continuation, LoadOrigin, StopScope, begin_load, continue_load, current_gen, current_load,
     pack_load_state, unpack_load_state,
 };
 
@@ -170,6 +170,32 @@ async fn a_continuation_mints_only_over_the_load_it_continues() {
     );
 }
 
+/// A session release landing between the re-arm's look at the load and its mint was overridden:
+/// the released track restarted in a finished session's name.
+#[tokio::test]
+async fn a_rearm_behind_a_session_release_does_not_claim_the_player_back() {
+    let _serialised = serialised().await;
+    let _slot = crate::state::current_track_fixture::CurrentTrackSlot::clear();
+    let player = silent_player();
+
+    let cast = begin_load(LoadOrigin::Connect);
+    // The controller's session ends before the re-arm runs.
+    player
+        .stop(StopScope::Cast)
+        .expect("the player thread takes the stop");
+    let released = current_load();
+    let outcome = rearm_of(&player, cast);
+    let after = current_load();
+
+    begin_load(LoadOrigin::Local);
+    assert_eq!(released, (cast.wrapping_add(1), LoadOrigin::Local));
+    assert_eq!(
+        after, released,
+        "the re-arm restarted a released track in a finished session's name"
+    );
+    assert_eq!(outcome, Continuation::Superseded);
+}
+
 #[tokio::test]
 async fn the_advance_does_not_start_over_a_cast_that_took_the_player_after_the_take() {
     let _serialised = serialised().await;
@@ -222,4 +248,71 @@ fn staged_next(load_gen: u32) -> crate::state::RetainedTrack {
         },
         load_gen,
     }
+}
+
+/// Every scope against every owner: what a stop may halt, and whose the player is after it.
+#[test]
+fn a_stop_halts_only_the_music_its_scope_covers() {
+    use LoadOrigin::{Connect, Local};
+    let table = [
+        (StopScope::As(Local), Local, Some(Local)),
+        (StopScope::As(Local), Connect, Some(Local)),
+        (StopScope::As(Connect), Local, Some(Connect)),
+        (StopScope::As(Connect), Connect, Some(Connect)),
+        (StopScope::Playing, Local, Some(Local)),
+        (StopScope::Playing, Connect, Some(Connect)),
+        (StopScope::OwnMusic, Local, Some(Local)),
+        (StopScope::OwnMusic, Connect, None),
+        (StopScope::Cast, Local, None),
+        (StopScope::Cast, Connect, Some(Local)),
+    ];
+    for (scope, owner, minted_as) in table {
+        assert_eq!(scope.claim(owner), minted_as, "{scope:?} over {owner:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_stop_from_the_os_controls_leaves_a_cast_its_owner() {
+    let _serialised = serialised().await;
+    let player = silent_player();
+
+    let cast = begin_load(LoadOrigin::Connect);
+    player
+        .stop(StopScope::Playing)
+        .expect("the player thread takes the stop");
+    let after = current_load();
+
+    begin_load(LoadOrigin::Local);
+    assert_eq!(after, (cast.wrapping_add(1), LoadOrigin::Connect));
+}
+
+#[tokio::test]
+async fn a_page_session_ending_leaves_a_cast_playing() {
+    let _serialised = serialised().await;
+    let player = silent_player();
+
+    let cast = begin_load(LoadOrigin::Connect);
+    player
+        .stop(StopScope::OwnMusic)
+        .expect("a declined stop is not a failure");
+    let after = current_load();
+
+    begin_load(LoadOrigin::Local);
+    assert_eq!(after, (cast, LoadOrigin::Connect), "no stop was minted");
+}
+
+/// The release of a session that never cast used to stop this host's own music anyway.
+#[tokio::test]
+async fn a_session_that_never_cast_leaves_local_music_playing() {
+    let _serialised = serialised().await;
+    let player = silent_player();
+
+    let local = begin_load(LoadOrigin::Local);
+    player
+        .stop(StopScope::Cast)
+        .expect("a declined stop is not a failure");
+    let after = current_load();
+
+    begin_load(LoadOrigin::Local);
+    assert_eq!(after, (local, LoadOrigin::Local), "no stop was minted");
 }

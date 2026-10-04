@@ -521,7 +521,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Stop audio, then tear Connect down on the short exit budget (the window is
     // already gone; a session-grade drain here would just look like a hang).
     let cm = app_state::with_state(|state| {
-        let _ = state.player.stop(crate::player::LoadOrigin::Local);
+        let _ = state.player.stop(crate::player::StopScope::Playing);
         state.connect.take()
     })
     .flatten();
