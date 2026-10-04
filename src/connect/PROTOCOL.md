@@ -125,7 +125,7 @@ need socket-id suffixes.
 | receiver routing loop | `ConnectReceiver.tasks` | 5 s |
 | mDNS browser event loop | `ConnectManager.controller_tasks` | 2 s |
 | WS server listener | `WsServer.tasks` | 2 s |
-| WS server per-client read/write/heartbeat | `ClientHandle` (raw) | abort on disconnect |
+| WS server per-client read/write/heartbeat | `ClientHandle` (raw) | abort on disconnect; `shutdown()` lets each writer flush its queue first, 2 s |
 | WS client per-connection read/write/heartbeat | `WsClient` (raw) | abort on `shutdown()` |
 | IPC fire-and-forget handlers | raw `tokio::spawn` | ephemeral |
 | controller session send (fire-and-forget) | raw `tokio::spawn` | ephemeral |

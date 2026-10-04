@@ -1,12 +1,12 @@
-//! The controller's websocket writer: it forwards its queue to the socket until the queue closes
-//! or the token is cancelled.
+//! The writer each websocket connection runs, the controller's and every receiver client's: it
+//! forwards its queue to the socket until the queue closes or the token is cancelled.
 
 use futures_util::SinkExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
-/// Generic over the sink, which keeps the socket's type out of this signature.
+/// Generic over the sink: each side's socket has its own type, and a test stands in for either.
 pub(crate) async fn run<S>(
     mut write: S,
     mut rx: mpsc::Receiver<WsMessage>,

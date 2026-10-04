@@ -14,7 +14,7 @@ use crate::bridge::PlayerBridgeEvent;
 use crate::connect::mdns::advertiser::{AdvertiseConfig, MdnsAdvertiser};
 use crate::connect::runtime::TaskGroup;
 use crate::connect::types::{ReceiverConfig, RequestResult};
-use crate::connect::ws::server::{IncomingMessage, ServerEvent, WsServer};
+use crate::connect::ws::server::{ClientEvent, WsServer};
 use cef::*;
 
 use client_comm::{ClientCommunicator, DispatchedCommand, classify_command};
@@ -41,15 +41,14 @@ impl ConnectReceiver {
         let cancel = tasks.cancel_token();
 
         // Channels
-        let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingMessage>(128);
-        let (server_event_tx, server_event_rx) = mpsc::channel::<ServerEvent>(32);
+        let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
         let (session_tx, session_rx) = mpsc::channel::<SessionNotifyEvent>(64);
         let (playback_tx, playback_rx) = mpsc::channel::<PlaybackNotifyEvent>(64);
         let (queue_tx, queue_rx) = mpsc::channel::<QueueNotifyEvent>(64);
         let (bridge_tx, bridge_rx) = mpsc::channel::<BridgeEvent>(128);
 
         // WS server
-        let server = WsServer::start(config.ws_port, incoming_tx, server_event_tx).await?;
+        let server = WsServer::start(config.ws_port, client_tx).await?;
 
         // mDNS advertiser
         let mut adv = advertiser;
@@ -72,7 +71,6 @@ impl ConnectReceiver {
         let queue_mgr = QueueManager::new(reqwest::Client::new(), queue_tx);
         let client_comm = ClientCommunicator::new(server);
 
-        // Main routing loop with all 6 channel arms.
         let routing_cancel = cancel.clone();
         tasks.spawn(
             "receiver-routing",
@@ -82,8 +80,7 @@ impl ConnectReceiver {
                 playback_ctrl,
                 queue_mgr,
                 bridge_rx,
-                incoming_rx,
-                server_event_rx,
+                client_rx,
                 session_rx,
                 playback_rx,
                 queue_rx,
@@ -142,8 +139,7 @@ async fn routing_loop(
     mut playback_ctrl: PlaybackController,
     mut queue_mgr: QueueManager,
     mut bridge_rx: mpsc::Receiver<BridgeEvent>,
-    mut incoming_rx: mpsc::Receiver<IncomingMessage>,
-    mut server_event_rx: mpsc::Receiver<ServerEvent>,
+    mut client_rx: mpsc::Receiver<ClientEvent>,
     mut session_rx: mpsc::Receiver<SessionNotifyEvent>,
     mut playback_rx: mpsc::Receiver<PlaybackNotifyEvent>,
     mut queue_rx: mpsc::Receiver<QueueNotifyEvent>,
@@ -154,9 +150,10 @@ async fn routing_loop(
     // Open WS client sockets. The empty<->non-empty edge toggles the bridge idle
     // state (bridge::set_client_connected): while empty, local player events are
     // not forwarded to the receiver at all; the connect notify/broadcast chain
-    // stays dormant. Tracking socket ids (not a bare counter) keeps the state
-    // correct if a disconnect ever arrives without a matching connect. The server
-    // keeps listening and stays discoverable regardless. Reset the flag here: a
+    // stays dormant. A socket's connect is taken before its messages and its
+    // disconnect (one channel, see `ClientEvent`). The set holds exactly the
+    // sockets whose disconnect is still to come. The server keeps listening and
+    // stays discoverable regardless. Reset the flag here: a
     // stale value from a previous receiver session can't leak in.
     let mut connected_sockets: std::collections::HashSet<u32> = std::collections::HashSet::new();
     crate::connect::bridge::set_client_connected(false);
@@ -165,51 +162,42 @@ async fn routing_loop(
         tokio::select! {
             _ = cancel.cancelled() => break,
 
-            // Arm 1: Incoming WS messages from mobile clients
-            Some(incoming) = incoming_rx.recv() => {
-                // The first message from a socket can arrive before its
-                // ClientConnected event (separate channels, no select ordering;
-                // the WS read loop is spawned before the event is sent). Arm the
-                // bridge here, keeping a controller's initial load from being dropped
-                // by forward() while the client still looks disconnected.
-                if connected_sockets.insert(incoming.socket_id) {
-                    crate::connect::bridge::set_client_connected(true);
-                }
-                let command = incoming.message.get("command")
-                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let request_id = incoming.message.get("requestId").and_then(|v| v.as_u64());
-                let sid = incoming.socket_id;
-                crate::vprintln!("[connect::receiver] <- {} (socket {}, rid={:?})", command, sid, request_id);
-                let result = match classify_command(sid, &command, incoming.message) {
-                    DispatchedCommand::Session { socket_id, command, payload } => {
-                        session_mgr.handle_command(socket_id, &command, &payload).await;
-                        None // Sessions have their own notification protocol
-                    }
-                    DispatchedCommand::Playback { command, payload } => {
-                        dispatch_playback(&mut playback_ctrl, &command, &payload).await;
-                        Some(RequestResult::Done)
-                    }
-                    DispatchedCommand::Queue { socket_id, command, payload } => {
-                        Some(queue_mgr.handle_command(socket_id, &command, &payload).await)
-                    }
-                };
-                if let Some(result) = result
-                    && let Some(rid) = request_id
-                    && let Ok(reply) = serde_json::to_value(result.answer(rid))
-                {
-                    let _ = client_comm.send_to(sid, &reply).await;
-                }
-            }
-
-            // Arm 2: Server events (client connect/disconnect)
-            Some(event) = server_event_rx.recv() => {
+            // WS client sockets (connect, messages, disconnect), each socket's in the order
+            // it lived them. No message is taken before its socket's connect or after its
+            // disconnect; none arms the bridge or a session for a socket that is gone.
+            Some(event) = client_rx.recv() => {
                 match event {
-                    ServerEvent::ClientConnected(socket_id) => {
+                    ClientEvent::Connected(socket_id) => {
                         connected_sockets.insert(socket_id);
                         crate::connect::bridge::set_client_connected(true);
                         crate::vprintln!("[connect::receiver] Client {} connected", socket_id);
                     }
-                    ServerEvent::ClientDisconnected(socket_id) => {
+                    ClientEvent::Message { socket_id: sid, message } => {
+                        let command = message.get("command")
+                            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let request_id = message.get("requestId").and_then(|v| v.as_u64());
+                        crate::vprintln!("[connect::receiver] <- {} (socket {}, rid={:?})", command, sid, request_id);
+                        let result = match classify_command(sid, &command, message) {
+                            DispatchedCommand::Session { socket_id, command, payload } => {
+                                session_mgr.handle_command(socket_id, &command, &payload).await;
+                                None // Sessions have their own notification protocol
+                            }
+                            DispatchedCommand::Playback { command, payload } => {
+                                dispatch_playback(&mut playback_ctrl, &command, &payload).await;
+                                Some(RequestResult::Done)
+                            }
+                            DispatchedCommand::Queue { socket_id, command, payload } => {
+                                Some(queue_mgr.handle_command(socket_id, &command, &payload).await)
+                            }
+                        };
+                        if let Some(result) = result
+                            && let Some(rid) = request_id
+                            && let Ok(reply) = serde_json::to_value(result.answer(rid))
+                        {
+                            let _ = client_comm.send_to(sid, &reply).await;
+                        }
+                    }
+                    ClientEvent::Disconnected(socket_id) => {
                         connected_sockets.remove(&socket_id);
                         crate::connect::bridge::set_client_connected(!connected_sockets.is_empty());
                         session_mgr.handle_disconnect(socket_id).await;
