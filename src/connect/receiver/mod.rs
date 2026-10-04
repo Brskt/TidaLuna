@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connect::mdns::advertiser::{AdvertiseConfig, MdnsAdvertiser};
 use crate::connect::runtime::TaskGroup;
-use crate::connect::types::ReceiverConfig;
+use crate::connect::types::{ReceiverConfig, RequestResult};
 use crate::connect::ws::server::{IncomingMessage, ServerEvent, WsServer};
 use cef::*;
 
@@ -179,28 +179,23 @@ async fn routing_loop(
                 let request_id = incoming.message.get("requestId").and_then(|v| v.as_u64());
                 let sid = incoming.socket_id;
                 crate::vprintln!("[connect::receiver] <- {} (socket {}, rid={:?})", command, sid, request_id);
-                let needs_ack = match classify_command(sid, &command, incoming.message) {
+                let result = match classify_command(sid, &command, incoming.message) {
                     DispatchedCommand::Session { socket_id, command, payload } => {
                         session_mgr.handle_command(socket_id, &command, &payload).await;
-                        false // Sessions have their own notification protocol
+                        None // Sessions have their own notification protocol
                     }
                     DispatchedCommand::Playback { command, payload } => {
                         dispatch_playback(&mut playback_ctrl, &command, &payload).await;
-                        true
+                        Some(RequestResult::Done)
                     }
                     DispatchedCommand::Queue { socket_id, command, payload } => {
-                        queue_mgr.handle_command(socket_id, &command, &payload).await;
-                        true
+                        Some(queue_mgr.handle_command(socket_id, &command, &payload).await)
                     }
                 };
-                if needs_ack
+                if let Some(result) = result
                     && let Some(rid) = request_id
+                    && let Ok(reply) = serde_json::to_value(result.answer(rid))
                 {
-                    let reply = serde_json::json!({
-                        "command": "notifyRequestResult",
-                        "requestId": rid,
-                        "resultCode": 0,
-                    });
                     let _ = client_comm.send_to(sid, &reply).await;
                 }
             }

@@ -200,3 +200,91 @@ fn terminated_snapshot_but_relogin_landed_adopts_fresh() {
     let outcome = reconcile_refresh(Err(CASError::Terminated), "at-ours", &current);
     assert_eq!(outcome, RefreshOutcome::UseToken("at-fresh".to_string()));
 }
+
+/// A receiver whose window is loaded, playing `items[idx]` for a controller.
+fn casting(items: Vec<QueueItem>, idx: usize) -> (QueueManager, mpsc::Receiver<QueueNotifyEvent>) {
+    let (mut queue, notifies) = playing(items, idx);
+    queue.state = QueueState::Loaded;
+    (queue, notifies)
+}
+
+#[tokio::test]
+async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
+    // TIDAL's receiver answers each of these 1002 in its IDLE state, and acts on none.
+    let commands = [
+        ("next", serde_json::json!({})),
+        ("previous", serde_json::json!({})),
+        (
+            "selectQueueItem",
+            serde_json::json!({ "mediaInfo": { "itemId": "i-2", "mediaId": "222" } }),
+        ),
+        ("setRepeatMode", serde_json::json!({ "repeatMode": "ALL" })),
+        ("setShuffle", serde_json::json!({ "shuffle": true })),
+    ];
+    for state in [QueueState::Idle, QueueState::Loading] {
+        for (command, payload) in &commands {
+            let (mut queue, mut notifies) =
+                casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+            queue.state = state;
+
+            assert_eq!(
+                queue.handle_command(1, command, payload).await,
+                RequestResult::NoQueue,
+                "{state:?}: {command}"
+            );
+            assert!(
+                notifies.try_recv().is_err(),
+                "{state:?}: a refused {command} acted anyway"
+            );
+            assert_eq!(queue.state, state, "{command}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn volume_and_mute_are_carried_out_with_no_queue_loaded() {
+    // Refused before a queue loads, volume and mute would leave the phone unable to set the
+    // level of a cast it has just started.
+    for state in [QueueState::Idle, QueueState::Loading] {
+        let (mut queue, mut notifies) = casting(Vec::new(), 0);
+        queue.state = state;
+
+        assert_eq!(
+            queue
+                .handle_command(1, "setVolume", &serde_json::json!({ "level": 0.5 }))
+                .await,
+            RequestResult::Done,
+            "{state:?}"
+        );
+        assert!(matches!(
+            notifies.try_recv(),
+            Ok(QueueNotifyEvent::SetVolume { level }) if level == 0.5
+        ));
+
+        assert_eq!(
+            queue
+                .handle_command(1, "setMute", &serde_json::json!({ "mute": true }))
+                .await,
+            RequestResult::Done,
+            "{state:?}"
+        );
+        assert!(matches!(
+            notifies.try_recv(),
+            Ok(QueueNotifyEvent::SetMute { mute: true })
+        ));
+    }
+}
+
+#[test]
+fn the_answer_is_the_message_the_controller_already_reads() {
+    for (result, code) in [(RequestResult::Done, 0), (RequestResult::NoQueue, 1002)] {
+        assert_eq!(
+            serde_json::to_value(result.answer(7)).expect("a plain wire message"),
+            serde_json::json!({
+                "command": "notifyRequestResult",
+                "requestId": 7,
+                "resultCode": code,
+            })
+        );
+    }
+}

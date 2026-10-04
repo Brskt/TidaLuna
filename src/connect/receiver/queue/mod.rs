@@ -17,7 +17,8 @@ use crate::connect::token_state::{
     AuthStore, CASError, GenerationStatus, RefreshGuard, TerminationReason, TokenState,
 };
 use crate::connect::types::{
-    MediaInfo, QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode, ServerInfo,
+    MediaInfo, QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode,
+    RequestResult, ServerInfo,
 };
 
 /// Internal state of the queue façade. Kept private to the module, and every
@@ -54,15 +55,12 @@ pub(crate) enum QueueNotifyEvent {
     },
 }
 
-// ── Deferred command ────────────────────────────────────────────────
-
-struct DeferredCommand {
-    socket_id: u32,
-    command: String,
-    payload: serde_json::Value,
+/// A step through the controller's queue: the controller's own `next` or `previous`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueStep {
+    Next,
+    Previous,
 }
-
-const MAX_DEFERRED: usize = 32;
 
 pub(crate) struct QueueManager {
     state: QueueState,
@@ -94,8 +92,6 @@ pub(crate) struct QueueManager {
 
     /// Pending request for retry after token refresh (single retry only)
     pending_retry: Option<PendingRetry>,
-    /// Commands deferred during Loading state
-    deferred_commands: Vec<DeferredCommand>,
     /// Exactly-once gate for client notifications on terminal auth failure.
     /// Reset whenever `sync_auth_from_server_info` installs a fresh generation
     /// (login / relogin): a new generation re-arms the notification.
@@ -122,7 +118,6 @@ impl QueueManager {
             current_item_id_hint: None,
             notify_tx,
             pending_retry: None,
-            deferred_commands: Vec::new(),
             terminal_notified: false,
         }
     }
@@ -180,57 +175,34 @@ impl QueueManager {
         }
     }
 
-    /// Dispatch a command from a mobile client.
+    /// Dispatch a command from a mobile client, and say what came of it.
+    ///
+    /// A command acting on the controller's queue is refused while none is loaded, as TIDAL's
+    /// receiver refuses it in its IDLE state. None waits for one: TIDAL's keeps a step back only
+    /// until a window load it started lands, and here every load ends inside the call that
+    /// started it, none being in flight between two calls. A command kept back would play after
+    /// some later load, or never.
     pub async fn handle_command(
         &mut self,
         socket_id: u32,
         command: &str,
         payload: &serde_json::Value,
-    ) {
-        // Commands that always execute regardless of state
-        match command {
-            "loadCloudQueue" | "loadMedia" | "loadMediaInfo" | "updateServerInfo"
-            | "refreshQueue" => {
-                self.dispatch(socket_id, command, payload).await;
-                return;
-            }
-            _ => {}
-        }
-
-        // Commands that require a loaded queue - defer if Loading/Idle
-        if self.state == QueueState::Loading || self.state == QueueState::Idle {
-            crate::vprintln!(
-                "[connect::queue] Deferring command '{}' (state={:?})",
-                command,
-                self.state
-            );
-            if self.deferred_commands.len() < MAX_DEFERRED {
-                self.deferred_commands.push(DeferredCommand {
-                    socket_id,
-                    command: command.to_string(),
-                    payload: payload.clone(),
-                });
-            } else {
-                crate::vprintln!(
-                    "[connect::queue] Deferred queue full - dropping '{}'",
-                    command
-                );
-            }
-            return;
-        }
-
-        self.dispatch(socket_id, command, payload).await;
-    }
-
-    async fn dispatch(&mut self, socket_id: u32, command: &str, payload: &serde_json::Value) {
+    ) -> RequestResult {
         match command {
             "loadCloudQueue" => self.proc_load_cloud_queue(payload).await,
             "loadMedia" | "loadMediaInfo" => self.proc_load_media(payload).await,
-            "selectQueueItem" => self.proc_select_queue_item(payload).await,
             "refreshQueue" => self.proc_refresh_queue(payload).await,
+            "updateServerInfo" => self.proc_update_server_info(payload).await,
+            "next" => return self.step(QueueStep::Next).await,
+            "previous" => return self.step(QueueStep::Previous).await,
+            "selectQueueItem" | "setRepeatMode" | "setShuffle" if !self.queue_loaded() => {
+                return self.refuse(command);
+            }
+            "selectQueueItem" => self.proc_select_queue_item(payload).await,
             "setRepeatMode" => self.proc_set_repeat_mode(payload).await,
             "setShuffle" => self.proc_set_shuffle(payload).await,
-            "updateServerInfo" => self.proc_update_server_info(payload).await,
+            // The speaker's, not the queue's: TIDAL's receiver answers them from another
+            // component, whatever state its queue is in.
             "setVolume" => {
                 if let Some(level) = payload.get("level").and_then(|v| v.as_f64()) {
                     let _ = self
@@ -247,8 +219,6 @@ impl QueueManager {
                         .await;
                 }
             }
-            "next" => self.skip_next().await,
-            "previous" => self.skip_previous().await,
             _ => {
                 crate::vprintln!(
                     "[connect::queue] Unknown command: {} (socket {})",
@@ -257,6 +227,35 @@ impl QueueManager {
                 );
             }
         }
+        RequestResult::Done
+    }
+
+    /// A step through the controller's queue: its own `next` or `previous`. Refused with no
+    /// queue loaded, as every command on the queue.
+    pub async fn step(&mut self, step: QueueStep) -> RequestResult {
+        if !self.queue_loaded() {
+            return self.refuse(&format!("{step:?}"));
+        }
+        match step {
+            QueueStep::Next => self.skip_next().await,
+            QueueStep::Previous => self.skip_previous().await,
+        }
+        RequestResult::Done
+    }
+
+    /// Idle is a load that failed or never began. Loading, between two calls, is one that ended
+    /// without a window: none is ever in flight there (see `handle_command`).
+    fn queue_loaded(&self) -> bool {
+        !matches!(self.state, QueueState::Idle | QueueState::Loading)
+    }
+
+    fn refuse(&self, command: &str) -> RequestResult {
+        crate::vprintln!(
+            "[connect::queue] Refusing {}: no queue loaded (state={:?})",
+            command,
+            self.state
+        );
+        RequestResult::NoQueue
     }
 
     /// PlaybackController signals track ended.
@@ -816,22 +815,6 @@ impl QueueManager {
                 let _ = self.notify_tx.send(QueueNotifyEvent::Broadcast(msg)).await;
             }
         }
-
-        // Replay deferred commands
-        self.replay_deferred().await;
-    }
-
-    fn replay_deferred(
-        &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let commands = std::mem::take(&mut self.deferred_commands);
-            for cmd in commands {
-                crate::vprintln!("[connect::queue] Replaying deferred '{}'", cmd.command);
-                self.dispatch(cmd.socket_id, &cmd.command, &cmd.payload)
-                    .await;
-            }
-        })
     }
 
     async fn bump_queue_gen(&mut self) {

@@ -21,7 +21,6 @@ impl QueueManager {
     pub(super) async fn proc_load_cloud_queue(&mut self, payload: &serde_json::Value) {
         self.state = QueueState::Loading;
         self.bump_queue_gen().await;
-        self.deferred_commands.clear();
 
         let has_content = payload.get("contentServerInfo").is_some();
         let has_queue = payload.get("queueServerInfo").is_some();

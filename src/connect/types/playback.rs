@@ -60,6 +60,8 @@ pub(crate) enum PlaybackNotification {
     },
     #[serde(rename = "notifyRequestResult")]
     NotifyRequestResult {
+        #[serde(rename = "requestId")]
+        request_id: u64,
         #[serde(rename = "resultCode")]
         result_code: u32,
         #[serde(rename = "subCode", skip_serializing_if = "Option::is_none")]
@@ -82,4 +84,29 @@ pub(crate) enum PlaybackNotification {
         #[serde(rename = "streamType", skip_serializing_if = "Option::is_none")]
         stream_type: Option<String>,
     },
+}
+
+/// What the receiver makes of a controller's request, answered to it as `notifyRequestResult`.
+/// The codes are the ones TIDAL's own receiver sends (TIDAL 2.43.2's `tidal_connect_application`).
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestResult {
+    /// Not refused, whether or not the command changed anything.
+    Done,
+    /// Refused, and nothing done: the command acts on the controller's queue and none is
+    /// loaded. TIDAL's receiver answers this in its IDLE state.
+    NoQueue,
+}
+
+impl RequestResult {
+    pub(crate) fn answer(self, request_id: u64) -> PlaybackNotification {
+        PlaybackNotification::NotifyRequestResult {
+            request_id,
+            result_code: match self {
+                Self::Done => 0,
+                Self::NoQueue => 1002,
+            },
+            sub_code: None,
+        }
+    }
 }
