@@ -126,17 +126,11 @@ pub(crate) fn forward(event: &PlayerEvent) {
             // controller as the `TimeUpdate` that follows it.
             PlaybackState::Seeking => None,
         },
-        // The phone has to learn the track changed. Swallowed by the wildcard below, it
-        // keeps naming the outgoing one. But it is NOT a completion: a completion means the
-        // player stopped and the controller owes it the next track, where here the next
-        // track is already playing. Sent as one, the controller prepared it again and the
-        // listener heard it restart from zero.
-        PlayerEvent::CrossfadePromoted(_seq, track_id) => {
-            Some(BridgeEvent::CrossfadeTransitioned {
-                track_id: track_id.clone(),
-                engine_gen,
-            })
-        }
+        // A promotion only ever moves this host's own queue: a fade arms on the renderer's staged
+        // next, and only while the current load is local (`preload::next_is_current`). The
+        // controller's queue never moves; adopting the step would pull the receiver's index off
+        // the track the cast plays.
+        PlayerEvent::CrossfadePromoted(..) => None,
         PlayerEvent::TimeUpdate(seconds, _seq) => {
             let ms = (*seconds * 1000.0) as u64;
             Some(BridgeEvent::ProgressUpdated {
