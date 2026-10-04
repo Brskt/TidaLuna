@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::bridge::PlayerBridgeEvent;
 use crate::connect::mdns::advertiser::{AdvertiseConfig, MdnsAdvertiser};
 use crate::connect::runtime::TaskGroup;
 use crate::connect::types::{ReceiverConfig, RequestResult};
@@ -18,7 +19,7 @@ use cef::*;
 
 use client_comm::{ClientCommunicator, DispatchedCommand, classify_command};
 use playback::{PlaybackController, PlaybackInternalEvent, PlaybackNotifyEvent};
-use queue::{QueueManager, QueueNotifyEvent};
+use queue::{CastRoute, QueueManager, QueueNotifyEvent, QueueStep};
 use session::{ReceiverSession, SessionInternalEvent, SessionNotifyEvent};
 use speaker_bridge::{BridgeEvent, SpeakerBridge};
 
@@ -350,10 +351,59 @@ async fn routing_loop(
                         crate::vprintln!("[connect::bridge] <- DurationMeasured {}ms (gen={})", duration_ms, engine_gen);
                         playback_ctrl.on_duration_measured(duration_ms, track_id.as_deref(), engine_gen).await;
                     }
+                    BridgeEvent::LocalLoad(load) => {
+                        // Answered before anything is selected or stepped. The receiver's load of
+                        // the new track mints in a later turn of this loop, so the answer reaches
+                        // the renderer ahead of every event that load sends.
+                        let route = queue_mgr.cast_route(&load.product_id, load.act, crate::player::current_load().1);
+                        crate::ui::flush::post_player_event(route.answer(load.load_id));
+                        match route {
+                            CastRoute::Select { index } => {
+                                crate::vprintln!("[connect::receiver] Local pick {} plays from the queue (index {})", load.product_id, index);
+                                queue_mgr.select_pick(index).await;
+                            }
+                            CastRoute::Playing => {
+                                crate::vprintln!("[connect::receiver] Local load {} is the track the cast plays", load.product_id);
+                            }
+                            // The answer keeps the SDK's play of the reloaded entry off the cast, and
+                            // it is the page's whole reply: a step refused with no queue loaded has
+                            // no one left to tell, beyond the log `step` writes.
+                            CastRoute::Next => {
+                                crate::vprintln!("[connect::receiver] Local next");
+                                let _ = queue_mgr.step(QueueStep::Next).await;
+                            }
+                            CastRoute::Previous => {
+                                crate::vprintln!("[connect::receiver] Local previous");
+                                let _ = queue_mgr.step(QueueStep::Previous).await;
+                            }
+                            CastRoute::RefusePick => {
+                                crate::vprintln!("[connect::receiver] Local pick {} is not the cast's to take", load.product_id);
+                                // Read from what plays, not from the window: none may be loaded.
+                                if let Some(media) = playback_ctrl.current_media() {
+                                    crate::connect::ipc::post_emit_with_data("connect.receiver.media_changed", media);
+                                }
+                            }
+                            CastRoute::Refuse => {
+                                crate::vprintln!("[connect::receiver] Local load {} refused (act: {:?})", load.product_id, load.act);
+                            }
+                        }
+                    }
                 }
             }
 
             else => break,
+        }
+    }
+
+    // A load taken into the channel is answered even when the loop ends before serving it: the
+    // SDK waits on it with no timeout. Closed first, so a later one is refused by its sender
+    // instead of landing behind the drain.
+    bridge_rx.close();
+    while let Ok(event) = bridge_rx.try_recv() {
+        if let BridgeEvent::LocalLoad(load) = event {
+            crate::ui::flush::post_player_event(PlayerBridgeEvent::cast_owns_player(Some(
+                load.load_id,
+            )));
         }
     }
 

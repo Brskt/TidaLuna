@@ -20,6 +20,8 @@ use crate::connect::types::{
     MediaInfo, QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode,
     RequestResult, ServerInfo,
 };
+use crate::player::LoadOrigin;
+use crate::player::ipc::ListenerAct;
 
 /// Internal state of the queue façade. Kept private to the module, and every
 /// transition goes through a `QueueManager` method: external callers can
@@ -55,7 +57,47 @@ pub(crate) enum QueueNotifyEvent {
     },
 }
 
-/// A step through the controller's queue: the controller's own `next` or `previous`.
+/// What the receiver makes of a load the SDK on this host asked for during a cast (see
+/// `QueueManager::cast_route`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CastRoute {
+    /// A listener's pick: play the window's item at `index`, as the controller's own
+    /// `selectQueueItem` would.
+    Select { index: usize },
+    /// The track the cast already plays: the load settles as one that ran, and nothing changes.
+    Playing,
+    /// A listener's Next: the cast steps as the controller's own `next` makes it. The load is not
+    /// run, since it only reloads the entry the page's queue holds.
+    Next,
+    /// A listener's Previous, as the controller's own `previous`.
+    Previous,
+    /// A listener's pick the cast does not take: the window does not hold it, or no window is
+    /// loaded. TIDAL has already made it the page's queue, which a Play after the cast would
+    /// resume: the track the cast plays is announced to the page again, and its queue follows it
+    /// back.
+    RefusePick,
+    /// None of these: an automatic load of another track or with no window loaded, or any load
+    /// once the cast is over.
+    Refuse,
+}
+
+impl CastRoute {
+    /// The renderer's answer to load `load_id`, owed exactly once whatever the route: the SDK
+    /// waits on it with no timeout. Settled as run when the cast plays that track, refused
+    /// otherwise (a step only reloads the page's entry, and is not run either).
+    pub(crate) fn answer(self, load_id: u64) -> crate::bridge::PlayerBridgeEvent {
+        use crate::bridge::PlayerBridgeEvent;
+        match self {
+            Self::Select { .. } | Self::Playing => PlayerBridgeEvent::cast_routed(load_id),
+            Self::Next | Self::Previous | Self::RefusePick | Self::Refuse => {
+                PlayerBridgeEvent::cast_owns_player(Some(load_id))
+            }
+        }
+    }
+}
+
+/// A step through the controller's queue, whoever takes it: the controller's own `next` or
+/// `previous`, or a listener's on this host during a cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueueStep {
     Next,
@@ -230,8 +272,8 @@ impl QueueManager {
         RequestResult::Done
     }
 
-    /// A step through the controller's queue: its own `next` or `previous`. Refused with no
-    /// queue loaded, as every command on the queue.
+    /// A step through the controller's queue, whoever asks: its own `next` or `previous`, or a
+    /// listener's during a cast. Refused with no queue loaded, as every command on the queue.
     pub async fn step(&mut self, step: QueueStep) -> RequestResult {
         if !self.queue_loaded() {
             return self.refuse(&format!("{step:?}"));
@@ -283,6 +325,72 @@ impl QueueManager {
         if let Some(idx) = self.current_index {
             self.advance_to_next(idx).await;
         }
+    }
+
+    /// What a load the SDK on this host asked for becomes while the controller owns the player.
+    ///
+    /// A listener's act plays as the controller's own would: a pick selects its item (the one track
+    /// change a receiver may make), Next/Previous step the queue. A pick outside the window is
+    /// refused, a receiver never adding to the controller's queue; `CastRoute` names the rest.
+    ///
+    /// `owner` is read in the routing loop, the only place a cast is released: selecting for a
+    /// session already gone would claim the player back.
+    ///
+    /// A pick searches from the current item and wraps: of two copies, the one the controller
+    /// reaches first wins, and picking the playing track restarts it, as TIDAL does.
+    pub fn cast_route(
+        &self,
+        media_id: &str,
+        act: Option<ListenerAct>,
+        owner: LoadOrigin,
+    ) -> CastRoute {
+        if owner != LoadOrigin::Connect {
+            return CastRoute::Refuse;
+        }
+        match act {
+            // A step reads no window here: it goes through the gate the controller's own takes
+            // (`step`), which refuses it with none loaded.
+            Some(ListenerAct::Next) => CastRoute::Next,
+            Some(ListenerAct::Previous) => CastRoute::Previous,
+            // Refused as a pick with no window loaded too: the page made it its queue whatever
+            // state the window is in.
+            Some(ListenerAct::Pick) if self.state != QueueState::Loaded => CastRoute::RefusePick,
+            None if self.state != QueueState::Loaded => CastRoute::Refuse,
+            None => {
+                let playing = self
+                    .playing_item()
+                    .is_some_and(|item| item.media_id == media_id);
+                if playing {
+                    CastRoute::Playing
+                } else {
+                    CastRoute::Refuse
+                }
+            }
+            Some(ListenerAct::Pick) => {
+                let len = self.queue_items.len();
+                let start = self.current_index.unwrap_or(0);
+                (0..len)
+                    .map(|step| (start + step) % len)
+                    .find(|&i| self.queue_items[i].media_id == media_id)
+                    .map_or(CastRoute::RefusePick, |index| CastRoute::Select { index })
+            }
+        }
+    }
+
+    fn playing_item(&self) -> Option<&QueueItem> {
+        self.current_index.and_then(|i| self.queue_items.get(i))
+    }
+
+    /// Play the window's item at `index` for a listener's pick, by the steps `selectQueueItem`
+    /// takes for the controller's own. The controller hears of it as it hears of its own:
+    /// through the `notifyMediaChanged` the load sends.
+    pub async fn select_pick(&mut self, index: usize) {
+        self.state = QueueState::Moving;
+        self.bump_queue_gen().await;
+        self.current_index = Some(index);
+        self.send_set_media(index).await;
+        self.state = QueueState::Loaded;
+        self.reload_queue_window_around_current().await;
     }
 
     /// The speaker advanced on its own: the index has to follow without a load.

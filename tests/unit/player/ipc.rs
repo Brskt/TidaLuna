@@ -1,6 +1,6 @@
 //! Tests for `src/player/ipc.rs`, attached to it by `#[path]`.
 
-use super::{OutputMode, PlayerIpc, parse_player_ipc};
+use super::{ListenerAct, OutputMode, PlayerIpc, parse_player_ipc};
 use serde_json::json;
 
 #[test]
@@ -20,6 +20,8 @@ fn parses_load_tuple_shape() {
             product_id: None,
             restart: false,
             want_play: false,
+            load_id: None,
+            act: None,
         }
     );
 }
@@ -41,6 +43,8 @@ fn parses_load_restart_flag() {
             product_id: None,
             restart: true,
             want_play: false,
+            load_id: None,
+            act: None,
         }
     );
 }
@@ -68,6 +72,8 @@ fn parses_load_want_play_flag() {
             product_id: None,
             restart: false,
             want_play: true,
+            load_id: None,
+            act: None,
         }
     );
 }
@@ -251,6 +257,8 @@ fn a_load_carries_the_track_it_is_for() {
             product_id: Some("12345".to_string()),
             restart: false,
             want_play: false,
+            load_id: None,
+            act: None,
         }
     );
 }
@@ -339,4 +347,63 @@ fn a_numeric_track_id_reads_as_the_same_track_as_its_string() {
         ),
         "a numeric id was read as no id at all"
     );
+}
+
+#[test]
+fn a_delegate_load_carries_its_number_and_whether_a_listener_picked_it() {
+    let parsed = parse_player_ipc(
+        "player.load",
+        &[
+            json!("https://a"),
+            json!("flac"),
+            json!("k"),
+            json!(true),
+            json!(true),
+            json!("12345"),
+            json!(9),
+            json!("pick"),
+        ],
+        None,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            parsed,
+            PlayerIpc::Load {
+                load_id: Some(9),
+                act: Some(ListenerAct::Pick),
+                ..
+            }
+        ),
+        "{parsed:?}"
+    );
+}
+
+#[test]
+fn a_delegate_load_names_the_listeners_act_it_answers() {
+    let act_of = |wire: serde_json::Value| match parse_player_ipc(
+        "player.load",
+        &[
+            json!("https://a"),
+            json!("flac"),
+            json!("k"),
+            json!(false),
+            json!(false),
+            json!("12345"),
+            json!(9),
+            wire,
+        ],
+        None,
+    )
+    .unwrap()
+    {
+        PlayerIpc::Load { act, .. } => act,
+        other => panic!("{other:?}"),
+    };
+
+    assert_eq!(act_of(json!("next")), Some(ListenerAct::Next));
+    assert_eq!(act_of(json!("previous")), Some(ListenerAct::Previous));
+    // An automatic load, and anything the renderer does not name, is no act.
+    assert_eq!(act_of(json!("")), None);
+    assert_eq!(act_of(json!(true)), None);
 }

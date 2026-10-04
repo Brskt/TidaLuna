@@ -9,7 +9,9 @@ import { createUserSession } from "./controllers/session";
 import { createUserSettings } from "./controllers/settings";
 import { createWindowController } from "./controllers/window";
 import { createTidalConnectController, createRemoteDesktopController, setupConnectEventListeners } from "./connect";
-import { createNativePlayerComponent } from "./controllers/player";
+import { createNativePlayerComponent, intentOfTrackList, moveOf, pickOf } from "./controllers/player";
+import type { LoadRefusal, TrackListPayload } from "./controllers/player";
+import { followCastQueue } from "./connect/middleware";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
 import { refusePlayback } from "./refuse-playback";
@@ -174,7 +176,10 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             updatePlaybackState(playing);
             if (event.v === "completed") {
                 proxyReset();
-                if (isSelfLoad()) {
+                // `cast`: a TIDAL Connect controller owns the player, so the track that ended
+                // is one this queue never chose, and the controller has its next already.
+                // `_selfLoad` cannot say so: it names the last load THIS page issued.
+                if (isSelfLoad() && !event.cast) {
                     // Self-loaded tracks bypass NativePlayer - manually advance queue.
                     const { store } = require("../plugins/lib/src/redux/store");
                     const { playQueue: q } = store.getState();
@@ -215,6 +220,40 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 "no bytes for 30s",
                 "TidaLunar cannot play music without an internet connection. Please try again when you're connected.",
             );
+        } else if (type === "mediacastowned") {
+            // Rust refused a load: a TIDAL Connect controller owns the player. `load` names the
+            // SDK load refused (none for a self-load, which the SDK does not wait on). The SDK
+            // waits with no timeout, and 0 is its unknown-duration sentinel. No seq: the refusal
+            // minted no generation, and the cast's events must keep outranking it.
+            const sdkLoad = event.v?.load !== undefined;
+            // Before the duration that settles the load: the SDK's autoplay runs off that await,
+            // and its play is for the refused track, which would resume the cast's instead.
+            const refusal: LoadRefusal | undefined = sdkLoad ? bridge.refuseLoad?.(event.v.load) : undefined;
+            if (!sdkLoad || refusal?.kind === "pick") {
+                refusePlayback(
+                    "tidalunar_cast_owns_player",
+                    "a TIDAL Connect controller owns the player",
+                    "App is being controlled via another client. Disconnect to control the app again.",
+                );
+                if (sdkLoad) bridge.trigger("mediaduration", 0);
+            } else if (refusal?.kind === "automatic") {
+                // Nobody asked, nobody is told; the transport stays the cast's.
+                bridge.settleLoad?.(0);
+                try {
+                    const { store } = require("../plugins/lib/src/redux/store");
+                    followCastQueue(store, refusal.productId);
+                } catch (_) {}
+            } else if (refusal?.kind === "moved") {
+                // The cast answers the listener's step as the controller's own: nothing to tell,
+                // and the SDK's play of its reload stays off the cast.
+                bridge.settleLoad?.(refusal.duration);
+            }
+        } else if (type === "mediacastrouted") {
+            // A load the TIDAL Connect controller's queue plays: a listener's pick, as the
+            // controller's own pick would be, or the track the cast already plays. Settled as one
+            // that ran, with the catalog's length (`routeLoad`; `moved` in LoadRefusal says why).
+            const duration = bridge.routeLoad?.(event.v?.load);
+            if (typeof duration === "number") bridge.settleLoad?.(duration);
         } else if (mapped) {
             bridge.trigger(mapped, event.v, event.seq);
         } else if (PASSTHROUGH_EVENTS.has(type)) {
@@ -314,10 +353,10 @@ const init = async () => {
 
     // SDK middleware doesn't reach Rust player for DASH/AAC - intercept Redux actions.
     {
-        const { interceptors } = require("../render/src/exposeTidalInternals.patchAction");
-        const add = (action: string, cb: Function) => {
-            interceptors[action] ??= new Set();
-            interceptors[action].add(cb);
+        const { interceptors, putInterceptors } = require("../render/src/exposeTidalInternals.patchAction");
+        const add = (action: string, cb: Function, registry: Record<string, Set<Function>> = interceptors) => {
+            registry[action] ??= new Set();
+            registry[action].add(cb);
         };
         add("playbackControls/PLAY", () => {
             // Self-load (DASH/AAC) keeps its direct path; SDK tracks go through the
@@ -333,15 +372,25 @@ const init = async () => {
         // getPlaybackInfo gap) while the OLD track is still committed; resuming here audibly
         // replays the OLD track (the "bleed"). Request auto-play on the SELECTED track's
         // load instead of a separate play: fixes the bleed and the startup first-play.
-        add("playQueue/ADD_TRACK_LIST_TO_PLAY_QUEUE", (p: { position?: number | string }) => {
-            // Only "now" carries play intent; "next"/"last"/index are queue edits with no
-            // load following, and arming on them would force-resume a paused track later.
-            // Unknown payload shapes keep the arm (HW-verified row-click sends {position:"now"}).
-            const position = p?.position;
-            if (position === undefined || position === "now") {
-                (window.NativePlayerComponent as any)?.requestPlayOnLoad?.();
-            }
+        add("playQueue/ADD_TRACK_LIST_TO_PLAY_QUEUE", (p: TrackListPayload) => {
+            const bridge = window.NativePlayerComponent as any;
+            if (intentOfTrackList(p)) bridge?.requestPlayOnLoad?.();
+            const pick = pickOf(p);
+            if (pick) bridge?.actOnQueue?.(pick);
         });
+        // A move reaches either rail: TIDAL's saga puts it for the player's Next and Previous, and
+        // this page's own advance dispatches it. Read before the queue moves.
+        for (const [action, act] of [["playQueue/MOVE_NEXT", "next"], ["playQueue/MOVE_PREVIOUS", "previous"]] as const) {
+            const onMove = () => {
+                try {
+                    const { store } = require("../plugins/lib/src/redux/store");
+                    const move = moveOf(act, store.getState()?.playQueue);
+                    if (move) (window.NativePlayerComponent as any)?.actOnQueue?.(move);
+                } catch (_) {}
+            };
+            add(action, onMove);
+            add(action, onMove, putInterceptors);
+        }
         add("playbackControls/SEEK", (time: number) => {
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;

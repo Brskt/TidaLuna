@@ -59,6 +59,19 @@ pub(crate) fn set_client_connected(connected: bool) {
     BRIDGE_HAS_CLIENT.store(connected, Ordering::Release);
 }
 
+/// Hand a load of the SDK's to the receiver's routing loop, the one owner of the controller's
+/// queue. `false` when no loop can take it: none runs, it has shut down, or it is too far
+/// behind. The caller then answers the load itself, since the loop never will.
+///
+/// Not gated on a connected client as `forward` is: a load reaches here only while a controller
+/// owns the player, and the loop answers it even when the socket has gone.
+pub(crate) fn route_load(load: crate::player::ipc::CastLoad) -> bool {
+    let guard = BRIDGE_TX.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .is_some_and(|tx| tx.try_send(BridgeEvent::LocalLoad(load)).is_ok())
+}
+
 /// Forward a player event to the receiver, if active. Called from
 /// `ui::flush`'s per-event hook on the player event loop.
 pub(crate) fn forward(event: &PlayerEvent) {

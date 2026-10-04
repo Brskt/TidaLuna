@@ -460,6 +460,12 @@ impl PlaybackController {
         self.notify_player_status().await;
     }
 
+    /// The track the cast plays, whatever the queue's window says. `None` before anything was
+    /// set, and once the controller stopped or the session ended.
+    pub fn current_media(&self) -> Option<&MediaInfo> {
+        self.current_media.as_ref()
+    }
+
     async fn notify_player_status(&self) {
         let player_state = match (self.state, self.play_state) {
             (PbState::Started, PbPlayState::Playing) => PlayerState::Playing,

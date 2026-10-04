@@ -67,8 +67,8 @@ pub(crate) enum LoadOrigin {
 /// the controller's track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StopScope {
-    /// In this origin's name, over whatever plays: the renderer's delegate and the controller's
-    /// own stop.
+    /// In this origin's name, over whatever plays: the renderer's delegate (which the cast gate
+    /// lets through only while this host owns the player) and the controller's own stop.
     As(LoadOrigin),
     /// Whatever plays, left with its owner: a Stop from the OS media controls or the tray, and
     /// quitting. A transport command, as the controller's own is: it changes nobody's claim.

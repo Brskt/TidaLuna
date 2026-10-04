@@ -187,6 +187,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                 state.pending_player_events.push(PlayerBridgeEvent::state(
                     PlaybackState::Completed.as_str(),
                     seq,
+                    crate::player::current_load().1,
                 ));
             }
             PlayerEvent::StateChange(st, seq) => {
@@ -232,9 +233,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     ));
                 }
 
-                state
-                    .pending_player_events
-                    .push(PlayerBridgeEvent::state(st.as_str(), seq));
+                state.pending_player_events.push(PlayerBridgeEvent::state(
+                    st.as_str(),
+                    seq,
+                    crate::player::current_load().1,
+                ));
             }
             PlayerEvent::Duration(duration, seq, track_id) => {
                 // Taken by value to keep the decision below out of the lock, and to record the
@@ -407,6 +410,19 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
 
     if let Some(effects) = effects {
         run_post_lock_effects(effects);
+    }
+}
+
+/// Queue an event for the renderer from off the UI thread, behind every event already queued,
+/// and have the UI thread flush it. The order is the one events are pushed in, under the
+/// `AppState` lock: nothing pushed after this can reach the renderer ahead of it.
+pub(crate) fn post_player_event(event: PlayerBridgeEvent) {
+    let schedule = with_state(|state| {
+        state.pending_player_events.push(event);
+        !std::mem::replace(&mut state.flush_scheduled, true)
+    });
+    if schedule == Some(true) {
+        schedule_flush_task();
     }
 }
 

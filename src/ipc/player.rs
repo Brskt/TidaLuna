@@ -1,7 +1,7 @@
 use crate::app_state::{IpcMessage, with_state};
 use crate::ipc::plugin::handle_jsrt_fire_and_forget;
 use crate::ipc::window::handle_window_ipc;
-use crate::player::ipc::{PlayerIpc, parse_player_ipc};
+use crate::player::ipc::{CastGate, CastLoad, PlayerIpc, parse_player_ipc};
 use crate::state::TrackInfo;
 use crate::ui::flush::{FlushBatch, run_flush_batch, take_flush_batch};
 
@@ -80,158 +80,205 @@ pub(crate) fn same_track(measured: Option<&str>, announced: Option<&str>) -> boo
     matches!((measured, announced), (Some(a), Some(b)) if a == b)
 }
 
+/// A load the gate refused, answered to the renderer alone. Through `handle_player_event` it
+/// would also reach the Connect receiver, which would read it as its own track failing.
+fn refuse_takeover(
+    state: &mut crate::app_state::AppState,
+    channel: &str,
+    load_id: Option<u64>,
+) -> PlayerIpcEffects {
+    crate::vprintln!("[IPC]    {channel} refused: a TIDAL Connect controller owns the player");
+    state
+        .pending_player_events
+        .push(crate::bridge::PlayerBridgeEvent::cast_owns_player(load_id));
+    PlayerIpcEffects {
+        batch: Some(take_flush_batch(state)),
+        ..Default::default()
+    }
+}
+
+/// A load of the SDK's during a cast, handed to the receiver's routing loop, the one owner of
+/// the controller's queue. The loop answers it once it has looked the track up in that queue;
+/// refused here when no loop can take it.
+fn route_to_cast(
+    state: &mut crate::app_state::AppState,
+    channel: &str,
+    load: CastLoad,
+) -> PlayerIpcEffects {
+    let load_id = load.load_id;
+    if crate::connect::bridge::route_load(load) {
+        crate::vprintln!("[IPC]    {channel} handed to the TIDAL Connect receiver");
+        PlayerIpcEffects::default()
+    } else {
+        refuse_takeover(state, channel, Some(load_id))
+    }
+}
+
 fn handle_player_ipc(msg: &IpcMessage) {
-    let effects =
-        with_state(
-            |state| match parse_player_ipc(&msg.channel, &msg.args, msg.id.as_deref()) {
-                Ok(player_ipc) => match player_ipc {
-                    PlayerIpc::Load {
-                        url,
-                        format,
-                        key,
-                        product_id,
-                        restart,
-                        want_play,
-                    } => {
-                        if let Err(e) = state
-                            .player
-                            .load(url, format, key, product_id, restart, want_play)
-                        {
-                            crate::vprintln!("[PLAYER] Failed to load track: {}", e);
-                        }
-                        PlayerIpcEffects::default()
+    let effects = with_state(|state| {
+        // Read under the `AppState` lock, which the receiver also holds for every load and stop
+        // it issues: no cast can begin between this read and the command it lets through.
+        let owner = crate::player::current_load().1;
+        match parse_player_ipc(&msg.channel, &msg.args, msg.id.as_deref())
+            .map(|player_ipc| (player_ipc.cast_gate(owner), player_ipc))
+        {
+            Ok((CastGate::Route(load), _)) => route_to_cast(state, &msg.channel, load),
+            Ok((CastGate::Refuse, player_ipc)) => {
+                refuse_takeover(state, &msg.channel, player_ipc.load_id())
+            }
+            Ok((CastGate::Drop, _)) => {
+                crate::vprintln!(
+                    "[IPC]    {} dropped: a TIDAL Connect controller owns the player",
+                    msg.channel
+                );
+                PlayerIpcEffects::default()
+            }
+            Ok((CastGate::Pass, player_ipc)) => match player_ipc {
+                PlayerIpc::Load {
+                    url,
+                    format,
+                    key,
+                    product_id,
+                    restart,
+                    want_play,
+                    ..
+                } => {
+                    if let Err(e) = state
+                        .player
+                        .load(url, format, key, product_id, restart, want_play)
+                    {
+                        crate::vprintln!("[PLAYER] Failed to load track: {}", e);
                     }
-                    PlayerIpc::LoadDash {
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::LoadDash {
+                    init_url,
+                    segment_urls,
+                    format,
+                    product_id,
+                } => {
+                    if let Err(e) = state.player.load_dash(
                         init_url,
                         segment_urls,
                         format,
                         product_id,
-                    } => {
-                        if let Err(e) = state.player.load_dash(
-                            init_url,
-                            segment_urls,
-                            format,
-                            product_id,
-                            crate::player::LoadOrigin::Local,
-                        ) {
-                            crate::vprintln!("[PLAYER] Failed to load DASH track: {}", e);
-                        }
-                        PlayerIpcEffects::default()
+                        crate::player::LoadOrigin::Local,
+                    ) {
+                        crate::vprintln!("[PLAYER] Failed to load DASH track: {}", e);
                     }
-                    PlayerIpc::Recover {
-                        url,
-                        format,
-                        key,
-                        target_time,
-                    } => {
-                        if let Err(e) = state.player.recover(url, format, key, target_time) {
-                            crate::vprintln!("[PLAYER] Failed to recover track: {}", e);
-                        }
-                        PlayerIpcEffects::default()
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::Recover {
+                    url,
+                    format,
+                    key,
+                    target_time,
+                } => {
+                    if let Err(e) = state.player.recover(url, format, key, target_time) {
+                        crate::vprintln!("[PLAYER] Failed to recover track: {}", e);
                     }
-                    PlayerIpc::Preload {
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::Preload {
+                    url,
+                    format,
+                    key,
+                    product_id,
+                } => {
+                    // The renderer names the track off the play queue; the SDK's own
+                    // delegate carries only the url triple. A tag that names the wrong
+                    // track fails closed: `same_track` refuses it downstream and nothing
+                    // is published, which is exactly what an absent tag already does.
+                    let track = TrackInfo {
                         url,
                         format,
                         key,
                         product_id,
-                    } => {
-                        // The renderer names the track off the play queue; the SDK's own
-                        // delegate carries only the url triple. A tag that names the wrong
-                        // track fails closed: `same_track` refuses it downstream and nothing
-                        // is published, which is exactly what an absent tag already does.
-                        let track = TrackInfo {
-                            url,
-                            format,
-                            key,
-                            product_id,
-                        };
-                        let governor = state.player.governor().clone();
-                        crate::state::rt_handle().spawn(async move {
-                            crate::audio::preload::start_preload(track, governor).await;
-                        });
-                        PlayerIpcEffects::default()
-                    }
-                    PlayerIpc::PreloadCancel => {
-                        crate::state::rt_handle().spawn(async {
-                            crate::audio::preload::cancel_preload().await;
-                        });
-                        PlayerIpcEffects::default()
-                    }
-                    PlayerIpc::Metadata { payload } => {
-                        let meta = crate::util::metadata::parse_track_metadata(&payload);
-                        let (title, artist) = (meta.title.clone(), meta.artist.clone());
-                        let mc = state.media_controls.take();
-                        // The measurement's own tag vouches for the length; the shared
-                        // metadata slot cannot, being rewritten by a track's first frame.
-                        // Nothing is cleared here either: a measurement can land before its
-                        // own metadata, and no `Duration` event is owed to replace it.
-                        let length = state
-                            .media_duration
-                            .as_ref()
-                            .filter(|d| same_track(d.track_id.as_deref(), meta.id.as_deref()))
-                            .map(|d| d.secs);
-                        match crate::state::CURRENT_METADATA.lock() {
-                            Ok(mut lock) => *lock = Some(meta),
-                            Err(e) => {
-                                crate::vprintln!("[PLAYER] CURRENT_METADATA lock poisoned: {e}")
-                            }
-                        }
-                        let mc_metadata = Some((title, artist, length));
-                        PlayerIpcEffects {
-                            mc,
-                            mc_metadata,
-                            ..Default::default()
+                    };
+                    let governor = state.player.governor().clone();
+                    crate::state::rt_handle().spawn(async move {
+                        crate::audio::preload::start_preload(track, governor).await;
+                    });
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::PreloadCancel => {
+                    crate::state::rt_handle().spawn(async {
+                        crate::audio::preload::cancel_preload().await;
+                    });
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::Metadata { payload } => {
+                    let meta = crate::util::metadata::parse_track_metadata(&payload);
+                    let (title, artist) = (meta.title.clone(), meta.artist.clone());
+                    let mc = state.media_controls.take();
+                    // The measurement's own tag vouches for the length; the shared
+                    // metadata slot cannot, being rewritten by a track's first frame.
+                    // Nothing is cleared here either: a measurement can land before its
+                    // own metadata, and no `Duration` event is owed to replace it.
+                    let length = state
+                        .media_duration
+                        .as_ref()
+                        .filter(|d| same_track(d.track_id.as_deref(), meta.id.as_deref()))
+                        .map(|d| d.secs);
+                    match crate::state::CURRENT_METADATA.lock() {
+                        Ok(mut lock) => *lock = Some(meta),
+                        Err(e) => {
+                            crate::vprintln!("[PLAYER] CURRENT_METADATA lock poisoned: {e}")
                         }
                     }
-                    PlayerIpc::Play => {
-                        report_undelivered("play", state.player.play());
-                        PlayerIpcEffects::default()
+                    let mc_metadata = Some((title, artist, length));
+                    PlayerIpcEffects {
+                        mc,
+                        mc_metadata,
+                        ..Default::default()
                     }
-                    PlayerIpc::Pause => {
-                        report_undelivered("pause", state.player.pause());
-                        PlayerIpcEffects::default()
+                }
+                PlayerIpc::Play => {
+                    report_undelivered("play", state.player.play());
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::Pause => {
+                    report_undelivered("pause", state.player.pause());
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::Stop => {
+                    report_undelivered(
+                        "stop",
+                        state.player.stop(crate::player::StopScope::As(
+                            crate::player::LoadOrigin::Local,
+                        )),
+                    );
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::Seek { time } => {
+                    let seq = crate::player::current_gen();
+                    state.pending_time_update = Some((time, seq));
+                    let batch = take_flush_batch(state);
+                    report_undelivered("seek", state.player.seek(time));
+                    PlayerIpcEffects {
+                        batch: Some(batch),
+                        ..Default::default()
                     }
-                    PlayerIpc::Stop => {
-                        report_undelivered(
-                            "stop",
-                            state.player.stop(crate::player::StopScope::As(
-                                crate::player::LoadOrigin::Local,
-                            )),
-                        );
-                        PlayerIpcEffects::default()
-                    }
-                    PlayerIpc::Seek { time } => {
-                        let seq = crate::player::current_gen();
-                        state.pending_time_update = Some((time, seq));
-                        let batch = take_flush_batch(state);
-                        report_undelivered("seek", state.player.seek(time));
-                        PlayerIpcEffects {
-                            batch: Some(batch),
-                            ..Default::default()
-                        }
-                    }
-                    PlayerIpc::Volume { volume, seen } => {
-                        report_undelivered("volume", state.player.set_volume(volume, seen));
-                        PlayerIpcEffects::default()
-                    }
-                    PlayerIpc::DevicesGet { request_id } => {
-                        report_undelivered(
-                            "devices.get",
-                            state.player.get_audio_devices(request_id),
-                        );
-                        PlayerIpcEffects::default()
-                    }
-                    PlayerIpc::DevicesSet { id, mode } => {
-                        report_undelivered("devices.set", state.player.set_audio_device(id, mode));
-                        PlayerIpcEffects::default()
-                    }
-                },
-                Err(e) => {
-                    crate::vprintln!("[IPC]    Invalid player IPC ({}): {:?}", msg.channel, e);
+                }
+                PlayerIpc::Volume { volume, seen } => {
+                    report_undelivered("volume", state.player.set_volume(volume, seen));
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::DevicesGet { request_id } => {
+                    report_undelivered("devices.get", state.player.get_audio_devices(request_id));
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::DevicesSet { id, mode } => {
+                    report_undelivered("devices.set", state.player.set_audio_device(id, mode));
                     PlayerIpcEffects::default()
                 }
             },
-        );
+            Err(e) => {
+                crate::vprintln!("[IPC]    Invalid player IPC ({}): {:?}", msg.channel, e);
+                PlayerIpcEffects::default()
+            }
+        }
+    });
 
     if let Some(mut effects) = effects {
         if let (Some(mc), Some((title, artist, duration))) = (&mut effects.mc, &effects.mc_metadata)

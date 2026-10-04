@@ -171,7 +171,7 @@ async fn a_continuation_mints_only_over_the_load_it_continues() {
 }
 
 /// A session release landing between the re-arm's look at the load and its mint was overridden:
-/// the released track restarted in a finished session's name.
+/// the renderer's loads were then refused for a controller already gone.
 #[tokio::test]
 async fn a_rearm_behind_a_session_release_does_not_claim_the_player_back() {
     let _serialised = serialised().await;

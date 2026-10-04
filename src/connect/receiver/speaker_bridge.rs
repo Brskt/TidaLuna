@@ -1,8 +1,8 @@
 use crate::app_state::with_state;
 use crate::connect::types::{MediaInfo, PlayerState};
 
-/// Events from the local player forwarded to the PlaybackController.
-/// Each event carries an `engine_gen` for stale-event filtering.
+/// Events from this host forwarded to the receiver: the local player's, each carrying an
+/// `engine_gen` for stale-event filtering, and the loads the SDK asks for during a cast.
 pub(crate) enum BridgeEvent {
     Prepared {
         engine_gen: u64,
@@ -45,6 +45,10 @@ pub(crate) enum BridgeEvent {
         track_id: Option<String>,
         engine_gen: u64,
     },
+    /// The SDK on this host asked for a load while the controller owns the player. The loop
+    /// decides what it becomes against the controller's queue, and answers it whatever it
+    /// decides: the SDK waits on that load with no timeout.
+    LocalLoad(crate::player::ipc::CastLoad),
 }
 
 /// Bridge between TIDAL Connect receiver and the local Rust player.
@@ -182,8 +186,9 @@ impl SpeakerBridge {
     }
 
     /// Stop the cast, handing the player back to this host: the session that owned it is over.
-    /// A stop in Connect's name would leave the controller owning a player it no longer drives.
-    /// A session that never took the player stops nothing: the music playing is this host's own.
+    /// A stop in Connect's name would leave the controller owning a player it no longer drives,
+    /// and every load the renderer asks for after it would be refused. A session that never took
+    /// the player stops nothing: the music playing is this host's own.
     pub fn release(&self) {
         with_state(|state| {
             Self::send_transport("release", state.player.stop(crate::player::StopScope::Cast))

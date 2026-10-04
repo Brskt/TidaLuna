@@ -4,6 +4,80 @@ import { applyVolume } from "../volume";
 import { deviceReleasedToShaka, selectDevice } from "../output-device";
 import type { AudioDevice } from "../types";
 
+export type TrackListPayload = { position?: number | string; context?: { id?: unknown; type?: string; isAutoPlay?: boolean } } | undefined;
+
+/**
+ * What a `playQueue/ADD_TRACK_LIST_TO_PLAY_QUEUE` asks of the load that follows it, `null` for
+ * nothing. Only "now" (or an unknown shape) carries play intent; "next"/"last"/index are queue
+ * edits with no load, and arming on them would force-resume a paused track later. A "now" is a
+ * listener's pick, except the mix TIDAL starts itself when a queue runs out (`context.isAutoPlay`).
+ */
+export const intentOfTrackList = (p: TrackListPayload): "play" | "pick" | null => {
+    const position = p?.position;
+    if (position !== undefined && position !== "now") return null;
+    return p?.context?.isAutoPlay ? "play" : "pick";
+};
+
+/**
+ * A listener's act on this page's play queue that TIDAL answers with a load of the entry it lands
+ * on. During a TIDAL Connect cast, Rust plays it on the cast's queue or refuses it (`CastRoute`).
+ */
+export type ListenerAct = "pick" | "next" | "previous";
+
+/**
+ * A listener's act and the play queue entries it acted on, named by their `context` object:
+ * every entry TIDAL makes for one play-now carries that action's own `context`, and every copy
+ * TIDAL makes of an entry keeps it. An entry made by anything else carries another one.
+ */
+export type QueueAct = { act: ListenerAct; context: object };
+
+type PlayQueueState = { currentIndex?: number; elements?: { uid?: unknown; context?: unknown }[] } | undefined;
+
+const isObject = (v: unknown): v is object => typeof v === "object" && v !== null;
+
+/** The pick a play-now is, bound to the entries TIDAL makes for it; `null` for any other. */
+export const pickOf = (p: TrackListPayload): QueueAct | null =>
+    intentOfTrackList(p) === "pick" && isObject(p?.context) ? { act: "pick", context: p.context } : null;
+
+/**
+ * A Next or Previous, bound to the entries of the queue's current one, read before TIDAL moves
+ * the queue. During a cast that queue is the cast's track alone, so the move reloads that entry.
+ */
+export const moveOf = (act: "next" | "previous", queue: PlayQueueState): QueueAct | null => {
+    const context = queue?.elements?.[queue?.currentIndex ?? -1]?.context;
+    return isObject(context) ? { act, context } : null;
+};
+
+/**
+ * The act a load answers: `pending`'s, when the entry loaded (the one whose uid is the load's
+ * `referenceId`) is one the act was on, and none otherwise. Only a load of one of its own
+ * entries counts for an act, and no other load may spend it: a pick whose load never came would
+ * otherwise go to TIDAL's next automatic load and restart the cast's track.
+ */
+export const actOfLoad = (pending: QueueAct | null, queue: PlayQueueState, referenceId: unknown): ListenerAct | null => {
+    if (pending === null || referenceId === null || referenceId === undefined) return null;
+    const entry = queue?.elements?.find((e) => e?.uid === referenceId);
+    return entry !== undefined && entry.context === pending.context ? pending.act : null;
+};
+
+/**
+ * What Rust's refusal of a load it did not run makes of the SDK's latest load (see `refuseLoad`).
+ * Only a pick is told why nothing plays: TIDAL loads on its own during a cast too (the cast's
+ * track after each change of it, a restore), and a banner then answers a question no one asked.
+ */
+export type LoadRefusal =
+    // Answers an earlier load (see loadId).
+    | { kind: "stale" }
+    | { kind: "pick" }
+    // The reload of a listener's Next or Previous: Rust steps the cast as the controller's own
+    // step would (at once, or not at all with no queue loaded or at its end). Settled with the
+    // catalog's `duration`: at 0, TIDAL's play step reads the time as past the length and
+    // reloads again, which at the queue's end is the cast's own track, and its play would resume
+    // a paused cast.
+    | { kind: "moved"; duration: number }
+    // A load TIDAL made on its own, for `productId`.
+    | { kind: "automatic"; productId: string | null };
+
 export const createNativePlayerComponent = () => {
     let activeEmitter: any = null;
     let activePlayer: any = null;
@@ -44,6 +118,35 @@ export const createNativePlayerComponent = () => {
     // load, never a separate player.play that would resume the still-committed OLD paused
     // track (the "bleed"). Set on select, consumed/cleared per load.
     let wantPlayOnLoad = false;
+    // The listener's latest act on the play queue, until a load of its own entries answers it
+    // (see actOfLoad). Apart from wantPlayOnLoad because the two age differently: the play
+    // intent is spent by the next load, whichever it is.
+    let pendingAct: QueueAct | null = null;
+    // The number of the SDK's latest load, sent with it. Rust's answer to a load it did not run
+    // names the load it answers, and one naming an earlier load is stale: acting on it would
+    // settle or refuse the newer load instead.
+    let loadId = 0;
+    // The track the SDK's latest load is for, which a settled answer takes its length from.
+    let loadProductId: string | null = null;
+    // The listener's act the SDK's latest load answers, which a refusal of it goes by.
+    let loadAct: ListenerAct | null = null;
+    // The player state Rust last reported. A load Rust did not run leaves the player in it, while
+    // the SDK's load set its own to NOT_PLAYING as it began, and told TIDAL's store and the OS.
+    let reportedState: unknown = null;
+    // Set when Rust refused the SDK's last load, cleared by its next. The SDK's autoplay still
+    // `play()`s the refused track, which Rust would take as resuming the cast's. A listener's own
+    // Play comes through TIDAL's PLAY action and `setDesiredPlayback`, not here.
+    let loadRefused = false;
+    // The length TIDAL's own pick saga announces the SDK's latest load's track with: the catalog's.
+    const catalogLength = (): number => {
+        try {
+            const { store } = require("../../plugins/lib/src/redux/store");
+            const item = store?.getState?.()?.content?.mediaItems?.[String(loadProductId)]?.item;
+            return Number(item?.duration) || 0;
+        } catch (_) {
+            return 0;
+        }
+    };
 
     // Stable handle published on tidalModules for @luna/lib PlayState.currentTime to resolve.
     const playerHandle = {
@@ -162,6 +265,8 @@ export const createNativePlayerComponent = () => {
                 }
                 loadedUrl = url;
                 loadedFmt = streamFormat;
+                loadId++;
+                loadRefused = false;
                 setSelfLoad(false);
                 seekTarget = null;
                 // Fresh play instance? A changed mediaProduct.referenceId means the user
@@ -174,9 +279,11 @@ export const createNativePlayerComponent = () => {
                 // this delegate already ships; Rust needs it to publish a measured length
                 // under this track rather than whichever one announced itself first.
                 let productId: string | null = null;
+                let act: ListenerAct | null = null;
                 try {
                     const { store } = require("../../plugins/lib/src/redux/store");
-                    const mediaProduct = store?.getState?.()?.playbackControls?.mediaProduct;
+                    const state = store?.getState?.();
+                    const mediaProduct = state?.playbackControls?.mediaProduct;
                     productId = mediaProduct?.productId ?? null;
                     const refId = mediaProduct?.referenceId ?? null;
                     // Only a CHANGE from a known previous id is a fresh play; the first
@@ -184,7 +291,11 @@ export const createNativePlayerComponent = () => {
                     // re-assert from being mistaken for a replay.
                     restart = lastReferenceId !== null && refId !== null && refId !== lastReferenceId;
                     if (refId !== null) lastReferenceId = refId;
+                    act = actOfLoad(pendingAct, state?.playQueue, refId);
                 } catch (_) {}
+                loadProductId = productId;
+                if (act !== null) pendingAct = null;
+                loadAct = act;
                 // On a restart, pin our reported head to 0 to match the position the
                 // SDK expects after a load, closing the mismatch that drives its seek loop.
                 if (restart) _time = 0;
@@ -202,10 +313,12 @@ export const createNativePlayerComponent = () => {
                 // First fresh time report must not be held behind the 250ms throttle
                 // (armed against the OLD track's last dispatch); mirrors SEEK.
                 (window as any).__LUNAR_FORCE_TIME_DISPATCH__?.();
-                sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay, productId ?? "");
+                sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay, productId ?? "", loadId, act ?? "");
             },
             play: () => {
                 sendDbgIpc("SDK->play");
+                // The play of a track Rust never loaded: it can only resume the cast's.
+                if (loadRefused) return;
                 cancelDeferredStop();
                 setDesired(true);
             },
@@ -311,7 +424,7 @@ export const createNativePlayerComponent = () => {
         return player;
     }
 
-    return {
+    const component = {
         Player,
         activePlayer: playerHandle,
         // Deduped play/pause intent for SDK tracks, driven by the Redux
@@ -321,6 +434,33 @@ export const createNativePlayerComponent = () => {
         // clearPlayOnLoad drops it on a self-load path, which bypasses this delegate.
         requestPlayOnLoad: () => { wantPlayOnLoad = true; },
         clearPlayOnLoad: () => { wantPlayOnLoad = false; },
+        // A listener's act on the play queue, for the load of its own entries (see pendingAct).
+        actOnQueue: (act: QueueAct) => { pendingAct = act; },
+        // Rust's answers to a load it did not run during a cast (see loadId).
+        // Refused (`mediacastowned`): see loadRefused and LoadRefusal.
+        refuseLoad: (id: unknown): LoadRefusal => {
+            if (id !== loadId) return { kind: "stale" };
+            loadRefused = true;
+            switch (loadAct) {
+                case "pick":
+                    return { kind: "pick" };
+                case "next":
+                case "previous":
+                    return { kind: "moved", duration: catalogLength() };
+                case null:
+                    return { kind: "automatic", productId: loadProductId };
+            }
+        },
+        // Played by the controller's queue (`mediacastrouted`): the load stands as one that ran,
+        // with the catalog's length. Null for a stale answer.
+        routeLoad: (id: unknown): number | null => (id === loadId ? catalogLength() : null),
+        // Ends the SDK's wait on a load Rust did not run and gives its player back the state Rust
+        // last reported (see reportedState). A refused pick is not settled here: its refusal
+        // stops the transport on purpose.
+        settleLoad: (duration: number) => {
+            component.trigger("mediaduration", duration);
+            if (reportedState !== null) component.trigger("mediastate", reportedState);
+        },
         trigger: (event: string, target: any, gen?: number) => {
             if (event !== "mediacurrenttime") {
                 sendDbgIpc("trigger", event, target, "listeners=" + (activeEmitter?.listeners?.get(event)?.size ?? 0), "playerCalls=" + playerCallCount);
@@ -329,6 +469,7 @@ export const createNativePlayerComponent = () => {
                 if (gen < activeGen) return;
                 if (gen > activeGen) activeGen = gen;
             }
+            if (event === "mediastate") reportedState = target;
 
             // Before Player(): update snapshot with latest values.
             // Each event type overwrites the previous value; only the
@@ -354,4 +495,5 @@ export const createNativePlayerComponent = () => {
             processEvent(event, target);
         }
     };
+    return component;
 }

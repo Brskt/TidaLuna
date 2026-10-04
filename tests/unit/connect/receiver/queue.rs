@@ -208,6 +208,278 @@ fn casting(items: Vec<QueueItem>, idx: usize) -> (QueueManager, mpsc::Receiver<Q
     (queue, notifies)
 }
 
+const PICK: Option<ListenerAct> = Some(ListenerAct::Pick);
+const AUTOMATIC: Option<ListenerAct> = None;
+
+#[test]
+fn a_pick_in_the_controllers_queue_selects_that_item() {
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    assert_eq!(
+        queue.cast_route("222", PICK, LoadOrigin::Connect),
+        CastRoute::Select { index: 1 }
+    );
+}
+
+#[test]
+fn a_pick_outside_the_controllers_queue_is_refused() {
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    assert_eq!(
+        queue.cast_route("999", PICK, LoadOrigin::Connect),
+        CastRoute::RefusePick
+    );
+}
+
+#[test]
+fn an_automatic_load_never_changes_the_track_even_one_the_queue_holds() {
+    // TIDAL's advance on the SDK's `ended` names the page's next track, which the controller's
+    // queue may well hold.
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    assert_eq!(
+        queue.cast_route("222", AUTOMATIC, LoadOrigin::Connect),
+        CastRoute::Refuse
+    );
+}
+
+#[test]
+fn an_automatic_load_of_the_track_the_cast_plays_is_settled_as_playing() {
+    // TIDAL reloads its playing track on its own (a pick played past its length, a page reload's
+    // restore); refusing it raised the "controlled via another client" banner over it.
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
+
+    assert_eq!(
+        queue.cast_route("222", AUTOMATIC, LoadOrigin::Connect),
+        CastRoute::Playing
+    );
+}
+
+#[test]
+fn a_pick_of_the_track_the_cast_plays_restarts_it() {
+    // A controller selecting its current item reloads it too: a pick is a select, never a settle.
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
+
+    assert_eq!(
+        queue.cast_route("222", PICK, LoadOrigin::Connect),
+        CastRoute::Select { index: 1 }
+    );
+}
+
+#[test]
+fn a_load_served_after_the_cast_ended_is_refused() {
+    // The session ended between the load and its turn in the loop: nothing plays for it to
+    // settle on.
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
+
+    assert_eq!(
+        queue.cast_route("222", PICK, LoadOrigin::Local),
+        CastRoute::Refuse
+    );
+    assert_eq!(
+        queue.cast_route("222", AUTOMATIC, LoadOrigin::Local),
+        CastRoute::Refuse
+    );
+}
+
+#[test]
+fn a_load_while_the_window_is_not_loaded_is_refused() {
+    // Without a loaded window the items go unread, even to settle on the track the cast plays.
+    let (mut queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
+    queue.state = QueueState::Loading;
+
+    assert_eq!(
+        queue.cast_route("222", AUTOMATIC, LoadOrigin::Connect),
+        CastRoute::Refuse
+    );
+}
+
+#[test]
+fn a_pick_while_the_window_is_not_loaded_is_refused_as_a_pick() {
+    // Refused as any other load, it left the page's queue on the pick, which a Play after the cast
+    // resumed: only the refusal of a pick announces the cast's track back to the page.
+    let (mut queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
+
+    for state in [QueueState::Idle, QueueState::Loading, QueueState::Moving] {
+        queue.state = state;
+        for media_id in ["222", "999"] {
+            assert_eq!(
+                queue.cast_route(media_id, PICK, LoadOrigin::Connect),
+                CastRoute::RefusePick,
+                "{state:?}, pick {media_id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_track_queued_twice_resolves_to_the_copy_the_controller_reaches_next() {
+    // The earlier copy is one the controller has already played past.
+    let (queue, _notifies) = casting(
+        vec![item("i-1", "111"), item("i-2", "222"), item("i-3", "111")],
+        1,
+    );
+
+    assert_eq!(
+        queue.cast_route("111", PICK, LoadOrigin::Connect),
+        CastRoute::Select { index: 2 }
+    );
+}
+
+#[test]
+fn every_route_answers_the_load_it_was_asked_for() {
+    for (route, answer) in [
+        (CastRoute::Select { index: 0 }, "mediacastrouted"),
+        (CastRoute::Playing, "mediacastrouted"),
+        (CastRoute::Next, "mediacastowned"),
+        (CastRoute::Previous, "mediacastowned"),
+        (CastRoute::RefusePick, "mediacastowned"),
+        (CastRoute::Refuse, "mediacastowned"),
+    ] {
+        let sent = serde_json::to_value(route.answer(7)).expect("a plain wire message");
+        assert_eq!(sent["t"], answer, "{route:?}");
+        assert_eq!(sent["v"]["load"], 7, "{route:?} names another load");
+    }
+}
+
+#[tokio::test]
+async fn a_selected_pick_is_played_as_the_controllers_own_select() {
+    // Stops at the `SetMedia`: its load, not `select_pick`, sends the `notifyMediaChanged`.
+    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    queue.select_pick(1).await;
+
+    assert_eq!(queue.current_index, Some(1));
+    assert_eq!(queue.state, QueueState::Loaded);
+    let mut set_media = None;
+    while let Ok(event) = notifies.try_recv() {
+        if let QueueNotifyEvent::SetMedia { media_info, .. } = event {
+            set_media = Some(media_info);
+        }
+    }
+    let media = set_media.expect("the picked item handed to playback");
+    assert_eq!(
+        (media.item_id.as_str(), media.media_id.as_str()),
+        ("i-2", "222")
+    );
+}
+
+const NEXT: Option<ListenerAct> = Some(ListenerAct::Next);
+const PREVIOUS: Option<ListenerAct> = Some(ListenerAct::Previous);
+
+#[test]
+fn a_listeners_next_steps_the_cast_whatever_track_the_page_reloads() {
+    // The page's queue holds the cast's track alone, so TIDAL's Next reloads that same track.
+    // Settled as playing, the reload's autoplay resumed a cast the phone had paused.
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    assert_eq!(
+        queue.cast_route("111", NEXT, LoadOrigin::Connect),
+        CastRoute::Next
+    );
+    assert_eq!(
+        queue.cast_route("999", NEXT, LoadOrigin::Connect),
+        CastRoute::Next
+    );
+    assert_eq!(
+        queue.cast_route("111", PREVIOUS, LoadOrigin::Connect),
+        CastRoute::Previous
+    );
+}
+
+#[test]
+fn a_listeners_step_with_no_cast_to_step_is_refused() {
+    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    assert_eq!(
+        queue.cast_route("111", NEXT, LoadOrigin::Local),
+        CastRoute::Refuse
+    );
+    assert_eq!(
+        queue.cast_route("111", PREVIOUS, LoadOrigin::Local),
+        CastRoute::Refuse
+    );
+}
+
+#[test]
+fn a_listeners_step_reaches_the_queue_whatever_state_its_window_is_in() {
+    // Refused by `cast_route`, the listener's step never reached `step`.
+    let (mut queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    for state in [QueueState::Idle, QueueState::Loading, QueueState::Moving] {
+        queue.state = state;
+        assert_eq!(
+            queue.cast_route("111", NEXT, LoadOrigin::Connect),
+            CastRoute::Next,
+            "{state:?}"
+        );
+        assert_eq!(
+            queue.cast_route("111", PREVIOUS, LoadOrigin::Connect),
+            CastRoute::Previous,
+            "{state:?}"
+        );
+    }
+}
+
+/// A window response naming `items`, as the queue server sends it.
+fn window(items: &[(&str, &str)]) -> serde_json::Value {
+    serde_json::json!({
+        "items": items
+            .iter()
+            .map(|(item_id, media_id)| serde_json::json!({ "item_id": item_id, "media_id": media_id }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[tokio::test]
+async fn a_step_with_no_queue_loaded_is_refused_for_the_listener_and_the_controller_alike() {
+    // One gate for the listener and the controller (see `handle_command`): a step kept back would
+    // play after whichever window landed next, in any session, or never.
+    for state in [QueueState::Idle, QueueState::Loading] {
+        for listener in [true, false] {
+            let (mut queue, mut notifies) =
+                casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+            queue.current_item_id_hint = Some("i-1".to_string());
+            queue.state = state;
+
+            let result = if listener {
+                queue.step(QueueStep::Next).await
+            } else {
+                queue
+                    .handle_command(1, "next", &serde_json::json!({}))
+                    .await
+            };
+            assert_eq!(
+                result,
+                RequestResult::NoQueue,
+                "{state:?}, listener: {listener}"
+            );
+
+            queue
+                .process_queue_window_response(window(&[("i-1", "111"), ("i-2", "222")]))
+                .await;
+
+            assert!(
+                handed_to_playback(&mut notifies).is_empty(),
+                "a refused step played once a window landed ({state:?}, listener: {listener})"
+            );
+            assert_eq!(queue.current_index, Some(0));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_listeners_step_in_a_loaded_window_plays_at_once() {
+    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
+
+    assert_eq!(queue.step(QueueStep::Previous).await, RequestResult::Done);
+
+    assert_eq!(
+        handed_to_playback(&mut notifies),
+        vec![("i-1".to_string(), "111".to_string())]
+    );
+}
+
 #[tokio::test]
 async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
     // TIDAL's receiver answers each of these 1002 in its IDLE state, and acts on none.
@@ -287,4 +559,39 @@ fn the_answer_is_the_message_the_controller_already_reads() {
             })
         );
     }
+}
+
+/// The media of every `SetMedia` the receiver handed to playback, in order.
+fn handed_to_playback(notifies: &mut mpsc::Receiver<QueueNotifyEvent>) -> Vec<(String, String)> {
+    let mut handed = Vec::new();
+    while let Ok(event) = notifies.try_recv() {
+        if let QueueNotifyEvent::SetMedia { media_info, .. } = event {
+            handed.push((media_info.item_id, media_info.media_id));
+        }
+    }
+    handed
+}
+
+#[tokio::test]
+async fn a_listeners_next_plays_the_controllers_next_item() {
+    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+
+    queue.skip_next().await;
+
+    assert_eq!(queue.current_index, Some(1));
+    assert_eq!(
+        handed_to_playback(&mut notifies),
+        vec![("i-2".to_string(), "222".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_listeners_next_at_the_queues_end_hands_nothing_to_playback() {
+    // As the controller's own `next` there: nothing plays, and a paused cast stays paused.
+    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
+
+    queue.skip_next().await;
+
+    assert_eq!(queue.current_index, Some(1));
+    assert!(handed_to_playback(&mut notifies).is_empty());
 }

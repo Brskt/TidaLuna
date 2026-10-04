@@ -35,7 +35,10 @@ export const createPlaybackController = () => {
                 else if (type === "stop") sendIpc("player.stop");
             }
         },
-        setCurrentMediaItem: (item: any) => {
+        // TIDAL calls this with the item alone. `alreadyPlaying` is for a track something else
+        // has loaded: the TIDAL Connect receiver announces the one it plays through here, and Rust
+        // refuses a self-load of it during the cast, stopping this page's transport under a banner.
+        setCurrentMediaItem: (item: any, { alreadyPlaying = false }: { alreadyPlaying?: boolean } = {}) => {
             if (item && typeof item === "object") {
                 // The one signal that fires for EVERY track, animated cover or not:
                 // `setCurrentTrack` hangs the cover's lifetime on it (see its doc). The still
@@ -92,7 +95,7 @@ export const createPlaybackController = () => {
                                 actualQuality = pbi?.audioQuality;
 
                                 // Self-load non-FLAC BTS streams (TIDAL's boombox doesn't work in CEF)
-                                if (pbi?.manifestMimeType === "application/dash+xml" && pbi.manifest) {
+                                if (!alreadyPlaying && pbi?.manifestMimeType === "application/dash+xml" && pbi.manifest) {
                                     const manifest = pbi.manifest as any;
                                     if (manifest.initUrl && manifest.segmentUrls?.length > 0) {
                                         const codec = manifest.codec?.split(".")?.[0] ?? "aac";
@@ -103,7 +106,7 @@ export const createPlaybackController = () => {
                                         sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec, productId);
                                     }
                                 }
-                                if (pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
+                                if (!alreadyPlaying && pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
                                     const manifest = pbi.manifest;
                                     const streamUrl = manifest.urls?.[0];
                                     const mimeType: string = manifest.mimeType ?? "";
