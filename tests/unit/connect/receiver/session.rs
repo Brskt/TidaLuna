@@ -86,3 +86,69 @@ async fn no_session_means_no_notice() {
     let (tx, _rx) = mpsc::channel(1);
     assert!(ReceiverSession::new(tx).revoke().is_none());
 }
+
+/// The ends the receiver's services were told of, in order.
+fn ends_heard(rx: &mut mpsc::Receiver<SessionNotifyEvent>) -> Vec<SessionEnd> {
+    let mut ends = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let SessionNotifyEvent::Internal(SessionInternalEvent::SessionEnded(end)) = event {
+            ends.push(end);
+        }
+    }
+    ends
+}
+
+#[tokio::test]
+async fn the_last_phone_gone_leaves_the_session_to_its_resume() {
+    let (mut session, id, mut heard) = started_hearing(7).await;
+
+    session.handle_disconnect(7).await;
+
+    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Suspended]);
+    session
+        .handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }))
+        .await;
+    assert_eq!(session.state, ReceiverSessionState::Active);
+}
+
+#[tokio::test]
+async fn an_end_that_stops_casting_is_over_and_one_that_does_not_is_a_suspension() {
+    let (mut stopped, id, mut heard) = started_hearing(7).await;
+    stopped
+        .handle_command(
+            7,
+            "endSession",
+            &serde_json::json!({ "sessionId": id, "stopCasting": true }),
+        )
+        .await;
+    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Over]);
+
+    let (mut paused, id, mut heard) = started_hearing(7).await;
+    paused
+        .handle_command(
+            7,
+            "endSession",
+            &serde_json::json!({ "sessionId": id, "stopCasting": false }),
+        )
+        .await;
+    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Suspended]);
+}
+
+/// Over, not suspended: TIDAL's receiver drops its queue on the switch.
+#[tokio::test]
+async fn a_new_session_ends_the_one_held_for_good() {
+    let (mut live, _, mut heard) = started_hearing(7).await;
+    live.handle_command(8, "startSession", &serde_json::json!({}))
+        .await;
+    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Over]);
+
+    let (mut suspended, _, mut heard) = started_hearing(7).await;
+    suspended.handle_disconnect(7).await;
+    suspended
+        .handle_command(8, "startSession", &serde_json::json!({}))
+        .await;
+    assert_eq!(
+        ends_heard(&mut heard),
+        vec![SessionEnd::Suspended, SessionEnd::Over]
+    );
+}

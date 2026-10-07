@@ -481,3 +481,32 @@ async fn a_listeners_next_at_the_queues_end_hands_nothing_to_playback() {
     assert_eq!(queue.current_index, Some(1));
     assert!(handed_to_playback(&mut notifies).is_empty());
 }
+
+#[tokio::test]
+async fn a_queue_whose_session_is_over_answers_as_no_queue_loaded() {
+    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+    queue.content_server = Some(
+        serde_json::from_value(serde_json::json!({ "serverUrl": "https://api.tidal.com/v1" }))
+            .expect("a url makes a server"),
+    );
+    queue.queue_server = queue.content_server.clone();
+    queue.current_media_id_hint = Some("111".to_string());
+    queue.current_item_id_hint = Some("i-1".to_string());
+    queue.queue_gen = 5;
+
+    queue.end_session();
+
+    assert_eq!(queue.step(QueueStep::Next).await, RequestResult::NoQueue);
+    assert_eq!(
+        queue.cast_route("222", PICK, LoadOrigin::Connect),
+        CastRoute::RefusePick
+    );
+    queue.on_media_ended().await;
+    assert!(handed_to_playback(&mut notifies).is_empty());
+    assert!(queue.content_server.is_none() && queue.queue_server.is_none());
+    assert!(queue.current_media_id_hint.is_none() && queue.current_item_id_hint.is_none());
+    assert_eq!(
+        queue.queue_gen, 5,
+        "end_session did not carry the queue generation over"
+    );
+}

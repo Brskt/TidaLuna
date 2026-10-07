@@ -20,9 +20,18 @@ pub(crate) enum SessionNotifyEvent {
     Internal(SessionInternalEvent),
 }
 
+/// How a session ended, as `notifySessionEnded` tells its phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionEnd {
+    /// Kept for a `resumeSession`.
+    Suspended,
+    /// Gone: no phone can resume it.
+    Over,
+}
+
 pub(crate) enum SessionInternalEvent {
     SessionStarted { session_id: String },
-    SessionEnded,
+    SessionEnded(SessionEnd),
     ResourcesGranted,
     ResourcesRevoked,
 }
@@ -90,9 +99,10 @@ impl ReceiverSession {
     }
 
     async fn proc_start_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
-        // If already active, end the old session first (suspended)
-        if self.state == ReceiverSessionState::Active {
-            self.handle_session_ended(true).await;
+        // A new session replaces the one held, live or suspended, and its id with it: no phone
+        // can resume the old one after this.
+        if self.session.is_some() {
+            self.handle_session_ended(false).await;
         }
 
         let app_id = payload
@@ -320,11 +330,17 @@ impl ReceiverSession {
         }
 
         self.state = ReceiverSessionState::Ended;
+        // Only a suspension keeps the session.
+        let end = if self.session.is_some() {
+            SessionEnd::Suspended
+        } else {
+            SessionEnd::Over
+        };
 
         let _ = self
             .notify_tx
             .send(SessionNotifyEvent::Internal(
-                SessionInternalEvent::SessionEnded,
+                SessionInternalEvent::SessionEnded(end),
             ))
             .await;
     }

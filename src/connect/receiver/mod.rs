@@ -20,7 +20,7 @@ use cef::*;
 use client_comm::{ClientCommunicator, DispatchedCommand, classify_command};
 use playback::{PlaybackController, PlaybackInternalEvent, PlaybackNotifyEvent};
 use queue::{CastRoute, QueueManager, QueueNotifyEvent, QueueStep};
-use session::{ReceiverSession, SessionInternalEvent, SessionNotifyEvent};
+use session::{ReceiverSession, SessionEnd, SessionInternalEvent, SessionNotifyEvent};
 use speaker_bridge::{BridgeEvent, SpeakerBridge};
 
 /// In-session graceful-shutdown budget (receiver toggled off, or orphan cleanup).
@@ -216,8 +216,14 @@ async fn routing_loop(
                     }
                     SessionNotifyEvent::Internal(ref internal) => {
                         match internal {
-                            SessionInternalEvent::SessionEnded => {
+                            SessionInternalEvent::SessionEnded(end) => {
                                 playback_ctrl.reset().await;
+                                match end {
+                                    // Kept for a `resumeSession`: its phone steps on through
+                                    // the same queue.
+                                    SessionEnd::Suspended => {}
+                                    SessionEnd::Over => queue_mgr.end_session(),
+                                }
                             }
                             SessionInternalEvent::SessionStarted { session_id } => {
                                 crate::vprintln!("[connect::receiver] Session started: {}", session_id);

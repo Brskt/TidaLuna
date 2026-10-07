@@ -164,6 +164,16 @@ impl QueueManager {
         }
     }
 
+    /// The session this queue was loaded for is over, and TIDAL's receiver drops its queue then.
+    /// Kept, the window, index and hints steer the next session's steps and loads, and the
+    /// servers carry the ended phone's tokens. The generation goes on counting.
+    pub fn end_session(&mut self) {
+        *self = Self {
+            queue_gen: self.queue_gen,
+            ..Self::new(self.http.clone(), self.notify_tx.clone())
+        };
+    }
+
     /// Extract access/refresh tokens from the current ServerInfos and seed or
     /// advance the AuthStore. Called whenever the mobile client pushes
     /// `loadCloudQueue` or `updateServerInfo`.
