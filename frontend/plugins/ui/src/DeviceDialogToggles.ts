@@ -9,7 +9,7 @@ import { ipcRenderer, observe, redux } from "@luna/lib";
 // ASIO has no TIDAL Redux concept, so we inject ONE row cloned from the native card
 // (inherits TIDAL's exact styling) that we fully own. Mutual exclusion: enabling ASIO
 // dispatches SET_DEVICE_MODE("shared") (Redux turns the native exclusive switch off);
-// enabling exclusive clears ASIO via our store subscription. Windows-only. Rust unchanged.
+// enabling exclusive clears ASIO via our store subscription. Windows-only.
 
 const W = window as any;
 
