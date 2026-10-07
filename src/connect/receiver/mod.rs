@@ -225,7 +225,7 @@ async fn routing_loop(
                 }
             }
 
-            // Arm 3: Session notifications -> relay to WS + handle internals
+            // Session notifications -> relay to WS + handle internals
             Some(event) = session_rx.recv() => {
                 match event {
                     SessionNotifyEvent::Broadcast(ref msg) => {
@@ -253,7 +253,7 @@ async fn routing_loop(
                 }
             }
 
-            // Arm 4: Playback notifications -> relay to WS + handle internals
+            // Playback notifications -> relay to WS + handle internals
             Some(event) = playback_rx.recv() => {
                 match event {
                     PlaybackNotifyEvent::Broadcast(ref msg) => {
@@ -273,7 +273,7 @@ async fn routing_loop(
                 }
             }
 
-            // Arm 5: Queue notifications -> relay to WS + dispatch to playback
+            // Queue notifications -> relay to WS + dispatch to playback
             Some(event) = queue_rx.recv() => {
                 match event {
                     QueueNotifyEvent::Broadcast(ref msg) => {
@@ -315,7 +315,7 @@ async fn routing_loop(
                 }
             }
 
-            // Arm 6: Bridge events from local player
+            // Bridge events: the local player's, and the loads the SDK asks for during a cast
             Some(event) = bridge_rx.recv() => {
                 match event {
                     BridgeEvent::Prepared { from } => {
