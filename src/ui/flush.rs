@@ -155,7 +155,7 @@ fn run_post_lock_effects(mut effects: PostLockEffects) {
 }
 
 pub(crate) fn handle_player_event(event: PlayerEvent) {
-    crate::connect::bridge::forward(&event);
+    crate::connect::bridge::forward(&event, crate::player::current_load().1);
 
     let effects = with_state(|state| {
         let mut should_flush = true;

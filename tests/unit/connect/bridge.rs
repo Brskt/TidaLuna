@@ -25,16 +25,19 @@ async fn a_completion_reaches_the_receiver_and_a_promotion_does_not() {
     set_active(Some(tx));
     set_client_connected(true);
 
-    forward(&PlayerEvent::CrossfadePromoted(
-        1,
-        Some("120002099".to_string()),
-    ));
+    forward(
+        &PlayerEvent::CrossfadePromoted(1, Some("120002099".to_string())),
+        LoadOrigin::Connect,
+    );
     assert!(
         rx.try_recv().is_err(),
         "a local promotion reached the controller's queue"
     );
 
-    forward(&PlayerEvent::StateChange(PlaybackState::Completed, 1));
+    forward(
+        &PlayerEvent::StateChange(PlaybackState::Completed, 1),
+        LoadOrigin::Connect,
+    );
     let completed = rx.try_recv().expect("a natural end reaches the receiver");
     assert!(
         matches!(completed, BridgeEvent::PlaybackCompleted { .. }),
@@ -59,7 +62,7 @@ async fn a_dead_network_reaches_the_controller() {
     set_active(Some(tx));
     set_client_connected(true);
 
-    forward(&PlayerEvent::NetworkLost);
+    forward(&PlayerEvent::NetworkLost, LoadOrigin::Connect);
 
     let lost = rx.try_recv().expect("a dead network reaches the receiver");
     assert!(
@@ -78,7 +81,10 @@ async fn no_client_means_no_forwarding() {
     set_active(Some(tx));
     set_client_connected(false);
 
-    forward(&PlayerEvent::StateChange(PlaybackState::Completed, 1));
+    forward(
+        &PlayerEvent::StateChange(PlaybackState::Completed, 1),
+        LoadOrigin::Connect,
+    );
 
     assert!(
         rx.try_recv().is_err(),

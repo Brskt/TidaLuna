@@ -1,10 +1,10 @@
 //! Player-to-receiver bridge state and event forwarding.
 //!
-//! When the TIDAL Connect receiver is active on this host, player events
-//! (state changes, time updates, errors) are translated to `BridgeEvent`s
-//! and forwarded to the receiver's playback task. When inactive, the
-//! forwarding path short-circuits on an atomic flag: the hot player loop
-//! pays no lock cost.
+//! When the TIDAL Connect receiver is active on this host, the events of
+//! the loads it made (state changes, time updates, errors) are translated
+//! to `BridgeEvent`s and forwarded to the receiver's playback task. When
+//! inactive, the forwarding path short-circuits on an atomic flag: the hot
+//! player loop pays no lock cost.
 //!
 //! The bridge owns its own statics here rather than being exposed as a
 //! `Mutex<Option<Sender>>` in `ui/flush.rs`: that way `ui/` does not need
@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::connect::receiver::speaker_bridge::BridgeEvent;
 use crate::connect::types::PlayerState as ConnectPlayerState;
-use crate::player::{PlaybackState, PlayerEvent};
+use crate::player::{LoadOrigin, PlaybackState, PlayerEvent};
 
 /// Monotonic counter stamped on each bridge event. The receiver drops
 /// events whose generation does not match the current media, preventing
@@ -73,8 +73,16 @@ pub(crate) fn route_load(load: crate::player::ipc::CastLoad) -> bool {
 }
 
 /// Forward a player event to the receiver, if active. Called from
-/// `ui::flush`'s per-event hook on the player event loop.
-pub(crate) fn forward(event: &PlayerEvent) {
+/// `ui::flush`'s per-event hook on the player event loop, with `owner` the origin of the load
+/// that is current (`player::current_load`).
+///
+/// Only a load the receiver made is the receiver's to hear. `ENGINE_GEN` cannot tell: the
+/// receiver writes it and every event is stamped with it; a local track's end would match the
+/// generation of a suspended session and step the queue it keeps into the player.
+pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
+    if owner != LoadOrigin::Connect {
+        return;
+    }
     // Idle unless the receiver is running AND a controller is connected: with
     // nobody to notify, forwarding/notify/broadcast is wasted work. Resumes
     // the instant a client connects.
