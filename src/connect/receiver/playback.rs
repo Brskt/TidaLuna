@@ -77,8 +77,13 @@ impl PlaybackController {
         crate::connect::bridge::ENGINE_GEN
             .store(self.engine_gen, std::sync::atomic::Ordering::Relaxed);
 
-        // Stop current playback if active
-        if self.state == PbState::Started || self.state == PbState::Preparing {
+        // Stop what plays before loading: this controller's previous track, or with none held
+        // (`NoEngine`) this host's own music, which would play on until the cast's first track
+        // has been fetched. `Completed` and `Stopped` leave nothing playing.
+        if matches!(
+            self.state,
+            PbState::Started | PbState::Preparing | PbState::NoEngine
+        ) {
             self.bridge.stop();
         }
 
