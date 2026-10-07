@@ -595,6 +595,7 @@ mod windows_impl {
         // SAFETY: lock_name is NUL-terminated UTF-16; returns an owned handle or null.
         let mutex = unsafe { CreateMutexW(&attributes, FALSE, lock_name.as_ptr()) };
         if mutex.is_null() {
+            // SAFETY: reads this thread's last error, set by the call above.
             crate::vprintln!("[LOCK]   CreateMutexW failed: {}", unsafe {
                 GetLastError()
             });
@@ -763,6 +764,7 @@ mod windows_impl {
             )
         };
         if pipe == INVALID_HANDLE_VALUE {
+            // SAFETY: reads this thread's last error, set by the call above.
             crate::vprintln!("[LOCK]   Link pipe unavailable: {}", unsafe {
                 GetLastError()
             });

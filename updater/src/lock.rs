@@ -7,7 +7,7 @@
 //!   * The limited and elevated halves of one account open what either created.
 //!   * Identity is sourced from the process token, immune to env-var spoof.
 //!
-//! Acquired by ownership via `WaitForSingleObject` - the
+//! Acquired by ownership via `WaitForSingleObject`: the
 //! `bInitialOwner=TRUE` + `ERROR_ALREADY_EXISTS` idiom does NOT prove
 //! acquisition (an existing object's `bInitialOwner` is ignored, and a
 //! stale open handle keeps the kernel object alive across retries).

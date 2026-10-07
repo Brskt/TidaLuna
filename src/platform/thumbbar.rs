@@ -84,8 +84,7 @@ const BTN_PLAY_PAUSE: u32 = 1;
 const BTN_NEXT: u32 = 2;
 
 // THUMBBUTTON flags and masks (windows-sys uses flat constants).
-
-// THB_ICON = 0x2 - the hIcon field is valid
+// THB_ICON marks the hIcon field as valid.
 const THB_ICON: i32 = 0x2;
 // THBF_ENABLED = 0x0
 const THBF_ENABLED: i32 = 0x0;

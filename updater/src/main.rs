@@ -17,8 +17,8 @@ mod cleanup;
 #[cfg(target_os = "windows")]
 mod lock;
 
-// Public key for update signature verification
-// Replace with actual key from `cargo xtask generate-keypair`
+// Ed25519 public key for update manifests; CI signs them with its `UPDATE_SIGNING_KEY` secret.
+// `cargo xtask generate-keypair` prints a new keypair; src/updater/verify.rs holds the same const.
 const UPDATE_PUBLIC_KEY: [u8; 32] = [
     104, 175, 158, 150, 215, 73, 36, 25, 193, 27, 127, 255, 238, 170, 136, 130, 171, 47, 180, 243,
     2, 222, 95, 197, 57, 244, 218, 25, 117, 200, 42, 57,
