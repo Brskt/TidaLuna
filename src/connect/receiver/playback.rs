@@ -28,7 +28,7 @@ pub(crate) struct PlaybackController {
     next_media: Option<NextMediaSlot>,
     media_seq_no: u32,
 
-    /// Engine generation - incremented on every set_media/reset
+    /// Engine generation, incremented by set_media, stop and reset
     engine_gen: u64,
     /// The event generation of the load last handed to the player. `engine_gen` is stamped on
     /// an event when it is forwarded, so an event the previous load emitted earlier and that
@@ -78,7 +78,7 @@ impl PlaybackController {
         }
         self.media_seq_no = media_seq_no;
         self.engine_gen += 1;
-        // Sync the shared atomic for flush.rs to stamp events with the same gen
+        // Publish it for `bridge::forward` to stamp on each event it sends
         crate::connect::bridge::ENGINE_GEN
             .store(self.engine_gen, std::sync::atomic::Ordering::Relaxed);
 

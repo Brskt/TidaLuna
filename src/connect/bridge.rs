@@ -20,10 +20,10 @@ use crate::connect::receiver::speaker_bridge::{BridgeEvent, EventStamp};
 use crate::connect::types::PlayerState as ConnectPlayerState;
 use crate::player::{LoadOrigin, PlaybackState, PlayerEvent};
 
-/// Monotonic counter stamped on each bridge event. The receiver drops
-/// events whose generation does not match the current media, preventing
-/// stale events from a previous track from affecting the new one after
-/// rapid skips.
+/// `PlaybackController`'s generation, stored by its `set_media`, `stop` and `reset` for `forward`
+/// to stamp on each event it sends. The receiver drops an event stamped with another generation;
+/// an event of the previous load that `forward` sent after the generation moved carries the
+/// new value, and only `EventStamp::seq` can still tell it from a new load's events.
 pub(crate) static ENGINE_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// Fast check to skip the mutex lock when no receiver is active. Kept
