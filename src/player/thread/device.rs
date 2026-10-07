@@ -12,8 +12,87 @@ use std::sync::mpsc;
 use crate::player::asio::host::AsioHandle;
 #[cfg(target_os = "windows")]
 use crate::player::wasapi::ExclusiveHandle;
+#[cfg(any(target_os = "windows", test))]
+use crate::state::RetainedTrack;
+
+/// How a mode switch brings back the track it tears down.
+///
+/// The bytes in memory are asked first. A whole track restarts on them at the live position,
+/// whether or not a source is retained: a DASH track retains none (`load_dash` publishes
+/// `None`) and still switches like a cached one.
+#[cfg(any(target_os = "windows", test))]
+pub(super) enum SwitchRearm {
+    /// The whole track is in memory: the new backend starts on it directly.
+    Reuse(RamBuffer),
+    /// Bytes still arriving: a fresh load of the retained source probes cleanly.
+    Replay(RetainedTrack),
+    /// Bytes still arriving and nothing retained. No load ever published a replayable source,
+    /// or a DASH load did publish its absence and has yet to land its buffer: that load is the
+    /// one the new mode plays.
+    AwaitLoad,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl SwitchRearm {
+    pub(super) fn choose(current: Option<&RamBuffer>, retained: Option<RetainedTrack>) -> Self {
+        match (current.filter(|buffer| buffer.is_reusable()), retained) {
+            (Some(buffer), _) => Self::Reuse(buffer.clone()),
+            (None, Some(retained)) => Self::Replay(retained),
+            (None, None) => Self::AwaitLoad,
+        }
+    }
+}
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
+    /// The switch took the pipeline down and nothing on this thread starts it again: the track
+    /// is no longer loaded here, and whatever seek it carried died with its decoder.
+    #[cfg(target_os = "windows")]
+    fn vacate_switched_track(&mut self) {
+        self.has_track = false;
+        self.is_playing = false;
+        self.seeking = false;
+        self.seek_target = None;
+    }
+
+    /// `SwitchRearm::Replay`: the replay is a new load and owns the load bookkeeping from here.
+    #[cfg(target_os = "windows")]
+    fn replay_switched_track(
+        &mut self,
+        retained: RetainedTrack,
+        position: Option<f64>,
+        was_playing: bool,
+    ) {
+        self.vacate_switched_track();
+        self.loading_gen = None;
+        self.pending_play = None;
+        (self.callback)(PlayerEvent::ReplayRequest {
+            track: retained.track,
+            expected_gen: retained.load_gen,
+            position,
+            play: was_playing,
+        });
+    }
+
+    /// `SwitchRearm::AwaitLoad`: nothing superseded the load in flight, so its bookkeeping stays
+    /// standing and a play arriving before it lands still defers to it.
+    #[cfg(target_os = "windows")]
+    fn await_load_after_switch(&mut self) {
+        self.vacate_switched_track();
+        crate::vprintln!(
+            "[AUDIO] nothing to rebuild the track from; the load in flight plays in the new mode"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn switch_rearm(&self) -> SwitchRearm {
+        let retained = crate::state::CURRENT_TRACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retained()
+            .cloned();
+        SwitchRearm::choose(self.current_buffer.as_ref(), retained)
+    }
+
     pub(super) fn handle_set_audio_device(&mut self, id: String, mode: OutputMode) {
         // An ASIO teardown is still draining driver-side: two driver instances
         // must never coexist and the old one still holds its KS claim: park
@@ -85,20 +164,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.cancel_crossfade();
         #[cfg(target_os = "windows")]
         {
-            // Non-replayable source (DASH nulls CURRENT_TRACK): the bypass switches below can't
-            // re-arm it. Bail BEFORE the decoder-cancel (cancelling a live bypass decoder then
-            // returning would strand the mode with no producer); gated on a live bypass decoder.
-            if self.has_track
-                && (self.is_asio_mode || self.is_exclusive_mode)
-                && crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .is_none()
-            {
-                crate::vprintln!("[AUDIO] Device switch skipped: non-replayable source active");
-                return;
-            }
             // Per-track mode skip: bail BEFORE retiring the live reader below. Toggling to
             // a mode this track can't do (e.g. ASIO while it plays in exclusive due to
             // asio_skip_track) must not kill the live decoder with nothing re-armed: that
@@ -155,18 +220,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         .and_then(|tid| self.resume_store.get(tid))
                 });
 
-                // Non-replayable source (DASH clears CURRENT_TRACK): no-op the switch
-                // instead of killing playback (the re-arm below needs a track).
-                let replayable = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .is_some();
-                if self.has_track && !replayable {
-                    crate::vprintln!("[AUDIO] ASIO switch skipped: non-replayable source active");
-                    return;
-                }
-
                 self.stop_decode();
                 self.cpal_stream = None;
                 self.cpal_stream_error = None;
@@ -208,40 +261,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     // polls for that. Fall back like the two ->shared branches below, but not
                     // through `rearm_shared_after_asio_failure`: it re-derives its position from
                     // `last_asio_pos`, stale once a session has left ASIO before.
-                    if self
-                        .current_buffer
-                        .as_ref()
-                        .is_some_and(RamBuffer::is_reusable)
-                    {
-                        self.seeking = false;
-                        self.seek_target = None;
-                        crate::vprintln!(
-                            "[ASIO] spawn failed; rebuilding shared on the retained buffer"
-                        );
-                        self.rebuild_pipeline_at(position.unwrap_or(0.0));
-                        return;
-                    }
-                    // Still streaming, and a rebuild would race the decoder probe against a
-                    // moving base_offset. The track is re-loaded instead, as the siblings do.
-                    self.has_track = false;
-                    self.is_playing = false;
-                    self.loading_gen = None;
-                    self.pending_play = None;
-                    self.seeking = false;
-                    self.seek_target = None;
-                    crate::vprintln!("[ASIO] spawn failed; re-arming shared");
-                    let retained = crate::state::CURRENT_TRACK
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .retained()
-                        .cloned();
-                    if let Some(retained) = retained {
-                        (self.callback)(PlayerEvent::ReplayRequest {
-                            track: retained.track,
-                            expected_gen: retained.load_gen,
-                            position,
-                            play: was_playing,
-                        });
+                    match self.switch_rearm() {
+                        SwitchRearm::Reuse(_) => {
+                            self.seeking = false;
+                            self.seek_target = None;
+                            crate::vprintln!(
+                                "[ASIO] spawn failed; rebuilding shared on the retained buffer"
+                            );
+                            self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                        }
+                        // Still streaming, and a rebuild would race the decoder probe against a
+                        // moving base_offset. The track is re-loaded instead, as the siblings do.
+                        SwitchRearm::Replay(retained) => {
+                            crate::vprintln!("[ASIO] spawn failed; re-arming shared");
+                            self.replay_switched_track(retained, position, was_playing);
+                        }
+                        SwitchRearm::AwaitLoad => self.await_load_after_switch(),
                     }
                     return;
                 };
@@ -257,37 +292,26 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Only a still-STREAMING buffer races the decoder probe (its base_offset
                 // churns mid-download); a complete one is probe-safe (the same invariant
                 // cache-hit loads rely on every day). No new load: clear the load bookkeeping.
-                if let Some(buffer) = self.current_buffer.clone().filter(RamBuffer::is_reusable) {
-                    self.loading_gen = None;
-                    self.pending_play = None;
-                    crate::vprintln!("[AUDIO] Switched to ASIO output (retained buffer)");
-                    // The seek queued while the old device was released is still pending, and
-                    // this spawn is its last reader: nothing downstream looks at it.
-                    let seek_to = self.take_user_seek_override().or(position);
-                    self.spawn_asio_decoder(buffer, seek_to, !was_playing);
-                    return;
-                }
-                // Still-streaming buffer: a fresh load re-probes cleanly (handle_load takes
-                // the ASIO branch since is_asio_mode is set).
-                self.has_track = false;
-                self.is_playing = false;
-                self.loading_gen = None;
-                self.pending_play = None;
-                self.seeking = false;
-                self.seek_target = None;
-                let retained = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .cloned();
-                crate::vprintln!("[AUDIO] Switched to ASIO output");
-                if let Some(retained) = retained {
-                    (self.callback)(PlayerEvent::ReplayRequest {
-                        track: retained.track,
-                        expected_gen: retained.load_gen,
-                        position,
-                        play: was_playing,
-                    });
+                match self.switch_rearm() {
+                    SwitchRearm::Reuse(buffer) => {
+                        self.loading_gen = None;
+                        self.pending_play = None;
+                        crate::vprintln!("[AUDIO] Switched to ASIO output (retained buffer)");
+                        // The seek queued while the old device was released is still pending,
+                        // and this spawn is its last reader: nothing downstream looks at it.
+                        let seek_to = self.take_user_seek_override().or(position);
+                        self.spawn_asio_decoder(buffer, seek_to, !was_playing);
+                    }
+                    // Still-streaming buffer: a fresh load re-probes cleanly (handle_load takes
+                    // the ASIO branch since is_asio_mode is set).
+                    SwitchRearm::Replay(retained) => {
+                        crate::vprintln!("[AUDIO] Switched to ASIO output");
+                        self.replay_switched_track(retained, position, was_playing);
+                    }
+                    SwitchRearm::AwaitLoad => {
+                        crate::vprintln!("[AUDIO] Switched to ASIO output");
+                        self.await_load_after_switch();
+                    }
                 }
                 return;
             }
@@ -304,21 +328,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         .as_deref()
                         .and_then(|tid| self.resume_store.get(tid))
                 });
-
-                // Non-replayable source (DASH clears CURRENT_TRACK): the teardown
-                // re-arms via ReplayRequest, which needs a track; no-op the
-                // switch instead of killing playback.
-                let replayable = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .is_some();
-                if self.has_track && !replayable {
-                    crate::vprintln!(
-                        "[AUDIO] Exclusive switch skipped: non-replayable source active"
-                    );
-                    return;
-                }
 
                 self.stop_decode();
                 self.cpal_stream = None;
@@ -368,58 +377,35 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // exclusive decoder on it directly, no network re-download and no idle stall.
                 // The probe race that motivated the fresh load only affects a still-STREAMING
                 // buffer (its base_offset churns mid-download); a complete one is probe-safe.
-                if let Some(buffer) = self.current_buffer.clone().filter(RamBuffer::is_reusable) {
-                    self.loading_gen = None;
-                    self.pending_play = None;
-                    self.seeking = false;
-                    self.seek_target = None;
-                    crate::vprintln!(
-                        "[AUDIO] Switched to exclusive WASAPI (retained buffer): {}",
-                        id
-                    );
-                    // Same as the ASIO switch above: this spawn is the last reader of a seek
-                    // queued while the old device was released.
-                    let seek_to = self.take_user_seek_override().or(position);
-                    self.spawn_exclusive_decoder(buffer, seek_to, !was_playing);
-                    return;
-                }
-                // Still-streaming buffer: symphonia's probe would race the mid-stream churn
-                // (silence): re-arm a fresh load that probes cleanly; handle_load takes
-                // the exclusive branch since is_exclusive_mode is set.
-                self.has_track = false;
-                self.is_playing = false;
-                self.loading_gen = None;
-                self.pending_play = None;
-                self.seeking = false;
-                self.seek_target = None;
-                let retained = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .cloned();
-                crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
-                if let Some(retained) = retained {
-                    (self.callback)(PlayerEvent::ReplayRequest {
-                        track: retained.track,
-                        expected_gen: retained.load_gen,
-                        position,
-                        play: was_playing,
-                    });
+                match self.switch_rearm() {
+                    SwitchRearm::Reuse(buffer) => {
+                        self.loading_gen = None;
+                        self.pending_play = None;
+                        self.seeking = false;
+                        self.seek_target = None;
+                        crate::vprintln!(
+                            "[AUDIO] Switched to exclusive WASAPI (retained buffer): {}",
+                            id
+                        );
+                        // Same as the ASIO switch above: this spawn is the last reader of a seek
+                        // queued while the old device was released.
+                        let seek_to = self.take_user_seek_override().or(position);
+                        self.spawn_exclusive_decoder(buffer, seek_to, !was_playing);
+                    }
+                    // Still-streaming buffer: symphonia's probe would race the mid-stream churn
+                    // (silence). Re-arm a fresh load that probes cleanly; handle_load takes
+                    // the exclusive branch since is_exclusive_mode is set.
+                    SwitchRearm::Replay(retained) => {
+                        crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
+                        self.replay_switched_track(retained, position, was_playing);
+                    }
+                    SwitchRearm::AwaitLoad => {
+                        crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
+                        self.await_load_after_switch();
+                    }
                 }
                 return;
             } else if self.is_exclusive_mode {
-                // Same non-replayable guard: with no CURRENT_TRACK there's nothing
-                // to re-arm; no-op instead of killing playback.
-                let replayable = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .is_some();
-                if self.has_track && !replayable {
-                    crate::vprintln!("[AUDIO] Shared switch skipped: non-replayable source active");
-                    return;
-                }
-
                 if let Some(old) = self.exclusive_handle.take() {
                     old.shutdown();
                 }
@@ -447,49 +433,28 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // re-download and no idle stall. A seek killed mid-flight by the exclusive
                 // entry must not survive into the rebuilt pipeline (it would pin the poll
                 // loop at a ghost position): clear it first.
-                if self
-                    .current_buffer
-                    .as_ref()
-                    .is_some_and(RamBuffer::is_reusable)
-                {
-                    self.seeking = false;
-                    self.seek_target = None;
-                    crate::vprintln!("[AUDIO] Switched back to shared mode (retained buffer)");
-                    self.rebuild_pipeline_at(position.unwrap_or(0.0));
-                    return;
-                }
-
-                // Still-streaming buffer: the exclusive reader parks it mid-range, and a
-                // fresh shared load probes cleanly instead of blocking the player loop.
                 let was_playing = self.is_playing;
-                self.has_track = false;
-                self.is_playing = false;
-                self.loading_gen = None;
-                self.pending_play = None;
-                self.seeking = false;
-                self.seek_target = None;
-                crate::vprintln!("[AUDIO] Switched back to shared mode");
-                if let Some(retained) = retained {
-                    (self.callback)(PlayerEvent::ReplayRequest {
-                        track: retained.track,
-                        expected_gen: retained.load_gen,
-                        position,
-                        play: was_playing,
-                    });
+                match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
+                    SwitchRearm::Reuse(_) => {
+                        self.seeking = false;
+                        self.seek_target = None;
+                        crate::vprintln!("[AUDIO] Switched back to shared mode (retained buffer)");
+                        self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                    }
+                    // Still-streaming buffer: the exclusive reader parks it mid-range, and a
+                    // fresh shared load probes cleanly instead of blocking the player loop.
+                    SwitchRearm::Replay(retained) => {
+                        crate::vprintln!("[AUDIO] Switched back to shared mode");
+                        self.replay_switched_track(retained, position, was_playing);
+                    }
+                    SwitchRearm::AwaitLoad => {
+                        crate::vprintln!("[AUDIO] Switched back to shared mode");
+                        self.await_load_after_switch();
+                    }
                 }
                 return;
             } else if self.is_asio_mode {
-                // asio -> shared (same non-replayable guard as the exclusive path).
-                let replayable = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .is_some();
-                if self.has_track && !replayable {
-                    crate::vprintln!("[AUDIO] Shared switch skipped: non-replayable source active");
-                    return;
-                }
-
+                // asio -> shared.
                 if let Some(old) = self.asio_handle.take() {
                     // Driver-timed teardown: park the switch, the poll re-dispatches it.
                     // The switch supersedes any pending idle release.
@@ -521,36 +486,24 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Reuse the retained buffer when the track is fully in memory: rebuild the
                 // shared pipeline on it in place (the device-switch path), no network
                 // re-download and no idle stall.
-                if self
-                    .current_buffer
-                    .as_ref()
-                    .is_some_and(RamBuffer::is_reusable)
-                {
-                    self.seeking = false;
-                    self.seek_target = None;
-                    crate::vprintln!(
-                        "[AUDIO] Switched back to shared mode (from ASIO, retained buffer)"
-                    );
-                    self.rebuild_pipeline_at(position.unwrap_or(0.0));
-                    return;
-                }
-
-                // Still-streaming buffer: a fresh shared load probes cleanly.
                 let was_playing = self.is_playing;
-                self.has_track = false;
-                self.is_playing = false;
-                self.loading_gen = None;
-                self.pending_play = None;
-                self.seeking = false;
-                self.seek_target = None;
-                crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
-                if let Some(retained) = retained {
-                    (self.callback)(PlayerEvent::ReplayRequest {
-                        track: retained.track,
-                        expected_gen: retained.load_gen,
-                        position,
-                        play: was_playing,
-                    });
+                match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
+                    SwitchRearm::Reuse(_) => {
+                        self.seeking = false;
+                        self.seek_target = None;
+                        crate::vprintln!(
+                            "[AUDIO] Switched back to shared mode (from ASIO, retained buffer)"
+                        );
+                        self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                    }
+                    SwitchRearm::Replay(retained) => {
+                        crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
+                        self.replay_switched_track(retained, position, was_playing);
+                    }
+                    SwitchRearm::AwaitLoad => {
+                        crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
+                        self.await_load_after_switch();
+                    }
                 }
                 return;
             }
@@ -693,3 +646,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/thread/device.rs"]
+mod tests;

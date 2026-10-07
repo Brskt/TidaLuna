@@ -900,8 +900,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 play: was_playing,
             });
         } else {
-            // Non-replayable source (DASH): no track to re-arm, and playback stops (as in the
-            // device.rs switch paths). Logged to keep the silent stop diagnosable.
+            // Non-replayable source (DASH): no track to re-arm, and playback stops. Logged to
+            // keep the silent stop diagnosable.
             crate::vprintln!(
                 "[ASIO] fallback: non-replayable source, playback stopped (cannot re-arm shared)"
             );

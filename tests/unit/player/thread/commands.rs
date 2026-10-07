@@ -348,8 +348,8 @@ fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
 
 use crate::state::current_track_fixture::CurrentTrackSlot;
 
-/// A re-armable track in the process-wide slot, for one test. A device switch refuses a live
-/// track it cannot replay.
+/// A re-armable track in the process-wide slot. A device switch replays a still-streaming track
+/// from it.
 ///
 /// A thin naming of [`CurrentTrackSlot::holding`]: the exclusion and the restore-on-drop come
 /// from there, this only says which track a replay-authorising slot holds.
@@ -726,8 +726,7 @@ fn a_queued_seek_survives_a_parked_switch_through_the_reap() {
     h.player.asio_handle = None;
     h.player.pending_device_switch = Some(("dev-1".to_string(), crate::player::OutputMode::Asio));
     h.player.user_seek_override = Some(("track-1".to_string(), 45.0));
-    // A live track the switch can re-arm. `has_track` without one is a DASH-only state, and
-    // every device switch refuses it.
+    // A live track the switch can re-arm: with no buffer to reuse, it replays this one.
     let _track = ReplayableTrack::set("https://example.invalid/track-1.flac");
 
     let started = h.player.start_asio_playback(
@@ -774,6 +773,208 @@ fn a_queued_seek_survives_a_parked_switch_through_the_reap() {
         Some(45.0),
         "the seek the listener asked for outlived the fallback, the refusal and the reap"
     );
+}
+
+/// Names no endpoint on any machine: an exclusive render thread fails its device lookup and
+/// exits. The ASIO control thread opens a driver only on a stream start, which a three-byte
+/// buffer never reaches: nothing in these tests opens real hardware.
+#[cfg(target_os = "windows")]
+const NO_SUCH_DEVICE_A: &str = "tidalunar-test: no such device A";
+#[cfg(target_os = "windows")]
+const NO_SUCH_DEVICE_B: &str = "tidalunar-test: no such device B";
+
+#[cfg(target_os = "windows")]
+fn replay_requested(events: &Spy) -> bool {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|ev| matches!(ev, PlayerEvent::ReplayRequest { .. }))
+}
+
+/// A DASH track as the thread holds it: `load_dash` publishes no retained source, and hands over
+/// a buffer that is whole in memory from the start.
+#[cfg(target_os = "windows")]
+fn hold_a_dash_track(h: &mut Harness) -> CurrentTrackSlot {
+    h.player.current_buffer = Some(crate::player::buffer::RamBuffer::from_complete(vec![
+        1, 2, 3,
+    ]));
+    CurrentTrackSlot::clear()
+}
+
+/// A device pick while a DASH track plays exclusive. TIDAL commits the pick whatever Rust does;
+/// a refusal here leaves the UI on a device the audio never moved to.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_dash_track_in_exclusive_moves_to_the_device_picked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let _slot = hold_a_dash_track(&mut h);
+    h.player.is_exclusive_mode = true;
+    h.player.current_device_id = Some(NO_SUCH_DEVICE_A.to_string());
+    let decoder_on_a = Arc::new(AtomicBool::new(false));
+    h.player.exclusive_stream_cancel = Some(decoder_on_a.clone());
+
+    h.player.handle_set_audio_device(
+        NO_SUCH_DEVICE_B.to_string(),
+        crate::player::OutputMode::Exclusive,
+    );
+
+    assert!(
+        decoder_on_a.load(Relaxed),
+        "the decoder on device A was never retired"
+    );
+    assert_eq!(
+        h.player.current_device_id.as_deref(),
+        Some(NO_SUCH_DEVICE_B)
+    );
+    assert!(h.player.is_exclusive_mode);
+    assert!(
+        h.player.exclusive_handle.is_some(),
+        "no render thread for device B"
+    );
+    assert!(
+        h.player.has_track && h.player.current_exclusive_stream_id.is_some(),
+        "the bytes in memory are the whole track: it restarts on them"
+    );
+    assert!(!replay_requested(&h.events));
+}
+
+/// The exclusive toggle while a DASH track plays shared. TIDAL shows exclusive from the moment it
+/// sends this. The audio has to follow.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_shared_dash_track_follows_the_exclusive_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let _slot = hold_a_dash_track(&mut h);
+
+    h.player.handle_set_audio_device(
+        NO_SUCH_DEVICE_A.to_string(),
+        crate::player::OutputMode::Exclusive,
+    );
+
+    assert!(h.player.is_exclusive_mode, "the toggle was refused");
+    assert_eq!(
+        h.player.current_device_id.as_deref(),
+        Some(NO_SUCH_DEVICE_A)
+    );
+    assert!(h.player.exclusive_handle.is_some());
+    assert!(h.player.has_track && h.player.current_exclusive_stream_id.is_some());
+    assert!(!replay_requested(&h.events));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_shared_dash_track_follows_the_asio_toggle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let _slot = hold_a_dash_track(&mut h);
+
+    h.player.handle_set_audio_device(
+        NO_SUCH_DEVICE_A.to_string(),
+        crate::player::OutputMode::Asio,
+    );
+
+    assert!(h.player.is_asio_mode, "the toggle was refused");
+    assert_eq!(
+        h.player.current_device_id.as_deref(),
+        Some(NO_SUCH_DEVICE_A)
+    );
+    assert!(h.player.asio_handle.is_some());
+    assert!(h.player.has_track && h.player.current_asio_stream_id.is_some());
+    assert!(!replay_requested(&h.events));
+}
+
+/// Leaving ASIO drains the driver first, parking the switch for the teardown poll to replay. A
+/// DASH track used to be refused before it ever got parked.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_dash_track_in_asio_parks_its_way_back_to_shared() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let _slot = hold_a_dash_track(&mut h);
+    let (handle, _driver_events, _driver_cmds) = AsioHandle::for_test();
+    h.player.is_asio_mode = true;
+    h.player.asio_handle = Some(handle);
+
+    h.player.handle_set_audio_device(
+        NO_SUCH_DEVICE_B.to_string(),
+        crate::player::OutputMode::Shared,
+    );
+
+    assert!(
+        h.player.asio_handle.is_none(),
+        "the ASIO handle was never torn down"
+    );
+    assert_eq!(
+        h.player.pending_device_switch,
+        Some((
+            NO_SUCH_DEVICE_B.to_string(),
+            crate::player::OutputMode::Shared
+        ))
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_switch_under_an_unlanded_dash_load_leaves_that_load_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let _slot = CurrentTrackSlot::clear();
+    let (streaming, _writer) = crate::player::buffer::RamBuffer::new_for_test(1_000);
+    h.player.current_buffer = Some(streaming);
+    h.player.loading_gen = Some(41);
+    h.player.pending_play = Some(41);
+
+    h.player.handle_set_audio_device(
+        NO_SUCH_DEVICE_A.to_string(),
+        crate::player::OutputMode::Exclusive,
+    );
+
+    assert!(h.player.is_exclusive_mode, "the toggle was refused");
+    assert!(h.player.exclusive_handle.is_some());
+    assert!(
+        !h.player.has_track,
+        "the torn-down track has no backend left"
+    );
+    assert!(!h.player.is_playing);
+    assert_eq!(
+        (h.player.loading_gen, h.player.pending_play),
+        (Some(41), Some(41)),
+        "nothing superseded that load: a play arriving before it lands still waits for it"
+    );
+    assert!(!replay_requested(&h.events));
+}
+
+/// The sibling the case above must not turn into: a still-streaming track with a retained
+/// source comes back through a fresh load of it, which owns the load bookkeeping from here.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_switch_on_a_streaming_track_replays_its_retained_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let _track = ReplayableTrack::set("https://example.invalid/track-1.flac");
+    let (streaming, _writer) = crate::player::buffer::RamBuffer::new_for_test(1_000);
+    h.player.current_buffer = Some(streaming);
+    h.player.loading_gen = Some(41);
+
+    h.player.handle_set_audio_device(
+        NO_SUCH_DEVICE_A.to_string(),
+        crate::player::OutputMode::Exclusive,
+    );
+
+    assert!(h.player.is_exclusive_mode);
+    assert!(!h.player.has_track);
+    assert_eq!(
+        h.player.loading_gen, None,
+        "the replay's own load replaces it"
+    );
+    assert!(h.events.lock().unwrap().iter().any(|ev| matches!(
+        ev,
+        PlayerEvent::ReplayRequest { track, play: true, .. }
+            if track.url == "https://example.invalid/track-1.flac"
+    )));
 }
 
 /// A load announces where it will open before the backend that consumes the pair is chosen.
