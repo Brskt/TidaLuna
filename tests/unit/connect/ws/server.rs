@@ -151,8 +151,8 @@ async fn a_send_in_flight_leaves_the_map_to_the_cleanup() {
     sender.abort();
 }
 
-/// A receiver switched off while a phone stopped reading: a notice sent to that phone, then the
-/// routing epilogue's reset and the server's own shutdown, under the receiver's deadline.
+/// The routing epilogue on a receiver switched off while a phone stopped reading: the revoke
+/// notice, then the reset, then the server's own shutdown, under the receiver's deadline.
 async fn epilogue_run() -> (ShutdownReport, bool, ListenerProbe) {
     let (mut server, listener, _wire, _filler) = server_with_stalled_client().await;
     let receiver = TaskGroup::new();
@@ -177,7 +177,7 @@ async fn epilogue_run() -> (ShutdownReport, bool, ListenerProbe) {
 #[tokio::test]
 async fn the_epilogue_runs_to_its_end_past_a_peer_that_stopped_reading() {
     let (report, reset_ran, _listener) = epilogue_run().await;
-    assert!(reset_ran, "the reset after the notice never ran");
+    assert!(reset_ran, "the reset after the revoke notice never ran");
     assert_eq!(
         report.graceful_completed,
         vec!["receiver-routing"],

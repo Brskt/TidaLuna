@@ -377,6 +377,14 @@ async fn routing_loop(
         }
     }
 
+    // The phone hears the session end before its socket closes, as TIDAL's own receiver says it
+    // (`notifyEndedAndClose`). Queued here, written by `shutdown`, which flushes before closing.
+    if let Some(revoked) = session_mgr.revoke() {
+        for socket_id in revoked.sockets {
+            let _ = client_comm.send_to(socket_id, &revoked.notice).await;
+        }
+    }
+
     // A receiver switched off mid-cast gets no `SessionEnded`: the loop is cancelled before any
     // disconnect is read, and the controller would own the player for the rest of the process.
     // `reset` stops only a cast (`StopScope::Cast`), leaving local music alone.

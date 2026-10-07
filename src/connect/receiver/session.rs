@@ -27,6 +27,12 @@ pub(crate) enum SessionInternalEvent {
     ResourcesRevoked,
 }
 
+/// A session this receiver ended on its own, and the phones that have to be told.
+pub(crate) struct RevokedSession {
+    pub(crate) sockets: Vec<u32>,
+    pub(crate) notice: serde_json::Value,
+}
+
 struct SessionData {
     session_id: String,
     _app_id: String,
@@ -246,15 +252,28 @@ impl ReceiverSession {
         // suspended = !stopCasting (if stopCasting=true -> clean end, not suspended)
         self.handle_session_ended(!stop_casting).await;
 
-        let notify = serde_json::json!({
-            "command": "notifySessionEnded",
-            "sessionId": session_id,
-            "suspended": !stop_casting,
-        });
+        let notify = session_ended_notice(&session_id, !stop_casting);
         let _ = self
             .notify_tx
             .send(SessionNotifyEvent::Broadcast(notify))
             .await;
+    }
+
+    /// End the live session from this side, because the receiver is going away (switched off,
+    /// or the app quitting). TIDAL's own receiver does this on a host `revokeResources` while
+    /// casting: each of the session's sockets hears `notifySessionEnded` with `suspended: false`,
+    /// then is closed. Not suspended, since nothing is left here to resume it. `None` when no
+    /// session is live: a suspended one's phones are left on `suspended: true`, or it has none.
+    pub fn revoke(&mut self) -> Option<RevokedSession> {
+        if self.state != ReceiverSessionState::Active {
+            return None;
+        }
+        let session = self.session.take()?;
+        self.state = ReceiverSessionState::Ended;
+        Some(RevokedSession {
+            sockets: session.connected_sockets.into_iter().collect(),
+            notice: session_ended_notice(&session.session_id, false),
+        })
     }
 
     async fn proc_request_resources(&mut self, socket_id: u32) {
@@ -324,6 +343,15 @@ impl ReceiverSession {
             })
             .await;
     }
+}
+
+/// `suspended` tells the phone whether the session can still be resumed on this receiver.
+fn session_ended_notice(session_id: &str, suspended: bool) -> serde_json::Value {
+    serde_json::json!({
+        "command": "notifySessionEnded",
+        "sessionId": session_id,
+        "suspended": suspended,
+    })
 }
 
 /// Generate a UUID v4 session ID, or `None` if the system RNG is unavailable.
