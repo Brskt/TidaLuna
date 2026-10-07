@@ -170,10 +170,13 @@ async fn routing_loop(
     let mut connected_sockets: std::collections::HashSet<u32> = std::collections::HashSet::new();
     crate::connect::bridge::set_client_connected(false);
 
+    // The token is raced against each turn as a whole, the arm's work included, not read only
+    // between turns: an arm awaits the network (queue HTTP, up to HTTP_TIMEOUT_SECS) and the
+    // notify channels this loop itself drains. A turn the token cannot interrupt outlives the
+    // receiver's deadline, and the abort that follows skips the teardown below.
     loop {
+        let turn = cancel.run_until_cancelled(async {
         tokio::select! {
-            _ = cancel.cancelled() => break,
-
             // WS client sockets (connect, messages, disconnect), each socket's in the order
             // it lived them. No message is taken before its socket's connect or after its
             // disconnect; none arms the bridge or a session for a socket that is gone.
@@ -382,7 +385,13 @@ async fn routing_loop(
                 }
             }
 
-            else => break,
+            else => return false,
+        }
+        true
+        })
+        .await;
+        if turn != Some(true) {
+            break;
         }
     }
 
@@ -523,3 +532,7 @@ wrap_task! {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/connect/receiver/routing.rs"]
+mod tests;

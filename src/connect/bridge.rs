@@ -189,4 +189,4 @@ pub(crate) fn forward(event: &PlayerEvent) {
 
 #[cfg(test)]
 #[path = "../../tests/unit/connect/bridge.rs"]
-mod tests;
+pub(crate) mod tests;

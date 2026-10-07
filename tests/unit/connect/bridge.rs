@@ -8,8 +8,13 @@ use super::*;
 /// libtest runs the crate several threads wide and `BRIDGE_TX`/`BRIDGE_HAS_CLIENT` are
 /// process-wide: a second test replacing the channel mid-case would make the first one
 /// forward into the wrong receiver and fail for a reason that is not its own. Taken first by
-/// every case here, the way `tests/unit/audio/preload.rs` does for `PRELOAD_STATE`.
-static BRIDGE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// every case here and by the receiver's routing tests, which run the real loop over these
+/// statics, the way `tests/unit/audio/preload.rs` does for `PRELOAD_STATE`.
+pub(crate) static BRIDGE_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub(crate) fn has_client() -> bool {
+    BRIDGE_HAS_CLIENT.load(Ordering::Acquire)
+}
 
 /// Adopted, a promotion made the Next that followed step nothing. A natural end still reaches
 /// the receiver.
