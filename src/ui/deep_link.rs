@@ -271,11 +271,10 @@ pub(crate) fn deliver(raw: &str) {
         }
     }
 
-    // Posted whatever `target_for` answered, and that is load-bearing on macOS;
-    // Windows and Linux each carry a focus signal beside the link, so a refused
-    // one still raises the window there. macOS is handed nothing but this task,
-    // its single-instance guard being a no-op. Gating this on an accepted link
-    // would leave a refused click answering with nothing at all.
+    // Posted whatever `target_for` answered, and that is load-bearing everywhere:
+    // a link that lands carries no focus signal beside it on Windows or Linux, and
+    // macOS is handed nothing but this task. Gating this on an accepted link would
+    // leave a refused click answering with nothing at all.
     //
     // Correctness of the link itself does not rest on the readiness flag;
     // `on_after_created` drains the slot when the browser appears, and a link

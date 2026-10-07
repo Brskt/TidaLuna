@@ -165,8 +165,9 @@ wrap_resource_handler! {
                         None => st.status = 0,
                     }
                 }
-                // Resume CEF on its own IO thread (Continue from a tokio worker is the
-                // documented crash class). Runs exactly once. The request never hangs.
+                // Resume CEF on its IO thread, where `cancel()` also runs: the `cancelled`
+                // check before `cont()` cannot race a cancel. Runs exactly once. The request
+                // never hangs.
                 let mut task = StoreContinueTask::new(callback, state);
                 post_task(ThreadId::IO, Some(&mut task));
             });
