@@ -73,7 +73,7 @@ pub(super) fn is_default_selector(id: &str) -> bool {
     id == "default" || id == "auto"
 }
 
-pub(super) fn find_output_device(device_id: &str) -> Option<cpal::Device> {
+pub(in crate::player) fn find_output_device(device_id: &str) -> Option<cpal::Device> {
     let host = cpal::default_host();
     // A default selector maps to the OS default without enumerating.
     if is_default_selector(device_id) {

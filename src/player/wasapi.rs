@@ -4,6 +4,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use cpal::traits::DeviceTrait;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -22,6 +23,7 @@ use windows::Win32::System::Threading::{
 
 use crate::player::declick::{RESYNC_SILENCE_MS, silence_frames};
 use crate::player::packet_failure::{PacketFailure, classify_packet_failure};
+use crate::player::thread::output::find_output_device;
 use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
 pub(super) enum ExclusiveCommand {
@@ -731,24 +733,15 @@ fn init_exclusive_client(device_id: &str) -> Result<(DeviceEnumerator, wasapi::D
             .get_default_device(&Direction::Render)
             .map_err(|e| format!("default device: {e}"))?
     } else {
-        // `device_id` is cpal's DeviceDesc ("Speakers"), NOT the endpoint id nor
-        // the FriendlyName. Match get_description() (same property cpal stores) to
-        // line up with the shared path's find_output_device; fall back to
-        // FriendlyName for the rare driver where cpal itself did.
-        let collection = enumerator
-            .get_device_collection(&Direction::Render)
-            .map_err(|e| format!("device collection: {e}"))?;
-        let count = collection
-            .get_nbr_devices()
-            .map_err(|e| format!("device count: {e}"))?;
-        (0..count)
-            .find_map(|i| {
-                let dev = collection.get_device_at_index(i).ok()?;
-                let matches = dev.get_description().ok().as_deref() == Some(device_id)
-                    || dev.get_friendlyname().ok().as_deref() == Some(device_id);
-                matches.then_some(dev)
-            })
-            .ok_or_else(|| format!("device '{device_id}': not found"))?
+        // `device_id` is cpal's device name: FriendlyName, or DeviceDesc when a driver
+        // sets none. Letting cpal resolve it and opening its endpoint id picks the device
+        // the shared path would, which matching either property does not guarantee.
+        let endpoint = find_output_device(device_id)
+            .and_then(|d| d.id().ok())
+            .ok_or_else(|| format!("device '{device_id}': not found"))?;
+        enumerator
+            .get_device(&endpoint.1)
+            .map_err(|e| format!("device '{device_id}': {e}"))?
     };
 
     Ok((enumerator, device))
