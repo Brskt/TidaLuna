@@ -1,3 +1,4 @@
+use crate::connect::receiver::session::Admission;
 use crate::connect::ws::server::WsServer;
 
 /// Simplified client communicator - just wraps WsServer for broadcast/unicast.
@@ -22,25 +23,36 @@ pub(crate) enum DispatchedCommand {
         command: String,
         payload: serde_json::Value,
     },
+    /// Dropped unanswered, as TIDAL's receiver drops it: sent by a socket outside the live
+    /// session, which an answer would tell what the session is doing, or one of the messages
+    /// TIDAL's receiver sends its own speaker and never takes from a phone.
+    Dropped { command: String },
 }
 
+/// Every socket may start, resume or end a session, the session being what admits a socket.
+/// Everything else is its members' alone.
 pub(crate) fn classify_command(
     socket_id: u32,
     command: &str,
     payload: serde_json::Value,
+    admission: Admission,
 ) -> DispatchedCommand {
-    match command {
-        "startSession" | "resumeSession" | "endSession" | "releaseResources"
-        | "requestResources" => DispatchedCommand::Session {
+    match (command, admission) {
+        ("startSession" | "resumeSession" | "endSession", _) => DispatchedCommand::Session {
             socket_id,
             command: command.to_string(),
             payload,
         },
-        "play" | "pause" | "stop" | "seek" => DispatchedCommand::Playback {
+        ("requestResources" | "releaseResources", _) | (_, Admission::Outsider) => {
+            DispatchedCommand::Dropped {
+                command: command.to_string(),
+            }
+        }
+        ("play" | "pause" | "stop" | "seek", Admission::Member) => DispatchedCommand::Playback {
             command: command.to_string(),
             payload,
         },
-        _ => DispatchedCommand::Queue {
+        (_, Admission::Member) => DispatchedCommand::Queue {
             socket_id,
             command: command.to_string(),
             payload,
@@ -69,3 +81,7 @@ impl ClientCommunicator {
         self.server.shutdown().await;
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/connect/receiver/client_comm.rs"]
+mod tests;

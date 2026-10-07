@@ -177,7 +177,12 @@ async fn routing_loop(
                             .and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let request_id = message.get("requestId").and_then(|v| v.as_u64());
                         crate::vprintln!("[connect::receiver] <- {} (socket {}, rid={:?})", command, sid, request_id);
-                        let result = match classify_command(sid, &command, message) {
+                        let admission = session_mgr.admission(sid);
+                        let result = match classify_command(sid, &command, message, admission) {
+                            DispatchedCommand::Dropped { command } => {
+                                crate::vprintln!("[connect::receiver] Dropped {} from socket {} ({:?})", command, sid, admission);
+                                None
+                            }
                             DispatchedCommand::Session { socket_id, command, payload } => {
                                 session_mgr.handle_command(socket_id, &command, &payload).await;
                                 None // Sessions have their own notification protocol
@@ -228,8 +233,6 @@ async fn routing_loop(
                             SessionInternalEvent::SessionStarted { session_id } => {
                                 crate::vprintln!("[connect::receiver] Session started: {}", session_id);
                             }
-                            SessionInternalEvent::ResourcesGranted
-                            | SessionInternalEvent::ResourcesRevoked => {}
                         }
                     }
                 }

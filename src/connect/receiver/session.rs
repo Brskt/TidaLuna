@@ -32,14 +32,24 @@ pub(crate) enum SessionEnd {
 pub(crate) enum SessionInternalEvent {
     SessionStarted { session_id: String },
     SessionEnded(SessionEnd),
-    ResourcesGranted,
-    ResourcesRevoked,
 }
 
 /// A session this receiver ended on its own, and the phones that have to be told.
 pub(crate) struct RevokedSession {
     pub(crate) sockets: Vec<u32>,
     pub(crate) notice: serde_json::Value,
+}
+
+/// Whether a socket speaks for the live session. TIDAL's receiver holds every new socket to
+/// `startSession`, `resumeSession` and `endSession` until a session starts or resumes on it, and
+/// drops anything else it sends without an answer: without that, any peer on the network drives
+/// the phone's cast unseen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Admission {
+    /// One of the sockets the live session started or resumed on.
+    Member,
+    /// Any other: no session, a suspended one, or one held by other sockets.
+    Outsider,
 }
 
 struct SessionData {
@@ -67,6 +77,21 @@ impl ReceiverSession {
         }
     }
 
+    /// Read for each command as it is taken: a `startSession` or `resumeSession` adds its socket
+    /// before the loop reads that socket's next message, so a command sent right behind one is
+    /// a member's.
+    pub fn admission(&self, socket_id: u32) -> Admission {
+        match &self.session {
+            Some(session)
+                if self.state == ReceiverSessionState::Active
+                    && session.connected_sockets.contains(&socket_id) =>
+            {
+                Admission::Member
+            }
+            _ => Admission::Outsider,
+        }
+    }
+
     /// Dispatch a session command from a mobile client.
     pub async fn handle_command(
         &mut self,
@@ -78,8 +103,6 @@ impl ReceiverSession {
             "startSession" => self.proc_start_session(socket_id, payload).await,
             "resumeSession" => self.proc_resume_session(socket_id, payload).await,
             "endSession" => self.proc_end_session(socket_id, payload).await,
-            "releaseResources" => self.proc_release_resources(socket_id).await,
-            "requestResources" => self.proc_request_resources(socket_id).await,
             _ => {
                 crate::vprintln!("[connect::receiver::session] Unknown command: {}", command);
             }
@@ -253,11 +276,22 @@ impl ReceiverSession {
             return;
         }
 
-        let session_id = self
+        // Open to every socket: only one that names the session ends it, as TIDAL's receiver
+        // checks; a peer that never heard its id cannot end another phone's session.
+        let requested_sid = payload
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let Some(session_id) = self
             .session
             .as_ref()
             .map(|s| s.session_id.clone())
-            .unwrap_or_default();
+            .filter(|id| id == requested_sid)
+        else {
+            self.send_session_error(socket_id, "endSession", "Invalid SessionId")
+                .await;
+            return;
+        };
 
         // suspended = !stopCasting (if stopCasting=true -> clean end, not suspended)
         self.handle_session_ended(!stop_casting).await;
@@ -284,33 +318,6 @@ impl ReceiverSession {
             sockets: session.connected_sockets.into_iter().collect(),
             notice: session_ended_notice(&session.session_id, false),
         })
-    }
-
-    async fn proc_request_resources(&mut self, socket_id: u32) {
-        // Grant resources immediately
-        let msg = serde_json::json!({ "command": "grantResources" });
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Unicast {
-                socket_id,
-                message: msg,
-            })
-            .await;
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Internal(
-                SessionInternalEvent::ResourcesGranted,
-            ))
-            .await;
-    }
-
-    async fn proc_release_resources(&mut self, _socket_id: u32) {
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Internal(
-                SessionInternalEvent::ResourcesRevoked,
-            ))
-            .await;
     }
 
     /// Transition to Ended state.
