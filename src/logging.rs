@@ -174,9 +174,9 @@ fn err_budget(now_ms: u64, state: &AtomicU64, missed: &AtomicU32) -> ErrBudget {
     // Masking keeps a saturated clock from shifting into the budget's own bits.
     let now_ms = now_ms & ERR_WINDOW_MASK;
     // One compare-and-swap settles both halves: roll the window, or claim a unit from the one
-    // standing. `fetch_update` retries until it wins: whoever succeeds is the only caller to
+    // standing. `try_update` retries until it wins: whoever succeeds is the only caller to
     // have acted on the value it read, which a load followed by a separate subtract cannot promise.
-    let claimed = state.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |packed| {
+    let claimed = state.try_update(Ordering::Relaxed, Ordering::Relaxed, |packed| {
         if now_ms.saturating_sub(packed >> ERR_LEFT_BITS) >= ERR_INTERVAL_MS {
             return Some((now_ms << ERR_LEFT_BITS) | u64::from(ERR_BURST - 1));
         }

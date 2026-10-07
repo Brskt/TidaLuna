@@ -180,7 +180,7 @@ impl CoverInterest {
         use std::sync::atomic::Ordering;
         let _ = self
             .waiters
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_sub(1))
             });
     }

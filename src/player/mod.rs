@@ -129,7 +129,7 @@ fn pack_load_state(cur_gen: u32, origin: LoadOrigin) -> u64 {
 /// lock, and a decision taken on a word read beforehand could act on a load already replaced.
 fn mint_if(claim: impl Fn(u32, LoadOrigin) -> Option<LoadOrigin>) -> Option<u32> {
     LOAD_STATE
-        .fetch_update(AcqRel, Acquire, |word| {
+        .try_update(AcqRel, Acquire, |word| {
             let (cur_gen, owner) = unpack_load_state(word);
             claim(cur_gen, owner).map(|origin| pack_load_state(cur_gen.wrapping_add(1), origin))
         })
