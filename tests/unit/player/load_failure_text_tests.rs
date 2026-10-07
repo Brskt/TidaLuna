@@ -184,6 +184,36 @@ async fn a_refused_dash_init_publishes_no_credential() {
     assert_no_credential(&settled_error(&events).await);
 }
 
+/// The Connect receiver tells its own load's events from a previous load's by the seq the load
+/// answered. A failure carrying a lower seq would be dropped as an earlier load's, and the
+/// cast's own track would sit in `Preparing` with no one told it cannot play.
+#[tokio::test]
+async fn a_failed_load_names_the_seq_the_load_answered() {
+    let _serialised = serialised().await;
+    let (player, events) = spying_player();
+
+    let seq = player
+        .load_dash(
+            "http://127.0.0.1:1/init.mp4".to_string(),
+            vec!["http://127.0.0.1:1/seg-0.m4s".to_string()],
+            "flac".to_string(),
+            None,
+            LoadOrigin::Local,
+        )
+        .expect("a non-empty segment list is accepted");
+
+    settled_error(&events).await;
+    let failure_seq = events
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find_map(|ev| match ev {
+            PlayerEvent::MediaError { seq, .. } => Some(*seq),
+            _ => None,
+        });
+    assert_eq!(failure_seq, Some(seq), "the failure named another load");
+}
+
 #[tokio::test]
 async fn a_truncated_dash_init_publishes_no_credential() {
     let _serialised = serialised().await;

@@ -727,7 +727,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // Error first (cause), then Duration(0) (effect): the SDK's load()
                 // awaits `mediaduration` with no timeout, and 0 is its own
                 // unknown-duration sentinel.
-                (self.callback)(PlayerEvent::MediaError { error, code });
+                (self.callback)(PlayerEvent::MediaError { error, code, seq });
                 // The failed load's own id, carried on the command: this runs before
                 // `handle_load`; the thread is still committed to the previous track, and
                 // `self.current_product_id` would name it instead.

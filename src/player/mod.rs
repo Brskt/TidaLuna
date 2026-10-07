@@ -551,15 +551,20 @@ pub enum PlayerEvent {
         bytes: u64,
     },
     Version(&'static str),
+    /// `seq` is the event generation of the load that failed, as every other per-load event
+    /// carries one: a failure that does not name its load is charged to whichever load is
+    /// current when it is read.
     MediaError {
         error: String,
         code: MediaErrorCode,
+        seq: u32,
     },
     MaxConnectionsReached,
     /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the
     /// player and raises TIDAL's own error banner; never advances the queue, and never
-    /// touches the cache: the file was fine, the connection was not.
-    NetworkLost,
+    /// touches the cache: the file was fine, the connection was not. Carries the load's event
+    /// generation, as `MediaError` does.
+    NetworkLost(u32),
     /// Re-arm a retained source into the shared pipeline: flush.rs reloads `track`
     /// at the generation snapshot (skipped if a newer load/stop superseded it),
     /// seeks to `position` (None = start), and auto-plays per `play`. Emitted on a
@@ -1409,7 +1414,8 @@ impl Player {
     }
 
     /// `load_gen` is minted by the caller, which is where it is decided whose load this is and
-    /// whether it may start at all.
+    /// whether it may start at all. Answers the event generation every event of this load
+    /// carries.
     fn load_with_policy(
         &self,
         url: String,
@@ -1419,7 +1425,7 @@ impl Player {
         resume_policy: ResumePolicy,
         auto_play: bool,
         load_gen: u32,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u32> {
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
@@ -1512,7 +1518,7 @@ impl Player {
 
         *self.load_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 
-        Ok(())
+        Ok(event_seq)
     }
 
     pub fn load(
@@ -1552,15 +1558,17 @@ impl Player {
                     want_play,
                     short_id(&canonical_url_id, 60)
                 );
-                return self.load_with_policy(
-                    url,
-                    format,
-                    key,
-                    product_id,
-                    ResumePolicy::Restart,
-                    want_play,
-                    begin_load(LoadOrigin::Local),
-                );
+                return self
+                    .load_with_policy(
+                        url,
+                        format,
+                        key,
+                        product_id,
+                        ResumePolicy::Restart,
+                        want_play,
+                        begin_load(LoadOrigin::Local),
+                    )
+                    .map(|_| ());
             }
             // Takes the new credential, keeps the play instance. The skip below correctly answers
             // "same track?" but must not also mean "still fetchable": every same-track load carries a
@@ -1612,11 +1620,12 @@ impl Player {
             want_play,
             begin_load(LoadOrigin::Local),
         )
+        .map(|_| ())
     }
 
     /// A load over whatever plays, in `origin`'s name: the Connect receiver's, on a controller's
     /// behalf. The renderer's completion-time advance carries its own load on instead
-    /// ([`Player::advance`]).
+    /// ([`Player::advance`]). Answers the event generation every event of the load carries.
     pub fn load_and_play(
         &self,
         url: String,
@@ -1624,7 +1633,7 @@ impl Player {
         key: String,
         product_id: Option<String>,
         origin: LoadOrigin,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u32> {
         self.load_with_policy(
             url,
             format,
@@ -1657,7 +1666,8 @@ impl Player {
         .map(|_| Continuation::Started)
     }
 
-    /// Load a DASH stream by fetching init + media segments and concatenating them.
+    /// Load a DASH stream by fetching init + media segments and concatenating them. Answers the
+    /// event generation every event of the load carries.
     pub fn load_dash(
         &self,
         init_url: String,
@@ -1665,7 +1675,7 @@ impl Player {
         format: String,
         product_id: Option<String>,
         origin: LoadOrigin,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u32> {
         // The shared choke point. The IPC channel validates its own arguments, but the
         // Connect receiver reaches this function directly in Rust and handed it an empty
         // list, which loads as a header-only fMP4 and "completes" in zero samples. Which of
@@ -1841,7 +1851,7 @@ impl Player {
         });
 
         *self.load_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
-        Ok(())
+        Ok(event_seq)
     }
 
     /// An explicit target seeks there (when past the resume floor); otherwise
@@ -1873,6 +1883,7 @@ impl Player {
             false,
             begin_load(LoadOrigin::Local),
         )
+        .map(|_| ())
     }
 
     /// Re-arm the shared pipeline from a `ReplayRequest`: `Some(position)` seeks

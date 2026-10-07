@@ -318,32 +318,32 @@ async fn routing_loop(
             // Arm 6: Bridge events from local player
             Some(event) = bridge_rx.recv() => {
                 match event {
-                    BridgeEvent::Prepared { engine_gen } => {
-                        crate::vprintln!("[connect::bridge] <- Prepared (gen={})", engine_gen);
-                        playback_ctrl.on_prepared(engine_gen).await;
+                    BridgeEvent::Prepared { from } => {
+                        crate::vprintln!("[connect::bridge] <- Prepared ({:?})", from);
+                        playback_ctrl.on_prepared(from).await;
                     }
-                    BridgeEvent::StatusUpdated { ref state, engine_gen } => {
-                        crate::vprintln!("[connect::bridge] <- StatusUpdated {:?} (gen={})", state, engine_gen);
-                        playback_ctrl.on_status_updated(*state, engine_gen).await;
+                    BridgeEvent::StatusUpdated { ref state, from } => {
+                        crate::vprintln!("[connect::bridge] <- StatusUpdated {:?} ({:?})", state, from);
+                        playback_ctrl.on_status_updated(*state, from).await;
                     }
-                    BridgeEvent::ProgressUpdated { progress_ms, duration_ms, engine_gen } => {
-                        // Don't log every progress (too noisy) - logged once via flush.rs.
+                    BridgeEvent::ProgressUpdated { progress_ms, duration_ms, from } => {
+                        // Don't log each progress (too noisy); one is logged via flush.rs.
                         // When idle, bridge::forward short-circuits at the source, so
                         // no bridge events reach this loop at all.
-                        playback_ctrl.on_progress_updated(progress_ms, duration_ms, engine_gen).await;
+                        playback_ctrl.on_progress_updated(progress_ms, duration_ms, from).await;
                     }
-                    BridgeEvent::PlaybackCompleted { has_next_media, engine_gen } => {
-                        crate::vprintln!("[connect::bridge] <- PlaybackCompleted has_next={} (gen={})", has_next_media, engine_gen);
+                    BridgeEvent::PlaybackCompleted { has_next_media, from } => {
+                        crate::vprintln!("[connect::bridge] <- PlaybackCompleted has_next={} ({:?})", has_next_media, from);
                         let _ = has_next_media;
-                        playback_ctrl.on_playback_completed(engine_gen).await;
+                        playback_ctrl.on_playback_completed(from).await;
                     }
-                    BridgeEvent::PlaybackError { ref status_code, engine_gen } => {
-                        crate::vprintln!("[connect::bridge] <- PlaybackError {} (gen={})", status_code, engine_gen);
-                        playback_ctrl.on_playback_error(status_code, engine_gen).await;
+                    BridgeEvent::PlaybackError { ref status_code, from } => {
+                        crate::vprintln!("[connect::bridge] <- PlaybackError {} ({:?})", status_code, from);
+                        playback_ctrl.on_playback_error(status_code, from).await;
                     }
-                    BridgeEvent::DurationMeasured { duration_ms, ref track_id, engine_gen } => {
-                        crate::vprintln!("[connect::bridge] <- DurationMeasured {}ms (gen={})", duration_ms, engine_gen);
-                        playback_ctrl.on_duration_measured(duration_ms, track_id.as_deref(), engine_gen).await;
+                    BridgeEvent::DurationMeasured { duration_ms, ref track_id, from } => {
+                        crate::vprintln!("[connect::bridge] <- DurationMeasured {}ms ({:?})", duration_ms, from);
+                        playback_ctrl.on_duration_measured(duration_ms, track_id.as_deref(), from).await;
                     }
                     BridgeEvent::LocalLoad(load) => {
                         // Answered before anything is selected or stepped. The receiver's load of

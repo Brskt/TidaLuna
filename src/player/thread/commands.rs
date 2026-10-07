@@ -779,10 +779,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return false;
         }
         match failure {
-            IncomingFailure::NetworkStalled => (self.callback)(PlayerEvent::NetworkLost),
+            IncomingFailure::NetworkStalled => {
+                (self.callback)(PlayerEvent::NetworkLost(self.current_seq));
+            }
             IncomingFailure::Decode(error) => (self.callback)(PlayerEvent::MediaError {
                 error,
                 code: MediaErrorCode::UnreadableFile,
+                seq: self.current_seq,
             }),
         }
         // Left set, both arm a guard nothing can clear: the channel behind them is dead.
@@ -1289,6 +1292,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 (self.callback)(PlayerEvent::MediaError {
                     error: e,
                     code: MediaErrorCode::UnreadableFile,
+                    seq: self.current_seq,
                 });
                 // Settle the SDK's load() (its `mediaduration` await has no
                 // timeout); 0, not the previous track's stale current_duration.

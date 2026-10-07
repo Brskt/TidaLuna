@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::mpsc;
 
-use crate::connect::receiver::speaker_bridge::BridgeEvent;
+use crate::connect::receiver::speaker_bridge::{BridgeEvent, EventStamp};
 use crate::connect::types::PlayerState as ConnectPlayerState;
 use crate::player::{LoadOrigin, PlaybackState, PlayerEvent};
 
@@ -106,29 +106,30 @@ pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
     };
 
     let engine_gen = ENGINE_GEN.load(Ordering::Relaxed);
+    let from = |seq: u32| EventStamp { engine_gen, seq };
 
     let bridge_event = match event {
-        PlayerEvent::StateChange(state, _seq) => match state {
-            PlaybackState::Ready => Some(BridgeEvent::Prepared { engine_gen }),
+        PlayerEvent::StateChange(state, seq) => match state {
+            PlaybackState::Ready => Some(BridgeEvent::Prepared { from: from(*seq) }),
             PlaybackState::Active => Some(BridgeEvent::StatusUpdated {
                 state: ConnectPlayerState::Playing,
-                engine_gen,
+                from: from(*seq),
             }),
             PlaybackState::Paused => Some(BridgeEvent::StatusUpdated {
                 state: ConnectPlayerState::Paused,
-                engine_gen,
+                from: from(*seq),
             }),
             PlaybackState::Idle => Some(BridgeEvent::StatusUpdated {
                 state: ConnectPlayerState::Buffering,
-                engine_gen,
+                from: from(*seq),
             }),
             PlaybackState::Completed => Some(BridgeEvent::PlaybackCompleted {
                 has_next_media: false,
-                engine_gen,
+                from: from(*seq),
             }),
             PlaybackState::Stopped => Some(BridgeEvent::StatusUpdated {
                 state: ConnectPlayerState::Idle,
-                engine_gen,
+                from: from(*seq),
             }),
             // Connect's state set has no seeking, and the seek's own answer reaches the
             // controller as the `TimeUpdate` that follows it.
@@ -139,25 +140,25 @@ pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
         // controller's queue never moves; adopting the step would pull the receiver's index off
         // the track the cast plays.
         PlayerEvent::CrossfadePromoted(..) => None,
-        PlayerEvent::TimeUpdate(seconds, _seq) => {
+        PlayerEvent::TimeUpdate(seconds, seq) => {
             let ms = (*seconds * 1000.0) as u64;
             Some(BridgeEvent::ProgressUpdated {
                 progress_ms: ms,
                 duration_ms: 0,
-                engine_gen,
+                from: from(*seq),
             })
         }
-        PlayerEvent::MediaError { error, .. } => Some(BridgeEvent::PlaybackError {
+        PlayerEvent::MediaError { error, seq, .. } => Some(BridgeEvent::PlaybackError {
             status_code: error.clone(),
-            engine_gen,
+            from: from(*seq),
         }),
         // Zero is the sentinel a failed load emits to settle the SDK's `mediaduration` await,
         // not a length: forwarding it would announce a track of no duration to the controller.
-        PlayerEvent::Duration(secs, _seq, track_id) if *secs > 0.0 => {
+        PlayerEvent::Duration(secs, seq, track_id) if *secs > 0.0 => {
             Some(BridgeEvent::DurationMeasured {
                 duration_ms: (*secs * 1000.0) as u64,
                 track_id: track_id.clone(),
-                engine_gen,
+                from: from(*seq),
             })
         }
         // A dead network stops the local player for good; the controller has to hear it
@@ -165,9 +166,9 @@ pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
         // arm rather than a `StatusUpdated`, because the receiver answers this one by
         // settling to `Stopped` FIRST: a status alone leaves `PbState::Started` standing,
         // and the status recomputed from it re-asserts `Playing` to the phone.
-        PlayerEvent::NetworkLost => Some(BridgeEvent::PlaybackError {
+        PlayerEvent::NetworkLost(seq) => Some(BridgeEvent::PlaybackError {
             status_code: "network connection lost".to_string(),
-            engine_gen,
+            from: from(*seq),
         }),
         // The guard above owns the real measurement; this is its zero sentinel.
         PlayerEvent::Duration(..) => None,

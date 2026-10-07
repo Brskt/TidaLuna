@@ -15,6 +15,11 @@ fn media(id: &str, duration: Option<u64>) -> MediaInfo {
     .expect("ids and metadata are all this needs")
 }
 
+/// An event of the load the controller handed the player at `engine_gen`, its first seq.
+fn of_engine(engine_gen: u64) -> EventStamp {
+    EventStamp { engine_gen, seq: 0 }
+}
+
 /// A controller already announcing `media`, with the broadcast channel in the test's hand.
 fn announcing(media: MediaInfo) -> (PlaybackController, mpsc::Receiver<PlaybackNotifyEvent>) {
     let (tx, rx) = mpsc::channel(8);
@@ -52,7 +57,7 @@ async fn a_measurement_for_the_announced_track_corrects_its_length() {
     let (mut controller, mut broadcasts) = announcing(media("88264189", None));
 
     controller
-        .on_duration_measured(214_000, Some("88264189"), 0)
+        .on_duration_measured(214_000, Some("88264189"), of_engine(0))
         .await;
 
     assert!(
@@ -76,7 +81,7 @@ async fn a_measurement_confirming_the_announced_length_announces_nothing() {
     let (mut controller, mut broadcasts) = announcing(media("88264189", Some(214_000)));
 
     controller
-        .on_duration_measured(214_000, Some("88264189"), 0)
+        .on_duration_measured(214_000, Some("88264189"), of_engine(0))
         .await;
 
     assert!(
@@ -91,7 +96,7 @@ async fn a_measurement_naming_another_track_changes_nothing() {
     let (mut controller, mut broadcasts) = announcing(media("88264189", None));
 
     controller
-        .on_duration_measured(214_000, Some("120002099"), 0)
+        .on_duration_measured(214_000, Some("120002099"), of_engine(0))
         .await;
 
     assert!(broadcasts.try_recv().is_err());
@@ -110,7 +115,9 @@ async fn a_measurement_naming_no_track_changes_nothing() {
     // Two unidentified sides are not the same track, which is what `same_track` exists to say.
     let (mut controller, mut broadcasts) = announcing(media("88264189", None));
 
-    controller.on_duration_measured(214_000, None, 0).await;
+    controller
+        .on_duration_measured(214_000, None, of_engine(0))
+        .await;
 
     assert!(broadcasts.try_recv().is_err());
 }
@@ -121,8 +128,117 @@ async fn a_measurement_from_a_retired_engine_changes_nothing() {
     let (mut controller, mut broadcasts) = announcing(media("88264189", None));
 
     controller
-        .on_duration_measured(214_000, Some("88264189"), 7)
+        .on_duration_measured(214_000, Some("88264189"), of_engine(7))
         .await;
 
     assert!(broadcasts.try_recv().is_err());
+}
+
+#[test]
+fn a_load_owns_the_events_of_its_generation_from_its_seq_on() {
+    assert!(
+        !EventStamp {
+            engine_gen: 1,
+            seq: 9
+        }
+        .is_from(1, 10)
+    );
+    assert!(
+        EventStamp {
+            engine_gen: 1,
+            seq: 10
+        }
+        .is_from(1, 10)
+    );
+    // A stop or a re-arm the player took over the same load since.
+    assert!(
+        EventStamp {
+            engine_gen: 1,
+            seq: 11
+        }
+        .is_from(1, 10)
+    );
+    assert!(
+        !EventStamp {
+            engine_gen: 0,
+            seq: 11
+        }
+        .is_from(1, 10)
+    );
+}
+
+fn preparing_the_casts_first_track() -> (PlaybackController, mpsc::Receiver<PlaybackNotifyEvent>) {
+    let (mut controller, notices) = announcing(media("88264189", None));
+    controller.state = PbState::Preparing;
+    controller.engine_gen = 1;
+    controller.load_seq = 10;
+    (controller, notices)
+}
+
+/// The listener's own track can end while the cast's first track is fetched, its last events
+/// forwarded after the cast took the player. Taken as the cast's, that end skipped the cast's
+/// first track, or with nothing after it left the controller `Completed` under a track that
+/// plays, which the phone could no longer pause.
+#[tokio::test]
+async fn a_local_tracks_end_forwarded_late_leaves_the_casts_first_track_alone() {
+    let (mut controller, mut notices) = preparing_the_casts_first_track();
+
+    controller
+        .on_playback_completed(EventStamp {
+            engine_gen: 1,
+            seq: 9,
+        })
+        .await;
+
+    assert_eq!(controller.state, PbState::Preparing);
+    assert!(
+        notices.try_recv().is_err(),
+        "the end of a track the cast never played moved the cast"
+    );
+}
+
+/// Same window, the local decoder failing: taken as the cast's, it settled the controller to
+/// `Stopped`, and the cast's own `Ready` was then ignored.
+#[tokio::test]
+async fn a_local_tracks_failure_forwarded_late_leaves_the_casts_first_track_alone() {
+    let (mut controller, mut notices) = preparing_the_casts_first_track();
+
+    controller
+        .on_playback_error(
+            "decode failed",
+            EventStamp {
+                engine_gen: 1,
+                seq: 9,
+            },
+        )
+        .await;
+
+    assert_eq!(controller.state, PbState::Preparing);
+    assert!(notices.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn the_casts_own_end_still_moves_its_queue_on() {
+    let (mut controller, mut notices) = preparing_the_casts_first_track();
+    controller.state = PbState::Started;
+
+    controller
+        .on_playback_completed(EventStamp {
+            engine_gen: 1,
+            seq: 10,
+        })
+        .await;
+
+    assert_eq!(controller.state, PbState::Completed);
+    let mut asked_for_next = false;
+    while let Ok(notice) = notices.try_recv() {
+        asked_for_next |= matches!(
+            notice,
+            PlaybackNotifyEvent::Internal(PlaybackInternalEvent::MediaCompleted { .. })
+        );
+    }
+    assert!(
+        asked_for_next,
+        "the cast's own end did not ask for the next track"
+    );
 }

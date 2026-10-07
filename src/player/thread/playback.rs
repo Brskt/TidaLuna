@@ -171,11 +171,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // caller; what crosses to the SDK is the bare fact, as on the shared path.
             PacketFailure::Network => {
                 crate::verr!("[BYPASS] Network lost, stopping the player");
-                (self.callback)(PlayerEvent::NetworkLost);
+                (self.callback)(PlayerEvent::NetworkLost(self.current_seq));
             }
             PacketFailure::Source => (self.callback)(PlayerEvent::MediaError {
                 error,
                 code: MediaErrorCode::UnreadableFile,
+                seq: self.current_seq,
             }),
         }
         // The SDK's same-track recovery reload rebuilds instead of resuming a dead decoder.
@@ -1135,7 +1136,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         // Deliberately none of what the error arm below does. `drop_entry`
                         // would evict a file that decoded fine until the bytes stopped,
                         // and every `MediaError` code TIDAL maps advances the queue.
-                        (self.callback)(PlayerEvent::NetworkLost);
+                        (self.callback)(PlayerEvent::NetworkLost(self.current_seq));
                         // The decode thread is gone; leaving these set arms a guard that
                         // nothing can clear, exactly as in the error arm.
                         self.set_committed_track(None);
@@ -1175,6 +1176,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         (self.callback)(PlayerEvent::MediaError {
                             error: e,
                             code: MediaErrorCode::UnreadableFile,
+                            seq: self.current_seq,
                         });
                         // Init-time decode errors emit Error with no trailing Finished,
                         // and nothing else clears committed_track. Drop it here for the SDK's

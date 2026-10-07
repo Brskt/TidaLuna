@@ -315,7 +315,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::device_error(kind.as_str()));
             }
-            PlayerEvent::MediaError { error, code } => {
+            PlayerEvent::MediaError { error, code, .. } => {
                 state
                     .pending_player_events
                     .push(PlayerBridgeEvent::media_error(&error, code.as_str()));
@@ -325,7 +325,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::max_connections());
             }
-            PlayerEvent::NetworkLost => {
+            PlayerEvent::NetworkLost(_) => {
                 state
                     .pending_player_events
                     .push(PlayerBridgeEvent::network_lost());

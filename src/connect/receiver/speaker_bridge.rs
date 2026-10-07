@@ -1,28 +1,49 @@
 use crate::app_state::with_state;
 use crate::connect::types::{MediaInfo, PlayerState};
 
-/// Events from this host forwarded to the receiver: the local player's, each carrying an
-/// `engine_gen` for stale-event filtering, and the loads the SDK asks for during a cast.
+/// Which load a player event comes from, as the bridge hands it over.
+///
+/// `engine_gen` is the controller's generation, read when the event is forwarded rather than
+/// when it was emitted: a local track's end still queued when the cast's first load starts
+/// reads that load's generation. `seq` is the event generation the player stamped on the event
+/// as it emitted it, and only it names the load that did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EventStamp {
+    pub(crate) engine_gen: u64,
+    pub(crate) seq: u32,
+}
+
+impl EventStamp {
+    /// Whether the event comes from the load the controller handed the player at `engine_gen`,
+    /// whose events start at `load_seq`. A later seq is that load's too, or a command the player
+    /// took over it since (a stop, a re-arm); an earlier one belongs to a load before it.
+    pub(crate) fn is_from(self, engine_gen: u64, load_seq: u32) -> bool {
+        self.engine_gen == engine_gen && self.seq >= load_seq
+    }
+}
+
+/// Events from this host forwarded to the receiver: the local player's, each stamped with the
+/// load it comes from, and the loads the SDK asks for during a cast.
 pub(crate) enum BridgeEvent {
     Prepared {
-        engine_gen: u64,
+        from: EventStamp,
     },
     StatusUpdated {
         state: PlayerState,
-        engine_gen: u64,
+        from: EventStamp,
     },
     ProgressUpdated {
         progress_ms: u64,
         duration_ms: u64,
-        engine_gen: u64,
+        from: EventStamp,
     },
     PlaybackCompleted {
         has_next_media: bool,
-        engine_gen: u64,
+        from: EventStamp,
     },
     PlaybackError {
         status_code: String,
-        engine_gen: u64,
+        from: EventStamp,
     },
     /// The local decoder measured the track's real length. The queue metadata is the only other
     /// source the controller ever sees, and window items reach us without one. Carries the track
@@ -30,7 +51,7 @@ pub(crate) enum BridgeEvent {
     DurationMeasured {
         duration_ms: u64,
         track_id: Option<String>,
-        engine_gen: u64,
+        from: EventStamp,
     },
     /// The SDK on this host asked for a load while the controller owns the player. The loop
     /// decides what it becomes against the controller's queue, and answers it whatever it
@@ -56,14 +77,15 @@ impl SpeakerBridge {
     /// Load and play a track. Extracts url/format/key from MediaInfo.
     /// Supports both direct streams (BTS/FLAC) and DASH (AAC).
     ///
-    /// `false` when the track never reached the player. No `PlayerEvent` follows a refusal, so
-    /// the caller's `Preparing` would stand forever unless it answers for the failure itself.
-    pub fn prepare(&self, media_info: &MediaInfo) -> bool {
+    /// The event generation the load's events start at, `None` when the track never reached
+    /// the player. No `PlayerEvent` follows a refusal; the caller's `Preparing` would stand
+    /// forever unless it answers for the failure itself.
+    pub fn prepare(&self, media_info: &MediaInfo) -> Option<u32> {
         let url = match &media_info.src_url {
             Some(url) => url.clone(),
             None => {
                 crate::verr!("[connect::bridge] MediaInfo without srcUrl - cannot load");
-                return false;
+                return None;
             }
         };
 
@@ -101,14 +123,14 @@ impl SpeakerBridge {
                     media_id,
                     crate::player::LoadOrigin::Connect,
                 ) {
-                    Ok(()) => true,
+                    Ok(seq) => Some(seq),
                     Err(e) => {
                         crate::verr!("[connect::bridge] Player DASH load error: {}", e);
-                        false
+                        None
                     }
                 }
             })
-            .unwrap_or(false);
+            .flatten();
         }
 
         // Direct stream path (BTS/FLAC)
@@ -129,14 +151,14 @@ impl SpeakerBridge {
                 media_id,
                 crate::player::LoadOrigin::Connect,
             ) {
-                Ok(()) => true,
+                Ok(seq) => Some(seq),
                 Err(e) => {
                     crate::verr!("[connect::bridge] Player load error: {}", e);
-                    false
+                    None
                 }
             }
         })
-        .unwrap_or(false)
+        .flatten()
     }
 
     /// The player thread is the only receiver and nothing restarts it: a refused send means

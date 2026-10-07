@@ -471,7 +471,7 @@ fn a_bypass_network_loss_holds_the_queue_and_still_frees_the_device() {
             .lock()
             .unwrap()
             .iter()
-            .any(|ev| matches!(ev, PlayerEvent::NetworkLost)),
+            .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
         "a stall has to raise the no-connection banner, not blame the track"
     );
     assert!(
@@ -2143,7 +2143,7 @@ fn a_promoted_fade_settles_the_incoming_track_that_died() {
         assert!(
             events
                 .iter()
-                .any(|ev| matches!(ev, PlayerEvent::NetworkLost)),
+                .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
             "a stalled incoming track that got promoted must still report the loss, got {events:?}"
         );
     }
@@ -2160,7 +2160,7 @@ fn a_promoted_fade_settles_the_incoming_track_that_died() {
     assert!(
         !events
             .iter()
-            .any(|ev| matches!(ev, PlayerEvent::NetworkLost)),
+            .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
         "a skip is not a failure: promoting for one must report nothing, got {events:?}"
     );
 }

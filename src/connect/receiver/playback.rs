@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::connect::receiver::speaker_bridge::SpeakerBridge;
+use crate::connect::receiver::speaker_bridge::{EventStamp, SpeakerBridge};
 use crate::connect::types::{
     MediaInfo, MediaMetadata, PbPlayState, PbState, PlaybackNotification, PlayerState,
 };
@@ -30,6 +30,10 @@ pub(crate) struct PlaybackController {
 
     /// Engine generation - incremented on every set_media/reset
     engine_gen: u64,
+    /// The event generation of the load last handed to the player. `engine_gen` is stamped on
+    /// an event when it is forwarded, so an event the previous load emitted earlier and that
+    /// is forwarded late carries it too; only an event's own generation tells the two apart.
+    load_seq: u32,
     /// Queue generation - set by QueueManager, checked on gapless swap
     queue_gen: u64,
 
@@ -52,6 +56,7 @@ impl PlaybackController {
             next_media: None,
             media_seq_no: 0,
             engine_gen: 0,
+            load_seq: 0,
             queue_gen: 0,
             bridge,
             notify_tx,
@@ -98,14 +103,21 @@ impl PlaybackController {
         self.play_state = PbPlayState::Playing; // Default intent: autoplay
 
         let handed_to_player = self.bridge.prepare(&media_info);
+        if let Some(seq) = handed_to_player {
+            self.load_seq = seq;
+        }
         self.notify_media_changed().await;
-        if !handed_to_player {
+        if handed_to_player.is_none() {
             // Nothing reached the player: no `PlayerEvent` will ever arrive, and `Preparing`
             // would stand for the rest of the session. Answer for it here, where the state that
             // would be stranded lives.
-            self.on_playback_error("media could not be loaded", self.engine_gen)
-                .await;
+            self.fail("media could not be loaded").await;
         }
+    }
+
+    /// Whether a player event belongs to the load this controller handed the player last.
+    fn hears(&self, from: EventStamp) -> bool {
+        from.is_from(self.engine_gen, self.load_seq)
     }
 
     /// Prepare next media for gapless playback.
@@ -218,12 +230,13 @@ impl PlaybackController {
     }
 
     /// Player finished preparing (Ready state).
-    pub async fn on_prepared(&mut self, engine_gen: u64) {
-        if engine_gen != self.engine_gen {
+    pub async fn on_prepared(&mut self, from: EventStamp) {
+        if !self.hears(from) {
             crate::vprintln!(
-                "[connect::playback] Stale prepared: gen={}, current={}",
-                engine_gen,
-                self.engine_gen
+                "[connect::playback] Stale prepared: {:?}, current gen={} seq={}",
+                from,
+                self.engine_gen,
+                self.load_seq
             );
             return;
         }
@@ -241,8 +254,8 @@ impl PlaybackController {
     }
 
     /// Player state changed.
-    pub async fn on_status_updated(&mut self, player_state: PlayerState, engine_gen: u64) {
-        if engine_gen != self.engine_gen {
+    pub async fn on_status_updated(&mut self, player_state: PlayerState, from: EventStamp) {
+        if !self.hears(from) {
             return;
         }
         match player_state {
@@ -258,9 +271,9 @@ impl PlaybackController {
         &mut self,
         progress_ms: u64,
         duration_ms: u64,
-        engine_gen: u64,
+        from: EventStamp,
     ) {
-        if engine_gen != self.engine_gen {
+        if !self.hears(from) {
             return;
         }
         self.last_progress_ms = progress_ms;
@@ -282,9 +295,9 @@ impl PlaybackController {
         &mut self,
         duration_ms: u64,
         track_id: Option<&str>,
-        engine_gen: u64,
+        from: EventStamp,
     ) {
-        if engine_gen != self.engine_gen {
+        if !self.hears(from) {
             return;
         }
         let corrected = {
@@ -318,8 +331,8 @@ impl PlaybackController {
     }
 
     /// Track finished playing.
-    pub async fn on_playback_completed(&mut self, engine_gen: u64) {
-        if engine_gen != self.engine_gen {
+    pub async fn on_playback_completed(&mut self, from: EventStamp) {
+        if !self.hears(from) {
             return;
         }
         self.state = PbState::Completed;
@@ -345,10 +358,16 @@ impl PlaybackController {
     }
 
     /// Playback error.
-    pub async fn on_playback_error(&mut self, status_code: &str, engine_gen: u64) {
-        if engine_gen != self.engine_gen {
+    pub async fn on_playback_error(&mut self, status_code: &str, from: EventStamp) {
+        if !self.hears(from) {
             return;
         }
+        self.fail(status_code).await;
+    }
+
+    /// The current track cannot play: the controller hears it, and the state settles to
+    /// `Stopped`.
+    async fn fail(&mut self, status_code: &str) {
         crate::vprintln!("[connect::playback] Error: {}", status_code);
 
         let notification = PlaybackNotification::NotifyPlaybackError {
