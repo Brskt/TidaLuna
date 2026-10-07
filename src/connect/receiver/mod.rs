@@ -111,9 +111,12 @@ impl ConnectReceiver {
         Ok((Self { tasks, advertiser }, bridge_tx))
     }
 
-    /// Tear down WS server, mDNS advertiser and routing task within `deadline`
-    /// (mDNS gets a fifth of it, the TaskGroup the rest).
-    pub async fn shutdown(&mut self, deadline: Duration) {
+    /// Tear down WS server, mDNS advertiser and routing task. mDNS gets a fifth of
+    /// `deadline`, then the TaskGroup all of it.
+    pub async fn shutdown(
+        &mut self,
+        deadline: Duration,
+    ) -> crate::connect::runtime::ShutdownReport {
         // Stop advertising (unregister + goodbye packet) and then drive a
         // bounded shutdown of the mDNS daemon thread via `MdnsBackend`.
         // The backend is idempotent: if the daemon is already stopped,
@@ -137,6 +140,7 @@ impl ConnectReceiver {
             report.aborted,
             report.panicked,
         );
+        report
     }
 }
 
