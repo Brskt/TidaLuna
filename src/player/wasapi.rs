@@ -23,7 +23,7 @@ use windows::Win32::System::Threading::{
 
 use crate::player::declick::{RESYNC_SILENCE_MS, silence_frames};
 use crate::player::packet_failure::{PacketFailure, classify_packet_failure};
-use crate::player::thread::output::find_output_device;
+use crate::player::thread::output::{find_output_device, is_default_selector};
 use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
 pub(super) enum ExclusiveCommand {
@@ -725,10 +725,9 @@ fn negotiate_format(
 fn init_exclusive_client(device_id: &str) -> Result<(DeviceEnumerator, wasapi::Device), String> {
     let enumerator = DeviceEnumerator::new().map_err(|e| format!("DeviceEnumerator: {e}"))?;
 
-    // "auto"/"default"/empty are the default-device sentinels (TIDAL's selectSystemDevice
-    // and the sticky exclusive re-assert send "auto", matching the shared cpal path); resolve
-    // them to the OS default render endpoint instead of a literal device-name lookup.
-    let device = if device_id == "default" || device_id == "auto" || device_id.is_empty() {
+    // "auto"/"default"/empty are the default-device sentinels: resolve them to the OS default
+    // render endpoint instead of a literal device-name lookup.
+    let device = if is_default_selector(device_id) || device_id.is_empty() {
         enumerator
             .get_default_device(&Direction::Render)
             .map_err(|e| format!("default device: {e}"))?

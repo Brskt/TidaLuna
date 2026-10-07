@@ -123,10 +123,9 @@ impl VolumeSync {
             let dev_enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
-            // "auto"/empty are default-device aliases, same as is_default_selector
-            // (output.rs) and the exclusive/cpal paths; without this they fell into
-            // find_device_by_name("auto") and failed with E_FAIL, dropping volume_sync.
-            let device = if device_id == "default" || device_id == "auto" || device_id.is_empty() {
+            // The default-device sentinels, as on the exclusive and cpal paths: looked up by
+            // name, "auto" failed with E_FAIL and dropped volume_sync.
+            let device = if crate::player::is_default_selector(device_id) || device_id.is_empty() {
                 dev_enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?
             } else {
                 find_device_by_name(&dev_enumerator, device_id)?

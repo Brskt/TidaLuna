@@ -69,7 +69,7 @@ pub(super) fn enumerate_audio_devices() -> Vec<AudioDevice> {
 
 /// True when `id` selects the OS default device rather than a specific one:
 /// `"default"` (the device-list entry) and `"auto"` (selectSystemDevice) are aliases.
-pub(super) fn is_default_selector(id: &str) -> bool {
+pub(crate) fn is_default_selector(id: &str) -> bool {
     id == "default" || id == "auto"
 }
 

@@ -761,6 +761,10 @@ pub struct Player {
 
 pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
 
+// Gated: its only caller outside `player` is Windows-only, and clippy denies an unused re-export.
+#[cfg(target_os = "windows")]
+pub(crate) use thread::output::is_default_selector;
+
 fn http_version_str(v: reqwest::Version) -> &'static str {
     if v == reqwest::Version::HTTP_3 {
         "3"
