@@ -110,9 +110,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             mode == OutputMode::Shared && !self.is_asio_mode && !self.is_exclusive_mode;
         #[cfg(not(target_os = "windows"))]
         let shared_reassert = mode == OutputMode::Shared;
-        // No-op only if the request resolves to the open device and keeps the same
-        // follow-class (see output_is_default); a class flip on one device must
-        // rebuild. Fast-path id == the open name to skip the resolve.
+        // No-op only if the request resolves to the open device, whatever its
+        // follow-class (see output_is_default). Fast-path id == the open name to
+        // skip the resolve.
         let requested_is_default = super::output::is_default_selector(&id);
         if shared_reassert
             && self.has_track
