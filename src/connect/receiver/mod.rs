@@ -37,15 +37,8 @@ impl ConnectReceiver {
         config: ReceiverConfig,
         advertiser: Option<MdnsAdvertiser>,
     ) -> anyhow::Result<(Self, mpsc::Sender<BridgeEvent>)> {
-        let tasks = Arc::new(TaskGroup::new());
-        let cancel = tasks.cancel_token();
-
         // Channels
         let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
-        let (session_tx, session_rx) = mpsc::channel::<SessionNotifyEvent>(64);
-        let (playback_tx, playback_rx) = mpsc::channel::<PlaybackNotifyEvent>(64);
-        let (queue_tx, queue_rx) = mpsc::channel::<QueueNotifyEvent>(64);
-        let (bridge_tx, bridge_rx) = mpsc::channel::<BridgeEvent>(128);
 
         // WS server
         let server = WsServer::start(config.ws_port, client_tx).await?;
@@ -64,11 +57,38 @@ impl ConnectReceiver {
             }
         }
 
+        let (receiver, bridge_tx) = Self::launch(server, client_rx, reqwest::Client::new(), adv)?;
+
+        crate::vprintln!(
+            "[connect::receiver] Started on port {} as '{}'",
+            config.ws_port,
+            config.friendly_name,
+        );
+
+        Ok((receiver, bridge_tx))
+    }
+
+    /// The services and the routing task over a started server. The queue's HTTP client is
+    /// taken as given so a test can point it at a server of its own.
+    fn launch(
+        server: WsServer,
+        client_rx: mpsc::Receiver<ClientEvent>,
+        http: reqwest::Client,
+        advertiser: Option<MdnsAdvertiser>,
+    ) -> anyhow::Result<(Self, mpsc::Sender<BridgeEvent>)> {
+        let tasks = Arc::new(TaskGroup::new());
+        let cancel = tasks.cancel_token();
+
+        let (session_tx, session_rx) = mpsc::channel::<SessionNotifyEvent>(64);
+        let (playback_tx, playback_rx) = mpsc::channel::<PlaybackNotifyEvent>(64);
+        let (queue_tx, queue_rx) = mpsc::channel::<QueueNotifyEvent>(64);
+        let (bridge_tx, bridge_rx) = mpsc::channel::<BridgeEvent>(128);
+
         // Services
         let session_mgr = ReceiverSession::new(session_tx);
         let bridge = SpeakerBridge::new();
         let playback_ctrl = PlaybackController::new(bridge, playback_tx);
-        let queue_mgr = QueueManager::new(reqwest::Client::new(), queue_tx);
+        let queue_mgr = QueueManager::new(http, queue_tx);
         let client_comm = ClientCommunicator::new(server);
 
         let routing_cancel = cancel.clone();
@@ -88,19 +108,7 @@ impl ConnectReceiver {
             ),
         )?;
 
-        crate::vprintln!(
-            "[connect::receiver] Started on port {} as '{}'",
-            config.ws_port,
-            config.friendly_name,
-        );
-
-        Ok((
-            Self {
-                tasks,
-                advertiser: adv,
-            },
-            bridge_tx,
-        ))
+        Ok((Self { tasks, advertiser }, bridge_tx))
     }
 
     /// Tear down WS server, mDNS advertiser and routing task within `deadline`
