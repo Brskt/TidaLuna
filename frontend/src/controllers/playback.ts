@@ -10,6 +10,10 @@ import { storePublished } from "../store-published";
 // 415. Set in `src/ipc/plugin/mod.rs`; every other parse failure answers 400.
 const UNDECODABLE_PROFILE = 415;
 
+// The channel `getPlaybackInfo` rejects from when Rust cannot read a DASH manifest. The rejection
+// carries it (`invokeIpcAs`), and only a DASH stream reaches that call.
+const DASH_PARSE_CHANNEL = "player.parse_dash";
+
 // `MediaItem.fromPlaybackContext` reads a null here as a track: a video needs a value, and nothing
 // on this surface resolves video quality.
 const VIDEO_QUALITY_UNRESOLVED = "UNKNOWN";
@@ -276,11 +280,19 @@ export const createPlaybackController = () => {
                                 // which would otherwise write this track's identity over the
                                 // current one. The log stays: it names a real failure either way.
                                 if (lastTransitionId !== productId) return;
-                                // 415 is the one failure a listener can act on: no decoder for
-                                // this codec. Rust names it for the console, the banner below
-                                // carries the human sentence. Other failures stay silent as
-                                // before; a network hiccup is not a quality problem.
-                                if ((e as any)?.code === UNDECODABLE_PROFILE) {
+                                // A manifest Rust cannot read is DASH, which the SDK plays through
+                                // the element this page proxies. Only this page could have
+                                // loaded the track, and the SDK's play would resume what Rust
+                                // still holds under this track's name. Every other failure stays
+                                // silent: it does not say what the SDK loads (a FLAC stream goes
+                                // to the native player, which a refusal would stop) nor whether
+                                // the SDK's own request failed too, and a network hiccup is not
+                                // a quality problem.
+                                const failure = e as { code?: number; channel?: string };
+                                if (failure?.code === UNDECODABLE_PROFILE) {
+                                    // 415 is the failure a listener can act on: no decoder for
+                                    // this codec. Rust names it for the console, the banner
+                                    // below carries the human sentence.
                                     // Deliberately no `player.pause`. Answering "paused" to a
                                     // TIDAL that just asked to play reads as a failed start,
                                     // and it advances the queue; measured on two tracks.
@@ -289,6 +301,13 @@ export const createPlaybackController = () => {
                                         "tidalunar_undecodable_profile",
                                         "stream codec not supported by this build",
                                         "TidaLunar cannot play music below 320 kbps for the moment. Please change the quality in TIDAL's settings.",
+                                    );
+                                } else if (failure?.channel === DASH_PARSE_CHANNEL) {
+                                    refusedHere = true;
+                                    refuse(
+                                        "tidalunar_manifest_unreadable",
+                                        "stream manifest rejected by this build",
+                                        "TidaLunar could not load this track. Please try again or pick another one.",
                                     );
                                 }
                             }

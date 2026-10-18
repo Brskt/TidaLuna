@@ -123,12 +123,83 @@ test("a refusal for the track that is still current is acted on", async () => {
 	expect(dispatched.filter((d) => d.type === "message/MESSAGE_ERROR")).toHaveLength(1);
 });
 
-test("a video is never asked for playback info", async () => {
+// A DASH manifest Rust cannot read: `invokeIpc` rejects with the code and the channel it asked.
+const manifestFailure = () => Object.assign(new Error("manifest rejected"), { code: 400, channel: "player.parse_dash" });
+const stops = () => dispatched.filter((d) => d.type === "playbackControls/STOP");
+const banners = () => dispatched.filter((d) => d.type === "message/MESSAGE_ERROR");
+
+test("a DASH manifest Rust cannot read refuses the track that is still current", async () => {
+	// The SDK plays a DASH track through the element this page proxies; Rust never hears of
+	// it and the SDK's own play resumes what Rust still holds under this track's name.
+	const triggered: [string, any][] = [];
+	(window as any).NativePlayerComponent = { trigger: (name: string, payload: unknown) => triggered.push([name, payload]) };
+	try {
+		const controller = createPlaybackController();
+		controller.setCurrentMediaItem({ productId: "dash", type: "track" });
+		await flush();
+
+		rejectPbi?.(manifestFailure());
+		await flush();
+
+		expect(stops()).toHaveLength(1);
+		expect(banners()).toHaveLength(1);
+		// The code stays outside TIDAL's table, or the refusal skips the track or doubles the banner.
+		expect(triggered).toEqual([["mediaerror", expect.objectContaining({ errorCode: "tidalunar_manifest_unreadable" })]]);
+		expect((banners()[0].payload as any).message).not.toContain("320 kbps");
+	} finally {
+		delete (window as any).NativePlayerComponent;
+	}
+});
+
+test("a failure that does not name the stream refuses nothing, on the fetch channel or off it", async () => {
+	// Our request failing says nothing about the SDK's: a FLAC track is loaded by the SDK itself,
+	// and stopping it here would stop a healthy track. `tidalFetch` rejects through `invokeIpc` too,
+	// with its own channel: only the DASH parse names a stream.
+	for (const [productId, failure] of [
+		["unknown", new Error("500 Internal Server Error")],
+		["blip", Object.assign(new Error("fetch failed"), { code: 500, channel: "tidal.fetch" })],
+	] as const) {
+		const controller = createPlaybackController();
+		controller.setCurrentMediaItem({ productId, type: "track" });
+		await flush();
+
+		rejectPbi?.(failure);
+		await flush();
+
+		expect(stops()).toEqual([]);
+		expect(banners()).toEqual([]);
+	}
+});
+
+test("a track with no playback info refuses nothing", async () => {
+	// 403 and 404 resolve to `undefined`: the SDK's own request gets the same answer and reports it.
 	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "vid", type: "video" });
+	controller.setCurrentMediaItem({ productId: "gone", type: "track" });
 	await flush();
 
-	expect(pbiCalls).toEqual([]);
+	resolvePbi?.(undefined);
+	await flush();
+
+	expect(stops()).toEqual([]);
+	expect(banners()).toEqual([]);
+});
+
+test("a FLAC stream the SDK loads itself is left alone", async () => {
+	const from = sent.length;
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "flac", type: "track" });
+	await flush();
+
+	resolvePbi?.({
+		audioQuality: "LOSSLESS",
+		manifestMimeType: "application/vnd.tidal.bts",
+		manifest: { urls: ["https://cdn/mediatracks/flac"], mimeType: "audio/flac", codecs: "flac", keyId: "" },
+	});
+	await flush();
+
+	expect(sentSince(from)).not.toContain("player.load");
+	expect(stops()).toEqual([]);
+	expect(banners()).toEqual([]);
 });
 
 test("a refusal that raises is reported and does not cost the track its context write", async () => {
