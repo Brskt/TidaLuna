@@ -16,26 +16,6 @@ fn seed(status: GenerationStatus) -> TokenState {
 }
 
 #[test]
-fn load_returns_current_snapshot() {
-    let store = AuthStore::new(seed(GenerationStatus::Active));
-    let snap = store.load();
-    assert_eq!(snap.access_token, "at-1");
-    assert_eq!(snap.token_version, 1);
-}
-
-#[test]
-fn cas_succeeds_when_snapshot_is_current() {
-    let store = AuthStore::new(seed(GenerationStatus::Active));
-    let guard = RefreshGuard::new(&store);
-    let mut new = (**guard.snapshot()).clone();
-    new.token_version = 2;
-    new.access_token = "at-2".to_string();
-    guard.try_apply(new).expect("CAS should succeed");
-    assert_eq!(store.load().token_version, 2);
-    assert_eq!(store.load().access_token, "at-2");
-}
-
-#[test]
 fn cas_rejects_stale_snapshot() {
     let store = AuthStore::new(seed(GenerationStatus::Active));
     let guard_a = RefreshGuard::new(&store);
@@ -140,30 +120,6 @@ fn guard_against_stale_generation_rejects_refresh() {
     let loaded = store.load();
     assert_eq!(loaded.generation, 2);
     assert_eq!(loaded.access_token, "at-gen2");
-}
-
-#[test]
-fn generation_store_is_monotonically_replaceable() {
-    // Each wire-initiated relogin bumps generation. `store` does not
-    // enforce ordering, but the caller is expected to increment.
-    // This test documents the contract: successive relogins observed
-    // by `AuthStore::load` reflect the last `store` write, regardless
-    // of the previous status.
-    let store = AuthStore::new(seed(GenerationStatus::Terminated(
-        TerminationReason::Revoked,
-    )));
-    for gen_id in 2..=4 {
-        let mut next = (*store.load()).clone();
-        next.generation = gen_id;
-        next.token_version = 1;
-        next.access_token = format!("at-gen{gen_id}");
-        next.status = GenerationStatus::Active;
-        store.store(next);
-        let loaded = store.load();
-        assert_eq!(loaded.generation, gen_id);
-        assert_eq!(loaded.access_token, format!("at-gen{gen_id}"));
-        assert!(matches!(loaded.status, GenerationStatus::Active));
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

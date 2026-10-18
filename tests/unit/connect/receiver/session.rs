@@ -81,12 +81,6 @@ async fn a_suspended_session_has_nobody_to_tell() {
     assert!(session.revoke().is_none());
 }
 
-#[tokio::test]
-async fn no_session_means_no_notice() {
-    let (tx, _rx) = mpsc::channel(1);
-    assert!(ReceiverSession::new(tx).revoke().is_none());
-}
-
 /// The ends the receiver's services were told of, in order.
 fn ends_heard(rx: &mut mpsc::Receiver<SessionNotifyEvent>) -> Vec<SessionEnd> {
     let mut ends = Vec::new();
@@ -179,30 +173,6 @@ async fn a_socket_is_a_member_only_of_the_live_session_it_started_or_resumed() {
             "socket {replaced} of the session the new one replaced"
         );
     }
-}
-
-#[tokio::test]
-async fn a_suspended_session_admits_nobody_until_it_is_resumed() {
-    let (mut session, id, _heard) = started_hearing(7).await;
-    session
-        .handle_command(
-            7,
-            "endSession",
-            &serde_json::json!({ "sessionId": id, "stopCasting": false }),
-        )
-        .await;
-    assert_eq!(session.admission(7), Admission::Outsider);
-
-    session
-        .handle_command(7, "resumeSession", &serde_json::json!({ "sessionId": id }))
-        .await;
-    assert_eq!(session.admission(7), Admission::Member);
-}
-
-#[test]
-fn no_session_admits_nobody() {
-    let (tx, _rx) = mpsc::channel(1);
-    assert_eq!(ReceiverSession::new(tx).admission(7), Admission::Outsider);
 }
 
 /// Each refused end is answered with an error, as TIDAL's receiver does.

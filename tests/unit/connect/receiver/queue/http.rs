@@ -121,21 +121,16 @@ fn extract_oauth_params_returns_none_when_no_credentials() {
 }
 
 #[test]
-fn parse_oauth_error_code_extracts_invalid_grant() {
-    let body = br#"{"error":"invalid_grant","error_description":"Token revoked"}"#;
-    assert_eq!(
-        parse_oauth_error_code(body).as_deref(),
-        Some("invalid_grant")
-    );
-}
-
-#[test]
-fn parse_oauth_error_code_extracts_other_codes() {
-    let body = br#"{"error":"invalid_request"}"#;
-    assert_eq!(
-        parse_oauth_error_code(body).as_deref(),
-        Some("invalid_request")
-    );
+fn parse_oauth_error_code_extracts_any_code() {
+    for (body, code) in [
+        (
+            &br#"{"error":"invalid_grant","error_description":"Token revoked"}"#[..],
+            "invalid_grant",
+        ),
+        (br#"{"error":"invalid_request"}"#, "invalid_request"),
+    ] {
+        assert_eq!(parse_oauth_error_code(body).as_deref(), Some(code));
+    }
 }
 
 #[test]

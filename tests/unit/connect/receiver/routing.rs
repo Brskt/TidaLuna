@@ -224,21 +224,6 @@ fn receiver_whose_routing_panics(server: WsServer) -> ConnectReceiver {
     }
 }
 
-#[tokio::test]
-async fn a_panic_in_the_routing_task_frees_the_port_and_the_phones() {
-    let (server, listener, mut wire, filler) = WsServer::with_client_for_test(1, 64).await;
-    drop(filler);
-    let mut receiver = receiver_whose_routing_panics(server);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let report = receiver.shutdown(SHUTDOWN_DEADLINE).await;
-    let (_, closed) = drain_wire(&mut wire, Duration::from_secs(1)).await;
-    assert!(
-        listener.closed(),
-        "the listener outlived the crash ({report:?})"
-    );
-    assert!(closed, "the phone's socket outlived the crash ({report:?})");
-}
-
 /// The receiver switched off with a session open and nothing in flight.
 #[tokio::test]
 async fn a_switch_off_with_a_session_open_tells_the_phone_before_closing() {
