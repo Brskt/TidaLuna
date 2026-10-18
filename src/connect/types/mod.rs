@@ -14,7 +14,7 @@ pub(crate) use auth::{
     AuthInfo, OAuthAuthInfo, OAuthFormParameters, OAuthParameters, OAuthServerInfo, ServerInfo,
 };
 pub(crate) use device::{DeviceType, MdnsDevice};
-pub(crate) use media::{MediaInfo, MediaMetadata, default_policy};
+pub(crate) use media::{MediaInfo, MediaMetadata, ResolvedStream, default_policy};
 pub(crate) use playback::{PbPlayState, PbState, PlaybackNotification, PlayerState, RequestResult};
 pub(crate) use queue::{QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode};
 pub(crate) use session::{SessionCommand, SessionNotification, SessionStatus};

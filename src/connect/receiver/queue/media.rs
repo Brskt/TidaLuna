@@ -13,7 +13,7 @@
 use base64::Engine as _;
 
 use crate::connect::consts;
-use crate::connect::types::{MediaInfo, MediaMetadata, QueueItem, ServerInfo};
+use crate::connect::types::{MediaInfo, MediaMetadata, QueueItem, ResolvedStream, ServerInfo};
 
 use super::http::{is_trusted_server_url, resolve_auth_header};
 
@@ -73,6 +73,7 @@ pub(super) fn queue_item_to_media_info(item: &QueueItem) -> MediaInfo {
         custom_data: item.custom_data.clone(),
         media_type: 0,
         policy: crate::connect::types::default_policy(),
+        stream: None,
     }
 }
 
@@ -176,11 +177,15 @@ pub(super) async fn resolve_media_url(
 
     if manifest_mime == "application/dash+xml" {
         apply_dash_manifest(&manifest_bytes, media);
-        return;
+    } else {
+        // BTS/JSON manifest (FLAC, lossless)
+        apply_bts_manifest(&manifest_bytes, media);
     }
 
-    // BTS/JSON manifest (FLAC, lossless)
-    apply_bts_manifest(&manifest_bytes, media);
+    // Only a stream that will load has a format worth announcing.
+    if media.src_url.is_some() {
+        media.stream = Some(ResolvedStream::from_playbackinfo(&body));
+    }
 }
 
 /// Parse a DASH MPD manifest and inject the resulting URL / codec / segment

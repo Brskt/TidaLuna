@@ -4,7 +4,7 @@
 //! resolves is the only one a connected controller is ever told for a track.
 
 use super::queue_item_to_media_info;
-use crate::connect::types::QueueItem;
+use crate::connect::types::{QueueItem, ResolvedStream};
 use serde_json::json;
 
 /// A window item as the wire sends it, carrying only what the test is about beside its ids.
@@ -63,4 +63,63 @@ fn an_item_naming_no_length_anywhere_mints_none() {
     // Nothing is invented: absent stays absent rather than becoming zero, which `set_metadata`
     // writes as a zero-second track rather than an unknown one.
     assert_eq!(resolved_duration(json!({})), None);
+}
+
+fn playback_info(fields: serde_json::Value) -> ResolvedStream {
+    ResolvedStream::from_playbackinfo(&fields)
+}
+
+#[test]
+fn the_stream_is_what_the_playbackinfo_answer_names_not_what_was_asked() {
+    // The controller asks `HI_RES_LOSSLESS`; the answer names what came back, and that is what plays.
+    let stream = playback_info(json!({
+        "audioQuality": "LOSSLESS",
+        "bitDepth": 16,
+        "sampleRate": 44_100,
+        "manifestMimeType": "application/vnd.tidal.bts",
+    }));
+    assert_eq!(stream.audio_quality.as_deref(), Some("LOSSLESS"));
+    assert_eq!(stream.bit_depth, Some(16));
+    assert_eq!(stream.sample_rate, Some(44_100));
+}
+
+#[test]
+fn a_field_the_answer_omits_or_mistypes_stays_absent() {
+    // A lossy tier carries no bit depth; nothing is invented, and a value that does not fit stays out.
+    let stream =
+        playback_info(json!({ "audioQuality": "HIGH", "bitDepth": null, "sampleRate": "44100" }));
+    assert_eq!(stream.audio_quality.as_deref(), Some("HIGH"));
+    assert_eq!(stream.bit_depth, None);
+    assert_eq!(stream.sample_rate, None);
+    assert_eq!(
+        playback_info(json!({ "sampleRate": 5_000_000_000_u64 })).sample_rate,
+        None
+    );
+    assert_eq!(playback_info(json!({})), ResolvedStream::default());
+}
+
+#[test]
+fn the_page_hears_the_stream_and_the_controller_never_does() {
+    let mut media = queue_item_to_media_info(&item(json!({})));
+    media.stream = Some(playback_info(
+        json!({ "audioQuality": "HIGH", "sampleRate": 48_000 }),
+    ));
+
+    let page = media.page_payload();
+    assert_eq!(page["mediaId"], "88264189");
+    assert_eq!(page["stream"]["audioQuality"], "HIGH");
+    assert_eq!(page["stream"]["sampleRate"], 48_000);
+    assert!(page["stream"]["bitDepth"].is_null());
+
+    let wire = serde_json::to_value(&media).expect("a MediaInfo serializes");
+    assert!(
+        wire.get("stream").is_none(),
+        "the controller's message grew a field it never had"
+    );
+}
+
+#[test]
+fn a_track_with_no_resolved_stream_announces_null_not_a_neighbours_format() {
+    let media = queue_item_to_media_info(&item(json!({})));
+    assert!(media.page_payload()["stream"].is_null());
 }

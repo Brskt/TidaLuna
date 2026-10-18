@@ -448,7 +448,7 @@ impl PlaybackController {
                 });
             }
             let notification = PlaybackNotification::NotifyMediaChanged {
-                media_info: announced_media,
+                media_info: Box::new(announced_media),
             };
             if let Ok(msg) = serde_json::to_value(&notification) {
                 let _ = self

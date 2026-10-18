@@ -49,7 +49,7 @@ pub(crate) enum PlaybackNotification {
     #[serde(rename = "notifyMediaChanged")]
     NotifyMediaChanged {
         #[serde(rename = "mediaInfo")]
-        media_info: MediaInfo,
+        media_info: Box<MediaInfo>,
     },
     #[serde(rename = "notifyPlaybackError")]
     NotifyPlaybackError {

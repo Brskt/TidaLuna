@@ -278,3 +278,16 @@ async fn the_casts_own_end_still_moves_its_queue_on() {
         "the cast's own end did not ask for the next track"
     );
 }
+
+/// What a controller is sent for a changed track, byte for byte. Parsed from the wire and sent
+/// back; the test holds whatever shape the variant's `media_info` is stored in.
+#[test]
+fn a_media_changed_notification_keeps_its_wire_bytes() {
+    let wire = r#"{"command":"notifyMediaChanged","mediaInfo":{"itemId":"i-1","mediaId":"88264189","srcUrl":"https://cdn/x.flac","streamType":"flac","metadata":{"title":"T","albumTitle":null,"artists":["A"],"duration":214000,"images":null},"customData":"{}","mediaType":0,"policy":{"canNext":true,"canPrevious":true}}}"#;
+    let parsed: PlaybackNotification =
+        serde_json::from_str(wire).expect("the controller's own message parses");
+    assert_eq!(
+        serde_json::to_string(&parsed).expect("a notification serializes"),
+        wire
+    );
+}

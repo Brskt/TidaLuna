@@ -371,7 +371,7 @@ async fn routing_loop(
                                 crate::vprintln!("[connect::receiver] Local pick {} is not the cast's to take", load.product_id);
                                 // Read from what plays, not from the window: none may be loaded.
                                 if let Some(media) = playback_ctrl.current_media() {
-                                    crate::connect::ipc::post_emit_with_data("connect.receiver.media_changed", media);
+                                    crate::connect::ipc::post_emit_with_data("connect.receiver.media_changed", &media.page_payload());
                                 }
                             }
                             CastRoute::Refuse => {
@@ -484,7 +484,10 @@ fn emit_receiver_metadata(media: &crate::connect::types::MediaInfo) {
     post_task(ThreadId::UI, Some(&mut task));
 
     // Emit full MediaInfo to frontend for player bar + Redux updates
-    crate::connect::ipc::post_emit_with_data("connect.receiver.media_changed", media);
+    crate::connect::ipc::post_emit_with_data(
+        "connect.receiver.media_changed",
+        &media.page_payload(),
+    );
 }
 
 wrap_task! {

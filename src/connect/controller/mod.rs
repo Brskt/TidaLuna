@@ -209,7 +209,7 @@ impl TidalConnectController {
                         if let Ok(PlaybackNotification::NotifyMediaChanged { media_info }) =
                             serde_json::from_value::<PlaybackNotification>(json.clone())
                         {
-                            self.last_media = Some(media_info);
+                            self.last_media = Some(*media_info);
                         }
                     }
                     _ => {}
