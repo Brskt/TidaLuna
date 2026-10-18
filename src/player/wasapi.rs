@@ -1335,6 +1335,24 @@ impl RenderContext {
             self.post_start_silence_remaining = 0;
         }
 
+        self.adopt_stream(event_tx, start);
+        Ok(())
+    }
+
+    /// The adoption itself, apart from the device work `handle_start_stream` does before it:
+    /// what the context holds of the stream, and the Duration and transport state it announces.
+    /// Opens no device: a paused start only stops the client already held, none in a test's.
+    fn adopt_stream(&mut self, event_tx: &mpsc::Sender<ExclusiveEvent>, start: StreamStart) {
+        let StreamStart {
+            stream_id,
+            sample_rate,
+            channels,
+            bits_per_sample,
+            duration_secs,
+            start_secs,
+            start_paused,
+            consumed,
+        } = start;
         self.pcm_data.clear();
         self.pcm_sample_rate = sample_rate;
         self.pcm_channels = channels;
@@ -1376,7 +1394,6 @@ impl RenderContext {
             self.state = RenderState::Playing;
             let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
         }
-        Ok(())
     }
 
     fn handle_push_pcm(&mut self, stream_id: u32, data: Vec<u8>) {
