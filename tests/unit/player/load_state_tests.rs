@@ -132,18 +132,16 @@ async fn a_rearm_keeps_the_owner_of_the_load_it_rearms() {
 
 /// A re-arm of the load `expected_gen`, the way the `ReplayRequest` consumer issues it.
 fn rearm_of(player: &super::Player, expected_gen: u32) -> Continuation {
-    player
-        .rearm(
-            // Nothing listens there: the re-armed load fails on its own, off this test's path.
-            "http://127.0.0.1:9/mediatracks/cast.flac".to_string(),
-            "flac".to_string(),
-            String::new(),
-            Some("1".to_string()),
-            None,
-            false,
-            expected_gen,
-        )
-        .expect("a re-arm reaches the load path")
+    player.rearm(
+        // Nothing listens there: the re-armed load fails on its own, off this test's path.
+        "http://127.0.0.1:9/mediatracks/cast.flac".to_string(),
+        "flac".to_string(),
+        String::new(),
+        Some("1".to_string()),
+        None,
+        false,
+        expected_gen,
+    )
 }
 
 #[tokio::test]
@@ -206,9 +204,7 @@ async fn the_advance_does_not_start_over_a_cast_that_took_the_player_after_the_t
     let next = staged_next(local);
     // A controller takes the player between the take and the advance's mint.
     let cast = begin_load(LoadOrigin::Connect);
-    let outcome = player
-        .advance(next)
-        .expect("an advance reaches the load path");
+    let outcome = player.advance(next);
     let after = current_load();
 
     begin_load(LoadOrigin::Local);
@@ -227,9 +223,7 @@ async fn the_advance_still_moves_this_hosts_own_queue_on() {
     let player = silent_player();
 
     let local = begin_load(LoadOrigin::Local);
-    let outcome = player
-        .advance(staged_next(local))
-        .expect("an advance reaches the load path");
+    let outcome = player.advance(staged_next(local));
     let after = current_load();
 
     begin_load(LoadOrigin::Local);

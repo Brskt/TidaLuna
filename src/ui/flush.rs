@@ -207,14 +207,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                             // The renderer's own queue moving on; `advance` re-checks at the mint
                             // that the load the record was staged under still holds the player.
                             match player.advance(next) {
-                                Ok(crate::player::Continuation::Started) => {}
-                                Ok(crate::player::Continuation::Superseded) => {
+                                crate::player::Continuation::Started => {}
+                                crate::player::Continuation::Superseded => {
                                     crate::vprintln!(
                                         "[AUTO]   Next track dropped: a newer load or a stop took the player"
                                     );
-                                }
-                                Err(e) => {
-                                    crate::vprintln!("[AUTO]   Failed to load next track: {e}");
                                 }
                             }
                         } else {
@@ -355,15 +352,14 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         play,
                         expected_gen,
                     ) {
-                        Ok(crate::player::Continuation::Started) => {
+                        crate::player::Continuation::Started => {
                             crate::vprintln!("[REPLAY] re-armed retained source");
                         }
-                        Ok(crate::player::Continuation::Superseded) => {
+                        crate::player::Continuation::Superseded => {
                             crate::vprintln!(
                                 "[REPLAY] re-arm skipped: superseded by a newer load/stop"
                             );
                         }
-                        Err(e) => crate::vprintln!("[REPLAY] re-arm failed: {e}"),
                     }
                 });
             }

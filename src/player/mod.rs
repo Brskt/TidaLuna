@@ -1428,7 +1428,7 @@ impl Player {
 
     /// `load_gen` is minted by the caller, which is where it is decided whose load this is and
     /// whether it may start at all. Answers the event generation every event of this load
-    /// carries.
+    /// carries. Starting a load cannot fail: its failures settle later, as `LoadFailed`.
     fn load_with_policy(
         &self,
         url: String,
@@ -1438,7 +1438,7 @@ impl Player {
         resume_policy: ResumePolicy,
         auto_play: bool,
         load_gen: u32,
-    ) -> anyhow::Result<u32> {
+    ) -> u32 {
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
         });
@@ -1531,7 +1531,7 @@ impl Player {
 
         *self.load_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
 
-        Ok(event_seq)
+        event_seq
     }
 
     pub fn load(
@@ -1542,7 +1542,7 @@ impl Player {
         product_id: Option<String>,
         restart: bool,
         want_play: bool,
-    ) -> anyhow::Result<()> {
+    ) {
         // Idempotent reconcile: when the SDK re-loads the track currently COMMITTED in
         // the pipeline, either restart it (a fresh play instance) or resume it in place
         // (a keep-position re-assert), without a full rebuild. The comparison is against
@@ -1571,17 +1571,16 @@ impl Player {
                     want_play,
                     short_id(&canonical_url_id, 60)
                 );
-                return self
-                    .load_with_policy(
-                        url,
-                        format,
-                        key,
-                        product_id,
-                        ResumePolicy::Restart,
-                        want_play,
-                        begin_load(LoadOrigin::Local),
-                    )
-                    .map(|_| ());
+                self.load_with_policy(
+                    url,
+                    format,
+                    key,
+                    product_id,
+                    ResumePolicy::Restart,
+                    want_play,
+                    begin_load(LoadOrigin::Local),
+                );
+                return;
             }
             // Takes the new credential, keeps the play instance. The skip below correctly answers
             // "same track?" but must not also mean "still fetchable": every same-track load carries a
@@ -1619,7 +1618,7 @@ impl Player {
                 product_id,
                 track_id: canonical_url_id,
             });
-            return Ok(());
+            return;
         }
         // Different track (genuine select / queue advance): fresh load. `want_play` folds
         // the SELECT's play-intent into the load: no separate player.play arrives while
@@ -1632,8 +1631,7 @@ impl Player {
             ResumePolicy::Disabled,
             want_play,
             begin_load(LoadOrigin::Local),
-        )
-        .map(|_| ())
+        );
     }
 
     /// A load over whatever plays, in `origin`'s name: the Connect receiver's, on a controller's
@@ -1646,7 +1644,7 @@ impl Player {
         key: String,
         product_id: Option<String>,
         origin: LoadOrigin,
-    ) -> anyhow::Result<u32> {
+    ) -> u32 {
         self.load_with_policy(
             url,
             format,
@@ -1662,9 +1660,9 @@ impl Player {
     /// under is still the current one. Taking the record proved it (`next_is_current`), but this
     /// runs in a spawned task holding no lock, and a controller's load can take the player between
     /// the take and this mint.
-    pub fn advance(&self, next: crate::state::RetainedTrack) -> anyhow::Result<Continuation> {
+    pub fn advance(&self, next: crate::state::RetainedTrack) -> Continuation {
         let Some(load_gen) = continue_load(next.load_gen) else {
-            return Ok(Continuation::Superseded);
+            return Continuation::Superseded;
         };
         let track = next.track;
         self.load_with_policy(
@@ -1675,8 +1673,8 @@ impl Player {
             ResumePolicy::Disabled,
             true,
             load_gen,
-        )
-        .map(|_| Continuation::Started)
+        );
+        Continuation::Started
     }
 
     /// Load a DASH stream by fetching init + media segments and concatenating them. Answers the
@@ -1876,13 +1874,7 @@ impl Player {
         }
     }
 
-    pub fn recover(
-        &self,
-        url: String,
-        format: String,
-        key: String,
-        target_time: Option<f64>,
-    ) -> anyhow::Result<()> {
+    pub fn recover(&self, url: String, format: String, key: String, target_time: Option<f64>) {
         // The SDK's `recover` delegate carries only a url and a key: the id comes from the
         // retained source instead. A recover re-fetches the track already playing, never
         // another; the retained id is that track's own.
@@ -1895,8 +1887,7 @@ impl Player {
             Self::resume_policy_for(target_time),
             false,
             begin_load(LoadOrigin::Local),
-        )
-        .map(|_| ())
+        );
     }
 
     /// Re-arm the shared pipeline from a `ReplayRequest`: `Some(position)` seeks
@@ -1914,9 +1905,9 @@ impl Player {
         position: Option<f64>,
         play: bool,
         expected_gen: u32,
-    ) -> anyhow::Result<Continuation> {
+    ) -> Continuation {
         let Some(load_gen) = continue_load(expected_gen) else {
-            return Ok(Continuation::Superseded);
+            return Continuation::Superseded;
         };
         // Honor the caller position directly (live re-arm target, not a
         // resume-store candidate): resume_policy_for would floor sub-1s to Auto
@@ -1925,8 +1916,8 @@ impl Player {
             Some(t) => ResumePolicy::Explicit(t),
             None => ResumePolicy::Disabled,
         };
-        self.load_with_policy(url, format, key, product_id, policy, play, load_gen)
-            .map(|_| Continuation::Started)
+        self.load_with_policy(url, format, key, product_id, policy, play, load_gen);
+        Continuation::Started
     }
 
     fn send_cmd(&self, cmd: PlayerCommand) -> anyhow::Result<()> {

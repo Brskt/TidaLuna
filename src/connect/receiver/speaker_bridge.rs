@@ -144,21 +144,14 @@ impl SpeakerBridge {
 
         let media_id = media_info.track_id();
         with_state(|state| {
-            match state.player.load_and_play(
+            state.player.load_and_play(
                 url,
                 format,
                 key,
                 media_id,
                 crate::player::LoadOrigin::Connect,
-            ) {
-                Ok(seq) => Some(seq),
-                Err(e) => {
-                    crate::verr!("[connect::bridge] Player load error: {}", e);
-                    None
-                }
-            }
+            )
         })
-        .flatten()
     }
 
     /// The player thread is the only receiver and nothing restarts it: a refused send means
