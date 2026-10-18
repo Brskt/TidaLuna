@@ -177,6 +177,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 error,
                 code: MediaErrorCode::UnreadableFile,
                 seq: self.current_seq,
+                product_id: None,
             }),
         }
         // The SDK's same-track recovery reload rebuilds instead of resuming a dead decoder.
@@ -1177,6 +1178,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             error: e,
                             code: MediaErrorCode::UnreadableFile,
                             seq: self.current_seq,
+                            product_id: None,
                         });
                         // Init-time decode errors emit Error with no trailing Finished,
                         // and nothing else clears committed_track. Drop it here for the SDK's

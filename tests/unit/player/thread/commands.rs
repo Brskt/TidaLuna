@@ -254,6 +254,88 @@ async fn a_failed_load_leaves_no_track_behind() {
     );
 }
 
+/// The id and seq stamped on the last media error, the outer `Option` saying whether one was raised.
+fn last_media_error(events: &Spy) -> Option<(u32, Option<String>)> {
+    events.lock().unwrap().iter().rev().find_map(|ev| match ev {
+        PlayerEvent::MediaError {
+            seq, product_id, ..
+        } => Some((*seq, product_id.clone())),
+        _ => None,
+    })
+}
+
+/// The renderer refuses a track it loaded itself on the name its failure carries. A probe
+/// failure must name the load that failed, not the track the thread held before it.
+#[tokio::test]
+async fn a_probe_failure_names_the_track_its_load_carried() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+
+    let delivered = h.player.handle_load(
+        LoadRequest {
+            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+            load_gen: crate::player::current_gen(),
+            seq: 7,
+            track_id: "track-1".to_string(),
+            product_id: Some("120002099".to_string()),
+            resume_policy: ResumePolicy::Restart,
+            load_start: std::time::Instant::now(),
+            cached: true,
+            format: "flac".to_string(),
+        },
+        false,
+    );
+
+    assert!(!delivered, "three bytes cannot probe as audio");
+    assert_eq!(
+        last_media_error(&h.events),
+        Some((7, Some("120002099".to_string())))
+    );
+}
+
+/// A fetch that failed never reached `handle_load`: the thread still holds the previous track,
+/// and the id has to come from the command.
+#[tokio::test]
+async fn a_fetch_failure_names_the_track_its_load_carried() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.current_product_id = Some("previous".to_string());
+
+    h.player.handle_command(PlayerCommand::LoadFailed {
+        error: "HTTP 403 Forbidden".to_string(),
+        code: crate::player::MediaErrorCode::NoSuchFile,
+        seq: 9,
+        load_gen: crate::player::current_gen(),
+        product_id: Some("120002099".to_string()),
+    });
+
+    assert_eq!(
+        last_media_error(&h.events),
+        Some((9, Some("120002099".to_string())))
+    );
+}
+
+/// The counterweight: a load a newer one superseded reports nothing (the renderer is never
+/// told that a track it has since replaced failed).
+#[tokio::test]
+async fn a_superseded_fetch_failure_names_nobody() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+
+    h.player.handle_command(PlayerCommand::LoadFailed {
+        error: "HTTP 403 Forbidden".to_string(),
+        code: crate::player::MediaErrorCode::NoSuchFile,
+        seq: 9,
+        load_gen: crate::player::current_gen().wrapping_sub(1),
+        product_id: Some("120002099".to_string()),
+    });
+
+    assert_eq!(last_media_error(&h.events), None);
+}
+
 /// The re-assert is the one load path that never reaches `handle_load`; it is the only one that
 /// has to carry the id itself. Dropping it there left a gapless-advanced track nameless for the
 /// rest of its life, with every length it measured publishable under nothing.

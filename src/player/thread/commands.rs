@@ -786,6 +786,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 error,
                 code: MediaErrorCode::UnreadableFile,
                 seq: self.current_seq,
+                product_id: None,
             }),
         }
         // Left set, both arm a guard nothing can clear: the channel behind them is dead.
@@ -1293,6 +1294,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     error: e,
                     code: MediaErrorCode::UnreadableFile,
                     seq: self.current_seq,
+                    product_id: self.current_product_id.clone(),
                 });
                 // Settle the SDK's load() (its `mediaduration` await has no
                 // timeout); 0, not the previous track's stale current_duration.

@@ -54,3 +54,55 @@ fn a_routed_load_names_the_load_it_answers() {
         serde_json::json!({ "t": "mediacastrouted", "v": { "load": 7 } })
     );
 }
+
+/// The renderer refuses a track it loaded itself on the name the failure carries.
+#[test]
+fn a_load_failure_of_this_host_names_the_track() {
+    let event = PlayerBridgeEvent::media_error(
+        "HTTP 403 Forbidden",
+        "no_such_file",
+        Some("120002099"),
+        LoadOrigin::Local,
+    );
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({
+            "t": "mediaerror",
+            "v": { "error": "HTTP 403 Forbidden", "errorCode": "no_such_file", "productId": "120002099" }
+        })
+    );
+}
+
+/// A load a controller made is the receiver's to report: naming its track would let the page
+/// refuse the one it loaded itself when both are the same product.
+#[test]
+fn a_load_failure_during_a_cast_names_no_track() {
+    let event = PlayerBridgeEvent::media_error(
+        "HTTP 403 Forbidden",
+        "no_such_file",
+        Some("120002099"),
+        LoadOrigin::Connect,
+    );
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({
+            "t": "mediaerror",
+            "v": { "error": "HTTP 403 Forbidden", "errorCode": "no_such_file" }
+        })
+    );
+}
+
+/// The counterweight, and the shape TIDAL's native player already reads: a failure with no
+/// track to name is the payload it always was.
+#[test]
+fn a_failure_that_names_no_track_is_unchanged() {
+    let event =
+        PlayerBridgeEvent::media_error("probe failed", "unreadable_file", None, LoadOrigin::Local);
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({
+            "t": "mediaerror",
+            "v": { "error": "probe failed", "errorCode": "unreadable_file" }
+        })
+    );
+}

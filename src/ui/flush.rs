@@ -312,10 +312,20 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     .pending_player_events
                     .push(PlayerBridgeEvent::device_error(kind.as_str()));
             }
-            PlayerEvent::MediaError { error, code, .. } => {
+            PlayerEvent::MediaError {
+                error,
+                code,
+                product_id,
+                ..
+            } => {
                 state
                     .pending_player_events
-                    .push(PlayerBridgeEvent::media_error(&error, code.as_str()));
+                    .push(PlayerBridgeEvent::media_error(
+                        &error,
+                        code.as_str(),
+                        product_id.as_deref(),
+                        crate::player::current_load().1,
+                    ));
             }
             PlayerEvent::MaxConnectionsReached => {
                 state

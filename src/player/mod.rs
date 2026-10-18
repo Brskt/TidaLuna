@@ -590,10 +590,16 @@ pub enum PlayerEvent {
     /// `seq` is the event generation of the load that failed, as every other per-load event
     /// carries one: a failure that does not name its load is charged to whichever load is
     /// current when it is read.
+    ///
+    /// `product_id` names the track that failed to load, when the failure is the load's own (the
+    /// fetch or the probe, before the track played) and the load carried one. The renderer
+    /// refuses a track it loaded itself on that name alone: the SDK does not know such a track.
+    /// `None` for a failure of a track already playing, which the renderer leaves to the SDK.
     MediaError {
         error: String,
         code: MediaErrorCode,
         seq: u32,
+        product_id: Option<String>,
     },
     MaxConnectionsReached,
     /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the

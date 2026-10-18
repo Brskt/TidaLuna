@@ -124,12 +124,24 @@ impl PlayerBridgeEvent {
         }
     }
 
-    pub fn media_error(error: &str, code: &str) -> Self {
+    /// `product_id` is the track whose load failed. It rides along only while this host owns the
+    /// player: the renderer refuses a track it loaded itself on that name, and a load a
+    /// controller made is the receiver's to report.
+    pub fn media_error(
+        error: &str,
+        code: &str,
+        product_id: Option<&str>,
+        owner: crate::player::LoadOrigin,
+    ) -> Self {
+        let mut v = serde_json::json!({ "error": error, "errorCode": code });
+        if let Some(id) = product_id.filter(|_| owner == crate::player::LoadOrigin::Local) {
+            v["productId"] = serde_json::json!(id);
+        }
         Self {
             t: "mediaerror",
             seq: None,
             cast: false,
-            v: serde_json::json!({ "error": error, "errorCode": code }),
+            v,
         }
     }
 

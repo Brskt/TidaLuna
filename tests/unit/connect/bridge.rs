@@ -123,6 +123,7 @@ async fn ready_progress_duration_end_and_failures_reach_the_receiver_with_their_
             error: "decode failed".to_string(),
             code: MediaErrorCode::UnreadableFile,
             seq: 7,
+            product_id: None,
         },
         PlayerEvent::NetworkLost(7),
     ] {
@@ -172,6 +173,7 @@ fn events_of_a_track() -> Vec<PlayerEvent> {
             error: "load failed".to_string(),
             code: MediaErrorCode::NoSuchFile,
             seq: 1,
+            product_id: None,
         },
         PlayerEvent::MaxConnectionsReached,
         PlayerEvent::NetworkLost(1),
