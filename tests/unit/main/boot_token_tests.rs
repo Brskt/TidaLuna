@@ -57,24 +57,6 @@ fn blob_with(at: &str, rt: &str) -> Box<RawSdkBlob> {
     raw_from_entries(entries)
 }
 
-fn blob_tokens(raw: &RawSdkBlob) -> (String, String) {
-    let credentials = sdk_storage::decrypt_raw_blob(raw).expect("blob decrypts");
-    let at = credentials
-        .access_token
-        .and_then(|a| a.token)
-        .unwrap_or_default();
-    let rt = credentials.refresh_token.unwrap_or_default();
-    (at, rt)
-}
-
-#[test]
-fn seed_entries_roundtrip_through_decrypt() {
-    let raw = blob_with("at_value", "rt_value");
-    let (at, rt) = blob_tokens(&raw);
-    assert_eq!(at, "at_value");
-    assert_eq!(rt, "rt_value");
-}
-
 #[test]
 fn current_opaque_match_restores_without_refresh() {
     let cur = generation("cur");

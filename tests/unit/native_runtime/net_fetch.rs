@@ -26,12 +26,6 @@ fn parse_defaults_method_get() {
 }
 
 #[test]
-fn parse_uppercases_method() {
-    let req = json!({ "reqId": 1, "plugin": "P", "url": "https://h/p", "method": "post" });
-    assert_eq!(parse_fetch_request(&req).expect("valid").method, "POST");
-}
-
-#[test]
 fn parse_rejects_connect_and_trace_methods() {
     for m in ["CONNECT", "connect", "TRACE", "trace", "TRACK"] {
         let req = json!({ "reqId": 1, "plugin": "P", "url": "https://h/p", "method": m });

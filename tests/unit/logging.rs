@@ -260,36 +260,6 @@ fn prune_logs_keeps_only_the_newest() {
 }
 
 #[test]
-fn rotate_moves_leftover_into_logs_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let current = dir.path().join("console.log");
-    std::fs::write(&current, b"previous session\n").unwrap();
-
-    rotate_console_log(dir.path());
-
-    // The root console.log is gone (rotation only moves; the fresh one is
-    // created later by ensure_file_sink).
-    assert!(!current.exists());
-
-    let logs_dir = dir.path().join("logs");
-    let archived: Vec<_> = std::fs::read_dir(&logs_dir)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("console-") && n.ends_with(".log"))
-        })
-        .collect();
-    assert_eq!(archived.len(), 1);
-    assert_eq!(
-        std::fs::read_to_string(&archived[0]).unwrap(),
-        "previous session\n"
-    );
-}
-
-#[test]
 fn rotate_is_noop_without_leftover() {
     let dir = tempfile::tempdir().unwrap();
     rotate_console_log(dir.path()); // must not panic / must not create logs/

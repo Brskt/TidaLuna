@@ -28,10 +28,11 @@ fn redact_url_query_passthrough_without_query() {
 
 /// The url reaches a refusal log from an untrusted source and `verr!` is never level-gated:
 /// logging it verbatim let a refused-call loop write attacker-chosen text (newlines, terminal
-/// escapes) into the persistent log at LOGS=0. Only the host is kept, and only bounded.
+/// escapes) into the persistent log at LOGS=0. Only the host is kept, and only bounded: the query,
+/// where a credential rides (the opaque `luna_*` nonce, an OAuth `code`), goes with the rest.
 #[test]
 fn a_refused_url_is_reduced_to_a_bounded_host_for_the_log() {
-    let forged = "https://evil.test/x\n2026-08-01 [AUTH] token=deadbeef";
+    let forged = "https://evil.test/x?t=luna_0123abcd\n2026-08-01 [AUTH] token=deadbeef";
     let logged = refused_host(forged);
     assert_eq!(logged, "evil.test");
     assert!(!logged.contains('\n'));
@@ -40,16 +41,6 @@ fn a_refused_url_is_reduced_to_a_bounded_host_for_the_log() {
     assert!(refused_host(&long).len() <= 64);
 
     assert_eq!(refused_host("not a url"), "unparseable url");
-}
-
-/// A query is where a credential rides: the opaque `luna_*` nonce the renderer holds, an OAuth
-/// `code`. Stripping only the length, as `truncate_str` does, leaves a 37-byte nonce whole.
-#[test]
-fn a_refused_url_carries_none_of_its_query_into_the_log() {
-    assert_eq!(
-        refused_host("https://evil.test/collect?t=luna_0123456789abcdef0123456789abcdef"),
-        "evil.test"
-    );
 }
 
 /// `reqwest::Error`'s own `Display` appends the request URL, query included, and a media URL's
