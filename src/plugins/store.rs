@@ -91,6 +91,13 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// What the user is told when plugins.db was replaced by an empty store: where the copies of the
+/// damaged files are kept.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct PluginsReset {
+    pub(crate) asides: Vec<String>,
+}
+
 /// One copy of a damaged store the user has not been told of. Written into the store that
 /// replaces it: the row exists exactly when the replacement does.
 pub(crate) fn record_reset(conn: &Connection, aside: &str) -> rusqlite::Result<()> {
@@ -106,6 +113,25 @@ pub(crate) fn recorded_resets(conn: &Connection) -> rusqlite::Result<Vec<String>
     conn.prepare("SELECT aside FROM reset_notice ORDER BY rowid")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect()
+}
+
+/// The resets the user has not been told of, from this launch or an earlier one. A copy that is no
+/// longer on disk is left out: naming it would send the user to a file that is gone.
+pub(crate) fn pending_reset(conn: &Connection) -> rusqlite::Result<Option<PluginsReset>> {
+    let recorded = recorded_resets(conn)?;
+    if recorded.is_empty() {
+        return Ok(None);
+    }
+    let asides = recorded
+        .into_iter()
+        .filter(|aside| std::path::Path::new(aside).exists())
+        .collect();
+    Ok(Some(PluginsReset { asides }))
+}
+
+/// The banner is on the page's screen: the resets are told, and go.
+pub(crate) fn acknowledge_resets(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM reset_notice", []).map(drop)
 }
 
 /// Mark a plugin as having had its code dispatched at least once.

@@ -206,6 +206,40 @@ fn replace_plugins(path: &Path, cause: &rusqlite::Error) -> Result<Connection, O
         .map_err(|e| OpenError::sqlite(path, &e))
 }
 
+/// What the page owes the user of the repairs the stores made at launch. The settings notice keeps
+/// its own shape, and `plugins` appears only when plugins.db was replaced: one banner tells both.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct PendingRepairs {
+    #[serde(flatten)]
+    settings: Option<crate::settings::RepairNotice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugins: Option<crate::plugins::store::PluginsReset>,
+}
+
+/// The repairs the user has not been told of; `None` when there are none. A plugins notice that
+/// cannot be read stays in its store for the next ask.
+pub(crate) fn pending_repairs(
+    plugins: &Connection,
+    settings: &Connection,
+) -> Option<PendingRepairs> {
+    let settings = crate::settings::pending_notice(settings);
+    let plugins = crate::plugins::store::pending_reset(plugins).unwrap_or_else(|e| {
+        crate::verr!(
+            "[PLUGINS] cannot read the pending reset notice, it stays for the next ask: {e}"
+        );
+        None
+    });
+    (settings.is_some() || plugins.is_some()).then_some(PendingRepairs { settings, plugins })
+}
+
+/// The banner of `pending_repairs` is on the page's screen: both stores drop what it told.
+pub(crate) fn acknowledge_repairs(plugins: &Connection, settings: &Connection) {
+    crate::settings::acknowledge_repair_notice(settings);
+    if let Err(e) = crate::plugins::store::acknowledge_resets(plugins) {
+        crate::verr!("[PLUGINS] cannot clear the reset notice, it will be shown again: {e}");
+    }
+}
+
 /// Handle to the database actor thread.
 ///
 /// All SQLite operations go through [`call`](DbActor::call), which sends a
@@ -387,3 +421,7 @@ mod db_tests;
 #[cfg(test)]
 #[path = "../tests/unit/db_open_tests.rs"]
 mod db_open_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/db_repair_notice_tests.rs"]
+mod db_repair_notice_tests;

@@ -298,6 +298,12 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             });
             crate::vprintln!("[PLAYER] Crossfade {enabled}, {secs}s (effective {effective}s)");
         }
+        // The page's confirmation that the banner of `settings.store_repair` is on the screen.
+        "settings.store_repair_ack" => {
+            crate::state::db().post(|plugins, settings| {
+                crate::db::acknowledge_repairs(plugins, settings);
+            });
+        }
         "settings.open_logs_dir" => {
             let dir = crate::state::cache_data_dir().join("logs");
             let _ = std::fs::create_dir_all(&dir);

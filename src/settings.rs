@@ -907,6 +907,43 @@ fn read_notice(conn: &Connection) -> rusqlite::Result<Option<RepairNotice>> {
     }))
 }
 
+/// A read that fails for what the row holds or for damage fails the same way at every
+/// launch; a busy or an I/O error is gone at the next.
+fn permanently_unreadable(e: &rusqlite::Error) -> bool {
+    corruption(e)
+        || matches!(
+            e,
+            rusqlite::Error::FromSqlConversionFailure(..) | rusqlite::Error::InvalidColumnType(..)
+        )
+}
+
+/// The repair the user has not been told of yet, from this launch or an earlier one. A row that
+/// can never be read again is told as a wider loss: answering nothing would owe it for good.
+pub(crate) fn pending_notice(conn: &Connection) -> Option<RepairNotice> {
+    match read_notice(conn) {
+        Ok(notice) => notice,
+        Err(e) if permanently_unreadable(&e) => {
+            crate::verr!(
+                "[SETTINGS] the pending repair notice cannot be read, told as a wider loss: {e}"
+            );
+            Some(RepairNotice::unreadable_earlier(conn))
+        }
+        Err(e) => {
+            crate::verr!(
+                "[SETTINGS] cannot read the pending repair notice, it stays for the next ask: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// The banner is on the page's screen: the notice is told, and goes.
+pub(crate) fn acknowledge_repair_notice(conn: &Connection) {
+    if let Err(e) = conn.execute("DELETE FROM repair_notice", []) {
+        crate::verr!("[SETTINGS] cannot clear the repair notice, it will be shown again: {e}");
+    }
+}
+
 pub(crate) fn corruption(e: &rusqlite::Error) -> bool {
     matches!(
         e.sqlite_error_code(),

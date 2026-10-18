@@ -468,6 +468,163 @@ fn a_repair_is_told_only_when_the_user_would_notice_it() {
     }
 }
 
+fn told_of(turned_off: &[&'static str], trust: Trust, saved: bool) -> Option<RepairNotice> {
+    Some(RepairNotice {
+        turned_off: turned_off.to_vec(),
+        trust,
+        saved,
+    })
+}
+
+#[test]
+fn a_repair_notice_outlives_the_process_that_made_it_until_it_is_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path());
+    ruin_page(&path, root_page(&path, "settings"));
+    let told = told_of(&BOTH_CONSENTS, Trust::Dropped, true);
+    {
+        let (conn, _) = open(&path).unwrap();
+        assert_eq!(pending_notice(&conn), told);
+    }
+    // The process ended before the page asked: the next launch still owes the banner, however
+    // many launches pass.
+    for _ in 0..2 {
+        let (conn, opened) = open(&path).unwrap();
+        assert_eq!(opened, Opened::Healthy);
+        assert_eq!(pending_notice(&conn), told);
+    }
+    let (conn, _) = open(&path).unwrap();
+    acknowledge_repair_notice(&conn);
+    drop(conn);
+    let (conn, opened) = open(&path).unwrap();
+    assert_eq!(opened, Opened::Healthy);
+    assert_eq!(pending_notice(&conn), None);
+}
+
+/// What `settings.store_repair` answers: the notice in the shape the page's `StoreRepair` reads,
+/// then `null` once it is acknowledged.
+#[test]
+fn the_reply_to_the_ask_is_the_notice_as_the_page_reads_it_then_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path());
+    ruin_page(&path, root_page(&path, "settings"));
+    let (conn, _) = open(&path).unwrap();
+    assert_eq!(
+        serde_json::to_string(&pending_notice(&conn)).unwrap(),
+        r#"{"turnedOff":["connect.receiver_always_on","video.codec_enabled"],"trust":"dropped","saved":true}"#
+    );
+    acknowledge_repair_notice(&conn);
+    assert_eq!(
+        serde_json::to_string(&pending_notice(&conn)).unwrap(),
+        "null"
+    );
+}
+
+#[test]
+fn a_reindex_that_turned_a_setting_off_leaves_its_notice_in_the_same_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = table_page_reverted_index_kept(dir.path(), |_| {});
+    drop(open(&path).unwrap());
+
+    let (conn, opened) = open(&path).unwrap();
+
+    assert_eq!(opened, Opened::Healthy);
+    assert_eq!(
+        pending_notice(&conn),
+        told_of(&[VIDEO_CODEC_ENABLED.key], Trust::Empty, true)
+    );
+}
+
+#[test]
+fn a_volatile_run_tells_it_cannot_save_and_leaves_nothing_on_disk_to_tell_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path());
+    ruin_page(&path, root_page(&path, "settings"));
+    block(&beside(&path, ".new"));
+
+    let (conn, _) = open(&path).unwrap();
+    assert_eq!(
+        pending_notice(&conn),
+        told_of(&BOTH_CONSENTS, Trust::Dropped, false)
+    );
+    acknowledge_repair_notice(&conn);
+    assert_eq!(pending_notice(&conn), None);
+    drop(conn);
+
+    // The damaged file is still there; the next launch repairs it and tells of that repair
+    // once.
+    std::fs::remove_dir_all(beside(&path, ".new")).unwrap();
+    let (conn, opened) = open(&path).unwrap();
+    assert!(matches!(opened, Opened::Rebuilt { .. }));
+    assert_eq!(
+        pending_notice(&conn),
+        told_of(&BOTH_CONSENTS, Trust::Dropped, true)
+    );
+}
+
+#[test]
+fn a_second_repair_before_the_first_was_told_tells_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path());
+    ruin_page(&path, root_page(&path, "settings"));
+    drop(open(&path).unwrap());
+    ruin_page(&path, root_page(&path, "native_trust"));
+
+    let (conn, _) = open(&path).unwrap();
+
+    assert_eq!(
+        pending_notice(&conn),
+        told_of(&BOTH_CONSENTS, Trust::Dropped, true)
+    );
+}
+
+#[test]
+fn the_notice_is_no_setting_and_no_rebuild_carries_it_as_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seeded(dir.path());
+    ruin_page(&path, root_page(&path, "native_trust"));
+    let (conn, _) = open(&path).unwrap();
+    assert!(pending_notice(&conn).is_some());
+    let keys: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM settings WHERE key LIKE '%notice%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(keys, 0);
+}
+
+/// A store with nothing to repair owes no notice: a profile of this build, and stores written
+/// before the notice table, or before the trust table too, which must not have one invented.
+#[test]
+fn a_store_from_before_the_notice_opens_healthy() {
+    const BEFORE_THE_NOTICE: &str =
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE native_trust (
+            code_hash TEXT NOT NULL, plugin TEXT NOT NULL, module TEXT NOT NULL,
+            granted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (code_hash, plugin, module));
+         INSERT INTO settings VALUES ('logging.level', '2');";
+    const BEFORE_THE_TRUST_TABLE: &str =
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         INSERT INTO settings VALUES ('logging.level', '2');";
+    for schema in [None, Some(BEFORE_THE_NOTICE), Some(BEFORE_THE_TRUST_TABLE)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = match schema {
+            None => seeded(dir.path()),
+            Some(sql) => {
+                let path = dir.path().join("settings.db");
+                Connection::open(&path).unwrap().execute_batch(sql).unwrap();
+                path
+            }
+        };
+        let (mut conn, opened) = open(&path).unwrap();
+        assert_eq!(opened, Opened::Healthy, "{schema:?}");
+        assert_eq!(pending_notice(&conn), None, "{schema:?}");
+        assert_eq!(load_log_level(&mut conn), 2, "{schema:?}");
+    }
+}
+
 #[test]
 fn a_volatile_run_leaves_the_damaged_store_exactly_where_it_was() {
     let dir = tempfile::tempdir().unwrap();
@@ -957,6 +1114,107 @@ fn delete_schema_rows(path: &Path, table: &str) {
         .unwrap();
 }
 
+fn set_notice_row(path: &Path, json: &str) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute("UPDATE repair_notice SET notice = ?1", [json])
+        .unwrap();
+}
+
+/// A profile whose first repair was never told of: both consents turned off, trust dropped.
+fn repaired_untold(dir: &Path) -> PathBuf {
+    let path = seeded(dir);
+    ruin_page(&path, root_page(&path, "settings"));
+    drop(open(&path).unwrap());
+    path
+}
+
+/// What a notice that cannot be read again is stood in for by: every setting reading as a repair
+/// leaves it, and permissions that may be asked again.
+fn the_wider_notice() -> Option<RepairNotice> {
+    told_of(&BOTH_CONSENTS, Trust::Unknown, true)
+}
+
+#[test]
+fn an_unreadable_earlier_notice_is_told_as_a_wider_loss_by_the_next_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repaired_untold(dir.path());
+    ruin_page(&path, root_page(&path, "repair_notice"));
+
+    let (conn, opened) = open(&path).unwrap();
+
+    assert!(matches!(opened, Opened::Rebuilt { .. }));
+    assert_eq!(pending_notice(&conn), the_wider_notice());
+}
+
+#[test]
+fn an_earlier_notice_whose_table_left_the_schema_is_told_as_a_wider_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repaired_untold(dir.path());
+    delete_schema_rows(&path, "repair_notice");
+
+    let (conn, opened) = open(&path).unwrap();
+
+    assert!(matches!(opened, Opened::Rebuilt { .. }));
+    assert_eq!(pending_notice(&conn), the_wider_notice());
+}
+
+#[test]
+fn a_notice_row_that_cannot_be_parsed_is_still_owed_as_a_wider_loss() {
+    for json in [
+        "{not json",
+        r#"{"turnedOff":["video.codec_enabled"],"trust":"partial","saved":true}"#,
+        r#"{"turnedOff":["video.codec_enabled"],"trust":"dropped"}"#,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = repaired_untold(dir.path());
+        set_notice_row(&path, json);
+
+        let (conn, opened) = open(&path).unwrap();
+
+        assert_eq!(opened, Opened::Healthy, "{json}");
+        assert_eq!(pending_notice(&conn), the_wider_notice(), "{json}");
+        acknowledge_repair_notice(&conn);
+        assert_eq!(pending_notice(&conn), None, "{json}");
+    }
+}
+
+#[test]
+fn a_notice_row_from_a_later_build_keeps_what_this_build_can_tell() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repaired_untold(dir.path());
+    set_notice_row(
+        &path,
+        r#"{"turnedOff":["video.codec_enabled","future.key"],"trust":"dropped","saved":true,"extra":1}"#,
+    );
+
+    let (conn, _) = open(&path).unwrap();
+
+    assert_eq!(
+        pending_notice(&conn),
+        told_of(&[VIDEO_CODEC_ENABLED.key], Trust::Dropped, true)
+    );
+}
+
+#[test]
+fn a_reindex_replaces_an_unreadable_earlier_notice_instead_of_leaving_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repaired_untold(dir.path());
+    set_notice_row(&path, "{not json");
+    corrupt_index_byte(&path);
+
+    let (conn, opened) = open(&path).unwrap();
+
+    assert_eq!(
+        opened,
+        Opened::Reindexed {
+            turned_off: vec![],
+            trust: Trust::Empty
+        }
+    );
+    assert_eq!(pending_notice(&conn), the_wider_notice());
+    assert!(read_notice(&conn).is_ok());
+}
+
 #[test]
 fn a_trust_table_gone_from_the_schema_is_not_told_as_empty() {
     let dir = tempfile::tempdir().unwrap();
@@ -973,6 +1231,64 @@ fn a_trust_table_gone_from_the_schema_is_not_told_as_empty() {
         }
     );
     assert_eq!(trust_rows(&conn), 0);
+}
+
+/// A trust table whose page went back to before a refusal while its index kept it: a write that
+/// never reached the disk. `seed` runs on the connection that created the schema.
+fn trust_page_reverted_index_kept(dir: &Path, seed: impl FnOnce(&mut Connection)) -> PathBuf {
+    let path = dir.join("settings.db");
+    {
+        let mut conn = Connection::open(&path).unwrap();
+        init_schema(&mut conn).unwrap();
+        seed(&mut conn);
+    }
+    let table = root_page(&path, "native_trust");
+    let before = page_image(&path, table);
+    insert_refused_trust(&Connection::open(&path).unwrap());
+    overwrite(&path, (table - 1) * PAGE, &before);
+    path
+}
+
+#[test]
+fn a_trust_decision_the_table_lost_is_told_by_a_reindex() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = trust_page_reverted_index_kept(dir.path(), |conn| save_log_level(conn, 2));
+
+    let (conn, opened) = open(&path).unwrap();
+
+    assert_eq!(
+        opened,
+        Opened::Reindexed {
+            turned_off: vec![],
+            trust: Trust::Dropped
+        }
+    );
+    assert_eq!(pending_notice(&conn), told_of(&[], Trust::Dropped, true));
+    assert_eq!(trust_rows(&conn), 0);
+}
+
+#[test]
+fn a_reindex_that_turned_a_setting_off_tells_the_trust_it_lost_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = trust_page_reverted_index_kept(dir.path(), |conn| {
+        save_video_codec_enabled(conn, false);
+        save_log_level(conn, 2);
+    });
+    corrupt_index_byte(&path);
+
+    let (conn, opened) = open(&path).unwrap();
+
+    assert_eq!(
+        opened,
+        Opened::Reindexed {
+            turned_off: vec![CONNECT_RECEIVER_ALWAYS_ON.key],
+            trust: Trust::Dropped
+        }
+    );
+    assert_eq!(
+        pending_notice(&conn),
+        told_of(&[CONNECT_RECEIVER_ALWAYS_ON.key], Trust::Dropped, true)
+    );
 }
 
 #[test]
@@ -1028,6 +1344,65 @@ fn released(dir: &Path, rows: &str) -> PathBuf {
     .unwrap();
     conn.execute_batch(rows).unwrap();
     path
+}
+
+#[test]
+fn a_damaged_store_from_before_the_notice_is_told_only_what_its_own_repair_did() {
+    let receiver_off = "INSERT INTO settings VALUES ('connect.receiver_always_on', 'false');";
+    // (rows the user left, damage, what the repair itself turned off)
+    let cases = [
+        (receiver_off, corrupt_index_byte as fn(&Path), vec![]),
+        ("", corrupt_index_byte, vec![CONNECT_RECEIVER_ALWAYS_ON.key]),
+        (
+            receiver_off,
+            |path: &Path| ruin_page(path, root_page(path, "settings")),
+            BOTH_CONSENTS.to_vec(),
+        ),
+    ];
+    for (rows, damage, turned_off) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = released(dir.path(), rows);
+        damage(&path);
+
+        let (conn, opened) = open(&path).unwrap();
+
+        // No earlier notice existed to be lost: the user is told this repair and nothing wider.
+        assert_eq!(opened.notice(), pending_notice(&conn), "{rows}");
+        let told = pending_notice(&conn);
+        assert_eq!(
+            told.as_ref().map(|notice| notice.turned_off.clone()),
+            (!turned_off.is_empty()).then_some(turned_off.clone()),
+            "{rows}"
+        );
+        assert!(
+            told.is_none_or(|notice| notice.trust == Trust::Empty),
+            "{rows}"
+        );
+    }
+}
+
+#[test]
+fn a_store_is_stamped_with_the_tables_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut conn = Connection::open(dir.path().join("fresh.db")).unwrap();
+    init_schema(&mut conn).unwrap();
+    assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+
+    // A published store is stamped as it gains the table the stamp vouches for.
+    let before = tempfile::tempdir().unwrap();
+    let old = released(before.path(), "");
+    let (conn, opened) = open(&old).unwrap();
+    assert_eq!(opened, Opened::Healthy);
+    assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
+    assert_eq!(pending_notice(&conn), None);
+
+    // A later build's stamp is never lowered.
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+        .unwrap();
+    let mut conn = Connection::open(&old).unwrap();
+    init_schema(&mut conn).unwrap();
+    assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION + 1);
 }
 
 #[test]

@@ -155,6 +155,16 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         "settings.video_codec_state" => {
             ipc_callback_ok(&callback, &crate::video::codec::state_json());
         }
+        // The reply carries the repairs the user has not been told of (settings.db, plugins.db),
+        // `null` when there are none; they stay in their stores until `settings.store_repair_ack`.
+        "settings.store_repair" => {
+            crate::state::db().post(move |plugins, settings| {
+                match serde_json::to_string(&crate::db::pending_repairs(plugins, settings)) {
+                    Ok(json) => ipc_callback_ok(&callback, &json),
+                    Err(e) => ipc_callback_err(&callback, 500, &e.to_string()),
+                }
+            });
+        }
         _ => {
             plugin_ipc::handle_plugin_db(msg, &caller, callback);
         }
