@@ -34,16 +34,6 @@ async function armed(id: string) {
 	return { el, seen };
 }
 
-test("a healthy stream still announces itself", async () => {
-	// The guard on the nominal path: refusing a stream must not cost the four events TIDAL's
-	// saga waits on, nor the readiness a Rust-backed element is entitled to claim.
-	const { el, seen } = await armed("healthy");
-	expect(seen).toEqual(READINESS);
-	expect(el.readyState).toBe(4);
-	expect(el.networkState).toBe(2);
-	expect(el.error).toBeNull();
-});
-
 test("a refusal leaves shaka nothing to mint an error from", async () => {
 	// Read out of TIDAL's shipped bundle. Shaka turns a media element that looks broken into
 	// error code S3016, the one code its saga answers by advancing the queue. A refused
@@ -77,7 +67,8 @@ test("re-arming the same source does not resurrect readiness", async () => {
 
 test("a different source gets a fresh verdict", async () => {
 	// A refusal belongs to the stream that earned it. The next track must not inherit it, or
-	// one undecodable song would mute the rest of the queue.
+	// one undecodable song would mute the rest of the queue: it still gets the four events
+	// TIDAL's saga waits on, and the readiness a Rust-backed element is entitled to claim.
 	await armed("verdict-old");
 	proxyFail();
 

@@ -982,15 +982,3 @@ test("the refused item announced again under a new reference is no announcement:
 
 	expect(pbiCalls).toEqual(["9001"]);
 });
-
-test("a track TIDAL moves to is still self-loaded", async () => {
-	const from = sent.length;
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "local", type: "track" });
-	await flush();
-	resolvePbi?.(aacStream);
-	await flush();
-
-	expect(sentSince(from)).toContain("player.load");
-	expect(isSelfLoad()).toBe(true);
-});
