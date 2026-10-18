@@ -8,9 +8,7 @@
 //! within a reasonable time. This module wraps all three behind an
 //! `async` trait: callers only see a single deadline-bounded result.
 //!
-//! The prod implementation wraps `ServiceDaemon`. The test implementation is
-//! a simple fake that plays back a scripted sequence of outcomes, exercising
-//! shutdown behaviour without a real multicast interface.
+//! The one implementation, `ProdMdnsBackend`, wraps `ServiceDaemon`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -156,61 +154,6 @@ async fn probe_already_stopped(daemon: &ServiceDaemon) -> bool {
         // Sender dropped: daemon is gone.
         Ok(Err(_)) => true,
         _ => false,
-    }
-}
-
-/// A scripted fake backend. Pushes are consumed in order: a single fake can
-/// serve multiple shutdown() calls with different scripted outcomes.
-#[cfg(test)]
-pub struct FakeMdnsBackend {
-    script: std::sync::Mutex<std::collections::VecDeque<FakeResponse>>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub enum FakeResponse {
-    Clean,
-    AlreadyStopped,
-    Degraded {
-        retry_count: u32,
-        last_status: Option<String>,
-        last_error: Option<String>,
-    },
-}
-
-#[cfg(test)]
-impl FakeMdnsBackend {
-    pub fn with_script(script: Vec<FakeResponse>) -> Self {
-        Self {
-            script: std::sync::Mutex::new(script.into()),
-        }
-    }
-}
-
-#[cfg(test)]
-#[async_trait]
-impl MdnsBackend for FakeMdnsBackend {
-    async fn shutdown(&self, _deadline: Duration) -> ShutdownOutcome {
-        let next = self
-            .script
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pop_front();
-        match next {
-            Some(FakeResponse::Clean) => ShutdownOutcome::Clean,
-            Some(FakeResponse::AlreadyStopped) => ShutdownOutcome::AlreadyStopped,
-            Some(FakeResponse::Degraded {
-                retry_count,
-                last_status,
-                last_error,
-            }) => ShutdownOutcome::Degraded {
-                retry_count,
-                last_status,
-                last_error,
-            },
-            // Empty script behaves like a clean idempotent shutdown.
-            None => ShutdownOutcome::AlreadyStopped,
-        }
     }
 }
 
