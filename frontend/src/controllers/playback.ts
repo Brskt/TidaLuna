@@ -30,6 +30,11 @@ const btsSelfLoad = (pbi: any) => {
     return { streamUrl, codec: manifest.codecs?.split(".")?.[0] ?? "aac", encKey: manifest.keyId ?? "" };
 };
 
+// Whose a failed load is, by the product the failure names. `current`: a track this page loaded
+// itself and the listener still has. `superseded`: one it loaded itself and the listener has left.
+// `foreign`: anything else, which the SDK loaded and TIDAL's native player reports.
+export type LoadOwner = "current" | "superseded" | "foreign";
+
 export const createPlaybackController = () => {
     let delegate: any = null;
     let lastTransitionId = "";
@@ -147,6 +152,14 @@ export const createPlaybackController = () => {
     };
     onSdkReload(refreshCredential);
     const ctrl = {
+        // Rust names the product of a load that failed before its track played. The SDK knows
+        // nothing of a track this page loaded itself; the failure is this page's to answer,
+        // and only while the listener still has that track. The self-load flag says the last load
+        // was this page's: an SDK load after it is no self-load, whatever id it carries.
+        loadOwner(productId: unknown): LoadOwner {
+            if (!isSelfLoad() || loadedId === "" || String(productId ?? "") !== loadedId) return "foreign";
+            return lastTransitionId === loadedId ? "current" : "superseded";
+        },
         // The same track again, with nothing to announce it: TIDAL announces only when the current
         // item changes, and the guard below drops a repeated id.
         replaySelfLoad() {

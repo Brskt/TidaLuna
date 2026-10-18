@@ -847,6 +847,72 @@ test("the late failure of an earlier announcement of a product is not its later 
 	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
 });
 
+// Rust names the product of a load that failed before its track played. Whose failure it is
+// depends on who loaded the track: this page for a self-load, the SDK otherwise.
+test("a failed load of the track this page loaded, still the announced one, is the page's own", async () => {
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "mine", type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+
+	expect(controller.loadOwner("mine")).toBe("current");
+	expect(controller.loadOwner("another")).toBe("foreign");
+});
+
+test("a failed load of a track the SDK loaded is foreign, even under the id this page loaded before", async () => {
+	// The SDK's native load clears the self-load flag: the id left behind names a track the SDK
+	// now loads, and refusing it would stop what TIDAL's native player reports.
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "replayed", type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	setSelfLoad(false);
+
+	expect(controller.loadOwner("replayed")).toBe("foreign");
+});
+
+// The two refusals split a failure by whether this page sent Rust a load: the element's rule is for
+// the track it did not hand over, the load's own failure for the track it did.
+test("a track the element's rule refused, after an earlier load of this page, leaves that load's failure to no refusal", async () => {
+	const controller = createPlaybackController();
+	await announce(controller, "2032");
+	resolvePbi?.(aacStream);
+	await flush();
+
+	const stream = await sdkAnswers("2033");
+	await announce(controller, "2033");
+	ours("blip");
+	await flush();
+	await bindStream(document.createElement("audio"), stream);
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+
+	expect(controller.loadOwner("2032")).toBe("superseded");
+	expect(controller.loadOwner("2033")).toBe("foreign");
+});
+
+test("a replay refused by the element's rule still reads as the page's own load for the product's earlier failure", async () => {
+	// The one overlap: the earlier load of the same product is still the last this page sent. Rust
+	// reports a load's failure before the track plays; a replay exists only after that load
+	// succeeded and nothing is left to fail. The verdict is pinned as it stands.
+	const first = await sdkAnswers("2034");
+	const controller = createPlaybackController();
+	await announce(controller, "2034");
+	resolvePbi?.(aacStream);
+	await flush();
+	await bindStream(document.createElement("audio"), first);
+	dispatched = [];
+
+	controller.replaySelfLoad();
+	await flush();
+	ours("blip");
+	await flush();
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+
+	expect(controller.loadOwner("2034")).toBe("current");
+});
+
 test("a refusal of the track that is still current is the one a Play asks for again", async () => {
 	// The refusal names the product the closure was loading. The Play's retry announces it a second
 	// time: the guard against a repeated id would otherwise drop it, and nothing would ask again.

@@ -5,6 +5,7 @@ import { createApplicationController } from "./controllers/application";
 import { createAudioHack } from "./controllers/audio";
 import { createNavigationController } from "./controllers/navigation";
 import { createPlaybackController } from "./controllers/playback";
+import type { LoadOwner } from "./controllers/playback";
 import { createUserSession } from "./controllers/session";
 import { createUserSettings } from "./controllers/settings";
 import { createWindowController } from "./controllers/window";
@@ -234,6 +235,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             }
         }
         const mapped = SEQ_EVENTS[type];
+        const loadOwner: LoadOwner = type === "mediaerror" ? window.nativeInterface.playback.loadOwner(event.v?.productId) : "foreign";
         if (type === "medianetworklost") {
             // Not a passthrough: a raw `mediaerror` loses TIDAL's one-second STALLED
             // race, leaving the spinner turning over a player that will never resume.
@@ -278,10 +280,25 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             // that ran, with the catalog's length (`routeLoad`; `moved` in LoadRefusal says why).
             const duration = bridge.routeLoad?.(event.v?.load);
             if (typeof duration === "number") bridge.settleLoad?.(duration);
+        } else if (loadOwner !== "foreign") {
+            // Rust could not load a track this page loaded itself. The SDK never heard of it, and
+            // nothing refuses it but this page: raw, the failure reaches no listener while TIDAL's
+            // native player is unbuilt, and where it does it reads as a native track's, a banner
+            // beside ours that stops nothing. A track the listener has left is refused no more,
+            // and the failure is dropped rather than put under the track they moved to.
+            if (loadOwner === "current") {
+                refusePlayback(
+                    "tidalunar_load_failed",
+                    String(event.v?.error ?? ""),
+                    "TidaLunar could not load this track. Please try again or pick another one.",
+                    String(event.v?.productId ?? ""),
+                );
+            }
         } else if (mapped) {
             bridge.trigger(mapped, event.v, event.seq);
         } else if (PASSTHROUGH_EVENTS.has(type)) {
-            bridge.trigger(type, event.v);
+            // `productId` is this bridge's own: the SDK's native player reads `error` and `errorCode`.
+            bridge.trigger(type, type === "mediaerror" ? { error: event.v?.error, errorCode: event.v?.errorCode } : event.v);
             if (type === "mediaerror") {
                 // Rust has published this since the bridge was written and it stopped at the
                 // SDK delegate, leaving the element it describes unaware. Kept deliberately:
