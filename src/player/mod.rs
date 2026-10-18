@@ -601,7 +601,6 @@ pub enum PlayerEvent {
         seq: u32,
         product_id: Option<String>,
     },
-    MaxConnectionsReached,
     /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the
     /// player and raises TIDAL's own error banner; never advances the queue, and never
     /// touches the cache: the file was fine, the connection was not. Carries the load's event
@@ -767,7 +766,6 @@ enum PlayerCommand {
         /// `handle_load` ran, which leaves the thread still committed to the previous track.
         product_id: Option<String>,
     },
-    EmitMaxConnections,
     #[cfg(target_os = "windows")]
     SetVolumeSync(bool),
     /// Crossfade overlap in seconds, zero for off. The switch and the slider
@@ -1247,11 +1245,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
             if !r.status().is_success() {
                 let status = r.status();
                 crate::vprintln!("[ERROR]  Upstream status: {}", status);
-                if status.as_u16() == 429 {
-                    let _ = ctx.cmd_tx.send(PlayerCommand::EmitMaxConnections);
-                } else {
-                    ctx.fail_load(format!("HTTP {}", status), MediaErrorCode::NoSuchFile);
-                }
+                ctx.fail_load(format!("HTTP {}", status), MediaErrorCode::NoSuchFile);
                 return;
             }
             r

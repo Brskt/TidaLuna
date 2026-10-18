@@ -328,11 +328,6 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         crate::player::current_load().1,
                     ));
             }
-            PlayerEvent::MaxConnectionsReached => {
-                state
-                    .pending_player_events
-                    .push(PlayerBridgeEvent::max_connections());
-            }
             PlayerEvent::NetworkLost(_) => {
                 state
                     .pending_player_events

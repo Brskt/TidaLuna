@@ -161,16 +161,6 @@ impl PlayerBridgeEvent {
         }
     }
 
-    pub fn max_connections() -> Self {
-        Self {
-            t: "mediamaxconnectionsreached",
-            seq: None,
-            cast: false,
-            product: None,
-            v: serde_json::Value::Null,
-        }
-    }
-
     /// Not a passthrough event: the renderer answers it with the same five-step refusal
     /// the undecodable-profile branch uses, because a raw `mediaerror` alone loses the
     /// one-second STALLED race TIDAL arms on every autoplay load.

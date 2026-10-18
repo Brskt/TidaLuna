@@ -2257,8 +2257,8 @@ fn a_teardown_waits_out_a_swap_in_progress_and_promotes_it() {
 /// A Load the generation gate discards must leave a live fade alone. Tearing it down first
 /// retracts the attach slot and stops the incoming decoder, and nothing legitimate follows to
 /// justify it: a generation can be minted and then die to an HTTP error (`ctx.fail_load`), and
-/// neither `LoadFailed` nor `EmitMaxConnections` cancels a fade. The discarded Load is then the
-/// sole cause of the loss, and the outgoing gain snaps back mid-ramp.
+/// `LoadFailed` does not cancel a fade. The discarded Load is then the sole cause of the loss,
+/// and the outgoing gain snaps back mid-ramp.
 #[tokio::test]
 async fn a_stale_load_leaves_a_live_fade_armed() {
     // Held for the reason its siblings state: `handle_load` reads the process-wide generation.

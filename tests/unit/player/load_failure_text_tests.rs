@@ -270,3 +270,78 @@ async fn a_truncated_dash_segment_publishes_no_credential() {
 
     assert_no_credential(&settled_error(&events).await);
 }
+
+/// Binds a listener that answers one request with a 429 and closes.
+async fn rate_limited_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 1024];
+        let _ = sock.read(&mut request).await;
+        let _ = sock
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        let _ = sock.flush().await;
+    });
+    port
+}
+
+/// A stream the host refuses with 429 settles its load like any other refused fetch. The SDK's
+/// `mediaduration` await, Shaka's `durationchange` await and a Connect receiver's pending track
+/// have no timeout between them: a load nobody settles leaves all three waiting for good.
+#[tokio::test]
+async fn a_rate_limited_stream_settles_the_load_it_refused() {
+    let _serialised = serialised().await;
+    let (player, events) = spying_player();
+    let port = rate_limited_port().await;
+
+    let seq = player.load_and_play(
+        format!("http://127.0.0.1:{port}/track.flac"),
+        "flac".to_string(),
+        String::new(),
+        Some("120002099".to_string()),
+        LoadOrigin::Local,
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let settled = events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|ev| {
+                matches!(
+                    ev,
+                    PlayerEvent::Duration(d, s, Some(id)) if *d == 0.0 && *s == seq && id == "120002099"
+                )
+            });
+        if settled {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the refused load was never settled: {:?}",
+            events.lock().unwrap_or_else(|e| e.into_inner())
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // The renderer refuses a track it loaded itself on the name this failure carries.
+    assert!(
+        events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|ev| matches!(
+                ev,
+                PlayerEvent::MediaError { seq: s, product_id: Some(id), .. }
+                    if *s == seq && id == "120002099"
+            )),
+        "the refusal named neither its load nor its track"
+    );
+}

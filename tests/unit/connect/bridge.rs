@@ -175,7 +175,6 @@ fn events_of_a_track() -> Vec<PlayerEvent> {
             seq: 1,
             product_id: None,
         },
-        PlayerEvent::MaxConnectionsReached,
         PlayerEvent::NetworkLost(1),
         PlayerEvent::ReplayRequest {
             track: crate::state::TrackInfo {

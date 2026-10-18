@@ -738,9 +738,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 });
                 (self.callback)(PlayerEvent::Duration(0.0, seq, product_id));
             }
-            PlayerCommand::EmitMaxConnections => {
-                (self.callback)(PlayerEvent::MaxConnectionsReached);
-            }
             #[cfg(target_os = "windows")]
             PlayerCommand::SetVolumeSync(enabled) => {
                 self.handle_set_volume_sync(enabled);

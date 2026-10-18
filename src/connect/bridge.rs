@@ -186,9 +186,6 @@ pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
         // `StateChange` that follows. `FormatNotSupported` does not, and whether the
         // controller should hear that one is a question this arm does not answer.
         PlayerEvent::DeviceError(..) => None,
-        // Emitted on an HTTP 429 during fetch. Unlike every other load failure it does not
-        // call `fail_load`: no `MediaError` settles behind it either.
-        PlayerEvent::MaxConnectionsReached => None,
     };
 
     if let Some(evt) = bridge_event {
