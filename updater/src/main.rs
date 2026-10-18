@@ -1,5 +1,6 @@
 // Every line goes through say!, which a dead stderr cannot turn into a panic.
 #![deny(clippy::print_stderr, clippy::print_stdout)]
+#![deny(clippy::allow_attributes)]
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -191,8 +192,6 @@ struct JournalFile {
 
 #[derive(Deserialize)]
 struct GhRelease {
-    #[allow(dead_code)]
-    tag_name: String,
     assets: Vec<GhAsset>,
 }
 
