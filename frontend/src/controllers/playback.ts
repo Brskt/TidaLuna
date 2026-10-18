@@ -1,6 +1,6 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
 import { isSelfLoad, setSelfLoad, onHandoff, onProxyBind, onSdkLoad, onSdkReload, proxyFail, proxyLoading, proxyOwnerSrc } from "../audio-proxy";
-import { refusePlayback } from "../refuse-playback";
+import { forgetRefusal, refusePlayback } from "../refuse-playback";
 import { onSdkStream, productOfStream } from "../sdk-playbackinfo";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 import { setCurrentTrack } from "../video/cover-canvas";
@@ -74,7 +74,7 @@ export const createPlaybackController = () => {
     const refuse = (code: string, error: string, message: string) => {
         refused = true;
         try {
-            refusePlayback(code, error, message);
+            refusePlayback(code, error, message, lastTransitionId);
         } catch (e) {
             console.error("[luna:playback] refusal failed:", e);
         }
@@ -195,6 +195,7 @@ export const createPlaybackController = () => {
                     const announcement = ++announcements;
                     unloaded = null;
                     refused = false;
+                    forgetRefusal(productId);
                     disarm();
                     proxyLoading();
                     setTimeout(async () => {

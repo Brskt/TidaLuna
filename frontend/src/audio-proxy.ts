@@ -421,6 +421,13 @@ export function proxyFail() {
 	_settled = false;
 }
 
+// The listener asked for the refused stream again: the verdict is lifted, and the next time the SDK
+// assigns it the readiness is announced. TIDAL assigns the identical manifest, which stays refused
+// while the verdict stands.
+export function proxyRetry() {
+	_failedSrc = null;
+}
+
 export function proxyReset() {
 	_proxyElement = null;
 	_handover = false;

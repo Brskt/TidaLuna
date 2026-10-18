@@ -533,7 +533,7 @@ const ours = (what: "blip" | "forbidden" | "bts" | "incomplete-dash") => {
 	else if (what === "forbidden") resolvePbi?.(undefined);
 	else resolvePbi?.({ audioQuality: "HIGH", manifestMimeType: "application/dash+xml", manifest: { initUrl: "", segmentUrls: [], codec: "mp4a.40.2" } });
 };
-const refusedTracks = () => ({ stops: dispatched.filter((d) => d.type === "playbackControls/STOP").length, banners: dispatched.filter((d) => d.type === "message/MESSAGE_ERROR").length });
+const refusedTracks = () => ({ stops: stops().length, banners: banners().length });
 
 test("our request failing while the SDK takes the track to the element refuses it, and its readiness is withheld", async () => {
 	const stream = await sdkAnswers("2017");
@@ -564,6 +564,23 @@ test("every way this page ends without loading the track refuses it once the ele
 
 		expect({ what, ...refusedTracks() }).toEqual({ what, stops: 1, banners: 1 });
 		proxyReset();
+	}
+});
+
+test("a refusal says it could not load the track, outside TIDAL's table of codes", async () => {
+	const triggered: [string, any][] = [];
+	(window as any).NativePlayerComponent = { trigger: (name: string, payload: unknown) => triggered.push([name, payload]) };
+	try {
+		const stream = await sdkAnswers("2019");
+		const controller = createPlaybackController();
+		await announce(controller, "2019");
+		ours("blip");
+		await bindStream(document.createElement("audio"), stream);
+
+		expect(triggered).toEqual([["mediaerror", expect.objectContaining({ errorCode: "tidalunar_manifest_unreadable" })]]);
+		expect((banners()[0]!.payload as any).message).toContain("could not load this track");
+	} finally {
+		delete (window as any).NativePlayerComponent;
 	}
 });
 
@@ -708,6 +725,27 @@ test("a video, and a track the receiver already plays, are never refused for the
 	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
 });
 
+test("the element's rule never refuses a track this page loaded, and refuses nothing twice", async () => {
+	const stream = await sdkAnswers("2013");
+	const controller = createPlaybackController();
+	await announce(controller, "2013");
+	resolvePbi?.(aacStream);
+	await flush();
+	await bindStream(document.createElement("audio"), stream);
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+
+	// A manifest Rust cannot read refuses at once; the element holding the stream does not refuse it twice.
+	dispatched = [];
+	const stream2 = await sdkAnswers("2002");
+	await announce(controller, "2002");
+	rejectPbi?.(manifestFailure());
+	await flush();
+	await bindStream(document.createElement("audio"), stream2);
+	await sdkAnswers("2002");
+
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+});
+
 test("one refusal, however many of the failure, the bind and the answer say the same", async () => {
 	const stream = await sdkAnswers("2014");
 	const controller = createPlaybackController();
@@ -729,6 +767,7 @@ test("one refusal, however many of the failure, the bind and the answer say the 
 const undecodable = () => Object.assign(new Error("undecodable"), { code: 415 });
 const refusals = [
 	["an undecodable profile", "2040", undecodable],
+	["a manifest Rust cannot read", "2041", manifestFailure],
 	["our request failing", "2042", () => new Error("fetch failed")],
 ] as const;
 
@@ -757,6 +796,39 @@ for (const [what, id, failure] of refusals) {
 	});
 }
 
+// The Play that retries a refusal announces the product again and the SDK binds its stream: that
+// stream is the retry's, and its readiness is announced.
+for (const [what, id, failure] of refusals) {
+	test(`the retry of a refusal for ${what} announces the readiness of the stream it binds`, async () => {
+		const { playOnRefusal } = await import("../src/refuse-playback");
+		const first = await sdkAnswers(id);
+		const controller = createPlaybackController();
+		(window as any).nativeInterface = { playback: controller };
+		await announce(controller, id);
+		resolvePbi?.(aacStream);
+		await flush();
+		const el = document.createElement("audio");
+		await bindStream(el, first);
+
+		controller.replaySelfLoad();
+		await flush();
+		rejectPbi?.(failure());
+		await flush();
+		expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+		await bindStream(el, await sdkAnswers(id, dash(`${id} signed again`)));
+		state.playbackControls = { playbackContext: {}, mediaProduct: { productId: id } } as any;
+
+		expect(playOnRefusal()).toBe("retry");
+		await flush();
+		resolvePbi?.(aacStream);
+		await flush();
+		const seen = readinessOfEl(el);
+		await bindStream(el, await sdkAnswers(id, dash(`${id} signed for the retry`)));
+
+		expect(seen).toEqual(["loadedmetadata", "canplay"]);
+	});
+}
+
 test("the late failure of an earlier announcement of a product is not its later announcement's", async () => {
 	// `lastTransitionId` is a scalar: A, B, A satisfies its guard for the first A's rejection.
 	const stream = await sdkAnswers("2024");
@@ -773,6 +845,60 @@ test("the late failure of an earlier announcement of a product is not its later 
 	await flush();
 
 	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+});
+
+test("a refusal of the track that is still current is the one a Play asks for again", async () => {
+	// The refusal names the product the closure was loading. The Play's retry announces it a second
+	// time: the guard against a repeated id would otherwise drop it, and nothing would ask again.
+	const { playOnRefusal } = await import("../src/refuse-playback");
+	const controller = createPlaybackController();
+	(window as any).nativeInterface = { playback: controller };
+	controller.setCurrentMediaItem({ productId: "again", type: "track" });
+	await flush();
+	rejectPbi?.(Object.assign(new Error("undecodable"), { code: 415 }));
+	await flush();
+	state.playbackControls = { playbackContext: {}, mediaProduct: { productId: "again" } } as any;
+
+	expect(playOnRefusal()).toBe("retry");
+	await flush();
+
+	expect(pbiCalls).toEqual(["again", "again"]);
+});
+
+test("a track announced after the refusal forgets it", async () => {
+	const { playOnRefusal } = await import("../src/refuse-playback");
+	const controller = createPlaybackController();
+	(window as any).nativeInterface = { playback: controller };
+	controller.setCurrentMediaItem({ productId: "refused", type: "track" });
+	await flush();
+	rejectPbi?.(Object.assign(new Error("undecodable"), { code: 415 }));
+	await flush();
+	controller.setCurrentMediaItem({ productId: "next", type: "track" });
+	await flush();
+	state.playbackControls = { playbackContext: {}, mediaProduct: { productId: "refused" } } as any;
+
+	expect(playOnRefusal()).toBe("resume");
+});
+
+const refusedTrack = async (productId: string) => {
+	const controller = createPlaybackController();
+	(window as any).nativeInterface = { playback: controller };
+	controller.setCurrentMediaItem({ productId, type: "track" });
+	await flush();
+	rejectPbi?.(Object.assign(new Error("undecodable"), { code: 415 }));
+	await flush();
+	return controller;
+};
+
+test("the refused item announced again under a new reference is no announcement: nothing asked for it", async () => {
+	// TIDAL calls this on every new reference of the item (a page that lists the track reloads it), with
+	// nobody having asked for the track.
+	const controller = await refusedTrack("9001");
+
+	controller.setCurrentMediaItem({ productId: "9001", type: "track", title: "refreshed" });
+	await flush();
+
+	expect(pbiCalls).toEqual(["9001"]);
 });
 
 test("a track TIDAL moves to is still self-loaded", async () => {

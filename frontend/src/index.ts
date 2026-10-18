@@ -15,7 +15,7 @@ import type { LoadRefusal, TrackListPayload } from "./controllers/player";
 import { followCastQueue } from "./connect/middleware";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
-import { refusePlayback } from "./refuse-playback";
+import { askRefusedAgain, playOnRefusal, refusalDelivered, refusalStands, refusePlayback } from "./refuse-playback";
 import { installSdkFetchObserver } from "./sdk-playbackinfo";
 import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
@@ -181,6 +181,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             // reads it when `active` arrives, to know whose time the segment it opens is.
             (window as any).__LUNAR_RUST_PRODUCT_ID__ = product;
             proxySetDuration(event.v, product);
+            if (event.v > 0) refusalDelivered(product);
         } else if (type === "volume") {
             // The OS mixer moved the level: mirrored as a controller's move is. A store not yet
             // there misses it, and the page catches up with it once the store is found.
@@ -389,6 +390,15 @@ const init = async () => {
             registry[action].add(cb);
         };
         add("playbackControls/PLAY", () => {
+            // A track this page refused asks for the load again, and Rust's own track stays as it is.
+            // The Play is cancelled: it goes out again once the track is loaded.
+            switch (playOnRefusal()) {
+                case "retry":
+                case "wait":
+                    return true;
+                case "resume":
+                    break;
+            }
             // Self-load (DASH/AAC) keeps its direct path; SDK tracks go through the
             // deduped desired-intent: a user PLAY reaches Rust even when TIDAL
             // resumes via stop+load(same) without calling nativePlayer.play().
@@ -398,6 +408,16 @@ const init = async () => {
         add("playbackControls/PAUSE", () => {
             if (!isSelfLoad()) (window.NativePlayerComponent as any)?.setDesiredPlayback?.(false);
         });
+        // TIDAL puts this at the start of every load it begins (its pick, its Play on a stopped transport),
+        // naming the product, and the SDK's own retries of a request put nothing: the one signal that the
+        // listener asked for the product again. A product this page refused is then asked for once more.
+        add(
+            "playbackControls/PREFILL_MEDIA_PRODUCT_TRANSITION",
+            (p: { mediaProduct?: { productId?: unknown } } | undefined) => {
+                if (askRefusedAgain(String(p?.mediaProduct?.productId ?? ""))) window.nativeInterface.playback.replaySelfLoad();
+            },
+            putInterceptors,
+        );
         // TIDAL stops by resetting the SDK's players. The native player's reset() sends Rust a stop
         // only for a session it loaded itself, and Shaka's only unloads the element. A track this
         // page loaded (Rust's, behind an element that mirrors it) kept playing under a stopped
@@ -446,6 +466,8 @@ const init = async () => {
         add(PRELOAD_ITEM, onPreloadItem);
         add(PRELOAD_ITEM, onPreloadItem, putInterceptors);
         add("playbackControls/SEEK", (time: number) => {
+            // The bar names the refused track, and Rust's is the one the refusal left behind.
+            if (refusalStands()) return;
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;
         });
