@@ -1,3 +1,4 @@
+import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { invokeIpc, sendIpc } from "./ipc";
 
 // What Rust reports of the level it plays (`LevelReport`, src/player/mod.rs): after a Connect
@@ -118,25 +119,32 @@ type Store = { dispatch: (action: { type: string; payload?: unknown }) => void }
 // for that one applies the store's own level to restore, while Rust has already restored its own.
 // SET_VOLUME goes last, so the triple TIDAL persists on it is the settled one. A report older than
 // one already taken in changes nothing.
+//
+// Every write runs even when an earlier one throws. A store subscriber throws after its reducer
+// committed; stopping there would leave half a level that nothing completes. A store not
+// published yet is the one failure that stops it, nothing having committed and the older level
+// still showing: the report is then not taken in, or a level applied from that store would reach
+// Rust as if the page knew better. Other failures are raised after the last write and the report.
 export function mirrorRustLevel(store: Store, report: OutputLevelReport): void {
 	if (forwarder.knows(report.seq)) return;
 	const volume = Math.round(report.volume);
 	adoptRustVolume(volume);
-	store.dispatch({
-		type: "playbackControls/SET_VOLUME_UNMUTE",
-		payload: { volume: Math.round(report.unmuteVolume) },
-	});
-	store.dispatch({
-		type: "playbackControlsActions/INDICATE_MUTE",
-		payload: { mute: report.mute },
-	});
-	store.dispatch({
-		type: "playbackControls/SET_VOLUME",
-		payload: { volume },
-	});
-	// Taken in only once the store holds it: a store that threw still shows the older level, and
-	// a level applied from it must not reach Rust as if the page knew better.
+	const failures: unknown[] = [];
+	for (const action of [
+		{ type: "playbackControls/SET_VOLUME_UNMUTE", payload: { volume: Math.round(report.unmuteVolume) } },
+		{ type: "playbackControlsActions/INDICATE_MUTE", payload: { mute: report.mute } },
+		{ type: "playbackControls/SET_VOLUME", payload: { volume } },
+	]) {
+		try {
+			store.dispatch(action);
+		} catch (e) {
+			if (isStoreNotPublished(e)) throw e;
+			failures.push(e);
+		}
+	}
 	forwarder.see(report.seq);
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "[volume] several writes of the level failed");
 }
 
 // A page that loads catches up with the level Rust plays, once TIDAL's store exists. This install
