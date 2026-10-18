@@ -27,6 +27,10 @@ export class PlayState {
 	 * The time the last track started playing epoch ms
 	 */
 	public static lastPlayStart?: number;
+	// Where `cumulativePlaytime` is counted from. `lastPlayStart` stays an epoch because plugins
+	// read it as a timestamp, but the wall clock steps back (a VM's clock sync) and a playtime
+	// counted from it would lose the step; this one is monotonic. Set and cleared with it.
+	private static playStartMono?: number;
 
 	private static readonly trace: Tracer = libTrace.withSource(".PlayState").trace;
 	private static activePlayer?: { currentTime: number };
@@ -174,11 +178,13 @@ export class PlayState {
 			switch (state) {
 				case "PLAYING": {
 					this.lastPlayStart = Date.now();
+					this.playStartMono = performance.now();
 					break;
 				}
 				default: {
-					if (this.lastPlayStart !== undefined) this.cumulativePlaytime += Date.now() - this.lastPlayStart;
+					if (this.playStartMono !== undefined) this.cumulativePlaytime += performance.now() - this.playStartMono;
 					delete this.lastPlayStart;
+					delete this.playStartMono;
 				}
 			}
 		});
