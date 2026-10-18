@@ -4,6 +4,7 @@
 import { sendIpc } from "./ipc";
 import { applyVolume } from "./volume";
 import { attachCoverCanvas, coverSelected, isCoverUrl } from "./video/cover-canvas";
+import { productOfStream } from "./sdk-playbackinfo";
 
 // The element Rust's mirror belongs to: the one Shaka plays. Shaka keeps TWO (the active one and
 // the one it preloads the next track into), and only the active one may speak for Rust.
@@ -42,6 +43,17 @@ export function proxyOwnerSrc(): string | null {
 	return owner?._lunarProxy ? owner._lunarSrc || null : null;
 }
 let _proxyDuration = 0;
+// The track Rust holds and its length, as its latest `duration` named them. No product when that
+// report named none, or nothing was reported since the track ended.
+let _rustProduct: string | undefined;
+// Rust's reports belong to the track it plays. The element holds another track's stream when the SDK
+// bound one the listener has since left (a load that lost the race to a newer pick): what Rust reports
+// is not that stream's, and dispatching it on that element answers the SDK's load with another
+// track's length. A stream or a report that names no product cannot be told apart, and is the element's.
+const holdsAnotherTrack = () => {
+	const held = productOfStream((_proxyElement as any)?._lunarSrc);
+	return held !== undefined && _rustProduct !== undefined && held !== _rustProduct;
+};
 let _proxyTime = 0;
 let _proxyPlaying = false;
 
@@ -284,7 +296,7 @@ const mirrorsRust = () => !!_proxyElement && !!(_proxyElement as any)._lunarProx
 
 export function proxySetPlaying(playing: boolean) {
 	if (!mirrorsRust()) return;
-	if (_handover) return;
+	if (_handover || holdsAnotherTrack()) return;
 	_proxyPlaying = playing;
 	if (playing) {
 		_proxyElement.dispatchEvent(new Event("playing"));
@@ -295,13 +307,17 @@ export function proxySetPlaying(playing: boolean) {
 
 export function proxySetTime(time: number) {
 	if (!mirrorsRust()) return;
-	if (_handover) return;
+	if (_handover || holdsAnotherTrack()) return;
 	_proxyTime = time;
 	_proxyElement.dispatchEvent(new Event("timeupdate"));
 }
 
-export function proxySetDuration(duration: number) {
+// `product` is the track the length was measured on, when Rust says so.
+export function proxySetDuration(duration: number, product?: string) {
+	_rustProduct = product;
 	if (!mirrorsRust()) return;
+	// A handover stays pending too while the element's own track is still to be reported.
+	if (holdsAnotherTrack()) return;
 	// The first length Rust reports after a handover is the next track's.
 	const handedOver = _handover;
 	_handover = false;
@@ -315,10 +331,16 @@ export function proxySetDuration(duration: number) {
 // The track Rust played ended: say so on the element TIDAL observes, as a media element does, then
 // read as stopped at the start. The elements keep their binding, since the next track may be one
 // TIDAL already loaded into the other element.
-// False when nothing it could end is there: no element, or one already handed over to the next
-// track (its end was the previous one's, and the hand-over already told the listener).
+// False when nothing it could end is there: no element, one already handed over to the next
+// track (its end was the previous one's, and the hand-over already told the listener), or one
+// holding another track's stream.
 export function proxyEnded(): boolean {
+	// Rust's track ended whichever element holds its stream, or none, and Rust holds nothing now. An
+	// element that holds another track's stream has nothing to end.
+	const ends = !holdsAnotherTrack();
+	_rustProduct = undefined;
 	if (!_proxyElement || !((_proxyElement as any)._lunarProxy) || _handover) return false;
+	if (!ends) return false;
 	_proxyPlaying = false;
 	// Armed before the event: TIDAL's reaction (the next element's prefill, a swap) can come within it.
 	handoff();
@@ -340,6 +362,7 @@ export function proxyFail() {
 export function proxyReset() {
 	_proxyElement = null;
 	_handover = false;
+	_rustProduct = undefined;
 	_proxyPlaying = false;
 	_proxyTime = 0;
 	_proxyDuration = 0;

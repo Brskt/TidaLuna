@@ -180,7 +180,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             // it is how the page learns which track Rust holds. States carry no track; `PlayState`
             // reads it when `active` arrives, to know whose time the segment it opens is.
             (window as any).__LUNAR_RUST_PRODUCT_ID__ = product;
-            proxySetDuration(event.v);
+            proxySetDuration(event.v, product);
         } else if (type === "volume") {
             // The OS mixer moved the level: mirrored as a controller's move is. A store not yet
             // there misses it, and the page catches up with it once the store is found.
