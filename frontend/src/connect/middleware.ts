@@ -5,6 +5,8 @@
 // listener a relay while the network/DOM side-effects live here.
 
 import { tidalFetch } from "../ipc";
+import { isStoreNotPublished } from "../../plugins/lib/src/redux/storeNotPublished";
+import { storePublished } from "../store-published";
 import type { ReceiverMediaChangedPayload } from "./types";
 
 type Store = {
@@ -28,15 +30,27 @@ let latestAnnouncement = 0;
 export async function handleReceiverMediaChanged(
     store: Store,
     data: ReceiverMediaChangedPayload,
+    published: () => Promise<void> = storePublished,
 ): Promise<void> {
     const trackId = data?.mediaId;
     if (!trackId) return;
     const announcement = ++latestAnnouncement;
 
     try {
-        const cid: string | undefined = store.getState()?.session?.clientId;
-        const cc: string = store.getState()?.session?.countryCode ?? "US";
-        const lang: string = store.getState()?.settings?.language ?? "en_US";
+        let state: any;
+        try {
+            state = store.getState();
+        } catch (e) {
+            if (!isStoreNotPublished(e)) throw e;
+            // A cast during boot lands before the store does: the announcement waits for it,
+            // unless a later one took its place meanwhile.
+            await published();
+            if (announcement !== latestAnnouncement) return;
+            state = store.getState();
+        }
+        const cid: string | undefined = state?.session?.clientId;
+        const cc: string = state?.session?.countryCode ?? "US";
+        const lang: string = state?.settings?.language ?? "en_US";
         const url = `https://desktop.tidal.com/v1/tracks/${trackId}?countryCode=${cc}&deviceType=DESKTOP&locale=${lang}`;
 
         const res = await tidalFetch(
