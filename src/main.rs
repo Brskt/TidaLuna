@@ -206,12 +206,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Fatal: must be loud at LOGS=0, and still traced on a desktop
                     // launch where nothing is attached to stderr.
                     if !is_setuid_root && !is_executable {
-                        crate::verr!(
-                            "chrome-sandbox at {} is neither setuid-root nor a normal executable.",
+                        refuse_to_start(&format!(
+                            "chrome-sandbox at {} is neither setuid-root nor a normal \
+                            executable. Reinstall the .deb or fix the binary's permissions.",
                             path.display()
-                        );
-                        crate::verr!("Reinstall the .deb or fix the binary's permissions.");
-                        std::process::exit(1);
+                        ));
                     }
                 }
                 Err(_) => {
