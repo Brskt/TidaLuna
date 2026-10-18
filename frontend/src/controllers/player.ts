@@ -103,6 +103,10 @@ export const createNativePlayerComponent = () => {
     // The stream Rust has staged as next. The SDK loads it again to switch to it, and that load is no
     // fresh play of it.
     let preloaded: { url: string } | null = null;
+    // The SDK's native player parks itself while another player is the active one: its `next()` calls
+    // `preload` and then `pause` in the same synchronous run. That pause is the only one that is not the
+    // listener's, and it is told apart by what comes right before it, not by who plays now.
+    let parkingNative = false;
     let pendingStop = false;
     // A real command (play/pause/seek/recover) supersedes a deferred stop.
     const cancelDeferredStop = () => { pendingStop = false; };
@@ -335,6 +339,9 @@ export const createNativePlayerComponent = () => {
                 setDesired(true);
             },
             pause: () => {
+                // The SDK parking the native player as it preloads a track into it, while another
+                // player is the active one: no pause of Rust's track.
+                if (parkingNative) return;
                 cancelDeferredStop();
                 setDesired(false);
             },
@@ -372,6 +379,8 @@ export const createNativePlayerComponent = () => {
                 const nextId = productOfStream(url) ?? "";
                 if (nextId === "") console.warn("[luna:player] preload of a stream no playbackinfo answer named");
                 preloaded = { url };
+                parkingNative = true;
+                queueMicrotask(() => { parkingNative = false; });
                 sendIpc("player.preload", url, streamFormat, encryptionKey, nextId);
             },
             cancelPreload: () => {

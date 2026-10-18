@@ -64,6 +64,37 @@ test("a stream that was not preloaded keeps the store's product and its restart 
 	expect([loadOf("player.load")[3], loadOf("player.load")[5]]).toEqual([true, 2]);
 });
 
+test("the SDK parking its native player as it preloads pauses nothing in Rust", () => {
+	// Parking is what the native player does to itself as it preloads while another player is active:
+	// `preload` and `pause` in one synchronous run.
+	setSelfLoad(true);
+	player.preload("https://cdn/2.flac", "flac", "");
+	player.pause();
+
+	expect(channel("player.pause")).toEqual([]);
+});
+
+test("a pause through the native player is a pause of Rust's track whatever the self-load flag holds", () => {
+	// Native is the active player once the SDK loaded into it; a pause is the listener's even where the
+	// page's self-load flag is still up (a self-load issued for a track the SDK plays natively).
+	for (const selfLoad of [false, true]) {
+		sent.length = 0;
+		player = createNativePlayerComponent().Player();
+		setSelfLoad(selfLoad);
+		player.pause();
+
+		expect(channel("player.pause"), `self-load: ${selfLoad}`).toHaveLength(1);
+	}
+});
+
+test("a pause after the parking run is the listener's", async () => {
+	player.preload("https://cdn/2.flac", "flac", "");
+	await Promise.resolve();
+	player.pause();
+
+	expect(channel("player.pause")).toHaveLength(1);
+});
+
 // The queue and the store are what the page can read of TIDAL's state, and each is stale somewhere: the queue
 // has moved on when the SDK's `next()` reaches its delegate, the store has not moved yet when the SDK switches
 // to a preloaded stream. The stream is the one thing the SDK's call carries, and the SDK's own playbackinfo
