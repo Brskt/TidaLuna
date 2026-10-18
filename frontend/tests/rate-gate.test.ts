@@ -58,9 +58,7 @@ test("a caller held back is served eventually, never dropped", async () => {
 	expect(gate.queued).toBe(0);
 });
 
-test("an idle gate does not bank its unused slots", async () => {
-	// A token bucket would hand out everything it saved while nobody was asking, which is the
-	// burst this exists to prevent. Rewinding to now is what keeps a quiet period quiet.
+test("after an idle spell, two callers are served within a few intervals", async () => {
 	const gate = new RateGate(100);
 	await gate.pass();
 	await new Promise((resolve) => setTimeout(resolve, 60));
@@ -69,8 +67,7 @@ test("an idle gate does not bank its unused slots", async () => {
 	await gate.pass();
 	await gate.pass();
 
-	// Two slots after an idle spell: the first is free, the second waits one interval, not
-	// six, which is what a banked bucket would have allowed.
+	// The first goes out at once and the second one interval (10 ms) later.
 	expect(performance.now() - started).toBeLessThan(40);
 });
 
