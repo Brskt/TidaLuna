@@ -3,7 +3,7 @@
 //! `write_dst_sample` mirrors `wasapi::convert_pcm_frame`'s byte math; ASIO output is
 //! bit-identical to the exclusive WASAPI path; the RT host deinterleaves inline into the
 //! per-channel buffers. Platform-independent, and unit-tested on any host.
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#![cfg_attr(not(target_os = "windows"), expect(dead_code))]
 
 /// The ASIO output sample types we support (a subset of `ASIOSampleType`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

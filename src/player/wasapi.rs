@@ -227,7 +227,7 @@ fn append_interleaved_i32_as_pcm(samples: &[i32], bits_per_sample: u32, out: &mu
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn stream_flac_reader_to_wasapi<R>(
     reader: R,
     byte_len: u64,

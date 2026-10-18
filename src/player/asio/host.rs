@@ -1452,7 +1452,7 @@ impl ControlCtx {
     /// Arm the RT fade-to-silence, adopt the new stream's identity (so intervening
     /// commands target it), and hand the device rebuild to the run-loop `Rebuilding`
     /// poll, not blocking the control thread for the whole fade window.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn begin_deferred_rebuild(
         &mut self,
         event_tx: &mpsc::Sender<AsioEvent>,
@@ -1515,7 +1515,7 @@ impl ControlCtx {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn handle_start_stream(
         &mut self,
         event_tx: &mpsc::Sender<AsioEvent>,
@@ -2660,7 +2660,7 @@ impl Drop for AsioHandle {
 /// `wasapi::stream_flac_reader_to_wasapi`, but the ring is i32; `PushPcm` carries
 /// `Vec<i32>` directly (no byte-packing) and the RT host renders it as src_bps=32.
 /// `RamBuffer` is itself a `MediaSource`, needing no `SizedMediaSource` wrapper.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn stream_reader_to_asio(
     reader: RamBuffer,
     stream_id: u32,
