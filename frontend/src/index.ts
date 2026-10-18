@@ -146,8 +146,11 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
     if (_hasTransition && _hasTime) {
         _forceTimeDispatch = true;
     }
-    for (const event of events) {
-        if (!event || typeof event !== "object") continue;
+    // One event's handling, apart from its neighbours': a consumer that throws (the SDK's listeners
+    // run inside `bridge.trigger`) must not cost the events behind it, whose `state` or `duration`
+    // the SDK waits on.
+    const handle = (event: any): void => {
+        if (!event || typeof event !== "object") return;
         const type = event.t;
         if (type === "mediaformat") {
             (window as any).__LUNAR_MEDIA_FORMAT__ = event.v;
@@ -312,6 +315,13 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             // exactly how two backend-death events reached no listener at all. The updater's
             // dispatch learned the same lesson and keeps a warn of its own for it.
             console.warn(`[bridge] unhandled player event: ${type}`);
+        }
+    };
+    for (const event of events) {
+        try {
+            handle(event);
+        } catch (e) {
+            console.error("[bridge] player event failed:", event?.t, e);
         }
     }
 };
