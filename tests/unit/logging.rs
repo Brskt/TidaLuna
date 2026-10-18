@@ -176,6 +176,36 @@ fn a_composed_line_carries_its_own_newline() {
     );
 }
 
+/// Fails every write the way a stderr that outlived its pipe or its disk does.
+struct DeadConsole(std::io::ErrorKind);
+
+impl Write for DeadConsole {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(self.0.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(self.0.into())
+    }
+}
+
+#[test]
+fn a_dead_console_costs_the_line_neither_a_panic_nor_its_file_copy() {
+    for kind in [
+        std::io::ErrorKind::BrokenPipe,
+        std::io::ErrorKind::StorageFull,
+        std::io::ErrorKind::WouldBlock,
+    ] {
+        let sink = Mutex::new(Some(Vec::new()));
+        write_line(&mut DeadConsole(kind), &sink, "[00:00:00:000] kept\n");
+        assert_eq!(
+            sink.into_inner().unwrap(),
+            Some(b"[00:00:00:000] kept\n".to_vec()),
+            "{kind:?}"
+        );
+    }
+}
+
 #[test]
 fn effective_level_takes_the_max() {
     assert_eq!(effective_level(0, 0), 0);

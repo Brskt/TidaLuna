@@ -237,17 +237,44 @@ fn compose_line(now: OffsetDateTime, args: std::fmt::Arguments<'_>) -> String {
     )
 }
 
-// The crate's only writer: the deny targets its callers, not the sink itself.
-#[allow(clippy::print_stderr)]
 #[inline]
 fn print_log(args: std::fmt::Arguments<'_>) {
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     let line = compose_line(now, args);
-    eprint!("{line}");
+    #[cfg(not(test))]
+    let mut console = std::io::stderr();
+    #[cfg(test)]
+    let mut console = CapturedStderr;
+    write_line(&mut console, &FILE_SINK, &line);
+}
+
+/// The crate's only writer to stderr, and both writes are best effort. `eprint!` panics when
+/// stderr outlives what it pointed at (a pipe whose reader exited, a full disk): an abort inside
+/// a CEF callback, a dead task elsewhere, and the line never reaching `console.log`.
+fn write_line(console: &mut impl Write, sink: &Mutex<Option<impl Write>>, line: &str) {
+    let _ = console.write_all(line.as_bytes());
     // Callers gate themselves: vlog* past their level, vlog_err by opening the sink.
-    let mut guard = FILE_SINK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = sink.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(file) = guard.as_mut() {
         let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Libtest captures what `eprint!` prints, not what goes to `io::stderr()` directly: the lines a
+/// test provokes stay out of the run's output, and a failing test shows them.
+#[cfg(test)]
+struct CapturedStderr;
+
+#[cfg(test)]
+#[expect(clippy::print_stderr)]
+impl Write for CapturedStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        eprint!("{}", String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
