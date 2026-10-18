@@ -43,7 +43,7 @@ fn a_fresh_measurement_of_a_named_track_replaces_the_earlier_one() {
 }
 
 #[test]
-fn js_string_literal_escapes_quotes_backslashes_and_newlines() {
+fn js_string_literal_is_a_json_string() {
     assert_eq!(js_string_literal("a\"b\\c\nd"), r#""a\"b\\c\nd""#);
 }
 
