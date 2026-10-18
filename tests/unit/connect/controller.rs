@@ -79,9 +79,10 @@ fn disconnecting_without_a_session_announces_nothing() {
 fn insert_device_capped_dedups_and_bounds() {
     let mut devices = Vec::new();
     insert_device_capped(&mut devices, dev("a"), 2);
-    insert_device_capped(&mut devices, dev("b"), 2);
-    // Dedup by fullname: re-seeing a known device does not grow the list.
+    // Dedup by fullname, below the cap: re-seeing a known device does not grow the list.
     insert_device_capped(&mut devices, dev("a"), 2);
+    assert_eq!(devices.len(), 1);
+    insert_device_capped(&mut devices, dev("b"), 2);
     assert_eq!(devices.len(), 2);
     // At the cap, a new distinct device is refused.
     insert_device_capped(&mut devices, dev("c"), 2);
