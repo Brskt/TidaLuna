@@ -178,6 +178,31 @@ impl AppState {
             waiters: std::mem::take(&mut self.plugin_load_waiters),
         }
     }
+
+    /// End the music of the page that is gone, and the events it had queued for itself.
+    pub(crate) fn end_page_music(&mut self) {
+        end_page_music(
+            &self.player,
+            &mut self.pending_player_events,
+            &mut self.pending_time_update,
+        );
+    }
+}
+
+/// What the end of a page owes the music it was playing, stated without an `AppState` behind it.
+///
+/// Rust plays on its own thread; a page that dies does not take its music with it, and the
+/// page that follows boots with nothing loaded: it could neither show the track nor stop it.
+/// This host's own music only: a cast plays whether or not a page is loaded here. What was
+/// queued describes the dead page's track, and a successor must not be told of it.
+fn end_page_music(
+    player: &crate::player::Player,
+    pending_events: &mut Vec<crate::bridge::PlayerBridgeEvent>,
+    pending_time: &mut Option<(f64, u32)>,
+) {
+    let _ = player.stop(crate::player::StopScope::OwnMusic);
+    pending_events.clear();
+    *pending_time = None;
 }
 
 // SAFETY: `thumbbar` (Windows only) holds raw `ITaskbarList3` pointers and a

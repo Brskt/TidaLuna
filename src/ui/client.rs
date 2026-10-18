@@ -438,6 +438,30 @@ wrap_life_span_handler! {
     }
 }
 
+/// Whether a document commit is the end of the page that owned this host's music.
+///
+/// A reload, a crash recovery and a navigation all commit a new main document over the one that
+/// issued the loads, and the new one boots knowing nothing of what plays. Same-page navigations
+/// (history API, fragments) never commit, which `on_load_start` documents. Only the app's own
+/// browser and only its main frame count: a subframe commits while the page it belongs to lives
+/// on, and an auth popup is not the page that plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentEnd {
+    /// The app's main document is gone, and the music it owned is left with nobody.
+    Owner,
+    /// A commit that replaces nothing that owned the music.
+    Other,
+}
+
+impl DocumentEnd {
+    fn of(in_app_browser: bool, is_main_frame: bool) -> Self {
+        match (in_app_browser, is_main_frame) {
+            (true, true) => Self::Owner,
+            (true, false) | (false, _) => Self::Other,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum PageState {
     Initial,
@@ -468,11 +492,18 @@ wrap_load_handler! {
     impl LoadHandler {
         fn on_load_start(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             frame: Option<&mut Frame>,
             _transition_type: TransitionType,
         ) {
             if let Some(frame) = frame {
+                // Before the new document runs anything: its first load must find the player
+                // as a fresh page expects it, and nothing the old page queued left to deliver.
+                let in_app_browser = browser.as_ref().is_some_and(|b| b.is_popup() == 0);
+                if DocumentEnd::of(in_app_browser, frame.is_main() != 0) == DocumentEnd::Owner {
+                    crate::vprintln!("[LOAD]   main document replaced, ending its music");
+                    with_state(|state| state.end_page_music());
+                }
                 let url_userfree = frame.url();
                 let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
                 let policy = NavigationPolicy::for_page(PageKind::classify(&url));
@@ -855,6 +886,10 @@ wrap_request_handler! {
             if !is_main {
                 return;
             }
+
+            // The page died with every control over its music, and the dialog below can stay up
+            // as long as the user likes: stop it here instead of at the reload's commit.
+            with_state(|state| state.end_page_music());
 
             // Stack guard: if the reloaded page crashes again while a dialog is
             // already up, just reload rather than opening another dialog.

@@ -1,6 +1,10 @@
 //! Tests for `src/app_state.rs`, attached to it by `#[path]`.
 
-use super::{MeasuredDuration, js_ipc_response, js_string_literal, settle_recorded_duration};
+use super::{
+    MeasuredDuration, end_page_music, js_ipc_response, js_string_literal, settle_recorded_duration,
+};
+use crate::bridge::PlayerBridgeEvent;
+use crate::player::{LoadOrigin, Player, begin_load, current_load};
 
 /// A measurement as an ingress hands it over, before the slot decides anything.
 fn measured(id: Option<&str>, secs: f64) -> MeasuredDuration {
@@ -104,4 +108,61 @@ fn js_ipc_response_keeps_malicious_id_inside_one_string_literal() {
     let decoded: String =
         serde_json::from_str(first_arg).expect("first arg is a valid JSON string literal");
     assert_eq!(decoded, malicious);
+}
+
+/// What the page had queued for itself: a position and a state, both its own track's.
+fn queued_for_the_page() -> (Vec<PlayerBridgeEvent>, Option<(f64, u32)>) {
+    (
+        vec![
+            PlayerBridgeEvent::time(1.0, 1),
+            PlayerBridgeEvent::state("active", 1, LoadOrigin::Local),
+        ],
+        Some((1.5, 1)),
+    )
+}
+
+#[tokio::test]
+async fn the_end_of_a_page_stops_the_music_it_loaded_and_drops_what_it_queued() {
+    // Every writer of the load generation holds this: a mint from another test cannot land
+    // between the one under test and the read that checks it.
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let player = Player::new(|_| {}, tokio::runtime::Handle::current());
+    let local = begin_load(LoadOrigin::Local);
+    let (mut events, mut time) = queued_for_the_page();
+
+    end_page_music(&player, &mut events, &mut time);
+    let after = current_load();
+
+    begin_load(LoadOrigin::Local);
+    assert_eq!(
+        after,
+        (local.wrapping_add(1), LoadOrigin::Local),
+        "a stop was minted"
+    );
+    assert!(
+        events.is_empty(),
+        "the dead page's events were kept for its successor"
+    );
+    assert_eq!(
+        time, None,
+        "the dead page's position was kept for its successor"
+    );
+}
+
+#[tokio::test]
+async fn the_end_of_a_page_leaves_a_cast_playing() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let player = Player::new(|_| {}, tokio::runtime::Handle::current());
+    let cast = begin_load(LoadOrigin::Connect);
+    let (mut events, mut time) = queued_for_the_page();
+
+    end_page_music(&player, &mut events, &mut time);
+    let after = current_load();
+
+    begin_load(LoadOrigin::Local);
+    assert_eq!(after, (cast, LoadOrigin::Connect), "no stop was minted");
+    assert!(
+        events.is_empty() && time.is_none(),
+        "what the page queued is its own either way"
+    );
 }

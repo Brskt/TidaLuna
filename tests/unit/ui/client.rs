@@ -1,6 +1,8 @@
 //! Tests for `src/ui/client.rs`, attached to it by `#[path]`.
 
-use super::{PrivilegedGate, is_privileged_channel, privileged_gate, trusted_via_memo};
+use super::{
+    DocumentEnd, PrivilegedGate, is_privileged_channel, privileged_gate, trusted_via_memo,
+};
 use crate::ui::nav::PageKind;
 
 #[test]
@@ -98,4 +100,21 @@ fn open_url_and_device_control_are_privileged() {
     // Benign page-chrome stays reachable.
     assert!(!is_privileged_channel("window.minimize"));
     assert!(!is_privileged_channel("player.play"));
+}
+
+#[test]
+fn only_the_app_browsers_main_frame_ends_the_page_that_plays() {
+    let table = [
+        (true, true, DocumentEnd::Owner),
+        (true, false, DocumentEnd::Other),
+        (false, true, DocumentEnd::Other),
+        (false, false, DocumentEnd::Other),
+    ];
+    for (in_app_browser, is_main_frame, expected) in table {
+        assert_eq!(
+            DocumentEnd::of(in_app_browser, is_main_frame),
+            expected,
+            "app browser: {in_app_browser}, main frame: {is_main_frame}"
+        );
+    }
 }
