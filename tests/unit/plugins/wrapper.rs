@@ -77,18 +77,38 @@ fn test_wrap_shadows_dangerous_apis() {
         "__LUNAR_CONFIG__",
         "__LUNAR_SESSION_DELEGATE__",
         "nativeInterface",
-        "cefQuery",
+        // `cefQuery` is pinned by `test_wrap_cefquery_private`: `window.cefQuery` would match here.
     ] {
         assert!(result.contains(name), "Missing shadowed global: {}", name);
     }
 }
 
+/// `__cq` is the real `window.cefQuery`, handed in by position, and the bare `cefQuery` a plugin can
+/// name is shadowed to `undefined`. Pairing each parameter with its argument is what pins both: a
+/// text search also finds `window.cefQuery` in the ack captured outside the IIFE.
 #[test]
 fn test_wrap_cefquery_private() {
     let result = wrap_plugin_code("test", "", 0, 0, "cap");
-    // cefQuery is captured as __cq (private), not exposed by name
-    assert!(result.contains("__cq"));
-    assert!(result.contains("window.cefQuery"));
+    let params: Vec<&str> = result
+        .split("(async function(")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .expect("parameter list present")
+        .split(',')
+        .map(str::trim)
+        .collect();
+    let args: Vec<&str> = result
+        .rsplit("})('")
+        .next()
+        .and_then(|s| s.split(')').next())
+        .expect("argument list present")
+        .split(',')
+        .map(str::trim)
+        .collect();
+    let bound = |name: &str| params.iter().position(|p| *p == name).map(|i| args[i]);
+
+    assert_eq!(bound("__cq"), Some("window.cefQuery"));
+    assert_eq!(bound("cefQuery"), Some("undefined"));
 }
 
 #[test]
@@ -138,8 +158,14 @@ fn the_ipc_bridge_is_shadowed_and_carries_the_capability() {
         "the bare identifier the inlined call uses is not shadowed"
     );
     // The identity rides the envelope, taken from the closure parameter, the same way the fetch
-    // and storage shims above do it rather than by reaching for a global.
-    assert!(result.contains("cap: __cap"));
+    // and storage shims above do it rather than by reaching for a global. Both bridge methods
+    // carry it: the shims hold `cap: __cap` too, a bare search would find theirs.
+    assert!(result.contains(
+        "request: JSON.stringify({ channel: channel, args: args, id: String(++__ipcRenderer.__seq), cap: __cap })"
+    ));
+    assert!(
+        result.contains("request: JSON.stringify({ channel: channel, args: args, cap: __cap })")
+    );
     // Listener registration acts on no caller's identity and keeps forwarding; `on` still
     // returns the unsubscribe the page's object hands back.
     assert!(result.contains("window.__ipcRenderer"));

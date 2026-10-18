@@ -44,6 +44,8 @@ fn export_default_class_keeps_declaration() {
     let js = lower("export default class Foo {}");
     assert!(js.contains("class Foo"));
     assert!(!js.contains("export"));
+    // A declaration, not an expression bound to the anonymous default's name.
+    assert!(!js.contains("__default"), "{js}");
 }
 
 #[test]
@@ -69,6 +71,7 @@ fn export_default_named_function_keeps_declaration() {
     let js = lower("export default function Foo() { return 1; }");
     assert!(js.contains("function Foo"));
     assert!(!js.contains("export"));
+    assert!(!js.contains("__default"), "{js}");
 }
 
 #[test]
@@ -159,7 +162,8 @@ fn export_type_block_is_dropped() {
 fn export_inline_type_specifier_is_dropped() {
     let js = lower("var x = 1; type T = number; export { x as X, type T };");
     assert!(js.contains("X: x"));
-    assert!(!js.contains("T:"));
+    // The exports object may spell a kept specifier as shorthand: no `T` may appear at all.
+    assert!(!js.contains('T'), "{js}");
 }
 
 #[test]

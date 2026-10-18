@@ -115,17 +115,20 @@ fn test_mark_ready_with_matching_load_id_and_nonce() {
     assert_eq!(mgr.current_load_id("p"), Some(load_id));
 }
 
+/// Both loads carry the same nonce: only the load id can tell the stale ack apart.
 #[test]
 fn test_mark_ready_with_stale_load_id_ignored() {
     let mut mgr = PluginManager::new();
-    let old_nonce = 0x1111;
-    let old_id = mgr.mark_loading("p", "p", old_nonce, "cap-old", 0);
-    let new_id = mgr.mark_loading("p", "p", 0x2222, "cap-new", 0); // reload
-    assert!(!mgr.mark_ready("p", old_id, old_nonce)); // stale
-    assert_eq!(
-        mgr.current_load_id("p"),
-        Some(new_id),
-        "the reload is untouched by an ack for the load it replaced"
+    let nonce = 0x1111;
+    let old_id = mgr.mark_loading("p", "p", nonce, "cap-old", 0);
+    let new_id = mgr.mark_loading("p", "p", nonce, "cap-new", 0); // reload
+    assert!(
+        !mgr.mark_ready("p", old_id, nonce),
+        "an ack for the load the reload replaced"
+    );
+    assert!(
+        mgr.mark_ready("p", new_id, nonce),
+        "the reload is still waiting for its own"
     );
 }
 
@@ -237,10 +240,12 @@ fn a_capability_resolves_only_to_its_own_plugin() {
     let mut mgr = PluginManager::new();
     mgr.mark_loading("https://example.test/a.js", "A", 1, "cap-a", 0);
     mgr.mark_loading("https://example.test/b.js", "B", 2, "cap-b", 0);
-    assert_eq!(
-        mgr.plugin_for_capability("cap-b").as_deref(),
-        Some("https://example.test/b.js")
-    );
+    for (cap, plugin) in [
+        ("cap-a", "https://example.test/a.js"),
+        ("cap-b", "https://example.test/b.js"),
+    ] {
+        assert_eq!(mgr.plugin_for_capability(cap).as_deref(), Some(plugin));
+    }
 }
 
 #[test]
@@ -337,6 +342,8 @@ fn a_capability_remembers_the_session_that_issued_it() {
         None,
         "a capability nobody minted names no session"
     );
+    // Even with a load recorded under an empty capability, which is what the guard is for.
+    mgr.mark_loading("https://example.test/c.js", "C", 3, "", 6);
     assert_eq!(
         mgr.capability_epoch(""),
         None,
