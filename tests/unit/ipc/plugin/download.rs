@@ -206,11 +206,21 @@ fn mp4(payload: usize) -> Vec<u8> {
 }
 
 /// Both containers TIDAL actually serves over BTS. Rejecting `ftyp` is what broke an earlier
-/// attempt: AAC arrives as ISO-BMFF, not raw ADTS; refusing it fails every AAC track.
+/// attempt: AAC arrives as ISO-BMFF, not raw ADTS; refusing it fails every AAC track. A
+/// concatenated DASH body is `ftyp`+`moov` then one `moof`+`mdat` per segment, and the box chain
+/// accounts for every byte of it too.
 #[test]
 fn the_containers_tidal_serves_are_accepted() {
     assert!(is_audio_container(&flac(64)), "FLAC");
     assert!(is_audio_container(&mp4(64)), "ISO-BMFF/M4A");
+
+    let mut dash = box_of(b"ftyp", 16);
+    dash.extend(box_of(b"moov", 40));
+    for _ in 0..3 {
+        dash.extend(box_of(b"moof", 24));
+        dash.extend(box_of(b"mdat", 512));
+    }
+    assert!(is_audio_container(&dash), "concatenated DASH");
 }
 
 /// A DASH download is the init segment followed by its media segments, and `fetch_track` already
@@ -236,19 +246,6 @@ fn a_url_list_longer_than_a_real_manifest_is_refused() {
     );
 }
 
-/// A concatenated fMP4 is `ftyp`+`moov` then one `moof`+`mdat` per segment; the box chain accounts
-/// for every byte and `is_audio_container` accepts it. This is what makes the ISO-BMFF branch reachable.
-#[test]
-fn a_concatenated_dash_body_is_a_valid_container() {
-    let mut body = box_of(b"ftyp", 16);
-    body.extend(box_of(b"moov", 40));
-    for _ in 0..3 {
-        body.extend(box_of(b"moof", 24));
-        body.extend(box_of(b"mdat", 512));
-    }
-    assert!(is_audio_container(&body));
-}
-
 /// A zero-size box means "to end of file": one would swallow any payload while the walk still
 /// terminated happily (the accounting property itself).
 #[test]
@@ -260,18 +257,6 @@ fn a_zero_size_box_cannot_swallow_a_payload() {
     assert!(!is_audio_container(&polyglot));
 }
 
-/// A truncated final segment leaves a box that overruns the body, which the chain walk catches; a
-/// partial DASH download cannot be written as if it were whole.
-#[test]
-fn a_truncated_dash_body_is_refused() {
-    let mut body = box_of(b"ftyp", 16);
-    body.extend(box_of(b"moov", 40));
-    let mut cut = box_of(b"mdat", 512);
-    cut.truncate(cut.len() - 100);
-    body.extend(cut);
-    assert!(!is_audio_container(&body));
-}
-
 /// One ISO-BMFF box: a big-endian total size, the type, then payload.
 fn box_of(kind: &[u8; 4], total: usize) -> Vec<u8> {
     let mut out = (total as u32).to_be_bytes().to_vec();
@@ -280,27 +265,42 @@ fn box_of(kind: &[u8; 4], total: usize) -> Vec<u8> {
     out
 }
 
-/// Each puts `ftyp` at offset 4 with four bytes of its own comment syntax, and each is a file another
-/// program acts on.
+/// Bodies that only dress up as a container. The first two put `ftyp` at offset 4 with four bytes
+/// of their own comment syntax, and each is a file another program acts on. A truncated final
+/// segment leaves a box that overruns the body: a partial DASH download cannot be written as if it
+/// were whole. Bytes glued on after the chain fall outside every box, the one polyglot shape
+/// ISO-BMFF catches and FLAC does not; it is not a seal (see
+/// `a_sized_box_may_carry_a_foreign_payload`).
 #[test]
-fn a_polyglot_that_merely_places_the_magic_is_refused() {
+fn a_body_the_box_chain_does_not_cover_exactly_is_refused() {
     let mut desktop = b"#abcftyp\n".to_vec();
     desktop.extend_from_slice(b"[Desktop Entry]\nType=Application\nExec=rm -rf /\n");
-    assert!(!is_audio_container(&desktop), "desktop entry");
 
     let mut xml = b"<!--ftyp-->".to_vec();
     xml.extend_from_slice(b"<?xml version=\"1.0\"?><plist><dict/></plist>");
-    assert!(!is_audio_container(&xml), "xml/plist");
-}
 
-/// Bytes glued on after the chain fall outside every box. The walk lands past the end and refuses.
-/// This is the one polyglot shape ISO-BMFF catches and FLAC does not; it is not a seal (see
-/// `a_sized_box_may_carry_a_foreign_payload`).
-#[test]
-fn data_appended_to_an_iso_bmff_body_breaks_the_chain() {
+    let mut truncated = box_of(b"ftyp", 16);
+    truncated.extend(box_of(b"moov", 40));
+    let mut cut = box_of(b"mdat", 512);
+    cut.truncate(cut.len() - 100);
+    truncated.extend(cut);
+
     let mut with_zip = mp4(64);
     with_zip.extend_from_slice(b"PK\x03\x04 appended archive");
-    assert!(!is_audio_container(&with_zip));
+
+    let mut lying = 9999u32.to_be_bytes().to_vec();
+    lying.extend_from_slice(b"ftypM4A ");
+    lying.extend_from_slice(&[0u8; 16]);
+
+    for (body, what) in [
+        (desktop, "desktop entry"),
+        (xml, "xml/plist"),
+        (truncated, "truncated DASH body"),
+        (with_zip, "data appended after the chain"),
+        (lying, "a box running past the end"),
+    ] {
+        assert!(!is_audio_container(&body), "{what}");
+    }
 }
 
 /// The ceiling this check actually buys, pinned here to avoid being mistaken for a seal: a box whose declared
@@ -326,14 +326,6 @@ fn a_flac_frame_region_may_carry_a_foreign_payload() {
     let mut carried = flac(0);
     carried.extend_from_slice(b"PK\x03\x04 a whole archive, found from its tail PK\x05\x06");
     assert!(is_audio_container(&carried));
-}
-
-#[test]
-fn a_body_whose_boxes_run_past_the_end_is_refused() {
-    let mut lying = 9999u32.to_be_bytes().to_vec();
-    lying.extend_from_slice(b"ftypM4A ");
-    lying.extend_from_slice(&[0u8; 16]);
-    assert!(!is_audio_container(&lying));
 }
 
 /// A signature with no stream behind it is not a track, and a block header overrunning the body
@@ -367,12 +359,28 @@ fn a_flac_chain_not_opening_on_streaminfo_is_refused() {
 /// destination the user was tricked into accepting cannot receive a file another program would
 /// act on.
 #[test]
-fn formats_another_program_would_execute_are_refused() {
+fn a_body_without_a_container_magic_in_place_is_refused() {
     assert!(!is_audio_container(b"[Desktop Entry]\nExec=rm -rf /\n"));
     assert!(!is_audio_container(b"#!/bin/sh\nrm -rf /\n"));
     assert!(!is_audio_container(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00"));
     assert!(!is_audio_container(b"<?xml version=\"1.0\"?><plist/>"));
     assert!(!is_audio_container(b"\x7fELF\x02\x01\x01\x00\x00\x00"));
+
+    // `ftyp` sits at offset 4, after the box size: carried anywhere else it is not ISO-BMFF,
+    // and a body must not pass by containing the word.
+    let mut misplaced = b"ftyp".to_vec();
+    misplaced.extend_from_slice(&[0u8; 34]);
+    assert!(!is_audio_container(&misplaced), "ftyp at offset 0");
+
+    let mut buried = vec![0u8; 40];
+    buried[20..24].copy_from_slice(b"ftyp");
+    assert!(!is_audio_container(&buried), "ftyp deeper in the body");
+
+    // A box chain that covers the body exactly but does not open on `ftyp`: only the magic's
+    // own check can refuse it.
+    let mut unopened = box_of(b"moov", 16);
+    unopened.extend(box_of(b"mdat", 32));
+    assert!(!is_audio_container(&unopened), "a chain with no ftyp first");
 }
 
 #[test]
@@ -381,19 +389,6 @@ fn a_body_too_short_to_carry_a_container_is_refused() {
     assert!(!is_audio_container(b"fLa"));
     // Four bytes of magic and nothing else: no stream can follow; this is not a track.
     assert!(!is_audio_container(b"fLaC"));
-}
-
-/// `ftyp` sits at offset 4, after the box size. A body carrying it anywhere else is not
-/// ISO-BMFF and must not pass by containing the word.
-#[test]
-fn ftyp_is_only_accepted_where_iso_bmff_puts_it() {
-    let mut misplaced = b"ftyp".to_vec();
-    misplaced.extend_from_slice(&[0u8; 34]);
-    assert!(!is_audio_container(&misplaced), "ftyp at offset 0");
-
-    let mut buried = vec![0u8; 40];
-    buried[20..24].copy_from_slice(b"ftyp");
-    assert!(!is_audio_container(&buried), "ftyp deeper in the body");
 }
 
 /// A policy refusal is permanent. It must answer 403, not the 500 documented as worth a retry.
