@@ -113,9 +113,13 @@ const LOGGING_CONSOLE: Setting<bool> = Setting {
     absent: false,
     unreadable: false,
 };
+// Cisco's binary licence requires the user to be able to enable and disable the library
+// (condition 2), not to opt in. On by default, as Firefox ships it: animated covers work
+// without a trip to settings, and a user who turns it off keeps the row that says so. Off when
+// unknown: a refusal the store lost must not read as consent to a third-party download.
 const VIDEO_CODEC_ENABLED: Setting<bool> = Setting {
     key: "video.codec_enabled",
-    absent: false,
+    absent: true,
     unreadable: false,
 };
 
@@ -459,9 +463,6 @@ pub(crate) fn save_console(conn: &mut Connection, enabled: bool) {
     LOGGING_CONSOLE.save(conn, &enabled.to_string());
 }
 
-/// Cisco's binary licence requires the user to be able to enable and disable the library
-/// (condition 2). Off by default: the library is a separate download to a host that is not
-/// TIDAL's, and nothing should reach for it before the user asks.
 #[cfg(test)]
 pub(crate) fn load_video_codec_enabled(conn: &mut Connection) -> bool {
     Reader::new(conn).get(&VIDEO_CODEC_ENABLED)

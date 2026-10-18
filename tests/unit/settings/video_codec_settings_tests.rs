@@ -4,13 +4,7 @@ use super::fixture::mem_conn;
 use super::*;
 
 #[test]
-fn the_video_codec_is_off_by_default() {
-    let mut conn = mem_conn();
-    assert!(!load_video_codec_enabled(&mut conn));
-}
-
-#[test]
-fn save_then_load_the_video_codec_switch_roundtrips() {
+fn boot_settings_carry_the_video_codec_switch() {
     let mut conn = mem_conn();
     save_video_codec_enabled(&mut conn, true);
     assert!(load_video_codec_enabled(&mut conn));
