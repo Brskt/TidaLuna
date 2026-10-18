@@ -7,12 +7,17 @@ pub(crate) mod cef_loader;
 pub(crate) mod clipboard;
 #[cfg(target_os = "linux")]
 pub(crate) mod desktop_entry;
+pub(crate) mod durable_fs;
 pub(crate) mod js_actions;
 pub(crate) mod media_controls;
 pub(crate) mod process_args;
 pub(crate) mod refusal;
 pub(crate) mod sdk_storage;
 pub(crate) mod secure_store;
+// Linux only: on macOS `File::sync_all` issues `fcntl(F_FULLFSYNC)`, never the `fsync` it traces.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/unit/platform/syscall_trace.rs"]
+pub(crate) mod syscall_trace;
 #[cfg(target_os = "windows")]
 pub(crate) mod thumbbar;
 pub(crate) mod tray;

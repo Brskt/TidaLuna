@@ -63,3 +63,36 @@ fn an_opaque_refresh_nonce_alone_does_not_make_a_generation_durable() {
     // next launch a credential it cannot redeem.
     assert!(!generation("", "luna_bbbb").is_durable());
 }
+
+#[cfg(target_os = "linux")]
+mod file_durability {
+    use super::*;
+    use crate::platform::syscall_trace::{Event, traced};
+
+    #[test]
+    fn saving_the_token_file_flushes_the_directory_after_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+
+        let (saved, events) = traced(|| save_platform(dir.path(), b"{\"stored\":true}"));
+
+        saved.unwrap();
+        // The staged file's name is random: its entry is told apart by not being a directory.
+        let [
+            Event::Fsync {
+                directory: false, ..
+            },
+            flushed,
+        ] = events.as_slice()
+        else {
+            panic!("the file, then its directory: {events:?}");
+        };
+        assert_eq!(
+            flushed,
+            &Event::Fsync {
+                path: canonical,
+                directory: true
+            }
+        );
+    }
+}

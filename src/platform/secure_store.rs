@@ -188,9 +188,8 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     unsafe { windows_sys::Win32::Foundation::LocalFree(output.pbData.cast()) };
 
     let path = data_dir.join("auth_tokens.dpapi");
-    // Best-effort durability: sync_all flushes file content, persist does an atomic
-    // rename. Directory fsync is not done - a power loss right after persist could
-    // lose the entry, which is acceptable (triggers re-login, not corruption).
+    // sync_all flushes the content, durable_fs::persist the rename: a save lost to a power cut
+    // would put back an older generation.
     let mut f = tempfile::NamedTempFile::new_in(data_dir)
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     f.write_all(&encrypted)
@@ -198,7 +197,7 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     f.as_file()
         .sync_all()
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-    f.persist(&path)
+    crate::platform::durable_fs::persist(f, &path)
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     Ok(())
 }
@@ -300,7 +299,7 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
     f.as_file()
         .sync_all()
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-    f.persist(&path)
+    crate::platform::durable_fs::persist(f, &path)
         .map_err(|e| StoreError::Backend(e.to_string()))?;
     Ok(())
 }

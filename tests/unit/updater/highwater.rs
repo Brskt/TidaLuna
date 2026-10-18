@@ -8,11 +8,24 @@ fn load_absent_is_zero() {
     assert_eq!(load(dir.path()), "0.0.0");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn record_then_load_roundtrips() {
+fn recording_a_mark_flushes_its_directory_after_the_file() {
+    use crate::platform::syscall_trace::{Event, traced};
+
     let dir = tempfile::tempdir().unwrap();
-    record(dir.path(), "0.0.9-alpha");
-    assert_eq!(load(dir.path()), "0.0.9-alpha");
+    let canonical = dir.path().canonicalize().unwrap();
+
+    let ((), events) = traced(|| record(dir.path(), "0.0.9-alpha"));
+
+    assert_eq!(
+        events.last(),
+        Some(&Event::Fsync {
+            path: canonical,
+            directory: true
+        }),
+        "{events:?}"
+    );
 }
 
 #[test]

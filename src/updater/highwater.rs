@@ -72,8 +72,7 @@ fn atomic_write(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         tmp.as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    crate::platform::durable_fs::persist(tmp, path)
 }
 
 #[cfg(test)]
