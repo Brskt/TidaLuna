@@ -80,10 +80,14 @@ fn every_command() -> Vec<PlayerIpc> {
 }
 
 /// No receiver, a phone attached but not casting, or a session that ended: `Local` stays
-/// current, every command passes, and local gapless and crossfade stay untouched by the gate.
+/// current, every command passes (a numbered pick included), and local gapless and crossfade
+/// stay untouched by the gate.
 #[test]
 fn this_host_owning_the_player_passes_every_command() {
-    for command in every_command() {
+    for command in every_command()
+        .into_iter()
+        .chain([sdk_load(Some("2"), true)])
+    {
         assert_eq!(
             command.cast_gate(LoadOrigin::Local),
             CastGate::Pass,
@@ -140,53 +144,33 @@ fn sdk_load(product_id: Option<&str>, pick: bool) -> PlayerIpc {
     }
 }
 
+/// A pick, an automatic load and a listener's Next all reach the receiver with the act they
+/// answer. The automatic one is routed, not refused: only the receiver knows whether it names the
+/// track the cast already plays. A Next reloads the page's entry, and the receiver steps the cast
+/// for it.
 #[test]
-fn a_listeners_pick_during_a_cast_goes_to_the_receiver() {
-    assert_eq!(
-        sdk_load(Some("2"), true).cast_gate(LoadOrigin::Connect),
-        CastGate::Route(CastLoad {
-            product_id: "2".to_string(),
-            load_id: 7,
-            act: Some(ListenerAct::Pick),
-        })
-    );
-}
-
-/// Routed, not refused: only the receiver knows whether it names the track the cast already plays.
-#[test]
-fn an_automatic_load_during_a_cast_goes_to_the_receiver_as_no_pick() {
-    assert_eq!(
-        sdk_load(Some("2"), false).cast_gate(LoadOrigin::Connect),
-        CastGate::Route(CastLoad {
-            product_id: "2".to_string(),
-            load_id: 7,
-            act: None,
-        })
-    );
-}
-
-/// A listener's Next reloads the page's entry: the receiver is told which act it answers, and
-/// steps the cast for it.
-#[test]
-fn a_listeners_next_during_a_cast_goes_to_the_receiver_as_one() {
-    let next = PlayerIpc::Load {
-        url: "https://cdn/mediatracks/cast.flac".to_string(),
-        format: "flac".to_string(),
-        key: String::new(),
-        product_id: Some("2".to_string()),
-        restart: false,
-        want_play: false,
-        load_id: Some(8),
-        act: Some(ListenerAct::Next),
-    };
-    assert_eq!(
-        next.cast_gate(LoadOrigin::Connect),
-        CastGate::Route(CastLoad {
-            product_id: "2".to_string(),
-            load_id: 8,
-            act: Some(ListenerAct::Next),
-        })
-    );
+fn a_numbered_load_during_a_cast_goes_to_the_receiver_with_its_act() {
+    for act in [Some(ListenerAct::Pick), None, Some(ListenerAct::Next)] {
+        let load = PlayerIpc::Load {
+            url: "https://cdn/mediatracks/cast.flac".to_string(),
+            format: "flac".to_string(),
+            key: String::new(),
+            product_id: Some("2".to_string()),
+            restart: true,
+            want_play: act.is_some(),
+            load_id: Some(7),
+            act,
+        };
+        assert_eq!(
+            load.cast_gate(LoadOrigin::Connect),
+            CastGate::Route(CastLoad {
+                product_id: "2".to_string(),
+                load_id: 7,
+                act,
+            }),
+            "{act:?}"
+        );
+    }
 }
 
 #[test]
@@ -194,14 +178,6 @@ fn a_load_naming_no_track_is_refused() {
     assert_eq!(
         sdk_load(None, true).cast_gate(LoadOrigin::Connect),
         CastGate::Refuse
-    );
-}
-
-#[test]
-fn a_pick_with_no_cast_is_loaded_here() {
-    assert_eq!(
-        sdk_load(Some("2"), true).cast_gate(LoadOrigin::Local),
-        CastGate::Pass
     );
 }
 
