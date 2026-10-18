@@ -2,7 +2,7 @@
 //! exclusive). Both restart the device on a sample-rate change, which pops the DAC; these
 //! helpers fade the stream edges and size the post-restart silence that masks the hardware
 //! PLL relock. Platform-independent; the envelope math is unit-tested on any host.
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#![cfg_attr(not(target_os = "windows"), expect(dead_code))]
 
 /// De-click fade length: teardown fade-out and post-resync fade-in. Short enough
 /// to be musically imperceptible, long enough to guarantee a clean zero crossing.

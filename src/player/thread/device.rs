@@ -158,7 +158,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// re-dispatches a parked switch here directly: is_asio_mode stays true
     /// for the whole drain, and the guards above would no-op the replay (a
     /// parked switch back to ASIO would never respawn the handle).
-    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    #[cfg_attr(not(target_os = "windows"), expect(unused_variables))]
     pub(super) fn apply_device_switch(&mut self, id: String, mode: OutputMode) {
         // The fade's ring is attached to the stream about to be torn down.
         self.cancel_crossfade();

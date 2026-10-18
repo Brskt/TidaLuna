@@ -413,7 +413,7 @@ impl RamBuffer {
     // Callers are all cfg(windows) (the buffer-reuse gates in thread/device.rs), and
     // Linux clippy therefore sees it as dead; keep it compiled/type-checked there anyway
     // (same pattern as declick.rs / convert.rs).
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(all(not(target_os = "windows"), not(test)), expect(dead_code))]
     pub fn is_reusable(&self) -> bool {
         let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         // A cancel outlives the download it stopped and there is no un-cancel: every later

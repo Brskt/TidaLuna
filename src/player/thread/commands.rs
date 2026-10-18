@@ -1106,7 +1106,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn handle_load(
         &mut self,
         req: LoadRequest,
-        #[allow(unused_variables)] auto_play: bool,
+        #[cfg_attr(not(target_os = "windows"), expect(unused_variables))] auto_play: bool,
     ) -> bool {
         let LoadRequest {
             buffer,

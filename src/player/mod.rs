@@ -212,24 +212,33 @@ impl PlaybackState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // ExclusiveModeNotAllowed + Locked are Windows-only
+// A variant marked `expect(dead_code)` is built only by the Windows backends.
 pub enum DeviceErrorKind {
     NotFound,
     FormatNotSupported,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     ExclusiveModeNotAllowed,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     ExclusiveFormatUnsupported,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     Locked,
     Disconnected,
     Unknown,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     AsioDriverNotFound,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     AsioFormatUnsupported,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     AsioInitFailed,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     AsioRateUnsupported,
     /// The backend thread itself stopped without saying so. Every typed failure below
     /// reports before exiting; a PANIC produces no error value at all, and no hook turns
     /// one into anything. Left unnoticed it stranded two threads: the render thread, and
     /// the decoder parked against a `consumed` counter only that thread advances.
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     ExclusiveBackendDied,
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     AsioBackendDied,
 }
 
@@ -575,7 +584,7 @@ pub enum PlayerEvent {
         position: Option<f64>,
         play: bool,
     },
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(all(not(target_os = "windows"), not(test)), expect(dead_code))]
     VolumeSync(f64),
 }
 

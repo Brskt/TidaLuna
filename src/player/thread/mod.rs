@@ -347,7 +347,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub fn new(
         cmd_rx: mpsc::Receiver<PlayerCommand>,
         callback: F,
-        #[allow(unused_variables)] volume_sync_enabled: bool,
+        #[cfg_attr(not(target_os = "windows"), expect(unused_variables))] volume_sync_enabled: bool,
         restored_level: Option<crate::player::Volume>,
         committed_track: Arc<std::sync::Mutex<Option<(String, String)>>>,
         governor: crate::audio::bandwidth::GovernorHandle,
