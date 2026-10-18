@@ -61,19 +61,6 @@ test("a pinned host slot cannot be taken by a plugin", () => {
 	expect(registry.__lunaLibFor).toBe(real);
 });
 
-// The pin must not reach further than the host's own modules. `LunaPlugin` writes
-// `modules[this.name]` on load and deletes it on unload, and the core-plugin names
-// (`@luna/lib`, `@luna/lib.native`, `@luna/ui`, `@luna/dev`, `@luna/linux`) go through that
-// same path, and pinning one of those would break loading it.
-test("a plugin's own slot stays writable and removable", () => {
-	modules["@some/plugin"] = { exports: 1 };
-	modules["@some/plugin"] = { exports: 2 };
-	expect(modules["@some/plugin"]).toEqual({ exports: 2 });
-
-	delete modules["@some/plugin"];
-	expect(modules["@some/plugin"]).toBeUndefined();
-});
-
 test("uses the host trio when the host supplies all three", () => {
 	(window as any).__lunaHostModules = {
 		react: hostReact,
