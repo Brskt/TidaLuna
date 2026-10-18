@@ -92,6 +92,18 @@ fn sink_dir() -> Option<&'static Path> {
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_LINES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The `verr!` lines this test thread emitted since the last call, before the budget: what a test
+/// asserts is that the code reported, not that a budget other tests share had room for it.
+#[cfg(test)]
+pub(crate) fn take_lines() -> Vec<String> {
+    TEST_LINES.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+}
+
 /// Archive the previous session's `console.log`, for the process that owns the
 /// session and only for it.
 ///
@@ -217,6 +229,8 @@ fn err_budget(now_ms: u64, state: &AtomicU64, missed: &AtomicU32) -> ErrBudget {
 /// drive the disk at any level, and `console.log` rotates only at launch. The budget lives here
 /// because three call sites had hand-rolled a guard and the fourth forgot it.
 pub fn vlog_err(args: std::fmt::Arguments<'_>) {
+    #[cfg(test)]
+    TEST_LINES.with(|lines| lines.borrow_mut().push(args.to_string()));
     let now_ms = u64::try_from(PROCESS_START.elapsed().as_millis()).unwrap_or(u64::MAX);
     let missed = match err_budget(now_ms, &ERR_STATE, &ERR_MISSED) {
         ErrBudget::Drop => return,

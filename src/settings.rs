@@ -545,3 +545,7 @@ mod video_codec_settings_tests;
 #[cfg(test)]
 #[path = "../tests/unit/settings/output_level_settings_tests.rs"]
 mod output_level_settings_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/settings/store_damage_tests.rs"]
+mod store_damage_tests;
