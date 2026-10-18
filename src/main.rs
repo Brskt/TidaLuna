@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = platform::process_args::ProcessArgs::new();
     let Some(cmd_line) = args.as_cmd_line() else {
-        return Err("Failed to parse command line arguments".into());
+        refuse_to_start("TidaLunar could not read its command line.");
     };
 
     let switch = CefString::from("type");
