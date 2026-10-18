@@ -237,8 +237,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Fatal rather than dropped: `initialize` below reads the same line again
         // from the OS.
         if ui::deep_link::classify_launch(&carried) == ui::deep_link::Launch::LinkAndMore {
-            crate::verr!("[SCHEME] launch carries more than a link; refusing to start");
-            std::process::exit(1);
+            refuse_to_start(
+                "TidaLunar refused this launch: a tidal:// link arrived together with \
+                other arguments, which the link handler never passes.",
+            );
         }
     }
 
