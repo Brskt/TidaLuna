@@ -31,6 +31,30 @@ export class PlayState {
 	// read it as a timestamp, but the wall clock steps back (a VM's clock sync) and a playtime
 	// counted from it would lose the step; this one is monotonic. Set and cleared with it.
 	private static playStartMono?: number;
+	// The track Rust held when the open segment began, as the bridge names it (`__LUNAR_RUST_PRODUCT_ID__`,
+	// set from the `duration` event that opens every load). Rust's states and the page's announcement of a
+	// track travel apart and neither waits for the other. A segment is counted for the track it was
+	// played on, not for whichever one is announced when it closes. `undefined` when Rust named none:
+	// the segment then counts for the announced track.
+	private static segmentProduct?: string;
+	// Time played on tracks that are not the announced one: the next, whose `active` came before its
+	// announcement, and the last, whose `paused` comes after the next one's.
+	private static readonly otherPlaytime = new Map<string, number>();
+
+	private static heldProduct(): string | undefined {
+		const held = (globalThis as { __LUNAR_RUST_PRODUCT_ID__?: unknown }).__LUNAR_RUST_PRODUCT_ID__;
+		return typeof held === "string" ? held : undefined;
+	}
+	private static countsForCurrent(product: string | undefined): boolean {
+		return product === undefined || this.currentMediaItem === undefined || product === String(this.currentMediaItem.id);
+	}
+	// Adds the open segment's time so far to the track it was played on.
+	private static foldOpenSegment(now: number): void {
+		if (this.playStartMono === undefined) return;
+		const elapsed = now - this.playStartMono;
+		if (this.countsForCurrent(this.segmentProduct)) this.cumulativePlaytime += elapsed;
+		else this.otherPlaytime.set(this.segmentProduct!, (this.otherPlaytime.get(this.segmentProduct!) ?? 0) + elapsed);
+	}
 
 	private static readonly trace: Tracer = libTrace.withSource(".PlayState").trace;
 	private static activePlayer?: { currentTime: number };
@@ -177,14 +201,20 @@ export class PlayState {
 		redux.intercept("playbackControls/SET_PLAYBACK_STATE", unloads, (state) => {
 			switch (state) {
 				case "PLAYING": {
+					// A segment still open has nobody to close it when a self-load is replaced by another
+					// (no pause is sent), and Rust reports `active` twice for one start.
+					const now = performance.now();
+					this.foldOpenSegment(now);
 					this.lastPlayStart = Date.now();
-					this.playStartMono = performance.now();
+					this.playStartMono = now;
+					this.segmentProduct = this.heldProduct();
 					break;
 				}
 				default: {
-					if (this.playStartMono !== undefined) this.cumulativePlaytime += performance.now() - this.playStartMono;
+					this.foldOpenSegment(performance.now());
 					delete this.lastPlayStart;
 					delete this.playStartMono;
+					delete this.segmentProduct;
 				}
 			}
 		});
@@ -203,10 +233,6 @@ export class PlayState {
 			if (hasScrobbledCurrent) return false;
 			if (mediaItem.duration === undefined) return false;
 
-			if (this.lastPlayStart !== undefined) {
-				this.cumulativePlaytime += Date.now() - this.lastPlayStart;
-			}
-
 			const longerThan4min = this.cumulativePlaytime >= this.MIN_SCROBBLE_DURATION;
 			const minPlayTime = mediaItem.duration * this.MIN_SCROBBLE_PERCENTAGE * 1000;
 			const moreThan50Percent = this.cumulativePlaytime >= minPlayTime;
@@ -220,12 +246,34 @@ export class PlayState {
 		};
 
 		MediaItem.onMediaTransition(unloads, (mediaItem) => {
+			// What the open segment has counted for the track we are leaving, if it is that track's. It is
+			// counted from here on: the segment goes on for whichever track it was played on.
+			if (this.playStartMono !== undefined && this.countsForCurrent(this.segmentProduct)) {
+				const now = performance.now();
+				this.cumulativePlaytime += now - this.playStartMono;
+				this.playStartMono = now;
+			}
 			// Scrobble the track we just finished (works for normal transitions AND repeat mode)
 			if (this.currentMediaItem !== undefined) {
 				checkAndScrobble(this.currentMediaItem);
 			}
+			const left = this.currentMediaItem === undefined ? undefined : String(this.currentMediaItem.id);
+			const announced = String(mediaItem.id);
 			this.currentMediaItem = mediaItem;
-			this.cumulativePlaytime = 0;
+			// The announced track starts from what was played on it before its announcement. With no track
+			// announced before, nothing could have been counted for another one: the count is this one's.
+			this.cumulativePlaytime = this.otherPlaytime.get(announced) ?? (left === undefined ? this.cumulativePlaytime : 0);
+			for (const product of this.otherPlaytime.keys()) {
+				if (product !== this.segmentProduct) this.otherPlaytime.delete(product);
+			}
+			this.otherPlaytime.delete(announced);
+			// A segment still open on the track just left counts for nothing now: that track's count is
+			// settled, and the pause that closes this segment can arrive after this announcement.
+			if (left !== undefined && left !== announced && this.segmentProduct === left) {
+				delete this.lastPlayStart;
+				delete this.playStartMono;
+				delete this.segmentProduct;
+			}
 			hasScrobbledCurrent = false;
 		});
 

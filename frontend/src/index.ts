@@ -166,6 +166,11 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 } catch (_) {}
             }
         } else if (type === "duration") {
+            const product = typeof event.product === "string" ? event.product : undefined;
+            // Rust announces this for every load, even one with no length (src/player/thread/commands.rs):
+            // it is how the page learns which track Rust holds. States carry no track; `PlayState`
+            // reads it when `active` arrives, to know whose time the segment it opens is.
+            (window as any).__LUNAR_RUST_PRODUCT_ID__ = product;
             proxySetDuration(event.v);
         } else if (type === "volume") {
             // The OS mixer moved the level: mirrored as a controller's move is. A store not yet
@@ -178,6 +183,9 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             }
         } else if (type === "state") {
             const playing = event.v === "active";
+            // A cast's tracks are named in Connect's space, which is never compared with this page's:
+            // under a cast no track Rust holds can be named here.
+            if (event.cast) (window as any).__LUNAR_RUST_PRODUCT_ID__ = undefined;
             (window as any).__TL_PLAYING__ = playing;
             updatePlaybackState(playing);
             if (event.v === "completed") {
