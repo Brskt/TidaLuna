@@ -103,6 +103,32 @@ pub(crate) enum Continuation {
     Superseded,
 }
 
+/// The media segments of a DASH load, never none: an empty list loads as a header-only fMP4 and
+/// "completes" in zero samples. The type is the refusal; a caller meets it where it builds
+/// the list, and the load itself has nothing left to refuse.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SegmentUrls(Vec<String>);
+
+impl SegmentUrls {
+    /// `None` for an empty list.
+    pub(crate) fn new(urls: Vec<String>) -> Option<Self> {
+        (!urls.is_empty()).then_some(Self(urls))
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl IntoIterator for SegmentUrls {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 /// Split a `LOAD_STATE` word into its generation and origin. An origin byte that is not
 /// `Connect` reads as `Local`: the initial value of an untouched process is this host's own.
 #[inline]
@@ -1682,20 +1708,14 @@ impl Player {
     pub fn load_dash(
         &self,
         init_url: String,
-        segment_urls: Vec<String>,
+        segment_urls: SegmentUrls,
         format: String,
         product_id: Option<String>,
         origin: LoadOrigin,
-    ) -> anyhow::Result<u32> {
-        // The shared choke point. The IPC channel validates its own arguments, but the
-        // Connect receiver reaches this function directly in Rust and handed it an empty
-        // list, which loads as a header-only fMP4 and "completes" in zero samples. Which of
-        // the two called is also why `origin` is a parameter and not something read here:
-        // this function cannot tell them apart, and the staged-next guard has to.
-        if segment_urls.is_empty() {
-            anyhow::bail!("load_dash: refusing an empty segment list");
-        }
-
+    ) -> u32 {
+        // Both the IPC channel and the Connect receiver reach this function. Which of the two
+        // called is why `origin` is a parameter and not something read here: this function
+        // cannot tell them apart, and the staged-next guard has to.
         let load_gen = begin_load(origin);
         let _ = self.cmd_tx.send(PlayerCommand::LoadStarted {
             generation: load_gen,
@@ -1862,7 +1882,7 @@ impl Player {
         });
 
         *self.load_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
-        Ok(event_seq)
+        event_seq
     }
 
     /// An explicit target seeks there (when past the resume floor); otherwise

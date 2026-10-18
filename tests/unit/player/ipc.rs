@@ -1,6 +1,8 @@
 //! Tests for `src/player/ipc.rs`, attached to it by `#[path]`.
 
-use super::{ListenerAct, OutputMode, PlayerIpc, parse_player_ipc};
+use super::{
+    ListenerAct, OutputMode, PlayerIpc, PlayerIpcParseError, SegmentUrls, parse_player_ipc,
+};
 use serde_json::json;
 
 #[test]
@@ -280,11 +282,27 @@ fn a_dash_load_carries_the_track_it_is_for() {
         parsed,
         PlayerIpc::LoadDash {
             init_url: "https://init".to_string(),
-            segment_urls: vec!["https://s1".to_string()],
+            segment_urls: SegmentUrls::new(vec!["https://s1".to_string()]).unwrap(),
             format: "aac".to_string(),
             product_id: Some("777".to_string()),
         }
     );
+}
+
+/// The refusal is the only door to a DASH load: a list that is empty, unreadable or missing, or
+/// an init url that is blank, never becomes a command.
+#[test]
+fn a_dash_load_without_a_segment_or_an_init_url_is_refused() {
+    let refused = Err(PlayerIpcParseError::InvalidArgs("player.load_dash"));
+    for args in [
+        vec![json!("https://init"), json!("[]"), json!("aac")],
+        vec![json!("https://init"), json!("not json"), json!("aac")],
+        vec![json!("https://init")],
+        vec![json!(""), json!("[\"https://s1\"]"), json!("aac")],
+    ] {
+        assert_eq!(parse_player_ipc("player.load_dash", &args, None), refused);
+    }
+    assert_eq!(SegmentUrls::new(Vec::new()), None);
 }
 
 #[test]

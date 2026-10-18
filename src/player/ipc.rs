@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::OutputMode;
+use super::{OutputMode, SegmentUrls};
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum PlayerIpc {
@@ -28,7 +28,7 @@ pub(crate) enum PlayerIpc {
     },
     LoadDash {
         init_url: String,
-        segment_urls: Vec<String>,
+        segment_urls: SegmentUrls,
         format: String,
         product_id: Option<String>,
     },
@@ -293,21 +293,20 @@ pub(crate) fn parse_player_ipc(
         },
         "player.load_dash" => {
             let init_url = args.first().and_then(|v| v.as_str()).unwrap_or_default();
-            let segment_urls: Vec<String> = args
+            let segment_urls = args
                 .get(1)
                 .and_then(|v| v.as_str())
                 .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
+                .and_then(SegmentUrls::new);
             let format = args.get(2).and_then(|v| v.as_str()).unwrap_or("aac");
-            if init_url.is_empty() || segment_urls.is_empty() {
-                Err(PlayerIpcParseError::InvalidArgs("player.load_dash"))
-            } else {
-                Ok(PlayerIpc::LoadDash {
+            match segment_urls {
+                Some(segment_urls) if !init_url.is_empty() => Ok(PlayerIpc::LoadDash {
                     init_url: init_url.to_string(),
                     segment_urls,
                     format: format.to_string(),
                     product_id: optional_id(args.get(3)),
-                })
+                }),
+                _ => Err(PlayerIpcParseError::InvalidArgs("player.load_dash")),
             }
         }
         "player.recover" => parse_player_recover_args(args)

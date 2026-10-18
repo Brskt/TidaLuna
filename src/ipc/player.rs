@@ -154,15 +154,13 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     format,
                     product_id,
                 } => {
-                    if let Err(e) = state.player.load_dash(
+                    state.player.load_dash(
                         init_url,
                         segment_urls,
                         format,
                         product_id,
                         crate::player::LoadOrigin::Local,
-                    ) {
-                        crate::vprintln!("[PLAYER] Failed to load DASH track: {}", e);
-                    }
+                    );
                     PlayerIpcEffects::default()
                 }
                 PlayerIpc::Recover {

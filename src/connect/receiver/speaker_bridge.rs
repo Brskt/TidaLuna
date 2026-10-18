@@ -115,22 +115,19 @@ impl SpeakerBridge {
             // Named in Connect's space from end to end, never compared against the
             // frontend's: the receiver's metadata task records this same id.
             let media_id = media_info.track_id();
+            let Some(segments) = crate::player::SegmentUrls::new(segments) else {
+                crate::verr!("[connect::bridge] Player DASH load error: empty segment list");
+                return None;
+            };
             return with_state(|state| {
-                match state.player.load_dash(
+                state.player.load_dash(
                     url,
                     segments,
                     format,
                     media_id,
                     crate::player::LoadOrigin::Connect,
-                ) {
-                    Ok(seq) => Some(seq),
-                    Err(e) => {
-                        crate::verr!("[connect::bridge] Player DASH load error: {}", e);
-                        None
-                    }
-                }
-            })
-            .flatten();
+                )
+            });
         }
 
         // Direct stream path (BTS/FLAC)

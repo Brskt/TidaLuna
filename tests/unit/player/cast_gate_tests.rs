@@ -3,7 +3,7 @@
 //! load. Pinned on the command type: the handler that applies the rule needs the whole `AppState`.
 
 use super::{CastGate, CastLoad, ListenerAct, PlayerIpc};
-use crate::player::{LoadOrigin, OutputMode};
+use crate::player::{LoadOrigin, OutputMode, SegmentUrls};
 use serde_json::json;
 
 fn load() -> PlayerIpc {
@@ -22,7 +22,7 @@ fn load() -> PlayerIpc {
 fn load_dash() -> PlayerIpc {
     PlayerIpc::LoadDash {
         init_url: "https://cdn/init.mp4".to_string(),
-        segment_urls: vec!["https://cdn/1.mp4".to_string()],
+        segment_urls: SegmentUrls::new(vec!["https://cdn/1.mp4".to_string()]).unwrap(),
         format: "mp4a".to_string(),
         product_id: Some("2".to_string()),
     }

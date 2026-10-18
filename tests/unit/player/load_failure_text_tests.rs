@@ -10,7 +10,8 @@
 //! the helper sat one module away. These drive the real functions instead.
 
 use super::{
-    LoadContext, LoadOrigin, Player, PlayerCommand, PlayerEvent, ResumePolicy, start_stream_load,
+    LoadContext, LoadOrigin, Player, PlayerCommand, PlayerEvent, ResumePolicy, SegmentUrls,
+    start_stream_load,
 };
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -55,6 +56,11 @@ async fn truncated_response_port() -> u16 {
         let _ = sock.flush().await;
     });
     port
+}
+
+/// The one-segment list every DASH test here loads: a list must not be empty to be built at all.
+fn one_segment(url: String) -> SegmentUrls {
+    SegmentUrls::new(vec![url]).expect("a non-empty segment list")
 }
 
 /// A `Player` whose events land in a vector the caller can poll.
@@ -168,17 +174,15 @@ async fn a_refused_dash_init_publishes_no_credential() {
     let _serialised = serialised().await;
     let (player, events) = spying_player();
 
-    // The segment list is never fetched on this arm, but it cannot be empty: `load_dash` bails
-    // on an empty one before it mints a load at all.
-    player
-        .load_dash(
-            "http://127.0.0.1:1/init.mp4?token=SECRET&exp=1".to_string(),
-            vec!["http://127.0.0.1:1/seg-0.m4s".to_string()],
-            "flac".to_string(),
-            None,
-            LoadOrigin::Local,
-        )
-        .expect("a non-empty segment list is accepted");
+    // The segment list is never fetched on this arm, but it cannot be empty: `SegmentUrls` does
+    // not build from an empty one.
+    player.load_dash(
+        "http://127.0.0.1:1/init.mp4?token=SECRET&exp=1".to_string(),
+        one_segment("http://127.0.0.1:1/seg-0.m4s".to_string()),
+        "flac".to_string(),
+        None,
+        LoadOrigin::Local,
+    );
 
     assert_no_credential(&settled_error(&events).await);
 }
@@ -191,15 +195,13 @@ async fn a_failed_load_names_the_seq_the_load_answered() {
     let _serialised = serialised().await;
     let (player, events) = spying_player();
 
-    let seq = player
-        .load_dash(
-            "http://127.0.0.1:1/init.mp4".to_string(),
-            vec!["http://127.0.0.1:1/seg-0.m4s".to_string()],
-            "flac".to_string(),
-            None,
-            LoadOrigin::Local,
-        )
-        .expect("a non-empty segment list is accepted");
+    let seq = player.load_dash(
+        "http://127.0.0.1:1/init.mp4".to_string(),
+        one_segment("http://127.0.0.1:1/seg-0.m4s".to_string()),
+        "flac".to_string(),
+        None,
+        LoadOrigin::Local,
+    );
 
     settled_error(&events).await;
     let failure_seq = events
@@ -219,15 +221,13 @@ async fn a_truncated_dash_init_publishes_no_credential() {
     let (player, events) = spying_player();
     let init = truncated_response_port().await;
 
-    player
-        .load_dash(
-            format!("http://127.0.0.1:{init}/init.mp4?token=SECRET&exp=1"),
-            vec!["http://127.0.0.1:1/seg-0.m4s".to_string()],
-            "flac".to_string(),
-            None,
-            LoadOrigin::Local,
-        )
-        .expect("a non-empty segment list is accepted");
+    player.load_dash(
+        format!("http://127.0.0.1:{init}/init.mp4?token=SECRET&exp=1"),
+        one_segment("http://127.0.0.1:1/seg-0.m4s".to_string()),
+        "flac".to_string(),
+        None,
+        LoadOrigin::Local,
+    );
 
     assert_no_credential(&settled_error(&events).await);
 }
@@ -240,15 +240,13 @@ async fn a_refused_dash_segment_publishes_no_credential() {
 
     // One segment is enough, and it is also the safe count: `buffered` holds up to six futures
     // at once, and the loop returns on the first error without draining the rest.
-    player
-        .load_dash(
-            format!("http://127.0.0.1:{init}/init.mp4"),
-            vec!["http://127.0.0.1:1/seg-0.m4s?token=SECRET&exp=1".to_string()],
-            "flac".to_string(),
-            None,
-            LoadOrigin::Local,
-        )
-        .expect("a non-empty segment list is accepted");
+    player.load_dash(
+        format!("http://127.0.0.1:{init}/init.mp4"),
+        one_segment("http://127.0.0.1:1/seg-0.m4s?token=SECRET&exp=1".to_string()),
+        "flac".to_string(),
+        None,
+        LoadOrigin::Local,
+    );
 
     assert_no_credential(&settled_error(&events).await);
 }
@@ -260,17 +258,15 @@ async fn a_truncated_dash_segment_publishes_no_credential() {
     let init = complete_response_port().await;
     let segment = truncated_response_port().await;
 
-    player
-        .load_dash(
-            format!("http://127.0.0.1:{init}/init.mp4"),
-            vec![format!(
-                "http://127.0.0.1:{segment}/seg-0.m4s?token=SECRET&exp=1"
-            )],
-            "flac".to_string(),
-            None,
-            LoadOrigin::Local,
-        )
-        .expect("a non-empty segment list is accepted");
+    player.load_dash(
+        format!("http://127.0.0.1:{init}/init.mp4"),
+        one_segment(format!(
+            "http://127.0.0.1:{segment}/seg-0.m4s?token=SECRET&exp=1"
+        )),
+        "flac".to_string(),
+        None,
+        LoadOrigin::Local,
+    );
 
     assert_no_credential(&settled_error(&events).await);
 }
