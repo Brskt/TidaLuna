@@ -75,6 +75,11 @@ export type SdkLoad = { kind: "reload" } | { kind: "late"; duration: number } | 
 // Told by the page, which knows the product of the stream and the one Rust has.
 let _classifySdkLoad: ((stream: string) => SdkLoad) | null = null;
 export function onSdkLoad(cb: (stream: string) => SdkLoad) { _classifySdkLoad = cb; }
+// Told when an `src` is a reload of that kind. The answer to the SDK waits for the promise it returns:
+// the SDK plays only once its load is answered, and what the page owes Rust for the reload must reach
+// it before that play.
+let _onSdkReload: (() => Promise<void>) | null = null;
+export function onSdkReload(cb: () => Promise<void>) { _onSdkReload = cb; }
 // The page announced a track: Rust's is the previous one's until the load for it reports its length.
 export function proxyLoading() { _settled = false; }
 
@@ -127,9 +132,10 @@ if (srcDesc) {
 					bound("src");
 				}
 
-				// Emit readiness events for the SDK's saga to continue normally.
-				// Use microtask timing to match real media element behavior.
+				// Emit readiness events for the SDK's saga to continue normally, in a microtask like a
+				// real media element, or once the credential a reload is owed has been refreshed.
 				let length = false;
+				let owed: Promise<void> | undefined;
 				if (!preload) {
 					let load: SdkLoad | undefined;
 					try {
@@ -140,6 +146,11 @@ if (srcDesc) {
 					if (load?.kind === "reload" && _settled && !holdsAnotherTrack()) {
 						length = true;
 						_proxyDuration = _rustDuration;
+						try {
+							owed = _onSdkReload?.();
+						} catch (e) {
+							console.error("[audio-proxy] reload listener failed:", e);
+						}
 					} else if (load?.kind === "late") {
 						length = true;
 						_proxyDuration = load.duration;
@@ -152,7 +163,8 @@ if (srcDesc) {
 					this.dispatchEvent(new Event("canplay"));
 					this.dispatchEvent(new Event("canplaythrough"));
 				};
-				queueMicrotask(answer);
+				if (owed) void owed.then(answer, answer);
+				else queueMicrotask(answer);
 				return;
 			}
 			srcDesc.set!.call(this, value);

@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { SentIpc } from "./setup";
 
 import { sdkDashAnswer } from "./helpers/sdk-answer";
-import { onSdkLoad, proxyEnded, proxyLoading, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
+import { onSdkLoad, onSdkReload, proxyEnded, proxyLoading, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
 const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
@@ -35,12 +35,14 @@ beforeEach(() => {
 	proxyReset();
 	setSelfLoad(true);
 	onSdkLoad(() => ({ kind: "other" }));
+	onSdkReload(async () => {});
 });
 
 afterEach(() => {
 	proxyReset();
 	setSelfLoad(false);
 	onSdkLoad(() => ({ kind: "other" }));
+	onSdkReload(async () => {});
 });
 
 // The SDK bound the stream of track `held` while Rust holds track `rust`, reported with `length`.

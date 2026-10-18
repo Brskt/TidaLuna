@@ -1,5 +1,5 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
-import { setSelfLoad, onSdkLoad, proxyLoading } from "../audio-proxy";
+import { isSelfLoad, setSelfLoad, onSdkLoad, onSdkReload, proxyLoading } from "../audio-proxy";
 import { refusePlayback } from "../refuse-playback";
 import { productOfStream } from "../sdk-playbackinfo";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
@@ -14,11 +14,26 @@ const UNDECODABLE_PROFILE = 415;
 // on this surface resolves video quality.
 const VIDEO_QUALITY_UNRESOLVED = "UNKNOWN";
 
+// How long the SDK's reload waits for the fresh credential `refreshCredential` asks for.
+const CREDENTIAL_WAIT_MS = 3000;
+
+// What `player.load` is handed for a BTS stream this page plays itself: the url, the codec, the key.
+// `undefined` for a FLAC stream, which the SDK's native player loads.
+const btsSelfLoad = (pbi: any) => {
+    const manifest = pbi?.manifestMimeType === "application/vnd.tidal.bts" ? pbi.manifest : undefined;
+    const streamUrl = manifest?.urls?.[0];
+    if (!streamUrl || (manifest.mimeType ?? "").includes("flac")) return undefined;
+    return { streamUrl, codec: manifest.codecs?.split(".")?.[0] ?? "aac", encKey: manifest.keyId ?? "" };
+};
+
 export const createPlaybackController = () => {
     let delegate: any = null;
     let lastTransitionId = "";
     // The product of the last self-load sent to Rust.
     let loadedId = "";
+    // Whether that self-load is a BTS stream, which Rust keeps fetching with the url it was handed. A
+    // DASH one is fetched whole before it plays and holds no url afterwards.
+    let loadedProgressive = false;
     // A refusal raises what its steps raised, after running them all. In the catch below that
     // would reach the catch of the whole notification and skip its context write: reported here.
     // It refuses the product last announced, which is the one every caller is loading.
@@ -45,6 +60,38 @@ export const createPlaybackController = () => {
         }
         return loadedId !== "" && current === loadedId ? { kind: "reload" } : { kind: "other" };
     });
+    // The SDK reloads the track it plays when its own stream expired (a Play long after the pause) or was
+    // loaded paused, and answers itself from Rust's track; Rust is sent nothing. Rust keeps streaming
+    // a BTS track with the signed url it was handed, and takes a new one only from a `player.load` of the
+    // same track, which the SDK never sends for a track it did not load: its reconnect would meet a 403.
+    // A fresh answer is asked for and handed over, keeping the position (no restart, no play intent).
+    const askForCredential = async (productId: string) => {
+        try {
+            const { getPlaybackInfo } = require("../../plugins/lib/src/helpers/getPlaybackInfo");
+            const { store } = require("../../plugins/lib/src/redux/store");
+            const fresh = btsSelfLoad(await getPlaybackInfo(productId, store.getState().settings?.quality?.streaming));
+            // Left behind during the request: the listener moved on, or the SDK loaded something itself.
+            if (!fresh || loadedId !== productId || lastTransitionId !== productId || !isSelfLoad()) return;
+            sendIpc("player.load", fresh.streamUrl, fresh.codec, fresh.encKey, false, false, productId);
+        } catch (e) {
+            console.error("[luna:playback] credential refresh failed:", e);
+        }
+    };
+    // Waited for by the answer to the SDK, whose play follows it: a re-arm of Rust's track at that play
+    // would otherwise use the old url. Bounded: a request stuck behind the rate gate cannot hold the
+    // play. Past it the SDK is answered, and the credential still goes out when it arrives.
+    const refreshCredential = async () => {
+        const productId = loadedId;
+        if (!loadedProgressive || productId === "") return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const stuck = new Promise<void>((resolve) => (timer = setTimeout(resolve, CREDENTIAL_WAIT_MS)));
+        try {
+            await Promise.race([askForCredential(productId), stuck]);
+        } finally {
+            clearTimeout(timer);
+        }
+    };
+    onSdkReload(refreshCredential);
     return {
         registerDelegate: (d: any) => {
             delegate = d;
@@ -131,6 +178,7 @@ export const createPlaybackController = () => {
                                         const codec = manifest.codec?.split(".")?.[0] ?? "aac";
                                         setSelfLoad(true);
                                         loadedId = productId;
+                                        loadedProgressive = false;
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
@@ -138,14 +186,12 @@ export const createPlaybackController = () => {
                                     }
                                 }
                                 if (!alreadyPlaying && pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
-                                    const manifest = pbi.manifest;
-                                    const streamUrl = manifest.urls?.[0];
-                                    const mimeType: string = manifest.mimeType ?? "";
-                                    if (streamUrl && !mimeType.includes("flac")) {
-                                        const codec = manifest.codecs?.split(".")?.[0] ?? "aac";
-                                        const encKey = manifest.keyId ?? "";
+                                    const self = btsSelfLoad(pbi);
+                                    if (self) {
+                                        const { streamUrl, codec, encKey } = self;
                                         setSelfLoad(true);
                                         loadedId = productId;
+                                        loadedProgressive = true;
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
