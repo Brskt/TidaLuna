@@ -22,6 +22,25 @@ fn companions(path: &Path) -> Vec<String> {
 }
 
 #[test]
+fn a_healthy_plugins_db_is_not_touched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = Connection::open(dir.path().join("plugins.db")).unwrap();
+    seed(&mut conn);
+    drop(conn);
+
+    let db = DbActor::open(dir.path()).unwrap();
+
+    assert_eq!(db.call_plugins(|c| crate::plugins::store::list(c).len()), 1);
+    assert_eq!(
+        companions(&dir.path().join("plugins.db"))
+            .iter()
+            .filter(|n| n.contains("corrupt"))
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn a_plugins_db_another_connection_holds_is_never_replaced() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("plugins.db");
@@ -90,6 +109,7 @@ fn a_fault_with_a_remedy_says_what_to_do_and_an_unknown_one_shows_its_cause() {
     for (fault, advice) in [
         (Fault::Locked, "Close any other TidaLunar"),
         (Fault::Unwritable, "Make the folder writable"),
+        (Fault::Unreplaceable, "Move that file"),
     ] {
         let text = at(fault).refusal();
         assert!(

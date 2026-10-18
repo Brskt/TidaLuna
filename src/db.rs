@@ -15,6 +15,8 @@ pub(crate) enum Fault {
     Locked,
     /// The file, or the folder that has to hold its `-wal`, cannot be written or created.
     Unwritable,
+    /// A damaged store the repair could not put a new one in place of.
+    Unreplaceable,
     Other,
 }
 
@@ -54,6 +56,10 @@ impl OpenError {
             Fault::Unwritable => format!(
                 "TidaLunar cannot write to its data folder ({file}: {detail}). \
                 Make the folder writable, then start again."
+            ),
+            Fault::Unreplaceable => format!(
+                "TidaLunar found {file} damaged and could not replace it ({detail}). \
+                Move that file, with its -wal and -shm files, out of the folder, then start again."
             ),
             Fault::Other => format!("TidaLunar cannot open its database {file} ({detail})."),
         }
@@ -124,6 +130,46 @@ fn store_of(conn: &Connection) -> String {
         .map_or_else(|| "in-memory".into(), |n| n.to_string_lossy().into_owned())
 }
 
+/// A file SQLite cannot read as a database (`CORRUPT`, `NOTADB`) is copied aside
+/// and replaced by an empty store: plugin code is fetched again, a reinstall starts disabled, and
+/// trust decisions live in settings.db. The replacement leaves a reset notice in the new store, for the
+/// page to tell. Anything else (`BUSY`, `READONLY`, `CANTOPEN`) returns with the file untouched: a
+/// transient fault is no reason to discard what the user installed.
+fn open_plugins(path: &Path) -> Result<Connection, OpenError> {
+    let opened = Connection::open(path).and_then(|mut conn| {
+        crate::plugins::store::init_schema(&mut conn)?;
+        Ok(conn)
+    });
+    match opened {
+        Ok(conn) => Ok(conn),
+        Err(e) if crate::settings::corruption(&e) => replace_plugins(path, &e),
+        Err(e) => Err(OpenError::sqlite(path, &e)),
+    }
+}
+
+/// The store is built in memory, where nothing can fail on a disk, then put in place of the
+/// damaged file, a copy of which is kept aside. The failed open has already folded a `-wal` no
+/// other connection holds into the file; a `-wal` that remains is a live holder's and `replace`
+/// refuses.
+fn replace_plugins(path: &Path, cause: &rusqlite::Error) -> Result<Connection, OpenError> {
+    let unreplaceable = |why: String| OpenError {
+        path: path.to_owned(),
+        fault: Fault::Unreplaceable,
+        detail: format!("{cause}; {why}"),
+    };
+    let fresh = Connection::open_in_memory()
+        .and_then(|mut fresh| crate::plugins::store::init_schema(&mut fresh).map(|()| fresh))
+        .map_err(|e| unreplaceable(e.to_string()))?;
+    let aside = crate::settings::replace(path, &fresh).map_err(unreplaceable)?;
+    crate::verr!(
+        "[PLUGINS] plugins.db was damaged ({cause}), a copy is kept as {}; plugins start empty",
+        aside.display()
+    );
+    Connection::open(path)
+        .and_then(|mut conn| crate::plugins::store::init_schema(&mut conn).map(|()| conn))
+        .map_err(|e| OpenError::sqlite(path, &e))
+}
+
 /// Handle to the database actor thread.
 ///
 /// All SQLite operations go through [`call`](DbActor::call), which sends a
@@ -175,11 +221,7 @@ impl DbActor {
             .name("db-actor".into())
             .spawn(move || {
                 let result = (|| -> Result<(Connection, Connection), OpenError> {
-                    let plugins_path = data_dir.join("plugins.db");
-                    let mut plugins_conn = Connection::open(&plugins_path)
-                        .map_err(|e| OpenError::sqlite(&plugins_path, &e))?;
-                    crate::plugins::store::init_schema(&mut plugins_conn)
-                        .map_err(|e| OpenError::sqlite(&plugins_path, &e))?;
+                    let plugins_conn = open_plugins(&data_dir.join("plugins.db"))?;
                     let settings_path = data_dir.join("settings.db");
                     // Checked and, when damaged, rebuilt: what it did waits in the store for the
                     // page.
