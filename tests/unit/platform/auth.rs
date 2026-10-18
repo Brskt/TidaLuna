@@ -9,7 +9,7 @@ fn write_private_forces_owner_only() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("pkce_credentials.json");
-    // A pre-existing world-readable file must be tightened to 0600.
+    // A world-readable file already there is replaced by one created owner-only.
     std::fs::write(&path, b"old").expect("seed");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).expect("chmod");
 
