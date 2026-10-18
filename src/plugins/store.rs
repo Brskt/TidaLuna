@@ -1,3 +1,4 @@
+use crate::db::{ROUTINE_SYNC, Stable};
 use rusqlite::{Connection, params};
 
 #[derive(Debug, serde::Serialize)]
@@ -44,7 +45,8 @@ pub(crate) fn parse_luna_meta(manifest: &str) -> Result<Option<LunaMeta>, String
 
 pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // A write whose loss would undo a refusal takes `Stable` itself, as `disable` and `uninstall` do.
+    conn.pragma_update(None, "synchronous", ROUTINE_SYNC)?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS plugins (
@@ -149,19 +151,33 @@ pub(crate) fn install(
     Ok(())
 }
 
+/// Removes the plugin and its storage, on the disk before this returns: a removal a power cut took
+/// back would bring the plugin back, code and enabled flag included. One transaction: the two
+/// deletes are one commit and one sync.
 pub(crate) fn uninstall(conn: &mut Connection, url: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM plugins WHERE url = ?1", params![url])?;
-    conn.execute(
+    let _stable = Stable::begin(conn);
+    remove_rows(conn, url)
+}
+
+/// `uninstall` for every plugin, under the same sync.
+pub(crate) fn uninstall_all(conn: &mut Connection) -> rusqlite::Result<()> {
+    let _stable = Stable::begin(conn);
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM plugins", [])?;
+    tx.execute("DELETE FROM plugin_storage", [])?;
+    tx.commit()
+}
+
+/// The plugin's rows in one transaction, on whatever sync the connection is at: the caller
+/// decides whether losing the removal matters.
+fn remove_rows(conn: &Connection, url: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM plugins WHERE url = ?1", params![url])?;
+    tx.execute(
         "DELETE FROM plugin_storage WHERE namespace = ?1",
         params![url],
     )?;
-    Ok(())
-}
-
-pub(crate) fn uninstall_all(conn: &mut Connection) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM plugins", [])?;
-    conn.execute("DELETE FROM plugin_storage", [])?;
-    Ok(())
+    tx.commit()
 }
 
 pub(crate) fn enable(conn: &mut Connection, url: &str) -> rusqlite::Result<()> {
@@ -172,7 +188,20 @@ pub(crate) fn enable(conn: &mut Connection, url: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// The user turns the plugin off, on the disk before this returns: a disable a power cut took back
+/// would run the plugin again at the next launch, and its native grants are still valid.
 pub(crate) fn disable(conn: &mut Connection, url: &str) -> rusqlite::Result<()> {
+    let _stable = Stable::begin(conn);
+    clear_enabled(conn, url)
+}
+
+/// A load that failed turns the flag off again, on the routine sync: a flag a power cut brings
+/// back only makes the next launch try the load and fail the same way.
+pub(crate) fn disable_failed(conn: &mut Connection, url: &str) -> rusqlite::Result<()> {
+    clear_enabled(conn, url)
+}
+
+fn clear_enabled(conn: &Connection, url: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE plugins SET enabled = 0 WHERE url = ?1",
         params![url],
@@ -507,7 +536,8 @@ pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
     // Now mutate: delete losers
     let mut removed = Vec::new();
     for (name, url) in losers {
-        if let Err(e) = uninstall(conn, &url) {
+        // A removal lost with the tail is found again at the next launch.
+        if let Err(e) = remove_rows(conn, &url) {
             crate::vprintln!("[PLUGINS] dedup: failed to remove '{name}' ({url}): {e}");
         } else {
             removed.push((url, name));
@@ -519,3 +549,7 @@ pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
 #[cfg(test)]
 #[path = "../../tests/unit/plugins/store.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/plugins/durability_store_tests.rs"]
+mod durability_store_tests;

@@ -226,7 +226,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         let revert_url = url.to_string();
         let _ = tokio::task::spawn_blocking(move || {
             let _ = crate::state::db()
-                .call_plugins(move |pc| crate::plugins::store::disable(pc, &revert_url));
+                .call_plugins(move |pc| crate::plugins::store::disable_failed(pc, &revert_url));
         })
         .await;
     }
@@ -297,7 +297,7 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
                 let url_disable = timeout_url.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     crate::state::db().call_plugins(move |pc| {
-                        let _ = crate::plugins::store::disable(pc, &url_disable);
+                        let _ = crate::plugins::store::disable_failed(pc, &url_disable);
                     });
                 })
                 .await;

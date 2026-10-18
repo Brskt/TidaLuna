@@ -247,7 +247,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
         let urls = failed_urls.clone();
         db.call_plugins(move |pc| {
             for url in &urls {
-                if let Err(e) = crate::plugins::store::disable(pc, url) {
+                if let Err(e) = crate::plugins::store::disable_failed(pc, url) {
                     crate::vprintln!("[PLUGIN] Failed to auto-disable '{url}': {e}");
                 } else {
                     crate::vprintln!("[PLUGIN] Auto-disabled '{url}': failed to load at startup");
@@ -285,7 +285,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                     let url_disable = url.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         crate::state::db().call_plugins(move |pc| {
-                            let _ = crate::plugins::store::disable(pc, &url_disable);
+                            let _ = crate::plugins::store::disable_failed(pc, &url_disable);
                         });
                     })
                     .await;
