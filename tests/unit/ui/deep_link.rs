@@ -59,6 +59,8 @@ fn the_content_routes_still_open() {
 #[test]
 fn a_foreign_scheme_is_not_ours_to_route() {
     assert!(target_for("https://desktop.tidal.com/album/1").is_none());
+    // A route our list holds, behind another scheme: only the scheme check refuses it.
+    assert!(target_for("https://album/1").is_none());
     assert!(target_for("file:///etc/passwd").is_none());
     assert!(target_for("javascript:alert(1)").is_none());
     assert!(target_for("tidalx://album/1").is_none());
@@ -95,10 +97,10 @@ fn a_route_nobody_has_read_is_refused_until_someone_has() {
 
 #[test]
 fn a_character_straddling_the_scheme_length_is_refused_not_fatal() {
-    // Each of these puts a multi-byte character across the offset a byte-count
-    // split would cut at. They arrive from a launch argument and from the two
+    // Each of these puts a multi-byte character across byte 8, where the split
+    // after `tidal://` cuts. They arrive from a launch argument and from the two
     // listeners, making a panic here any local process's to trigger.
-    for raw in ["tida\u{20AC}xy", "tida\u{1F600}", "tid\u{20AC}al://x"] {
+    for raw in ["tidal:/\u{20AC}", "tidal:\u{20AC}x", "tidal\u{1F600}"] {
         assert!(target_for(raw).is_none(), "{raw} was accepted");
     }
 }
