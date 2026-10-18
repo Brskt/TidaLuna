@@ -9,9 +9,6 @@
 //!   `{hi, lo}` pairs.
 //! - Vtable slots and callbacks use `extern "system"` (x64 unifies stdcall/thiscall).
 //! - A driver uses its CLSID as the IID: `CoCreateInstance` passes it as both.
-//!
-//! FFI/ABI plumbing: some vtable slots and fields exist only for layout.
-#![allow(dead_code)]
 
 use core::ffi::{c_char, c_void};
 
@@ -26,16 +23,11 @@ pub(crate) type AsioBool = i32;
 pub(crate) type AsioError = i32;
 /// `ASIOSampleRate`: an IEEE-754 double.
 pub(crate) type AsioSampleRate = f64;
-/// `ASIOSampleType`: a C `long` (see the `ASIO_ST_*` discriminants).
+/// `ASIOSampleType`: a C `long`. The codes we render are mapped by
+/// [`AsioSampleType::from_asio`](super::convert::AsioSampleType::from_asio).
 pub(crate) type AsioSampleType = i32;
 
 pub(crate) const ASE_OK: AsioError = 0;
-
-// The LSB integer/float discriminants we support (the full enum is larger).
-pub(crate) const ASIO_ST_INT16_LSB: AsioSampleType = 16;
-pub(crate) const ASIO_ST_INT24_LSB: AsioSampleType = 17;
-pub(crate) const ASIO_ST_INT32_LSB: AsioSampleType = 18;
-pub(crate) const ASIO_ST_FLOAT32_LSB: AsioSampleType = 19;
 
 /// True if an `ASIOError` indicates success.
 pub(crate) fn asio_ok(err: AsioError) -> bool {
@@ -58,13 +50,6 @@ pub(crate) struct AsioTimeStamp {
     pub lo: u32,
 }
 
-impl AsioSamples {
-    /// Recombine the `{hi, lo}` split into a single 64-bit frame count.
-    pub(crate) fn to_u64(self) -> u64 {
-        ((self.hi as u64) << 32) | self.lo as u64
-    }
-}
-
 #[repr(C)]
 pub(crate) struct AsioClockSource {
     pub index: i32,
@@ -84,7 +69,7 @@ pub(crate) struct AsioChannelInfo {
     pub is_active: AsioBool,
     /// Out: the channel group.
     pub channel_group: i32,
-    /// Out: the driver's sample type (`ASIO_ST_*`).
+    /// Out: the driver's sample type (see [`AsioSampleType`]).
     pub sample_type: AsioSampleType,
     /// Out: the channel name.
     pub name: [c_char; 32],
@@ -159,7 +144,8 @@ pub(crate) struct IUnknownVtbl {
 }
 
 /// The `IASIO` vtable: `IUnknown` (3 slots) followed by the 21 ASIO methods in
-/// their canonical order. The order and signatures are load-bearing.
+/// their canonical order. The order and signatures are load-bearing: a slot nothing
+/// calls stays declared, since removing it would shift every later one.
 #[repr(C)]
 pub(crate) struct IAsioVtbl {
     pub base: IUnknownVtbl,
@@ -265,10 +251,6 @@ impl AsioDriver {
         unsafe { (self.vtbl().init)(self.0, sys_handle) }
     }
 
-    pub(crate) unsafe fn get_driver_name(&self, name: *mut c_char) {
-        unsafe { (self.vtbl().get_driver_name)(self.0, name) }
-    }
-
     pub(crate) unsafe fn get_error_message(&self, string: *mut c_char) {
         unsafe { (self.vtbl().get_error_message)(self.0, string) }
     }
@@ -307,14 +289,6 @@ impl AsioDriver {
         unsafe { (self.vtbl().set_sample_rate)(self.0, rate) }
     }
 
-    pub(crate) unsafe fn get_sample_position(
-        &self,
-        s_pos: *mut AsioSamples,
-        ts: *mut AsioTimeStamp,
-    ) -> AsioError {
-        unsafe { (self.vtbl().get_sample_position)(self.0, s_pos, ts) }
-    }
-
     pub(crate) unsafe fn get_channel_info(&self, info: *mut AsioChannelInfo) -> AsioError {
         unsafe { (self.vtbl().get_channel_info)(self.0, info) }
     }
@@ -335,10 +309,6 @@ impl AsioDriver {
 
     pub(crate) unsafe fn control_panel(&self) -> AsioError {
         unsafe { (self.vtbl().control_panel)(self.0) }
-    }
-
-    pub(crate) unsafe fn output_ready(&self) -> AsioError {
-        unsafe { (self.vtbl().output_ready)(self.0) }
     }
 
     /// The raw `IASIO` COM pointer; the real-time callback (which holds no
