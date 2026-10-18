@@ -88,10 +88,8 @@ fn picture_fields_round_trip_as_big_endian() {
         .expect("a picture block")
         .2;
 
-    assert_eq!(
-        u32::from_be_bytes(body[0..4].try_into().unwrap()),
-        FRONT_COVER
-    );
+    // 3 is the front cover in the FLAC picture-type table.
+    assert_eq!(u32::from_be_bytes(body[0..4].try_into().unwrap()), 3);
     let mime_len = u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize;
     assert_eq!(&body[8..8 + mime_len], b"image/jpeg");
     let data_len = u32::from_be_bytes(body[body.len() - 8..body.len() - 4].try_into().unwrap());
@@ -115,7 +113,10 @@ fn a_second_pass_replaces_the_blocks_instead_of_stacking_them() {
 
 #[test]
 fn malformed_streams_are_refused_without_panicking() {
-    assert!(retag(b"nope".to_vec(), &comments(), None).is_err());
+    // A whole stream behind any other signature.
+    let mut unsigned = minimal_flac();
+    unsigned[..4].copy_from_slice(b"nope");
+    assert!(retag(unsigned, &comments(), None).is_err());
     assert!(retag(b"fLaC".to_vec(), &comments(), None).is_err());
     // A declared length that runs past the buffer.
     let mut runaway = b"fLaC".to_vec();

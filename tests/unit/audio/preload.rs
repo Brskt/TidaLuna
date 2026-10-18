@@ -512,7 +512,9 @@ async fn a_record_staged_under_another_origins_load_is_not_promoted() {
         "https://cdn.invalid/media/track-a.flac?token=STAGED",
     ));
 
-    let refused = take_next_track().await.is_none() && peek_next_track().is_none();
+    // The peek first: the take resets the slot, after which a peek finds nothing either way.
+    let no_fade = peek_next_track().is_none();
+    let refused = no_fade && take_next_track().await.is_none();
 
     // Process-wide, like the generation it now shares a word with: hand the local origin back
     // before asserting; a failure here must not leave every later test refusing its own preload.
@@ -889,6 +891,9 @@ async fn a_load_of_the_track_being_staged_does_not_cost_it_its_bytes() {
         .claim(&track, crate::player::current_gen())
         .expect("nothing is staged, so the claim is granted");
 
+    // The load for that track begins, and the clear below really drops the staged name:
+    // the attempt is then all that keeps the slot.
+    crate::player::begin_load(crate::player::LoadOrigin::Local);
     clear_next_track_if_match("https://cdn.invalid/media/track-a.flac").await;
 
     assert!(
