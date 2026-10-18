@@ -50,7 +50,7 @@ mock.module("../src/controllers/mediasession", () => ({
 }));
 
 const { createPlaybackController } = await import("../src/controllers/playback");
-const { isSelfLoad, setSelfLoad } = await import("../src/audio-proxy");
+const { isSelfLoad, setSelfLoad, proxyReset, proxySetDuration } = await import("../src/audio-proxy");
 
 // The closure schedules itself with setTimeout(0) and awaits inside; two macrotask turns let
 // it reach its first suspension point and, later, run its resumption to completion.
@@ -226,6 +226,63 @@ test("a DASH track the Connect receiver already plays is not loaded again either
 
 	expect(sentSince(from)).not.toContain("player.load_dash");
 	expect(isSelfLoad()).toBe(false);
+});
+
+test("a track TIDAL moves to is still self-loaded", async () => {
+	const from = sent.length;
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "local", type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+
+	expect(sentSince(from)).toContain("player.load");
+	expect(isSelfLoad()).toBe(true);
+});
+
+const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
+
+// The SDK's own reload of the track it plays (its expired-stream retry on Play, the retry once the
+// network is back). The page announces nothing for it and Rust reports no length. The element
+// answers the SDK's load itself, for the product the store names and Rust has loaded.
+async function settled(controller: ReturnType<typeof createPlaybackController>, id: string, length: number) {
+	controller.setCurrentMediaItem({ productId: id, type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	proxyReset();
+	const el = document.createElement("audio");
+	el.src = dash(id);
+	await flush();
+	proxySetDuration(length);
+	state.playbackControls = { mediaProduct: { productId: id }, playbackContext: {} } as any;
+	return el;
+}
+
+const reloadSeen = async (el: HTMLAudioElement) => {
+	let answered = 0;
+	el.addEventListener("durationchange", () => answered++);
+	el.load();
+	el.src = dash("signed again");
+	// A reload of the track Rust has asks for a fresh credential first and is answered once it has one.
+	resolvePbi?.(aacStream);
+	await flush();
+	return answered;
+};
+
+test("an announced track is not answered for until Rust reports its length", async () => {
+	const controller = createPlaybackController();
+	const el = await settled(controller, "playing", 200);
+	controller.setCurrentMediaItem({ productId: "next", type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	state.playbackControls = { mediaProduct: { productId: "next" }, playbackContext: {} } as any;
+
+	expect(await reloadSeen(el)).toBe(0);
+
+	proxySetDuration(180);
+	expect(await reloadSeen(el)).toBe(1);
 });
 
 test("a track TIDAL moves to is still self-loaded", async () => {

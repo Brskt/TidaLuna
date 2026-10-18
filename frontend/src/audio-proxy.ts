@@ -42,10 +42,13 @@ export function proxyOwnerSrc(): string | null {
 	const owner = _proxyElement as any;
 	return owner?._lunarProxy ? owner._lunarSrc || null : null;
 }
+// What the bound element reads as its length. Rust's own is `_rustDuration`: they differ while the
+// element holds the stream of another track than the one Rust has.
 let _proxyDuration = 0;
 // The track Rust holds and its length, as its latest `duration` named them. No product when that
 // report named none, or nothing was reported since the track ended.
 let _rustProduct: string | undefined;
+let _rustDuration = 0;
 // Rust's reports belong to the track it plays. The element holds another track's stream when the SDK
 // bound one the listener has since left (a load that lost the race to a newer pick): what Rust reports
 // is not that stream's, and dispatching it on that element answers the SDK's load with another
@@ -56,6 +59,20 @@ const holdsAnotherTrack = () => {
 };
 let _proxyTime = 0;
 let _proxyPlaying = false;
+// Rust has the track the page last loaded into it and has reported its length. TIDAL reloads the
+// track it plays (its expired-stream retry on Play, the retry after the network came back) without
+// announcing anything. Rust is sent nothing and no `duration` follows, while the SDK's load waits on one.
+// A `src` assigned while this holds, for that very track, is such a reload, and answers with the
+// length already reported.
+let _settled = false;
+// What a `src` assigned loads. `reload`: the track Rust has, which Rust's length answers while Rust's
+// track is settled. `other`: no answer, a length is Rust's to report.
+export type SdkLoad = { kind: "reload" } | { kind: "other" };
+// Told by the page, which knows the product of the stream and the one Rust has.
+let _classifySdkLoad: ((stream: string) => SdkLoad) | null = null;
+export function onSdkLoad(cb: (stream: string) => SdkLoad) { _classifySdkLoad = cb; }
+// The page announced a track: Rust's is the previous one's until the load for it reports its length.
+export function proxyLoading() { _settled = false; }
 
 // The src of the stream we were told will not play. Held as the src, not a flag: TIDAL
 // re-assigns the identical manifest after a failure, and only that one stays refused.
@@ -108,12 +125,27 @@ if (srcDesc) {
 
 				// Emit readiness events for the SDK's saga to continue normally.
 				// Use microtask timing to match real media element behavior.
-				queueMicrotask(() => {
+				let length = false;
+				if (!preload) {
+					let load: SdkLoad | undefined;
+					try {
+						load = _classifySdkLoad?.(value);
+					} catch (e) {
+						console.error("[audio-proxy] reload probe failed:", e);
+					}
+					if (load?.kind === "reload" && _settled && !holdsAnotherTrack()) {
+						length = true;
+						_proxyDuration = _rustDuration;
+					}
+				}
+				const answer = () => {
+					if (length) this.dispatchEvent(new Event("durationchange"));
 					this.dispatchEvent(new Event("loadedmetadata"));
 					this.dispatchEvent(new Event("loadeddata"));
 					this.dispatchEvent(new Event("canplay"));
 					this.dispatchEvent(new Event("canplaythrough"));
-				});
+				};
+				queueMicrotask(answer);
 				return;
 			}
 			srcDesc.set!.call(this, value);
@@ -161,6 +193,7 @@ HTMLMediaElement.prototype.play = function () {
 			// track until the page loads the next. This is no command for Rust.
 			_proxyElement = this;
 			_handover = true;
+			_settled = false;
 			_proxyPlaying = true;
 			_proxyTime = 0;
 			this.dispatchEvent(new Event("play"));
@@ -314,7 +347,13 @@ export function proxySetTime(time: number) {
 
 // `product` is the track the length was measured on, when Rust says so.
 export function proxySetDuration(duration: number, product?: string) {
+	// Kept whether or not an element holds the track yet: Rust measures a load whatever the SDK is doing,
+	// and a length reported before the SDK binds the stream (its request slower than ours, or Shaka between
+	// its unload and its next `src`) is the answer that bind owes it.
+	if (!_selfLoad) return;
 	_rustProduct = product;
+	_rustDuration = duration;
+	_settled = duration > 0;
 	if (!mirrorsRust()) return;
 	// A handover stays pending too while the element's own track is still to be reported.
 	if (holdsAnotherTrack()) return;
@@ -339,6 +378,8 @@ export function proxyEnded(): boolean {
 	// element that holds another track's stream has nothing to end.
 	const ends = !holdsAnotherTrack();
 	_rustProduct = undefined;
+	_rustDuration = 0;
+	_settled = false;
 	if (!_proxyElement || !((_proxyElement as any)._lunarProxy) || _handover) return false;
 	if (!ends) return false;
 	_proxyPlaying = false;
@@ -357,12 +398,15 @@ export function proxyFail() {
 	if (!_proxyElement || !((_proxyElement as any)._lunarProxy)) return;
 	_failedSrc = (_proxyElement as any)._lunarSrc ?? null;
 	_proxyPlaying = false;
+	_settled = false;
 }
 
 export function proxyReset() {
 	_proxyElement = null;
 	_handover = false;
+	_settled = false;
 	_rustProduct = undefined;
+	_rustDuration = 0;
 	_proxyPlaying = false;
 	_proxyTime = 0;
 	_proxyDuration = 0;

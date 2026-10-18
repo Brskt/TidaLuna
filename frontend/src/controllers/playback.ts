@@ -1,5 +1,5 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
-import { setSelfLoad } from "../audio-proxy";
+import { setSelfLoad, onSdkLoad, proxyLoading } from "../audio-proxy";
 import { refusePlayback } from "../refuse-playback";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 import { setCurrentTrack } from "../video/cover-canvas";
@@ -16,6 +16,8 @@ const VIDEO_QUALITY_UNRESOLVED = "UNKNOWN";
 export const createPlaybackController = () => {
     let delegate: any = null;
     let lastTransitionId = "";
+    // The product of the last self-load sent to Rust.
+    let loadedId = "";
     // A refusal raises what its steps raised, after running them all. In the catch below that
     // would reach the catch of the whole notification and skip its context write: reported here.
     // It refuses the product last announced, which is the one every caller is loading.
@@ -26,6 +28,11 @@ export const createPlaybackController = () => {
             console.error("[luna:playback] refusal failed:", e);
         }
     };
+    onSdkLoad(() => {
+        const { store } = require("../../plugins/lib/src/redux/store");
+        const current = String(store.getState().playbackControls?.mediaProduct?.productId ?? "");
+        return loadedId !== "" && current === loadedId ? { kind: "reload" } : { kind: "other" };
+    });
     return {
         registerDelegate: (d: any) => {
             delegate = d;
@@ -64,6 +71,7 @@ export const createPlaybackController = () => {
                 const productId = String(item.productId ?? item.id ?? "");
                 if (productId && productId !== lastTransitionId) {
                     lastTransitionId = productId;
+                    proxyLoading();
                     setTimeout(async () => {
                         try {
                             if (lastTransitionId !== productId) return;
@@ -110,6 +118,7 @@ export const createPlaybackController = () => {
                                     if (manifest.initUrl && manifest.segmentUrls?.length > 0) {
                                         const codec = manifest.codec?.split(".")?.[0] ?? "aac";
                                         setSelfLoad(true);
+                                        loadedId = productId;
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
@@ -124,6 +133,7 @@ export const createPlaybackController = () => {
                                         const codec = manifest.codecs?.split(".")?.[0] ?? "aac";
                                         const encKey = manifest.keyId ?? "";
                                         setSelfLoad(true);
+                                        loadedId = productId;
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();

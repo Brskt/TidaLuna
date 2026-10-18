@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { SentIpc } from "./setup";
 
-import { onHandoff, proxyEnded, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
+import { onHandoff, onSdkLoad, proxyEnded, proxyFail, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
 const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
@@ -22,12 +22,14 @@ beforeEach(() => {
 	setSelfLoad(true);
 	handoffs = 0;
 	onHandoff(() => void handoffs++);
+	onSdkLoad(() => ({ kind: "reload" }));
 });
 
 afterEach(() => {
 	proxyReset();
 	setSelfLoad(false);
 	onHandoff(() => {});
+	onSdkLoad(() => ({ kind: "other" }));
 });
 
 // The playing element and the preloaded one, past their readiness bursts.
@@ -170,6 +172,95 @@ test("unloading the preloaded element leaves the mirror with the playing one", a
 	preloaded.load();
 
 	expect(playing.currentTime).toBe(30);
+});
+
+// TIDAL reloads the track it plays without announcing anything (its expired-stream retry on Play, the
+// retry once the network is back): Rust is sent nothing and reports no length, and the SDK's load
+// waits on one. The `src` of such a reload answers with the length Rust already reported.
+const eventsOf = (el: HTMLElement) => {
+	const seen: string[] = [];
+	for (const type of ["durationchange", "loadedmetadata", "canplaythrough"]) el.addEventListener(type, () => seen.push(type));
+	return seen;
+};
+
+test("a reload of the track Rust has settled answers with its length, ahead of the readiness burst", async () => {
+	const { playing } = await pair();
+	proxySetDuration(200);
+	playing.load();
+	const seen = eventsOf(playing);
+	playing.src = dash("playing, signed again");
+	await flush();
+
+	expect(seen).toEqual(["durationchange", "loadedmetadata", "canplaythrough"]);
+	expect(playing.duration).toBe(200);
+});
+
+test("a length of zero settles nothing: Rust has no length to answer with", async () => {
+	const { playing } = await pair();
+	proxySetDuration(0);
+	playing.load();
+	const seen = eventsOf(playing);
+	playing.src = dash("no length yet");
+	await flush();
+
+	expect(seen).toEqual(["loadedmetadata", "canplaythrough"]);
+});
+
+test("the track's end, a failure and a reset each unsettle it", async () => {
+	for (const unsettle of [() => proxyEnded(), () => proxyFail(), () => proxyReset()]) {
+		proxyReset();
+		const { playing } = await pair();
+		proxySetDuration(200);
+		unsettle();
+		const seen = eventsOf(playing);
+		playing.src = dash("after");
+		await flush();
+		expect(seen).not.toContain("durationchange");
+	}
+});
+
+test("a manifest on the other element is Shaka's preload, and is not answered", async () => {
+	const { preloaded } = await pair();
+	proxySetDuration(200);
+	preloaded.load();
+	const seen = eventsOf(preloaded);
+	preloaded.src = dash("preload again");
+	await flush();
+
+	expect(seen).toEqual(["loadedmetadata", "canplaythrough"]);
+});
+
+test("the hand-over to the preloaded element unsettles: Rust still has the previous track", async () => {
+	const { playing, preloaded } = await pair();
+	proxySetDuration(200);
+	await preloaded.play();
+	playing.load();
+	preloaded.load();
+	const seen = eventsOf(preloaded);
+	preloaded.src = dash("loaded again before Rust has the newcomer");
+	await flush();
+
+	expect(seen).toEqual(["loadedmetadata", "canplaythrough"]);
+});
+
+test("a probe that throws answers nothing and breaks nothing", async () => {
+	onSdkLoad(() => {
+		throw new Error("probe failed");
+	});
+	const { playing } = await pair();
+	proxySetDuration(200);
+	playing.load();
+	const seen = eventsOf(playing);
+	const error = console.error;
+	console.error = () => {};
+	try {
+		playing.src = dash("probe throws");
+		await flush();
+	} finally {
+		console.error = error;
+	}
+
+	expect(seen).toEqual(["loadedmetadata", "canplaythrough"]);
 });
 
 test("an SDK-native track's reports reach no element: a preloaded element is not found past zero", async () => {
