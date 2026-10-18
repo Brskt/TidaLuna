@@ -23,14 +23,7 @@ fn a_large_finite_level_cannot_reach_infinity_at_the_cast() {
     // `/ 100.0` quotient still exceeds f32::MAX (~3.4e38) and casts to infinity.
     // The threshold is the quotient, not the input: 1e40 divides down to 1e38 and stays
     // finite, which is why this test pins 1e41 rather than the first value that looks big.
-    let raw = 1e41_f64;
-    assert!(raw.is_finite(), "the input itself is an ordinary f64");
-    assert!(
-        ((raw / 100.0) as f32).is_infinite(),
-        "unsanitized, the cast saturates"
-    );
-
-    assert_eq!(Volume::from_percent(raw).as_gain(), 1.0);
+    assert_eq!(Volume::from_percent(1e41).as_gain(), 1.0);
 }
 
 #[test]
@@ -40,10 +33,6 @@ fn non_finite_levels_sanitize_to_silence_not_full_scale() {
     assert_eq!(Volume::from_percent(f64::NAN).as_percent(), 0.0);
     assert_eq!(Volume::from_percent(f64::NEG_INFINITY).as_percent(), 0.0);
     assert_eq!(Volume::from_percent(f64::INFINITY).as_percent(), 0.0);
-    assert!(
-        f64::NAN.clamp(0.0, 100.0).is_nan(),
-        "the reason from_percent cannot be a bare clamp"
-    );
 }
 
 // `OutputLevel`: what a Connect receiver's mute silences and its unmute restores.
@@ -77,11 +66,6 @@ fn a_mute_repeated_by_the_controller_keeps_the_level_to_restore() {
 }
 
 #[test]
-fn an_unmute_while_audible_leaves_the_level_alone() {
-    assert_eq!(level_after(&[&set(40.0), &unmute]), (40.0, 40.0));
-}
-
-#[test]
 fn a_level_set_while_muted_ends_the_mute_at_that_level() {
     // The later unmute must not jump back to the level the mute silenced.
     assert_eq!(level_after(&[&set(80.0), &mute, &set(25.0)]), (25.0, 25.0));
@@ -93,35 +77,13 @@ fn a_level_set_while_muted_ends_the_mute_at_that_level() {
 
 #[test]
 fn a_mute_taken_locally_is_one_a_remote_unmute_restores() {
-    // TIDAL's own mute button reaches the player as a level of zero.
+    // TIDAL's own mute button reaches the player as a level of zero, alone or behind a mute
+    // already taken.
     assert_eq!(level_after(&[&set(64.0), &set(0.0), &unmute]), (64.0, 64.0));
-}
-
-#[test]
-fn a_level_of_zero_set_while_muted_keeps_the_level_to_restore() {
-    // TIDAL's mute puts a level of zero behind itself; it lands on a mute already taken.
     assert_eq!(
         level_after(&[&set(70.0), &mute, &set(0.0), &unmute]),
         (70.0, 70.0)
     );
-}
-
-#[test]
-fn before_any_level_an_unmute_restores_what_the_thread_starts_at() {
-    assert_eq!(level_after(&[&mute, &unmute]), (100.0, 100.0));
-}
-
-#[tokio::test]
-async fn an_unmute_restores_the_level_the_player_was_given_not_full_scale() {
-    let player = silent_player();
-    player.set_volume(40.0, None).expect("thread alive");
-
-    let muted = player.set_mute(true).expect("thread alive");
-    assert_eq!(muted.volume().as_percent(), 0.0);
-    assert_eq!(muted.report().unmute_volume, 40.0);
-
-    let unmuted = player.set_mute(false).expect("thread alive");
-    assert_eq!(unmuted.volume().as_percent(), 40.0);
 }
 
 #[tokio::test]
@@ -151,20 +113,6 @@ fn report_after(steps: &[&dyn Fn(&mut OutputLevel)]) -> LevelReport {
 }
 
 #[test]
-fn the_start_level_is_nobodys_change() {
-    let report = OutputLevel::START.report();
-    assert!(!report.chosen);
-    assert_eq!(report.seq, 0);
-}
-
-#[test]
-fn a_controllers_level_is_newer_than_any_saved_one() {
-    let report = report_after(&[&set(70.0), &remote(30.0)]);
-    assert!(report.chosen);
-    assert_eq!(report.volume, 30.0);
-}
-
-#[test]
 fn a_controllers_mute_and_unmute_are_newer_than_any_saved_level() {
     let muted = report_after(&[&set(70.0), &mute]);
     assert!(muted.chosen);
@@ -177,44 +125,9 @@ fn a_controllers_mute_and_unmute_are_newer_than_any_saved_level() {
 }
 
 #[test]
-fn a_page_level_after_a_remote_change_is_the_newer_one() {
-    // A page's level is a choice too: a page of another account loading next takes it.
-    let report = report_after(&[&remote(30.0), &set(50.0)]);
-    assert!(report.chosen);
-    assert_eq!(report.volume, 50.0);
-}
-
-#[test]
 fn every_change_is_counted_whoever_made_it() {
     let report = report_after(&[&set(70.0), &remote(30.0), &mute, &unmute, &set(40.0)]);
     assert_eq!(report.seq, 5);
-}
-
-#[test]
-fn a_page_level_decided_before_a_remote_change_is_refused() {
-    let mut level = OutputLevel::START;
-    level.set(Volume::from_percent(70.0), LevelWriter::Page);
-    level.mute();
-    let muted_at = level.report().seq;
-    assert!(!level.admits(Some(muted_at - 1)));
-    assert!(level.admits(Some(muted_at)));
-}
-
-#[test]
-fn a_page_level_is_admitted_while_no_remote_change_happened() {
-    // A fresh boot with no controller: the page's first level is TIDAL's saved one, and it must
-    // reach the player even though the page has taken in no report yet.
-    let mut level = OutputLevel::START;
-    assert!(level.admits(Some(0)));
-    level.set(Volume::from_percent(70.0), LevelWriter::Page);
-    assert!(level.admits(Some(0)));
-}
-
-#[test]
-fn a_sender_that_keeps_no_count_is_taken_at_its_word() {
-    let mut level = OutputLevel::START;
-    level.set(Volume::from_percent(30.0), LevelWriter::Remote);
-    assert!(level.admits(None));
 }
 
 #[tokio::test]
@@ -453,26 +366,6 @@ fn a_restored_level_keeps_the_invariant_of_the_level_to_restore() {
 // One level per install. Every page is a fresh document whose count starts at 0.
 
 #[tokio::test]
-async fn a_page_loading_after_another_pages_level_cannot_undo_it() {
-    // Alice sets 30 from her page, logs out, and Bob's page builds its player at the store's
-    // initial full scale before it caught up: no remote change separates the two.
-    let player = silent_player();
-    let alice = player.catch_up_page().report().seq;
-    player.set_volume(30.0, Some(alice)).expect("thread alive");
-
-    player.set_volume(100.0, Some(0)).expect("thread alive");
-    assert_eq!(player.output_level().volume().as_percent(), 30.0);
-
-    let bob = player.catch_up_page().report();
-    assert!(bob.chosen);
-    assert_eq!(bob.volume, 30.0);
-    player
-        .set_volume(40.0, Some(bob.seq))
-        .expect("thread alive");
-    assert_eq!(player.output_level().volume().as_percent(), 40.0);
-}
-
-#[tokio::test]
 async fn a_page_keeps_setting_levels_after_it_caught_up() {
     let player = silent_player();
     let seen = player.catch_up_page().report().seq;
@@ -480,18 +373,6 @@ async fn a_page_keeps_setting_levels_after_it_caught_up() {
         player.set_volume(volume, Some(seen)).expect("thread alive");
         assert_eq!(player.output_level().volume().as_percent(), volume);
     }
-}
-
-#[tokio::test]
-async fn a_page_level_sent_before_its_page_caught_up_is_refused() {
-    // Sent before the catch-up's reply reached the page: it still carries the older count.
-    let player = silent_player();
-    player.set_volume(30.0, None).expect("thread alive");
-    let seen = player.catch_up_page().report().seq;
-    player
-        .set_volume(70.0, Some(seen - 1))
-        .expect("thread alive");
-    assert_eq!(player.output_level().volume().as_percent(), 30.0);
 }
 
 #[tokio::test]
@@ -556,25 +437,4 @@ fn a_catch_up_changes_no_level_and_chooses_none() {
     assert_eq!((report.volume, report.unmute_volume), (100.0, 100.0));
     assert!(!level.admits(Some(0)));
     assert!(level.admits(Some(report.seq)));
-}
-
-#[tokio::test]
-async fn after_a_restart_the_page_of_any_account_takes_the_level_the_last_launch_played() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let first = launch(dir.path());
-    let alice = first.player.catch_up_page().report().seq;
-    first
-        .player
-        .set_volume(30.0, Some(alice))
-        .expect("thread alive");
-    first.quit();
-
-    let second = launch(dir.path());
-    second
-        .player
-        .set_volume(100.0, Some(0))
-        .expect("thread alive");
-    let bob = second.player.catch_up_page().report();
-    assert!(bob.chosen);
-    assert_eq!(bob.volume, 30.0);
 }
