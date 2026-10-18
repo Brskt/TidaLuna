@@ -241,7 +241,6 @@ export const createPlaybackController = () => {
                             let refusedHere = false;
 
                             // Get actual audio quality from playbackInfo API (same as TIDAL's SDK)
-                            let actualQuality: string | undefined;
                             let pbi: any;
                             try {
                                 const { getPlaybackInfo } = require("../../plugins/lib/src/helpers/getPlaybackInfo");
@@ -249,17 +248,12 @@ export const createPlaybackController = () => {
                                 const streamingQuality = state.settings?.quality?.streaming;
 
                                 if (!isVideo && !alreadyPlaying) {
+                                    // TIDAL's own player sends this setting unchanged for every track, on
+                                    // this same endpoint: a track below it is not refused for its quality,
+                                    // and another quality has nothing to recover.
                                     pbi = await getPlaybackInfo(productId, streamingQuality);
-                                    if (!pbi && streamingQuality) {
-                                        const trackItem = state.content?.mediaItems?.[productId]?.item ?? state.content?.tracks?.[productId];
-                                        const fallbackQuality = trackItem?.audioQuality;
-                                        if (fallbackQuality && fallbackQuality !== streamingQuality) {
-                                            pbi = await getPlaybackInfo(productId, fallbackQuality);
-                                        }
-                                    }
                                 }
                                 if (lastTransitionId !== productId) return; // stale after async
-                                actualQuality = pbi?.audioQuality;
 
                                 // Self-load non-FLAC BTS streams (TIDAL's boombox doesn't work in CEF)
                                 if (pbi?.manifestMimeType === "application/dash+xml" && pbi.manifest) {
@@ -362,7 +356,7 @@ export const createPlaybackController = () => {
                                 actualProductId: productId,
                                 actualDuration: item.duration ?? oldCtx.actualDuration ?? 0,
                                 actualVideoQuality: isVideo ? VIDEO_QUALITY_UNRESOLVED : null,
-                                actualAudioQuality: isVideo ? null : (actualQuality ?? format?.audioQuality ?? carried(oldCtx.actualAudioQuality)),
+                                actualAudioQuality: isVideo ? null : (format?.audioQuality ?? carried(oldCtx.actualAudioQuality)),
                                 bitDepth: isVideo ? null : (format?.bitDepth ?? carried(oldCtx.bitDepth ?? null)),
                                 sampleRate: isVideo ? null : (format?.sampleRate ?? carried(oldCtx.sampleRate ?? null)),
                             };
