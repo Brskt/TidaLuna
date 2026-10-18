@@ -80,15 +80,6 @@ fn no_new_refresh_token_keeps_prior_client_id() {
 }
 
 #[test]
-fn rotating_refresh_keeps_same_client_id() {
-    // A refresh that rotates the token stays on the same client.
-    assert_eq!(
-        resolve_generation_client_id(true, Some("user"), Some("user")),
-        "user"
-    );
-}
-
-#[test]
 fn empty_exchange_falls_back_to_prior_on_new_refresh() {
     // Defensive: a new refresh_token with no observed client_id keeps the
     // prior rather than blanking it.

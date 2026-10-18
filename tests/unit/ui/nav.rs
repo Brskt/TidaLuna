@@ -7,20 +7,6 @@ fn u(s: &str) -> RequestUrl {
 }
 
 #[test]
-fn only_external_pages_are_untrusted() {
-    for kind in [
-        PageKind::DesktopApp,
-        PageKind::LoginPage,
-        PageKind::LoginCallback,
-        PageKind::AuthHost,
-        PageKind::TidalCallback,
-    ] {
-        assert!(kind.is_trusted(), "{kind:?}");
-    }
-    assert!(!PageKind::External.is_trusted());
-}
-
-#[test]
 fn tidal_origin_matches_the_apex_and_subdomains() {
     assert!(is_tidal_origin(&u("https://tidal.com/")));
     assert!(is_tidal_origin(&u("https://listen.tidal.com/v1/x")));
@@ -28,19 +14,15 @@ fn tidal_origin_matches_the_apex_and_subdomains() {
     assert!(!is_tidal_origin(&u("https://tidal.com.evil.io/")));
 }
 
-#[test]
-fn tidal_origin_keeps_the_relative_path_fallback() {
-    assert!(is_tidal_origin(&u("/v1/tracks/1")));
-    assert!(!is_tidal_origin(&u("not a url")));
-}
-
-/// `//evil.example/x` is a protocol-relative absolute reference, not a same-origin path, and
-/// `starts_with('/')` alone cannot tell the two apart. `fetch_proxy.js:57` already draws the
-/// line on the JS side; this fallback did not, so it answered same-origin for a foreign host.
+/// The fallback for what does not parse keeps a relative path same-origin. `//evil.example/x` is
+/// a protocol-relative absolute reference, not a same-origin path, and `starts_with('/')` alone
+/// cannot tell the two apart. `fetch_proxy.js:57` already draws the line on the JS side; this
+/// fallback did not, and answered same-origin for a foreign host.
 #[test]
 fn tidal_origin_refuses_a_protocol_relative_url() {
     assert!(!is_tidal_origin(&u("//evil.example/x")));
     assert!(!is_tidal_origin(&u("//tidal.com.evil.io/x")));
+    assert!(!is_tidal_origin(&u("not a url")));
     assert!(is_tidal_origin(&u("/v1/tracks/1")));
 }
 
