@@ -1440,13 +1440,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
         }
 
-        if self.current_duration > 0.0 {
-            (self.callback)(PlayerEvent::Duration(
-                self.current_duration,
-                self.current_seq,
-                self.current_product_id.clone(),
-            ));
-        }
+        // Announced even when the container declares no length (0, the SDK's unknown sentinel): the
+        // page learns which track Rust holds from this event, and its position, state and end are
+        // taken for another track's until it does. The exclusive and ASIO backends report theirs
+        // whatever it is.
+        (self.callback)(PlayerEvent::Duration(
+            self.current_duration,
+            self.current_seq,
+            self.current_product_id.clone(),
+        ));
 
         let bitrate = if self.current_duration > 0.0 {
             (total_len as f64 * 8.0 / self.current_duration / 1000.0) as u32
