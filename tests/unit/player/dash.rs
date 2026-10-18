@@ -312,8 +312,8 @@ fn an_absurd_declared_duration_is_refused_before_it_allocates() {
     );
     let err = parse_dash_mpd(&xml).expect_err("an unbounded expansion must be refused");
     assert!(
-        err.to_string().contains("expands past"),
-        "unexpected message: {err}"
+        err.to_string().contains("segments; refusing"),
+        "the segment ceiling must be what refuses this, not the bytes: {err}"
     );
 }
 
@@ -353,8 +353,8 @@ fn an_absurd_repeat_count_is_refused_before_it_allocates() {
     );
     let err = parse_dash_mpd(&xml).expect_err("an i64::MAX repeat must be refused");
     assert!(
-        err.to_string().contains("expands past"),
-        "unexpected message: {err}"
+        err.to_string().contains("segments; refusing"),
+        "the segment ceiling must be what refuses this, not the bytes: {err}"
     );
 }
 
