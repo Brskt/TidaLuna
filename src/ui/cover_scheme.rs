@@ -165,9 +165,10 @@ async fn run_cover_job(
             crate::vprintln!("[VIDEO]   Cover without a codec: {}", st.reason());
             (503, st.reason().to_string(), Vec::new())
         }
-        CoverOutcome::Failed(reason) => {
-            crate::verr!("[VIDEO]   Cover failed: {reason}");
-            (502, reason, Vec::new())
+        // The cause stays in the log: a loader message names the codec's path on disk.
+        CoverOutcome::Failed(cause) => {
+            crate::verr!("[VIDEO]   Cover failed: {cause}");
+            (502, "the cover could not be loaded".to_string(), Vec::new())
         }
         CoverOutcome::Abandoned => {
             crate::vprintln!("[VIDEO]   Cover abandoned before it was needed");
