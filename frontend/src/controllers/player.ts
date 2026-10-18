@@ -79,6 +79,74 @@ export type LoadRefusal =
     // A load TIDAL made on its own, for `productId`.
     | { kind: "automatic"; productId: string | null };
 
+/** TIDAL's `setNext`: its payload is the product to prepare as next, or none to unset it. */
+export const PRELOAD_ITEM = "player/PRELOAD_ITEM";
+
+/** The product a PRELOAD_ITEM names, `null` for an unset. */
+export const nextProductOf = (p: unknown): string | null => {
+    const id = (p as { productId?: unknown } | null | undefined)?.productId;
+    return typeof id === "string" || typeof id === "number" ? String(id) : null;
+};
+
+/**
+ * Whether a PRELOAD_ITEM naming `requested` leaves the track the native player staged in Rust (`staged`) behind.
+ * The SDK unloads that player's preload only when the new next goes to that player (`NativePlayer.next`): a next
+ * it serves from Shaka, or a video, leaves the staged track where it is, and Rust plays it when the current one
+ * ends in place of the one TIDAL chose. The same product again leaves nothing behind (a re-preload keeps the head
+ * Rust holds), and neither does an unset (the SDK unloads every player's preload itself) or a staged track no
+ * playbackinfo answer named, which cannot be compared.
+ */
+export const leavesStagedBehind = (staged: string | null, requested: string | null): boolean =>
+    staged !== null && requested !== null && requested !== staged;
+
+type StagedNextBridge = { supersedesStaged?: (requested: unknown) => boolean };
+
+/**
+ * The hook of PRELOAD_ITEM. A next that leaves the staged track behind is dropped, the SDK's own `setNext` is
+ * called to unset the next (its native player unloads its preload, whose `cancelPreload` reaches Rust and clears
+ * this page's record), and the next is put again through `rawDispatch`, which no interceptor sees, once that
+ * has settled. Unsetting through the SDK and not through TIDAL's PRELOAD_ITEM keeps TIDAL's `Bat` saga out of
+ * it: its PRELOAD_SUCCESS would release the fallback `Wat` keeps for a preload that did not finish. Settled
+ * first, the unset's own end cannot abort the controller of the next's `setNext` (the SDK's guard against the
+ * same product asked twice).
+ *
+ * The next asked for while that runs is the latest one, and is the one put again; an unset in that time is
+ * the unset already under way. Without the SDK's API or `rawDispatch` the action is left be.
+ */
+export const unloadBeforeNext = (
+    bridge: () => StagedNextBridge | undefined,
+    sdk: () => { setNext(product?: unknown): Promise<unknown> } | null,
+    rawDispatch: () => ((action: object) => unknown) | undefined,
+) => {
+    let running: { latest: unknown } | null = null;
+    return (requested: unknown): boolean => {
+        if (running !== null) {
+            running.latest = nextProductOf(requested) === null ? null : requested;
+            return true;
+        }
+        const player = sdk();
+        const raw = rawDispatch();
+        if (player === null || typeof raw !== "function" || bridge()?.supersedesStaged?.(requested) !== true) return false;
+        const pending = { latest: requested };
+        running = pending;
+        const putAgain = () => {
+            running = null;
+            if (pending.latest !== null) raw({ type: PRELOAD_ITEM, payload: pending.latest });
+        };
+        let unloading: Promise<unknown>;
+        try {
+            unloading = player.setNext(undefined);
+        } catch (e) {
+            unloading = Promise.reject(e);
+        }
+        unloading.then(putAgain, (e) => {
+            console.error("[luna:player] unloading the native player's preload failed:", e);
+            putAgain();
+        });
+        return true;
+    };
+};
+
 export const createNativePlayerComponent = () => {
     let activeEmitter: any = null;
     let activePlayer: any = null;
@@ -103,6 +171,12 @@ export const createNativePlayerComponent = () => {
     // The stream Rust has staged as next. The SDK loads it again to switch to it, and that load is no
     // fresh play of it.
     let preloaded: { url: string } | null = null;
+    // The product of that stream, for the PRELOAD_ITEM that changes the SDK's next to another one (see
+    // `leavesStagedBehind`). Kept apart from `preloaded`, whose rule outlives Rust's advance to the staged
+    // track: this one ends with the slot, at a `completed` or at the load that takes the stream. Any other
+    // load leaves it, since the SDK's native player keeps its own record of the preload when it has no
+    // track of its own to reset (`NativePlayer.reset`), and only an unset clears that.
+    let stagedProduct: string | null = null;
     // The SDK's native player parks itself while another player is the active one: its `next()` calls
     // `preload` and then `pause` in the same synchronous run. That pause is the only one that is not the
     // listener's, and it is told apart by what comes right before it, not by who plays now.
@@ -304,6 +378,7 @@ export const createNativePlayerComponent = () => {
                 // it by itself, and a restart would rewind it.
                 if (preloaded?.url === url) {
                     restart = false;
+                    stagedProduct = null;
                 }
                 preloaded = null;
                 // The SDK's playbackinfo answer the stream was parsed from names its track. The store
@@ -379,6 +454,7 @@ export const createNativePlayerComponent = () => {
                 const nextId = productOfStream(url) ?? "";
                 if (nextId === "") console.warn("[luna:player] preload of a stream no playbackinfo answer named");
                 preloaded = { url };
+                stagedProduct = nextId === "" ? null : nextId;
                 parkingNative = true;
                 queueMicrotask(() => { parkingNative = false; });
                 sendIpc("player.preload", url, streamFormat, encryptionKey, nextId);
@@ -388,6 +464,7 @@ export const createNativePlayerComponent = () => {
                 // above is its only producer), and it is dropped whoever plays now. Held back during a
                 // self-load, a stale staged next would be promoted when that track ends.
                 preloaded = null;
+                stagedProduct = null;
                 sendIpc("player.preload.cancel");
             },
             recover: (...args: any[]) => {
@@ -477,6 +554,8 @@ export const createNativePlayerComponent = () => {
         // Played by the controller's queue (`mediacastrouted`): the load stands as one that ran,
         // with the catalog's length. Null for a stale answer.
         routeLoad: (id: unknown): number | null => (id === loadId ? catalogLength() : null),
+        // Whether a PRELOAD_ITEM naming `requested` leaves the stream Rust staged behind (see `leavesStagedBehind`).
+        supersedesStaged: (requested: unknown): boolean => leavesStagedBehind(stagedProduct, nextProductOf(requested)),
         // Ends the SDK's wait on a load Rust did not run and gives its player back the state Rust
         // last reported (see reportedState). A refused pick is not settled here: its refusal
         // stops the transport on purpose.
@@ -493,6 +572,8 @@ export const createNativePlayerComponent = () => {
                 if (gen > activeGen) activeGen = gen;
             }
             if (event === "mediastate") reportedState = target;
+            // Rust takes its staged slot at every `completed` (its own advance, or the promotion of a fade).
+            if (event === "mediastate" && target === "completed") stagedProduct = null;
 
             // Before Player(): update snapshot with latest values.
             // Each event type overwrites the previous value; only the

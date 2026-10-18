@@ -403,10 +403,8 @@ fn the_sdk_api_chunks_go_through_the_capture() {
 }
 
 #[test]
-fn non_utf8_body_passes_through_unchanged() {
-    // append_capture only handles &str; the filter's strict decode guards the
-    // non-UTF-8 path, but a lone invalid byte through append_capture must not
-    // panic. (Filter-level passthrough is covered by the strict from_utf8.)
-    let src = "var x=1;export{x as a};";
-    assert!(append_capture(src, "react").contains("a: x"));
+fn the_sdk_api_id_is_the_one_the_frontend_reads() {
+    // One id on both sides of the capture: `frontend/src/sdk-player.ts` names it too.
+    let reader = include_str!("../../../frontend/src/sdk-player.ts");
+    assert!(reader.contains(&format!("\"{SDK_PLAYER_API}\"")));
 }

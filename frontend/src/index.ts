@@ -9,7 +9,8 @@ import { createUserSession } from "./controllers/session";
 import { createUserSettings } from "./controllers/settings";
 import { createWindowController } from "./controllers/window";
 import { createTidalConnectController, createRemoteDesktopController, setupConnectEventListeners } from "./connect";
-import { createNativePlayerComponent, intentOfTrackList, moveOf, pickOf } from "./controllers/player";
+import { createNativePlayerComponent, intentOfTrackList, moveOf, pickOf, PRELOAD_ITEM, unloadBeforeNext } from "./controllers/player";
+import { sdkPlayer, startSdkPlayer } from "./sdk-player";
 import type { LoadRefusal, TrackListPayload } from "./controllers/player";
 import { followCastQueue } from "./connect/middleware";
 import { updatePlaybackState } from "./controllers/mediasession";
@@ -420,6 +421,20 @@ const init = async () => {
             add(action, onMove);
             add(action, onMove, putInterceptors);
         }
+        // TIDAL's `setNext`. A next the SDK serves from Shaka (or a video) leaves the track its native player
+        // staged in Rust, which plays when the current one ends. The SDK's own unset, called ahead of
+        // the new next (put again once it has settled), makes it unload that preload (its `cancelPreload`
+        // reaches Rust) before it acts on the new next, with no `Bat` saga whose PRELOAD_SUCCESS would
+        // release `Wat`'s fallback. Both rails: TIDAL's saga puts it for the queue's next, a component
+        // dispatches it for the row under the pointer.
+        const onPreloadItem = unloadBeforeNext(
+            () => window.NativePlayerComponent as any,
+            sdkPlayer,
+            () => require("../plugins/lib/src/redux/store").store.__lunaRawDispatch,
+        );
+        void startSdkPlayer();
+        add(PRELOAD_ITEM, onPreloadItem);
+        add(PRELOAD_ITEM, onPreloadItem, putInterceptors);
         add("playbackControls/SEEK", (time: number) => {
             sendIpc("player.seek", time);
             _forceTimeDispatch = true;
