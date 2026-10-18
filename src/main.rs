@@ -56,15 +56,17 @@ fn attach_or_alloc_console() {
     }
 }
 
-/// Stops a launch with no absolute data directory, saying why, before any file is
-/// written.
+/// Stops a launch with no absolute UTF-8 data directory, saying why, before any
+/// file is written.
 fn refuse_without_data_dir() -> ! {
     #[cfg(target_os = "windows")]
-    const WHY: &str = "TidaLunar cannot find your local application data folder \
-        (LOCALAPPDATA), so it has nowhere to keep your session and settings.";
+    const WHY: &str = "TidaLunar cannot use your local application data folder \
+        (LOCALAPPDATA is missing, not an absolute path, or not valid Unicode text) \
+        and has nowhere to keep your session and settings.";
     #[cfg(not(target_os = "windows"))]
-    const WHY: &str = "TidaLunar cannot find your home directory (HOME is unset or \
-        not an absolute path), so it has nowhere to keep your session and settings.";
+    const WHY: &str = "TidaLunar cannot use your home directory (HOME is unset, \
+        not an absolute path, or not valid UTF-8 text) and has nowhere to keep \
+        your session and settings.";
     refuse_to_start(WHY)
 }
 

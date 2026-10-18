@@ -290,6 +290,11 @@ pub struct PreloadedTrack {
 /// A relative directory is no directory at all here: it follows whatever the
 /// current directory is, and CEF refuses one outright, running its profile in
 /// memory.
+///
+/// A base that is not UTF-8 text is refused rather than replaced. CEF and the
+/// native host only take paths as text: a lossy copy would send them to a
+/// sibling directory while the rest of the app stays on the real one; falling
+/// back would instead move the data somewhere the user never named.
 pub(crate) fn resolve_base(
     env: Option<std::ffi::OsString>,
     fallback: impl FnOnce() -> Option<PathBuf>,
@@ -297,6 +302,7 @@ pub(crate) fn resolve_base(
     env.map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .or_else(|| fallback().filter(|dir| dir.is_absolute()))
+        .filter(|dir| dir.to_str().is_some())
 }
 
 /// The account's home directory, resolved once. `home_dir` reads `HOME` again,
@@ -348,7 +354,7 @@ fn known_local_app_data() -> Option<PathBuf> {
 const APP_DIR: &str = "tidalunar";
 
 /// Where this account's data lives, resolved once; `None` when no absolute
-/// directory can be named, and then `main` refuses to start.
+/// UTF-8 directory can be named, and then `main` refuses to start.
 pub(crate) fn data_dir() -> Option<&'static Path> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {

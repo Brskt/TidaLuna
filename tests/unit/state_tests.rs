@@ -14,6 +14,20 @@ fn untouched() -> Option<PathBuf> {
     panic!("the fallback was consulted although the variable named a directory")
 }
 
+/// Absolute, with a last component that is not UTF-8: a Latin-1 byte on Unix.
+#[cfg(unix)]
+fn not_utf8() -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    absolute("x").join(std::ffi::OsStr::from_bytes(b"Jos\xe9"))
+}
+
+/// Absolute, with a last component that is not UTF-8: a lone surrogate on Windows.
+#[cfg(windows)]
+fn not_utf8() -> PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    absolute("x").join(OsString::from_wide(&[u16::from(b'J'), 0xD800]))
+}
+
 #[test]
 fn an_absolute_variable_is_the_base_and_nothing_else_is_asked() {
     let dir = absolute("home");
@@ -53,6 +67,22 @@ fn the_shell_names_local_app_data_as_an_absolute_directory() {
     let dir = super::known_local_app_data().expect("the shell names LocalAppData");
     assert!(dir.is_absolute(), "{dir:?} is not absolute");
     assert!(dir.is_dir(), "{dir:?} is not a directory");
+}
+
+#[test]
+fn a_variable_that_is_not_utf8_is_refused_and_not_replaced() {
+    let dir = not_utf8();
+    assert!(
+        dir.to_str().is_none(),
+        "{dir:?} is UTF-8, the test proves nothing"
+    );
+    // The variable names where the data is: falling back would move it.
+    assert_eq!(resolve_base(Some(dir.into_os_string()), untouched), None);
+}
+
+#[test]
+fn a_fallback_that_is_not_utf8_is_refused() {
+    assert_eq!(resolve_base(None, || Some(not_utf8())), None);
 }
 
 #[test]
