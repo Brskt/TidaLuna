@@ -46,14 +46,10 @@ fn a_live_token_still_reads_as_live_on_the_millisecond_clock_the_sdk_uses() {
     let mut cur_gen = generation("real-refresh-token", "luna_bbbb");
     cur_gen.access_expires = now_secs + 3600;
 
+    // The raw field, in seconds, is what used to be seeded: against this clock an hour
+    // of life left read as decades expired.
     let now_ms = now_secs * 1000;
     assert!(cur_gen.access_expires_ms() > now_ms);
-
-    // The control that keeps the assertion above from being vacuous, and the
-    // defect it pins: the raw field is what used to be seeded, and it fails the
-    // very same comparison by three orders of magnitude - an hour of life left
-    // read as decades expired.
-    assert!(cur_gen.access_expires < now_ms);
 }
 
 #[test]

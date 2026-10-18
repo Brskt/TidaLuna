@@ -43,21 +43,15 @@ fn an_administrators_owned_pipe_is_foreign_to_a_limited_token() {
     );
 }
 
+/// Another account's pipe, and a SID that merely starts like ours.
 #[test]
 fn a_link_pipe_another_account_created_is_foreign() {
-    assert_eq!(
-        classify_owner(Some(OTHER), &limited()),
-        ObjectOwner::Foreign(OTHER.into())
-    );
-}
-
-#[test]
-fn a_sid_that_merely_starts_like_ours_is_foreign() {
-    let longer = format!("{USER}0");
-    assert_eq!(
-        classify_owner(Some(&longer), &limited()),
-        ObjectOwner::Foreign(longer.clone())
-    );
+    for sid in [OTHER.to_string(), format!("{USER}0")] {
+        assert_eq!(
+            classify_owner(Some(&sid), &limited()),
+            ObjectOwner::Foreign(sid.clone())
+        );
+    }
 }
 
 #[test]

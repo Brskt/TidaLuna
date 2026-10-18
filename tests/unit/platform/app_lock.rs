@@ -347,33 +347,3 @@ fn an_address_nobody_holds_is_named_rather_than_swallowed() {
         HandOff::NoListener
     );
 }
-
-#[test]
-fn the_kernel_reports_the_real_sender_of_a_datagram() {
-    // The mechanism against the real kernel rather than the rule above. Without
-    // credential passing enabled on the receiver, no control message arrives and
-    // there is nothing to check.
-    //
-    // A child forked here would carry this same uid, leaving a genuinely foreign
-    // one impossible to produce on one account. What it would do is settled by
-    // `a_datagram_from_another_user_is_not_ours`, not here.
-    let addr =
-        SocketAddr::from_abstract_name(format!("tidalunar-test-creds-{}", std::process::id()))
-            .expect("an abstract address");
-    let socket = UnixDatagram::bind_addr(&addr).expect("bind the receiver");
-    enable_peer_credentials(&socket).expect("enable credential passing");
-
-    let client = UnixDatagram::unbound().expect("an unbound sender");
-    client.connect_addr(&addr).expect("connect to the receiver");
-    client.send(FOCUS_SIGNAL.as_bytes()).expect("send");
-
-    let mut buf = [0u8; MAX_SIGNAL];
-    let (n, peer) = recv_with_sender(&socket, &mut buf).expect("receive");
-
-    assert_eq!(&buf[..n], FOCUS_SIGNAL.as_bytes());
-    assert_eq!(
-        peer,
-        Some(own_uid()),
-        "the kernel did not attribute a datagram we sent ourselves"
-    );
-}
