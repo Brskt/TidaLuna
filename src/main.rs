@@ -3,6 +3,7 @@
 // for what the level may silence, verr! for a failure with no other channel.
 // Crate-local: the updater has a real console and prints through its own say!.
 #![deny(clippy::print_stderr, clippy::print_stdout)]
+#![deny(clippy::allow_attributes)]
 mod app_state;
 mod audio;
 mod bridge;
