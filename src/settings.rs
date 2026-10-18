@@ -565,5 +565,9 @@ mod output_level_settings_tests;
 pub(crate) mod durability_settings_tests;
 
 #[cfg(test)]
+#[path = "../tests/unit/settings/durability_trust_tests.rs"]
+mod durability_trust_tests;
+
+#[cfg(test)]
 #[path = "../tests/unit/settings/store_damage_tests.rs"]
 mod store_damage_tests;

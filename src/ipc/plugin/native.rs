@@ -545,7 +545,7 @@ fn do_register(
                             );
                             // Broadcast result without removing the key - late
                             // subscribers can still dedup via rx.borrow(). The key
-                            // is removed after save_trust makes the decision durable.
+                            // is removed once save_trust has committed the decision.
                             crate::state::rt_handle().spawn(async move {
                                 let granted = dialog_rx.await.unwrap_or(false);
                                 let guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
@@ -581,7 +581,10 @@ fn do_register(
                         let plugin = attempt.reservation.module().to_string();
                         let mod_name = module.clone();
                         // Awaited rather than posted: the dedup key below may only go once this
-                        // write is durable. Handed to the blocking pool: the round trip parks
+                        // write is committed, or a caller after it would find neither the key nor
+                        // the row and prompt again. Not synced to the disk: a commit a power cut
+                        // takes back asks again, since `clear_trust_by_plugin` leaves no older
+                        // grant to read back. Handed to the blocking pool: the round trip parks
                         // that pool's thread instead of this tokio worker.
                         let written = tokio::task::spawn_blocking(move || {
                             crate::state::db().call_settings(move |conn| {
@@ -618,7 +621,7 @@ fn do_register(
                             crate::verr!("[NATIVE] Trust write did not run: {e}");
                         }
                     }
-                    // DB is durable - safe to remove the dedup key now.
+                    // The row is committed: safe to remove the dedup key now.
                     {
                         let mut guard = PENDING_TRUST.lock().unwrap_or_else(|e| e.into_inner());
                         guard.remove(&trust_key);
