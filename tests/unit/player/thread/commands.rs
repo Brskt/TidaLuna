@@ -245,20 +245,7 @@ async fn a_failed_load_leaves_no_track_behind() {
     let mut h = harness(dir.path());
     assert!(h.player.has_track, "the harness starts on a live track");
 
-    let delivered = h.player.handle_load(
-        LoadRequest {
-            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
-            load_gen: crate::player::current_gen(),
-            seq: 3,
-            track_id: "track-2".to_string(),
-            product_id: None,
-            resume_policy: ResumePolicy::Restart,
-            load_start: std::time::Instant::now(),
-            cached: true,
-            format: "flac".to_string(),
-        },
-        false,
-    );
+    let delivered = h.player.handle_load(load_req(3, "track-2"), false);
 
     assert!(!delivered, "three bytes cannot probe as audio");
     assert!(
@@ -1299,20 +1286,7 @@ async fn a_bypass_load_announces_that_nothing_plays_yet() {
     // device is not open, and nothing downstream can speak for it until it is.
     h.player.exclusive_handle = None;
 
-    let delivered = h.player.handle_load(
-        LoadRequest {
-            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
-            load_gen: crate::player::current_gen(),
-            seq: 1,
-            track_id: "track-1".to_string(),
-            product_id: None,
-            resume_policy: ResumePolicy::Restart,
-            load_start: std::time::Instant::now(),
-            cached: true,
-            format: "flac".to_string(),
-        },
-        false,
-    );
+    let delivered = h.player.handle_load(load_req(1, "track-1"), false);
 
     assert!(delivered, "the exclusive branch owns this load");
     assert_eq!(
@@ -1860,6 +1834,29 @@ fn the_live_streams_asio_rate_refusal_still_falls_back_to_shared() {
         Some("track-1"),
         "the refused track was left free to re-engage ASIO and refuse again"
     );
+}
+
+fn load_req_of(buffer: crate::player::buffer::RamBuffer, seq: u32, track: &str) -> LoadRequest {
+    LoadRequest {
+        buffer,
+        load_gen: crate::player::current_gen(),
+        seq,
+        track_id: track.to_string(),
+        product_id: None,
+        resume_policy: ResumePolicy::Restart,
+        load_start: std::time::Instant::now(),
+        cached: true,
+        format: "flac".to_string(),
+    }
+}
+
+/// Bytes no decoder reads: the stream is opened and named, which is all these cases need.
+fn load_req(seq: u32, track: &str) -> LoadRequest {
+    load_req_of(
+        crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+        seq,
+        track,
+    )
 }
 
 /// A player mid-fade: the outgoing track is playing and the incoming one is armed.
