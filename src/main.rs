@@ -159,6 +159,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let switch = CefString::from("type");
     let is_browser = cmd_line.has_switch(Some(&switch)) != 1;
 
+    // From the first line that runs in the browser alone: a panic on this thread stops the
+    // launch with a reason on screen until `on_context_initialized` has asked for the window.
+    if is_browser {
+        platform::refusal::guard_launch();
+    }
+
     // Subprocesses inherit the environment the browser was resolved from.
     if is_browser && state::data_dir().is_none() {
         refuse_without_data_dir();

@@ -6,6 +6,9 @@
 //! end a launch (`main`, the macOS CEF bootstrap, the application singleton)
 //! calls this instead of exiting on its own.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::ThreadId;
+
 use super::process_args::is_helper_process;
 
 /// Blocks on a dialog carrying `text`; `style` is the icon.
@@ -128,3 +131,66 @@ pub(crate) fn refuse_to_start(why: &str) -> ! {
     }
     std::process::exit(1);
 }
+
+/// The text a caught panic carried, if it carried one.
+///
+/// `panic!`, `assert!` and `unwrap` box a `&str` or a `String` depending on whether the message
+/// was formatted (`Result::unwrap`'s is, `Option::unwrap`'s is not). Both shapes have to be
+/// tried before giving up.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("no message")
+}
+
+/// What the user is told when a panic ends the launch.
+fn panic_refusal(message: &str, location: Option<(&str, u32)>) -> String {
+    let at = location.map_or_else(String::new, |(file, line)| format!(" ({file}:{line})"));
+    format!("TidaLunar hit an unexpected error while starting and cannot continue: {message}{at}")
+}
+
+/// Set once the browser and its window have been asked for; from then on a panic is the
+/// ordinary kind again.
+static LAUNCHED: AtomicBool = AtomicBool::new(false);
+
+/// Makes a panic on the calling thread stop the launch through [`refuse_to_start`].
+///
+/// A panic otherwise ends the launch with a line on a stderr that a desktop launch does not
+/// have: no log entry, no window, and an app that simply does not open. It is a hook rather than
+/// a `catch_unwind` around `main` because the hook runs at the panic itself. Unwinding first
+/// would drop the tokio runtime, which waits for every blocking task before returning, and
+/// would never see a panic inside a CEF callback, which cannot unwind and aborts.
+///
+/// Call it from the browser process's main thread, which is where the launch runs, and not from
+/// a CEF subprocess. Panics on other threads are left alone: a runtime task's panic is caught
+/// and reported by its `JoinHandle`, and the launch does not depend on a worker. No code on the
+/// main thread between here and [`launch_done`] may catch a panic, because the hook acts before
+/// any `catch_unwind` could.
+pub(crate) fn guard_launch() {
+    install_launch_guard(std::thread::current().id(), &LAUNCHED, refuse_to_start);
+}
+
+/// Ends [`guard_launch`]'s watch: called when the browser and its window have been requested.
+pub(crate) fn launch_done() {
+    LAUNCHED.store(true, Ordering::Release);
+}
+
+/// [`guard_launch`] with the thread it watches, the flag that ends it and the refusal injected.
+fn install_launch_guard(main: ThreadId, launched: &'static AtomicBool, refuse: fn(&str) -> !) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // The standard report first: it is the only one that carries a backtrace.
+        previous(info);
+        if launched.load(Ordering::Acquire) || std::thread::current().id() != main {
+            return;
+        }
+        let location = info.location().map(|at| (at.file(), at.line()));
+        refuse(&panic_refusal(panic_message(info.payload()), location));
+    }));
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/platform/refusal.rs"]
+mod tests;

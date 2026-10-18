@@ -14,7 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::process_args::is_helper_process;
-use super::refusal::refuse_to_start;
+use super::refusal::{panic_message, refuse_to_start};
 
 /// Hop from the main executable's directory up to the frameworks directory:
 /// `Contents/MacOS/<exe>` to `Contents/Frameworks`.
@@ -81,19 +81,6 @@ fn build_tree_framework_path() -> Option<PathBuf> {
 /// opens it, so only the helper hop exists.
 fn sandbox_dylib_path(exe_dir: &Path) -> PathBuf {
     exe_dir.join(FROM_HELPER_EXE).join(SANDBOX_DYLIB)
-}
-
-/// The text a caught panic carried, if it carried one.
-///
-/// `panic!` and `assert!` box a `&str` or a `String` depending on whether the
-/// message was formatted, and `unwrap` always formats, so both shapes have to be
-/// tried before giving up.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("no message")
 }
 
 /// Adopt Chromium's sandbox context, or terminate the process.

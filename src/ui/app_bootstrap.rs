@@ -534,6 +534,7 @@ self.__lunaRewriteEpoch="{rewrite_epoch:016x}";
 
             let mut window_delegate = TidalWindowDelegate::new(RefCell::new(browser_view), OnceCell::new());
             window_create_top_level(Some(&mut window_delegate));
+            crate::platform::refusal::launch_done();
             crate::vprintln!("[CEF]    Initialized");
         }
 
