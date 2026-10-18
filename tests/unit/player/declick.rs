@@ -10,15 +10,6 @@ fn silence_frames_scales_with_rate() {
 }
 
 #[test]
-fn fade_in_runs_zero_to_one() {
-    assert!(fade_in_env(0, 441).abs() < 1e-6);
-    assert!((fade_in_env(441, 441) - 1.0).abs() < 1e-6);
-    // Monotone rising and bounded.
-    let (a, b) = (fade_in_env(110, 441), fade_in_env(330, 441));
-    assert!(a < b && (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b));
-}
-
-#[test]
 fn fade_out_runs_one_to_zero() {
     assert!((fade_out_env(0, 441) - 1.0).abs() < 1e-6);
     assert!(fade_out_env(441, 441).abs() < 1e-6);

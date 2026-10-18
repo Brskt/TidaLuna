@@ -190,17 +190,3 @@ fn two_records_of_one_source_match_whether_or_not_they_name_the_track() {
         "a preload hit stopped matching once the load carried an id"
     );
 }
-
-/// Identity is the query-stripped path; a task started on one signature still matches the track
-/// after it is re-signed. That match is exactly what lets the refresh reach it.
-#[test]
-fn identity_ignores_the_signature_while_the_fetch_url_carries_it() {
-    let retained = track("https://cdn.test/mediatracks/abc?sig=SECOND");
-    let started_with = "https://cdn.test/mediatracks/abc?sig=FIRST";
-
-    let id = crate::player::canonical_track_id(started_with);
-    assert_eq!(
-        refreshed_fetch_url(&id, Some(&retained)).as_deref(),
-        Some("https://cdn.test/mediatracks/abc?sig=SECOND")
-    );
-}

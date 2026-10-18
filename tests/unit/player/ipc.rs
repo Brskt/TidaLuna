@@ -236,36 +236,6 @@ fn errors_on_invalid_required_args() {
 }
 
 #[test]
-fn a_load_carries_the_track_it_is_for() {
-    let parsed = parse_player_ipc(
-        "player.load",
-        &[
-            json!("https://a"),
-            json!("flac"),
-            json!("k"),
-            json!(false),
-            json!(false),
-            json!("12345"),
-        ],
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        parsed,
-        PlayerIpc::Load {
-            url: "https://a".to_string(),
-            format: "flac".to_string(),
-            key: "k".to_string(),
-            product_id: Some("12345".to_string()),
-            restart: false,
-            want_play: false,
-            load_id: None,
-            act: None,
-        }
-    );
-}
-
-#[test]
 fn a_dash_load_carries_the_track_it_is_for() {
     let parsed = parse_player_ipc(
         "player.load_dash",

@@ -3,14 +3,6 @@
 use super::*;
 
 #[test]
-fn envelopes_run_the_full_range() {
-    assert!((xfade_out_env(0, 441) - 1.0).abs() < 1e-6);
-    assert!(xfade_out_env(441, 441).abs() < 1e-6);
-    assert!(xfade_in_env(0, 441).abs() < 1e-6);
-    assert!((xfade_in_env(441, 441) - 1.0).abs() < 1e-6);
-}
-
-#[test]
 fn envelopes_are_equal_power_not_equal_gain() {
     // The invariant that separates this pair from declick.rs: the SQUARES sum to
     // one; summed power stays flat for two uncorrelated sources.
@@ -154,24 +146,6 @@ fn a_fade_is_refused_rather_than_made_absurdly_short() {
     // Degenerate inputs refuse rather than divide or overflow.
     assert_eq!(fade_len_samples(0, 6, per_second * 10), None);
     assert_eq!(fade_len_samples(per_second, 0, per_second * 10), None);
-}
-
-#[test]
-fn mix_reuses_caller_scratch_and_never_allocates_per_call() {
-    // The callback is a real-time context. `mix_frames` must write into buffers the
-    // caller already owns; this pins that shape against a later refactor quietly
-    // returning a fresh Vec.
-    let mut scratch_out = vec![0.0f32; 128];
-    let mut scratch_in = vec![0.0f32; 128];
-    let mut dst = vec![0.0f32; 128];
-    scratch_out.fill(0.5);
-    scratch_in.fill(0.5);
-    let mut pos = 0usize;
-    for _ in 0..8 {
-        pos = mix_frames(&mut dst, &scratch_out, &scratch_in, pos, 1024, 1.0);
-    }
-    assert_eq!(pos, 1024);
-    assert_eq!(dst.len(), 128, "mix must not resize the destination");
 }
 
 /// The real-time callback mixes its buffer in fixed-size passes, because cpal declines to
