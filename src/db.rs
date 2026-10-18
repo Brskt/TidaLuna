@@ -1,5 +1,5 @@
-use rusqlite::Connection;
-use std::path::Path;
+use rusqlite::{Connection, ErrorCode};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::{JoinHandle, ThreadId};
 
@@ -7,6 +7,58 @@ type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static
 
 /// Operations the actor's channel holds before a sender waits.
 pub(crate) const QUEUE_CAPACITY: usize = 64;
+
+/// What kept a database from opening, as far as the user can act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fault {
+    /// Another connection holds the file past the busy timeout.
+    Locked,
+    /// The file, or the folder that has to hold its `-wal`, cannot be written or created.
+    Unwritable,
+    Other,
+}
+
+/// A database that did not open: which file, and why.
+#[derive(Debug)]
+pub(crate) struct OpenError {
+    path: PathBuf,
+    fault: Fault,
+    detail: String,
+}
+
+impl OpenError {
+    fn sqlite(path: &Path, e: &rusqlite::Error) -> Self {
+        let fault = match e.sqlite_error_code() {
+            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => Fault::Locked,
+            Some(ErrorCode::ReadOnly | ErrorCode::CannotOpen | ErrorCode::PermissionDenied) => {
+                Fault::Unwritable
+            }
+            _ => Fault::Other,
+        };
+        Self {
+            path: path.to_owned(),
+            fault,
+            detail: e.to_string(),
+        }
+    }
+
+    /// What the launch tells the user when it stops here.
+    pub(crate) fn refusal(&self) -> String {
+        let file = self.path.display();
+        let detail = &self.detail;
+        match self.fault {
+            Fault::Locked => format!(
+                "TidaLunar cannot open its database {file}: another program is holding it. \
+                Close any other TidaLunar and any tool reading that folder, then start again."
+            ),
+            Fault::Unwritable => format!(
+                "TidaLunar cannot write to its data folder ({file}: {detail}). \
+                Make the folder writable, then start again."
+            ),
+            Fault::Other => format!("TidaLunar cannot open its database {file} ({detail})."),
+        }
+    }
+}
 
 /// What every commit of a store syncs, unless a write asks for more: `NORMAL` leaves the last
 /// commits to the OS write-back, which is enough for a window position or a plugin's own key.
@@ -114,19 +166,25 @@ impl DbActor {
     ///
     /// The actor thread owns `plugins.db` and `settings.db` connections.
     /// Returns once both connections are open and schema is initialized.
-    pub fn open(data_dir: &Path) -> rusqlite::Result<Self> {
+    pub fn open(data_dir: &Path) -> Result<Self, OpenError> {
         let (tx, rx) = mpsc::sync_channel::<BoxedFn>(QUEUE_CAPACITY);
-        let (init_tx, init_rx) = mpsc::sync_channel::<rusqlite::Result<()>>(0);
+        let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), OpenError>>(0);
         let data_dir = data_dir.to_owned();
 
         let handle = std::thread::Builder::new()
             .name("db-actor".into())
             .spawn(move || {
-                let result = (|| -> rusqlite::Result<(Connection, Connection)> {
-                    let mut plugins_conn = Connection::open(data_dir.join("plugins.db"))?;
-                    let mut settings_conn = Connection::open(data_dir.join("settings.db"))?;
-                    crate::plugins::store::init_schema(&mut plugins_conn)?;
-                    crate::settings::init_schema(&mut settings_conn)?;
+                let result = (|| -> Result<(Connection, Connection), OpenError> {
+                    let plugins_path = data_dir.join("plugins.db");
+                    let settings_path = data_dir.join("settings.db");
+                    let mut plugins_conn = Connection::open(&plugins_path)
+                        .map_err(|e| OpenError::sqlite(&plugins_path, &e))?;
+                    let mut settings_conn = Connection::open(&settings_path)
+                        .map_err(|e| OpenError::sqlite(&settings_path, &e))?;
+                    crate::plugins::store::init_schema(&mut plugins_conn)
+                        .map_err(|e| OpenError::sqlite(&plugins_path, &e))?;
+                    crate::settings::init_schema(&mut settings_conn)
+                        .map_err(|e| OpenError::sqlite(&settings_path, &e))?;
                     Ok((plugins_conn, settings_conn))
                 })();
 
@@ -247,3 +305,7 @@ impl DbActor {
 #[cfg(test)]
 #[path = "../tests/unit/db_tests.rs"]
 mod db_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/db_open_tests.rs"]
+mod db_open_tests;

@@ -302,7 +302,7 @@ fn main() {
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         crate::vprintln!("[DB] Failed to create data dir {}: {e}", data_dir.display());
     }
-    let db_actor = db::DbActor::open(&data_dir).expect("Failed to open databases");
+    let db_actor = db::DbActor::open(&data_dir).unwrap_or_else(|e| refuse_to_start(&e.refusal()));
     let _ = state::DB.set(db_actor);
 
     // Load the bootstrap settings snapshot once, off the CEF UI thread, as the
