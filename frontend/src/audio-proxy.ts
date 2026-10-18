@@ -23,6 +23,24 @@ const handoff = () => {
 		console.error("[audio-proxy] handoff listener failed:", e);
 	}
 };
+// Told when the SDK commits a track to the proxied element: a manifest assigned to the element that
+// holds Rust's mirror ("src"), or Shaka playing the element it preloaded ("handover"). Called from
+// inside the `src` setter and `play()`: a failing listener must not reach them.
+export type ProxyBind = "src" | "handover";
+let _onBind: ((kind: ProxyBind) => void) | null = null;
+export function onProxyBind(cb: (kind: ProxyBind) => void) { _onBind = cb; }
+const bound = (kind: ProxyBind) => {
+	try {
+		_onBind?.(kind);
+	} catch (e) {
+		console.error("[audio-proxy] bind listener failed:", e);
+	}
+};
+// The stream the SDK holds on the element that carries Rust's mirror.
+export function proxyOwnerSrc(): string | null {
+	const owner = _proxyElement as any;
+	return owner?._lunarProxy ? owner._lunarSrc || null : null;
+}
 let _proxyDuration = 0;
 let _proxyTime = 0;
 let _proxyPlaying = false;
@@ -71,6 +89,9 @@ if (srcDesc) {
 					// gets a fresh verdict.
 					if (value === _failedSrc) return;
 					_failedSrc = null;
+					// Before the readiness burst is queued: a refusal this notification queues runs
+					// first (microtasks are FIFO) and the burst below then finds its src refused.
+					bound("src");
 				}
 
 				// Emit readiness events for the SDK's saga to continue normally.
@@ -132,6 +153,7 @@ HTMLMediaElement.prototype.play = function () {
 			_proxyTime = 0;
 			this.dispatchEvent(new Event("play"));
 			handoff();
+			bound("handover");
 		}
 		return Promise.resolve();
 	}
