@@ -77,6 +77,8 @@ fn no_two_targets_share_a_platform() {
 #[test]
 fn the_current_platform_resolves_to_a_target() {
     let target = current_target().expect("this platform has no OpenH264 build in the table");
+    assert_eq!(target.os, std::env::consts::OS);
+    assert_eq!(target.arch, std::env::consts::ARCH);
     assert!(target.url().contains("2.6.0"));
 }
 
