@@ -607,7 +607,7 @@ fn start_boot_token_reconcile(data_dir: &std::path::Path, cef_profile: &std::pat
 
     let stored = match platform::secure_store::load(data_dir) {
         Ok(Some(s)) => s,
-        Ok(None) | Err(platform::secure_store::StoreError::Unavailable) => {
+        Ok(None) => {
             platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
             vprintln!("[AUTH]   No secure store - purged SDK blob");
             return;

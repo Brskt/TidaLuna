@@ -49,10 +49,7 @@ impl TokenGeneration {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // not every variant is constructed on every platform
 pub(crate) enum StoreError {
-    /// Backend not available (no Keychain, DPAPI failure, etc.)
-    Unavailable,
     /// Backend accessible but operation failed (permission, I/O, lock). Carries the
     /// platform's own message: the variant alone cannot tell a refused Keychain
     /// prompt from a full disk, and that distinction is the reason to report it.
