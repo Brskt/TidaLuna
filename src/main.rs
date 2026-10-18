@@ -326,7 +326,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .unwrap_or_else(|e| {
+            refuse_to_start(&format!(
+                "TidaLunar cannot start its background threads ({e}). The system may be out \
+                of threads, memory or file handles."
+            ))
+        });
     let rt_handle = rt.handle().clone();
     state::RT_HANDLE
         .set(rt_handle.clone())
