@@ -63,6 +63,9 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
             key       TEXT NOT NULL,
             value     TEXT NOT NULL,
             PRIMARY KEY (namespace, key)
+        );
+        CREATE TABLE IF NOT EXISTS reset_notice (
+            aside TEXT PRIMARY KEY
         );",
     )?;
 
@@ -86,6 +89,23 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     }
 
     Ok(())
+}
+
+/// One copy of a damaged store the user has not been told of. Written into the store that
+/// replaces it: the row exists exactly when the replacement does.
+pub(crate) fn record_reset(conn: &Connection, aside: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO reset_notice (aside) VALUES (?1)",
+        params![aside],
+    )
+    .map(drop)
+}
+
+/// The copies named by the resets not yet told, oldest row first.
+pub(crate) fn recorded_resets(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    conn.prepare("SELECT aside FROM reset_notice ORDER BY rowid")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect()
 }
 
 /// Mark a plugin as having had its code dispatched at least once.

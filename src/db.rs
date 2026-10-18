@@ -147,20 +147,56 @@ fn open_plugins(path: &Path) -> Result<Connection, OpenError> {
     }
 }
 
-/// The store is built in memory, where nothing can fail on a disk, then put in place of the
-/// damaged file, a copy of which is kept aside. The failed open has already folded a `-wal` no
-/// other connection holds into the file; a `-wal` that remains is a live holder's and `replace`
-/// refuses.
+/// The copies an earlier reset named and the page never told of, read from the file about to be
+/// replaced. A file from before the notice existed holds none; one that cannot be read tells
+/// nothing, and those copies stay beside it, unnamed.
+fn earlier_resets(path: &Path) -> Vec<String> {
+    let read = Connection::open(path).and_then(|conn| {
+        let table: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'reset_notice'",
+            [],
+            |row| row.get(0),
+        )?;
+        if table == 0 {
+            return Ok(Vec::new());
+        }
+        crate::plugins::store::recorded_resets(&conn)
+    });
+    read.unwrap_or_else(|e| {
+        crate::verr!(
+            "[PLUGINS] earlier reset notices of the damaged plugins.db cannot be read, their copies stay unnamed: {e}"
+        );
+        Vec::new()
+    })
+}
+
+/// The empty store that takes the place of the damaged `path`, with the reset notice already in it:
+/// the copies earlier resets named, then `aside`. Nothing is on disk yet.
+fn replacement_store(path: &Path, aside: &Path) -> rusqlite::Result<Connection> {
+    let mut fresh = Connection::open_in_memory()?;
+    crate::plugins::store::init_schema(&mut fresh)?;
+    for named in earlier_resets(path)
+        .into_iter()
+        .chain([aside.to_string_lossy().into_owned()])
+    {
+        crate::plugins::store::record_reset(&fresh, &named)?;
+    }
+    Ok(fresh)
+}
+
+/// The store is built in memory with the reset notice inside it, then put in place of the damaged
+/// file: the notice and the replacement are one rename (a crash leaves both or neither). The
+/// failed open has already folded a `-wal` no other connection holds into the file; a `-wal`
+/// that remains is a live holder's and `replace_naming` refuses.
 fn replace_plugins(path: &Path, cause: &rusqlite::Error) -> Result<Connection, OpenError> {
     let unreplaceable = |why: String| OpenError {
         path: path.to_owned(),
         fault: Fault::Unreplaceable,
         detail: format!("{cause}; {why}"),
     };
-    let fresh = Connection::open_in_memory()
-        .and_then(|mut fresh| crate::plugins::store::init_schema(&mut fresh).map(|()| fresh))
-        .map_err(|e| unreplaceable(e.to_string()))?;
-    let aside = crate::settings::replace(path, &fresh).map_err(unreplaceable)?;
+    let aside = crate::settings::aside_name(path);
+    let fresh = replacement_store(path, &aside).map_err(|e| unreplaceable(e.to_string()))?;
+    crate::settings::replace_naming(path, &fresh, &aside).map_err(unreplaceable)?;
     crate::verr!(
         "[PLUGINS] plugins.db was damaged ({cause}), a copy is kept as {}; plugins start empty",
         aside.display()
