@@ -44,8 +44,8 @@ pub(crate) struct PlaybackController {
     last_progress_ms: u64,
     current_duration_ms: u64,
 
-    /// Last time we broadcast progress (for throttling)
-    last_progress_broadcast: std::time::Instant,
+    /// When progress was last sent to the session, for throttling.
+    last_progress_sent: std::time::Instant,
 }
 
 impl PlaybackController {
@@ -63,7 +63,7 @@ impl PlaybackController {
             notify_tx,
             last_progress_ms: 0,
             current_duration_ms: 0,
-            last_progress_broadcast: std::time::Instant::now(),
+            last_progress_sent: std::time::Instant::now(),
         }
     }
 
@@ -281,9 +281,9 @@ impl PlaybackController {
         if duration_ms > 0 {
             self.current_duration_ms = duration_ms;
         }
-        // Throttle progress broadcasts to at most one per second
-        if self.last_progress_broadcast.elapsed() >= std::time::Duration::from_secs(1) {
-            self.last_progress_broadcast = std::time::Instant::now();
+        // Throttle progress sent to the session to at most one per second
+        if self.last_progress_sent.elapsed() >= std::time::Duration::from_secs(1) {
+            self.last_progress_sent = std::time::Instant::now();
             self.notify_player_status().await;
         }
     }
@@ -425,21 +425,21 @@ impl PlaybackController {
         if let Some(ref media) = self.current_media {
             // The native parser takes all 7 fields as fixed types: a null srcUrl or
             // customData fails it.
-            let mut broadcast_media = media.clone();
-            if broadcast_media.src_url.is_none() {
-                broadcast_media.src_url = Some(String::new());
+            let mut announced_media = media.clone();
+            if announced_media.src_url.is_none() {
+                announced_media.src_url = Some(String::new());
             }
-            match &broadcast_media.custom_data {
+            match &announced_media.custom_data {
                 Some(serde_json::Value::String(_)) => {}
                 Some(v) => {
-                    broadcast_media.custom_data = Some(serde_json::Value::String(v.to_string()));
+                    announced_media.custom_data = Some(serde_json::Value::String(v.to_string()));
                 }
                 None => {
-                    broadcast_media.custom_data = Some(serde_json::Value::String("{}".to_string()));
+                    announced_media.custom_data = Some(serde_json::Value::String("{}".to_string()));
                 }
             }
-            if broadcast_media.metadata.is_none() {
-                broadcast_media.metadata = Some(MediaMetadata {
+            if announced_media.metadata.is_none() {
+                announced_media.metadata = Some(MediaMetadata {
                     title: Some("Unknown".to_string()),
                     album_title: None,
                     artists: None,
@@ -448,7 +448,7 @@ impl PlaybackController {
                 });
             }
             let notification = PlaybackNotification::NotifyMediaChanged {
-                media_info: broadcast_media,
+                media_info: announced_media,
             };
             if let Ok(msg) = serde_json::to_value(&notification) {
                 let _ = self

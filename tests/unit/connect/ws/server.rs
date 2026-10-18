@@ -53,7 +53,7 @@ const HEARTBEAT_BOUND: Duration =
 
 /// A client whose peer stopped reading. The wire holds one message and is never read, so the
 /// writer parks in `write.send` on the next one, as it does on a full TCP send buffer. The queue
-/// is then filled to capacity, as broadcasts and pings fill it while the writer is parked.
+/// is then filled to capacity, as sends and pings fill it while the writer is parked.
 async fn stalled_client(
     cancel: CancellationToken,
 ) -> (
@@ -745,7 +745,7 @@ async fn a_read_parked_on_the_routing_loop_leaves_the_shutdown_its_budget() {
 }
 
 /// A socket's events, from a peer that sends a command and closes while the map is held, the way
-/// a broadcast holds it: its connect comes first, alone, and the rest follows once the map is let
+/// `send_to_each` holds it: its connect comes first, alone, and the rest follows once the map is let
 /// go, in the order the peer sent it, with no entry left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_socket_is_heard_connected_before_anything_its_read_loop_sends() {

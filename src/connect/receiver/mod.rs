@@ -161,7 +161,7 @@ async fn routing_loop(
 
     // Open WS client sockets. The empty<->non-empty edge toggles the bridge idle
     // state (bridge::set_client_connected): while empty, local player events are
-    // not forwarded to the receiver at all; the connect notify/broadcast chain
+    // not forwarded to the receiver at all; the connect notify chain
     // stays dormant. A socket's connect is taken before its messages and its
     // disconnect (one channel, see `ClientEvent`). The set holds exactly the
     // sockets whose disconnect is still to come. The server keeps listening and

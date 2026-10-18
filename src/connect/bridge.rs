@@ -33,7 +33,7 @@ static BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Whether a Connect controller is currently connected. While false the
 /// bridge is idle: local player events are not forwarded to the receiver at
-/// all. The whole notify/broadcast chain stays dormant until someone
+/// all. The whole notify chain stays dormant until someone
 /// connects. Toggled by the routing loop on the 0<->1 client edge.
 static BRIDGE_HAS_CLIENT: AtomicBool = AtomicBool::new(false);
 
@@ -54,7 +54,7 @@ pub(crate) fn set_active(tx: Option<mpsc::Sender<BridgeEvent>>) {
 
 /// Toggle whether a Connect controller is connected. While no client is
 /// connected `forward` short-circuits, leaving the receiver fully idle so
-/// local playback never drives its notify/broadcast chain.
+/// local playback never drives its notify chain.
 pub(crate) fn set_client_connected(connected: bool) {
     BRIDGE_HAS_CLIENT.store(connected, Ordering::Release);
 }
@@ -84,7 +84,7 @@ pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
         return;
     }
     // Idle unless the receiver is running AND a controller is connected: with
-    // nobody to notify, forwarding/notify/broadcast is wasted work. Resumes
+    // nobody to notify, forwarding/notify is wasted work. Resumes
     // the instant a client connects.
     if !BRIDGE_ACTIVE.load(Ordering::Acquire) || !BRIDGE_HAS_CLIENT.load(Ordering::Acquire) {
         return;
