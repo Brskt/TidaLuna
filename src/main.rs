@@ -407,7 +407,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let root_cache = state::cache_data_dir().join("cef");
     let profile_cache = root_cache.join("Default");
-    std::fs::create_dir_all(&profile_cache).ok();
+    // CEF takes the profile folder as given and answers a folder it cannot use with an exit
+    // code that says nothing about the path; the cause is named here while it is known.
+    if let Err(e) = std::fs::create_dir_all(&profile_cache) {
+        refuse_to_start(&format!(
+            "TidaLunar cannot create its browser profile folder {} ({e}). Make the folder \
+            writable, then start again.",
+            profile_cache.display()
+        ));
+    }
 
     // Token reconciliation, phase 1: secure-store load + raw SDK-blob read.
     // All LevelDB I/O happens here, while our process is still its only
