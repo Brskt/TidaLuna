@@ -120,7 +120,7 @@ fn main() {
                 println!("cargo:rustc-cfg=has_cef_build_dir");
             }
             // Not fatal: a bundled build never reads it. Said out loud because a developer
-            // running the tests without it gets a null dispatch table and a bare SIGSEGV.
+            // running the tests without it gets a test binary that refuses to start.
             Err(e) => println!(
                 "cargo:warning=DEP_CEF_DLL_WRAPPER_CEF_DIR is unavailable ({e}), so anything run outside the .app will not find the CEF framework"
             ),

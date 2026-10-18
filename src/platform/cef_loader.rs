@@ -221,8 +221,8 @@ fn running_exe_dir() -> PathBuf {
 /// Fill CEF's dispatch table once per process, whoever asks.
 ///
 /// `bootstrap()` is the production caller and runs exactly once, from `main`. A test binary
-/// has no `main`; each test that reaches a `cef_*` call asks here instead, and they must
-/// not stack `cef::load_library` calls on one another, hence the `Once`.
+/// has no `main`; the initializer in its test module asks here instead. A second
+/// `cef_load_library` call returns 0 once the first holds the handle, hence the `Once`.
 pub(crate) fn ensure_framework_loaded() {
     static LOADED: std::sync::Once = std::sync::Once::new();
     LOADED.call_once(|| {

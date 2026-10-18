@@ -6,6 +6,19 @@ use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Fill CEF's dispatch table before `main`; no test has to remember to.
+///
+/// A test binary has no `bootstrap()`, and a `cef_*` call on the empty table jumps to address
+/// zero, whether a test makes it directly or through a product function. dyld runs every entry
+/// of `__mod_init_func` before `main`, ahead of libtest's first thread.
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static LOAD_FRAMEWORK_BEFORE_MAIN: extern "C" fn() = load_framework_before_main;
+
+extern "C" fn load_framework_before_main() {
+    ensure_framework_loaded();
+}
+
 /// Lay out a bundle replica and hand back the two directories an executable can
 /// run from: the main app's `MacOS/`, and a helper app's own `MacOS/`.
 fn bundle(root: &Path) -> (PathBuf, PathBuf) {
