@@ -341,6 +341,67 @@ fn the_rewrite_epoch_hash_is_fnv1a_over_the_parts_joined() {
     assert_ne!(fnv1a64(&["tap_saga_put"]), fnv1a64(&["tap_saga_pUt"]));
 }
 
+// The shape of the chunk that defines the SDK's API object: the bundler's export helper builds it from
+// a table of getters named as the SDK's public functions, and the chunk exports the object under a
+// minified name.
+const SDK_CHUNK: &str = "var w=h({},{load:()=>m7,reset:()=>o7,setNext:()=>p7,startNativePlayer:()=>N7});\
+                         export{w as o,p7 as F};";
+
+#[test]
+fn classifies_the_chunks_that_may_hold_the_sdk_api() {
+    let u = |s: &str| RequestUrl::new(s.to_string());
+    assert!(matches!(
+        chunk_rewrite(&u("https://desktop.tidal.com/assets/vendor-IT_93Oov.js")),
+        Some(ChunkRewrite::SdkApi)
+    ));
+    assert!(matches!(
+        chunk_rewrite(&u(
+            "https://desktop.tidal.com/assets/load-uTL4eiru-BOQ4slVv.js"
+        )),
+        Some(ChunkRewrite::SdkApi)
+    ));
+    // The names that already mean something else keep it.
+    assert!(matches!(
+        chunk_rewrite(&u("https://desktop.tidal.com/assets/index-CaNNwb6Q.js")),
+        Some(ChunkRewrite::Entry)
+    ));
+    assert!(matches!(
+        chunk_rewrite(&u("https://desktop.tidal.com/assets/output-devices-x.js")),
+        Some(ChunkRewrite::Capture(SDK_OUTPUT_DEVICES))
+    ));
+    // Not the app host, not JS.
+    assert!(chunk_rewrite(&u("https://resources.tidal.com/assets/vendor-x.js")).is_none());
+    assert!(chunk_rewrite(&u("https://desktop.tidal.com/assets/vendor-DN277Tmi.css")).is_none());
+}
+
+#[test]
+fn the_chunk_that_defines_the_sdk_api_has_its_exports_captured_under_its_id() {
+    let out = capture_sdk_api(SDK_CHUNK);
+    assert!(out.starts_with(SDK_CHUNK));
+    assert!(out.ends_with(r#"globalThis.__LUNA_CAP("@tidal-music/player",{o: w, F: p7});"#));
+}
+
+#[test]
+fn a_chunk_that_does_not_define_the_sdk_api_is_left_be() {
+    let other = "var a=1;export{a as b};";
+    assert_eq!(capture_sdk_api(other), other);
+    // One of the two names is not the table: a chunk that merely mentions `setNext`.
+    let partial = "var a={setNext:()=>1};export{a as b};";
+    assert_eq!(capture_sdk_api(partial), partial);
+    let partial = "var a={startNativePlayer:()=>1};export{a as b};";
+    assert_eq!(capture_sdk_api(partial), partial);
+}
+
+#[test]
+fn the_sdk_api_chunks_go_through_the_capture() {
+    assert_eq!(
+        rewrite_chunk(ChunkRewrite::SdkApi, SDK_CHUNK),
+        capture_sdk_api(SDK_CHUNK)
+    );
+    let other = "var a=1;export{a as b};";
+    assert_eq!(rewrite_chunk(ChunkRewrite::SdkApi, other), other);
+}
+
 #[test]
 fn non_utf8_body_passes_through_unchanged() {
     // append_capture only handles &str; the filter's strict decode guards the

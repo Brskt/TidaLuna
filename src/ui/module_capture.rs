@@ -7,7 +7,8 @@
 //! no blob eval, no double-run; any parse/validation miss falls back to bundled
 //! React. Mirrors the buffering/dual-handler shape of `csp_filter`. The player
 //! SDK's `output-devices-*` chunk is captured the same way, for the host's own
-//! native-player delegate rather than for plugins.
+//! native-player delegate rather than for plugins, and so is the chunk that defines the SDK's API
+//! object (`capture_sdk_api`).
 //!
 //! Export capture cannot reach everything. `createRoot` is assigned onto a CJS
 //! exports object inside the entry chunk, which exports nothing at all. No import
@@ -96,6 +97,9 @@ pub(crate) enum ChunkRewrite {
     Entry,
     /// Vendored redux-saga: route its PUT runner through the host's tap.
     TapSagaPut,
+    /// A chunk that may hold the player SDK's API: capture its exports under [`SDK_PLAYER_API`] when
+    /// it does, and leave it be when it does not.
+    SdkApi,
 }
 
 /// Module id the player SDK's `output-devices-*` chunk is captured under. Its one export is the
@@ -103,10 +107,18 @@ pub(crate) enum ChunkRewrite {
 /// reads it under the same id.
 pub(crate) const SDK_OUTPUT_DEVICES: &str = "@tidal-music/player/output-devices";
 
+/// Module id the player SDK's API is captured under: the object a chunk exports that carries `setNext`,
+/// `load`, `reset` and the rest under their own names (the namespace TIDAL's entry chunk imports as
+/// `sdk`). `frontend/src/sdk-player.ts` reads it under the same id, by that shape, since the minified
+/// name of the export changes with every build.
+pub(crate) const SDK_PLAYER_API: &str = "@tidal-music/player";
+
 /// Classify a TIDAL asset URL, or `None` when the chunk is left untouched. The
 /// React-family names are tried first; `index-` is Vite's entry chunk, the only
 /// one that assigns `createRoot`, `store-` the one that vendors redux-saga, and
-/// `output-devices-` the player SDK's device state.
+/// `output-devices-` the player SDK's device state. `vendor-` and `load-` are where the SDK's
+/// package is bundled (the API object moved from `load-` to `vendor-` across builds). Both are
+/// looked at, and only the one carrying it is rewritten.
 pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
     if let Some(id) = target_module_id(url) {
         return Some(ChunkRewrite::Capture(id));
@@ -118,6 +130,8 @@ pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
         Some(ChunkRewrite::Capture(SDK_OUTPUT_DEVICES))
     } else if name.starts_with("store-") {
         Some(ChunkRewrite::TapSagaPut)
+    } else if name.starts_with("vendor-") || name.starts_with("load-") {
+        Some(ChunkRewrite::SdkApi)
     } else {
         None
     }
@@ -178,6 +192,18 @@ pub(crate) fn append_capture(js: &str, module_id: &str) -> String {
         "{js}\n;globalThis.__LUNA_CAP&&globalThis.__LUNA_CAP({id},{{{}}});",
         fields.join(", ")
     )
+}
+
+/// [`append_capture`] for the chunk that defines the SDK's API object, `js` unchanged for any other.
+/// The object is built by the bundler's export helper from a table of getters named as the SDK's
+/// public functions (`setNext:()=>p7`), which survive minification; a chunk without both `setNext` and
+/// `startNativePlayer` is not it. Only the chunk that carries them is parsed.
+pub(crate) fn capture_sdk_api(js: &str) -> String {
+    if js.contains("setNext:()=>") && js.contains("startNativePlayer:()=>") {
+        append_capture(js, SDK_PLAYER_API)
+    } else {
+        js.to_string()
+    }
 }
 
 /// Declared binding name(s) for a declaration carried by an export
@@ -420,6 +446,7 @@ pub(crate) fn rewrite_chunk(rewrite: ChunkRewrite, js: &str) -> String {
         ChunkRewrite::Capture(id) => append_capture(js, id),
         ChunkRewrite::Entry => route_volume_restore(&tag_create_root(js)),
         ChunkRewrite::TapSagaPut => tap_saga_put(js),
+        ChunkRewrite::SdkApi => capture_sdk_api(js),
     }
 }
 
@@ -471,6 +498,7 @@ wrap_resource_request_handler! {
                 ChunkRewrite::Capture(_) => 128 * 1024,
                 ChunkRewrite::Entry => 2 * 1024 * 1024,
                 ChunkRewrite::TapSagaPut => 256 * 1024,
+                ChunkRewrite::SdkApi => 2 * 1024 * 1024,
             };
             Some(new_buffering_filter(
                 capacity,
