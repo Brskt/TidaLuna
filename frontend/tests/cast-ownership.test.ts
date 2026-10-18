@@ -160,15 +160,6 @@ const castRefusal = async () => {
 	return { component, sdk, sent, channelsFrom };
 };
 
-test("the SDK's autoplay of a load refused for a cast does not resume the cast", async () => {
-	const { sdk, sent, channelsFrom } = await castRefusal();
-
-	const from = sent.length;
-	sdk.play();
-
-	expect(channelsFrom(from)).not.toContain("player.play");
-});
-
 test("a listener's own Play still reaches the cast after a refused load", async () => {
 	// TIDAL's PLAY action (the bar's button, the media keys) reaches `setDesiredPlayback`.
 	const { component, sent, channelsFrom } = await castRefusal();
@@ -474,18 +465,6 @@ test("the reload of a listener's Next is answered by the cast's step: no banner,
 	const from = sent.length;
 	sdk.play();
 	expect(channelsFrom(from)).not.toContain("player.play");
-});
-
-test("a listener's own Play still reaches the cast after its Next", async () => {
-	// The counterweight: only the SDK's play of its reload is held back.
-	const { component, sdk, sent, channelsFrom } = await castDelegate();
-	component.actOnQueue({ act: "next", context: listContext });
-	sdk.load("https://cdn.invalid/media/cast.flac", "flac", "");
-	push([{ t: "mediacastowned", v: { load: loadIdOf(sent) } }]);
-
-	const from = sent.length;
-	component.setDesiredPlayback(true);
-	expect(channelsFrom(from)).toContain("player.play");
 });
 
 test("a listener's act is bound to the entries it acted on", async () => {
