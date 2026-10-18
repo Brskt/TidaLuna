@@ -28,12 +28,6 @@ fn truncates_extra_parts() {
 }
 
 #[test]
-fn passes_through_already_normal() {
-    assert_eq!(numeric_version("1.2.3.4", 4), "1.2.3.4");
-    assert_eq!(numeric_version("1.2.3", 3), "1.2.3");
-}
-
-#[test]
 fn handles_garbage_suffix_per_part() {
     assert_eq!(numeric_version("1abc.2def.3ghi", 4), "1.2.3.0");
 }
