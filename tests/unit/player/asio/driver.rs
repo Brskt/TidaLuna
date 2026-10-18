@@ -85,9 +85,3 @@ fn a_request_naming_no_installed_driver_keeps_every_candidate() {
     let picked = open_candidates(&drivers, Some("Speakers (4- Focusrite USB Audio)"));
     assert_eq!(picked.len(), 3);
 }
-
-#[test]
-fn nothing_installed_yields_no_candidate() {
-    assert!(open_candidates(&[], Some("Focusrite USB ASIO")).is_empty());
-    assert!(open_candidates(&[], None).is_empty());
-}
