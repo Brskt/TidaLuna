@@ -118,6 +118,7 @@ test("the delegate and a committed switch send Rust the same thing", () => {
 	const store = fakeStore("guid-a");
 	follow(store);
 	store.commit({ activeDeviceId: "guid-b" });
+	expect(deviceSets()).toHaveLength(2);
 	const [fromDelegate, fromStore] = deviceSets();
 	expect(fromStore).toEqual(fromDelegate);
 });
