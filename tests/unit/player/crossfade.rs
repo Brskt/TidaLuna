@@ -32,9 +32,10 @@ fn mix_sums_both_sources_and_advances_the_position() {
     let mut dst = vec![0.0f32; 8];
     let end = mix_frames(&mut dst, &outgoing, &incoming, 0, 64, 1.0);
     assert_eq!(end, 8);
-    // Every sample is a real blend of the two, never one or the other alone.
-    for s in &dst {
-        assert!(*s > 0.9 && *s <= 1.45, "unexpected mixed sample {s}");
+    // Every sample is the blend of the two at its own point of the fade.
+    for (i, s) in dst.iter().enumerate() {
+        let expected = xfade_out_env(i, 64) + xfade_in_env(i, 64);
+        assert!((s - expected).abs() < 1e-6, "sample {i}: {s} vs {expected}");
     }
 }
 
@@ -52,15 +53,25 @@ fn a_missing_incoming_source_leaves_the_outgoing_untouched_in_shape() {
     }
 }
 
+/// The master volume is the only gain the mixer adds on top of the envelopes. At the first sample
+/// of a fade the outgoing envelope is exactly one and the incoming exactly zero: unity volume hands
+/// the outgoing sample back on the bits, and half volume halves it. A tolerance would hide the
+/// one-ulp drift a stray factor next to `volume` produces.
 #[test]
-fn volume_one_is_bit_exact() {
-    // The no-crossfade guarantee on cpal is FP identity at unity gain.
-    let outgoing = vec![0.123_456_79f32; 4];
-    let incoming: Vec<f32> = Vec::new();
-    let mut dst = vec![0.0f32; 4];
-    // Position 0 with an absent incoming source scales by exactly 1.0.
-    mix_frames(&mut dst, &outgoing, &incoming, 0, 64, 1.0);
-    assert_eq!(dst[0], 0.123_456_79f32);
+fn the_master_volume_is_the_only_gain_beyond_the_envelopes() {
+    let incoming = [0.9f32];
+    for volume in [1.0f32, 0.5] {
+        for sample in [0.3f32, -0.7, 0.25] {
+            let mut dst = [0.0f32];
+            mix_frames(&mut dst, &[sample], &incoming, 0, 64, volume);
+            assert_eq!(
+                dst[0].to_bits(),
+                (sample * volume).to_bits(),
+                "volume {volume}, sample {sample}: got {}",
+                dst[0]
+            );
+        }
+    }
 }
 
 #[test]
