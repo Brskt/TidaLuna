@@ -65,7 +65,7 @@ fn ensure_file_sink() {
     }
     // No data directory, no file: the line still reaches stderr, as `main`'s
     // refusal does.
-    let Some(dir) = crate::state::data_dir() else {
+    let Some(dir) = sink_dir() else {
         return;
     };
     // Create the data dir first: on a fresh profile this runs before main's own
@@ -78,6 +78,18 @@ fn ensure_file_sink() {
     {
         *guard = Some(file);
     }
+}
+
+#[cfg(not(test))]
+fn sink_dir() -> Option<&'static Path> {
+    crate::state::data_dir()
+}
+
+/// No file under test: `data_dir()` is the user's real one, and a `verr!` a test provokes does not
+/// belong in their `console.log`. `take_lines` is where a test reads it instead.
+#[cfg(test)]
+fn sink_dir() -> Option<&'static Path> {
+    None
 }
 
 /// Archive the previous session's `console.log`, for the process that owns the
