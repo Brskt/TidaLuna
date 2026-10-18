@@ -247,6 +247,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         None
                     }
                 };
+                let product = track_id.clone();
                 let (measured, action) =
                     settle_measured_duration(duration, track_id, announced.as_ref());
                 state.record_measured_duration(measured);
@@ -254,7 +255,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
 
                 state
                     .pending_player_events
-                    .push(PlayerBridgeEvent::duration(duration, seq));
+                    .push(PlayerBridgeEvent::duration(duration, seq, product));
             }
             PlayerEvent::AudioDevices(devices, req_id) => {
                 if let Ok(json_devices) = serde_json::to_string(&devices) {

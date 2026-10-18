@@ -92,6 +92,37 @@ fn a_load_failure_during_a_cast_names_no_track() {
     );
 }
 
+/// The renderer answers a media element with the length of the track the element holds; the
+/// length names the track it was measured on.
+#[test]
+fn a_duration_names_the_track_it_was_measured_on() {
+    let event = PlayerBridgeEvent::duration(215.0, 7, Some("120002099".to_owned()));
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({ "t": "duration", "seq": 7, "v": 215.0, "product": "120002099" })
+    );
+}
+
+/// The counterweight: a load that carried no id has no track to name, and the renderer then
+/// takes the length for whichever element it answers.
+#[test]
+fn a_duration_of_a_load_that_named_no_track_carries_no_product() {
+    let event = PlayerBridgeEvent::duration(215.0, 7, None);
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({ "t": "duration", "seq": 7, "v": 215.0 })
+    );
+}
+
+/// A position follows the duration that opened its load and carries the generation alone.
+#[test]
+fn a_position_names_no_track() {
+    assert_eq!(
+        serde_json::to_value(PlayerBridgeEvent::time(12.5, 7)).unwrap(),
+        serde_json::json!({ "t": "time", "seq": 7, "v": 12.5 })
+    );
+}
+
 /// The counterweight, and the shape TIDAL's native player already reads: a failure with no
 /// track to name is the payload it always was.
 #[test]

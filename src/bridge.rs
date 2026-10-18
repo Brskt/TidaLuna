@@ -10,6 +10,11 @@ pub(crate) struct PlayerBridgeEvent {
     /// belongs to a track the renderer's queue never chose, and the queue must not act on it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cast: bool,
+    /// Set on a duration event: the track the length was measured on. The renderer holds a stream per
+    /// media element and answers an element only with the length of the track it holds. A time or a
+    /// state event carries the load generation instead, and follows the duration that opened its load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
 }
 
 impl PlayerBridgeEvent {
@@ -19,15 +24,18 @@ impl PlayerBridgeEvent {
             seq: Some(seq),
             v: serde_json::json!(value),
             cast: false,
+            product: None,
         }
     }
 
-    pub fn duration(value: f64, seq: u32) -> Self {
+    /// `product` is the track the length was measured on, `None` when the load carried no id.
+    pub fn duration(value: f64, seq: u32, product: Option<String>) -> Self {
         Self {
             t: "duration",
             seq: Some(seq),
             v: serde_json::json!(value),
             cast: false,
+            product,
         }
     }
 
@@ -39,6 +47,7 @@ impl PlayerBridgeEvent {
             seq: Some(seq),
             v: serde_json::json!(value),
             cast: owner == crate::player::LoadOrigin::Connect,
+            product: None,
         }
     }
 
@@ -59,6 +68,7 @@ impl PlayerBridgeEvent {
                 |id| serde_json::json!({ "load": id }),
             ),
             cast: false,
+            product: None,
         }
     }
 
@@ -71,6 +81,7 @@ impl PlayerBridgeEvent {
             seq: None,
             v: serde_json::json!({ "load": load }),
             cast: false,
+            product: None,
         }
     }
 
@@ -79,6 +90,7 @@ impl PlayerBridgeEvent {
             t: "devices",
             seq: None,
             cast: false,
+            product: None,
             v: value,
         }
     }
@@ -88,6 +100,7 @@ impl PlayerBridgeEvent {
             t: event_name,
             seq: None,
             cast: false,
+            product: None,
             v: serde_json::Value::Null,
         }
     }
@@ -104,6 +117,7 @@ impl PlayerBridgeEvent {
             t: "mediaformat",
             seq: None,
             cast: false,
+            product: None,
             v: serde_json::json!({
                 "codec": codec,
                 "sampleRate": sample_rate,
@@ -120,6 +134,7 @@ impl PlayerBridgeEvent {
             t: "version",
             seq: None,
             cast: false,
+            product: None,
             v: serde_json::json!(v),
         }
     }
@@ -141,6 +156,7 @@ impl PlayerBridgeEvent {
             t: "mediaerror",
             seq: None,
             cast: false,
+            product: None,
             v,
         }
     }
@@ -150,6 +166,7 @@ impl PlayerBridgeEvent {
             t: "mediamaxconnectionsreached",
             seq: None,
             cast: false,
+            product: None,
             v: serde_json::Value::Null,
         }
     }
@@ -162,6 +179,7 @@ impl PlayerBridgeEvent {
             t: "medianetworklost",
             seq: None,
             cast: false,
+            product: None,
             v: serde_json::Value::Null,
         }
     }
@@ -173,6 +191,7 @@ impl PlayerBridgeEvent {
             t: "volume",
             seq: None,
             cast: false,
+            product: None,
             v: serde_json::to_value(report).unwrap_or_default(),
         }
     }
