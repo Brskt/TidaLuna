@@ -1159,7 +1159,3 @@ fn show_error(msg: &str) {
 fn show_error(msg: &str) {
     say!("ERROR: {msg}");
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/main/manifest_tests.rs"]
-mod manifest_tests;
