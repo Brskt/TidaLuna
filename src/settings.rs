@@ -322,17 +322,17 @@ pub(crate) fn save_maximized(conn: &mut Connection, maximized: bool) {
     WINDOW_MAXIMIZED.save(conn, &maximized.to_string());
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), expect(dead_code))]
 pub(crate) fn load_volume_sync(conn: &mut Connection) -> bool {
     Reader::new(conn).get(&PLAYER_VOLUME_SYNC)
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), expect(dead_code))]
 pub(crate) fn save_volume_sync(conn: &mut Connection, enabled: bool) {
     PLAYER_VOLUME_SYNC.save(conn, &enabled.to_string());
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), expect(dead_code))]
 pub(crate) fn save_asio(conn: &mut Connection, enabled: bool) {
     PLAYER_ASIO.save(conn, &enabled.to_string());
 }
