@@ -13,6 +13,7 @@
 // `completed`), and these fixtures must keep it.
 
 import { beforeEach, expect, mock, test } from "bun:test";
+import { bootStubs } from "./helpers/boot-stubs";
 
 type Dispatch = { type: string; payload?: unknown };
 
@@ -26,25 +27,7 @@ const storeStub = () => ({
 });
 mock.module("../plugins/lib/src/redux/store", storeStub);
 
-// `src/index.ts` is the application entry point: importing it drags in the whole Luna
-// core. Only the bridge function under test matters here; everything it boots is
-// stubbed out. Any import added to index.ts that reaches @luna/core will surface as a
-// resolution error in this file, which is the intended tripwire.
-mock.module("../render/src", () => ({
-	initCore: () => {},
-	modules: {},
-	defineHostModule: () => {},
-	LunaPlugin: class {},
-}));
-mock.module("../plugins/lib/src", () => ({}));
-mock.module("../plugins/lib.native/src/index.native", () => ({}));
-mock.module("../src/bootstrap", () => ({}));
-// happy-dom ships no `navigator.mediaSession`, which the state arm writes to.
-mock.module("../src/controllers/mediasession", () => ({
-	setupActionHandlers: () => {},
-	updateMetadata: () => {},
-	updatePlaybackState: () => {},
-}));
+bootStubs();
 
 await import("../src/index");
 

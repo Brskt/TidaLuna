@@ -4,6 +4,7 @@
 // cast's `completed` for this page's track and advanced the local queue over the cast.
 
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { bootStubs } from "./helpers/boot-stubs";
 import type { SentIpc } from "./setup";
 
 type Dispatch = { type: string; payload?: unknown };
@@ -38,22 +39,7 @@ const storeStub = () => ({
 });
 mock.module("../plugins/lib/src/redux/store", storeStub);
 
-// `src/index.ts` is the application entry point; everything it boots is stubbed out, as in
-// `time-dispatch-throttle.test.ts`.
-mock.module("../render/src", () => ({
-	initCore: () => {},
-	modules: {},
-	defineHostModule: () => {},
-	LunaPlugin: class {},
-}));
-mock.module("../plugins/lib/src", () => ({}));
-mock.module("../plugins/lib.native/src/index.native", () => ({}));
-mock.module("../src/bootstrap", () => ({}));
-mock.module("../src/controllers/mediasession", () => ({
-	setupActionHandlers: () => {},
-	updateMetadata: () => {},
-	updatePlaybackState: () => {},
-}));
+bootStubs();
 
 await import("../src/index");
 const { setSelfLoad } = await import("../src/audio-proxy");
