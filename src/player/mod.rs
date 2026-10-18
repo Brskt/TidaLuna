@@ -1348,7 +1348,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
 }
 
 impl Player {
-    pub fn new<F>(callback: F, rt_handle: tokio::runtime::Handle) -> anyhow::Result<Self>
+    pub fn new<F>(callback: F, rt_handle: tokio::runtime::Handle) -> Self
     where
         F: Fn(PlayerEvent) + Send + 'static,
     {
@@ -1361,7 +1361,7 @@ impl Player {
         callback: F,
         rt_handle: tokio::runtime::Handle,
         settings: Option<crate::db::DbActor>,
-    ) -> anyhow::Result<Self>
+    ) -> Self
     where
         F: Fn(PlayerEvent) + Send + 'static,
     {
@@ -1406,7 +1406,7 @@ impl Player {
             }
         });
 
-        Ok(Self {
+        Self {
             cmd_tx,
             rt_handle,
             load_handle: std::sync::Mutex::new(None),
@@ -1418,7 +1418,7 @@ impl Player {
                 unsaved: std::sync::Arc::new(std::sync::Mutex::new(None)),
             }),
             governor,
-        })
+        }
     }
 
     /// The governor a preload staged for this player shares with its playback.

@@ -70,8 +70,7 @@ fn spying_player() -> (Player, Arc<Mutex<Vec<PlayerEvent>>>) {
     let player = Player::new(
         move |ev| sink.lock().unwrap_or_else(|e| e.into_inner()).push(ev),
         tokio::runtime::Handle::current(),
-    )
-    .expect("construction opens no device and cannot fail off Windows");
+    );
     (player, events)
 }
 

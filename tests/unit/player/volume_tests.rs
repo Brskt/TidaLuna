@@ -268,8 +268,7 @@ fn launch(dir: &std::path::Path) -> Launch {
         |_| {},
         tokio::runtime::Handle::current(),
         Some(settings.clone()),
-    )
-    .expect("construction opens no device and cannot fail off Windows");
+    );
     Launch { player, settings }
 }
 

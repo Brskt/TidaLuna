@@ -368,16 +368,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Recover from any interrupted update before continuing startup
     updater::recover_interrupted_update();
 
-    let player = Arc::new(
-        Player::new(
-            move |event: PlayerEvent| {
-                let mut task = PlayerEventTask::new(event);
-                post_task(ThreadId::UI, Some(&mut task));
-            },
-            rt_handle.clone(),
-        )
-        .expect("Failed to initialize player"),
-    );
+    let player = Arc::new(Player::new(
+        move |event: PlayerEvent| {
+            let mut task = PlayerEventTask::new(event);
+            post_task(ThreadId::UI, Some(&mut task));
+        },
+        rt_handle.clone(),
+    ));
 
     #[cfg(target_os = "windows")]
     crate::player::asio::driver::log_asio_drivers();
