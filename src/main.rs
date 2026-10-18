@@ -151,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
-    let args = cef::args::Args::new();
+    let args = platform::process_args::ProcessArgs::new();
     let Some(cmd_line) = args.as_cmd_line() else {
         return Err("Failed to parse command line arguments".into());
     };

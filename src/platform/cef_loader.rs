@@ -40,7 +40,7 @@ const SANDBOX_DYLIB: &str = "Chromium Embedded Framework.framework/Libraries/lib
 /// release either before it exits.
 pub(crate) struct SandboxGuard {
     _sandbox: cef::sandbox::Sandbox,
-    _args: cef::args::Args,
+    _args: super::process_args::ProcessArgs,
 }
 
 /// Where the framework binary sits, seen from the directory holding the running
@@ -109,7 +109,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 /// frames after the FFI calls have returned, so no unwind crosses a C boundary.
 fn enter_sandbox(exe_dir: &Path) -> SandboxGuard {
     let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let args = cef::args::Args::new();
+        let args = super::process_args::ProcessArgs::new();
         let mut sandbox = cef::sandbox::Sandbox::new();
         sandbox.initialize(args.as_main_args());
         SandboxGuard {
