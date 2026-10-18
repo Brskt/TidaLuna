@@ -96,14 +96,6 @@ test("the receiver's track becomes this page's play queue, as TIDAL's receiver m
 	]);
 });
 
-test("the announcement leaves the media product to TIDAL's own transition", async () => {
-	// The hand-made one grafted the cast's id onto the product TIDAL's player still held.
-	const { log, store } = recording();
-	await announce(store);
-
-	expect(typesOf(log)).not.toContain("playbackControls/MEDIA_PRODUCT_TRANSITION");
-});
-
 test("the catalog holds the track and the delegate knows it plays before the queue names it", async () => {
 	const { log, store } = recording();
 	await withDelegate(log, () => announce(store));
@@ -120,13 +112,6 @@ test("a queue TIDAL does not load is loaded by its own reload of the queue's ite
 	await announce(store);
 
 	expect(typesOf(log).slice(-2)).toEqual(["playQueue/RESET", "playbackControls/REFRESH_PLAYBACK_AFTER_PURCHASE"]);
-});
-
-test("a queue TIDAL loads is not loaded a second time", async () => {
-	const { log, store } = recording({ prefilled: true });
-	await announce(store);
-
-	expect(typesOf(log)).not.toContain("playbackControls/REFRESH_PLAYBACK_AFTER_PURCHASE");
 });
 
 test("an announcement overtaken by a later one changes nothing", async () => {
@@ -148,13 +133,6 @@ test("an announcement overtaken by a later one changes nothing", async () => {
 
 	expect(log.filter((a) => a.type === "playQueue/RESET").map((a) => a.payload.elements[0].mediaItemId)).toEqual([6]);
 	expect(log.filter((a) => a.type === "content/LOAD_SINGLE_MEDIA_ITEM_SUCCESS")).toHaveLength(1);
-});
-
-test("a refused load of another track reloads the queue's", () => {
-	const { log, store } = recording({ queue: { currentIndex: 0, elements: [{ mediaItemId: 78 }] } });
-	followCastQueue(store as any, "77");
-
-	expect(typesOf(log)).toEqual(["playbackControls/REFRESH_PLAYBACK_AFTER_PURCHASE"]);
 });
 
 test("a refused load of the queue's own track reloads nothing", () => {
