@@ -1,5 +1,5 @@
 use crate::db::{ROUTINE_SYNC, Stable};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::str::FromStr;
 
 /// One persisted setting, declared once: its row and what each way of lacking a usable row
@@ -165,25 +165,82 @@ impl WindowState {
     }
 }
 
+/// A table of the store and the schema version that added it. A file stamped below `since` was
+/// written before the table existed: its absence is no loss. Version 0 is the schema of every
+/// build published before the stamp, and a file with no stamp reads 0.
+struct Table {
+    since: i64,
+    create: &'static str,
+}
+
+const SETTINGS: Table = Table {
+    since: 0,
+    create: "CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )",
+};
+
+const NATIVE_TRUST: Table = Table {
+    since: 0,
+    create: "CREATE TABLE IF NOT EXISTS native_trust (
+        code_hash TEXT NOT NULL,
+        plugin    TEXT NOT NULL,
+        module    TEXT NOT NULL,
+        granted   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (code_hash, plugin, module)
+    )",
+};
+
+const REPAIR_NOTICE: Table = Table {
+    since: 1,
+    create: "CREATE TABLE IF NOT EXISTS repair_notice (
+        id     INTEGER PRIMARY KEY CHECK (id = 1),
+        notice TEXT NOT NULL
+    )",
+};
+
+/// Every table of the store: a new one is declared here, with the version it brings.
+const TABLES: [&Table; 3] = [&SETTINGS, &NATIVE_TRUST, &REPAIR_NOTICE];
+
+/// What `init_schema` stamps in `user_version`: the newest version any table was added in.
+const SCHEMA_VERSION: i64 = {
+    let mut newest = 0;
+    let mut at = 0;
+    while at < TABLES.len() {
+        if TABLES[at].since > newest {
+            newest = TABLES[at].since;
+        }
+        at += 1;
+    }
+    newest
+};
+
+fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+}
+
 pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", ROUTINE_SYNC)?;
 
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS settings (
-            key   TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS native_trust (
-            code_hash TEXT NOT NULL,
-            plugin    TEXT NOT NULL,
-            module    TEXT NOT NULL,
-            granted   INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (code_hash, plugin, module)
-        );",
-    )?;
-
-    Ok(())
+    // The stamp lands with the tables it vouches for, or not at all. The write lock is taken up
+    // front when the stamp is owed: a snapshot that began as a read cannot be upgraded once another
+    // writer has committed.
+    let stamped = schema_version(conn)?;
+    let owed = stamped < SCHEMA_VERSION;
+    let tx = conn.transaction_with_behavior(if owed {
+        TransactionBehavior::Immediate
+    } else {
+        TransactionBehavior::Deferred
+    })?;
+    for table in TABLES {
+        tx.execute(table.create, [])?;
+    }
+    if owed {
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+    tx.commit()
 }
 
 /// Why a row could not be used, kept whole for the one line that reports it.
