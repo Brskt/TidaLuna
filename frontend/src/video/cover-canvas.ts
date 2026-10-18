@@ -28,9 +28,9 @@ const RECORD_LEN = 32;
 const COVER_EDGE = 640;
 
 /**
- * The playing item's still cover at `COVER_EDGE`, or null. It comes from TIDAL's media item and
- * lands in a CSS `url()`, which is why it is validated; only a trailing `/<w>x<h>.<ext>` is
- * rewritten.
+ * A still cover at `COVER_EDGE`, or null. It comes from TIDAL's media item or a legacy artwork's
+ * `poster` and lands in a CSS `url()`, which is why it is validated; only a trailing
+ * `/<w>x<h>.<ext>` is rewritten.
  */
 export const stillCoverUrl = (raw: unknown): string | null => {
 	if (typeof raw !== "string") return null;
@@ -188,9 +188,9 @@ let coverCache: { src: string; anim: CoverAnimation } | null = null;
 /**
  * TIDAL's artwork frame holds ONE in-flow artwork (`<img>` or `<video>`, `width:100%;
  * height:auto`) and takes its height from it; a second square would stack below. While we paint,
- * theirs is hidden by a rule, not an inline style: React replaces a failed `<video>` with an
- * `<img>`, and the rule matches whatever comes next. The rule's (0,1,1) beats their single class
- * without `!important`.
+ * theirs is hidden by a rule, not an inline style: React replaces the now-playing artwork's failed
+ * `<video>` with an `<img>`, and the rule matches whatever comes next. The rule's (0,1,1) beats
+ * their single class without `!important`.
  */
 const MARKER = "data-luna-cover";
 const STYLE_ID = "luna-cover-invariant";
@@ -220,11 +220,12 @@ const detachCover = (surface: HTMLElement, canvas: HTMLCanvasElement) => {
  */
 const releaseSurface = (surface: HTMLElement) => {
 	const held = (surface as any)._lunarCoverCanvas as HTMLCanvasElement | undefined;
+	(surface as any)._lunarCoverCanvas = undefined;
 	held?.remove();
 	abandonCoverRequest(surface);
-	(surface as any)._lunarCoverCanvas = undefined;
 	(surface as any)._lunarCoverSrc = undefined;
 	surface.removeAttribute(MARKER);
+	nowPlayingSurfaces.delete(surface);
 	forgetUnusedCover();
 };
 
@@ -254,49 +255,156 @@ const forgetUnusedCover = () => {
 };
 
 /**
- * The track now playing, as TIDAL announces it. `load()` fires only for a track WITH an animated
- * cover, and TIDAL re-renders rather than remounts the artwork: without this, the previous cover
- * would stay over the next track's frame. Keyed on the id, since TIDAL announces a track several
- * times per play. Only the now-playing frame is released, not an album header's. The announcement
- * arms a token the next attach consumes, and TIDAL announces from `componentDidUpdate` (layout
- * phase), before the cover's `load()` effect: that attach is the now-playing one. The token also
- * carries the still.
+ * The track now playing, as TIDAL announces it, for its still only. A frame's lifetime is never
+ * the announce's: it can come before or after the artwork changes, and a next track from the same
+ * album changes no artwork at all. The surface itself says when to let go (`evaluateSurface`).
+ *
+ * The now-playing artwork shows the same item the announce describes. Its frames take the new
+ * still whenever it changes, in whichever order the two arrive. A new id resets the still; a
+ * repeat of the same id (TIDAL announces a track several times per play) only fills one in. A new
+ * id with no still empties the background, and `reconcileMarker` then decides what the frame is
+ * worth without it.
  */
 let currentTrack: string | null = null;
-let announcedTrack = false;
-let nowPlayingSurface: HTMLElement | null = null;
+const nowPlayingSurfaces = new Set<HTMLElement>();
 export const setCurrentTrack = (item: {
 	id?: unknown;
 	productId?: unknown;
 	imageUrl?: unknown;
 }) => {
 	const id = String(item?.productId ?? item?.id ?? "");
-	if (id === currentTrack) return;
+	const still = stillCoverUrl(item?.imageUrl);
+	if (id === currentTrack && (still === null || still === currentStill)) return;
 	currentTrack = id;
-	currentStill = stillCoverUrl(item?.imageUrl);
-	announcedTrack = true;
+	currentStill = still;
 
-	// The previous track's frame goes back to TIDAL now, whether or not this track has a cover
-	// of its own.
-	if (nowPlayingSurface) releaseSurface(nowPlayingSurface);
-	nowPlayingSurface = null;
+	for (const surface of nowPlayingSurfaces) {
+		const canvas = (surface as any)._lunarCoverCanvas as HTMLCanvasElement | undefined;
+		if (!canvas) continue;
+		layStill(canvas, currentStill);
+		reconcileMarker(surface);
+	}
 };
 
 /**
- * The still, if this frame is the playing track's; null otherwise (a wrong album's sleeve is worse
- * than none, and still and animated URLs share no id). The first attach after an announcement
- * claims the frame; later attempts compare with `nowPlayingSurface`, since a `giveUp` retry finds
- * the token spent.
+ * The marker's one writer once a canvas is in place: it promises that our canvas shows something
+ * in place of TIDAL's artwork, frames or a still, and is derived from that every time either
+ * changes. A canvas with neither is not an artwork: while its decode is in flight (the abort
+ * controller is held) it stays unmarked, as at attach, and a settled one (refused, failed) has
+ * nothing left to wait for and hands the frame back.
  */
-const claimStillCover = (surface: HTMLElement): string | null => {
-	if (announcedTrack) {
-		announcedTrack = false;
-		nowPlayingSurface = surface;
-		return currentStill;
+const reconcileMarker = (surface: HTMLElement) => {
+	const canvas = (surface as any)._lunarCoverCanvas as HTMLCanvasElement | undefined;
+	if (!canvas) return;
+	if ((canvas as any)._lunarPainting || canvas.style.backgroundImage) {
+		surface.setAttribute(MARKER, "");
+	} else if ((surface as any)._lunarCoverAbort) {
+		surface.removeAttribute(MARKER);
+	} else {
+		releaseSurface(surface);
 	}
-	// Already identified, and identity is per track: `setCurrentTrack` drops this the moment the
-	// playing track changes, so a later track's frame can never inherit an earlier one's still.
-	return surface === nowPlayingSurface ? currentStill : null;
+};
+
+/**
+ * The still goes UNDERNEATH, as a CSS background: the WebGL context rules out drawing an image
+ * into the canvas, and the first decoded frame covers it with no swap. `cover` and `0 0` mirror
+ * `_artworkImage_`'s `object-fit: cover; object-position: 0 0`.
+ */
+const layStill = (canvas: HTMLCanvasElement, still: string | null) => {
+	canvas.style.backgroundImage = still ? `url("${still}")` : "";
+	canvas.style.backgroundSize = still ? "cover" : "";
+	canvas.style.backgroundPosition = still ? "0 0" : "";
+};
+
+/**
+ * The still that belongs under this frame, told by the element rather than by attach order. TIDAL
+ * paints animated covers through two components: the legacy one (album header, enlarge modal)
+ * carries its own album's still as `poster`, and the now-playing artwork has none, its still being
+ * the playing track's. Only the latter follows the announce.
+ */
+const stillFor = (el: HTMLMediaElement, surface: HTMLElement): string | null => {
+	const poster = el.getAttribute("poster");
+	if (poster) return stillCoverUrl(poster);
+	nowPlayingSurfaces.add(surface);
+	return currentStill;
+};
+
+/**
+ * A resource selection on `el`, as its `loadstart` reports one: attached unless this very
+ * selection already was. Every selection fires it, whatever started it: `load()`, a `src`, or a
+ * `<source>` inserted into a fresh `<video>`, which is how TIDAL remounts the now-playing cover
+ * after an error, with no `load()` to hook.
+ */
+export const coverSelected = (el: HTMLMediaElement) => {
+	const src = el.currentSrc;
+	if (el.localName !== "video" || !isCoverUrl(src)) return;
+	if ((el as any)._lunarCoverAttached === src) return;
+	attachCoverCanvas(el, src);
+};
+
+/**
+ * A held frame's lifetime, read off the surface whenever it changes: the announce and `load()`
+ * come in either order or not at all, while every change of artwork is a change here. What the
+ * surface shows decides, never the order of the records:
+ * - a `<video>` keeps the frame, and attaches its cover if this element was never handed over,
+ *   in the commit's own microtask rather than at its `loadstart`, one task later;
+ * - TIDAL's error fallback keeps it, being our failed `<video>`'s stand-in: always a `data:`
+ *   image with no `srcset` (`imageFallback`), which a real still never is;
+ * - any other `<img>` is a still of TIDAL's own, and takes the frame back;
+ * - no artwork at all takes it back too: a swap of artwork is one commit; an empty surface is
+ *   TIDAL showing nothing (a cover-less track, an entity not loaded yet), never a step between two.
+ */
+const evaluateSurface = (surface: HTMLElement) => {
+	if (!(surface as any)._lunarCoverCanvas) return;
+	const artwork = Array.from(surface.children).find((c) => c.localName === "video" || c.localName === "img");
+	if (!artwork) {
+		releaseSurface(surface);
+		return;
+	}
+	if (artwork.localName === "video") {
+		const media = artwork as HTMLMediaElement;
+		const next = media.querySelector("source")?.src || media.src;
+		if (isCoverUrl(next) && (media as any)._lunarCoverAttached !== next) attachCoverCanvas(media, next);
+		return;
+	}
+	const src = artwork.getAttribute("src") ?? "";
+	const fallback = (src === "" || src.startsWith("data:")) && !artwork.hasAttribute("srcset");
+	if (!fallback) releaseSurface(surface);
+};
+
+/**
+ * Watch a surface's artwork once it holds a canvas, through an observer scoped to it (the rest
+ * of the page costs nothing). Its own removal is invisible from inside: `CoverTether` reports it.
+ */
+const watchedSurfaces = new WeakSet<HTMLElement>();
+const watchSurface = (surface: HTMLElement) => {
+	if (watchedSurfaces.has(surface)) return;
+	watchedSurfaces.add(surface);
+	new MutationObserver(() => evaluateSurface(surface)).observe(surface, {
+		childList: true,
+		subtree: true,
+		attributes: true,
+		attributeFilter: ["src", "srcset"],
+	});
+};
+
+/**
+ * Carried inside each held canvas (fallback content, never rendered), to learn that the canvas left
+ * the document. The DOM's removal enqueues `disconnectedCallback` for every descendant of the
+ * removed node and runs it before the removing call returns, whatever went (the canvas, its
+ * surface, any ancestor) and with no frame to wait for. A hidden window that renders nothing
+ * still aborts a decode nobody will paint.
+ */
+const TETHER = "luna-cover-tether";
+class CoverTether extends HTMLElement {
+	lost?: () => void;
+	disconnectedCallback() {
+		// A move runs its reactions once it is back in: still connected, nothing lost.
+		if (!this.isConnected) this.lost?.();
+	}
+}
+const ensureTether = () => {
+	if (!customElements.get(TETHER)) customElements.define(TETHER, CoverTether);
 };
 
 /**
@@ -313,6 +421,9 @@ export const attachCoverCanvas = async (el: HTMLMediaElement, src: string) => {
 		console.log("[cover] not painting:", "the cover element had no parent to paint into");
 		return;
 	}
+	// The selection this element made is now ours, whichever signal brought it: `load()` and its
+	// `loadstart` describe the same one, and our own canvas going in must not attach it again.
+	(el as any)._lunarCoverAttached = src;
 
 	// Skip only when this surface is ALREADY painting this cover. Matching on the src alone would
 	// make the first attempt the only one, and that one cannot attach (it is still decoding while
@@ -326,17 +437,16 @@ export const attachCoverCanvas = async (el: HTMLMediaElement, src: string) => {
 	// never outlives a change of src. A superseded call has its request aborted, and one that
 	// resumes anyway no longer owns the slot: each of its exits leaves ours alone.
 	const previous = (surface as any)._lunarCoverCanvas as HTMLCanvasElement | undefined;
+	(surface as any)._lunarCoverCanvas = undefined;
 	previous?.remove();
 	abandonCoverRequest(surface);
-	(surface as any)._lunarCoverCanvas = undefined;
 	// Marker off until we have something to show: the still at once, else the first decoded frame
 	// (`takeOverFrame`).
 	surface.removeAttribute(MARKER);
 	ensureInvariantStyle();
 
-	// Claimed once, here: whether this frame is the playing track's, and therefore whether the
-	// still cover we hold belongs under it. Every use below reads this local, never the module's.
-	const still = claimStillCover(surface);
+	// Decided once, here: every use below reads this local, never the module's.
+	const still = stillFor(el, surface);
 
 	// Attached now, empty, before any fetch: TIDAL drops its artwork before a decode returns, and
 	// the frame, sized by its artwork, would collapse to a strip. An untouched canvas is
@@ -358,26 +468,26 @@ export const attachCoverCanvas = async (el: HTMLMediaElement, src: string) => {
 	canvas.width = COVER_EDGE;
 	canvas.height = COVER_EDGE;
 
-	// The still goes UNDERNEATH, as a CSS background: the WebGL context rules out drawing an image
-	// into the canvas, and the first decoded frame covers it with no swap. `cover` and `0 0` mirror
-	// `_artworkImage_`'s `object-fit: cover; object-position: 0 0`.
-	if (still) {
-		canvas.style.backgroundImage = `url("${still}")`;
-		canvas.style.backgroundSize = "cover";
-		canvas.style.backgroundPosition = "0 0";
-	}
+	layStill(canvas, still);
 
 	// No geometry of ours, and child order does not matter: their gloss overlay is `position:absolute;
 	// z-index:1`, above in-flow content either way.
 	surface.appendChild(canvas);
 	(surface as any)._lunarCoverCanvas = canvas;
+	ensureTether();
+	const tether = document.createElement(TETHER) as CoverTether;
+	tether.lost = () => {
+		if ((surface as any)._lunarCoverCanvas === canvas) releaseSurface(surface);
+	};
+	canvas.appendChild(tether);
+	watchSurface(surface);
 
 	// TIDAL's artwork steps aside once ours shows something at least as good: now with a still,
 	// else at the first decoded frame. Ownership is re-read here, where hiding happens: a released
 	// call that still hid the artwork would leave the square blank until the next animated cover.
 	const takeOverFrame = () => {
 		if ((surface as any)._lunarCoverCanvas !== canvas) return;
-		surface.setAttribute(MARKER, "");
+		reconcileMarker(surface);
 	};
 	if (still) takeOverFrame();
 
@@ -385,10 +495,13 @@ export const attachCoverCanvas = async (el: HTMLMediaElement, src: string) => {
 	// where the artwork belongs: with our canvas gone the frame falls back to whatever TIDAL makes
 	// of it.
 	const giveUp = (why: string) => {
-		// With a still, the canvas STAYS and TIDAL's artwork stays hidden: what TIDAL holds now is
-		// `imageFallback(...)`, the near-blank placeholder `artwork_filter` exists to avoid, and every
-		// path here (no codec yet, refused body, network, no WebGL) is better served by the still.
-		if (still && canvas.isConnected) {
+		// With a still, the canvas STAYS and TIDAL's artwork stays hidden. On the now-playing frame
+		// TIDAL holds `imageFallback(...)`, the near-blank placeholder `artwork_filter` exists to
+		// avoid; on a legacy frame its `<video>` shows its poster, the same still at a smaller
+		// size. Every path here (no codec yet, refused body, network, no WebGL) is better served by
+		// the still. Read off the canvas, not the attach's own: a now-playing frame takes the
+		// announce's still whenever it arrives.
+		if (canvas.style.backgroundImage && canvas.isConnected) {
 			console.log("[cover] showing the still cover instead:", why);
 			// The src is forgotten anyway, letting a later attempt at this same cover run instead of
 			// being skipped as "already painting": the codec may have finished installing in between.
@@ -470,8 +583,8 @@ export const attachCoverCanvas = async (el: HTMLMediaElement, src: string) => {
 		}
 	}
 
-	// Staleness is ownership: a later call replaces this slot at entry, and a track change empties it
-	// through `releaseSurface`. A canvas no longer in the slot has lost its frame.
+	// Staleness is ownership: a later call replaces this slot at entry, and a release empties it. A
+	// canvas no longer in the slot has lost its frame.
 	if ((surface as any)._lunarCoverCanvas !== canvas) {
 		detachCover(surface, canvas);
 		return;
@@ -528,6 +641,7 @@ export const attachCoverCanvas = async (el: HTMLMediaElement, src: string) => {
 
 		// Unless the still cover already did, the frame changes hands here: everything that could
 		// fail is behind us.
+		(canvas as any)._lunarPainting = true;
 		takeOverFrame();
 
 		const chromaWidth = Math.ceil(anim.width / 2);
