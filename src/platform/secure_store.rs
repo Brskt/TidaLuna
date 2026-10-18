@@ -210,6 +210,8 @@ fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
 
     let path = data_dir.join("auth_tokens.dpapi");
     let encrypted = match std::fs::read(&path) {
+        // What `durable_fs::tombstone` leaves of an erase whose unlink a power cut took back.
+        Ok(v) if v.is_empty() => return Ok(None),
         Ok(v) => v,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(StoreError::Backend(e.to_string())),
@@ -243,11 +245,8 @@ fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
 
 #[cfg(target_os = "windows")]
 fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
-    match std::fs::remove_file(data_dir.join("auth_tokens.dpapi")) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(StoreError::Backend(e.to_string())),
-    }
+    crate::platform::durable_fs::remove_file(&data_dir.join("auth_tokens.dpapi"))
+        .map_err(|e| StoreError::Backend(e.to_string()))
 }
 
 #[cfg(target_os = "macos")]
@@ -307,6 +306,8 @@ fn save_platform(data_dir: &Path, plaintext: &[u8]) -> Result<(), StoreError> {
 #[cfg(target_os = "linux")]
 fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
     match std::fs::read(data_dir.join("auth_tokens.json")) {
+        // What `durable_fs::tombstone` leaves of an erase whose unlink a power cut took back.
+        Ok(v) if v.is_empty() => Ok(None),
         Ok(v) => Ok(Some(v)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(StoreError::Backend(e.to_string())),
@@ -315,11 +316,8 @@ fn load_platform(data_dir: &Path) -> Result<Option<Vec<u8>>, StoreError> {
 
 #[cfg(target_os = "linux")]
 fn delete_platform(data_dir: &Path) -> Result<(), StoreError> {
-    match std::fs::remove_file(data_dir.join("auth_tokens.json")) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(StoreError::Backend(e.to_string())),
-    }
+    crate::platform::durable_fs::remove_file(&data_dir.join("auth_tokens.json"))
+        .map_err(|e| StoreError::Backend(e.to_string()))
 }
 
 #[cfg(test)]

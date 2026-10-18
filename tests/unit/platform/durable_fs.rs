@@ -3,6 +3,33 @@
 use super::*;
 
 #[test]
+fn removing_a_file_in_a_directory_that_is_not_there_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    remove_file(&dir.path().join("no-such-dir").join("absent")).unwrap();
+}
+
+#[test]
+fn a_tombstone_leaves_the_file_empty_and_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("token");
+    std::fs::write(&file, b"secret").unwrap();
+
+    tombstone(&file).unwrap();
+
+    assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+}
+
+#[test]
+fn a_tombstone_for_a_file_that_is_not_there_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("absent");
+
+    tombstone(&file).unwrap();
+
+    assert!(!file.exists());
+}
+
+#[test]
 fn persisting_replaces_the_destination() {
     use std::io::Write;
 
@@ -29,6 +56,33 @@ fn a_bare_file_name_does_not_fail_to_flush() {
 mod syscalls {
     use super::*;
     use crate::platform::syscall_trace::{Event, traced};
+
+    #[test]
+    fn removal_empties_then_unlinks_then_flushes_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, b"secret").unwrap();
+
+        let (removed, events) = traced(|| remove_file(&file));
+
+        removed.unwrap();
+        assert!(!file.exists());
+        assert_eq!(
+            events,
+            vec![
+                Event::Fsync {
+                    path: canonical.join("token"),
+                    directory: false
+                },
+                Event::Unlink(file),
+                Event::Fsync {
+                    path: canonical,
+                    directory: true
+                },
+            ]
+        );
+    }
 
     #[test]
     fn persisting_flushes_only_the_directory() {

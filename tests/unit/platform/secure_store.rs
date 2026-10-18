@@ -69,6 +69,39 @@ mod file_durability {
     use super::*;
     use crate::platform::syscall_trace::{Event, traced};
 
+    const FILE: &str = "auth_tokens.json";
+
+    fn stored_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        save_platform(dir.path(), b"{\"stored\":true}").unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        (dir, canonical)
+    }
+
+    #[test]
+    fn erasing_the_token_file_empties_it_then_unlinks_it_then_flushes_the_directory() {
+        let (dir, canonical) = stored_dir();
+
+        let (erased, events) = traced(|| delete_platform(dir.path()));
+
+        erased.unwrap();
+        assert!(!canonical.join(FILE).exists());
+        assert_eq!(
+            events,
+            vec![
+                Event::Fsync {
+                    path: canonical.join(FILE),
+                    directory: false
+                },
+                Event::Unlink(dir.path().join(FILE)),
+                Event::Fsync {
+                    path: canonical.clone(),
+                    directory: true
+                },
+            ]
+        );
+    }
+
     #[test]
     fn saving_the_token_file_flushes_the_directory_after_the_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -94,5 +127,27 @@ mod file_durability {
                 directory: true
             }
         );
+    }
+
+    #[test]
+    fn a_token_file_left_empty_by_an_erase_whose_unlink_was_lost_loads_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), b"").unwrap();
+
+        assert!(matches!(load(dir.path()), Ok(None)));
+    }
+
+    #[test]
+    fn a_token_file_with_a_stored_state_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StoredTokenState {
+            current: generation("real-refresh-token", "luna_bbbb"),
+            previous: None,
+            previous_valid_until: None,
+        };
+        save_platform(dir.path(), &serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let loaded = load(dir.path()).unwrap().expect("a stored state");
+        assert_eq!(loaded.current.refresh_token, "real-refresh-token");
     }
 }
