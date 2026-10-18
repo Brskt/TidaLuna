@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { SentIpc } from "./setup";
 
 import { sdkDashAnswer } from "./helpers/sdk-answer";
-import { onSdkLoad, onSdkReload, proxyEnded, proxyLoading, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
+import { onSdkLoad, onSdkReload, proxyEnded, proxyIdle, proxyLoading, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
 const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
@@ -179,8 +179,8 @@ test("the first length after a hand-over that is not the newcomer's does not sta
 	expect(sent.slice(from).map((s) => s.channel)).toEqual(["player.play"]);
 });
 
-test("nothing is known of Rust's track once the mirror is reset", async () => {
-	for (const forget of [() => proxyReset()]) {
+test("nothing is known of Rust's track once the mirror is reset or the track is not this page's", async () => {
+	for (const forget of [() => proxyReset(), () => proxyIdle()]) {
 		proxyReset();
 		const el = await bound("9020", "9021", 5);
 		forget();

@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { SentIpc } from "./setup";
 
-import { onHandoff, onSdkLoad, proxyEnded, proxyFail, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
+import { onHandoff, onSdkLoad, onSdkReload, proxyEnded, proxyFail, proxyIdle, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
 const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
@@ -23,6 +23,7 @@ beforeEach(() => {
 	handoffs = 0;
 	onHandoff(() => void handoffs++);
 	onSdkLoad(() => ({ kind: "reload" }));
+	onSdkReload(async () => {});
 });
 
 afterEach(() => {
@@ -30,6 +31,7 @@ afterEach(() => {
 	setSelfLoad(false);
 	onHandoff(() => {});
 	onSdkLoad(() => ({ kind: "other" }));
+	onSdkReload(async () => {});
 });
 
 // The playing element and the preloaded one, past their readiness bursts.
@@ -277,4 +279,31 @@ test("an SDK-native track's reports reach no element: a preloaded element is not
 
 	expect([preloaded.paused, preloaded.currentTime, playing.currentTime]).toEqual([true, 0, 0]);
 	expect(timeupdates).toBe(0);
+});
+
+test("a track that is not self-loaded ends: the mirror reads stopped and keeps its element", async () => {
+	const { playing } = await pair();
+	proxySetDuration(200);
+	proxySetPlaying(true);
+	proxySetTime(199);
+	proxyIdle();
+
+	expect([playing.paused, playing.currentTime, playing.duration]).toEqual([true, 0, 0]);
+	// Shaka may hold the next self-loaded track in it: that track's own end still has an element to say it on.
+	let ended = 0;
+	playing.addEventListener("ended", () => ended++);
+	expect(proxyEnded()).toBe(true);
+	expect(ended).toBe(1);
+});
+
+test("a track that is not self-loaded ends: Rust no longer has the settled track, and no manifest is answered", async () => {
+	const { playing } = await pair();
+	proxySetDuration(200);
+	proxyIdle();
+	playing.load();
+	const seen = eventsOf(playing);
+	playing.src = dash("after the native track");
+	await flush();
+
+	expect(seen).toEqual(["loadedmetadata", "canplaythrough"]);
 });

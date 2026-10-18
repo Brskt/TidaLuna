@@ -34,10 +34,10 @@ fn reads_the_string_id_plugins_send() {
 }
 
 #[test]
-fn reads_the_product_id_the_dash_auto_advance_sends() {
-    // `frontend/src/index.ts` announces the next DASH track as `{ productId, type }` with
-    // no `id` at all. Missing it left every such frame unidentified, and an unidentified
-    // frame can never match: the length was withheld for the whole track.
+fn reads_the_product_id_of_a_frame_without_an_id() {
+    // The frontend takes `productId` alone as a track's identity. Missing it here left such a
+    // frame unidentified, and an unidentified frame can never match: the length was withheld
+    // for the whole track.
     let meta = parse_track_metadata(&json!({ "productId": 88264189, "type": "track" }));
     assert_eq!(meta.id.as_deref(), Some("88264189"));
 }

@@ -406,6 +406,8 @@ export function proxyEnded(): boolean {
 	// Armed before the event: TIDAL's reaction (the next element's prefill, a swap) can come within it.
 	handoff();
 	_proxyElement.dispatchEvent(new Event("ended"));
+	_proxyTime = 0;
+	_proxyDuration = 0;
 	return true;
 }
 
@@ -426,6 +428,20 @@ export function proxyFail() {
 // while the verdict stands.
 export function proxyRetry() {
 	_failedSrc = null;
+}
+
+// A track that is not this page's self-load ended (an SDK-native one): the mirror reads stopped at the
+// start, and keeps its element. Shaka may already hold the next self-loaded track in its other element,
+// and the hand-over from the native player plays nothing on it (Shaka's `play()` returns early on an
+// instance that never loaded). No `src` or `play()` binds it again before that track ends.
+export function proxyIdle() {
+	_handover = false;
+	_settled = false;
+	_rustProduct = undefined;
+	_rustDuration = 0;
+	_proxyPlaying = false;
+	_proxyTime = 0;
+	_proxyDuration = 0;
 }
 
 export function proxyReset() {

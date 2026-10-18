@@ -15,7 +15,7 @@ import { sdkPlayer, startSdkPlayer } from "./sdk-player";
 import type { LoadRefusal, TrackListPayload } from "./controllers/player";
 import { followCastQueue } from "./connect/middleware";
 import { updatePlaybackState } from "./controllers/mediasession";
-import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
+import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyIdle, proxyFail, proxyEnded, isSelfLoad } from "./audio-proxy";
 import { askRefusedAgain, playOnRefusal, refusalDelivered, refusalStands, refusePlayback } from "./refuse-playback";
 import { installSdkFetchObserver } from "./sdk-playbackinfo";
 import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
@@ -159,6 +159,8 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
     const handle = (event: any): void => {
         if (!event || typeof event !== "object") return;
         const type = event.t;
+        // The SDK's native player has heard this event already (see `completed` below).
+        let toNative = false;
         if (type === "mediaformat") {
             (window as any).__LUNAR_MEDIA_FORMAT__ = event.v;
             for (const r of _mediaFormatResolvers) r(event.v);
@@ -200,28 +202,24 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             (window as any).__TL_PLAYING__ = playing;
             updatePlaybackState(playing);
             if (event.v === "completed") {
-                proxyReset();
                 // `cast`: a TIDAL Connect controller owns the player, so the track that ended
                 // is one this queue never chose, and the controller has its next already.
                 // `_selfLoad` cannot say so: it names the last load THIS page issued.
                 if (isSelfLoad() && !event.cast) {
-                    // Self-loaded tracks bypass NativePlayer - manually advance queue.
-                    const { store } = require("../plugins/lib/src/redux/store");
-                    const { playQueue: q } = store.getState();
-                    const nextId = q.elements[q.currentIndex + 1]?.mediaItemId;
-                    if (nextId) {
-                        setTimeout(() => {
-                            try {
-                                store.dispatch({ type: "playQueue/MOVE_NEXT" });
-                                window.nativeInterface.playback.setCurrentMediaItem({
-                                    productId: nextId,
-                                    type: "track",
-                                });
-                            } catch (e) {
-                                console.error("[luna] DASH auto-advance failed:", e);
-                            }
-                        }, 0);
-                    }
+                    // A self-loaded track ends in Rust; the element TIDAL plays never would. Say it
+                    // on that element, and TIDAL's own end-of-track path (the preloaded track's swap,
+                    // the queue's repeat modes, the autoplay mix after the last one) runs as for any
+                    // track.
+                    // The SDK's native player hears it first, while it is not the active player: the
+                    // `ended` below can make it one (TIDAL's switch to a track it preloaded there), and
+                    // an active native player takes a `completed` for its own and transitions a second time.
+                    bridge.trigger("mediastate", event.v, event.seq);
+                    toNative = true;
+                    proxyEnded();
+                } else if (event.cast) {
+                    proxyReset();
+                } else {
+                    proxyIdle();
                 }
             } else {
                 proxySetPlaying(playing);
@@ -295,7 +293,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 );
             }
         } else if (mapped) {
-            bridge.trigger(mapped, event.v, event.seq);
+            if (!toNative) bridge.trigger(mapped, event.v, event.seq);
         } else if (PASSTHROUGH_EVENTS.has(type)) {
             // `productId` is this bridge's own: the SDK's native player reads `error` and `errorCode`.
             bridge.trigger(type, type === "mediaerror" ? { error: event.v?.error, errorCode: event.v?.errorCode } : event.v);

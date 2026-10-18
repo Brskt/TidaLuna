@@ -52,7 +52,7 @@ fn parse_media_item_artist(obj: &Value) -> String {
 }
 
 /// The track id off a metadata payload. `productId` is read first because that is the order the
-/// frontend resolves identity in, and the DASH auto-advance frame carries that key and no `id`.
+/// frontend resolves identity in (`item.productId ?? item.id`).
 fn parse_track_id(obj: &Value) -> Option<String> {
     ["productId", "id"]
         .into_iter()

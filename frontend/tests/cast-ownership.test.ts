@@ -42,7 +42,7 @@ mock.module("../plugins/lib/src/redux/store", storeStub);
 bootStubs();
 
 await import("../src/index");
-const { setSelfLoad } = await import("../src/audio-proxy");
+const { setSelfLoad, proxyReset } = await import("../src/audio-proxy");
 
 const push = (events: unknown[]) => (window as any).__TIDALUNAR_PLAYER_PUSH__(events);
 // The advance runs behind a `setTimeout(0)`.
@@ -88,12 +88,21 @@ test("a cast's track ending does not move this page's queue", async () => {
 	expect(announced).toEqual([]);
 });
 
-test("this page's own self-loaded track ending still advances its queue", async () => {
+test("this page's own self-loaded track ending is told to the element TIDAL plays, and moves nothing here", async () => {
+	// `ended` on that element is what runs TIDAL's own end-of-track path (the preloaded track's swap,
+	// the repeat modes, the autoplay mix after the last track); this page makes no queue move.
+	proxyReset();
+	const el = document.createElement("audio");
+	let ended = 0;
+	el.addEventListener("ended", () => ended++);
+	el.src = `data:application/dash+xml;base64,${btoa("own-end")}`;
 	push([{ t: "state", v: "completed", seq: 5 }]);
 	await settle();
 
-	expect(types()).toContain("playQueue/MOVE_NEXT");
-	expect(announced).toEqual([{ productId: 2, type: "track" }]);
+	expect(ended).toBe(1);
+	expect(types()).not.toContain("playQueue/MOVE_NEXT");
+	// TIDAL announces the next item itself, in full, whichever way it moves on.
+	expect(announced).toEqual([]);
 });
 
 test("a cast's track ending still reaches the player bar", async () => {
