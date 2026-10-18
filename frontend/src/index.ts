@@ -86,7 +86,9 @@ const PASSTHROUGH_EVENTS = new Set([
 // Names Rust emits that this bridge drops on purpose. Listing them is what lets the arm at the
 // end of the dispatch treat every other unknown name as drift rather than as noise.
 const IGNORED_EVENTS = new Set(["volume"]);
-let _lastTimeDispatch = 0;
+// Monotonic, like the stamp it is compared with: a wall clock stepped back would hold the
+// throttle shut for the whole step. -Infinity because `performance.now()` is near 0 at start.
+let _lastTimeDispatch = -Infinity;
 let _forceTimeDispatch = false;
 // Let the load delegate (player.ts) bypass the 250ms time throttle for the
 // first report of a fresh load: the bar snaps to the new track's start
@@ -154,7 +156,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
         }
         if (type === "time") {
             proxySetTime(event.v);
-            const now = Date.now();
+            const now = performance.now();
             if (_forceTimeDispatch || now - _lastTimeDispatch >= 250) {
                 _forceTimeDispatch = false;
                 _lastTimeDispatch = now;
@@ -310,9 +312,9 @@ console.log("Native Interface exposed (sync)");
 // Fetch proxy, XHR patch, and token capture live in early_runtime.js (on_context_created).
 
 const init = async () => {
-    const now = Date.now();
+    const now = performance.now();
     initWindowControls();
-    console.log("Native Interface initialized in", Date.now() - now, "ms");
+    console.log("Native Interface initialized in", performance.now() - now, "ms");
 
     if (isLoginCallback()) {
         // Bundle runs on /login/auth but TIDAL's React app isn't mounted yet.

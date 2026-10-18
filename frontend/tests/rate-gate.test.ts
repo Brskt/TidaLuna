@@ -14,13 +14,13 @@ import { RateGate } from "../plugins/lib/src/helpers/RateGate";
 
 test("concurrent callers come out spaced, not in a burst", async () => {
 	const gate = new RateGate(100);
-	const started = Date.now();
+	const started = performance.now();
 
 	const at: number[] = [];
 	await Promise.all(
 		Array.from({ length: 5 }, async () => {
 			await gate.pass();
-			at.push(Date.now() - started);
+			at.push(performance.now() - started);
 		}),
 	);
 
@@ -65,11 +65,30 @@ test("an idle gate does not bank its unused slots", async () => {
 	await gate.pass();
 	await new Promise((resolve) => setTimeout(resolve, 60));
 
-	const started = Date.now();
+	const started = performance.now();
 	await gate.pass();
 	await gate.pass();
 
 	// Two slots after an idle spell: the first is free, the second waits one interval, not
 	// six, which is what a banked bucket would have allowed.
-	expect(Date.now() - started).toBeLessThan(40);
+	expect(performance.now() - started).toBeLessThan(40);
+});
+
+test("a wall clock put back does not hold the gate shut", async () => {
+	// The clock of a VM is corrected by steps, backwards among them. A release stamped from it
+	// would leave the next caller waiting out the whole step: here three seconds for a gate that
+	// asked for ten milliseconds.
+	const realNow = Date.now;
+	const gate = new RateGate(100);
+	await gate.pass();
+	await new Promise((resolve) => setTimeout(resolve, 60));
+
+	Date.now = () => realNow() - 3000;
+	try {
+		const started = performance.now();
+		await gate.pass();
+		expect(performance.now() - started).toBeLessThan(500);
+	} finally {
+		Date.now = realNow;
+	}
 });

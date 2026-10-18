@@ -20,7 +20,10 @@
 export class RateGate {
 	private readonly spacingMs: number;
 	private readonly waiting: Array<() => void> = [];
-	private lastRelease = 0;
+	// A monotonic stamp: the wall clock steps back (a clock sync, a manual change), and a stamp taken
+	// from it would make the next caller wait out the whole step. `performance.now()` counts from
+	// the page's start, near 0 on a young page: "never released" is -Infinity, not 0.
+	private lastRelease = -Infinity;
 	private pumping = false;
 
 	constructor(perSecond: number) {
@@ -51,12 +54,12 @@ export class RateGate {
 				this.pumping = false;
 				return;
 			}
-			this.lastRelease = Date.now();
+			this.lastRelease = performance.now();
 			next();
 			setTimeout(step, this.spacingMs);
 		};
 		// Counted from the last release rather than from now. A caller arriving just after one
 		// went out waits the remainder of that interval instead of a whole fresh one.
-		setTimeout(step, Math.max(0, this.lastRelease + this.spacingMs - Date.now()));
+		setTimeout(step, Math.max(0, this.lastRelease + this.spacingMs - performance.now()));
 	}
 }
