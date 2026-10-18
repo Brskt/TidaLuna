@@ -8,6 +8,70 @@ type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static
 /// Operations the actor's channel holds before a sender waits.
 pub(crate) const QUEUE_CAPACITY: usize = 64;
 
+/// What every commit of a store syncs, unless a write asks for more: `NORMAL` leaves the last
+/// commits to the OS write-back, which is enough for a window position or a plugin's own key.
+pub(crate) const ROUTINE_SYNC: &str = "NORMAL";
+
+/// The connection syncs each commit to the disk while this lives, then goes back to
+/// `ROUTINE_SYNC`. Held across a write whose loss would undo a refusal: a setting that grants
+/// when absent, a revoked grant, a plugin the user turned off or removed. A store that skips it
+/// reads the refusal as consent again after a power cut. `fullfsync` makes the sync reach the
+/// platter on macOS, where `fsync` stops at the drive cache; other platforms ignore it.
+pub(crate) struct Stable<'c> {
+    conn: &'c Connection,
+    applied: bool,
+}
+
+impl<'c> Stable<'c> {
+    /// A connection inside a transaction refuses the change: the write that follows still happens,
+    /// and the log says it is not synced. Begin before the transaction, not inside it.
+    pub(crate) fn begin(conn: &'c Connection) -> Self {
+        if let Err(e) = conn.pragma_update(None, "synchronous", "FULL") {
+            crate::verr!(
+                "[DB]     {}: cannot sync the next write, a power cut may undo it: {e}",
+                store_of(conn)
+            );
+            return Self {
+                conn,
+                applied: false,
+            };
+        }
+        if let Err(e) = conn.pragma_update(None, "fullfsync", "ON") {
+            crate::verr!(
+                "[DB]     {}: cannot reach the platter with the next write: {e}",
+                store_of(conn)
+            );
+        }
+        Self {
+            conn,
+            applied: true,
+        }
+    }
+}
+
+impl Drop for Stable<'_> {
+    fn drop(&mut self) {
+        if !self.applied {
+            return;
+        }
+        for (pragma, value) in [("fullfsync", "OFF"), ("synchronous", ROUTINE_SYNC)] {
+            if let Err(e) = self.conn.pragma_update(None, pragma, value) {
+                crate::verr!(
+                    "[DB]     {}: cannot restore {pragma}: {e}",
+                    store_of(self.conn)
+                );
+            }
+        }
+    }
+}
+
+/// The file a connection writes, for a log line: the guard serves every store.
+fn store_of(conn: &Connection) -> String {
+    conn.path()
+        .and_then(|path| Path::new(path).file_name())
+        .map_or_else(|| "in-memory".into(), |n| n.to_string_lossy().into_owned())
+}
+
 /// Handle to the database actor thread.
 ///
 /// All SQLite operations go through [`call`](DbActor::call), which sends a

@@ -1,3 +1,4 @@
+use crate::db::{ROUTINE_SYNC, Stable};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::str::FromStr;
 
@@ -13,9 +14,22 @@ pub(crate) struct Setting<T: 'static> {
     unreadable: T,
 }
 
-impl<T> Setting<T> {
+impl<T: PartialEq> Setting<T> {
+    /// Whether a missing row reads as something the user could have refused: `absent` is not
+    /// what the setting reads as when it cannot be used.
+    fn grants_when_absent(&self) -> bool {
+        self.absent != self.unreadable
+    }
+
+    /// A setting that grants when absent is on the disk before this returns: a
+    /// refusal that only reached the OS cache would read as consent after a power cut.
     fn save(&self, conn: &Connection, value: &str) {
-        set(conn, self.key, value);
+        if self.grants_when_absent() {
+            let _stable = Stable::begin(conn);
+            set(conn, self.key, value);
+        } else {
+            set(conn, self.key, value);
+        }
     }
 }
 
@@ -153,7 +167,7 @@ impl WindowState {
 
 pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "synchronous", ROUTINE_SYNC)?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (
@@ -545,6 +559,10 @@ mod video_codec_settings_tests;
 #[cfg(test)]
 #[path = "../tests/unit/settings/output_level_settings_tests.rs"]
 mod output_level_settings_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/settings/durability_settings_tests.rs"]
+pub(crate) mod durability_settings_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/settings/store_damage_tests.rs"]
