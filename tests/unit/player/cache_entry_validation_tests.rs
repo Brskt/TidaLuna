@@ -81,13 +81,18 @@ fn an_adts_header_stands_alone_when_the_frame_runs_past_what_we_have() {
 
 #[test]
 fn adts_headers_with_reserved_fields_are_rejected() {
+    // Each is followed by a real successor: the fields alone have to refuse it.
     let mut reserved_rate = adts_header(32);
     reserved_rate[2] = 0x74; // sampling index 13
-    assert!(!looks_like_mpeg_frame(&padded(&reserved_rate, 64)));
+    let mut data = padded(&reserved_rate, 32);
+    data.extend_from_slice(&adts_header(32));
+    assert!(!looks_like_mpeg_frame(&data));
 
     let mut no_channels = adts_header(32);
     no_channels[3] = 0x00; // channel configuration 0
-    assert!(!looks_like_mpeg_frame(&padded(&no_channels, 64)));
+    let mut data = padded(&no_channels, 32);
+    data.extend_from_slice(&adts_header(32));
+    assert!(!looks_like_mpeg_frame(&data));
 }
 
 #[test]

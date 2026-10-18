@@ -320,15 +320,16 @@ fn refusing_an_oversized_entry_clears_a_row_left_from_an_earlier_read_failure() 
 fn a_store_is_never_undone_by_the_eviction_it_triggers() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cache = AudioCache::open_with_capacity(tmp.path(), 100).unwrap();
-    cache.record("old", "flac", 80).unwrap();
+    cache.record("old", "flac", 20).unwrap();
 
-    // 85 fits under the target (90) but pushes the total over the cap; this insert
-    // triggers an eviction pass that must not reach the row it just wrote.
+    // 95 is admitted under the cap but pushes the total over it. Evicting `old` still
+    // leaves the total over the target (90): the pass goes on, and must not reach the
+    // row this insert just wrote.
     assert_eq!(
-        cache.record("fresh", "flac", 85).unwrap(),
+        cache.record("fresh", "flac", 95).unwrap(),
         StoreOutcome::Kept
     );
     assert!(cache.lookup_path("fresh").is_some());
     assert!(cache.lookup_path("old").is_none());
-    assert_eq!(cache.total_size(), 85);
+    assert_eq!(cache.total_size(), 95);
 }
