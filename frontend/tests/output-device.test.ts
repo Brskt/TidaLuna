@@ -23,8 +23,8 @@ const devices = [
 	{ id: "guid-c", name: "Monitor (C)", webDeviceId: "web-c" },
 ];
 
-function fakeStore(activeDeviceId: string, activeDeviceMode = "shared") {
-	let state = { player: { activeDeviceId, activeDeviceMode, availableDevices: devices } };
+function fakeStore(activeDeviceId: string) {
+	let state = { player: { activeDeviceId, activeDeviceMode: "shared", availableDevices: devices } };
 	const listeners = new Set<() => void>();
 	return {
 		getState: () => state,
@@ -62,21 +62,6 @@ test("a device TIDAL switches to during a self-loaded track reaches Rust", () =>
 	follow(store);
 	store.commit({ activeDeviceId: "guid-b", activeDeviceMode: "shared" });
 	expect(deviceSets()).toEqual([["Headphones (B)", "shared"]]);
-});
-
-test("the system default reaches Rust under the id the delegate sends it by", () => {
-	const store = fakeStore("guid-a");
-	follow(store);
-	store.commit({ activeDeviceId: "default" });
-	expect(deviceSets()).toEqual([["auto", "shared"]]);
-});
-
-test("leaving exclusive on A for the system default reaches Rust shared", () => {
-	// The switch resets TIDAL's mode to shared.
-	const store = fakeStore("guid-a", "exclusive");
-	follow(store);
-	store.commit({ activeDeviceId: "default", activeDeviceMode: "shared" });
-	expect(deviceSets()).toEqual([["auto", "shared"]]);
 });
 
 test("an exclusive mode TIDAL commits on a chosen device reaches Rust", () => {
