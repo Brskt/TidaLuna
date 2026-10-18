@@ -284,30 +284,10 @@ test("a track the Connect receiver already plays is announced, never loaded agai
 	const controller = createPlaybackController();
 	controller.setCurrentMediaItem({ productId: "cast", type: "track" }, { alreadyPlaying: true });
 	await flush();
-	resolvePbi?.(aacStream);
-	await flush();
+	expect(pbiCalls).toEqual([]);
 
 	expect(sentSince(from)).toContain("player.metadata");
 	expect(sentSince(from)).not.toContain("player.load");
-	expect(sentSince(from)).not.toContain("player.load_dash");
-	expect(isSelfLoad()).toBe(false);
-});
-
-test("a DASH track the Connect receiver already plays is not loaded again either", async () => {
-	// The other self-load road. Under the cast Rust refuses `player.load_dash` as it does
-	// `player.load`, and the refusal raises the banner over the receiver's track.
-	setSelfLoad(false);
-	const from = sent.length;
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "cast-dash", type: "track" }, { alreadyPlaying: true });
-	await flush();
-	resolvePbi?.({
-		audioQuality: "HIGH",
-		manifestMimeType: "application/dash+xml",
-		manifest: { initUrl: "https://cdn/init.mp4", segmentUrls: ["https://cdn/1.mp4"], codec: "mp4a.40.2" },
-	});
-	await flush();
-
 	expect(sentSince(from)).not.toContain("player.load_dash");
 	expect(isSelfLoad()).toBe(false);
 });

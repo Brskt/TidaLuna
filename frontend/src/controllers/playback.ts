@@ -242,7 +242,7 @@ export const createPlaybackController = () => {
                                 const state = store.getState();
                                 const streamingQuality = state.settings?.quality?.streaming;
 
-                                if (!isVideo) {
+                                if (!isVideo && !alreadyPlaying) {
                                     pbi = await getPlaybackInfo(productId, streamingQuality);
                                     if (!pbi && streamingQuality) {
                                         const trackItem = state.content?.mediaItems?.[productId]?.item ?? state.content?.tracks?.[productId];
@@ -256,7 +256,7 @@ export const createPlaybackController = () => {
                                 actualQuality = pbi?.audioQuality;
 
                                 // Self-load non-FLAC BTS streams (TIDAL's boombox doesn't work in CEF)
-                                if (!alreadyPlaying && pbi?.manifestMimeType === "application/dash+xml" && pbi.manifest) {
+                                if (pbi?.manifestMimeType === "application/dash+xml" && pbi.manifest) {
                                     const manifest = pbi.manifest as any;
                                     if (manifest.initUrl && manifest.segmentUrls?.length > 0) {
                                         const codec = manifest.codec?.split(".")?.[0] ?? "aac";
@@ -270,7 +270,7 @@ export const createPlaybackController = () => {
                                         handed = true;
                                     }
                                 }
-                                if (!alreadyPlaying && pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
+                                if (pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
                                     const self = btsSelfLoad(pbi);
                                     if (self) {
                                         const { streamUrl, codec, encKey } = self;
