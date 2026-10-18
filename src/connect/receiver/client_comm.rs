@@ -1,7 +1,7 @@
 use crate::connect::receiver::session::Admission;
 use crate::connect::ws::server::WsServer;
 
-/// Simplified client communicator - just wraps WsServer for broadcast/unicast.
+/// Simplified client communicator: wraps WsServer for unicast and session multicast.
 /// All channel routing is done directly in the routing_loop (receiver/mod.rs).
 pub(crate) struct ClientCommunicator {
     server: WsServer,
@@ -65,10 +65,12 @@ impl ClientCommunicator {
         Self { server }
     }
 
-    pub async fn broadcast(&self, msg: &serde_json::Value) {
+    /// Written to the named sockets alone: what the receiver says of a session is not for the
+    /// peers that merely hold a connection.
+    pub async fn send_to_each(&self, socket_ids: &[u32], msg: &serde_json::Value) {
         let cmd = msg.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-        crate::vprintln!("[connect::ws] -> broadcast: {}", cmd);
-        self.server.broadcast(msg).await;
+        crate::vprintln!("[connect::ws] -> multicast({:?}): {}", socket_ids, cmd);
+        self.server.send_to_each(socket_ids, msg).await;
     }
 
     pub async fn send_to(&self, socket_id: u32, msg: &serde_json::Value) -> anyhow::Result<()> {

@@ -12,7 +12,6 @@ pub(crate) enum ReceiverSessionState {
 }
 
 pub(crate) enum SessionNotifyEvent {
-    Broadcast(serde_json::Value),
     Unicast {
         socket_id: u32,
         message: serde_json::Value,
@@ -89,6 +88,18 @@ impl ReceiverSession {
                 Admission::Member
             }
             _ => Admission::Outsider,
+        }
+    }
+
+    /// The sockets the live session started or resumed on, in id order. Empty unless one is live.
+    pub fn members(&self) -> Vec<u32> {
+        match &self.session {
+            Some(session) if self.state == ReceiverSessionState::Active => {
+                let mut sockets: Vec<u32> = session.connected_sockets.iter().copied().collect();
+                sockets.sort_unstable();
+                sockets
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -293,14 +304,27 @@ impl ReceiverSession {
             return;
         };
 
+        // The notice carries the session id, and resumes it only when `suspended` is true; it goes
+        // to the sockets holding the session and to the one that ended it, as TIDAL's receiver
+        // tells the socket in context. A peer that merely holds a connection never hears it.
+        let mut hearers = self.members();
+        if !hearers.contains(&socket_id) {
+            hearers.push(socket_id);
+        }
+
         // suspended = !stopCasting (if stopCasting=true -> clean end, not suspended)
         self.handle_session_ended(!stop_casting).await;
 
         let notify = session_ended_notice(&session_id, !stop_casting);
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Broadcast(notify))
-            .await;
+        for hearer in hearers {
+            let _ = self
+                .notify_tx
+                .send(SessionNotifyEvent::Unicast {
+                    socket_id: hearer,
+                    message: notify.clone(),
+                })
+                .await;
+        }
     }
 
     /// End the live session from this side, because the receiver is going away (switched off,

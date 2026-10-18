@@ -121,10 +121,10 @@ async fn sending_to_a_peer_that_stopped_reading_returns_and_leaves_the_map_free(
         sent.is_ok(),
         "send_to parked on a peer that stopped reading"
     );
-    let broadcast = tokio::time::timeout(ENQUEUE_BOUND, server.broadcast(&notice)).await;
+    let sent_each = tokio::time::timeout(ENQUEUE_BOUND, server.send_to_each(&[1], &notice)).await;
     assert!(
-        broadcast.is_ok(),
-        "broadcast parked on a peer that stopped reading"
+        sent_each.is_ok(),
+        "send_to_each parked on a peer that stopped reading"
     );
     let cleanup = tokio::time::timeout(Duration::from_secs(1), server.clients.write()).await;
     assert!(cleanup.is_ok(), "the read-loop cleanup cannot take the map");
@@ -376,7 +376,7 @@ async fn park_then_remove(removal: Removal) {
     };
     let big = serde_json::json!({ "command": "notifyQueueChanged", "pad": "x".repeat(1 << 20) });
     for _ in 0..4 {
-        server.broadcast(&big).await;
+        server.send_to_each(&[id], &big).await;
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
@@ -797,7 +797,7 @@ async fn an_evicted_client_is_heard_disconnected_once() {
     let big = serde_json::json!({ "command": "notifyQueueChanged", "pad": "x".repeat(1 << 16) });
     let t0 = std::time::Instant::now();
     while !server.clients.read().await.is_empty() && t0.elapsed() < Duration::from_secs(10) {
-        server.broadcast(&big).await;
+        server.send_to_each(&[id], &big).await;
     }
     assert!(server.clients.read().await.is_empty(), "never evicted");
     let end = tokio::time::timeout(Duration::from_secs(5), events.recv()).await;

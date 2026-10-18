@@ -6,7 +6,8 @@ use crate::connect::types::{
 };
 
 pub(crate) enum PlaybackNotifyEvent {
-    Broadcast(serde_json::Value),
+    /// For the live session's phones alone: the track it plays carries the stream's own URL and key.
+    ToSession(serde_json::Value),
     Internal(PlaybackInternalEvent),
 }
 
@@ -377,7 +378,7 @@ impl PlaybackController {
         if let Ok(msg) = serde_json::to_value(&notification) {
             let _ = self
                 .notify_tx
-                .send(PlaybackNotifyEvent::Broadcast(msg))
+                .send(PlaybackNotifyEvent::ToSession(msg))
                 .await;
         }
 
@@ -415,7 +416,7 @@ impl PlaybackController {
         {
             let _ = self
                 .notify_tx
-                .send(PlaybackNotifyEvent::Broadcast(msg))
+                .send(PlaybackNotifyEvent::ToSession(msg))
                 .await;
         }
     }
@@ -452,7 +453,7 @@ impl PlaybackController {
             if let Ok(msg) = serde_json::to_value(&notification) {
                 let _ = self
                     .notify_tx
-                    .send(PlaybackNotifyEvent::Broadcast(msg))
+                    .send(PlaybackNotifyEvent::ToSession(msg))
                     .await;
             }
         }

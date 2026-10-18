@@ -206,7 +206,7 @@ impl QueueManager {
             reason: Some(QueueChangeReason::RefreshRequested),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::Broadcast(msg)).await;
+            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
         }
     }
 
@@ -249,7 +249,7 @@ impl QueueManager {
             reason: Some(QueueChangeReason::RepeatModeChanged),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::Broadcast(msg)).await;
+            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
         }
     }
 
@@ -285,7 +285,7 @@ impl QueueManager {
             reason: Some(QueueChangeReason::ShuffleChanged),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::Broadcast(msg)).await;
+            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
         }
     }
 

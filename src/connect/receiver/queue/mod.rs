@@ -37,7 +37,8 @@ enum QueueState {
 }
 
 pub(crate) enum QueueNotifyEvent {
-    Broadcast(serde_json::Value),
+    /// For the live session's phones alone.
+    ToSession(serde_json::Value),
     SetMedia {
         media_info: MediaInfo,
         media_seq_no: u32,
@@ -850,7 +851,7 @@ impl QueueManager {
                 queue_info: qi.clone(),
             };
             if let Ok(msg) = serde_json::to_value(&notification) {
-                let _ = self.notify_tx.send(QueueNotifyEvent::Broadcast(msg)).await;
+                let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
             }
         }
     }
@@ -896,7 +897,7 @@ impl QueueManager {
             details: Some(serde_json::json!({ "description": message })),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::Broadcast(msg)).await;
+            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
         }
     }
 }

@@ -122,8 +122,9 @@ impl WsServer {
         Ok(())
     }
 
-    /// Send a message to all connected clients (multicast), dropping those that stopped reading.
-    pub async fn broadcast(&self, message: &serde_json::Value) {
+    /// Send a message to each of `socket_ids` still connected (multicast), dropping those that
+    /// stopped reading. No call reaches a client it does not name: the server has no send to all.
+    pub async fn send_to_each(&self, socket_ids: &[u32], message: &serde_json::Value) {
         let text = match serde_json::to_string(message) {
             Ok(t) => t,
             Err(_) => return,
@@ -131,10 +132,14 @@ impl WsServer {
         let msg = WsMessage::Text(text.into());
         let stalled: Vec<u32> = {
             let clients = self.clients.read().await;
-            clients
+            socket_ids
                 .iter()
-                .filter(|(_, client)| client.write_tx.try_send(msg.clone()).is_err())
-                .map(|(socket_id, _)| *socket_id)
+                .filter(|socket_id| {
+                    clients
+                        .get(socket_id)
+                        .is_some_and(|client| client.write_tx.try_send(msg.clone()).is_err())
+                })
+                .copied()
                 .collect()
         };
         if !stalled.is_empty() {
@@ -519,34 +524,60 @@ impl WsServer {
         let tasks = Arc::new(TaskGroup::new());
         let cancel = tasks.cancel_token();
         let listener = spawn_test_listener(&tasks, cancel.clone()).await;
-        let client_cancel = cancel.child_token();
-        let (wire_tx, wire_rx) = mpsc::channel::<WsMessage>(wire_capacity);
-        let (write_tx, write_rx) = mpsc::channel::<WsMessage>(CLIENT_QUEUE);
-        let write_task = tokio::spawn(writer::run(
-            tokio_util::sync::PollSender::new(wire_tx),
-            write_rx,
-            client_cancel.clone(),
-        ));
-        let heartbeat_tx = write_tx.clone();
-        let filler = write_tx.clone();
-        let _heartbeat_task = tokio::spawn(async move {
-            let _held = heartbeat_tx;
-            std::future::pending::<()>().await;
-        });
-        let closing = CancellationToken::new();
-        let clients = Arc::new(RwLock::new(HashMap::from([(
-            socket_id,
-            ClientHandle {
-                write_tx,
-                cancel: client_cancel.drop_guard(),
-                closing: closing.clone(),
-                _read_task: tokio::spawn(async move { closing.cancelled().await }),
-                _heartbeat_task: AbortOnDropHandle::new(_heartbeat_task),
-                write_task: AbortOnDropHandle::new(write_task),
-            },
-        )])));
+        let (client, wire_rx, filler) = test_client(&cancel, wire_capacity);
+        let clients = Arc::new(RwLock::new(HashMap::from([(socket_id, client)])));
         (Self { tasks, clients }, listener, wire_rx, filler)
     }
+
+    /// Another client (`socket_id`) on the server, its socket the returned wire.
+    pub(crate) async fn add_client_for_test(
+        &self,
+        socket_id: u32,
+        wire_capacity: usize,
+    ) -> mpsc::Receiver<WsMessage> {
+        let (client, wire_rx, filler) = test_client(&self.tasks.cancel_token(), wire_capacity);
+        // The handle and the heartbeat stand-in hold senders already: the writer keeps its queue
+        // open without this one.
+        drop(filler);
+        self.clients.write().await.insert(socket_id, client);
+        wire_rx
+    }
+}
+
+/// One client as `start` builds it, its socket the returned wire and the sender the filler.
+#[cfg(test)]
+fn test_client(
+    cancel: &CancellationToken,
+    wire_capacity: usize,
+) -> (
+    ClientHandle,
+    mpsc::Receiver<WsMessage>,
+    mpsc::Sender<WsMessage>,
+) {
+    let client_cancel = cancel.child_token();
+    let (wire_tx, wire_rx) = mpsc::channel::<WsMessage>(wire_capacity);
+    let (write_tx, write_rx) = mpsc::channel::<WsMessage>(CLIENT_QUEUE);
+    let write_task = tokio::spawn(writer::run(
+        tokio_util::sync::PollSender::new(wire_tx),
+        write_rx,
+        client_cancel.clone(),
+    ));
+    let heartbeat_tx = write_tx.clone();
+    let filler = write_tx.clone();
+    let _heartbeat_task = tokio::spawn(async move {
+        let _held = heartbeat_tx;
+        std::future::pending::<()>().await;
+    });
+    let closing = CancellationToken::new();
+    let client = ClientHandle {
+        write_tx,
+        cancel: client_cancel.drop_guard(),
+        closing: closing.clone(),
+        _read_task: tokio::spawn(async move { closing.cancelled().await }),
+        _heartbeat_task: AbortOnDropHandle::new(_heartbeat_task),
+        write_task: AbortOnDropHandle::new(write_task),
+    };
+    (client, wire_rx, filler)
 }
 
 /// Reads whether a test listener is closed. Rebinding its port instead races every socket the

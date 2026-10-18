@@ -234,8 +234,12 @@ async fn an_end_that_does_not_name_the_live_session_ends_nothing() {
             {
                 errors.push((socket_id, message["requestedCommand"].clone()));
             }
-            SessionNotifyEvent::Internal(SessionInternalEvent::SessionEnded(_))
-            | SessionNotifyEvent::Broadcast(_) => ends += 1,
+            SessionNotifyEvent::Internal(SessionInternalEvent::SessionEnded(_)) => ends += 1,
+            SessionNotifyEvent::Unicast { message, .. }
+                if message["command"] == "notifySessionEnded" =>
+            {
+                ends += 1;
+            }
             _ => {}
         }
     }
@@ -263,4 +267,59 @@ async fn an_end_that_names_the_live_session_ends_it_whoever_sends_it() {
         .await;
     assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Over]);
     assert_eq!(session.admission(7), Admission::Outsider);
+}
+
+/// The sockets a `notifySessionEnded` was written to, in order.
+fn end_notices(rx: &mut mpsc::Receiver<SessionNotifyEvent>) -> Vec<u32> {
+    let mut sockets = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let SessionNotifyEvent::Unicast { socket_id, message } = event
+            && message["command"] == "notifySessionEnded"
+        {
+            sockets.push(socket_id);
+        }
+    }
+    sockets
+}
+
+#[tokio::test]
+async fn an_end_is_told_to_the_sockets_of_the_session_and_to_the_one_that_ended_it() {
+    for stop_casting in [false, true] {
+        let (mut session, id, mut heard) = started_hearing(7).await;
+        session
+            .handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }))
+            .await;
+        session
+            .handle_command(
+                9,
+                "endSession",
+                &serde_json::json!({ "sessionId": id, "stopCasting": stop_casting }),
+            )
+            .await;
+        assert_eq!(
+            end_notices(&mut heard),
+            vec![7, 8, 9],
+            "stopCasting: {stop_casting}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_members_are_the_sockets_of_the_live_session_only() {
+    let (mut session, id, _heard) = started_hearing(7).await;
+    assert_eq!(session.members(), vec![7]);
+
+    session
+        .handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }))
+        .await;
+    assert_eq!(session.members(), vec![7, 8]);
+
+    session
+        .handle_command(
+            7,
+            "endSession",
+            &serde_json::json!({ "sessionId": id, "stopCasting": false }),
+        )
+        .await;
+    assert!(session.members().is_empty(), "a suspended session has none");
 }

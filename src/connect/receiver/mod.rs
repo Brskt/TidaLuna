@@ -228,9 +228,6 @@ async fn routing_loop(
             // Session notifications -> relay to WS + handle internals
             Some(event) = session_rx.recv() => {
                 match event {
-                    SessionNotifyEvent::Broadcast(ref msg) => {
-                        client_comm.broadcast(msg).await;
-                    }
                     SessionNotifyEvent::Unicast { socket_id, ref message } => {
                         let _ = client_comm.send_to(socket_id, message).await;
                     }
@@ -256,8 +253,8 @@ async fn routing_loop(
             // Playback notifications -> relay to WS + handle internals
             Some(event) = playback_rx.recv() => {
                 match event {
-                    PlaybackNotifyEvent::Broadcast(ref msg) => {
-                        client_comm.broadcast(msg).await;
+                    PlaybackNotifyEvent::ToSession(ref msg) => {
+                        client_comm.send_to_each(&session_mgr.members(), msg).await;
                     }
                     PlaybackNotifyEvent::Internal(ref internal) => {
                         match internal {
@@ -276,8 +273,8 @@ async fn routing_loop(
             // Queue notifications -> relay to WS + dispatch to playback
             Some(event) = queue_rx.recv() => {
                 match event {
-                    QueueNotifyEvent::Broadcast(ref msg) => {
-                        client_comm.broadcast(msg).await;
+                    QueueNotifyEvent::ToSession(ref msg) => {
+                        client_comm.send_to_each(&session_mgr.members(), msg).await;
                     }
                     QueueNotifyEvent::SetMedia { ref media_info, media_seq_no } => {
                         crate::vprintln!("[connect::receiver] SetMedia: {} (seq={})", media_info.item_id, media_seq_no);

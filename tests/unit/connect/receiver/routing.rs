@@ -529,3 +529,204 @@ async fn a_suspended_session_takes_its_phones_commands_again_once_resumed() {
         vec!["notifyRequestResult#9", "notifySessionResumed"]
     );
 }
+
+/// What a receiver of two connected sockets hands a test: both wires, and the senders that keep
+/// the receiver and its bridge alive.
+struct Pair {
+    receiver: ConnectReceiver,
+    events: mpsc::Sender<ClientEvent>,
+    phone: mpsc::Receiver<WsMessage>,
+    other: mpsc::Receiver<WsMessage>,
+    _bridge_tx: mpsc::Sender<BridgeEvent>,
+}
+
+/// Sockets 1 and 2, both connected, the test reading what each is written. Neither has a session.
+async fn two_sockets(http: reqwest::Client) -> Pair {
+    let (server, _listener, phone, filler) = WsServer::with_client_for_test(1, 64).await;
+    drop(filler);
+    let other = server.add_client_for_test(2, 64).await;
+    let (events, client_rx) = mpsc::channel::<ClientEvent>(128);
+    events.send(ClientEvent::Connected(1)).await.unwrap();
+    events.send(ClientEvent::Connected(2)).await.unwrap();
+    let (receiver, _bridge_tx) = ConnectReceiver::launch(server, client_rx, http, None).unwrap();
+    Pair {
+        receiver,
+        events,
+        phone,
+        other,
+        _bridge_tx,
+    }
+}
+
+impl Pair {
+    async fn say(&self, socket_id: u32, message: serde_json::Value) {
+        self.events
+            .send(ClientEvent::Message { socket_id, message })
+            .await
+            .unwrap();
+    }
+
+    /// Socket 1 starts a session and says what its id is.
+    async fn phone_starts_a_session(&mut self) -> serde_json::Value {
+        self.say(1, serde_json::json!({ "command": "startSession" }))
+            .await;
+        let started = heard_on(&mut self.phone, Duration::from_millis(500)).await;
+        started[0]["sessionId"].clone()
+    }
+}
+
+#[tokio::test]
+async fn a_suspension_is_told_to_the_phone_and_to_no_other_socket() {
+    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
+    let mut pair = two_sockets(reqwest::Client::new()).await;
+    let id = pair.phone_starts_a_session().await;
+
+    pair.say(
+        1,
+        serde_json::json!({ "command": "endSession", "sessionId": id, "stopCasting": false }),
+    )
+    .await;
+    let phone = heard_on(&mut pair.phone, Duration::from_millis(500)).await;
+    let outsider = heard_on(&mut pair.other, Duration::from_millis(500)).await;
+    pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
+
+    assert_eq!(
+        phone,
+        vec![serde_json::json!({
+            "command": "notifySessionEnded",
+            "sessionId": id,
+            "suspended": true,
+        })]
+    );
+    assert!(
+        outsider.is_empty(),
+        "a socket outside the session heard the id that resumes it: {outsider:?}"
+    );
+}
+
+/// The id a socket outside the session could have heard, or one it makes up: whichever it has.
+fn an_id_for(outsider: &[serde_json::Value]) -> serde_json::Value {
+    outsider
+        .iter()
+        .find(|m| m["command"] == "notifySessionEnded")
+        .map(|m| m["sessionId"].clone())
+        .unwrap_or_else(|| serde_json::json!("00000000-0000-4000-8000-000000000000"))
+}
+
+#[tokio::test]
+async fn an_outsider_cannot_take_over_the_session_a_phone_suspended() {
+    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
+    let stall = stall_server();
+    let mut pair = two_sockets(stalled_http(&stall)).await;
+    let id = pair.phone_starts_a_session().await;
+    pair.say(
+        1,
+        serde_json::json!({ "command": "endSession", "sessionId": id, "stopCasting": false }),
+    )
+    .await;
+    let overheard = heard_on(&mut pair.other, Duration::from_millis(500)).await;
+
+    pair.say(
+        2,
+        serde_json::json!({ "command": "resumeSession", "sessionId": an_id_for(&overheard) }),
+    )
+    .await;
+    pair.say(2, load_cloud_queue(stall.port, 8)).await;
+    let answered = heard_on(&mut pair.other, Duration::from_millis(500)).await;
+    let fetched = recv_within(&stall.accepted, Duration::from_millis(500)).await;
+    pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
+
+    assert!(
+        !answered
+            .iter()
+            .any(|m| m["command"] == "notifySessionResumed"),
+        "the outsider resumed the phone's session: {answered:?}"
+    );
+    assert!(
+        fetched.is_none(),
+        "the outsider drove the cast: its queue was fetched"
+    );
+}
+
+#[tokio::test]
+async fn the_phone_resumes_the_session_it_suspended() {
+    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
+    let mut pair = two_sockets(reqwest::Client::new()).await;
+    let id = pair.phone_starts_a_session().await;
+    pair.say(
+        1,
+        serde_json::json!({ "command": "endSession", "sessionId": id, "stopCasting": false }),
+    )
+    .await;
+    heard_on(&mut pair.phone, Duration::from_millis(500)).await;
+
+    pair.say(
+        1,
+        serde_json::json!({ "command": "resumeSession", "sessionId": id }),
+    )
+    .await;
+    let resumed = heard_on(&mut pair.phone, Duration::from_millis(500)).await;
+    pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
+
+    assert_eq!(
+        resumed,
+        vec![serde_json::json!({ "command": "notifySessionResumed", "sessionId": id })]
+    );
+}
+
+#[tokio::test]
+async fn what_the_session_says_of_its_queue_is_heard_by_its_phones_only() {
+    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
+    let mut pair = two_sockets(reqwest::Client::new()).await;
+    pair.phone_starts_a_session().await;
+
+    pair.say(
+        1,
+        serde_json::json!({ "command": "refreshQueue", "requestId": 8 }),
+    )
+    .await;
+    let mut phone: Vec<String> = heard_on(&mut pair.phone, Duration::from_millis(500))
+        .await
+        .iter()
+        .map(command_of)
+        .collect();
+    phone.sort();
+    let outsider = heard_on(&mut pair.other, Duration::from_millis(500)).await;
+    pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
+
+    assert_eq!(
+        phone,
+        vec!["notifyQueueItemsChanged", "notifyRequestResult#8"]
+    );
+    assert!(
+        outsider.is_empty(),
+        "a socket outside the session heard its queue: {outsider:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_phone_that_resumed_the_session_hears_it_too() {
+    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
+    let mut pair = two_sockets(reqwest::Client::new()).await;
+    let id = pair.phone_starts_a_session().await;
+    pair.say(
+        2,
+        serde_json::json!({ "command": "resumeSession", "sessionId": id }),
+    )
+    .await;
+    heard_on(&mut pair.other, Duration::from_millis(500)).await;
+
+    pair.say(
+        1,
+        serde_json::json!({ "command": "refreshQueue", "requestId": 8 }),
+    )
+    .await;
+    let second: Vec<String> = heard_on(&mut pair.other, Duration::from_millis(500))
+        .await
+        .iter()
+        .map(command_of)
+        .collect();
+    pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
+
+    assert_eq!(second, vec!["notifyQueueItemsChanged"]);
+}
