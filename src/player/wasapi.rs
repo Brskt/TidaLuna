@@ -1436,6 +1436,37 @@ impl RenderContext {
         let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
     }
 
+    /// What a `Pause` means to the playing render loop, apart from `apply_play` for the seam
+    /// it gives a test. Stream-scoped: a stale pause from a superseded track must not stop the
+    /// live stream; one for a not-yet-adopted stream is latched, making its StartStream start
+    /// paused.
+    fn apply_pause(&mut self, event_tx: &mpsc::Sender<ExclusiveEvent>, stream_id: u32) {
+        if self.current_stream_id != Some(stream_id) {
+            self.pending_transport = Some((stream_id, false));
+        } else {
+            // The clock stops for real here, and `pending_start` makes
+            // resume re-prime a full period before Start(): a bare restart
+            // over a stale tail saturates. A pause before the first write
+            // has nothing queued, and only a tail that exists is worth a
+            // Reset().
+            if let Some(ref ac) = self.audio_client {
+                let _ = timed_endpoint("stop (pause)", || ac.stop_stream());
+                if self.endpoint_dirty {
+                    let _ = timed_endpoint("reset (pause)", || ac.reset_stream());
+                    self.endpoint_dirty = false;
+                }
+            }
+            self.client_started = false;
+            self.pending_start = true;
+            self.state = RenderState::Paused;
+            // From here the loop blocks on `recv` and nothing downstream
+            // reports again until a command wakes it. Only `release_device`
+            // hands the device back, never a pause.
+            crate::vprintln!("[WASAPI] render paused, endpoint still held (stream {stream_id})");
+            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
+        }
+    }
+
     fn handle_end_stream(&mut self, stream_id: u32) {
         if self.current_stream_id == Some(stream_id) {
             self.stream_ended = true;
@@ -1728,41 +1759,7 @@ fn render_thread_inner(
                             ctx.apply_play(&event_tx, stream_id)
                         }
                         ExclusiveCommand::Pause { stream_id } => {
-                            // Stream-scoped: a stale pause from a superseded track must
-                            // not stop the live stream; one for a not-yet-adopted stream
-                            // is latched, making its StartStream start paused. Latching
-                            // falls through instead of skipping ahead: an early exit here
-                            // would leave the probe's span open and bill it to whichever
-                            // handler laps next.
-                            if ctx.current_stream_id != Some(stream_id) {
-                                ctx.pending_transport = Some((stream_id, false));
-                            } else {
-                                // The clock stops for real here, and `pending_start` makes
-                                // resume re-prime a full period before Start(): a bare restart
-                                // over a stale tail saturates. A pause before the first write
-                                // has nothing queued, and only a tail that exists is worth a
-                                // Reset().
-                                if let Some(ref ac) = ctx.audio_client {
-                                    let _ = timed_endpoint("stop (pause)", || ac.stop_stream());
-                                    if ctx.endpoint_dirty {
-                                        let _ =
-                                            timed_endpoint("reset (pause)", || ac.reset_stream());
-                                        ctx.endpoint_dirty = false;
-                                    }
-                                }
-                                ctx.client_started = false;
-                                ctx.pending_start = true;
-                                ctx.state = RenderState::Paused;
-                                // From here the loop blocks on `recv` and nothing downstream
-                                // reports again until a command wakes it. Only `release_device`
-                                // hands the device back, never a pause.
-                                crate::vprintln!(
-                                    "[WASAPI] render paused, endpoint still held (stream {stream_id})"
-                                );
-                                let _ = event_tx.send(ExclusiveEvent::StateChange(
-                                    super::PlaybackState::Paused,
-                                ));
-                            }
+                            ctx.apply_pause(&event_tx, stream_id)
                         }
                         ExclusiveCommand::StartStream(start) => {
                             ctx.handle_start_stream(&device, &event_tx, start)?;
