@@ -86,6 +86,7 @@ afterEach(() => {
 	setSelfLoad(false);
 });
 
+const ctxOf = () => contextOf(dispatched);
 const contextOf = (calls: Dispatch[]) => calls.find((d) => d.type === "playbackControls/UPDATE_PLAYBACK_CONTEXT")?.payload as any;
 
 test("a late refusal from a superseded track leaves the current one alone", async () => {
@@ -290,6 +291,41 @@ test("a track the Connect receiver already plays is announced, never loaded agai
 	expect(sentSince(from)).not.toContain("player.load");
 	expect(sentSince(from)).not.toContain("player.load_dash");
 	expect(isSelfLoad()).toBe(false);
+});
+
+// What the receiver resolved for the track it plays: its own playbackinfo answer.
+const receiverStream = { audioQuality: "HI_RES_LOSSLESS", bitDepth: 24, sampleRate: 96000 };
+const previousTrack = { actualAudioQuality: "LOW", bitDepth: 16, sampleRate: 44100 };
+
+test("a track the Connect receiver already plays shows the format the receiver resolved", async () => {
+	// This page is set to LOW and the phone casts at HI_RES: showing the page's own quality, or
+	// the previous track's, would be wrong whenever the two settings differ.
+	state.playbackControls.playbackContext = { ...previousTrack } as any;
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "cast-fmt", type: "track" }, { alreadyPlaying: true, stream: receiverStream });
+	await flush();
+
+	expect(ctxOf()).toMatchObject({ actualAudioQuality: "HI_RES_LOSSLESS", bitDepth: 24, sampleRate: 96000 });
+});
+
+test("a track the Connect receiver plays with no stream resolved shows no format, not the previous track's", async () => {
+	state.playbackControls.playbackContext = { ...previousTrack } as any;
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "cast-none", type: "track" }, { alreadyPlaying: true, stream: null });
+	await flush();
+
+	expect(ctxOf()).toMatchObject({ actualAudioQuality: null, bitDepth: null, sampleRate: null });
+});
+
+test("a track this page loads keeps the previous context for what its own answer omits", async () => {
+	state.playbackControls.playbackContext = { ...previousTrack } as any;
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "own", type: "track" });
+	await flush();
+	resolvePbi?.(undefined);
+	await flush();
+
+	expect(ctxOf()).toMatchObject(previousTrack);
 });
 
 // The same-product rule. TIDAL announces a track only when its current item changes; a track that

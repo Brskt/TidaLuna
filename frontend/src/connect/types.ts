@@ -82,11 +82,20 @@ export interface ServerErrorPayload {
     details?: unknown;
 }
 
+// The format of the stream the receiver resolved, from TIDAL's own `playbackinfo` answer. A field
+// the answer omitted is null; the whole object is null when no stream was resolved.
+export interface ReceiverStream {
+    audioQuality?: string | null;
+    bitDepth?: number | null;
+    sampleRate?: number | null;
+}
+
 export interface ReceiverMediaChangedPayload {
     mediaId?: string;
     metadata?: {
         duration?: number;
     };
+    stream?: ReceiverStream | null;
 }
 
 export interface ConnectStateSnapshot {

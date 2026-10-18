@@ -41,6 +41,17 @@ test("the receiver's track reaches the delegate as one already playing", async (
 	expect(calls[0][1]).toEqual({ alreadyPlaying: true });
 });
 
+test("the stream the receiver resolved rides with the announcement", async () => {
+	const calls: unknown[][] = [];
+	(window as any).nativeInterface = { playback: { setCurrentMediaItem: (...args: unknown[]) => calls.push(args) } };
+	const store = { dispatch: () => {}, getState: () => ({ session: { countryCode: "FR" }, playbackControls: {} }) };
+	const stream = { audioQuality: "LOSSLESS", bitDepth: 16, sampleRate: 44100 };
+
+	await handleReceiverMediaChanged(store, { mediaId: "77", stream } as any);
+
+	expect(calls[0][1]).toEqual({ alreadyPlaying: true, stream });
+});
+
 // Regression: announced alone, the cast's track never reached TIDAL's player, and a Play after
 // the cast reloaded the track it held before (TIDAL's `maybeHardReload`).
 

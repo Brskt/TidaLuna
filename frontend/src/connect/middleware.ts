@@ -7,7 +7,7 @@
 import { tidalFetch } from "../ipc";
 import { isStoreNotPublished } from "../../plugins/lib/src/redux/storeNotPublished";
 import { storePublished } from "../store-published";
-import type { ReceiverMediaChangedPayload } from "./types";
+import type { ReceiverMediaChangedPayload, ReceiverStream } from "./types";
 
 type Store = {
     dispatch: (action: { type: string; payload?: unknown }) => void;
@@ -76,9 +76,10 @@ export async function handleReceiverMediaChanged(
 
         // Feed through the normal playback path (MediaSession, interceptors), as a track already
         // playing: the receiver loaded it, and a self-load of it here would be refused, under the
-        // banner that names the cast. Before the queue changes: TIDAL announces the queue's new
-        // item through this same call without the second argument, and that call then matches
-        // `lastTransitionId` and loads nothing.
+        // banner that names the cast. The stream is the receiver's own playbackinfo answer: the
+        // page shows the format that plays and asks TIDAL for none of its own. Before the queue
+        // changes: TIDAL announces the queue's new item through this same call without the
+        // second argument, and that call then matches `lastTransitionId` and loads nothing.
         const item = {
             id: track.id,
             productId: track.id,
@@ -89,11 +90,11 @@ export async function handleReceiverMediaChanged(
             duration: track.duration,
             type: "track",
         };
-        (window as unknown as { nativeInterface?: { playback?: { setCurrentMediaItem?: (i: unknown, o: { alreadyPlaying: boolean }) => void } } })
+        (window as unknown as { nativeInterface?: { playback?: { setCurrentMediaItem?: (i: unknown, o: { alreadyPlaying: boolean; stream?: ReceiverStream | null }) => void } } })
             .nativeInterface
             ?.playback
             ?.setCurrentMediaItem
-            ?.(item, { alreadyPlaying: true });
+            ?.(item, { alreadyPlaying: true, stream: data.stream });
 
         castTrackBecomesQueue(store, track.id);
 
