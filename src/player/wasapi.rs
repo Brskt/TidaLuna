@@ -167,24 +167,24 @@ pub(super) enum ExclusiveEvent {
     },
 }
 
-struct SizedMediaSource<R> {
-    inner: R,
+struct SizedMediaSource {
+    inner: crate::player::buffer::RamBuffer,
     byte_len: u64,
 }
 
-impl<R: Read> Read for SizedMediaSource<R> {
+impl Read for SizedMediaSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.inner.read(buf)
     }
 }
 
-impl<R: Seek> Seek for SizedMediaSource<R> {
+impl Seek for SizedMediaSource {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.inner.seek(pos)
     }
 }
 
-impl<R: Read + Seek + Send + Sync> MediaSource for SizedMediaSource<R> {
+impl MediaSource for SizedMediaSource {
     fn is_seekable(&self) -> bool {
         true
     }
@@ -228,8 +228,8 @@ fn append_interleaved_i32_as_pcm(samples: &[i32], bits_per_sample: u32, out: &mu
 }
 
 #[expect(clippy::too_many_arguments)]
-pub(super) fn stream_flac_reader_to_wasapi<R>(
-    reader: R,
+pub(super) fn stream_flac_reader_to_wasapi(
+    reader: crate::player::buffer::RamBuffer,
     byte_len: u64,
     stream_id: u32,
     cmd_tx: mpsc::Sender<ExclusiveCommand>,
@@ -241,10 +241,9 @@ pub(super) fn stream_flac_reader_to_wasapi<R>(
     start_paused: bool,
     seek_rx: mpsc::Receiver<(f64, u32)>,
     consumed: Arc<AtomicU64>,
-) -> Result<(), String>
-where
-    R: Read + Seek + Send + Sync + 'static,
-{
+) -> Result<(), String> {
+    // A second reader over the same bytes, for the length a header may leave out.
+    let whole = reader.clone();
     let source = Box::new(SizedMediaSource {
         inner: reader,
         byte_len,
@@ -309,12 +308,7 @@ where
     let bits_per_sample = codec_params
         .bits_per_sample
         .ok_or_else(|| startup_failed("no bits_per_sample".to_string(), PacketFailure::Source))?;
-    let n_frames = track.num_frames.unwrap_or(0);
-    let duration_secs = if sample_rate > 0 && n_frames > 0 {
-        n_frames as f64 / sample_rate as f64
-    } else {
-        0.0
-    };
+    let duration_secs = crate::player::length::track_secs(&track, sample_rate, &whole);
 
     let stored_bps = if bits_per_sample <= 16 {
         16

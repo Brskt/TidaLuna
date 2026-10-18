@@ -2674,6 +2674,8 @@ pub(crate) fn stream_reader_to_asio(
     seek_rx: mpsc::Receiver<(f64, u32)>,
     consumed: Arc<AtomicU64>,
 ) -> Result<(), String> {
+    // A second reader over the same bytes, for the length a header may leave out.
+    let whole = reader.clone();
     let mss = MediaSourceStream::new(Box::new(reader), Default::default());
 
     let mut hint = Hint::new();
@@ -2730,12 +2732,7 @@ pub(crate) fn stream_reader_to_asio(
         .as_ref()
         .ok_or_else(|| startup_failed("no channel info".to_string(), PacketFailure::Source))?
         .count() as u32;
-    let n_frames = track.num_frames.unwrap_or(0);
-    let duration_secs = if sample_rate > 0 && n_frames > 0 {
-        n_frames as f64 / sample_rate as f64
-    } else {
-        0.0
-    };
+    let duration_secs = crate::player::length::track_secs(&track, sample_rate, &whole);
 
     // StartStream FIRST at offset 0 makes the control thread open the driver while a
     // forward seek into not-yet-downloaded data resolves; the landing position
