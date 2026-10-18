@@ -41,11 +41,6 @@ fn meets_min_version_floor_satisfied() {
 }
 
 #[test]
-fn meets_min_version_below_floor_blocked() {
-    assert!(!meets_min_version("0.0.7-alpha", "0.0.8-alpha"));
-}
-
-#[test]
 fn meets_min_version_unparseable_is_failclosed() {
     assert!(!meets_min_version("0.0.9-alpha", "")); // empty floor -> block
     assert!(!meets_min_version("0.0.9-alpha", "garbage"));

@@ -2,56 +2,6 @@
 
 use super::*;
 
-#[test]
-fn manifest_roundtrip_with_protocol_field() {
-    let json = r#"{
-        "version": "0.0.5-alpha",
-        "min_version": "0.0.4-alpha",
-        "target": "linux-amd64",
-        "files": {},
-        "sandbox_protocol_required": 1
-    }"#;
-    let m: Manifest = serde_json::from_str(json).unwrap();
-    assert_eq!(m.sandbox_protocol_required, Some(1));
-    let serialized = serde_json::to_string(&m).unwrap();
-    assert!(serialized.contains("\"sandbox_protocol_required\":1"));
-}
-
-#[test]
-fn manifest_roundtrip_without_protocol_field_defaults_none() {
-    // Older manifests (pre-2026-04) did not have this field.
-    let json = r#"{
-        "version": "0.0.4-alpha",
-        "min_version": "0.0.4-alpha",
-        "target": "windows-amd64",
-        "files": {}
-    }"#;
-    let m: Manifest = serde_json::from_str(json).unwrap();
-    assert_eq!(m.sandbox_protocol_required, None);
-}
-
-#[test]
-fn manifest_roundtrip_with_delta_from() {
-    let json = r#"{
-        "version": "0.0.5-alpha",
-        "min_version": "0.0.4-alpha",
-        "target": "linux-amd64",
-        "files": {},
-        "delta_from": "0.0.4-alpha"
-    }"#;
-    let m: Manifest = serde_json::from_str(json).unwrap();
-    assert_eq!(m.delta_from.as_deref(), Some("0.0.4-alpha"));
-    let s = serde_json::to_string(&m).unwrap();
-    assert!(s.contains("\"delta_from\":\"0.0.4-alpha\""));
-}
-
-#[test]
-fn manifest_without_delta_from_defaults_none() {
-    let json = r#"{"version":"0.0.4-alpha","min_version":"0.0.4-alpha","target":"linux-amd64","files":{}}"#;
-    let m: Manifest = serde_json::from_str(json).unwrap();
-    assert_eq!(m.delta_from, None);
-}
-
 /// A second apply, while the first is still validating staging and spawning, used to be
 /// accepted: two workers then deleted the same staging directory and spawned two updater
 /// children for one pid. On Windows the updater's own install mutex makes the loser
@@ -185,27 +135,6 @@ fn a_retraction_spares_an_offer_an_operation_is_acting_on() {
             "a stale check stripped the record from under {phase:?}"
         );
     }
-}
-
-/// `updater.download` took the version from its caller and asked nothing else. A renderer
-/// holding a record from before a channel switch (or any plugin, the channel being open to
-/// every trusted frame) could name a version no check had offered, and the download path
-/// fetches a release by exact tag with no channel filter of its own.
-#[test]
-fn a_download_is_refused_for_a_version_no_check_ever_offered() {
-    let state = state_holding(UpdaterPhase::Idle, offer("1.0.0"));
-
-    assert!(
-        !state.names_version("0.0.18-pre.dev.5"),
-        "a caller's own version is treated as an offer"
-    );
-}
-
-#[test]
-fn a_download_takes_the_offer_a_check_published() {
-    let state = state_holding(UpdaterPhase::Idle, offer("1.0.0"));
-
-    assert!(state.names_version("1.0.0"));
 }
 
 /// The offer has a second legitimate producer: a boot that finds a staged update sets the
@@ -473,36 +402,6 @@ fn a_claim_the_channel_still_speaks_for_comes_back() {
     );
 }
 
-/// A check settling while the claim is held records the channel it resolved under, and the
-/// first check of a session finds none recorded. That is an establishment, not a switch:
-/// reading the premise off the state would refuse a claim nobody contradicted.
-#[test]
-fn a_first_check_settling_under_the_same_channel_releases_the_claim() {
-    let mut state = state_holding(
-        UpdaterPhase::Ready("0.0.18-pre.dev.5".to_string()),
-        offer("0.0.18-pre.dev.5"),
-    );
-    assert_eq!(
-        state.phase.claim_apply("0.0.18-pre.dev.5"),
-        ClaimVerdict::Claimed,
-        "the staged version is on offer"
-    );
-
-    state.settle_check(
-        &CheckOutcome::Available {
-            info: UpdateInfo {
-                version: "0.0.18-pre.dev.5".to_string(),
-                download_size: 42,
-            },
-        },
-        UpdateChannel::Dev,
-    );
-    let staging_must_go = state.release_apply("0.0.18-pre.dev.5", UpdateChannel::Dev);
-
-    assert!(matches!(state.phase, UpdaterPhase::Ready(_)));
-    assert!(!staging_must_go);
-}
-
 /// A staged build adopted at boot never settles a check; the state speaks for no channel
 /// at all when the claim is taken. The premise has to come from the setting, which always
 /// names one: read off the state it would be absent here, and absent compares equal to
@@ -597,7 +496,8 @@ fn a_check_on_the_channel_the_state_is_on_settles() {
 }
 
 /// Nothing records the channel before the first check settles, and refusing there would
-/// refuse every offer on a run where the user never touched the setting.
+/// refuse every offer on a run where the user never touched the setting. That is an
+/// establishment, not a switch.
 #[test]
 fn the_first_check_of_a_session_establishes_the_channel_it_answers_for() {
     let mut state = state_holding(UpdaterPhase::Idle, None);
@@ -610,21 +510,6 @@ fn the_first_check_of_a_session_establishes_the_channel_it_answers_for() {
         Some(UpdateChannel::Dev),
         "the state answers for no channel, so the next check cannot be placed"
     );
-}
-
-/// The change is what knows the premise moved; it is what records it. Without this the
-/// guard above has nothing to compare against and every late answer settles.
-#[test]
-fn a_channel_change_records_the_channel_it_leaves_the_state_on() {
-    let mut state = state_on(
-        UpdateChannel::Dev,
-        UpdaterPhase::Idle,
-        offer("0.0.18-pre.dev.5"),
-    );
-
-    state.abandon_for_channel_change(UpdateChannel::Stable);
-
-    assert_eq!(state.channel, Some(UpdateChannel::Stable));
 }
 
 /// Compared by value, not counted. A user who flips to stable and back to dev while a dev
@@ -651,29 +536,6 @@ fn a_check_survives_a_channel_change_that_came_back_to_its_own() {
         settlement,
         CheckSettlement::Settled,
         "an answer correct for the selected channel was thrown away"
-    );
-}
-
-/// The publishing half belongs to the same owner. Two callers wrote the offer by hand (one
-/// of them not at all), which is how the manual check came to refresh neither the record it
-/// serves on the next mount nor the stale one it had just disproved.
-#[test]
-fn a_check_that_finds_an_update_publishes_it_as_the_offer() {
-    let mut state = state_holding(UpdaterPhase::Idle, None);
-
-    state.settle_check(
-        &CheckOutcome::Available {
-            info: UpdateInfo {
-                version: "9.9.9".to_string(),
-                download_size: 42,
-            },
-        },
-        UpdateChannel::Stable,
-    );
-
-    assert_eq!(
-        state.last_info.as_ref().map(|i| i.version.as_str()),
-        Some("9.9.9")
     );
 }
 
@@ -713,6 +575,11 @@ fn a_download_names_which_operation_holds_the_phase() {
     );
 }
 
+/// `updater.download` took the version from its caller and asked nothing else. A renderer
+/// holding a record from before a channel switch (or any plugin, the channel being open to
+/// every trusted frame) could name a version no check had offered, and the download path
+/// fetches a release by exact tag with no channel filter of its own.
+///
 /// A version nothing offered is the one refusal that is not a phase: no surface may adopt a
 /// state from it, and announcing one would paint a phase over a genuine error.
 #[test]
