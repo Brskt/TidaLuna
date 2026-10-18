@@ -19,6 +19,7 @@ import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyIdle,
 import { askRefusedAgain, playOnRefusal, refusalDelivered, refusalStands, refusePlayback } from "./refuse-playback";
 import { installSdkFetchObserver } from "./sdk-playbackinfo";
 import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
+import { bannerScreen, deliverStoreRepair, observeMutations } from "./store-repair";
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
 import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
@@ -396,6 +397,16 @@ const init = async () => {
         (window as any).__LUNAR_SET_CLOSE_TO_TRAY__ = setCloseToTray;
         setCloseToTray(!!(window as any).__TIDALUNAR_CLOSE_TO_TRAY__);
     }
+
+    // Repairs Rust made at launch (settings.db, plugins.db), asked for here where the banner can
+    // land. Rust keeps them until the banner is on the screen; a page that dies first leaves them
+    // for the next.
+    deliverStoreRepair(
+        store,
+        () => invokeIpc("settings.store_repair"),
+        bannerScreen(document, observeMutations),
+        () => sendIpc("settings.store_repair_ack"),
+    ).catch((e) => console.error("[luna] Store repair notice failed:", e));
 
     // SDK middleware doesn't reach Rust player for DASH/AAC - intercept Redux actions.
     {
