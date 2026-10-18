@@ -3,6 +3,7 @@ import { setSelfLoad, isSelfLoad } from "../audio-proxy";
 import { applyVolume } from "../volume";
 import { deviceReleasedToShaka, selectDevice } from "../output-device";
 import type { AudioDevice } from "../types";
+import { productOfStream } from "../sdk-playbackinfo";
 
 export type TrackListPayload = { position?: number | string; context?: { id?: unknown; type?: string; isAutoPlay?: boolean } } | undefined;
 
@@ -274,10 +275,9 @@ export const createNativePlayerComponent = () => {
                 // 0) Rust must restart the committed track instead of resuming it. A same
                 // referenceId (a quality-swap re-load) keeps its position.
                 let restart = false;
-                // The track this load is for. Read from the same mediaProduct object as
-                // referenceId below, so it is exactly as current as the restart decision
-                // this delegate already ships; Rust needs it to publish a measured length
-                // under this track rather than whichever one announced itself first.
+                // The track this load is for; Rust needs it to publish a measured length under this
+                // track rather than whichever one announced itself first. Named by the stream below,
+                // and the store's product only stands in for a stream this page saw no answer for.
                 let productId: string | null = null;
                 let act: ListenerAct | null = null;
                 try {
@@ -293,6 +293,9 @@ export const createNativePlayerComponent = () => {
                     if (refId !== null) lastReferenceId = refId;
                     act = actOfLoad(pendingAct, state?.playQueue, refId);
                 } catch (_) {}
+                // The SDK's playbackinfo answer the stream was parsed from names its track. The store
+                // cannot: it holds the track that just ended when the SDK switches to a preloaded one.
+                productId = productOfStream(url) ?? productId;
                 loadProductId = productId;
                 if (act !== null) pendingAct = null;
                 loadAct = act;
@@ -352,16 +355,13 @@ export const createNativePlayerComponent = () => {
             },
             setVolume: (volume: number) => applyVolume(volume),
             preload: (url: string, streamFormat: string, encryptionKey: string = "") => {
-                // The delegate carries only the url triple, but the queue already names what
-                // plays next. For SDK-native tracks the advance runs in Rust and nothing
-                // re-tags them afterwards, which makes this the only chance to name one.
-                // Self-load streams take the renderer path in index.ts and tag their own load.
-                let nextId = "";
-                try {
-                    const { store } = require("../../plugins/lib/src/redux/store");
-                    const { playQueue: q } = store.getState();
-                    nextId = String(q?.elements?.[q.currentIndex + 1]?.mediaItemId ?? "");
-                } catch (_) {}
+                // The delegate carries only the url triple, but the SDK's playbackinfo answer the
+                // stream was parsed from names its track. For SDK-native tracks the advance runs in
+                // Rust and nothing re-tags them afterwards, which makes this the only chance to
+                // name one. Self-load streams take the renderer path in index.ts and tag their own
+                // load. A stream that answer never named goes untagged: no tag publishes no length.
+                const nextId = productOfStream(url) ?? "";
+                if (nextId === "") console.warn("[luna:player] preload of a stream no playbackinfo answer named");
                 sendIpc("player.preload", url, streamFormat, encryptionKey, nextId);
             },
             cancelPreload: () => {
