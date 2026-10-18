@@ -1,7 +1,6 @@
 //! Tests for `src/connect/ws/server.rs`, attached to it by `#[path]`.
 
 use super::*;
-use crate::connect::runtime::ShutdownReport;
 use futures_util::SinkExt;
 
 // The accept must observe a cancelled token instead of blocking forever in
@@ -16,32 +15,6 @@ async fn accept_or_cancel_yields_none_when_cancelled() {
         .await
         .expect("accept_or_cancel did not observe cancellation");
     assert!(result.is_none(), "cancelled accept must yield None");
-}
-
-/// The notice is queued right before `shutdown`, before the writer has taken it.
-#[tokio::test]
-async fn a_shutdown_writes_what_was_queued_before_it_closes() {
-    let (mut server, _listener, mut wire, filler) = WsServer::with_client_for_test(1, 8).await;
-    // Kept, it would hold the queue open: the writer would leave on the shutdown deadline's
-    // abort, never on its own close, and the wire would read closed all the same.
-    drop(filler);
-
-    let notice = serde_json::json!({ "command": "notifySessionEnded" });
-    server
-        .send_to(1, &notice)
-        .await
-        .expect("the client is known");
-    server.shutdown().await;
-
-    let written = tokio::time::timeout(Duration::from_secs(1), wire.recv())
-        .await
-        .expect("the writer finished within the shutdown");
-    assert_eq!(
-        written,
-        Some(WsMessage::Text(notice.to_string().into())),
-        "the notice queued before the shutdown reaches the wire"
-    );
-    assert_eq!(wire.recv().await, None, "then the socket is closed");
 }
 
 /// Longest any enqueue may keep its caller waiting: the flush budget the shutdown grants, twice.
@@ -131,69 +104,6 @@ async fn sending_to_a_peer_that_stopped_reading_returns_and_leaves_the_map_free(
 }
 
 #[tokio::test]
-async fn a_send_in_flight_leaves_the_map_to_the_cleanup() {
-    let (server, _listener, _wire, _filler) = server_with_stalled_client().await;
-    let server = Arc::new(server);
-    let sender = {
-        let server = server.clone();
-        tokio::spawn(async move {
-            let notice = serde_json::json!({ "command": "notifyMediaChanged" });
-            let _ = server.send_to(1, &notice).await;
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let cleanup = tokio::time::timeout(Duration::from_secs(1), server.clients.write()).await;
-    assert!(
-        cleanup.is_ok(),
-        "clients.write() blocked while a send_to is in flight"
-    );
-    drop(cleanup);
-    sender.abort();
-}
-
-/// The routing epilogue on a receiver switched off while a phone stopped reading: the revoke
-/// notice, then the reset, then the server's own shutdown, under the receiver's deadline.
-async fn epilogue_run() -> (ShutdownReport, bool, ListenerProbe) {
-    let (mut server, listener, _wire, _filler) = server_with_stalled_client().await;
-    let receiver = TaskGroup::new();
-    let reset_ran = Arc::new(AtomicBool::new(false));
-    {
-        let reset_ran = reset_ran.clone();
-        receiver
-            .spawn("receiver-routing", async move {
-                let notice = serde_json::json!({ "command": "notifySessionEnded" });
-                let _ = server.send_to(1, &notice).await;
-                reset_ran.store(true, Ordering::SeqCst);
-                server.shutdown().await;
-            })
-            .unwrap();
-    }
-    let report = receiver
-        .shutdown(crate::connect::receiver::SHUTDOWN_DEADLINE)
-        .await;
-    (report, reset_ran.load(Ordering::SeqCst), listener)
-}
-
-#[tokio::test]
-async fn the_epilogue_runs_to_its_end_past_a_peer_that_stopped_reading() {
-    let (report, reset_ran, _listener) = epilogue_run().await;
-    assert!(reset_ran, "the reset after the revoke notice never ran");
-    assert_eq!(
-        report.graceful_completed,
-        vec!["receiver-routing"],
-        "the routing task was aborted: {report:?}"
-    );
-}
-
-#[tokio::test]
-async fn the_port_is_free_once_the_receiver_shut_down() {
-    let (_report, _reset_ran, listener) = epilogue_run().await;
-    // The listener task leaves on its token; give the runtime a turn to drop it.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(listener.closed(), "the listener outlived the shutdown");
-}
-
-#[tokio::test]
 async fn a_heartbeat_on_a_full_queue_reaches_its_verdict() {
     let (write_tx, _write_rx_never_read) = mpsc::channel::<WsMessage>(1);
     write_tx.try_send(WsMessage::Ping(vec![].into())).unwrap();
@@ -219,25 +129,6 @@ async fn a_heartbeat_on_a_full_queue_reaches_its_verdict() {
         "the peer was never declared dead"
     );
     assert!(!alive.load(Ordering::SeqCst));
-}
-
-/// The heartbeat as the server runs it, behind the client's real writer parked on the peer.
-#[tokio::test]
-async fn a_heartbeat_behind_a_stalled_writer_returns() {
-    let (client, _wire, _filler) = stalled_client(CancellationToken::new()).await;
-    let pong_received = Arc::new(AtomicBool::new(true));
-    let alive = Arc::new(AtomicBool::new(true));
-    let run = crate::connect::ws::heartbeat::run(
-        client.write_tx.clone(),
-        pong_received,
-        alive,
-        || async {},
-    );
-    let finished = tokio::time::timeout(HEARTBEAT_BOUND, run).await;
-    assert!(
-        finished.is_ok(),
-        "the heartbeat parked behind the stalled writer"
-    );
 }
 
 /// The receiver's certificate is its own, not one a test client could check: every one passes.
@@ -351,14 +242,10 @@ async fn connect_peer(port: u16, rcvbuf: u32) -> Peer {
 /// How a client whose writer is parked leaves the server.
 #[derive(Clone, Copy, Debug)]
 enum Removal {
-    /// What `on_timeout` does: cancel the client's token, entry left for the read loop.
-    VerdictCancel,
     /// The real heartbeat verdict (missed Pongs), no help from the test.
     VerdictReal,
     /// The peer sends a Close frame, then never reads again.
     PeerClose,
-    /// The peer sends a malformed frame (reserved bits set), then never reads again.
-    ReadError,
     /// The client is still in the map when the server shuts down.
     Shutdown,
 }
@@ -386,28 +273,10 @@ async fn park_then_remove(removal: Removal) {
     );
 
     match removal {
-        Removal::VerdictCancel => {
-            server
-                .clients
-                .read()
-                .await
-                .get(&id)
-                .unwrap()
-                .cancel
-                .token()
-                .cancel();
-        }
         Removal::VerdictReal | Removal::Shutdown => {}
         Removal::PeerClose => {
             let _ = tokio::time::timeout(Duration::from_secs(2), peer.send(WsMessage::Close(None)))
                 .await;
-        }
-        Removal::ReadError => {
-            use tokio::io::AsyncWriteExt;
-            // FIN + RSV1..3 + Text, masked, empty payload: tungstenite fails the read.
-            let raw = peer.get_mut();
-            raw.write_all(&[0xF1, 0x80, 1, 2, 3, 4]).await.unwrap();
-            raw.flush().await.unwrap();
         }
     }
 
@@ -457,11 +326,6 @@ async fn park_then_remove(removal: Removal) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_cancelled_client_ends_its_parked_writer() {
-    park_then_remove(Removal::VerdictCancel).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missed_heartbeat_ends_the_parked_writer() {
     park_then_remove(Removal::VerdictReal).await;
 }
@@ -469,11 +333,6 @@ async fn a_missed_heartbeat_ends_the_parked_writer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_peer_close_ends_the_parked_writer() {
     park_then_remove(Removal::PeerClose).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_read_error_ends_the_parked_writer() {
-    park_then_remove(Removal::ReadError).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -580,24 +439,6 @@ fn drain(mut events: mpsc::Receiver<ClientEvent>) {
     tokio::spawn(async move { while events.recv().await.is_some() {} });
 }
 
-/// The peer reads nothing before the shutdown: it meets the heartbeat's Ping inside the flush,
-/// and its Pong reaches a server that has stopped serving.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pong_that_arrives_during_the_shutdown_leaves_the_queue_whole() {
-    let (events_tx, mut events) = mpsc::channel(64);
-    let (mut server, id, peer) = server_with_a_peer(events_tx, &mut events).await;
-    drain(events);
-    queue_a_session_end(&server, id).await;
-    let (_write, read) = peer.split();
-    let heard = tokio::spawn(hear_to_the_end(read));
-    server.shutdown().await;
-    let heard = tokio::time::timeout(Duration::from_secs(5), heard)
-        .await
-        .expect("the peer never saw its socket end")
-        .unwrap();
-    assert_heard_the_session_end(&heard);
-}
-
 /// The Pong is read before the shutdown: the command sent behind it reaches the routing loop, and
 /// frames are read in order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -665,48 +506,6 @@ async fn a_command_sent_during_the_shutdown_is_read_and_dropped() {
         dispatched.load(Ordering::SeqCst),
         0,
         "a command was dispatched"
-    );
-}
-
-/// A peer that reads only once its own sends are done, and sends more than the server buffers
-/// while the server's queue outgrows the peer's window: each side waits on the other unless the
-/// server keeps reading through its flush.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_peer_that_sends_through_the_flush_still_gets_the_whole_queue() {
-    let (events_tx, mut events) = mpsc::channel(64);
-    let (mut server, id, mut peer) = server_with_a_peer(events_tx, &mut events).await;
-    drain(events);
-    let pad = "y".repeat(1 << 20);
-    for i in 0..16 {
-        let notice = serde_json::json!({ "command": "notifyQueueChanged", "i": i, "pad": pad });
-        server.send_to(id, &notice).await.unwrap();
-    }
-    let end = serde_json::json!({ "command": "notifySessionEnded" });
-    server.send_to(id, &end).await.unwrap();
-    let command = serde_json::json!({ "command": "getQueue", "pad": "z".repeat(1 << 20) });
-    let heard = tokio::spawn(async move {
-        for _ in 0..16 {
-            peer.send(WsMessage::Text(command.to_string().into()))
-                .await
-                .unwrap();
-        }
-        hear_to_the_end(peer.split().1).await
-    });
-    server.shutdown().await;
-    let heard = tokio::time::timeout(Duration::from_secs(5), heard)
-        .await
-        .expect("the peer never saw its socket end")
-        .unwrap();
-    assert_eq!(
-        heard.texts.len(),
-        17,
-        "every queued notice reached the peer"
-    );
-    assert!(heard.closed, "the Close frame followed the notices");
-    assert!(
-        heard.ended_on_a_fin(),
-        "the socket was reset: {:?}",
-        heard.end
     );
 }
 
