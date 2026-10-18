@@ -128,6 +128,12 @@ fn parameter_sets_carries_the_length_size_and_parameter_sets_through() {
     assert!(matches!(sets.length_size, LengthSize::FourBytes));
     assert_eq!(sets.sps, vec![vec![0x67, 0x42, 0x00, 0x1E]]);
     assert_eq!(sets.pps, vec![vec![0x68, 0xCE, 0x3C, 0x80]]);
+
+    // Four bytes is also what a reader falls back on: the narrower widths must come through too.
+    for (minus_one, width) in [(0, LengthSize::OneByte), (1, LengthSize::TwoBytes)] {
+        let sets = parameter_sets(&avcc(minus_one, vec![vec![0x67]], vec![vec![0x68]])).unwrap();
+        assert_eq!(sets.length_size, width, "length_size_minus_one {minus_one}");
+    }
 }
 
 #[test]
@@ -141,18 +147,20 @@ fn a_cover_url_on_the_artwork_host_is_accepted() {
 #[test]
 fn lookalike_artwork_hosts_are_refused() {
     assert!(!is_cover_url(
-        "https://resources.tidal.com.evil.example/a.mp4"
+        "https://resources.tidal.com.evil.example/videos/a.mp4"
     ));
-    assert!(!is_cover_url("https://evil-resources.tidal.com/a.mp4"));
+    assert!(!is_cover_url(
+        "https://evil-resources.tidal.com/videos/a.mp4"
+    ));
 }
 
 /// The host comes from the parsed url, and plaintext is refused outright.
 #[test]
 fn a_userinfo_prefix_does_not_impersonate_the_artwork_host() {
     assert!(!is_cover_url(
-        "https://resources.tidal.com@evil.example/a.mp4"
+        "https://resources.tidal.com@evil.example/videos/a.mp4"
     ));
-    assert!(!is_cover_url("http://resources.tidal.com/a.mp4"));
+    assert!(!is_cover_url("http://resources.tidal.com/videos/a.mp4"));
     assert!(!is_cover_url("not a url"));
 }
 
@@ -233,10 +241,12 @@ fn samples_claiming_more_than_the_file_holds_are_refused() {
 }
 
 /// A declared size wide enough to wrap the running total would otherwise slip under the ceiling
-/// by arithmetic rather than by being small.
+/// by arithmetic rather than by being small. The total starts above zero: on an empty budget
+/// `usize::MAX` fits without wrapping and proves nothing about the addition.
 #[test]
 fn a_sample_size_that_would_overflow_the_running_total_is_refused() {
     let mut budget = SampleBudget::new(1_000);
+    budget.charge(1).unwrap();
 
     assert!(budget.charge(usize::MAX).is_err());
 }
