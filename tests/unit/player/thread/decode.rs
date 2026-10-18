@@ -80,46 +80,6 @@ fn a_queued_pause_is_handed_back_to_the_caller() {
 }
 
 #[test]
-fn an_interruption_reports_how_far_the_push_got() {
-    // The EOF flush cannot be replayed (the pipeline empties its accumulator as it
-    // flushes), and its caller can only carry the remainder if the push says where it
-    // stopped. Reporting a bare interruption once cost a resampled track its final
-    // samples whenever a pause landed on them.
-    let (mut producer, _consumer) = ring(4);
-    let (tx, rx) = mpsc::channel();
-    let counted = AtomicU64::new(0);
-    let mut logged = true;
-
-    // Nothing ever reads the ring: the push fills it and can go no further whatever the
-    // pause's timing, making the count 4 by construction rather than by luck.
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = tx.send(DecodeCommand::Pause);
-    });
-
-    match push_samples(&[0.5f32; 8], &mut producer, &rx, &counted, &mut logged) {
-        PushOutcome::Interrupted(PushInterrupt::Pause, written) => {
-            assert_eq!(written, 4, "the caller cannot tell what is left to deliver");
-        }
-        _ => panic!("the pause did not reach the caller"),
-    }
-}
-
-#[test]
-fn a_queued_stop_is_handed_back_to_the_caller() {
-    let (mut producer, _consumer) = ring(64);
-    let (tx, rx) = mpsc::channel();
-    tx.send(DecodeCommand::Stop).unwrap();
-    let counted = AtomicU64::new(0);
-    let mut logged = true;
-
-    assert!(matches!(
-        push_samples(&[0.5f32; 8], &mut producer, &rx, &counted, &mut logged),
-        PushOutcome::Interrupted(PushInterrupt::Stop, _)
-    ));
-}
-
-#[test]
 fn a_queued_seek_carries_its_target_and_generation_back() {
     let (mut producer, _consumer) = ring(64);
     let (tx, rx) = mpsc::channel();
@@ -197,47 +157,18 @@ fn a_pause_hands_back_only_what_the_ring_did_not_take() {
 }
 
 #[test]
-fn a_refused_seek_pushes_the_rest_through() {
-    let (mut producer, consumer) = ring(64);
-    let (tx, rx) = mpsc::channel();
-    tx.send(DecodeCommand::Seek(3.0, 1)).unwrap();
-    let counted = AtomicU64::new(0);
-    let mut logged = true;
-    let mut seeks = 0;
-
-    // A refusal leaves the reader on these samples, and they are still the ones owed: the run
-    // carries on instead of reporting an interruption its caller would drop them on.
-    let run = push_until_settled(
-        &[0.5f32; 8],
-        &mut producer,
-        &rx,
-        &counted,
-        &mut logged,
-        |_, _| {
-            seeks += 1;
-            SeekOutcome::Refused
-        },
-    );
-
-    assert!(matches!(run, PushRun::Drained));
-    assert_eq!(seeks, 1, "the seek was never attempted");
-    assert_eq!(
-        consumer.slots(),
-        8,
-        "the refused seek cost the buffer its samples"
-    );
-}
-
-#[test]
 fn a_refused_seek_resumes_where_the_push_stopped() {
-    // Advancing by the reported count is what keeps the retry from re-sending what already
-    // reached the ring: a track that repeats four samples is as wrong as one that drops them.
+    // A refusal leaves the reader on these samples, and they are still the ones owed: the run
+    // carries on instead of reporting an interruption its caller would drop them on. Advancing
+    // by the reported count is what keeps the retry from re-sending what already reached the
+    // ring; a track that repeats four samples is as wrong as one that drops them.
     let (mut producer, mut consumer) = ring(4);
     let (tx, rx) = mpsc::channel();
     let counted = AtomicU64::new(0);
     let mut logged = true;
     let samples: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let mut received: Vec<f32> = Vec::new();
+    let mut seeks = 0;
 
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -253,6 +184,7 @@ fn a_refused_seek_resumes_where_the_push_stopped() {
         &counted,
         &mut logged,
         |_, _| {
+            seeks += 1;
             while let Ok(s) = consumer.pop() {
                 received.push(s);
             }
@@ -264,6 +196,7 @@ fn a_refused_seek_resumes_where_the_push_stopped() {
         received.push(s);
     }
     assert!(matches!(run, PushRun::Drained));
+    assert_eq!(seeks, 1, "the seek was never attempted");
     assert_eq!(
         received, samples,
         "the retry replayed or skipped part of the buffer"

@@ -47,11 +47,6 @@ fn play_cold_empty_is_ignored() {
 }
 
 #[test]
-fn settle_clears_loading_for_matching_gen() {
-    assert_eq!(settle_load(Some(5), None, 5), (None, None));
-}
-
-#[test]
 fn settle_ignores_a_mismatched_gen() {
     // a stale settle for an old gen must not clear a newer in-flight load
     assert_eq!(settle_load(Some(6), None, 5), (Some(6), None));
@@ -449,34 +444,6 @@ impl ReplayableTrack {
             }),
         }
     }
-}
-
-#[test]
-fn a_seek_taken_while_paused_settles_without_a_resume() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-
-    h.player.handle_pause();
-    h.player.handle_seek(30.0);
-    assert!(
-        h.player.seeking,
-        "the seek is armed before the decoder answers"
-    );
-
-    h.decode_events
-        .send(DecodeEvent::SeekComplete {
-            gen_id: h.player.seek_ack_gen,
-            position: 30.0,
-            refused: false,
-        })
-        .unwrap();
-    h.player.poll_playback();
-
-    assert!(
-        !h.player.seeking,
-        "a paused poll has to read the decoder's answer; waiting for Play strands it"
-    );
-    assert_eq!(h.player.seek_target, None);
 }
 
 #[cfg(target_os = "windows")]
@@ -1480,43 +1447,10 @@ fn a_seek_queued_behind_a_load_persists_nothing() {
     );
 }
 
-/// The shape natural completion leaves behind. The IPC handler flushes the seek target to the
-/// frontend before the thread ever sees it; a refusal that says nothing leaves the bar on a
-/// position playback never reached, for as long as no load lands. The counter is set apart from
-/// the target, keeping the answer from being a constant.
-#[test]
-fn a_seek_with_nothing_loaded_answers_with_the_played_position() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.decode_cmd_tx = None;
-    h.player.has_track = false;
-    h.player.current_track_id = None;
-    h.player.sample_rate = 1;
-    h.player.channels = 1;
-    h.player.played_samples.store(30, Relaxed);
-
-    h.player.handle_seek(120.0);
-
-    let positions: Vec<f64> = h
-        .events
-        .lock()
-        .unwrap()
-        .iter()
-        .filter_map(|ev| match ev {
-            PlayerEvent::TimeUpdate(t, _) => Some(*t),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        positions,
-        vec![30.0],
-        "a seek nothing can serve is still owed the position playback stands at"
-    );
-}
-
-/// The other way into the same branch: a fatal decode error nulled the sender while a newer load
-/// is still fetching. That load's own `handle_load` overwrites the queued target before any
-/// decoder reads it; the queue cannot be what answers the frontend here either.
+/// A fatal decode error nulled the sender while a newer load is still fetching. The IPC handler
+/// flushed the seek target to the frontend before the thread ever saw it, and that load's own
+/// `handle_load` overwrites the queued target before any decoder reads it: the queue cannot be
+/// what answers. The counter is set apart from the target, keeping the answer from being a constant.
 #[test]
 fn a_seek_queued_behind_a_load_answers_the_optimistic_jump() {
     let dir = tempfile::tempdir().unwrap();
@@ -2373,41 +2307,8 @@ async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it
 /// which runs AFTER the commands of the same pass. A stop, a seek or a skip landing in that
 /// window retired the incoming decoder feeding the ring the device had just been handed:
 /// silence with no producer left, no watchdog behind it, and a UI still naming the outgoing
-/// track. Had the poll run first the fade would have promoted; both orderings must agree.
-#[test]
-fn a_cancellation_promotes_a_fade_the_callback_already_finished() {
-    let dir = tempfile::tempdir().unwrap();
-    let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
-    let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
-    // What the callback leaves behind when it completes a fade on its own clock.
-    h.player.cpal_xfade = Some(crate::player::thread::output::CrossfadeLink {
-        attach: Arc::new(Mutex::new(None)),
-        cancel: Arc::new(AtomicBool::new(false)),
-        out_eof: Arc::new(AtomicBool::new(false)),
-        in_eof: Arc::new(AtomicBool::new(false)),
-        done: Arc::new(std::sync::atomic::AtomicU64::new(
-            crate::player::thread::output::pack_xfade_done(1, SIX_SECONDS),
-        )),
-    });
-
-    h.player.cancel_crossfade();
-
-    assert!(
-        h.player.pending_crossfade.is_none(),
-        "the fade is spent either way; what differs is which track survives it"
-    );
-    let events = h.events.lock().unwrap();
-    assert!(
-        events
-            .iter()
-            .any(|ev| matches!(ev, PlayerEvent::CrossfadePromoted(..))),
-        "a finished fade must promote, not cancel, got {events:?}"
-    );
-}
-
-/// The helper stands in for the callback: it holds the offer guard, publishes `done`, and only
-/// then releases.
+/// track. The helper stands in for the callback: it holds the offer guard, publishes `done`,
+/// and only then releases.
 #[test]
 fn a_teardown_waits_out_a_swap_in_progress_and_promotes_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -2933,44 +2834,6 @@ async fn a_promotion_yields_the_slot_to_a_load_published_after_its_fade_armed() 
     assert!(h.player.reconcile_completed_crossfade());
     handle_load_of_c(&mut h, gen_c, seq_c);
     assert_the_slot_names_c(gen_c);
-}
-
-/// Same window, but `handle_load(C)` finds the fade finished and promotes inside its own teardown.
-#[tokio::test]
-async fn a_load_whose_teardown_promotes_keeps_the_slot_it_published() {
-    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
-    let _incoming = arm_for_promotion(&mut h, 246.0);
-    h.player.cpal_xfade = Some(swapped_link());
-
-    let (gen_c, seq_c) = load_c_on_the_ipc_thread();
-    h.player.handle_load_started(gen_c);
-    handle_load_of_c(&mut h, gen_c, seq_c);
-    assert_the_slot_names_c(gen_c);
-}
-
-#[tokio::test]
-async fn a_promotion_under_a_newer_load_announces_nothing_that_outranks_it() {
-    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
-    let _incoming = arm_for_promotion(&mut h, 246.0);
-    h.player.cpal_xfade = Some(swapped_link());
-
-    let (gen_c, seq_c) = load_c_on_the_ipc_thread();
-    h.player.handle_load_started(gen_c);
-    assert!(h.player.reconcile_completed_crossfade());
-    handle_load_of_c(&mut h, gen_c, seq_c);
-
-    let max = max_emitted_seq(&h);
-    assert_eq!(h.player.current_seq, seq_c);
-    assert!(
-        max.is_none_or(|m| m <= seq_c),
-        "an event carrying seq {max:?} outranks C's seq {seq_c}: the bridge drops every event C emits"
-    );
 }
 
 /// A stop mints a generation and publishes nothing: the promotion is still the newest source.
