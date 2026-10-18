@@ -1452,7 +1452,7 @@ fn a_seek_queued_behind_a_load_persists_nothing() {
 /// `handle_load` overwrites the queued target before any decoder reads it: the queue cannot be
 /// what answers. The counter is set apart from the target, keeping the answer from being a constant.
 #[test]
-fn a_seek_queued_behind_a_load_answers_the_optimistic_jump() {
+fn a_seek_queued_behind_a_load_answers_the_played_position() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = harness(dir.path());
     h.player.decode_cmd_tx = None;

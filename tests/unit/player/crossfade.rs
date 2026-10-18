@@ -205,12 +205,12 @@ fn a_chained_sequence_of_passes_mixes_exactly_like_one() {
     }
 }
 
-/// A pass whose ring gave nothing hands the mixer an empty slice, and the padding has to
-/// land where a single pass over a source that simply ran short would have put it.
+/// A pass whose ring ran short hands the mixer a short slice, and the padding has to land
+/// where a single pass over a source that simply ran short would have put it.
 /// Otherwise a starved ring would sound different depending on the quantum, which is the
 /// one way the pass split could become audible.
 #[test]
-fn a_pass_that_drained_nothing_pads_like_a_source_that_ran_short() {
+fn a_short_outgoing_slice_pads_like_a_source_that_ran_short() {
     let len = 256usize;
     let outgoing = vec![0.5f32; 96];
 
