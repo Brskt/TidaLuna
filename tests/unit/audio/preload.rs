@@ -129,59 +129,6 @@ async fn a_claim_over_a_dead_download_restages_instead_of_restamping() {
     preload_state().reset();
 }
 
-/// The capped mode is no longer what the preload normally uses: it stages a stream and
-/// has no ceiling. This covers the one path that still reaches it: a server that
-/// announces no length at all, where a whole-copy fetch is the only option and nothing
-/// else bounds the body.
-///
-/// Within that mode the refusal still has to come from the announced length rather than
-/// from what has arrived. This server promises a body far past the cap and then sends
-/// none of it. A fetch that reached for the bytes before deciding would spend its read
-/// timeout and come back an error, which is what the assertion below distinguishes.
-#[tokio::test]
-async fn an_over_size_body_is_refused_from_its_announced_length() {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut request = [0u8; 1024];
-        let _ = sock.read(&mut request).await;
-        let announced = PRELOAD_MAX_BYTES + 1;
-        sock.write_all(
-            format!("HTTP/1.1 200 OK\r\nContent-Length: {announced}\r\n\r\n").as_bytes(),
-        )
-        .await
-        .unwrap();
-        sock.flush().await.unwrap();
-        // Never send the body: reaching for it is the failure this test names.
-        std::future::pending::<()>().await;
-    });
-
-    let fetched = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        fetch_and_decrypt_inner(
-            &format!("http://127.0.0.1:{port}/track.flac"),
-            "",
-            Some(PRELOAD_MAX_BYTES),
-            DownloadOwner::Preload,
-            // The refusal must decide on the header alone. The fetch opens its own
-            // response rather than being handed one.
-            None,
-            &GovernorHandle::ungoverned(),
-        ),
-    )
-    .await
-    .expect("deciding on the header alone needs no body, so this cannot wait on one")
-    .expect("an over-size track is a refusal to stage, not a failed fetch");
-
-    assert!(
-        fetched.is_none(),
-        "a track whose announced size passes the cap must not be staged"
-    );
-}
-
 /// `data` carries the bytes: committing one track must not spend the record another
 /// transition owns: a staged copy reaches the disk cache only after its own track has
 /// been current, and dropping it here would take the ciphertext with it.

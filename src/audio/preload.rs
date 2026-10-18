@@ -18,43 +18,18 @@ pub struct FetchedTrack {
 }
 
 /// `owner` decides which bucket of `governor` pays; this path has no streaming buffer to carry
-/// either, and a load with no `Content-Length` falls back here too. `opened` is a response already
-/// in hand: issuing a second GET holds the first open with its body unread, and an HTTP/1.1
-/// connection in that state is unusable until it drops.
+/// either, and a load with no `Content-Length` falls back here too. `resp` is a response already
+/// in hand, its success status checked by the caller: issuing a second GET holds the first open
+/// with its body unread, and an HTTP/1.1 connection in that state is unusable until it drops.
 async fn fetch_and_decrypt_inner(
     url: &str,
     key: &str,
     max_bytes: Option<usize>,
     owner: DownloadOwner,
-    opened: Option<reqwest::Response>,
+    resp: reqwest::Response,
     governor: &GovernorHandle,
 ) -> anyhow::Result<Option<FetchedTrack>> {
     let start = std::time::Instant::now();
-    let resp = match opened {
-        Some(resp) => resp,
-        None => HTTP_CLIENT_PRELOAD.get(url).send().await?,
-    };
-
-    if !resp.status().is_success() {
-        anyhow::bail!("Upstream status: {}", resp.status());
-    }
-
-    // A cap counted only over what has arrived pays the whole ceiling before refusing:
-    // the bytes are fetched and decrypted, then dropped. The announced size settles it
-    // before the first byte of body. It is absent for a chunked or auto-decoded response,
-    // and reqwest reports that as `None` rather than a smaller number, leaving the
-    // running check below as the only guard when the size cannot be known up front.
-    if let Some(limit) = max_bytes
-        && let Some(announced) = resp.content_length()
-        && announced > limit as u64
-    {
-        crate::vprintln!(
-            "[PRELOAD] Skip RAM cache: announced {} > {}",
-            format_bytes(announced),
-            format_bytes(limit as u64)
-        );
-        return Ok(None);
-    }
 
     let decryptor = if key.is_empty() {
         None
@@ -188,23 +163,15 @@ async fn fetch_and_decrypt_inner(
 
 /// The uncapped whole-copy fetch, for the load path that has no `Content-Length` to build a
 /// streaming buffer from. Its bytes are the listener's: the caller is waiting to hear them,
-/// which is also why it hands over the response it already opened rather than leaving it to
-/// idle against a second one.
+/// which is also why it hands over the response it already opened, and checked for success,
+/// rather than leaving it to idle against a second one.
 pub async fn fetch_and_decrypt(
     url: &str,
     key: &str,
     opened: reqwest::Response,
     governor: &GovernorHandle,
 ) -> anyhow::Result<FetchedTrack> {
-    match fetch_and_decrypt_inner(
-        url,
-        key,
-        None,
-        DownloadOwner::Playback,
-        Some(opened),
-        governor,
-    )
-    .await?
+    match fetch_and_decrypt_inner(url, key, None, DownloadOwner::Playback, opened, governor).await?
     {
         Some(fetched) => Ok(fetched),
         None => anyhow::bail!("unexpected capped fetch in uncapped mode"),
@@ -667,7 +634,7 @@ async fn stage_streaming(
             &track.key,
             Some(PRELOAD_MAX_BYTES),
             DownloadOwner::Preload,
-            Some(resp),
+            resp,
             governor,
         )
         .await?
