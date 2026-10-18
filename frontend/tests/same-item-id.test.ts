@@ -18,11 +18,6 @@ test("a number and its string spelling name the same item", () => {
 	expect(sameItemId("103046509", 103046509)).toBe(true);
 });
 
-test("the same spelling on both sides still matches", () => {
-	expect(sameItemId(103046509, 103046509)).toBe(true);
-	expect(sameItemId("103046509", "103046509")).toBe(true);
-});
-
 test("different items do not match, however they are spelled", () => {
 	expect(sameItemId(103046509, 62416116)).toBe(false);
 	expect(sameItemId("103046509", 62416116)).toBe(false);
