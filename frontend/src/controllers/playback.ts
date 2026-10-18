@@ -3,6 +3,7 @@ import { setSelfLoad } from "../audio-proxy";
 import { refusePlayback } from "../refuse-playback";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 import { setCurrentTrack } from "../video/cover-canvas";
+import { storePublished } from "../store-published";
 
 // `player.parse_dash` failure code for "no decoder here handles this codec", mirroring HTTP
 // 415. Set in `src/ipc/plugin/mod.rs`; every other parse failure answers 400.
@@ -58,7 +59,7 @@ export const createPlaybackController = () => {
                         try {
                             if (lastTransitionId !== productId) return;
 
-                            await require("../../render/src/modules").storeReady;
+                            await storePublished();
                             if (lastTransitionId !== productId) return;
 
                             const { interceptors } = require("../../render/src/exposeTidalInternals.patchAction");
