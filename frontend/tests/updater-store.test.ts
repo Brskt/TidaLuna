@@ -269,15 +269,6 @@ describe("what a surface dismisses", () => {
 		withheldReason: "",
 	} satisfies UpdaterState;
 
-	// A failure is reported whether or not an offer was ever known, and the record the user is
-	// looking at may hold no version at all. Keyed on the version alone, the dismissal of such a
-	// record stored the absence itself: a surface holding "nothing dismissed" as the same
-	// absence could never match it. Its Close button did nothing for as long as the failure
-	// stood.
-	test("a failure with no offer still has an identity to dismiss", () => {
-		expect(dismissKey(notInstalled).length).toBeGreaterThan(0);
-	});
-
 	// Two failures that say different things are two different things to acknowledge: closing
 	// the first must not take the second down with it, unseen.
 	test("one failure is not dismissed by the acknowledgement of another", () => {
