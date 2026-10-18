@@ -4,30 +4,15 @@ use super::fixture::mem_conn;
 use super::*;
 
 #[test]
-fn get_u8_returns_default_when_absent() {
-    let conn = mem_conn();
-    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 0), 0);
-    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 2), 2);
-}
-
-#[test]
-fn get_u8_parses_stored_value() {
-    let conn = mem_conn();
-    set(&conn, LOGGING_LEVEL, "2");
-    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 0), 2);
-}
-
-#[test]
-fn get_u8_falls_back_on_unparseable() {
-    let conn = mem_conn();
-    set(&conn, LOGGING_LEVEL, "not-a-number");
-    assert_eq!(get_u8(&conn, LOGGING_LEVEL, 1), 1);
+fn the_log_level_is_off_when_absent() {
+    let mut conn = mem_conn();
+    assert_eq!(load_log_level(&mut conn), 0);
 }
 
 #[test]
 fn load_log_level_clamps_to_three() {
     let mut conn = mem_conn();
-    set(&conn, LOGGING_LEVEL, "99");
+    set(&conn, LOGGING_LEVEL.key, "99");
     assert_eq!(load_log_level(&mut conn), 3);
 }
 
