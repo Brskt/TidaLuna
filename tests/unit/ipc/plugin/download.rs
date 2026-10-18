@@ -103,27 +103,6 @@ fn field_names_outside_printable_ascii_are_refused() {
     assert!(!valid_field_name("TITLÉ"));
 }
 
-/// The regression that shipped twice: the dialog recorded its raw answer while the download
-/// resolved the sanitised name; every destination sanitisation touched was refused. The two
-/// forms have to be the same form, and no test paired them.
-#[test]
-fn the_recorded_form_is_the_sanitised_one() {
-    let dir = tempfile::tempdir().unwrap();
-    // `:` is legal on Linux and sanitisation rewrites it: the two forms differ here.
-    let answered = dir.path().join("Song: Live.flac");
-    let dest = sanitized_destination(answered.to_str().unwrap()).unwrap();
-    assert_ne!(answered, dest, "the fixture must exercise a rename");
-
-    crate::ui::file_dialog::record_user_choice(&answered, false);
-    assert!(
-        crate::ui::file_dialog::authorisation_for(&dest).is_none(),
-        "recording the raw answer authorises nothing"
-    );
-
-    crate::ui::file_dialog::record_user_choice(&dest, false);
-    assert!(crate::ui::file_dialog::authorisation_for(&dest).is_some());
-}
-
 /// The user was asked about this exact file and said replace. It is replaced.
 #[tokio::test]
 async fn a_confirmed_replacement_replaces() {

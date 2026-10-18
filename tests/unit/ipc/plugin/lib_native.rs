@@ -1,6 +1,8 @@
 //! Tests for `src/ipc/plugin/lib_native.rs`, attached to it by `#[path]`.
 
-use super::{asked_for_a_directory, build_send_to_render_js, names_a_directory};
+use super::{
+    asked_for_a_directory, build_send_to_render_js, names_a_directory, record_save_answer,
+};
 use serde_json::json;
 
 #[test]
@@ -47,4 +49,24 @@ fn only_a_directory_request_grants_a_write_folder() {
     assert!(!asked_for_a_directory(&[]));
     assert!(!asked_for_a_directory(&["multiSelections"]));
     assert!(!asked_for_a_directory(&["createDirectory"]));
+}
+
+/// The download looks its destination up sanitised. Recorded raw, the answer matched nothing and
+/// the download was refused for want of a dialog whenever the title held a character Windows refuses.
+#[test]
+fn a_save_answer_is_recorded_under_its_sanitised_name() {
+    use crate::ui::file_dialog::{authorisation_for, consume};
+
+    let dir = tempfile::tempdir().unwrap();
+    let raw = dir.path().join("Title: B?.flac");
+    let sanitised = dir.path().join("Title_ B_.flac");
+
+    record_save_answer(&raw.to_string_lossy());
+
+    let auth = authorisation_for(&sanitised).expect("the sanitised name is authorised");
+    consume(auth);
+    assert!(
+        authorisation_for(&raw).is_none(),
+        "the raw answer is not a name the download will write"
+    );
 }

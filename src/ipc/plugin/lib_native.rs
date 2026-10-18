@@ -244,29 +244,29 @@ pub(super) fn handle_show_save_dialog(msg: &IpcMessage, callback: IpcCallback) {
         // existence test and the recording both touch the filesystem.
         if !file_path.is_empty() {
             let answered = file_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                match super::download::sanitized_destination(&answered) {
-                    Ok(dest) => {
-                        // The OS prompts about replacing only when the file is already there, and
-                        // only for the name it was given: sanitisation can rename that, and the
-                        // prompt then said nothing about what gets written.
-                        let confirmed = dest.as_os_str()
-                            == std::path::Path::new(&answered).as_os_str()
-                            && dest.exists();
-                        crate::ui::file_dialog::record_user_choice(&dest, confirmed);
-                    }
-                    Err(e) => {
-                        crate::verr!(
-                            "[DIALOG] Unusable destination, download not authorised: {e:#}"
-                        )
-                    }
-                }
-            })
-            .await;
+            let _ = tokio::task::spawn_blocking(move || record_save_answer(&answered)).await;
         }
         let result = json!({ "canceled": file_path.is_empty(), "filePath": file_path });
         ipc_callback_ok(&callback, &result.to_string());
     });
+}
+
+/// Authorise the download that follows a save dialog's answer, under the sanitised name it will
+/// write to.
+fn record_save_answer(answered: &str) {
+    match super::download::sanitized_destination(answered) {
+        Ok(dest) => {
+            // The OS prompts about replacing only when the file is already there, and
+            // only for the name it was given: sanitisation can rename that, and the
+            // prompt then said nothing about what gets written.
+            let confirmed =
+                dest.as_os_str() == std::path::Path::new(answered).as_os_str() && dest.exists();
+            crate::ui::file_dialog::record_user_choice(&dest, confirmed);
+        }
+        Err(e) => {
+            crate::verr!("[DIALOG] Unusable destination, download not authorised: {e:#}")
+        }
+    }
 }
 
 /// Flatten Electron-style `filters: [{ name, extensions: [...] }]` into the
