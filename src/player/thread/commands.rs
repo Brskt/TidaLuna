@@ -1124,6 +1124,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!("[LOAD #{load_gen}] stale Load, ignoring");
             return false;
         }
+        self.orphaned = false;
         // A load supersedes whatever was fading. Manual skip keeps today's cut. Everything that
         // follows sits under the gate on purpose: a Load this thread discards commits to nothing,
         // with no fade to supersede and no refusal to forget. The generation that retired it
@@ -1528,6 +1529,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     pub(super) fn handle_play(&mut self) {
+        if self.orphaned {
+            crate::vprintln!("[PLAY]   ignored: the page that loaded this track is gone");
+            return;
+        }
         self.allow_startup_auto_resume = false;
         // Resuming cancels a pending real-stop device release (the user came back).
         #[cfg(target_os = "windows")]
@@ -1849,6 +1854,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.current_seq,
         ));
         self.resume_store.flush_if_due(true);
+    }
+
+    /// The page that loaded the retained track is gone. What `handle_stop` left to resume is
+    /// no longer one a page can name, and the intent it recorded for a quality swap's re-assert
+    /// belongs to that page too: the one that follows boots stopped, as a reload does.
+    pub(super) fn handle_orphan(&mut self) {
+        self.orphaned = true;
+        self.resume_on_reassert = false;
     }
 
     pub(super) fn handle_stop(&mut self, event_seq: u32) {

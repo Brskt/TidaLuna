@@ -164,6 +164,10 @@ pub(super) struct PlayerThread<F> {
     // (was playing) still resumes. A re-assert whose load carries the user's
     // play-intent resumes regardless (ReassertResume { want_play }).
     resume_on_reassert: bool,
+    // The page that loaded the retained track ended (`PlayerCommand::Orphan`): a play answers no
+    // one until a load or a re-assert names a track again. Set by `handle_orphan`, which also
+    // withdraws `resume_on_reassert`, cleared by `handle_load` and the re-assert.
+    orphaned: bool,
     // A play that arrived before the track finished loading, tagged with the load
     // generation it was meant for. Applied once that load reaches the
     // ready state: a play racing ahead of the async load is not dropped, and
@@ -403,6 +407,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             idle_state: crate::player::PlaybackState::Ready,
             has_track: false,
             resume_on_reassert: false,
+            orphaned: false,
             pending_play: None,
             loading_gen: None,
             current_duration: 0.0,
@@ -677,6 +682,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 if names_committed && product_id.is_some() {
                     self.current_product_id = product_id;
                 }
+                // A page names the retained track again, by a load of its own.
+                if names_committed {
+                    self.orphaned = false;
+                }
                 // Same-track re-assert (boombox does stop()+load(same)): its load() awaits
                 // `mediaduration` before the instance is seekable, but the idempotent skip
                 // never re-runs handle_load: that event is never re-emitted and boombox's
@@ -704,6 +713,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             PlayerCommand::Pause => self.handle_pause(),
             PlayerCommand::Stop(event_seq) => self.handle_stop(event_seq),
+            PlayerCommand::Orphan => self.handle_orphan(),
             PlayerCommand::Seek(time) => self.handle_seek(time),
             PlayerCommand::SetVolume(vol) => self.handle_set_volume(vol),
             PlayerCommand::GetAudioDevices(req_id) => self.handle_get_audio_devices(req_id),

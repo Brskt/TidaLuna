@@ -93,6 +93,16 @@ impl StopScope {
             StopScope::Cast => (owner == LoadOrigin::Connect).then_some(LoadOrigin::Local),
         }
     }
+
+    /// Whether the music this stop halts is left with no page behind it: a page's session or
+    /// document ended. A stop is pause-retain, and whoever presses Play next would meet a track no
+    /// page loaded.
+    pub(crate) fn orphans(self) -> bool {
+        match self {
+            StopScope::OwnMusic => true,
+            StopScope::As(_) | StopScope::Playing | StopScope::Cast => false,
+        }
+    }
 }
 
 /// What a load that carries an earlier one on did (see [`continue_load`]).
@@ -746,6 +756,9 @@ enum PlayerCommand {
     },
     Pause,
     Stop(u32),
+    /// The page that loaded the track just stopped is gone (`StopScope::orphans`): until a load
+    /// names a track again, the retained one is nobody's to resume.
+    Orphan,
     Seek(f64),
     SetVolume(Volume),
     GetAudioDevices(Option<String>),
@@ -1971,7 +1984,11 @@ impl Player {
             return Ok(());
         }
         let event_seq = next_event_seq();
-        self.send_cmd(PlayerCommand::Stop(event_seq))
+        self.send_cmd(PlayerCommand::Stop(event_seq))?;
+        if scope.orphans() {
+            self.send_cmd(PlayerCommand::Orphan)?;
+        }
+        Ok(())
     }
 
     pub fn seek(&self, time: f64) -> anyhow::Result<()> {

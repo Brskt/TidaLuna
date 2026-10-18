@@ -295,6 +295,23 @@ async fn a_page_session_ending_leaves_a_cast_playing() {
     assert_eq!(after, (cast, LoadOrigin::Connect), "no stop was minted");
 }
 
+/// A stop leaves the track retained and resumable; only the end of a page leaves it with no page
+/// behind it, and the player thread is told so for that scope alone.
+#[test]
+fn only_a_page_ending_leaves_the_music_it_stops_without_a_page() {
+    use LoadOrigin::{Connect, Local};
+    let table = [
+        (StopScope::As(Local), false),
+        (StopScope::As(Connect), false),
+        (StopScope::Playing, false),
+        (StopScope::OwnMusic, true),
+        (StopScope::Cast, false),
+    ];
+    for (scope, orphans) in table {
+        assert_eq!(scope.orphans(), orphans, "{scope:?}");
+    }
+}
+
 /// The release of a session that never cast used to stop this host's own music anyway.
 #[tokio::test]
 async fn a_session_that_never_cast_leaves_local_music_playing() {

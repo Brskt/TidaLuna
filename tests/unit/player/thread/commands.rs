@@ -3013,3 +3013,127 @@ fn the_thread_starts_at_the_restored_level() {
         assert_eq!(f32::from_bits(player.exclusive_gain.load(Relaxed)), 0.4);
     }
 }
+
+/// A page that ends stops its track, which stays retained and resumable. The page that follows
+/// presses Play for the track ITS queue names, and a resume of the retained one would play a track
+/// nothing on screen names until that page's own load replaced it.
+#[test]
+fn a_play_after_the_page_that_loaded_the_track_ended_resumes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+
+    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player.handle_command(PlayerCommand::Orphan);
+    h.events.lock().unwrap().clear();
+    h.player.handle_play();
+
+    assert!(!h.player.is_playing, "the retained track was resumed");
+    assert_ne!(last_state(&h.events), Some(PlaybackState::Active));
+}
+
+/// The control of the test above: the same stop and play, with the page still there.
+#[test]
+fn a_play_after_a_stop_resumes_the_retained_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+
+    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player.handle_play();
+
+    assert!(h.player.is_playing);
+    assert_eq!(last_state(&h.events), Some(PlaybackState::Active));
+}
+
+/// The intent a stop records for a quality swap's re-assert is the ended page's: a page that
+/// loads the same track on boot finds it stopped, as a reload leaves everything.
+#[test]
+fn the_page_that_follows_finds_the_retained_track_stopped_not_to_be_resumed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+
+    h.player.handle_command(PlayerCommand::Stop(1));
+    assert!(
+        h.player.resume_on_reassert,
+        "a stop of a playing track records the intent"
+    );
+    h.player.handle_command(PlayerCommand::Orphan);
+
+    assert!(!h.player.resume_on_reassert);
+}
+
+/// After a load names a track again, a Play is a Play of that track.
+#[tokio::test]
+async fn a_load_lifts_the_orphaning() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player.handle_command(PlayerCommand::Orphan);
+
+    h.player.handle_load(load_req(2, "track-2"), false);
+
+    assert!(!h.player.orphaned);
+}
+
+/// A load a newer one superseded names nothing, and leaves the track as orphaned as it was.
+#[tokio::test]
+async fn a_superseded_load_leaves_the_orphaning() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player.handle_command(PlayerCommand::Orphan);
+
+    h.player.handle_load(
+        LoadRequest {
+            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+            load_gen: crate::player::current_gen().wrapping_sub(1),
+            seq: 2,
+            track_id: "track-2".to_string(),
+            product_id: None,
+            resume_policy: ResumePolicy::Restart,
+            load_start: std::time::Instant::now(),
+            cached: true,
+            format: "flac".to_string(),
+        },
+        false,
+    );
+
+    assert!(h.player.orphaned);
+}
+
+/// A page that loads the retained track again, by the idempotent branch of `Player::load`, names
+/// it: the re-assert lifts the orphaning and, the page being new, resumes nothing by itself.
+#[test]
+fn a_reassert_lifts_the_orphaning_and_resumes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player.handle_command(PlayerCommand::Orphan);
+
+    h.player.handle_command(PlayerCommand::ReassertResume {
+        want_play: false,
+        product_id: None,
+        track_id: "track-1".to_string(),
+    });
+
+    assert!(!h.player.orphaned);
+    assert!(!h.player.is_playing);
+}
+
+/// A re-assert that names another track than the committed one names nothing of this one's.
+#[test]
+fn a_reassert_for_another_track_leaves_the_orphaning() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    h.player.handle_command(PlayerCommand::Stop(1));
+    h.player.handle_command(PlayerCommand::Orphan);
+
+    h.player.handle_command(PlayerCommand::ReassertResume {
+        want_play: false,
+        product_id: None,
+        track_id: "another".to_string(),
+    });
+
+    assert!(h.player.orphaned);
+}
