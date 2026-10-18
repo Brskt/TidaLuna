@@ -22,7 +22,7 @@ pub(crate) enum RepeatMode {
 // Queue notifications (device/receiver -> controller/mobile)
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "command", rename_all = "camelCase")]
-#[allow(clippy::enum_variant_names)]
+#[expect(clippy::enum_variant_names)]
 pub(crate) enum QueueNotification {
     #[serde(rename = "notifyQueueChanged")]
     NotifyQueueChanged {
