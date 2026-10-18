@@ -96,10 +96,12 @@ const UPDATER_SKIP_VERSION: Setting<Option<String>> = Setting {
     absent: None,
     unreadable: None,
 };
+// On by default, off when unknown: a refusal the store lost must not read as consent to a LAN
+// listener.
 const CONNECT_RECEIVER_ALWAYS_ON: Setting<bool> = Setting {
     key: "connect.receiver_always_on",
     absent: true,
-    unreadable: true,
+    unreadable: false,
 };
 const LOGGING_LEVEL: Setting<u8> = Setting {
     key: "logging.level",
