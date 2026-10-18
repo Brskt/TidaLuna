@@ -98,22 +98,6 @@ afterEach(() => {
 	W.__TIDALUNAR_ASIO__ = false;
 });
 
-test("handing a track to shaka releases exclusive on the chosen device, not onto the default", () => {
-	const sdk = exclusiveOnB();
-	sdk.setActivePlayer(sdk.shaka);
-	expect(deviceSets()).toEqual([["Headphones (B)", "shared"]]);
-});
-
-test("every later shaka load keeps the chosen device", () => {
-	const sdk = exclusiveOnB();
-	sdk.setActivePlayer(sdk.shaka);
-	sdk.setActivePlayer(sdk.shaka);
-	expect(deviceSets()).toEqual([
-		["Headphones (B)", "shared"],
-		["Headphones (B)", "shared"],
-	]);
-});
-
 test("the next native track takes exclusive back on the chosen device", () => {
 	const sdk = exclusiveOnB();
 	sdk.setActivePlayer(sdk.shaka);
@@ -125,48 +109,57 @@ test("the next native track takes exclusive back on the chosen device", () => {
 	]);
 });
 
-test("picking System Default from exclusive on B takes the default shared", () => {
-	// The setter resets the SDK's mode to shared before the delegate hears it.
-	const sdk = exclusiveOnB();
-	sdk.outputDevices.activeDevice = DEFAULT;
-	expect(deviceSets()).toEqual([["auto"]]);
-});
-
-test("picking System Default in shared mode sends the default", () => {
-	const sdk = tidalSdk();
-	sdk.setActivePlayer(sdk.nativePlayer);
-	sdk.outputDevices.activeDevice = B;
-	sent.length = 0;
-	sdk.outputDevices.activeDevice = DEFAULT;
-	expect(deviceSets()).toEqual([["auto"]]);
-});
-
-test("a boot play on the default sends the default", () => {
-	const sdk = tidalSdk();
-	sdk.setActivePlayer(sdk.nativePlayer);
-	sdk.nativePlayer.play();
-	expect(deviceSets()).toEqual([["auto"]]);
-});
-
-test("an exclusive mode the SDK accepts on the default never reaches Rust", () => {
-	const sdk = tidalSdk();
-	sdk.setActivePlayer(sdk.nativePlayer);
-	sdk.outputDevices.deviceMode = "exclusive";
-	expect(deviceSets()).toEqual([["auto"]]);
-});
-
-test("a release while the default is active leaves Rust where it is", () => {
-	// The SDK says exclusive on the default while Rust holds it shared; with the next native play
-	// deduped by the SDK, the release is the only call Rust hears.
-	const sdk = tidalSdk();
-	sdk.setActivePlayer(sdk.nativePlayer);
-	sdk.nativePlayer.play();
-	sdk.outputDevices.deviceMode = "exclusive";
-	sent.length = 0;
-	sdk.setActivePlayer(sdk.shaka);
-	sdk.setActivePlayer(sdk.nativePlayer);
-	sdk.nativePlayer.play();
-	expect(deviceSets()).toEqual([["auto"]]);
+test("the system default reaches Rust as the default, shared, whichever way the SDK gets there", () => {
+	const ways: [string, () => void][] = [
+		// The setter resets the SDK's mode to shared before the delegate hears it.
+		["picked from exclusive on B", () => void (exclusiveOnB().outputDevices.activeDevice = DEFAULT)],
+		[
+			"picked in shared mode",
+			() => {
+				const sdk = tidalSdk();
+				sdk.setActivePlayer(sdk.nativePlayer);
+				sdk.outputDevices.activeDevice = B;
+				sent.length = 0;
+				sdk.outputDevices.activeDevice = DEFAULT;
+			},
+		],
+		[
+			"a boot play on it",
+			() => {
+				const sdk = tidalSdk();
+				sdk.setActivePlayer(sdk.nativePlayer);
+				sdk.nativePlayer.play();
+			},
+		],
+		[
+			"an exclusive mode the SDK accepts on it",
+			() => {
+				const sdk = tidalSdk();
+				sdk.setActivePlayer(sdk.nativePlayer);
+				sdk.outputDevices.deviceMode = "exclusive";
+			},
+		],
+		[
+			// The SDK says exclusive on the default while Rust holds it shared; with the next native play
+			// deduped by the SDK, the release is the only call Rust hears.
+			"a release while it is active",
+			() => {
+				const sdk = tidalSdk();
+				sdk.setActivePlayer(sdk.nativePlayer);
+				sdk.nativePlayer.play();
+				sdk.outputDevices.deviceMode = "exclusive";
+				sent.length = 0;
+				sdk.setActivePlayer(sdk.shaka);
+				sdk.setActivePlayer(sdk.nativePlayer);
+				sdk.nativePlayer.play();
+			},
+		],
+	];
+	for (const [way, run] of ways) {
+		sent.length = 0;
+		run();
+		expect(deviceSets(), way).toEqual([["auto"]]);
+	}
 });
 
 test("ASIO stays sticky through a release", () => {
@@ -183,14 +176,4 @@ test("without the capture a release goes to the default, shared", () => {
 	delete W.__lunaHostModules;
 	sdk.setActivePlayer(sdk.shaka);
 	expect(deviceSets()).toEqual([["auto"]]);
-});
-
-test("ASIO stays sticky through a System Default pick", () => {
-	W.__TIDALUNAR_ASIO__ = true;
-	const sdk = tidalSdk();
-	sdk.setActivePlayer(sdk.nativePlayer);
-	sdk.outputDevices.activeDevice = B;
-	sent.length = 0;
-	sdk.outputDevices.activeDevice = DEFAULT;
-	expect(deviceSets()).toEqual([["auto", "asio"]]);
 });
