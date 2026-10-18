@@ -305,6 +305,31 @@ pub(crate) fn resolve_base(
         .filter(|dir| dir.to_str().is_some())
 }
 
+/// What the running executable's path gives CEF to load its resources from.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum InstallDir {
+    /// The directory holding the executable.
+    Found(PathBuf),
+    /// The system cannot name the executable; CEF looks on its own.
+    Unknown,
+    /// The path is not UTF-8 text, which CEF's resource settings cannot carry.
+    NotText,
+}
+
+/// Judges the whole path rather than its directory, since the desktop entry and
+/// the `tidal://` handler write the executable itself out as text.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn install_dir(exe: std::io::Result<PathBuf>) -> InstallDir {
+    match exe {
+        Err(_) => InstallDir::Unknown,
+        Ok(exe) if exe.to_str().is_none() => InstallDir::NotText,
+        Ok(exe) => exe.parent().map_or(InstallDir::Unknown, |dir| {
+            InstallDir::Found(dir.to_path_buf())
+        }),
+    }
+}
+
 /// The account's home directory, resolved once. `home_dir` reads `HOME` again,
 /// then the account database when `HOME` is unset or empty.
 #[cfg(not(target_os = "windows"))]

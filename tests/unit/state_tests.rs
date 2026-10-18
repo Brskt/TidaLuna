@@ -85,6 +85,39 @@ fn a_fallback_that_is_not_utf8_is_refused() {
     assert_eq!(resolve_base(None, || Some(not_utf8())), None);
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_install_dir_is_the_folder_holding_the_executable() {
+    use super::{InstallDir, install_dir};
+    let dir = absolute("tidalunar");
+    assert_eq!(
+        install_dir(Ok(dir.join("tidalunar"))),
+        InstallDir::Found(dir)
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_executable_the_system_cannot_name_leaves_the_install_dir_unknown() {
+    use super::{InstallDir, install_dir};
+    assert_eq!(
+        install_dir(Err(std::io::Error::other("no /proc"))),
+        InstallDir::Unknown
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_install_path_that_is_not_utf8_is_not_text_in_its_folder_or_its_name() {
+    use super::{InstallDir, install_dir};
+    // In the folder, then in the file name itself.
+    let in_folder = not_utf8().join("tidalunar");
+    let in_name = not_utf8();
+    for exe in [in_folder, in_name] {
+        assert_eq!(install_dir(Ok(exe.clone())), InstallDir::NotText, "{exe:?}");
+    }
+}
+
 #[test]
 fn nothing_absolute_anywhere_resolves_to_nothing() {
     assert_eq!(resolve_base(None, || None), None);

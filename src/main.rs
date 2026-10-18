@@ -70,6 +70,17 @@ fn refuse_without_data_dir() -> ! {
     refuse_to_start(WHY)
 }
 
+/// Stops a launch from an executable whose path is not UTF-8 text. CEF takes its
+/// resource directories as text: a lossy copy would name a folder that does
+/// not exist.
+#[cfg(not(target_os = "macos"))]
+fn refuse_install_dir_not_text() -> ! {
+    refuse_to_start(
+        "TidaLunar cannot run from this folder: its path is not valid Unicode text. \
+        Move TidaLunar to a folder whose name is plain text.",
+    )
+}
+
 fn main() {
     // Seed the live log level from the LOGS env var before anything can log.
     logging::init_env_floor();
@@ -126,9 +137,11 @@ fn main() {
     // executable. macOS carries them inside the .app and resolves them
     // elsewhere; nothing there consumes this.
     #[cfg(not(target_os = "macos"))]
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let exe_dir = match state::install_dir(std::env::current_exe()) {
+        state::InstallDir::Found(dir) => Some(dir),
+        state::InstallDir::Unknown => None,
+        state::InstallDir::NotText => refuse_install_dir_not_text(),
+    };
 
     // Set DLL search directory to bin/cef/, where delay-loaded libcef.dll lives
     #[cfg(target_os = "windows")]
