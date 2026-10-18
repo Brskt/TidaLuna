@@ -1,9 +1,9 @@
 //! Test-only helpers for the connect module.
 //!
 //! `MockWsServer` is a plain-WS (not WSS) server that listens on a
-//! randomly-assigned localhost port, letting unit tests exercise the
-//! parts of the TIDAL Connect protocol that depend on websocket
-//! framing without a real mobile device. TLS is intentionally out
+//! randomly-assigned localhost port and stands in for a mobile device:
+//! the code under test dials in, and the accepted connection stays open
+//! for as long as the test holds it. TLS is intentionally out
 //! of scope here: the crypto layer is orthogonal to the protocol
 //! state-machine logic under test, and a plain server avoids the
 //! need for test certificates.
@@ -12,23 +12,18 @@
 //!
 //! ```ignore
 //! let mut server = MockWsServer::new().await;
-//! let url = server.url();                // connect the SUT to this
-//! let mut conn = server.accept().await;  // wait for the SUT to dial in
-//! conn.send_text(r#"{"command":"ping"}"#).await.unwrap();
-//! let msg = conn.expect_text().await;
-//! assert!(msg.contains("pong"));
+//! let url = server.url();             // connect the SUT to this
+//! let _conn = server.accept().await;  // wait for the SUT to dial in, and keep it open
 //! ```
 
 #![cfg(test)]
 
 use std::net::SocketAddr;
 
-use anyhow::{Context, Result, anyhow};
-use futures_util::{SinkExt, StreamExt};
+use anyhow::{Context, Result};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, accept_async};
 
 /// A mock websocket server bound to a random loopback port.
@@ -61,7 +56,7 @@ impl MockWsServer {
                     Ok(ws) => ws,
                     Err(_) => continue,
                 };
-                if tx.send(MockWsConnection { stream: ws }).await.is_err() {
+                if tx.send(MockWsConnection { _stream: ws }).await.is_err() {
                     // Receiver dropped, server is shutting down.
                     break;
                 }
@@ -87,38 +82,7 @@ impl MockWsServer {
     }
 }
 
-/// An accepted server-side websocket connection.
+/// An accepted server-side websocket connection, open for as long as it is held.
 pub struct MockWsConnection {
-    stream: WebSocketStream<TcpStream>,
+    _stream: WebSocketStream<TcpStream>,
 }
-
-impl MockWsConnection {
-    pub async fn send_text(&mut self, text: impl Into<String>) -> Result<()> {
-        self.stream
-            .send(Message::Text(text.into().into()))
-            .await
-            .context("send text frame")
-    }
-
-    /// Next frame from the peer, if any. Returns `None` on clean close.
-    pub async fn recv(&mut self) -> Result<Option<Message>> {
-        match self.stream.next().await {
-            Some(Ok(msg)) => Ok(Some(msg)),
-            Some(Err(e)) => Err(e).context("recv frame"),
-            None => Ok(None),
-        }
-    }
-
-    /// Next frame, expected to be a text frame. Errors otherwise.
-    pub async fn expect_text(&mut self) -> Result<String> {
-        match self.recv().await? {
-            Some(Message::Text(s)) => Ok(s.to_string()),
-            Some(other) => Err(anyhow!("expected text frame, got {other:?}")),
-            None => Err(anyhow!("connection closed before text frame")),
-        }
-    }
-}
-
-#[cfg(test)]
-#[path = "../../tests/unit/connect/testing.rs"]
-mod tests;
