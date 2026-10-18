@@ -91,20 +91,100 @@ fn install_icon(home: &Path, size: u32) {
     }
 }
 
+/// Characters that force an `Exec` argument into double quotes: the spec's
+/// reserved set, plus the braces and brackets KDE's splitter reads as shell
+/// syntax and would hand to `/bin/sh -c`.
+const EXEC_RESERVED: &[char] = &[
+    ' ', '\t', '\n', '\r', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(',
+    ')', '`', '{', '}', '[', ']',
+];
+
+/// One `Exec` argument, quoted only when it has to be: a path that needs
+/// nothing stays byte for byte what earlier versions wrote. `%` is doubled
+/// either way, because the launcher reads it as a field code.
+fn quote_exec_arg(arg: &str) -> String {
+    let quoted = arg.contains(EXEC_RESERVED);
+    let mut out = String::with_capacity(arg.len() + 2);
+    if quoted {
+        out.push('"');
+    }
+    for c in arg.chars() {
+        match c {
+            '%' => out.push_str("%%"),
+            '"' | '`' | '$' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    if quoted {
+        out.push('"');
+    }
+    out
+}
+
+/// The file-level escapes of the spec's `string` type, applied to the whole
+/// value after the `Exec` quoting; a quoting backslash is itself doubled.
+fn escape_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `Exec=` value that opens `exe` on one URL, or `None` when the path
+/// cannot be written faithfully. A desktop entry is UTF-8, and a lossy copy of
+/// a path that is not would name a file that does not exist; the other control
+/// characters have no escape in the `string` type.
+///
+/// GLib and KDE both look the program up before they expand field codes; a
+/// `%%` in the program itself finds nothing. Behind `env` it is an argument,
+/// expanded before it is run, unless it holds `=`, which `env` would read as an
+/// assignment: that path has no form.
+fn exec_value(exe: &Path) -> Option<String> {
+    let path = exe.to_str()?;
+    if path
+        .chars()
+        .any(|c| c.is_ascii_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return None;
+    }
+    let launcher = match (path.contains('%'), path.contains('=')) {
+        (true, true) => return None,
+        (true, false) => "env ",
+        (false, _) => "",
+    };
+    Some(escape_string(&format!(
+        "{launcher}{} %u",
+        quote_exec_arg(path)
+    )))
+}
+
 fn install_desktop_entry(home: &Path, exe: &Path) {
+    let Some(exec) = exec_value(exe) else {
+        crate::verr!("[desktop_entry] Executable path cannot be written to an Exec line");
+        return;
+    };
     let dir = home.join(".local/share/applications");
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
     let path = dir.join(format!("{WM_CLASS}.desktop"));
-    let exe_str = exe.display();
     let contents = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=TidaLunar\n\
          GenericName=Music Player\n\
          Comment=A native TIDAL client\n\
-         Exec={exe_str} %u\n\
+         Exec={exec}\n\
          Icon={WM_CLASS}\n\
          StartupWMClass={WM_CLASS}\n\
          Categories=AudioVideo;Audio;Music;\n\
