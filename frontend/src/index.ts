@@ -77,7 +77,6 @@ const PASSTHROUGH_EVENTS = new Set([
     "devices", "devicedisconnected", "deviceexclusivemodenotallowed",
     "deviceformatnotsupported", "devicelocked", "devicenotfound",
     "deviceunknownerror", "mediaformat", "version", "mediaerror",
-    "mediamaxconnectionsreached",
     "deviceasiodrivernotfound", "deviceasioformatunsupported",
     "deviceasioinitfailed", "deviceasiorateunsupported",
     "deviceexclusiveformatunsupported",
