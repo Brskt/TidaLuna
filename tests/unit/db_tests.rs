@@ -15,20 +15,6 @@ fn actor() -> (DbActor, tempfile::TempDir) {
 }
 
 #[test]
-fn post_runs_the_closure_without_waiting_for_it() {
-    let (db, _dir) = actor();
-    let seen = Arc::new(Mutex::new(false));
-
-    let flag = Arc::clone(&seen);
-    db.post(move |_, _| {
-        *flag.lock().unwrap() = true;
-    });
-    db.flush();
-
-    assert!(*seen.lock().unwrap(), "the posted closure never ran");
-}
-
-#[test]
 fn posts_run_in_submission_order() {
     let (db, _dir) = actor();
     let order = Arc::new(Mutex::new(Vec::new()));
@@ -37,6 +23,8 @@ fn posts_run_in_submission_order() {
         let order = Arc::clone(&order);
         db.post(move |_, _| order.lock().unwrap().push(i));
     }
+    // Returning only once the queue has drained is what keeps a settings write from dying with
+    // the process at exit.
     db.flush();
 
     let seen = order.lock().unwrap().clone();
@@ -63,22 +51,4 @@ fn a_later_call_observes_every_earlier_post() {
     };
 
     assert_eq!(observed, 32, "a call overtook the posts queued before it");
-}
-
-#[test]
-fn flush_returns_only_once_the_queue_has_drained() {
-    let (db, _dir) = actor();
-    let done = Arc::new(Mutex::new(0u32));
-
-    for _ in 0..128 {
-        let done = Arc::clone(&done);
-        db.post(move |_, _| *done.lock().unwrap() += 1);
-    }
-    db.flush();
-
-    assert_eq!(
-        *done.lock().unwrap(),
-        128,
-        "flush is what keeps a settings write from dying with the process at exit"
-    );
 }
