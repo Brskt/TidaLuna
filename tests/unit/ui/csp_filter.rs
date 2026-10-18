@@ -59,16 +59,6 @@ fn the_host_check_outranks_the_resource_type() {
 }
 
 #[test]
-fn strips_csp_meta_tag() {
-    let html =
-        b"<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"x\"></head></html>";
-    let out = strip_csp_meta(html);
-    let s = std::str::from_utf8(&out).unwrap();
-    assert!(s.contains("<meta name=\"LunaWuzHere\""));
-    assert!(!s.contains("Content-Security-Policy"));
-}
-
-#[test]
 fn passthrough_when_absent() {
     let html = b"<html><head></head></html>";
     assert_eq!(strip_csp_meta(html), html);

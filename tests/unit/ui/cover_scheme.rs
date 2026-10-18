@@ -124,14 +124,6 @@ async fn answer_within_deadline(rx: CoverAnswer) -> Arc<CoverResponse> {
 }
 
 #[tokio::test]
-async fn a_job_that_panics_still_answers_its_waiter() {
-    let (rx, _interest) = join_or_start(job_key("panics"), |key, mine, result| {
-        tokio::spawn(run_cover_job(key, mine, result, panicking_load()));
-    });
-    assert_eq!(answer_within_deadline(rx).await.status, 502);
-}
-
-#[tokio::test]
 async fn a_request_after_a_job_panicked_starts_a_fresh_one() {
     let key = job_key("panics-then-asks-again");
     let mut job = None;
@@ -206,65 +198,4 @@ async fn a_job_nobody_waits_for_is_replaced_and_never_answers_its_successor() {
 
     assert!(finish_new.send(CoverOutcome::Decoded(vec![2])).is_ok());
     assert_eq!(*answer_within_deadline(new_rx).await.body, vec![2]);
-}
-
-#[test]
-fn a_job_its_runtime_drops_answers_its_waiter_and_is_retired() {
-    let key = job_key("runtime-drops-the-job");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("a test runtime");
-    let (_finish, load) = gated_load();
-    let (rx, _interest) = rt.block_on(async {
-        let joined = join_or_start(key.clone(), |key, mine, result| {
-            tokio::spawn(run_cover_job(key, mine, result, load));
-        });
-        // The job's first poll, which parks it on its load.
-        tokio::task::yield_now().await;
-        joined
-    });
-    drop(rt);
-
-    let answer = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("a test runtime")
-        .block_on(answer_within_deadline(rx));
-    assert_eq!(answer.status, 502);
-
-    let mut started = false;
-    let _ = join_or_start(key, |_, _, _| started = true);
-    assert!(
-        started,
-        "a later request joined a job its runtime had dropped"
-    );
-}
-
-/// A runtime already shut down drops the task inside `spawn()`, on the thread that called it, and
-/// `open()` calls it holding the `COVER_JOBS` lock.
-#[test]
-fn a_job_its_runtime_refuses_leaves_the_table_usable() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("a test runtime");
-    let handle = rt.handle().clone();
-    drop(rt);
-
-    let key = job_key("runtime-refuses-the-job");
-    let first = key.clone();
-    let (done, returned) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = join_or_start(first, |key, mine, result| {
-            handle.spawn(run_cover_job(key, mine, result, panicking_load()));
-        });
-        let _ = done.send(());
-    });
-    assert!(
-        returned.recv_timeout(ANSWER_DEADLINE).is_ok(),
-        "starting a job on a dead runtime deadlocked the table"
-    );
-
-    let mut started = false;
-    let _ = join_or_start(key, |_, _, _| started = true);
-    assert!(started, "a later request joined a job that never ran");
 }

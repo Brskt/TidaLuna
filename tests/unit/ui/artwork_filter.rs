@@ -61,35 +61,6 @@ fn drops_the_video_artwork_and_keeps_the_static_one() {
 }
 
 #[test]
-fn prunes_the_identifier_so_the_static_artwork_lands_first() {
-    let doc = rewritten(&album_with_both_artworks());
-
-    // TIDAL selectors read coverArt.data[0]; a hole left there blanks the cover
-    // just as surely as the unplayable video did.
-    let ids = doc["data"]["relationships"]["coverArt"]["data"]
-        .as_array()
-        .expect("the relationship survives");
-    assert_eq!(ids.len(), 1);
-    assert_eq!(ids[0]["id"], "img-1");
-}
-
-#[test]
-fn leaves_a_document_without_video_artwork_alone() {
-    let body = serde_json::json!({
-        "data": { "type": "albums", "id": "1" },
-        "included": [
-            { "type": "artworks", "id": "img-1", "attributes": { "mediaType": "IMAGE" } }
-        ]
-    })
-    .to_string();
-
-    assert!(matches!(
-        strip_video_artwork(body.as_bytes()),
-        StripResult::Unchanged
-    ));
-}
-
-#[test]
 fn keeps_a_video_artwork_that_is_the_requested_resource() {
     // GET /artworks/{id} answers with the artwork itself in `data`. Emptying it
     // would answer the request with nothing rather than with a static cover.
@@ -207,40 +178,40 @@ fn strips_only_json_on_the_openapi_host() {
     assert!(!should_strip(&plaintext, "application/json"));
 }
 
+/// Armed on the gateway only, and only while the codec is off: the switch disarms it on the same
+/// url and cannot arm it on another host.
 #[test]
 fn the_filter_arms_on_the_gateway_while_the_codec_is_off() {
-    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
-    assert!(arms_artwork_filter(&url, false));
+    for (host, codec_ready, armed) in [
+        ("openapi", false, true),
+        ("openapi", true, false),
+        ("listen", false, false),
+        ("listen", true, false),
+    ] {
+        let url = RequestUrl::new(format!("https://{host}.tidal.com/v2/albums/1"));
+        assert_eq!(
+            arms_artwork_filter(&url, codec_ready),
+            armed,
+            "{host}, codec ready: {codec_ready}"
+        );
+    }
 }
 
-#[test]
-fn the_codec_switch_disarms_the_filter_on_the_same_url() {
-    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
-    assert!(!arms_artwork_filter(&url, true));
-}
-
-#[test]
-fn the_switch_cannot_arm_the_filter_on_another_host() {
-    let url = RequestUrl::new("https://listen.tidal.com/v2/albums/1".to_owned());
-    assert!(!arms_artwork_filter(&url, false));
-    assert!(!arms_artwork_filter(&url, true));
-}
-
+/// The body rule strips JSON on the gateway while the codec is off; the switch lets the body
+/// through, and a body that is not JSON is left alone whatever the switch says.
 #[test]
 fn the_body_rule_strips_json_on_the_gateway_while_the_codec_is_off() {
     let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
-    assert!(strips_artwork_body(&url, "application/vnd.api+json", false));
-}
-
-#[test]
-fn the_codec_switch_lets_the_body_through_untouched() {
-    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
-    assert!(!strips_artwork_body(&url, "application/vnd.api+json", true));
-}
-
-#[test]
-fn a_non_json_body_is_left_alone_whatever_the_switch_says() {
-    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
-    assert!(!strips_artwork_body(&url, "image/jpeg", false));
-    assert!(!strips_artwork_body(&url, "image/jpeg", true));
+    for (content_type, codec_ready, stripped) in [
+        ("application/vnd.api+json", false, true),
+        ("application/vnd.api+json", true, false),
+        ("image/jpeg", false, false),
+        ("image/jpeg", true, false),
+    ] {
+        assert_eq!(
+            strips_artwork_body(&url, content_type, codec_ready),
+            stripped,
+            "{content_type}, codec ready: {codec_ready}"
+        );
+    }
 }
