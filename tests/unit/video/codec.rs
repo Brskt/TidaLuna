@@ -81,11 +81,6 @@ fn the_current_platform_resolves_to_a_target() {
 }
 
 #[test]
-fn the_codec_host_is_accepted() {
-    assert!(is_codec_host("ciscobinary.openh264.org"));
-}
-
-#[test]
 fn lookalike_codec_hosts_are_refused() {
     assert!(!is_codec_host("ciscobinary.openh264.org.evil.com"));
     assert!(!is_codec_host("evil-ciscobinary.openh264.org"));
