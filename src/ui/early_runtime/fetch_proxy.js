@@ -41,7 +41,7 @@ function proxyFetch(url, init) {
     });
 }
 
-var _lunaFetch = function(input, init) {
+var _lunaFetchInner = function(input, init) {
     var url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 
     if (url.indexOf(_tidalDomain) !== -1 && init && init.headers) {
@@ -71,6 +71,44 @@ var _lunaFetch = function(input, init) {
             throw err;
         });
     });
+};
+
+// The accessor below swallows every assignment; the host cannot wrap window.fetch to watch an
+// answer: it takes this slot instead, once, before any plugin runs (same shape as
+// __lunaSagaPutInstall). The observer gets (input, answerPromise) of every call, after the
+// proxy.fetch fallback above (a proxied answer is seen too). It cannot change the answer or
+// fail the call: it is handed the promise the page gets, and what it throws is logged, not raised.
+// One that answers a promise holds the page's answer until it settles (see _lunaFetch).
+var _fetchObserver = null;
+Object.defineProperty(globalThis, '__lunaFetchTapInstall', {
+    value: function(h) {
+        if (_fetchObserver !== null || typeof h !== 'function') return false;
+        _fetchObserver = h;
+        return true;
+    },
+    writable: false,
+    configurable: false,
+    enumerable: false
+});
+var _lunaFetch = function(input, init) {
+    var answer = _lunaFetchInner(input, init);
+    if (_fetchObserver !== null) {
+        try {
+            var seen = _fetchObserver(input, answer);
+            // An observer that answers a promise has something to read off this answer that the page's
+            // next step depends on: the page gets the answer once that is done (a rejection of it is the
+            // observer's own to report).
+            if (seen && typeof seen.then === 'function') {
+                return answer.then(function(resp) {
+                    var back = function() { return resp; };
+                    return seen.then(back, back);
+                });
+            }
+        } catch (e) {
+            console.warn('[luna:fetch] observer failed:', e);
+        }
+    }
+    return answer;
 };
 
 // Lock window.fetch via accessor descriptor (getter/setter).

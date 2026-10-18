@@ -178,10 +178,11 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     key,
                     product_id,
                 } => {
-                    // The renderer names the track off the play queue; the SDK's own
-                    // delegate carries only the url triple. A tag that names the wrong
-                    // track fails closed: `same_track` refuses it downstream and nothing
-                    // is published, which is exactly what an absent tag already does.
+                    // The renderer names the track by the SDK's playbackinfo answer the
+                    // stream came from; the SDK's own delegate carries only the url triple.
+                    // An absent tag publishes nothing, but a tag naming ANOTHER track does
+                    // not fail closed: `same_track` compares ids; that track's own
+                    // announcement is given this one's length.
                     let track = TrackInfo {
                         url,
                         format,

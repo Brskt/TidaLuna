@@ -15,6 +15,7 @@ import { followCastQueue } from "./connect/middleware";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
 import { refusePlayback } from "./refuse-playback";
+import { installSdkFetchObserver } from "./sdk-playbackinfo";
 import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
 import { followCommittedOutput } from "./output-device";
@@ -28,6 +29,11 @@ import * as LunaCore from "../render/src";
 import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
 import * as LibNative from "../plugins/lib.native/src/index.native";
+
+// Top level: it runs before TIDAL's SDK asks for its first playbackinfo and before any plugin
+// loads (`jsrt.load_plugins` is awaited in `init`, below). A plugin that took the slot first would
+// see every answer the page's `fetch` returns.
+installSdkFetchObserver();
 
 // Synchronous initialization: expose nativeInterface immediately for Tidal
 // to detect desktop mode before its own scripts run.
