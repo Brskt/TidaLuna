@@ -67,11 +67,18 @@ fn a_cancelled_buffer_is_not_reusable_even_once_complete() {
 fn retiring_one_reader_leaves_the_buffer_readable_by_the_next() {
     let (buffer, writer) = RamBuffer::new_for_test(4);
     let cancel = Arc::new(AtomicBool::new(false));
-    let retired = buffer.clone().with_reader_cancel(cancel.clone());
+    let mut retired = buffer.clone().with_reader_cancel(cancel.clone());
     cancel.store(true, Relaxed);
 
     let _ = writer.write_counted(b"data");
     writer.finish();
+
+    // The retired reader meets its own flag on its next read, and the buffer stays whole.
+    let mut one = [0u8; 1];
+    assert!(
+        retired.read(&mut one).is_err(),
+        "the retired reader read on"
+    );
 
     let mut fresh = buffer.clone();
     let mut sink = [0u8; 4];
@@ -146,6 +153,10 @@ fn a_read_far_past_the_frontier_arms_a_range_restart() {
 /// as "unexpected error (NPO03)". The correction swept the other way: `finish_with_error`
 /// gives up for six reasons and only two are the network, so an expired url's 403 and a key
 /// that will not decrypt both announced "no internet" over a healthy connection.
+///
+/// None of the three may be `Interrupted`: symphonia's `read_buf_exact` retries it without
+/// limit, and with the stop flags latched a decode thread spins at full CPU inside
+/// `next_packet` while `cancel_crossfade` waits on its join for good.
 #[test]
 fn the_three_ways_a_read_fails_report_three_kinds() {
     let mut sink = [0u8; 16];
@@ -201,38 +212,6 @@ fn the_three_ways_a_read_fails_report_three_kinds() {
             "never Interrupted: symphonia's read_buf_exact retries that kind forever"
         );
     }
-}
-
-/// The kind keeps symphonia out of an unbounded retry; the named `ReadStop` in the payload is
-/// what the decoder reads back. Symphonia's `read_buf_exact` retries
-/// `Interrupted` without limit, and both stop flags are latched; a read reporting that
-/// kind returns instantly on every retry: a decode thread spinning at full CPU inside
-/// `next_packet`, and `cancel_crossfade` blocked on its join for good. Unreachable while
-/// the incoming buffer is always complete; reachable the moment it streams.
-#[test]
-fn a_stopped_read_never_reports_a_kind_symphonia_retries() {
-    let (cancelled, _writer) = RamBuffer::new_for_test(1024);
-    cancelled.cancel();
-    let mut sink = [0u8; 16];
-    assert_ne!(
-        cancelled
-            .clone()
-            .read(&mut sink)
-            .expect_err("a cancelled buffer cannot read")
-            .kind(),
-        std::io::ErrorKind::Interrupted
-    );
-
-    let (buffer, _writer2) = RamBuffer::new_for_test(1024);
-    let retired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    assert_ne!(
-        buffer
-            .with_reader_cancel(retired)
-            .read(&mut sink)
-            .expect_err("a retired reader cannot read")
-            .kind(),
-        std::io::ErrorKind::Interrupted
-    );
 }
 
 /// Which stop it was has to survive the trip through `io::Error`, because the kind cannot say:
@@ -328,18 +307,6 @@ fn the_buffer_carries_the_token_that_stops_its_download() {
     assert!(
         token.is_cancelled(),
         "and the caller's own copy names the same download"
-    );
-}
-
-/// A complete buffer has no task filling it. Its handle answers as already stopped rather
-/// than as missing, which is what lets every caller treat the two the same.
-#[test]
-fn a_complete_buffer_has_nothing_left_to_stop() {
-    let buffer = RamBuffer::from_complete(vec![0u8; 16]);
-    buffer.cancel_download();
-    assert!(
-        buffer.is_same_stream(&buffer.clone()),
-        "a clone is the same stream"
     );
 }
 

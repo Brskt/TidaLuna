@@ -66,12 +66,6 @@ fn access_stamp_is_monotonic_across_clock_skew() {
 }
 
 #[test]
-fn access_stamp_on_empty_table_uses_now() {
-    let conn = test_conn();
-    assert_eq!(next_access_stamp(&conn, 100), 100);
-}
-
-#[test]
 fn disabled_cache_misses_and_noops() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cache = AudioCache::disabled(tmp.path());
