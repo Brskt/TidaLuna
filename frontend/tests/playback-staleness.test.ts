@@ -31,8 +31,18 @@ mock.module("../render/src/exposeTidalInternals.patchAction", () => ({
 	interceptors: {},
 	buildActions: {},
 }));
+const listeners = new Set<() => void>();
+let subscriptions = 0;
 mock.module("../plugins/lib/src/redux/store", () => ({
-	store: { getState: () => state, dispatch: (a: Dispatch) => dispatched.push(a) },
+	store: {
+		getState: () => state,
+		dispatch: (a: Dispatch) => dispatched.push(a),
+		subscribe: (cb: () => void) => {
+			subscriptions++;
+			listeners.add(cb);
+			return () => void listeners.delete(cb);
+		},
+	},
 }));
 mock.module("../plugins/lib/src/helpers/getPlaybackInfo", () => ({
 	getPlaybackInfo: (id: string) => {
@@ -50,7 +60,7 @@ mock.module("../src/controllers/mediasession", () => ({
 }));
 
 const { createPlaybackController } = await import("../src/controllers/playback");
-const { isSelfLoad, setSelfLoad, proxyReset, proxySetDuration } = await import("../src/audio-proxy");
+const { isSelfLoad, setSelfLoad, proxyEnded, proxyReset, proxySetDuration } = await import("../src/audio-proxy");
 
 // The closure schedules itself with setTimeout(0) and awaits inside; two macrotask turns let
 // it reach its first suspension point and, later, run its resumption to completion.
@@ -69,7 +79,10 @@ beforeEach(() => {
 // Reset even when an assertion failed: the seeded context and the self-load flag (a module global
 // the other files share) must not reach the next test.
 afterEach(() => {
-	state.playbackControls.playbackContext = {};
+	state.playbackControls = { playbackContext: {}, mediaProduct: {} };
+	listeners.clear();
+	subscriptions = 0;
+	proxyReset();
 	setSelfLoad(false);
 });
 
@@ -228,19 +241,131 @@ test("a DASH track the Connect receiver already plays is not loaded again either
 	expect(isSelfLoad()).toBe(false);
 });
 
-test("a track TIDAL moves to is still self-loaded", async () => {
-	const from = sent.length;
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "local", type: "track" });
+// The same-product rule. TIDAL announces a track only when its current item changes; a track that
+// starts again as the product Rust already loaded (repeat one, repeat all on a queue of one) comes with
+// no announcement. The page armed at the track's end (or Shaka's hand-over) takes the store's
+// transition to that product for it and asks for the load.
+const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
+const loadsFrom = (from: number) => sentSince(from).filter((c) => c === "player.load").length;
+
+// TIDAL's transition: a new media product and playback context in the store.
+const transitionTo = (productId: string) => {
+	state.playbackControls = { mediaProduct: { productId }, playbackContext: { actualProductId: productId } } as any;
+	for (const l of [...listeners]) l();
+};
+
+async function playedAndEnded(controller: ReturnType<typeof createPlaybackController>, id: string) {
+	controller.setCurrentMediaItem({ productId: id, type: "track" });
 	await flush();
 	resolvePbi?.(aacStream);
 	await flush();
+	proxyReset();
+	const el = document.createElement("audio");
+	el.src = dash(id);
+	proxyEnded();
+}
 
-	expect(sentSince(from)).toContain("player.load");
-	expect(isSelfLoad()).toBe(true);
+test("a transition to the product that just ended loads it again, once", async () => {
+	const from = sent.length;
+	const controller = createPlaybackController();
+	await playedAndEnded(controller, "again");
+	expect(loadsFrom(from)).toBe(1);
+
+	transitionTo("again");
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	expect(loadsFrom(from)).toBe(2);
+
+	// Disarmed by the replay: a later change of the same product is nobody's replay.
+	transitionTo("again");
+	await flush();
+	expect(loadsFrom(from)).toBe(2);
 });
 
-const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
+test("a transition to another product is no replay, and disarms the rule", async () => {
+	const from = sent.length;
+	const controller = createPlaybackController();
+	await playedAndEnded(controller, "first");
+
+	transitionTo("second");
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	expect(loadsFrom(from)).toBe(1);
+
+	transitionTo("first");
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	expect(loadsFrom(from)).toBe(1);
+});
+
+test("the next announcement disarms the rule, and its own context update is no replay", async () => {
+	// TIDAL announces the track it moved to, and the announcement writes the playback context once
+	// the stream is known: that write is not a transition.
+	const from = sent.length;
+	const controller = createPlaybackController();
+	await playedAndEnded(controller, "first");
+
+	controller.setCurrentMediaItem({ productId: "second", type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	expect(loadsFrom(from)).toBe(2);
+
+	transitionTo("second");
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	expect(loadsFrom(from)).toBe(2);
+});
+
+test("a hand-over while the next track's announcement is in flight arms nothing", async () => {
+	// The listener pressed Next after the preload: TIDAL announced the track, whose load is under way,
+	// and Shaka then plays the element it preloaded. The transition that follows is that track's own.
+	const from = sent.length;
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "first", type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	controller.setCurrentMediaItem({ productId: "second", type: "track" });
+	await flush();
+	proxyReset();
+	const playing = document.createElement("audio");
+	const preloaded = document.createElement("audio");
+	playing.src = dash("first");
+	preloaded.src = dash("second");
+	await preloaded.play();
+	expect(subscriptions).toBe(0);
+
+	transitionTo("second");
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	expect(loadsFrom(from)).toBe(2);
+});
+
+test("a hand-over arms the rule, and the `completed` that follows it does not arm it again", async () => {
+	// Armed again after the transition, the rule would take the announcement's own context update
+	// for a replay and load the new track twice.
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "first", type: "track" });
+	await flush();
+	resolvePbi?.(aacStream);
+	await flush();
+	proxyReset();
+	const playing = document.createElement("audio");
+	const preloaded = document.createElement("audio");
+	playing.src = dash("first");
+	preloaded.src = dash("second");
+	await preloaded.play();
+	expect(subscriptions).toBe(1);
+
+	expect(proxyEnded()).toBe(false);
+	expect(subscriptions).toBe(1);
+});
 
 // The SDK's own reload of the track it plays (its expired-stream retry on Play, the retry once the
 // network is back). The page announces nothing for it and Rust reports no length. The element
@@ -341,6 +466,20 @@ test("a late load of a track the catalog has no length for settles on 0, the SDK
 
 	expect(lengths).toEqual([0]);
 	expect(pbiCalls).toEqual([]);
+});
+
+test("a stream of the product Rust has is its reload, whatever the SDK's answer said", async () => {
+	const lengths = await lateBind(await sdkAnswers("3005"), "3005");
+
+	expect(lengths).toEqual([200]);
+	expect(pbiCalls).toEqual(["3005"]);
+});
+
+test("a stream this page never saw answered is taken for a reload of Rust's track", async () => {
+	const lengths = await lateBind(dash("never answered"), "3006");
+
+	expect(lengths).toEqual([200]);
+	expect(pbiCalls).toEqual(["3006"]);
 });
 
 test("a track TIDAL moves to is still self-loaded", async () => {

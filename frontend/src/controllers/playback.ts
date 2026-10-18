@@ -1,5 +1,5 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
-import { isSelfLoad, setSelfLoad, onSdkLoad, onSdkReload, proxyLoading } from "../audio-proxy";
+import { isSelfLoad, setSelfLoad, onHandoff, onSdkLoad, onSdkReload, proxyLoading } from "../audio-proxy";
 import { refusePlayback } from "../refuse-playback";
 import { productOfStream } from "../sdk-playbackinfo";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
@@ -29,11 +29,38 @@ const btsSelfLoad = (pbi: any) => {
 export const createPlaybackController = () => {
     let delegate: any = null;
     let lastTransitionId = "";
+    // The last audio item announced: what a replay asks the load of again.
+    let lastItem: any = null;
     // The product of the last self-load sent to Rust.
     let loadedId = "";
     // Whether that self-load is a BTS stream, which Rust keeps fetching with the url it was handed. A
     // DASH one is fetched whole before it plays and holds no url afterwards.
     let loadedProgressive = false;
+    // TIDAL announces a track only when its current item changes; a track that starts again as
+    // the very product Rust has loaded (ONE, ALL on a queue of one) is never announced, and nothing
+    // would load it. Armed when the track ends or Shaka swaps to its preload, disarmed by the next
+    // announcement: a transition to that product that comes first is such a replay. An announcement
+    // already in flight arms nothing: it loads the track the transition is about.
+    let disarm: () => void = () => {};
+    const arm = () => {
+        disarm();
+        if (lastTransitionId !== loadedId) return;
+        const { store } = require("../../plugins/lib/src/redux/store");
+        const c0 = store.getState().playbackControls;
+        const before = c0?.mediaProduct;
+        const beforeCtx = c0?.playbackContext;
+        const off = store.subscribe(() => {
+            const controls = store.getState().playbackControls;
+            if (controls?.mediaProduct === before && controls?.playbackContext === beforeCtx) return;
+            disarm();
+            if (String(controls?.mediaProduct?.productId ?? "") === loadedId) ctrl.replaySelfLoad();
+        });
+        disarm = () => {
+            off();
+            disarm = () => {};
+        };
+    };
+    onHandoff(arm);
     // A refusal raises what its steps raised, after running them all. In the catch below that
     // would reach the catch of the whole notification and skip its context write: reported here.
     // It refuses the product last announced, which is the one every caller is loading.
@@ -92,7 +119,14 @@ export const createPlaybackController = () => {
         }
     };
     onSdkReload(refreshCredential);
-    return {
+    const ctrl = {
+        // The same track again, with nothing to announce it: TIDAL announces only when the current
+        // item changes, and the guard below drops a repeated id.
+        replaySelfLoad() {
+            if (!lastItem) return;
+            lastTransitionId = "";
+            this.setCurrentMediaItem(lastItem);
+        },
         registerDelegate: (d: any) => {
             delegate = d;
             // Expose delegate and play/pause toggle for native menu controls.
@@ -117,6 +151,7 @@ export const createPlaybackController = () => {
         // refuses a self-load of it during the cast, stopping this page's transport under a banner.
         setCurrentMediaItem: (item: any, { alreadyPlaying = false }: { alreadyPlaying?: boolean } = {}) => {
             if (item && typeof item === "object") {
+                if (item.type !== "video") lastItem = item;
                 // The one signal that fires for EVERY track, animated cover or not.
                 // `setCurrentTrack` takes the still artwork from it (see its doc).
                 setCurrentTrack(item);
@@ -130,6 +165,7 @@ export const createPlaybackController = () => {
                 const productId = String(item.productId ?? item.id ?? "");
                 if (productId && productId !== lastTransitionId) {
                     lastTransitionId = productId;
+                    disarm();
                     proxyLoading();
                     setTimeout(async () => {
                         try {
@@ -286,5 +322,6 @@ export const createPlaybackController = () => {
         },
         setRepeatMode: (mode: any) => { },
         setShuffle: (shuffle: any) => { },
-    }
+    };
+    return ctrl;
 }
