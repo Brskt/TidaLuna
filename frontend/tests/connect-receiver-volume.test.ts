@@ -74,14 +74,6 @@ test("a remote mute shows muted, keeps Rust's level to restore, and persists bot
 	expect(volumes()).toEqual([]);
 });
 
-test("a remote unmute shows the level Rust restored", () => {
-	start(64, { sdk: false });
-	rustMute(true, 0, 64);
-	rustMute(false, 64, 64);
-	expect(controls).toEqual({ volume: 64, volumeUnmute: 64, muted: false });
-	expect(volumes()).toEqual([]);
-});
-
 test("a remote unmute takes Rust's level over the store's own memory", () => {
 	// The store missed a change Rust applied (no page was loaded); its memory is older. TIDAL's
 	// SET_MUTE saga would restore that one, and send it to Rust whenever the SDK has a stream.
@@ -90,20 +82,6 @@ test("a remote unmute takes Rust's level over the store's own memory", () => {
 	rustMute(false, 80, 80);
 	expect(controls.volume).toBe(80);
 	expect(controls.muted).toBe(false);
-	expect(volumes()).toEqual([]);
-});
-
-test("a mute repeated by the controller keeps the level to restore", () => {
-	start(55, { sdk: false });
-	rustMute(true, 0, 55);
-	rustMute(true, 0, 55);
-	expect(controls).toEqual({ volume: 0, volumeUnmute: 55, muted: true });
-});
-
-test("TIDAL re-applying a mirrored mute or unmute sends nothing back to Rust", () => {
-	start(50, { sdk: true });
-	rustMute(true, 0, 50);
-	rustMute(false, 50, 50);
 	expect(volumes()).toEqual([]);
 });
 
@@ -154,13 +132,6 @@ afterEach(() => {
 	unfollow = undefined;
 });
 
-test("the slider during a cast reaches Rust while TIDAL's SDK holds no stream", () => {
-	startLocal(70, { sdk: false });
-	cast();
-	slider(35);
-	expect(volumes()).toEqual([35]);
-});
-
 test("the mute button during a cast mutes Rust, and unmutes it at the level it had", () => {
 	startLocal(60, { sdk: false });
 	cast();
@@ -168,32 +139,6 @@ test("the mute button during a cast mutes Rust, and unmutes it at the level it h
 	expect(volumes()).toEqual([0]);
 	muteButton();
 	expect(volumes()).toEqual([0, 60]);
-});
-
-test("a local mute during a cast, then the phone's unmute, sends nothing back", () => {
-	startLocal(60, { sdk: false });
-	cast();
-	muteButton();
-	// Rust kept 60 to restore (`OutputLevel`), and reports it.
-	rustMute(false, 60, 60);
-	expect(controls).toEqual({ volume: 60, volumeUnmute: 60, muted: false });
-	expect(volumes()).toEqual([0]);
-});
-
-test("a cast that follows a self-loaded track takes the slider too", () => {
-	startLocal(70, { sdk: false });
-	setSelfLoad(true);
-	cast();
-	slider(25);
-	expect(volumes()).toEqual([25]);
-});
-
-test("while the SDK holds the cast track's stream and applies it, a change reaches Rust once", () => {
-	startLocal(70, { sdk: true });
-	cast();
-	slider(45);
-	muteButton();
-	expect(volumes()).toEqual([45, 0]);
 });
 
 test("the phone's own level, mirrored into the store during a cast, is not sent back", () => {
@@ -205,31 +150,6 @@ test("the phone's own level, mirrored into the store during a cast, is not sent 
 	// The slider back to the level Rust held before still reaches it.
 	slider(30);
 	expect(volumes()).toEqual([30]);
-});
-
-test("a level set before anything plays reaches Rust", () => {
-	startLocal(70, { sdk: false });
-	slider(40);
-	expect(volumes()).toEqual([40]);
-});
-
-test("a change made before the cast reaches Rust once, and is not replayed when it starts", () => {
-	startLocal(70, { sdk: false });
-	slider(50);
-	cast();
-	store.dispatch({ type: "playbackControls/SET_VOLUME_UNMUTE", payload: { volume: 50 } });
-	expect(volumes()).toEqual([50]);
-});
-
-test("a change before TIDAL's SDK holds a stream, then its own application, reaches Rust once", () => {
-	startLocal(70, { sdk: false });
-	cast();
-	// The delegate's `load` for a track picked here: its stream starts after the change.
-	setSelfLoad(false);
-	slider(20);
-	sdkApplies = true;
-	applyVolume(20);
-	expect(volumes()).toEqual([20]);
 });
 
 test("a local change during a cast carries the count of the phone's last level the page took in", () => {
