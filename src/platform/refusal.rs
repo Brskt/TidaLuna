@@ -6,6 +6,7 @@
 //! end a launch (`main`, the macOS CEF bootstrap, the application singleton)
 //! calls this instead of exiting on its own.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
 
@@ -189,6 +190,51 @@ fn install_launch_guard(main: ThreadId, launched: &'static AtomicBool, refuse: f
         let location = info.location().map(|at| (at.file(), at.line()));
         refuse(&panic_refusal(panic_message(info.payload()), location));
     }));
+}
+
+/// What a failed `cef::initialize` means for the launch.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InitFailure {
+    /// Another instance owns the session and has been told about this launch.
+    HandedOver,
+    /// Chromium ended the launch on purpose and nothing is wrong: a relaunch without elevation,
+    /// or a one-shot command that needs no window.
+    Finished,
+    /// Nothing started, and the user is owed the reason.
+    Refused(String),
+}
+
+/// Classifies the exit code `cef::get_exit_code` reports after a failed `initialize`.
+///
+/// The `Finished` set is Chromium's own list of results that are normal exits taken early
+/// (`IsNormalResultCode`, `chrome/common/chrome_result_codes.cc`), which libcef also logs as
+/// nothing. `PROFILE_IN_USE` is what Chromium's process singleton answers when the profile is
+/// held by a process that does not respond, and also when it cannot create or lock its lock file
+/// in the profile root (`chrome_main_delegate.cc`, `PostEarlyInitialization`: `LOCK_ERROR` maps
+/// to it too). `profile_root` is that folder.
+pub(crate) fn classify_init_failure(code: i32, profile_root: &Path) -> InitFailure {
+    use cef::sys::cef_resultcode_t as code_of;
+    const NORMAL_EXIT: i32 = code_of::CEF_RESULT_CODE_NORMAL_EXIT as i32;
+    const PROCESS_NOTIFIED: i32 = code_of::CEF_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED as i32;
+    const PACK_EXTENSION_SUCCESS: i32 =
+        code_of::CEF_RESULT_CODE_NORMAL_EXIT_PACK_EXTENSION_SUCCESS as i32;
+    const AUTO_DE_ELEVATED: i32 = code_of::CEF_RESULT_CODE_NORMAL_EXIT_AUTO_DE_ELEVATED as i32;
+    const PROFILE_IN_USE: i32 = code_of::CEF_RESULT_CODE_PROFILE_IN_USE as i32;
+
+    match code {
+        PROCESS_NOTIFIED => InitFailure::HandedOver,
+        NORMAL_EXIT | PACK_EXTENSION_SUCCESS | AUTO_DE_ELEVATED => InitFailure::Finished,
+        PROFILE_IN_USE => InitFailure::Refused(format!(
+            "TidaLunar cannot take over its browser profile folder ({}). Either another \
+            TidaLunar, or another computer sharing that folder, still holds it, or the folder \
+            cannot be written. Close the other one or make the folder writable, then start \
+            again.",
+            profile_root.display()
+        )),
+        other => InitFailure::Refused(format!(
+            "TidaLunar's browser engine failed to start (exit code {other})."
+        )),
+    }
 }
 
 #[cfg(test)]

@@ -492,13 +492,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) != 1
     {
         let code = get_exit_code();
-        let relaunch =
-            cef::sys::cef_resultcode_t::from(Resultcode::NORMAL_EXIT_PROCESS_NOTIFIED) as i32;
-        if code == relaunch {
-            crate::vprintln!("[CEF]    Another instance owns the session; exiting");
-            return Ok(());
+        match platform::refusal::classify_init_failure(code, &root_cache) {
+            platform::refusal::InitFailure::HandedOver => {
+                crate::vprintln!("[CEF]    Another instance owns the session; exiting");
+                return Ok(());
+            }
+            platform::refusal::InitFailure::Finished => {
+                crate::vprintln!("[CEF]    Chromium ended the launch early (exit code {code})");
+                return Ok(());
+            }
+            platform::refusal::InitFailure::Refused(why) => refuse_to_start(&why),
         }
-        return Err(format!("CEF initialization failed (exit code {code})").into());
     }
 
     // Record this build's version as the anti-rollback high-water mark now that

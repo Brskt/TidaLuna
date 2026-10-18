@@ -1,10 +1,54 @@
 //! Tests for `src/platform/refusal.rs`, attached by `#[path]`.
 
 use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{install_launch_guard, panic_message, panic_refusal};
+use super::{
+    InitFailure, classify_init_failure, install_launch_guard, panic_message, panic_refusal,
+};
+
+const PROFILE_ROOT: &str = "/home/user/.local/share/tidalunar/cef";
+
+fn classify(code: i32) -> InitFailure {
+    classify_init_failure(code, Path::new(PROFILE_ROOT))
+}
+
+#[test]
+fn another_instance_taking_over_the_launch_is_not_a_failure() {
+    assert_eq!(classify(24), InitFailure::HandedOver);
+}
+
+#[test]
+fn the_normal_exits_chromium_takes_early_are_not_failures() {
+    // NORMAL_EXIT, NORMAL_EXIT_PACK_EXTENSION_SUCCESS, NORMAL_EXIT_AUTO_DE_ELEVATED.
+    for code in [0, 36, 38] {
+        assert_eq!(classify(code), InitFailure::Finished, "exit code {code}");
+    }
+}
+
+#[test]
+fn a_profile_that_cannot_be_taken_over_names_its_folder() {
+    let InitFailure::Refused(why) = classify(21) else {
+        panic!("PROFILE_IN_USE must refuse the launch");
+    };
+    assert!(why.contains(PROFILE_ROOT), "{why}");
+    assert!(why.contains("cannot be written"), "{why}");
+}
+
+#[test]
+fn any_other_exit_code_refuses_with_the_code() {
+    // MISSING_DATA, UNSUPPORTED_PARAM, INVALID_SANDBOX_STATE, SYSTEM_RESOURCE_EXHAUSTED, a
+    // Windows sandbox fatal, and a code the enum does not know.
+    for code in [7, 13, 31, 37, 7007, 12345, -1] {
+        let InitFailure::Refused(why) = classify(code) else {
+            panic!("exit code {code} must refuse the launch");
+        };
+        assert!(why.contains(&format!("exit code {code})")), "{why}");
+        assert!(!why.contains(PROFILE_ROOT), "{why}");
+    }
+}
 
 fn refused() -> Result<(), &'static str> {
     Err("refused")
