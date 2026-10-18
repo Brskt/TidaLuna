@@ -285,7 +285,7 @@ fn write(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
 
 fn set(conn: &Connection, key: &str, value: &str) {
     if let Err(e) = write(conn, key, value) {
-        crate::vprintln!("[SETTINGS] Failed to write {key}: {e}");
+        crate::verr!("[SETTINGS] Failed to write {key}: {e}");
     }
 }
 
@@ -304,7 +304,7 @@ pub(crate) fn save_window_state(conn: &mut Connection, state: &WindowState) {
     let tx = match conn.unchecked_transaction() {
         Ok(tx) => tx,
         Err(e) => {
-            crate::vprintln!("[SETTINGS] Failed to begin transaction: {e}");
+            crate::verr!("[SETTINGS] Failed to begin transaction: {e}");
             return;
         }
     };
@@ -314,7 +314,7 @@ pub(crate) fn save_window_state(conn: &mut Connection, state: &WindowState) {
     WINDOW_HEIGHT.save(&tx, &state.height.to_string());
     WINDOW_MAXIMIZED.save(&tx, &state.maximized.to_string());
     if let Err(e) = tx.commit() {
-        crate::vprintln!("[SETTINGS] Failed to commit transaction: {e}");
+        crate::verr!("[SETTINGS] Failed to commit transaction: {e}");
     }
 }
 
@@ -351,14 +351,14 @@ pub(crate) fn save_output_level(conn: &mut Connection, volume: f64, unmute: f64)
     let tx = match conn.unchecked_transaction() {
         Ok(tx) => tx,
         Err(e) => {
-            crate::vprintln!("[SETTINGS] Failed to begin transaction: {e}");
+            crate::verr!("[SETTINGS] Failed to begin transaction: {e}");
             return;
         }
     };
     PLAYER_VOLUME.save(&tx, &volume.to_string());
     PLAYER_VOLUME_UNMUTE.save(&tx, &unmute.to_string());
     if let Err(e) = tx.commit() {
-        crate::vprintln!("[SETTINGS] Failed to commit transaction: {e}");
+        crate::verr!("[SETTINGS] Failed to commit transaction: {e}");
     }
 }
 
