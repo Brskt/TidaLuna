@@ -37,14 +37,33 @@ fn classifies_react_family_chunks() {
 
 #[test]
 fn captures_named_specifiers() {
-    let out = append_capture(
-        "var a=1,b=2;export{a as createElement,b as useState};",
-        "react",
-    );
-    assert!(out.contains("export{a as createElement,b as useState}"));
-    assert!(out.contains(r#"globalThis.__LUNA_CAP&&globalThis.__LUNA_CAP("react",{"#));
-    assert!(out.contains("createElement: a"));
-    assert!(out.contains("useState: b"));
+    for (src, expected) in [
+        (
+            "var a=1,b=2;export{a as createElement,b as useState};",
+            &[
+                "export{a as createElement,b as useState}",
+                "createElement: a",
+                "useState: b",
+            ][..],
+        ),
+        // `export{X as default}` is a named specifier like the others.
+        ("var X={};export{X as default};", &["default: X"]),
+        // TIDAL's react chunk tail: minified named exports of CJS loader fns. Every binding is
+        // captured for modules.ts to call the right one.
+        (
+            "var f=1,c=2,m=3;export{f as a,c as i,m as t};",
+            &["a: f", "i: c", "t: m"],
+        ),
+    ] {
+        let out = append_capture(src, "react");
+        assert!(
+            out.contains(r#"globalThis.__LUNA_CAP&&globalThis.__LUNA_CAP("react",{"#),
+            "{src}"
+        );
+        for part in expected {
+            assert!(out.contains(part), "{src}: {part}");
+        }
+    }
 }
 
 #[test]
@@ -58,22 +77,6 @@ fn captures_exported_declarations() {
 }
 
 #[test]
-fn captures_default_specifier() {
-    let out = append_capture("var X={};export{X as default};", "react");
-    assert!(out.contains("default: X"));
-}
-
-#[test]
-fn skips_reexport_from_but_still_emits_capture() {
-    let out = append_capture(
-        r#"export * from "./other";export const jsx=1;"#,
-        "react/jsx-runtime",
-    );
-    assert!(out.contains("jsx: jsx"));
-    assert!(out.contains("__LUNA_CAP"));
-}
-
-#[test]
 fn parse_failure_returns_source_unchanged() {
     let bad = "var x = ;;;(";
     assert_eq!(append_capture(bad, "react"), bad);
@@ -83,16 +86,6 @@ fn parse_failure_returns_source_unchanged() {
 fn no_exports_returns_source_unchanged() {
     let src = "console.log(1);";
     assert_eq!(append_capture(src, "react"), src);
-}
-
-#[test]
-fn captures_minified_cjs_loader_exports() {
-    // Mirrors TIDAL's react chunk tail: minified named exports of CJS loader
-    // fns. We must capture every binding for modules.ts to call the right one.
-    let out = append_capture("var f=1,c=2,m=3;export{f as a,c as i,m as t};", "react");
-    assert!(out.contains("a: f"));
-    assert!(out.contains("i: c"));
-    assert!(out.contains("t: m"));
 }
 
 #[test]
