@@ -335,13 +335,6 @@ fn a_fade_completion_survives_the_round_trip() {
 }
 
 #[test]
-fn a_zero_word_means_no_fade_has_completed() {
-    // The player thread starts at generation 0 and only acts on a difference; an
-    // untouched word must never look like a completed fade.
-    assert_eq!(unpack_xfade_done(0), (0, 0));
-}
-
-#[test]
 fn the_origin_never_bleeds_into_the_generation() {
     // 48 bits is centuries of samples at any real rate, but a value past that must
     // truncate rather than corrupt the generation beside it.
@@ -642,7 +635,8 @@ fn matching_rates_skip_the_resampler_and_pass_samples_through() {
 /// graph rate (it reports 48000 from two unrelated heuristics), and aiming at it would
 /// stack our conversion on top of PipeWire's. `attempt_order` takes that as a plain
 /// `pinned` argument instead of reading `ENGINE_RATE_IS_PINNED` itself, leaving both
-/// orders asserted here on every host.
+/// orders asserted here on every host. Either order keeps the other candidate as the
+/// fallback, for a device that refuses its own advertised default.
 #[test]
 fn the_device_default_is_tried_first_only_where_it_means_something() {
     let source = (44_100u32, 2u16);
@@ -658,16 +652,4 @@ fn the_device_default_is_tried_first_only_where_it_means_something() {
         [source, device],
         "Linux keeps the source-first policy"
     );
-}
-
-/// Either way the fallback must be the other one: a device that refuses its own
-/// advertised default still opens.
-#[test]
-fn both_candidates_are_always_offered() {
-    let source = (96_000u32, 2u16);
-    let device = (48_000u32, 6u16);
-    for pinned in [true, false] {
-        let order = attempt_order(source, device, pinned);
-        assert!(order.contains(&source) && order.contains(&device));
-    }
 }

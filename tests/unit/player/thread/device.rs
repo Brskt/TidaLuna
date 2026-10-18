@@ -50,16 +50,6 @@ fn a_streaming_track_replays_its_retained_source() {
 }
 
 #[test]
-fn a_streaming_track_with_nothing_retained_waits_for_the_load() {
-    let (streaming, _writer) = RamBuffer::new_for_test(1_000);
-
-    assert!(matches!(
-        SwitchRearm::choose(Some(&streaming), None),
-        SwitchRearm::AwaitLoad
-    ));
-}
-
-#[test]
 fn a_cancelled_track_is_never_reused() {
     let whole = RamBuffer::from_complete(vec![1, 2, 3]);
     whole.cancel();

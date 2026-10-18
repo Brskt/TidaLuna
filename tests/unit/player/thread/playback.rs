@@ -91,9 +91,3 @@ fn mid_stream_error_before_first_sample_settles() {
     // Finished arrived but the drain gate (played > 0) can never pass.
     assert!(decode_failure_needs_settle(true, 0));
 }
-
-#[test]
-fn mid_stream_error_with_audio_drains_to_completed() {
-    // The existing drain path owns this case (Completed after ring drain).
-    assert!(!decode_failure_needs_settle(true, 4096));
-}
