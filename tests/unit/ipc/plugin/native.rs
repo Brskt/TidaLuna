@@ -23,28 +23,6 @@ fn a_plugin_cannot_hold_unlimited_modules() {
     assert!(admits_new_module(under.iter().copied(), "Foo"));
 }
 
-/// The bound counts the ledger's entries, and the ledger is keyed by module: a module cannot be
-/// counted twice however many attempts it has in flight. Splitting settled and in-flight state across
-/// two ledgers double-counted a module being re-registered and refused a genuinely new one with a 403
-/// while the plugin was nowhere near the bound.
-#[test]
-fn a_module_is_counted_once_however_many_attempts_it_has() {
-    let mut ledger: std::collections::HashMap<String, ModuleEntry> =
-        std::collections::HashMap::new();
-
-    // Seven distinct modules, one of them being re-registered while already registered.
-    for n in 0..MAX_MODULES_PER_PLUGIN - 1 {
-        let entry = ledger.entry(format!("Foo/{n}.native.ts")).or_default();
-        entry.in_flight = if n == 0 { 2 } else { 0 };
-    }
-
-    assert_eq!(ledger.len(), MAX_MODULES_PER_PLUGIN - 1);
-    assert!(
-        admits_new_module(ledger.keys().map(String::as_str), "Foo"),
-        "an eighth distinct module must still be admitted"
-    );
-}
-
 // `NATIVE_MODULES` is a process-global and libtest runs these as threads of one process; every
 // test owns its module names: issuing supersedes the previous entry for a name, which is right in
 // production and evicts a neighbour's token here.
@@ -141,4 +119,27 @@ fn the_same_registration_hands_back_the_same_token() {
         Some("Twice/x.native.ts"),
         "the token handed to the first caller must stay live"
     );
+}
+
+/// A plugin at its bound re-registering a module it already holds takes no new slot: refusing it
+/// would answer a reload with a 403, while a name it does not hold is still refused.
+#[test]
+fn a_plugin_at_its_bound_can_reserve_a_module_it_already_holds() {
+    let names: Vec<String> = (0..MAX_MODULES_PER_PLUGIN)
+        .map(|n| format!("ReserveAtBound/{n}.native.ts"))
+        .collect();
+    let held: Vec<_> = names
+        .iter()
+        .map(|name| PendingRegistration::reserve(name, "ReserveAtBound").expect("under the bound"))
+        .collect();
+
+    assert!(
+        PendingRegistration::reserve("ReserveAtBound/extra.native.ts", "ReserveAtBound").is_none(),
+        "a ninth distinct module is refused"
+    );
+    let again = PendingRegistration::reserve(&names[0], "ReserveAtBound");
+    assert!(again.is_some(), "a module already held needs no new slot");
+
+    drop(again);
+    drop(held);
 }

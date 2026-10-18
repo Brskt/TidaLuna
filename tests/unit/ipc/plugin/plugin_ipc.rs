@@ -20,9 +20,10 @@ fn bump_capped_rejects_over_cap() {
 }
 
 #[test]
-fn bump_capped_saturates_on_huge_add() {
-    // A pathological chunk length must not overflow the running total into a pass.
-    let err = bump_capped(usize::MAX - 1, usize::MAX, 1024).unwrap_err();
+fn bump_capped_saturates_instead_of_wrapping() {
+    // A running total at the top of the range must not wrap into a pass: wrapped,
+    // this sum would read as 1, well under the cap.
+    let err = bump_capped(usize::MAX, 2, 1024).unwrap_err();
     assert!(err.to_string().contains("cap"), "got: {err}");
 }
 

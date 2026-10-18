@@ -40,15 +40,15 @@ fn parse_rejects_connect_and_trace_methods() {
 fn parse_headers_array_preserves_duplicates_and_order() {
     let req = json!({
         "reqId": 1, "plugin": "P", "url": "https://h/p",
-        "headers": [["accept", "a"], ["accept", "b"], ["x-test", "1"]]
+        "headers": [["x-test", "1"], ["accept", "a"], ["accept", "b"]]
     });
     let p = parse_fetch_request(&req).expect("valid");
     assert_eq!(
         p.headers,
         vec![
+            ("x-test".to_string(), "1".to_string()),
             ("accept".to_string(), "a".to_string()),
             ("accept".to_string(), "b".to_string()),
-            ("x-test".to_string(), "1".to_string()),
         ]
     );
 }
