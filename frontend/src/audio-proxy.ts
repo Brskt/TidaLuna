@@ -157,6 +157,7 @@ if (srcDesc) {
 					}
 				}
 				const answer = () => {
+					if (!preload && value === _failedSrc) return;
 					if (length) this.dispatchEvent(new Event("durationchange"));
 					this.dispatchEvent(new Event("loadedmetadata"));
 					this.dispatchEvent(new Event("loadeddata"));

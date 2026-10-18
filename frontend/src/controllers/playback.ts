@@ -1,7 +1,7 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
-import { isSelfLoad, setSelfLoad, onHandoff, onSdkLoad, onSdkReload, proxyLoading } from "../audio-proxy";
+import { isSelfLoad, setSelfLoad, onHandoff, onProxyBind, onSdkLoad, onSdkReload, proxyFail, proxyLoading, proxyOwnerSrc } from "../audio-proxy";
 import { refusePlayback } from "../refuse-playback";
-import { productOfStream } from "../sdk-playbackinfo";
+import { onSdkStream, productOfStream } from "../sdk-playbackinfo";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 import { setCurrentTrack } from "../video/cover-canvas";
 import { storePublished } from "../store-published";
@@ -61,16 +61,39 @@ export const createPlaybackController = () => {
         };
     };
     onHandoff(arm);
+    // A refusal withholds the readiness of a stream the SDK still binds for the same announcement.
+    // `refuse` sets it for every refusal; the next announcement clears it.
+    let refused = false;
     // A refusal raises what its steps raised, after running them all. In the catch below that
     // would reach the catch of the whole notification and skip its context write: reported here.
     // It refuses the product last announced, which is the one every caller is loading.
     const refuse = (code: string, error: string, message: string) => {
+        refused = true;
         try {
             refusePlayback(code, error, message);
         } catch (e) {
             console.error("[luna:playback] refusal failed:", e);
         }
     };
+    // A track the SDK plays through Shaka sits on the element this page proxies, which only mirrors
+    // Rust: when this page handed Rust nothing for it, the SDK's play resumes what Rust still holds
+    // under this track's name. The element carries no product, but the SDK's own playbackinfo answer
+    // does (`sdk-playbackinfo.ts`): the stream on the element names its track. `unloaded` is such a
+    // track, settled once the element holds its stream or a newer announcement drops it. A FLAC
+    // stream goes to the SDK's native player, never reaches the element and never settles.
+    let unloaded: (() => boolean) | null = null;
+    let announcements = 0;
+    const settle = () => {
+        if (unloaded?.()) unloaded = null;
+    };
+    onProxyBind((kind) => {
+        console.log("[luna:playback] SDK bound", kind, "product", productOfStream(proxyOwnerSrc()) ?? "unknown", "announced", lastTransitionId);
+        // A microtask: after the SDK's own call returns, and for a `src` before the readiness burst
+        // queued behind it, which the refusal then withholds.
+        if (unloaded) queueMicrotask(settle);
+        else if (refused) queueMicrotask(proxyFail);
+    });
+    onSdkStream(settle);
     // The SDK loads the product of its own `mediaProduct`, which its prefill writes before any load. A
     // load the listener has since left (a pick, then another) binds its stream after the newer track
     // is loaded, with the store still on that newer one. The stream names its own product, and the SDK
@@ -165,6 +188,9 @@ export const createPlaybackController = () => {
                 const productId = String(item.productId ?? item.id ?? "");
                 if (productId && productId !== lastTransitionId) {
                     lastTransitionId = productId;
+                    const announcement = ++announcements;
+                    unloaded = null;
+                    refused = false;
                     disarm();
                     proxyLoading();
                     setTimeout(async () => {
@@ -185,6 +211,10 @@ export const createPlaybackController = () => {
                             // no video playback info (`/v1/tracks/<videoId>/playbackinfo` answers
                             // 500). Leaving `pbi` undefined also skips the self-load blocks below.
                             const isVideo = item.type === "video";
+
+                            // Whether this page handed Rust the track, or refused it itself.
+                            let handed = false;
+                            let refusedHere = false;
 
                             // Get actual audio quality from playbackInfo API (same as TIDAL's SDK)
                             let actualQuality: string | undefined;
@@ -219,6 +249,7 @@ export const createPlaybackController = () => {
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
                                         sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec, productId);
+                                        handed = true;
                                     }
                                 }
                                 if (!alreadyPlaying && pbi?.manifestMimeType === "application/vnd.tidal.bts" && pbi.manifest) {
@@ -235,6 +266,7 @@ export const createPlaybackController = () => {
                                         // always been parsed with; they are spelled out only
                                         // so productId lands on the index player.load reads.
                                         sendIpc("player.load", streamUrl, codec, encKey, false, false, productId);
+                                        handed = true;
                                     }
                                 }
                             } catch (e) {
@@ -252,12 +284,30 @@ export const createPlaybackController = () => {
                                     // Deliberately no `player.pause`. Answering "paused" to a
                                     // TIDAL that just asked to play reads as a failed start,
                                     // and it advances the queue; measured on two tracks.
+                                    refusedHere = true;
                                     refuse(
                                         "tidalunar_undecodable_profile",
                                         "stream codec not supported by this build",
                                         "TidaLunar cannot play music below 320 kbps for the moment. Please change the quality in TIDAL's settings.",
                                     );
                                 }
+                            }
+
+                            // Every way this page can come out without having loaded the track lands
+                            // here: a failed request, no answer, an unreadable one, an incomplete one.
+                            // Whether it is a failure is the element's to say, not this page's.
+                            if (!handed && !refusedHere && !isVideo && !alreadyPlaying) {
+                                unloaded = () => {
+                                    if (announcement !== announcements) return true;
+                                    if (productOfStream(proxyOwnerSrc()) !== productId) return false;
+                                    refuse(
+                                        "tidalunar_manifest_unreadable",
+                                        "stream could not be loaded by this page",
+                                        "TidaLunar could not load this track. Please try again or pick another one.",
+                                    );
+                                    return true;
+                                };
+                                settle();
                             }
 
                             const oldCtx = controls.playbackContext ?? {};

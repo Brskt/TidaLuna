@@ -432,6 +432,105 @@ const sdkAnswers = async (id: string, stream = dash(id)) => {
 	await flush();
 	return stream;
 };
+const flacStream = "https://audio.tidal.com/mediatracks/flac";
+const sdkAnswersFlac = async (id: string) => {
+	const url = `https://api.tidal.com/v1/tracks/${id}/playbackinfo?audioquality=LOSSLESS`;
+	sdkBodies[url] = {
+		trackId: 1,
+		manifestMimeType: "application/vnd.tidal.bts",
+		manifest: btoa(JSON.stringify({ mimeType: "audio/flac", codecs: "flac", keyId: "", urls: [flacStream] })),
+	};
+	await sdk.fetch(url);
+	await flush();
+};
+const bindStream = async (el: HTMLAudioElement, stream: string) => {
+	el.src = stream;
+	await flush();
+};
+const readinessOfEl = (el: HTMLAudioElement) => {
+	const seen: string[] = [];
+	for (const name of ["loadedmetadata", "canplay"]) el.addEventListener(name, () => seen.push(name));
+	return seen;
+};
+const announce = async (controller: ReturnType<typeof createPlaybackController>, id: string, type = "track", options?: any) => {
+	controller.setCurrentMediaItem({ productId: id, type }, options);
+	await flush();
+};
+const ours = (what: "blip" | "forbidden" | "bts" | "incomplete-dash") => {
+	if (what === "blip") rejectPbi?.(new Error("fetch failed"));
+	else if (what === "bts") rejectPbi?.(new SyntaxError("Unexpected token"));
+	else if (what === "forbidden") resolvePbi?.(undefined);
+	else resolvePbi?.({ audioQuality: "HIGH", manifestMimeType: "application/dash+xml", manifest: { initUrl: "", segmentUrls: [], codec: "mp4a.40.2" } });
+};
+const refusedTracks = () => ({ stops: dispatched.filter((d) => d.type === "playbackControls/STOP").length, banners: dispatched.filter((d) => d.type === "message/MESSAGE_ERROR").length });
+
+test("our request failing while the SDK takes the track to the element refuses it, and its readiness is withheld", async () => {
+	const stream = await sdkAnswers("2017");
+	const controller = createPlaybackController();
+	await announce(controller, "2017");
+	ours("blip");
+	await flush();
+	// The element holds nothing yet: the SDK may still fail, or play it natively.
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+
+	const el = document.createElement("audio");
+	const seen = readinessOfEl(el);
+	await bindStream(el, stream);
+
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+	expect(seen).toEqual([]);
+});
+
+test("every way this page ends without loading the track refuses it once the element holds it", async () => {
+	for (const [what, id] of [["forbidden", "2009"], ["bts", "2010"], ["incomplete-dash", "2011"]] as const) {
+		dispatched = [];
+		const stream = await sdkAnswers(id);
+		const controller = createPlaybackController();
+		await announce(controller, id);
+		ours(what);
+		await flush();
+		await bindStream(document.createElement("audio"), stream);
+
+		expect({ what, ...refusedTracks() }).toEqual({ what, stops: 1, banners: 1 });
+		proxyReset();
+	}
+});
+
+test("the stream bound before the SDK's answer was read refuses the track when the answer lands", async () => {
+	const controller = createPlaybackController();
+	await announce(controller, "2020");
+	ours("blip");
+	await flush();
+	const stream = dash("2020");
+	await bindStream(document.createElement("audio"), stream);
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+
+	await sdkAnswers("2020");
+
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+});
+
+test("a late bind of a superseded track is not the next track's, whatever happens to the next", async () => {
+	// The SDK's load has no staleness check: A's stream can bind after B was announced.
+	const streamA = await sdkAnswers("2005");
+	const streamB = await sdkAnswers("2006");
+	const controller = createPlaybackController();
+	await announce(controller, "2005");
+	ours("blip");
+	await announce(controller, "2006");
+	const el = document.createElement("audio");
+
+	await bindStream(el, streamA);
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+
+	// B's own request fails alone while the element still holds A: not B's stream.
+	ours("blip");
+	await flush();
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+
+	await bindStream(el, streamB);
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+});
 
 // The late bind meets a settled Rust track and a store that still names it (the SDK's transition to
 // the superseded track comes only after its load): the stream names the product it is for.
@@ -480,6 +579,129 @@ test("a stream this page never saw answered is taken for a reload of Rust's trac
 
 	expect(lengths).toEqual([200]);
 	expect(pbiCalls).toEqual(["3006"]);
+});
+
+test("a native track whose request failed alone does not refuse the shaka track that follows", async () => {
+	// The next track's hand-over binds before its announcement, and the native track's wait is gone.
+	await sdkAnswersFlac("2007");
+	const controller = createPlaybackController();
+	await announce(controller, "2007");
+	ours("blip");
+	await flush();
+
+	const playing = document.createElement("audio");
+	const preloaded = document.createElement("audio");
+	await bindStream(playing, dash("X8"));
+	await bindStream(preloaded, await sdkAnswers("2008"));
+	await preloaded.play();
+	await announce(controller, "2008");
+	resolvePbi?.(aacStream);
+	await flush();
+
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+});
+
+test("a gapless hand-over that came before the announcement is refused when its request fails", async () => {
+	const playing = document.createElement("audio");
+	const preloaded = document.createElement("audio");
+	await bindStream(playing, dash("X9"));
+	await bindStream(preloaded, await sdkAnswers("2022"));
+	await preloaded.play();
+	const controller = createPlaybackController();
+	await announce(controller, "2022");
+	ours("blip");
+	await flush();
+
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+});
+
+test("a stream this page never saw answered names no track, and refuses nothing", async () => {
+	const controller = createPlaybackController();
+	await announce(controller, "2012");
+	ours("blip");
+	await flush();
+	await bindStream(document.createElement("audio"), dash("never answered"));
+
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+});
+
+test("a video, and a track the receiver already plays, are never refused for the element they sit on", async () => {
+	const stream = await sdkAnswers("2000");
+	const controller = createPlaybackController();
+	const el = document.createElement("audio");
+	await bindStream(el, stream);
+	await announce(controller, "2000", "video");
+	await announce(controller, "2001", "track", { alreadyPlaying: true });
+	await bindStream(el, await sdkAnswers("2001"));
+
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
+});
+
+test("one refusal, however many of the failure, the bind and the answer say the same", async () => {
+	const stream = await sdkAnswers("2014");
+	const controller = createPlaybackController();
+	await announce(controller, "2014");
+	const el = document.createElement("audio");
+	await bindStream(el, stream);
+	ours("blip");
+	await flush();
+	await bindStream(el, `${stream}`);
+	await sdkAnswers("2014");
+
+	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+});
+
+// The refusals this page decides itself, besides the element's rule: each leaves the SDK free to
+// bind a stream for the same announcement afterwards. The element still holds the product's
+// previous stream, and the refusal comes before the SDK's new bind: that bind is the same
+// announcement's and must not announce itself ready.
+const undecodable = () => Object.assign(new Error("undecodable"), { code: 415 });
+const refusals = [
+	["an undecodable profile", "2040", undecodable],
+	["our request failing", "2042", () => new Error("fetch failed")],
+] as const;
+
+for (const [what, id, failure] of refusals) {
+	test(`${what} withholds the replay stream the SDK binds after the refusal`, async () => {
+		const first = await sdkAnswers(id);
+		const controller = createPlaybackController();
+		await announce(controller, id);
+		resolvePbi?.(aacStream);
+		await flush();
+		const el = document.createElement("audio");
+		await bindStream(el, first);
+		dispatched = [];
+
+		controller.replaySelfLoad();
+		await flush();
+		rejectPbi?.(failure());
+		await flush();
+		expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+
+		const seen = readinessOfEl(el);
+		await bindStream(el, await sdkAnswers(id, dash(`${id} signed again`)));
+
+		expect(seen).toEqual([]);
+		expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
+	});
+}
+
+test("the late failure of an earlier announcement of a product is not its later announcement's", async () => {
+	// `lastTransitionId` is a scalar: A, B, A satisfies its guard for the first A's rejection.
+	const stream = await sdkAnswers("2024");
+	const controller = createPlaybackController();
+	await announce(controller, "2024");
+	const rejectFirst = rejectPbi;
+	await announce(controller, "2025");
+	await announce(controller, "2024");
+	resolvePbi?.(aacStream);
+	await flush();
+	await bindStream(document.createElement("audio"), stream);
+
+	rejectFirst?.(new Error("fetch failed"));
+	await flush();
+
+	expect(refusedTracks()).toEqual({ stops: 0, banners: 0 });
 });
 
 test("a track TIDAL moves to is still self-loaded", async () => {
