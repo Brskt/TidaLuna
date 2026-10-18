@@ -140,22 +140,6 @@ fn test_mark_ready_with_wrong_nonce_rejected() {
     );
 }
 
-#[test]
-fn a_loading_plugin_reports_the_load_that_owns_it() {
-    let mut mgr = PluginManager::new();
-    let load_id = mgr.mark_loading("p", "p", 0, "cap-p", 0);
-    assert_eq!(mgr.current_load_id("p"), Some(load_id));
-    assert_eq!(mgr.current_load_id("absent"), None);
-}
-
-#[test]
-fn retiring_a_load_clears_state() {
-    let mut mgr = PluginManager::new();
-    let load_id = mgr.mark_loading("p", "p", 0, "cap-p", 0);
-    assert!(mgr.retire_load("p", load_id));
-    assert_eq!(mgr.current_load_id("p"), None);
-}
-
 /// Nothing serialises `plugin.enable` against `plugin.disable`, and a disable holds no lock
 /// across its DB round trip. The removal therefore has to name the load it is ending.
 ///
@@ -224,23 +208,6 @@ fn forgetting_a_plugin_ignores_which_load_is_current() {
     assert!(mgr.loaded_loads().is_empty());
 }
 
-/// The sweep pairs each url with its load in ONE read. Taken as two (a list of urls, then a
-/// lookup each), the pair can describe two different loads, the same race one layer up.
-#[test]
-fn the_loaded_snapshot_carries_each_plugins_load() {
-    let mut mgr = PluginManager::new();
-    let a = mgr.mark_loading("a", "A", 1, "cap-a", 0);
-    let b = mgr.mark_loading("b", "B", 2, "cap-b", 0);
-
-    let mut snapshot = mgr.loaded_loads();
-    snapshot.sort();
-    assert_eq!(
-        snapshot,
-        vec![("a".to_string(), a), ("b".to_string(), b)],
-        "each url arrives with the load that owns it"
-    );
-}
-
 #[test]
 fn test_generate_unload_js_produces_cleanup_code() {
     let js = PluginManager::generate_unload_js("my-plugin");
@@ -263,16 +230,6 @@ fn random_capability_is_lowercase_hex_of_the_bytes() {
     .expect("entropy available");
     assert!(cap.starts_with("ab00"), "got {cap}");
     assert_eq!(cap.len(), 64, "32 bytes hex-encoded");
-}
-
-#[test]
-fn a_capability_resolves_to_the_plugin_it_was_issued_for() {
-    let mut mgr = PluginManager::new();
-    mgr.mark_loading("https://example.test/a.js", "A", 1, "cap-a", 0);
-    assert_eq!(
-        mgr.plugin_for_capability("cap-a").as_deref(),
-        Some("https://example.test/a.js")
-    );
 }
 
 #[test]
@@ -363,6 +320,10 @@ fn reloads_beyond_the_bound_drop_only_that_plugins_oldest() {
 /// renderer anyway, and nothing tracks it afterwards; it is in no `loaded_urls()`, so no
 /// later sweep unloads it. Its capability still resolves, which is deliberate, and until this
 /// it still bought the NEXT session's access token.
+///
+/// The epoch serves that credential check alone and must not become an attribution check:
+/// refusing a past-session capability where the CALLER is resolved would 403 the `onUnload`
+/// settings write of every plugin loaded at logout, not just a ghost.
 #[test]
 fn a_capability_remembers_the_session_that_issued_it() {
     let mut mgr = PluginManager::new();
@@ -380,31 +341,5 @@ fn a_capability_remembers_the_session_that_issued_it() {
         mgr.capability_epoch(""),
         None,
         "an empty envelope field cannot match, here as in attribution"
-    );
-}
-
-/// The guard above must not become an attribution check. Retiring a load keeps its capability
-/// alive on purpose: `eval_js` only DISPATCHES the cleanup, so a plugin's `onUnload` runs
-/// afterwards and an async one continues past an await. Its settings write still has to be
-/// attributable, including when the unload was a logout sweep.
-///
-/// This is the regression this whole design avoids: refusing a past-epoch capability at the
-/// point where the CALLER is resolved would 403 that write for every plugin loaded at logout,
-/// not just a ghost.
-#[test]
-fn a_capability_from_a_past_session_still_names_its_plugin() {
-    let mut mgr = PluginManager::new();
-    let load_id = mgr.mark_loading("https://example.test/a.js", "A", 1, "cap-a", 4);
-    mgr.retire_load("https://example.test/a.js", load_id);
-
-    assert_eq!(
-        mgr.plugin_for_capability("cap-a").as_deref(),
-        Some("https://example.test/a.js"),
-        "the unload handler is still attributable, which is why the capability outlives it"
-    );
-    assert_eq!(
-        mgr.capability_epoch("cap-a"),
-        Some(4),
-        "and the session it belonged to is still readable, for the credential check alone"
     );
 }

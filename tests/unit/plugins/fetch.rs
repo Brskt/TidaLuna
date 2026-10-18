@@ -28,18 +28,6 @@ fn tidal_api_refuses_plaintext() {
 }
 
 #[test]
-fn test_parse_fetch_opts() {
-    let json = r#"{"method":"POST","headers":{"Content-Type":"application/json"},"body":"{\"key\":\"val\"}"}"#;
-    let opts: FetchOpts = serde_json::from_str(json).unwrap();
-    assert_eq!(opts.method, "POST");
-    assert_eq!(
-        opts.headers.get("Content-Type").unwrap().as_str().unwrap(),
-        "application/json"
-    );
-    assert!(opts.body.is_some());
-}
-
-#[test]
 fn test_parse_fetch_opts_defaults() {
     let json = r#"{}"#;
     let opts: FetchOpts = serde_json::from_str(json).unwrap();

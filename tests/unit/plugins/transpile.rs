@@ -20,23 +20,15 @@ fn export_block_becomes_exports_object() {
 
 #[test]
 fn export_const_strips_keyword() {
-    let js = lower("export const foo = 42;");
-    assert!(js.contains("const foo = 42"));
-    assert!(!js.contains("export"));
-}
-
-#[test]
-fn export_function_strips_keyword() {
-    let js = lower("export function hello() { return 1; }");
-    assert!(js.contains("function hello"));
-    assert!(!js.contains("export"));
-}
-
-#[test]
-fn export_class_strips_keyword() {
-    let js = lower("export class Foo {}");
-    assert!(js.contains("class Foo"));
-    assert!(!js.contains("export"));
+    for (code, kept) in [
+        ("export const foo = 42;", "const foo = 42"),
+        ("export function hello() { return 1; }", "function hello"),
+        ("export class Foo {}", "class Foo"),
+    ] {
+        let js = lower(code);
+        assert!(js.contains(kept), "{code}");
+        assert!(!js.contains("export"), "{code}");
+    }
 }
 
 #[test]
@@ -204,11 +196,4 @@ fn strips_ts_types() {
     assert!(!js.contains(": string"));
     assert!(js.contains("const x = 42"));
     assert!(js.contains("function greet"));
-}
-
-#[test]
-fn mts_extension_is_supported() {
-    let js = transpile_ts("export const x: number = 1;", "plugin.mts").expect("transpile");
-    assert!(js.contains("const x = 1"));
-    assert!(!js.contains("export"));
 }

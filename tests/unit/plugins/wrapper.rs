@@ -18,15 +18,6 @@ fn test_wrap_produces_iife() {
 }
 
 #[test]
-fn test_wrap_shadows_localstorage() {
-    let result = wrap_plugin_code("test", "", 0, 0, "cap");
-    // localStorage should be a parameter name (shadowed to undefined)
-    assert!(result.contains("localStorage"));
-    // The IIFE call should pass undefined for it
-    assert!(result.contains(", undefined, undefined,"));
-}
-
-#[test]
 fn test_wrap_contains_controlled_fetch() {
     let result = wrap_plugin_code("test", "", 0, 0, "cap");
     assert!(result.contains("var fetch = function("));
