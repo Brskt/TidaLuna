@@ -41,6 +41,21 @@ fn verdict_names_current_stream(current: Option<u32>, verdict: Option<u32>) -> b
     matches!((current, verdict), (Some(a), Some(b)) if a == b)
 }
 
+/// The seq a transport state of a bypass stream travels under. A stream the current load
+/// opened is answered under `current_seq`, which a stop since `load_seq` has moved on and
+/// which the SDK and the Connect receiver both read as "this load". A stream an earlier load
+/// opened keeps that load's seq: the backend reports on its own clock, a render stop and reset
+/// can outlast the track change that retired the stream, and its state must still read as
+/// before the load that replaced it. Pure, to be unit-tested without a backend.
+#[cfg(any(target_os = "windows", test))]
+fn stream_state_seq(opened_under: u32, load_seq: u32, current_seq: u32) -> u32 {
+    if opened_under < load_seq {
+        opened_under
+    } else {
+        current_seq
+    }
+}
+
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn samples_to_secs(&self, samples: u64) -> f64 {
         let channels = self.channels.max(1) as u64;
@@ -310,11 +325,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 decode_failure = Some((error, cause));
                             }
                         }
-                        ExclusiveEvent::StateChange(s) => {
-                            // Transport states only. Completion arrives named, below: clearing
-                            // the track is the one effect a superseded stream must never have,
-                            // and this arm cannot tell whose stream it is.
-                            (self.callback)(PlayerEvent::StateChange(s, self.current_seq));
+                        ExclusiveEvent::StateChange {
+                            opened_under,
+                            state,
+                        } => {
+                            // Relayed whichever stream it describes: the retired stream's
+                            // pause is the page's only NOT_PLAYING in this mode. Only the seq
+                            // names the stream; the load that replaced it never hears it.
+                            (self.callback)(PlayerEvent::StateChange(
+                                state,
+                                stream_state_seq(opened_under, self.load_seq, self.current_seq),
+                            ));
                         }
                         ExclusiveEvent::Completed(sid) => {
                             // Ignore a completion from a superseded stream (a newer track
@@ -600,15 +621,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             decode_failure = Some((error, cause));
                         }
                     }
-                    AsioEvent::StateChange(s) => {
+                    AsioEvent::StateChange {
+                        opened_under,
+                        state,
+                    } => {
                         // Arm the progress watchdog when the clock starts; disarm on pause/stop.
-                        if matches!(s, PlaybackState::Active) {
+                        if matches!(state, PlaybackState::Active) {
                             self.asio_watchdog_pos = self.last_asio_pos.unwrap_or(0.0);
                             self.asio_watchdog_at = Some(std::time::Instant::now());
-                        } else if matches!(s, PlaybackState::Paused | PlaybackState::Stopped) {
+                        } else if matches!(state, PlaybackState::Paused | PlaybackState::Stopped) {
                             self.asio_watchdog_at = None;
                         }
-                        (self.callback)(PlayerEvent::StateChange(s, self.current_seq));
+                        // Relayed whichever stream it describes, as the exclusive twin does.
+                        (self.callback)(PlayerEvent::StateChange(
+                            state,
+                            stream_state_seq(opened_under, self.load_seq, self.current_seq),
+                        ));
                     }
                     AsioEvent::Completed(sid) => {
                         // Ignore a completion from a superseded stream (a newer track

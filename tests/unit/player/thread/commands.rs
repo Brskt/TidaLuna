@@ -11,6 +11,8 @@ use super::{
 #[cfg(target_os = "windows")]
 use crate::player::asio::host::{AsioEvent, AsioHandle};
 use crate::player::resume::ResumeStore;
+#[cfg(target_os = "windows")]
+use crate::player::thread::wav_fixture::wav_s16_mono;
 use crate::player::thread::{DecodeCommand, DecodeEvent, PlayerThread};
 use crate::player::{PlaybackState, PlayerCommand, PlayerEvent};
 use std::sync::atomic::AtomicBool;
@@ -1939,6 +1941,205 @@ fn load_req(seq: u32, track: &str) -> LoadRequest {
         seq,
         track,
     )
+}
+
+/// The transport states the player has handed its callback, with the seq each travels under.
+#[cfg(target_os = "windows")]
+fn state_stamps(events: &Spy) -> Vec<(PlaybackState, u32)> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|ev| match ev {
+            PlayerEvent::StateChange(state, seq) => Some((*state, *seq)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Track A's stream is paused by the skip that loads B, and the backend reports it only once
+/// the stop and reset of a dirty endpoint are done, after B has loaded and moved the seq. The
+/// pause is the page's only NOT_PLAYING in this mode and must still arrive, but under A's
+/// seq: under B's, the Connect receiver hears it as B's own and pauses itself.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_retired_asio_streams_pause_keeps_the_seq_of_its_load() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
+    let _ = h.player.handle_load(load_req(1, "track-1"), false);
+    let _ = h.player.handle_load(load_req(2, "track-2"), false);
+    h.events.lock().unwrap().clear();
+
+    asio_events
+        .send(AsioEvent::StateChange {
+            opened_under: 1,
+            state: PlaybackState::Paused,
+        })
+        .unwrap();
+    asio_events
+        .send(AsioEvent::StateChange {
+            opened_under: 2,
+            state: PlaybackState::Active,
+        })
+        .unwrap();
+    h.player.poll_asio_events();
+
+    assert_eq!(
+        state_stamps(&h.events),
+        vec![(PlaybackState::Paused, 1), (PlaybackState::Active, 2)],
+        "A's pause is B's, or B's own state lost its seq"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_retired_exclusive_streams_pause_keeps_the_seq_of_its_load() {
+    use crate::player::wasapi::{ExclusiveEvent, ExclusiveHandle};
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let (handle, exclusive_events, _commands) = ExclusiveHandle::for_test();
+    h.player.is_exclusive_mode = true;
+    h.player.exclusive_handle = Some(handle);
+    let _ = h.player.handle_load(load_req(1, "track-1"), false);
+    let _ = h.player.handle_load(load_req(2, "track-2"), false);
+    h.events.lock().unwrap().clear();
+
+    exclusive_events
+        .send(ExclusiveEvent::StateChange {
+            opened_under: 1,
+            state: PlaybackState::Paused,
+        })
+        .unwrap();
+    exclusive_events
+        .send(ExclusiveEvent::StateChange {
+            opened_under: 2,
+            state: PlaybackState::Active,
+        })
+        .unwrap();
+    h.player.poll_exclusive_events();
+
+    assert_eq!(
+        state_stamps(&h.events),
+        vec![(PlaybackState::Paused, 1), (PlaybackState::Active, 2)],
+        "A's pause is B's, or B's own state lost its seq"
+    );
+}
+
+/// The seq rides with the state. No order the backend's reports reach the player in changes
+/// whose they are: a retired stream's state behind a newer stream's is still the retired one's.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_states_seq_does_not_depend_on_the_order_the_reports_arrive_in() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
+    let _ = h.player.handle_load(load_req(1, "track-1"), false);
+    let _ = h.player.handle_load(load_req(2, "track-2"), false);
+    h.events.lock().unwrap().clear();
+
+    asio_events
+        .send(AsioEvent::StateChange {
+            opened_under: 2,
+            state: PlaybackState::Active,
+        })
+        .unwrap();
+    asio_events
+        .send(AsioEvent::StateChange {
+            opened_under: 1,
+            state: PlaybackState::Paused,
+        })
+        .unwrap();
+    h.player.poll_asio_events();
+
+    assert_eq!(
+        state_stamps(&h.events),
+        vec![(PlaybackState::Active, 2), (PlaybackState::Paused, 1)]
+    );
+}
+
+/// A stop keeps the pipeline for a same-track re-assert; the resume that follows it is
+/// answered by the very stream the stop left in place. The SDK drops anything below the newest
+/// seq it has heard, the stop's included: stamped with the load's, that `active` would never
+/// reach it.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_stop_leaves_the_stream_it_keeps_answering_under_the_newest_seq() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
+    let _ = h.player.handle_load(load_req(1, "track-1"), false);
+    h.player.handle_stop(3);
+    h.events.lock().unwrap().clear();
+
+    asio_events
+        .send(AsioEvent::StateChange {
+            opened_under: 1,
+            state: PlaybackState::Active,
+        })
+        .unwrap();
+    h.player.poll_asio_events();
+
+    assert_eq!(
+        state_stamps(&h.events),
+        vec![(PlaybackState::Active, 3)],
+        "a resume after a stop travelled under the seq the SDK already moved past"
+    );
+}
+
+/// The player names the load on the stream's own `StartStream`, which is where every state the
+/// backend reports for it takes its seq from.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn an_asio_stream_is_opened_under_the_seq_of_the_load_that_spawned_it() {
+    use crate::player::asio::host::AsioCommand;
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let (handle, _events, commands) = AsioHandle::for_test();
+    h.player.is_asio_mode = true;
+    h.player.asio_handle = Some(handle);
+    let wav = wav_s16_mono(44_100, &[1, 2, 3, 4]);
+    let _ = h.player.handle_load(
+        load_req_of(
+            crate::player::buffer::RamBuffer::from_complete(wav),
+            7,
+            "track-7",
+        ),
+        false,
+    );
+
+    match commands.recv() {
+        Ok(AsioCommand::StartStream { opened_under, .. }) => assert_eq!(opened_under, 7),
+        _ => panic!("the decoder's first word was not the StartStream of the load"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn an_exclusive_stream_is_opened_under_the_seq_of_the_load_that_spawned_it() {
+    use crate::player::wasapi::{ExclusiveCommand, ExclusiveHandle};
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(dir.path());
+    let (handle, _events, commands) = ExclusiveHandle::for_test();
+    h.player.is_exclusive_mode = true;
+    h.player.exclusive_handle = Some(handle);
+    let wav = wav_s16_mono(44_100, &[1, 2, 3, 4]);
+    let _ = h.player.handle_load(
+        load_req_of(
+            crate::player::buffer::RamBuffer::from_complete(wav),
+            7,
+            "track-7",
+        ),
+        false,
+    );
+
+    match commands.recv() {
+        Ok(ExclusiveCommand::StartStream(start)) => assert_eq!(start.opened_under, 7),
+        _ => panic!("the decoder's first word was not the StartStream of the load"),
+    }
 }
 
 /// A player mid-fade: the outgoing track is playing and the incoming one is armed.

@@ -206,6 +206,10 @@ pub(super) struct PlayerThread<F> {
     // loads, which skip the shared probe); re-sent on ReassertResume.
     last_media_format: Option<MediaFormatSnapshot>,
     current_seq: u32,
+    // The seq of the latest accepted load. `current_seq` also moves on a stop, which keeps the
+    // stream of the load it stops.
+    #[cfg(target_os = "windows")]
+    load_seq: u32,
     // Position tracking
     decoded_samples: Arc<AtomicU64>,
     sample_rate: u32,
@@ -419,6 +423,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             pending_crossfade: None,
             last_media_format: None,
             current_seq: 0,
+            #[cfg(target_os = "windows")]
+            load_seq: 0,
             decoded_samples: Arc::new(AtomicU64::new(0)),
             sample_rate: 44100,
             channels: 2,

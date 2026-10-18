@@ -1038,6 +1038,10 @@ pub(crate) fn run_ring_tone_test(info: &AsioDriverInfo) {
 pub(crate) enum AsioCommand {
     StartStream {
         stream_id: u32,
+        /// The seq of the load whose decoder opened the stream, echoed on every transport state
+        /// the control thread reports for it. Meaningful to the player alone, as `gen_id` is to
+        /// a seek.
+        opened_under: u32,
         sample_rate: u32,
         channels: u32,
         duration_secs: f64,
@@ -1111,7 +1115,13 @@ pub(crate) enum AsioEvent {
         position: f64,
         refused: bool,
     },
-    StateChange(PlaybackState),
+    /// A transport state of a stream, named by the load that opened it, which the player relays
+    /// whichever stream that is: a pause is reported after the clock it stops, which can
+    /// outlast the track change that retired the stream.
+    StateChange {
+        opened_under: u32,
+        state: PlaybackState,
+    },
     /// The adopted stream's track length. Stream-scoped like `Completed`: a superseded
     /// stream reports one too, and downstream nothing can tell whose it was.
     Duration {
@@ -1226,6 +1236,9 @@ struct ControlCtx {
     /// driver's lifetime).
     callbacks: Box<AsioCallbacks>,
     stream_id: Option<u32>,
+    /// The load that opened the adopted stream, echoed on its transport states. Written with
+    /// `stream_id`, meaningless without one.
+    opened_under: u32,
     /// Pre-adoption transport intent `(stream_id, play)`: a Play/Pause for a
     /// stream whose probe-delayed StartStream hasn't arrived yet (FIFO makes
     /// this deterministic). Consumed only by the adoption of the matching id; an
@@ -1282,6 +1295,7 @@ impl ControlCtx {
                 buffer_switch_time_info: tone_buffer_switch_time_info,
             }),
             stream_id: None,
+            opened_under: 0,
             pending_transport: None,
             sample_rate: 0,
             channels: 0,
@@ -1457,6 +1471,7 @@ impl ControlCtx {
         &mut self,
         event_tx: &mpsc::Sender<AsioEvent>,
         stream_id: u32,
+        opened_under: u32,
         sample_rate: u32,
         want_channels: usize,
         duration_secs: f64,
@@ -1479,6 +1494,7 @@ impl ControlCtx {
         self.adopt_stream_identity(
             event_tx,
             stream_id,
+            opened_under,
             sample_rate,
             want_channels,
             duration_secs,
@@ -1520,6 +1536,7 @@ impl ControlCtx {
         &mut self,
         event_tx: &mpsc::Sender<AsioEvent>,
         stream_id: u32,
+        opened_under: u32,
         sample_rate: u32,
         channels: u32,
         duration_secs: f64,
@@ -1571,6 +1588,7 @@ impl ControlCtx {
             self.begin_deferred_rebuild(
                 event_tx,
                 stream_id,
+                opened_under,
                 sample_rate,
                 want_channels,
                 duration_secs,
@@ -1629,6 +1647,7 @@ impl ControlCtx {
         self.adopt_stream_identity(
             event_tx,
             stream_id,
+            opened_under,
             sample_rate,
             want_channels,
             duration_secs,
@@ -1643,11 +1662,12 @@ impl ControlCtx {
     /// flags, and the decoder's throttle cell. Device resources are NOT touched, and a
     /// deferred rebuild adopts these up front; intervening commands then target the
     /// new stream by id while the old device is still fading.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn adopt_stream_identity(
         &mut self,
         event_tx: &mpsc::Sender<AsioEvent>,
         stream_id: u32,
+        opened_under: u32,
         sample_rate: u32,
         want_channels: usize,
         duration_secs: f64,
@@ -1659,6 +1679,7 @@ impl ControlCtx {
         // is abandoned (its decoder is cancelled at spawn time).
         self.consumed = consumed;
         self.stream_id = Some(stream_id);
+        self.opened_under = opened_under;
         self.reset_count = 0;
         self.sample_rate = sample_rate;
         self.channels = want_channels;
@@ -1690,10 +1711,16 @@ impl ControlCtx {
         self.paused.store(start_paused, Ordering::Relaxed);
         if start_paused {
             self.state = AsioState::Paused;
-            let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Paused));
+            let _ = event_tx.send(AsioEvent::StateChange {
+                opened_under: self.opened_under,
+                state: PlaybackState::Paused,
+            });
         } else {
             self.state = AsioState::Playing;
-            let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Active));
+            let _ = event_tx.send(AsioEvent::StateChange {
+                opened_under: self.opened_under,
+                state: PlaybackState::Active,
+            });
         }
     }
 
@@ -1912,7 +1939,10 @@ impl ControlCtx {
             self.last_time_report = Instant::now();
             crate::vprintln!("[ASIO] control: resumed");
         }
-        let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Active));
+        let _ = event_tx.send(AsioEvent::StateChange {
+            opened_under: self.opened_under,
+            state: PlaybackState::Active,
+        });
     }
 
     /// Write staged samples into the ring until the ring is full or staging empties.
@@ -2158,6 +2188,7 @@ impl ControlCtx {
         match cmd {
             AsioCommand::StartStream {
                 stream_id,
+                opened_under,
                 sample_rate,
                 channels,
                 duration_secs,
@@ -2174,6 +2205,7 @@ impl ControlCtx {
                     self.adopt_stream_identity(
                         event_tx,
                         stream_id,
+                        opened_under,
                         sample_rate,
                         want_channels,
                         duration_secs,
@@ -2188,6 +2220,7 @@ impl ControlCtx {
                     .handle_start_stream(
                         event_tx,
                         stream_id,
+                        opened_under,
                         sample_rate,
                         channels,
                         duration_secs,
@@ -2253,7 +2286,10 @@ impl ControlCtx {
                     // `paused` is set instead of ASIOStop-ing (which would free the device).
                     self.paused.store(true, Ordering::Relaxed);
                     self.state = AsioState::Paused;
-                    let _ = event_tx.send(AsioEvent::StateChange(PlaybackState::Paused));
+                    let _ = event_tx.send(AsioEvent::StateChange {
+                        opened_under: self.opened_under,
+                        state: PlaybackState::Paused,
+                    });
                 } else if self.stream_id != Some(stream_id) {
                     // Pre-adoption pause (e.g. clicked during an auto-play arm):
                     // latch it, making the adoption start paused instead of dropping it.
@@ -2664,6 +2700,7 @@ impl Drop for AsioHandle {
 pub(crate) fn stream_reader_to_asio(
     reader: RamBuffer,
     stream_id: u32,
+    opened_under: u32,
     cmd_tx: mpsc::Sender<AsioCommand>,
     cancel: Arc<AtomicBool>,
     seek_to: Option<f64>,
@@ -2740,6 +2777,7 @@ pub(crate) fn stream_reader_to_asio(
     cmd_tx
         .send(AsioCommand::StartStream {
             stream_id,
+            opened_under,
             sample_rate,
             channels,
             duration_secs,
@@ -2982,3 +3020,7 @@ pub(crate) fn stream_reader_to_asio(
         sent += sample_count;
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/asio/transport_tests.rs"]
+mod transport_tests;

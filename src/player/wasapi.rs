@@ -29,6 +29,9 @@ use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 /// The stream a decoder opened, as the render adopts it: its identity, format and starting point.
 pub(super) struct StreamStart {
     pub(super) stream_id: u32,
+    /// The seq of the load whose decoder opened the stream, echoed on every transport state
+    /// the render reports for it. Meaningful to the player alone, as `gen_id` is to a seek.
+    pub(super) opened_under: u32,
     pub(super) sample_rate: u32,
     pub(super) channels: u32,
     pub(super) bits_per_sample: u32,
@@ -129,9 +132,15 @@ pub(super) enum ExclusiveEvent {
         position: f64,
         refused: bool,
     },
-    /// Transport states only. They report what the endpoint is doing, not what a track is, so
-    /// no emitter of one has to know which stream it belongs to.
-    StateChange(super::PlaybackState),
+    /// A transport state of a stream, named by the load that opened it. The endpoint may report
+    /// one after the player has moved on (a pause waits out the stop and reset of a dirty
+    /// endpoint), and only that seq tells the player whose it is. Relayed whichever stream it
+    /// names, never discarded: completion is what a superseded stream must not announce, and
+    /// arrives apart.
+    StateChange {
+        opened_under: u32,
+        state: super::PlaybackState,
+    },
     /// Track finished (EOF + drained). Stream-scoped: a stale completion from a superseded
     /// stream must not clear a newer track, which would force a re-arm/double-load. Mirrors
     /// `AsioEvent::Completed`.
@@ -235,6 +244,7 @@ pub(super) fn stream_flac_reader_to_wasapi(
     reader: crate::player::buffer::RamBuffer,
     byte_len: u64,
     stream_id: u32,
+    opened_under: u32,
     cmd_tx: mpsc::Sender<ExclusiveCommand>,
     cancel: Arc<AtomicBool>,
     seek_to: Option<f64>,
@@ -331,6 +341,7 @@ pub(super) fn stream_flac_reader_to_wasapi(
     cmd_tx
         .send(ExclusiveCommand::StartStream(StreamStart {
             stream_id,
+            opened_under,
             sample_rate,
             channels,
             bits_per_sample: stored_bps,
@@ -620,6 +631,28 @@ impl ExclusiveHandle {
             event_rx,
             thread: Some(handle),
         }
+    }
+
+    /// A handle wired to channels the caller owns, with no render thread behind it: a test can
+    /// hand the player the very events the render would have sent. `thread: None` is what keeps
+    /// `Drop` from joining one that was never spawned. Mirrors `AsioHandle::for_test`.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> (
+        Self,
+        mpsc::Sender<ExclusiveEvent>,
+        mpsc::Receiver<ExclusiveCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ExclusiveCommand>();
+        let (event_tx, event_rx) = mpsc::channel::<ExclusiveEvent>();
+        (
+            Self {
+                cmd_tx,
+                event_rx,
+                thread: None,
+            },
+            event_tx,
+            cmd_rx,
+        )
     }
 
     pub fn send(&self, cmd: ExclusiveCommand) {
@@ -1159,6 +1192,9 @@ struct RenderContext {
     // thread is stuck opening the exclusive client.
     consumed: Arc<AtomicU64>,
     current_stream_id: Option<u32>,
+    // The load that opened the adopted stream, echoed on its transport states. Written with
+    // `current_stream_id`, meaningless without one.
+    opened_under: u32,
     // Pre-adoption transport intent (stream_id, play): a Play/Pause for a stream
     // whose probe-delayed StartStream hasn't arrived yet (FIFO makes this
     // deterministic). Every adoption consumes it: applied on id match, discarded
@@ -1204,6 +1240,7 @@ impl RenderContext {
             frames_played: 0,
             consumed: Arc::new(AtomicU64::new(0)),
             current_stream_id: None,
+            opened_under: 0,
             pending_transport: None,
             stream_ended: true,
             last_time_report: Instant::now(),
@@ -1345,6 +1382,7 @@ impl RenderContext {
     fn adopt_stream(&mut self, event_tx: &mpsc::Sender<ExclusiveEvent>, start: StreamStart) {
         let StreamStart {
             stream_id,
+            opened_under,
             sample_rate,
             channels,
             bits_per_sample,
@@ -1364,6 +1402,7 @@ impl RenderContext {
         self.consumed = consumed;
         self.frames_played = position_frames(start_secs, sample_rate);
         self.current_stream_id = Some(stream_id);
+        self.opened_under = opened_under;
         self.stream_ended = false;
         self.last_time_report = Instant::now();
         // Apply a transport command that raced ahead of this adoption (the player
@@ -1388,11 +1427,17 @@ impl RenderContext {
             self.pending_start = true;
             self.stop_audio_client();
             self.state = RenderState::Paused;
-            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
+            let _ = event_tx.send(ExclusiveEvent::StateChange {
+                opened_under,
+                state: super::PlaybackState::Paused,
+            });
         } else {
             self.pending_start = true;
             self.state = RenderState::Playing;
-            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+            let _ = event_tx.send(ExclusiveEvent::StateChange {
+                opened_under,
+                state: super::PlaybackState::Active,
+            });
         }
     }
 
@@ -1433,7 +1478,10 @@ impl RenderContext {
         // The pause armed `pending_start` and flushed a dirty endpoint: the playing loop
         // re-primes a full period ahead of Start() rather than restarting over a stale tail.
         self.state = RenderState::Playing;
-        let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Active));
+        let _ = event_tx.send(ExclusiveEvent::StateChange {
+            opened_under: self.opened_under,
+            state: super::PlaybackState::Active,
+        });
     }
 
     /// What a `Pause` means to the playing render loop, apart from `apply_play` for the seam
@@ -1463,7 +1511,10 @@ impl RenderContext {
             // reports again until a command wakes it. Only `release_device`
             // hands the device back, never a pause.
             crate::vprintln!("[WASAPI] render paused, endpoint still held (stream {stream_id})");
-            let _ = event_tx.send(ExclusiveEvent::StateChange(super::PlaybackState::Paused));
+            let _ = event_tx.send(ExclusiveEvent::StateChange {
+                opened_under: self.opened_under,
+                state: super::PlaybackState::Paused,
+            });
         }
     }
 

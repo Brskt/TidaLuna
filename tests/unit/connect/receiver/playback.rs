@@ -217,6 +217,42 @@ async fn a_local_tracks_failure_forwarded_late_leaves_the_casts_first_track_alon
     assert!(notices.try_recv().is_err());
 }
 
+/// The skip that loads the cast's next track pauses the previous one, and an exclusive or ASIO
+/// backend reports that pause after the load. Heard as the new track's own it set the intent to
+/// `Paused` and told the phone so, and the `Pause` the phone sent in the window after it was
+/// swallowed (`pause` does nothing once the intent already reads `Paused`) while the backend
+/// started the track anyway.
+#[tokio::test]
+async fn the_pause_of_the_previous_load_is_not_the_new_loads() {
+    let (mut controller, mut notices) = preparing_the_casts_first_track();
+    controller.state = PbState::Started;
+    controller.play_state = PbPlayState::Playing;
+
+    controller
+        .on_status_updated(
+            PlayerState::Paused,
+            EventStamp {
+                engine_gen: 1,
+                seq: 9,
+            },
+        )
+        .await;
+
+    assert_eq!(controller.play_state, PbPlayState::Playing);
+    assert!(
+        notices.try_recv().is_err(),
+        "the previous load's pause was announced to the phone as the new track's"
+    );
+
+    controller.pause().await;
+
+    assert_eq!(
+        controller.play_state,
+        PbPlayState::Paused,
+        "the phone's Pause was swallowed"
+    );
+}
+
 #[tokio::test]
 async fn the_casts_own_end_still_moves_its_queue_on() {
     let (mut controller, mut notices) = preparing_the_casts_first_track();

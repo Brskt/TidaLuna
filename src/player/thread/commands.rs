@@ -884,11 +884,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // or stale command must not act on a superseded render context (mirrors
         // current_asio_stream_id).
         self.current_exclusive_stream_id = Some(stream_id);
+        let opened_under = self.load_seq;
         thread::spawn(move || {
             if let Err(e) = wasapi::stream_flac_reader_to_wasapi(
                 reader,
                 total_len,
                 stream_id,
+                opened_under,
                 cmd_tx,
                 cancel.clone(),
                 seek_to,
@@ -975,10 +977,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // or a stale reverse-to-shared position from a prior ASIO session.
         self.asio_watchdog_at = None;
         self.last_asio_pos = None;
+        let opened_under = self.load_seq;
         thread::spawn(move || {
             if let Err(e) = crate::player::asio::host::stream_reader_to_asio(
                 reader,
                 stream_id,
+                opened_under,
                 cmd_tx,
                 cancel.clone(),
                 seek_to,
@@ -1145,6 +1149,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.set_committed_track(Some((track_id.clone(), format.clone())));
         self.pending_resume_seek = self.resolve_resume_policy(resume_policy, &track_id);
         self.current_seq = event_seq;
+        #[cfg(target_os = "windows")]
+        {
+            self.load_seq = event_seq;
+        }
         self.is_cached = cached;
         self.current_format = format;
         // Invalidated until this load's probe emits a fresh one (the ASIO/exclusive

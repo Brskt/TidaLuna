@@ -3,6 +3,7 @@
 use super::decode_failure_needs_settle;
 #[cfg(target_os = "windows")]
 use super::seek_ack_is_current;
+use super::stream_state_seq;
 #[cfg(target_os = "windows")]
 use super::verdict_names_current_stream;
 
@@ -59,6 +60,22 @@ fn a_verdict_that_names_no_stream_condemns_no_track() {
     assert!(!verdict_names_current_stream(None, None));
     assert!(!verdict_names_current_stream(Some(2), None));
     assert!(!verdict_names_current_stream(None, Some(2)));
+}
+
+#[test]
+fn a_stream_of_the_current_load_answers_under_the_current_seq() {
+    // A stop since the load moved the seq on and kept the stream: what it reports now belongs
+    // to the stop's seq, the newest the SDK has heard.
+    assert_eq!(stream_state_seq(5, 5, 5), 5);
+    assert_eq!(stream_state_seq(5, 5, 7), 7);
+}
+
+#[test]
+fn a_stream_of_an_earlier_load_keeps_that_loads_seq() {
+    // The defect: the retired stream's pause arrived after the next load and took its seq
+    // (the Connect receiver heard it as the new track's own).
+    assert_eq!(stream_state_seq(4, 5, 5), 4);
+    assert_eq!(stream_state_seq(4, 5, 8), 4);
 }
 
 #[test]
