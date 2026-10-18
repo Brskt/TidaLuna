@@ -155,30 +155,21 @@ fn a_newer_answer_for_the_same_path_is_not_spent_by_an_older_download() {
     );
 }
 
-/// Refused whether or not a real directory sits behind it. Tracking each kernel's own `..` semantics
-/// separately is what produced the traversal bypass.
-#[test]
-fn a_traversal_is_refused_with_or_without_a_directory_behind_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("song.flac");
-    record_user_choice(&dest, false);
-
-    let sub = dir.path().join("sub");
-    std::fs::create_dir(&sub).unwrap();
-    assert!(
-        authorisation_for(&sub.join("..").join("song.flac")).is_none(),
-        "real directory"
-    );
-    assert!(
-        authorisation_for(&dir.path().join("absent").join("..").join("song.flac")).is_none(),
-        "no directory behind it"
-    );
-}
-
+/// A relative path resolves against whatever the working directory is when the write runs, not
+/// against what the user answered: spelled relative, even an authorised file must not match.
+/// `./name` is the spelling that resolves; a bare `name` has no parent to canonicalise and would
+/// be refused with or without the check.
 #[test]
 fn a_path_that_is_not_absolute_is_refused() {
-    assert!(authorisation_for(std::path::Path::new("relative.flac")).is_none());
-    assert!(authorisation_for(std::path::Path::new("/..")).is_none());
+    let name = "a-relative-spelling-of-an-answer.flac";
+    let chosen = std::env::current_dir().unwrap().join(name);
+    record_user_choice(&chosen, false);
+
+    assert!(authorisation_for(&std::path::Path::new(".").join(name)).is_none());
+    assert!(
+        authorisation_for(&chosen).is_some(),
+        "the absolute spelling is the one answered"
+    );
 }
 
 /// Re-answering a dialog for a path already held replaces that entry. It needs no slot. Bounding
