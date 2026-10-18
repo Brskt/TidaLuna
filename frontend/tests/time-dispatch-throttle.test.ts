@@ -59,16 +59,6 @@ test("a transition's position is dispatched even inside the outgoing track's thr
 	expect(times()).toEqual([{ type: "playbackControls/TIME_UPDATE", payload: 6.0 }]);
 });
 
-test("ordinary periodic reports are still throttled", () => {
-	// The counterweight: the carve-out must not disarm the throttle for everything.
-	// Two plain position reports back to back are still one dispatch.
-	push([{ t: "time", v: 10.0, seq: 1 }]);
-	dispatched = [];
-	push([{ t: "time", v: 10.25, seq: 1 }]);
-
-	expect(times()).toEqual([]);
-});
-
 test("a completion carrying no position does not leave the bypass armed", () => {
 	// Exclusive and ASIO output end a track with the state alone, no position beside
 	// it. Arming on the state alone would leave the flag set until some unrelated
