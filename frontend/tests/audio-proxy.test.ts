@@ -9,7 +9,7 @@
 
 import { expect, test } from "bun:test";
 
-import { proxyFail } from "../src/audio-proxy";
+import { proxyFail, proxyReset } from "../src/audio-proxy";
 
 const READINESS = ["loadedmetadata", "loadeddata", "canplay", "canplaythrough"];
 
@@ -19,8 +19,11 @@ const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
 // Lets the proxy's `queueMicrotask` readiness burst run.
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-// An `<audio>` element already armed with `src`, past its readiness burst.
+// An `<audio>` element already armed with `src`, past its readiness burst. It is the element TIDAL
+// plays: a manifest on a second element while another holds the mirror is a preload, which the
+// previous test's element would otherwise make of this one.
 async function armed(id: string) {
+	proxyReset();
 	const el = document.createElement("audio");
 	const seen: string[] = [];
 	for (const name of [...READINESS, "error"]) {

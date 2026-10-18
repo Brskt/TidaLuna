@@ -5,7 +5,24 @@ import { sendIpc } from "./ipc";
 import { applyVolume } from "./volume";
 import { attachCoverCanvas, coverSelected, isCoverUrl } from "./video/cover-canvas";
 
+// The element Rust's mirror belongs to: the one Shaka plays. Shaka keeps TWO (the active one and
+// the one it preloads the next track into), and only the active one may speak for Rust.
 let _proxyElement: HTMLMediaElement | null = null;
+// An element took over from the owner while Rust still reports the previous track: its events
+// are that track's, and none of them belong to the newcomer until Rust loads the next one.
+let _handover = false;
+// Told when the track ends or Shaka plays its preloaded element: the page's track changed without
+// Rust being asked. Called from Shaka's own `play()` and from `proxyEnded`, which a failing
+// listener must not break.
+let _onHandoff: (() => void) | null = null;
+export function onHandoff(cb: () => void) { _onHandoff = cb; }
+const handoff = () => {
+	try {
+		_onHandoff?.();
+	} catch (e) {
+		console.error("[audio-proxy] handoff listener failed:", e);
+	}
+};
 let _proxyDuration = 0;
 let _proxyTime = 0;
 let _proxyPlaying = false;
@@ -39,15 +56,22 @@ if (srcDesc) {
 			if (shouldProxy(value)) {
 				(this as any)._lunarProxy = true;
 				(this as any)._lunarSrc = value;
-				_proxyElement = this;
-				_proxyPlaying = false;
-				_proxyTime = 0;
+				// A manifest on an element while another one holds Rust's mirror is Shaka's preload of
+				// the next track into its inactive element: it must not take the mirror from the
+				// element that is playing.
+				const preload = _proxyElement !== null && _proxyElement !== this;
+				if (!preload) {
+					_proxyElement = this;
+					_handover = false;
+					_proxyPlaying = false;
+					_proxyTime = 0;
 
-				// A refused stream keeps its verdict while it is the one assigned: announcing
-				// readiness again puts the transport back into buffering. Another source
-				// gets a fresh verdict.
-				if (value === _failedSrc) return;
-				_failedSrc = null;
+					// A refused stream keeps its verdict while it is the one assigned: announcing
+					// readiness again puts the transport back into buffering. Another source
+					// gets a fresh verdict.
+					if (value === _failedSrc) return;
+					_failedSrc = null;
+				}
 
 				// Emit readiness events for the SDK's saga to continue normally.
 				// Use microtask timing to match real media element behavior.
@@ -94,9 +118,21 @@ const origPlay = HTMLMediaElement.prototype.play;
 HTMLMediaElement.prototype.play = function () {
 	console.log("[audio-proxy] play() called, _lunarProxy:", !!(this as any)._lunarProxy);
 	if ((this as any)._lunarProxy) {
-		_proxyPlaying = true;
-		this.dispatchEvent(new Event("play"));
-		sendIpc("player.play");
+		if (_proxyElement === null || _proxyElement === this) {
+			_proxyElement = this;
+			_proxyPlaying = true;
+			this.dispatchEvent(new Event("play"));
+			sendIpc("player.play");
+		} else {
+			// Shaka plays its preloaded element: the track changes over to it. Rust has the old
+			// track until the page loads the next. This is no command for Rust.
+			_proxyElement = this;
+			_handover = true;
+			_proxyPlaying = true;
+			_proxyTime = 0;
+			this.dispatchEvent(new Event("play"));
+			handoff();
+		}
 		return Promise.resolve();
 	}
 	return origPlay.call(this);
@@ -105,6 +141,8 @@ HTMLMediaElement.prototype.play = function () {
 const origPause = HTMLMediaElement.prototype.pause;
 HTMLMediaElement.prototype.pause = function () {
 	if ((this as any)._lunarProxy) {
+		// Shaka pauses the outgoing element when it hands over: that is no pause of Rust's track.
+		if (_proxyElement !== null && _proxyElement !== this) return;
 		_proxyPlaying = false;
 		this.dispatchEvent(new Event("pause"));
 		sendIpc("player.pause");
@@ -115,7 +153,21 @@ HTMLMediaElement.prototype.pause = function () {
 
 const origLoad = HTMLMediaElement.prototype.load;
 HTMLMediaElement.prototype.load = function () {
-	if ((this as any)._lunarProxy) return;
+	if ((this as any)._lunarProxy) {
+		// Shaka's unload of a `src=` element: the manifest is gone, and so is the mirror if this
+		// element held it. The length stays: a reload of the track Rust is still playing (TIDAL's
+		// retry of a prefetched or expired stream on Play) gets no new `duration` report, and the
+		// `src` that follows only restarts the clock.
+		(this as any)._lunarProxy = false;
+		(this as any)._lunarSrc = "";
+		if (_proxyElement === this) {
+			_proxyElement = null;
+			_handover = false;
+			_proxyPlaying = false;
+			_proxyTime = 0;
+		}
+		return;
+	}
 
 	// TIDAL puts an animated cover on a <source> child, never on the element, and the `src` setter
 	// never sees it. `load()` does: a reused element can only change cover through it (the spec
@@ -146,11 +198,15 @@ document.addEventListener(
 	true,
 );
 
+// An element that does not hold the mirror (Shaka's preloaded one) reads as a loaded, idle one: not
+// playing, at zero. Its length stays the mirror's, since Shaka's `next()` waits 3 s for a
+// `durationchange` on a preloaded element whose `duration` is not a number.
+const holdsMirror = (el: any) => _proxyElement === null || _proxyElement === el;
 for (const [prop, getter] of Object.entries({
-	paused: () => !_proxyPlaying,
+	paused: (el: any) => (holdsMirror(el) ? !_proxyPlaying : true),
 	readyState: () => 4, // HAVE_ENOUGH_DATA
 	duration: () => _proxyDuration,
-	currentTime: () => _proxyTime,
+	currentTime: (el: any) => (holdsMirror(el) ? _proxyTime : 0),
 	buffered: () => ({
 		length: 1,
 		start: () => 0,
@@ -161,18 +217,18 @@ for (const [prop, getter] of Object.entries({
 	// event, and turns anything non-null into S3016: the one error code TIDAL answers by
 	// advancing the queue.
 	error: () => null,
-}) as [string, () => any][]) {
+}) as [string, (el: any) => any][]) {
 	const origDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, prop);
 	if (!origDesc) continue;
 	Object.defineProperty(HTMLMediaElement.prototype, prop, {
 		get() {
-			if ((this as any)._lunarProxy) return getter();
+			if ((this as any)._lunarProxy) return getter(this);
 			return origDesc.get!.call(this);
 		},
 		set: origDesc.set
 			? function (v: any) {
 					if ((this as any)._lunarProxy) {
-						if (prop === "currentTime" && typeof v === "number" && isFinite(v)) {
+						if (prop === "currentTime" && typeof v === "number" && isFinite(v) && holdsMirror(this)) {
 							sendIpc("player.seek", v);
 						}
 						return;
@@ -199,8 +255,14 @@ if (volumeDesc?.set) {
 	});
 }
 
+// Rust's reports belong to the element only while Rust plays this page's own self-load. Any other track
+// (an SDK-native one) is no element's: a manifest Shaka preloaded meanwhile must not read its position,
+// since Shaka rewinds a preloaded element it finds past zero, and that write is a seek of Rust's track.
+const mirrorsRust = () => !!_proxyElement && !!(_proxyElement as any)._lunarProxy && _selfLoad;
+
 export function proxySetPlaying(playing: boolean) {
-	if (!_proxyElement || !((_proxyElement as any)._lunarProxy)) return;
+	if (!mirrorsRust()) return;
+	if (_handover) return;
 	_proxyPlaying = playing;
 	if (playing) {
 		_proxyElement.dispatchEvent(new Event("playing"));
@@ -210,21 +272,36 @@ export function proxySetPlaying(playing: boolean) {
 }
 
 export function proxySetTime(time: number) {
-	if (!_proxyElement || !((_proxyElement as any)._lunarProxy)) return;
+	if (!mirrorsRust()) return;
+	if (_handover) return;
 	_proxyTime = time;
 	_proxyElement.dispatchEvent(new Event("timeupdate"));
 }
 
 export function proxySetDuration(duration: number) {
-	if (!_proxyElement || !((_proxyElement as any)._lunarProxy)) return;
+	if (!mirrorsRust()) return;
+	// The first length Rust reports after a handover is the next track's.
+	const handedOver = _handover;
+	_handover = false;
 	_proxyDuration = duration;
 	_proxyElement.dispatchEvent(new Event("durationchange"));
+	// Shaka played the element before Rust had the track; the play an SDK load ends with went
+	// nowhere. A self-loaded stream that is not DASH loads paused and waits for it.
+	if (handedOver && _proxyPlaying) sendIpc("player.play");
 }
 
-export function proxyEnded() {
-	if (!_proxyElement || !((_proxyElement as any)._lunarProxy)) return;
+// The track Rust played ended: say so on the element TIDAL observes, as a media element does, then
+// read as stopped at the start. The elements keep their binding, since the next track may be one
+// TIDAL already loaded into the other element.
+// False when nothing it could end is there: no element, or one already handed over to the next
+// track (its end was the previous one's, and the hand-over already told the listener).
+export function proxyEnded(): boolean {
+	if (!_proxyElement || !((_proxyElement as any)._lunarProxy) || _handover) return false;
 	_proxyPlaying = false;
+	// Armed before the event: TIDAL's reaction (the next element's prefill, a swap) can come within it.
+	handoff();
 	_proxyElement.dispatchEvent(new Event("ended"));
+	return true;
 }
 
 // Retire the loaded stream: stop announcing it ready, and say nothing else.
@@ -240,6 +317,7 @@ export function proxyFail() {
 
 export function proxyReset() {
 	_proxyElement = null;
+	_handover = false;
 	_proxyPlaying = false;
 	_proxyTime = 0;
 	_proxyDuration = 0;
