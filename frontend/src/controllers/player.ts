@@ -100,6 +100,9 @@ export const createNativePlayerComponent = () => {
     // load cancels it and skips the reload, leaving playback intact.
     let loadedUrl: string | null = null;
     let loadedFmt: string | null = null;
+    // The stream Rust has staged as next. The SDK loads it again to switch to it, and that load is no
+    // fresh play of it.
+    let preloaded: { url: string } | null = null;
     let pendingStop = false;
     // A real command (play/pause/seek/recover) supersedes a deferred stop.
     const cancelDeferredStop = () => { pendingStop = false; };
@@ -293,6 +296,12 @@ export const createNativePlayerComponent = () => {
                     if (refId !== null) lastReferenceId = refId;
                     act = actOfLoad(pendingAct, state?.playQueue, refId);
                 } catch (_) {}
+                // The load that switches to the staged track is no fresh play of it: Rust advanced to
+                // it by itself, and a restart would rewind it.
+                if (preloaded?.url === url) {
+                    restart = false;
+                }
+                preloaded = null;
                 // The SDK's playbackinfo answer the stream was parsed from names its track. The store
                 // cannot: it holds the track that just ended when the SDK switches to a preloaded one.
                 productId = productOfStream(url) ?? productId;
@@ -362,9 +371,14 @@ export const createNativePlayerComponent = () => {
                 // load. A stream that answer never named goes untagged: no tag publishes no length.
                 const nextId = productOfStream(url) ?? "";
                 if (nextId === "") console.warn("[luna:player] preload of a stream no playbackinfo answer named");
+                preloaded = { url };
                 sendIpc("player.preload", url, streamFormat, encryptionKey, nextId);
             },
             cancelPreload: () => {
+                // Not gated on isSelfLoad() like stop: the staged next is this player's alone (`preload`
+                // above is its only producer), and it is dropped whoever plays now. Held back during a
+                // self-load, a stale staged next would be promoted when that track ends.
+                preloaded = null;
                 sendIpc("player.preload.cancel");
             },
             recover: (...args: any[]) => {

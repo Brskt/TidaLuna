@@ -46,6 +46,15 @@ test("the load that switches to the preloaded stream names the preloaded track, 
 	expect(loadOf("player.load")[5]).toBe("2");
 });
 
+test("the load that switches to the preloaded stream is no fresh play, whichever referenceId the store holds", () => {
+	player.load("https://cdn/1.flac", "flac", "");
+	mediaProduct = { productId: 3, referenceId: "pq_3" };
+	player.preload("https://cdn/2.flac", "flac", "");
+	player.load("https://cdn/2.flac", "flac", "");
+
+	expect(loadOf("player.load")[3]).toBe(false);
+});
+
 test("a stream that was not preloaded keeps the store's product and its restart rule", () => {
 	player.load("https://cdn/1.flac", "flac", "");
 	mediaProduct = { productId: 2, referenceId: "pq_2" };
