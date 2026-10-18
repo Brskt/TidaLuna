@@ -66,8 +66,12 @@ let _proxyPlaying = false;
 // length already reported.
 let _settled = false;
 // What a `src` assigned loads. `reload`: the track Rust has, which Rust's length answers while Rust's
-// track is settled. `other`: no answer, a length is Rust's to report.
-export type SdkLoad = { kind: "reload" } | { kind: "other" };
+// track is settled. `late`: another product's stream, the SDK's load of a track the listener has since
+// left binding after the load that replaced it. The SDK's load waits on a length either way and records
+// it for the track it loads. That one gets its own (0 when unknown, the SDK's sentinel) whatever
+// Rust is doing, and Rust, whose track it is not, is owed nothing. `other`: no answer, a length is
+// Rust's to report.
+export type SdkLoad = { kind: "reload" } | { kind: "late"; duration: number } | { kind: "other" };
 // Told by the page, which knows the product of the stream and the one Rust has.
 let _classifySdkLoad: ((stream: string) => SdkLoad) | null = null;
 export function onSdkLoad(cb: (stream: string) => SdkLoad) { _classifySdkLoad = cb; }
@@ -136,6 +140,9 @@ if (srcDesc) {
 					if (load?.kind === "reload" && _settled && !holdsAnotherTrack()) {
 						length = true;
 						_proxyDuration = _rustDuration;
+					} else if (load?.kind === "late") {
+						length = true;
+						_proxyDuration = load.duration;
 					}
 				}
 				const answer = () => {

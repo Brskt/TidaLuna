@@ -1,6 +1,7 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
 import { setSelfLoad, onSdkLoad, proxyLoading } from "../audio-proxy";
 import { refusePlayback } from "../refuse-playback";
+import { productOfStream } from "../sdk-playbackinfo";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 import { setCurrentTrack } from "../video/cover-canvas";
 import { storePublished } from "../store-published";
@@ -28,9 +29,20 @@ export const createPlaybackController = () => {
             console.error("[luna:playback] refusal failed:", e);
         }
     };
-    onSdkLoad(() => {
+    // The SDK loads the product of its own `mediaProduct`, which its prefill writes before any load. A
+    // load the listener has since left (a pick, then another) binds its stream after the newer track
+    // is loaded, with the store still on that newer one. The stream names its own product, and the SDK
+    // records the length it is answered with for that product (the catalog's here; Rust may still be
+    // loading the newer track, whose length is no answer to this one). A stream this page cannot
+    // name (`productOfStream`) is taken for a reload of Rust's track.
+    onSdkLoad((stream) => {
         const { store } = require("../../plugins/lib/src/redux/store");
-        const current = String(store.getState().playbackControls?.mediaProduct?.productId ?? "");
+        const state = store.getState();
+        const current = String(state.playbackControls?.mediaProduct?.productId ?? "");
+        const product = productOfStream(stream);
+        if (product !== undefined && product !== current) {
+            return { kind: "late", duration: Number(state.content?.mediaItems?.[product]?.item?.duration) || 0 };
+        }
         return loadedId !== "" && current === loadedId ? { kind: "reload" } : { kind: "other" };
     });
     return {

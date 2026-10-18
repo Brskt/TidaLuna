@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { SentIpc } from "./setup";
 
 import { sdkDashAnswer } from "./helpers/sdk-answer";
-import { proxyEnded, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
+import { onSdkLoad, proxyEnded, proxyLoading, proxyReset, proxySetDuration, proxySetPlaying, proxySetTime, setSelfLoad } from "../src/audio-proxy";
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
 const dash = (id: string) => `data:application/dash+xml;base64,${btoa(id)}`;
@@ -34,11 +34,13 @@ const eventsOf = (el: HTMLAudioElement, names: string[]) => {
 beforeEach(() => {
 	proxyReset();
 	setSelfLoad(true);
+	onSdkLoad(() => ({ kind: "other" }));
 });
 
 afterEach(() => {
 	proxyReset();
 	setSelfLoad(false);
+	onSdkLoad(() => ({ kind: "other" }));
 });
 
 // The SDK bound the stream of track `held` while Rust holds track `rust`, reported with `length`.
@@ -51,6 +53,7 @@ async function bound(held: string, rust: string, length: number) {
 }
 
 test("a length Rust reports for another track is no answer of the element that holds this one's stream", async () => {
+	onSdkLoad(() => ({ kind: "late", duration: 4 }));
 	const el = document.createElement("audio");
 	const seen = eventsOf(el, ["durationchange"]);
 	el.src = await named("9001");
@@ -58,8 +61,8 @@ test("a length Rust reports for another track is no answer of the element that h
 
 	proxySetDuration(5, "9002");
 
-	expect(seen).toEqual([]);
-	expect(el.duration).toBe(0);
+	expect(seen).toEqual(["durationchange:4"]);
+	expect(el.duration).toBe(4);
 });
 
 test("the time, state and end Rust reports for another track are not the element's", async () => {
@@ -108,6 +111,48 @@ test("a stream no playbackinfo answer named takes whatever Rust reports", async 
 	proxySetTime(3);
 
 	expect(seen).toEqual(["durationchange:5", "timeupdate"]);
+});
+
+test("a late bind meets a Rust that is still loading the listener's track, and is answered at once", async () => {
+	// The page announced the current track: Rust's is the previous one's until the load reports.
+	onSdkLoad(() => ({ kind: "late", duration: 4 }));
+	const first = await bound("9012", "9012", 6);
+	proxyLoading();
+	const seen = eventsOf(first, ["durationchange"]);
+
+	first.src = await named("9013");
+	await flush();
+
+	expect(seen).toEqual(["durationchange:4"]);
+});
+
+test("a reload of the listener's track waits for Rust's length while Rust is still loading it", async () => {
+	onSdkLoad(() => ({ kind: "reload" }));
+	const el = await bound("9014", "9014", 6);
+	proxyLoading();
+	const seen = eventsOf(el, ["durationchange"]);
+
+	el.src = await named("9015");
+	await flush();
+	expect(seen).toEqual([]);
+
+	proxySetDuration(5, "9015");
+	expect(seen).toEqual(["durationchange:5"]);
+});
+
+test("a reload is answered with Rust's length, not the catalog length a late bind left on the element", async () => {
+	const el = await bound("9016", "9016", 5);
+	onSdkLoad(() => ({ kind: "late", duration: 4 }));
+	el.src = await named("9017");
+	await flush();
+	expect(el.duration).toBe(4);
+	const seen = eventsOf(el, ["durationchange"]);
+
+	onSdkLoad(() => ({ kind: "reload" }));
+	el.src = await named("9016");
+	await flush();
+
+	expect(seen).toEqual(["durationchange:5"]);
 });
 
 test("the first length after a hand-over that is not the newcomer's does not start it", async () => {
