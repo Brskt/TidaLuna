@@ -51,9 +51,8 @@ export const createPlaybackController = () => {
         // refuses a self-load of it during the cast, stopping this page's transport under a banner.
         setCurrentMediaItem: (item: any, { alreadyPlaying = false }: { alreadyPlaying?: boolean } = {}) => {
             if (item && typeof item === "object") {
-                // The one signal that fires for EVERY track, animated cover or not:
-                // `setCurrentTrack` hangs the cover's lifetime on it (see its doc). The still
-                // artwork rides along and is checked there.
+                // The one signal that fires for EVERY track, animated cover or not.
+                // `setCurrentTrack` takes the still artwork from it (see its doc).
                 setCurrentTrack(item);
 
                 // Send raw media item; metadata parsing/fallbacks are centralized in Rust.

@@ -3,7 +3,7 @@
 
 import { sendIpc } from "./ipc";
 import { applyVolume } from "./volume";
-import { attachCoverCanvas, isCoverUrl } from "./video/cover-canvas";
+import { attachCoverCanvas, coverSelected, isCoverUrl } from "./video/cover-canvas";
 
 let _proxyElement: HTMLMediaElement | null = null;
 let _proxyDuration = 0;
@@ -133,6 +133,18 @@ HTMLMediaElement.prototype.load = function () {
 
 	origLoad.call(this);
 };
+
+// The hook above stays for its timing (it attaches inside the commit, before TIDAL's unloaded
+// `<video>` can be painted), but `load()` is not every selection: a `<source>` inserted into a
+// fresh `<video>` starts one on its own. Its `loadstart` is the one signal every selection
+// fires. Captured on the document, since media events do not bubble.
+document.addEventListener(
+	"loadstart",
+	(e) => {
+		if (e.target instanceof HTMLMediaElement) coverSelected(e.target);
+	},
+	true,
+);
 
 for (const [prop, getter] of Object.entries({
 	paused: () => !_proxyPlaying,
