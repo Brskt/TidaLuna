@@ -27,6 +27,7 @@ use cef::wrapper::message_router::{
     MessageRouterConfig, MessageRouterRendererSide, RendererSideRouter,
 };
 use cef::*;
+use platform::refusal::refuse_to_start;
 use player::{Player, PlayerEvent};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -64,25 +65,7 @@ fn refuse_without_data_dir() -> ! {
     #[cfg(not(target_os = "windows"))]
     const WHY: &str = "TidaLunar cannot find your home directory (HOME is unset or \
         not an absolute path), so it has nowhere to keep your session and settings.";
-    crate::verr!("[BOOT]   {WHY}");
-    // A release build has no console: the dialog is where the user sees it.
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-        let text: Vec<u16> = WHY.encode_utf16().chain(Some(0)).collect();
-        let title: Vec<u16> = "TidaLunar".encode_utf16().chain(Some(0)).collect();
-        // SAFETY: both strings are NUL-terminated and outlive the call, and no
-        // owner window is named.
-        unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                text.as_ptr(),
-                title.as_ptr(),
-                MB_OK | MB_ICONERROR,
-            )
-        };
-    }
-    std::process::exit(1);
+    refuse_to_start(WHY)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -93,7 +76,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parent (Explorer). The --type= guard skips CEF subprocesses. This early
     // block is driven by the LOGS env var only (DB isn't open yet).
     #[cfg(target_os = "windows")]
-    if logging::log_level() >= 1 && !std::env::args().any(|a| a.starts_with("--type=")) {
+    if logging::log_level() >= 1 && !platform::process_args::is_helper_process(std::env::args_os())
+    {
         attach_or_alloc_console();
     }
 

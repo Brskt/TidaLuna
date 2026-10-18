@@ -194,6 +194,7 @@ windows-sys = { version = "0.61.2", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "NSAlert",
   "NSApplication",
   "NSEvent",
   "NSResponder",
@@ -212,6 +213,9 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 security-framework = "3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Already linked through the tray (`ksni`), at this exact version; named here for the
+# notification a launch that stops posts.
+dbus = "0.9.12"
 flate2 = { workspace = true }
 # Already resolved through the graph; named here for the `SCM_CREDENTIALS` call
 # that tells who sent a datagram, which `std` still gates behind nightly.

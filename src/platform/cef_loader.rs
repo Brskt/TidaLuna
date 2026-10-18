@@ -9,9 +9,12 @@
 //! Windows points the OS loader at `bin/cef` and Linux leans on an rpath; this is
 //! the macOS half of the same job.
 
-use std::ffi::{CString, OsString};
+use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use super::process_args::is_helper_process;
+use super::refusal::refuse_to_start;
 
 /// Hop from the main executable's directory up to the frameworks directory:
 /// `Contents/MacOS/<exe>` to `Contents/Frameworks`.
@@ -38,17 +41,6 @@ const SANDBOX_DYLIB: &str = "Chromium Embedded Framework.framework/Libraries/lib
 pub(crate) struct SandboxGuard {
     _sandbox: cef::sandbox::Sandbox,
     _args: cef::args::Args,
-}
-
-/// True when Chromium launched this executable as one of its subprocesses.
-///
-/// The switch is read from the raw arguments because the CEF command-line API is
-/// itself part of the library that has not been loaded yet. It is read as bytes
-/// rather than as `String` because the UTF-8 flavour unwraps internally: one
-/// argument that is not valid Unicode would panic here, and a panic at this point
-/// has no console, no sink and no `verr!` in front of it.
-fn is_helper_process(mut args: impl Iterator<Item = OsString>) -> bool {
-    args.any(|a| a.as_bytes().starts_with(b"--type="))
 }
 
 /// Where the framework binary sits, seen from the directory holding the running
@@ -146,10 +138,11 @@ fn enter_sandbox(exe_dir: &Path) -> SandboxGuard {
             // keeps the whole diagnosis on the one channel that survives.
             let cause = panic_message(payload.as_ref());
 
-            crate::verr!("[CEF]    Sandbox library {state}: {}", dylib.display());
-            crate::verr!("[CEF]    Cause: {cause}");
-            crate::verr!("[CEF]    The .app bundle is incomplete; unpack the release again.");
-            std::process::exit(1);
+            refuse_to_start(&format!(
+                "Sandbox library {state}: {} (cause: {cause}). \
+                The .app bundle is incomplete; unpack the release again.",
+                dylib.display()
+            ));
         }
     }
 }
@@ -172,29 +165,29 @@ fn load_framework(exe_dir: &Path, is_helper: bool) {
         Err(e) => match build_tree_framework_path().and_then(|p| p.canonicalize().ok()) {
             Some(path) => path,
             None => {
-                crate::verr!("[CEF]    No framework at {}: {e}", candidate.display());
-                crate::verr!("[CEF]    The .app bundle is incomplete; unpack the release again.");
-                std::process::exit(1);
+                refuse_to_start(&format!(
+                    "No framework at {}: {e}. \
+                    The .app bundle is incomplete; unpack the release again.",
+                    candidate.display()
+                ));
             }
         },
     };
 
     let Ok(path) = CString::new(framework.as_os_str().as_bytes()) else {
-        crate::verr!(
-            "[CEF]    Framework path {} holds a NUL byte.",
+        refuse_to_start(&format!(
+            "Framework path {} holds a NUL byte.",
             framework.display()
-        );
-        std::process::exit(1);
+        ));
     };
 
     // SAFETY: as_ptr() yields a live `*const c_char` that `path` owns for the whole
     // call, and CString guarantees the NUL terminator the C API reads past it.
     if unsafe { cef::load_library(Some(&*path.as_ptr())) } != 1 {
-        crate::verr!(
-            "[CEF]    Framework at {} refused to load.",
+        refuse_to_start(&format!(
+            "Framework at {} refused to load.",
             framework.display()
-        );
-        std::process::exit(1);
+        ));
     }
 
     // Deliberately never unloaded: the framework has to outlive every CEF call,
@@ -224,18 +217,16 @@ fn running_exe_dir() -> PathBuf {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
-            crate::verr!("[CEF]    Cannot locate the running executable: {e}");
-            std::process::exit(1);
+            refuse_to_start(&format!("Cannot locate the running executable: {e}"));
         }
     };
     match exe.parent() {
         Some(dir) => dir.to_path_buf(),
         None => {
-            crate::verr!(
-                "[CEF]    Executable {} has no parent directory.",
+            refuse_to_start(&format!(
+                "Executable {} has no parent directory.",
                 exe.display()
-            );
-            std::process::exit(1);
+            ));
         }
     }
 }

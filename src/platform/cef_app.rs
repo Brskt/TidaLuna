@@ -25,6 +25,8 @@ use objc2::runtime::{Bool, NSObjectProtocol};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, define_class, extern_methods, msg_send};
 use objc2_app_kit::{NSApp, NSApplication, NSEvent};
 
+use super::refusal::refuse_to_start;
+
 /// The one piece of state the protocol asks the application to hold.
 ///
 /// Left unseeded deliberately. AppKit builds the singleton itself from inside
@@ -102,8 +104,7 @@ impl LunaApplication {
 /// late and Chromium has already built a stock `NSApplication` of its own.
 pub(crate) fn install() {
     let Some(mtm) = MainThreadMarker::new() else {
-        crate::verr!("[CEF]    The application singleton has to be built on the main thread.");
-        std::process::exit(1);
+        refuse_to_start("The application singleton has to be built on the main thread.");
     };
 
     let _ = LunaApplication::shared_application();
@@ -113,9 +114,10 @@ pub(crate) fn install() {
     // the very crash this module exists to prevent; it is verified here while
     // the cause is still legible.
     if !NSApp(mtm).isKindOfClass(LunaApplication::class()) {
-        crate::verr!("[CEF]    Another NSApplication claimed the singleton first.");
-        crate::verr!("[CEF]    Closing the window would abort; refusing to continue.");
-        std::process::exit(1);
+        refuse_to_start(
+            "Another NSApplication claimed the singleton first. \
+            Closing the window would abort; refusing to continue.",
+        );
     }
 
     crate::vprintln!("[CEF]    Application singleton installed");

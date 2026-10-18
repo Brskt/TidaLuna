@@ -3,16 +3,8 @@
 //! macOS-only, like the module itself: they run on a mac and nowhere else.
 
 use super::*;
-use std::ffi::OsString;
 use std::fs;
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
-
-/// The argument vectors under test are byte strings, not `String`s: Chromium hands
-/// us whatever the OS gave it.
-fn argv(items: &[&str]) -> Vec<OsString> {
-    items.iter().map(|a| OsString::from(*a)).collect()
-}
 
 /// Lay out a bundle replica and hand back the two directories an executable can
 /// run from: the main app's `MacOS/`, and a helper app's own `MacOS/`.
@@ -65,40 +57,6 @@ fn the_main_process_taking_the_helper_hop_misses_the_framework() {
 
     // Three levels up from the main app leaves the bundle entirely.
     assert!(framework_path(&main_dir, true).canonicalize().is_err());
-}
-
-#[test]
-fn the_chromium_subprocess_switch_selects_the_helper_hop() {
-    assert!(is_helper_process(
-        argv(&["/path/to/exe", "--type=renderer", "--lang=en-US"]).into_iter()
-    ));
-}
-
-#[test]
-fn a_bare_launch_selects_the_main_hop() {
-    assert!(!is_helper_process(
-        argv(&["/path/to/exe", "--lang=en-US"]).into_iter()
-    ));
-}
-
-#[test]
-fn a_switch_merely_containing_the_word_type_selects_the_main_hop() {
-    // Chromium always spells it `--type=<kind>`; neither of these is that.
-    assert!(!is_helper_process(
-        argv(&["/path/to/exe", "--type", "--user-agent=x--type=renderer"]).into_iter()
-    ));
-}
-
-#[test]
-fn an_argument_that_is_not_valid_unicode_is_read_without_panicking() {
-    // `std::env::args()` unwraps internally and aborts on this input, which is why
-    // the predicate takes bytes. The switch after the bad argument still has to be
-    // seen, so this covers the reading as well as the surviving.
-    let mut items = argv(&["/path/to/exe"]);
-    items.push(OsString::from_vec(vec![0x2d, 0x2d, 0xff, 0xfe]));
-    items.push(OsString::from("--type=gpu-process"));
-
-    assert!(is_helper_process(items.into_iter()));
 }
 
 #[test]
