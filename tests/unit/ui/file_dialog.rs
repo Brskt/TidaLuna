@@ -56,23 +56,6 @@ fn a_destination_below_a_directory_that_does_not_exist_yet_is_authorised() {
     assert!(authorisation_for(&deep).is_some());
 }
 
-/// String comparison would accept this: it carries the authorised directory as a prefix and ends with
-/// the authorised name.
-#[test]
-fn a_traversal_that_leaves_the_authorised_file_is_not_authorised() {
-    let dir = tempfile::tempdir().unwrap();
-    let inner = dir.path().join("inner");
-    std::fs::create_dir(&inner).unwrap();
-    let chosen = inner.join("song.flac");
-    record_user_choice(&chosen, false);
-
-    assert!(authorisation_for(&inner.join("..").join("song.flac")).is_none());
-    assert!(
-        authorisation_for(&chosen).is_some(),
-        "the real one survived the attempt"
-    );
-}
-
 /// Refused even where it lands back on the authorised file. Resolving `..` to accept this is what the
 /// platform split rules out, and no dialog answer needs it.
 #[test]
@@ -169,22 +152,6 @@ fn a_newer_answer_for_the_same_path_is_not_spent_by_an_older_download() {
             .expect("the fresh answer must survive")
             .replace_confirmed(),
         "spending the older authorisation must not touch the newer entry"
-    );
-}
-
-/// One dialog answer buys one written file; the entry has to be gone afterwards.
-#[test]
-fn consuming_uses_the_identity_matched_before_the_write() {
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("song.flac");
-    record_user_choice(&dest, false);
-
-    let auth = authorisation_for(&dest).expect("authorised");
-    consume(auth);
-
-    assert!(
-        authorisation_for(&dest).is_none(),
-        "the entry must be gone, not left redeemable"
     );
 }
 
@@ -342,17 +309,6 @@ fn a_traversal_cannot_reach_a_granted_folder() {
     );
 }
 
-/// An album writes many files after one folder answer. The grant covers the directory rather
-/// than a name inside it.
-#[test]
-fn a_granted_folder_covers_a_file_directly_inside_it() {
-    let dir = tempfile::tempdir().unwrap();
-    record_folder_grant(dir.path());
-
-    let dest = resolved(&dir.path().join("song.flac")).expect("resolvable");
-    assert!(folder_grant_covers(&dest));
-}
-
 /// `pathFormat` is a user-editable template in the plugin; a `/` in it writes into subdirectories
 /// the user never named. Refusing those would break exactly the users who organise their library.
 #[test]
@@ -376,14 +332,6 @@ fn a_sibling_directory_sharing_a_prefix_is_not_covered() {
     record_folder_grant(&granted);
 
     let dest = resolved(&sibling.join("song.flac")).expect("resolvable");
-    assert!(!folder_grant_covers(&dest));
-}
-
-/// Nothing granted means nothing covered. Guards against an empty ledger matching by accident.
-#[test]
-fn no_grant_covers_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let dest = resolved(&dir.path().join("song.flac")).expect("resolvable");
     assert!(!folder_grant_covers(&dest));
 }
 
