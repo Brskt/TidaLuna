@@ -100,6 +100,8 @@ stdenv.mkDerivation {
     xorg.libXext
     xorg.libXrender
     xorg.libxcb
+    # libstdc++.so.6, for the --add-needed in installPhase.
+    (lib.getLib stdenv.cc.cc)
   ];
 
   # Chromium dlopen()s these; they aren't NEEDED entries: add them to the runpath.
@@ -118,6 +120,10 @@ stdenv.mkDerivation {
 
     mkdir -p "$out/libexec/tidalunar"
     cp -r . "$out/libexec/tidalunar/"
+    # Cisco's OpenH264, downloaded and dlopen()ed at run time, NEEDs libstdc++,
+    # which DT_RUNPATH does not serve to a dlopen()ed library; an already-loaded
+    # soname does. Before fixup, for autoPatchelf to add its RUNPATH entry.
+    patchelf --add-needed libstdc++.so.6 "$out/libexec/tidalunar/tidalunar"
 
     mkdir -p "$out/bin"
     # Chromium dlopen()s libGL.so.1 from libcef.so, and DT_RUNPATH doesn't apply
