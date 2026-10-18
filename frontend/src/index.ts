@@ -57,12 +57,13 @@ window.nativeInterface = {
 };
 window.NativePlayerComponent = createNativePlayerComponent();
 
-// Wire up TIDAL Connect event listeners once the store is available
+// Binds the TIDAL Connect relays at bundle load. Nothing here waits for the store (the lib's lazy
+// proxy); the state snapshot inside does, and reports its own failure.
 try {
     const { store } = require("../plugins/lib/src/redux/store");
     setupConnectEventListeners(store);
 } catch {
-    // Store not yet available - listeners will be set up when Redux initializes
+    // Only a store module that fails to load lands here, and nothing binds the relays afterwards.
 }
 
 // Live perf overlay (debug tool) - active only when Rust set the flag (env TIDALUNAR_PERF).

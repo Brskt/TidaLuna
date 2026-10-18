@@ -5,6 +5,8 @@
 // call out to the TIDAL API and mutate the DOM lives in `middleware.ts`.
 
 import { invokeIpc, onIpcEvent } from "../ipc";
+import { isStoreNotPublished } from "../../plugins/lib/src/redux/storeNotPublished";
+import { storePublished } from "../store-published";
 import { isOutputLevelReport, mirrorRustLevel } from "../volume";
 import { handleReceiverMediaChanged } from "./middleware";
 import type {
@@ -27,7 +29,7 @@ type Store = {
     getState: () => any;
 };
 
-export async function setupConnectEventListeners(store: Store) {
+export async function setupConnectEventListeners(store: Store, published: () => Promise<void> = storePublished) {
     onIpcEvent("connect.devices_received", (payload: DevicesReceivedPayload) => {
         store.dispatch({
             type: "remotePlayback/DEVICES_RECEIVED",
@@ -101,7 +103,7 @@ export async function setupConnectEventListeners(store: Store) {
     onIpcEvent("connect.receiver.media_changed", (data: ReceiverMediaChangedPayload) => {
         // Enrichment + DOM mutation lives in the middleware: the listener
         // stays a pure relay.
-        void handleReceiverMediaChanged(store, data);
+        void handleReceiverMediaChanged(store, data, published);
     });
 
     // Rust applies a controller's volume and mute itself: the receiver plays with or without a
@@ -113,33 +115,56 @@ export async function setupConnectEventListeners(store: Store) {
         });
     }
 
+    // Run from the bundle-load script, ahead of the page that mounts TIDAL's store. The read waits for
+    // the store; one taken earlier predates the pushes that reached no store meanwhile, and a snapshot
+    // with nothing in it raises no error to say so.
     try {
-        const state = (await invokeIpc("connect.get_state")) as ConnectStateSnapshot;
-        if (state?.devices?.length) {
-            store.dispatch({
-                type: "remotePlayback/DEVICES_RECEIVED",
-                payload: { deviceType: "tidalConnect", devices: state.devices },
-            });
+        try {
+            store.getState();
+        } catch (e) {
+            if (!isStoreNotPublished(e)) throw e;
+            await published();
         }
-        if (state?.session) {
-            store.dispatch({
-                type: "remotePlayback/DEVICE_CONNECTED",
-                payload: { device: state.session.device, session: state.session },
-            });
-        }
-        if (state?.media) {
-            store.dispatch({
-                type: "remotePlayback/tidalConnect/MEDIA_CHANGED",
-                payload: state.media,
-            });
-        }
-        if (state?.playerStatus) {
-            store.dispatch({
-                type: "remotePlayback/tidalConnect/UPDATE_PLAYER_STATE",
-                payload: state.playerStatus,
-            });
-        }
-    } catch {
-        // Connect not yet initialized - push events will take over.
+        const state = await readStateSnapshot();
+        if (state) applyStateSnapshot(store, state);
+    } catch (e) {
+        console.error("[connect] state snapshot not applied:", e);
+    }
+}
+
+async function readStateSnapshot(): Promise<ConnectStateSnapshot | undefined> {
+    try {
+        return (await invokeIpc("connect.get_state")) as ConnectStateSnapshot;
+    } catch (e) {
+        // Rust did not answer: the push events take over.
+        console.warn("[connect] state snapshot unavailable:", e);
+        return undefined;
+    }
+}
+
+function applyStateSnapshot(store: Store, state: ConnectStateSnapshot): void {
+    if (state.devices?.length) {
+        store.dispatch({
+            type: "remotePlayback/DEVICES_RECEIVED",
+            payload: { deviceType: "tidalConnect", devices: state.devices },
+        });
+    }
+    if (state.session) {
+        store.dispatch({
+            type: "remotePlayback/DEVICE_CONNECTED",
+            payload: { device: state.session.device, session: state.session },
+        });
+    }
+    if (state.media) {
+        store.dispatch({
+            type: "remotePlayback/tidalConnect/MEDIA_CHANGED",
+            payload: state.media,
+        });
+    }
+    if (state.playerStatus) {
+        store.dispatch({
+            type: "remotePlayback/tidalConnect/UPDATE_PLAYER_STATE",
+            payload: state.playerStatus,
+        });
     }
 }
