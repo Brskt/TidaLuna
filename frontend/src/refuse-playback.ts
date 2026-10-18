@@ -1,7 +1,15 @@
+import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { proxyFail } from "./audio-proxy";
+import { showErrorBanner } from "./banner";
 
 /**
  * Refuse the track that is loading or playing, and tell the listener why.
+ *
+ * Every step runs even when an earlier one fails. A store that is not published yet is the one
+ * failure that is no failure: the refusal is then the element's alone, and the steps that needed
+ * the store are dropped, not queued (a STOP landing after the store appears would stop whatever
+ * the listener has started since). Anything else that goes wrong is raised after the last step,
+ * for the caller's batch to report.
  *
  * The five steps are one unit and the order is load-bearing, found after five
  * attempts that each looked like a fix. TIDAL arms a one second
@@ -16,36 +24,37 @@ import { proxyFail } from "./audio-proxy";
  * `player/ERROR`, which is what wins the race.
  */
 export function refusePlayback(errorCode: string, error: string, message: string): void {
-    let store: { dispatch: (action: unknown) => void };
-    try {
-        ({ store } = require("../plugins/lib/src/redux/store"));
-    } catch (_) {
-        // No store yet means nothing is playing to refuse, and the banner has nowhere
-        // to land. `proxyFail` below is what actually stops the element re-arming.
-        proxyFail();
-        return;
-    }
+    const failures: unknown[] = [];
+    let storeMissing = false;
+    const attempt = (step: () => void) => {
+        try {
+            step();
+        } catch (e) {
+            if (isStoreNotPublished(e)) storeMissing = true;
+            else failures.push(e);
+        }
+    };
+    // The store is a lazy proxy that throws on first use until it is published: the `require`
+    // itself never fails and each use is what throws.
+    const store = () => require("../plugins/lib/src/redux/store").store;
 
     // The element stops announcing itself ready, or the spinner starts over.
     proxyFail();
     // `mediaerror` is the sanctioned channel: the SDK listens on this component and
     // reads `e.target.errorCode`.
-    (window as { NativePlayerComponent?: { trigger?: (name: string, payload: unknown) => void } })
-        .NativePlayerComponent?.trigger?.("mediaerror", { error, errorCode });
+    attempt(() =>
+        (window as { NativePlayerComponent?: { trigger?: (name: string, payload: unknown) => void } })
+            .NativePlayerComponent?.trigger?.("mediaerror", { error, errorCode }),
+    );
     // TIDAL's own pairing for a failure on the current track. STOP is grouped with
     // PAUSE in the reducer, never with SKIP_NEXT.
-    store.dispatch({ type: "playbackControls/STOP" });
+    attempt(() => store().dispatch({ type: "playbackControls/STOP" }));
     // Clears a STALLED already posted, without rewriting the intent the way
     // PLAYING and STALLED both do.
-    store.dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: "IDLE" });
-    // The red banner at the bottom of the screen.
-    store.dispatch({
-        type: "message/MESSAGE_ERROR",
-        payload: {
-            id: Date.now(),
-            category: "PLAYBACK",
-            severity: "ERROR",
-            message,
-        },
-    });
+    attempt(() => store().dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: "IDLE" }));
+    attempt(() => showErrorBanner(store(), "PLAYBACK", message));
+
+    if (storeMissing) console.warn("[refusePlayback] store not published: STOP, IDLE and banner dropped");
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "[refusePlayback] several steps failed");
 }

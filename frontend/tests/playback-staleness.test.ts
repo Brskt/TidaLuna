@@ -118,6 +118,26 @@ test("a video is never asked for playback info", async () => {
 	expect(pbiCalls).toEqual([]);
 });
 
+test("a refusal that raises is reported and does not cost the track its context write", async () => {
+	const reported: unknown[][] = [];
+	const original = console.error;
+	console.error = (...args: unknown[]) => void reported.push(args);
+	try {
+		const controller = createPlaybackController();
+		controller.setCurrentMediaItem({ productId: "raises", type: "track" });
+		await flush();
+		dispatched = { push: () => { throw new Error("reducer failed"); } } as unknown as Dispatch[];
+
+		rejectPbi?.(Object.assign(new Error("undecodable"), { code: 415 }));
+		await flush();
+
+		expect(reported.some((args) => args[0] === "[luna:playback] refusal failed:")).toBe(true);
+		expect((window as any).__LUNAR_CURRENT_PRODUCT_ID__).toBe("raises");
+	} finally {
+		console.error = original;
+	}
+});
+
 test("a video says it is one in the context it publishes", async () => {
 	// A null here made every consumer treat the video as a track, `fetchBestQuality` included.
 	const controller = createPlaybackController();

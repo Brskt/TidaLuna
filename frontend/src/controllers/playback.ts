@@ -16,6 +16,16 @@ const VIDEO_QUALITY_UNRESOLVED = "UNKNOWN";
 export const createPlaybackController = () => {
     let delegate: any = null;
     let lastTransitionId = "";
+    // A refusal raises what its steps raised, after running them all. In the catch below that
+    // would reach the catch of the whole notification and skip its context write: reported here.
+    // It refuses the product last announced, which is the one every caller is loading.
+    const refuse = (code: string, error: string, message: string) => {
+        try {
+            refusePlayback(code, error, message);
+        } catch (e) {
+            console.error("[luna:playback] refusal failed:", e);
+        }
+    };
     return {
         registerDelegate: (d: any) => {
             delegate = d;
@@ -139,7 +149,7 @@ export const createPlaybackController = () => {
                                     // Deliberately no `player.pause`. Answering "paused" to a
                                     // TIDAL that just asked to play reads as a failed start,
                                     // and it advances the queue; measured on two tracks.
-                                    refusePlayback(
+                                    refuse(
                                         "tidalunar_undecodable_profile",
                                         "stream codec not supported by this build",
                                         "TidaLunar cannot play music below 320 kbps for the moment. Please change the quality in TIDAL's settings.",
