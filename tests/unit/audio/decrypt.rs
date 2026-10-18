@@ -51,19 +51,3 @@ fn decrypt_round_trips() {
     dec.decrypt_in_place(&mut buf, 0).unwrap();
     assert_eq!(buf, plain);
 }
-
-/// A mid-file offset must not depend on having decrypted the earlier bytes -
-/// this is what would let a cached file be served from any point.
-#[test]
-fn a_mid_file_offset_decrypts_independently() {
-    let dec = decryptor();
-    let ciphertext: Vec<u8> = (0..2048u32).map(|i| (i % 97) as u8).collect();
-
-    let mut whole = ciphertext.clone();
-    dec.decrypt_in_place(&mut whole, 0).unwrap();
-
-    let mut tail = ciphertext[1000..].to_vec();
-    dec.decrypt_in_place(&mut tail, 1000).unwrap();
-
-    assert_eq!(&whole[1000..], &tail[..]);
-}

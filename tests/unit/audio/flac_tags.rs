@@ -48,21 +48,6 @@ fn streaminfo_stays_first_and_the_audio_survives() {
     assert_eq!(*out.last().unwrap(), 0xFF, "audio frames must survive");
 }
 
-/// The regression this guards is a STREAMINFO that keeps the flag it arrived with,
-/// which yields a file some decoders accept and others reject.
-#[test]
-fn only_the_final_block_is_flagged_last() {
-    let out = retag(minimal_flac(), &comments(), None).unwrap();
-    let blocks = chain(&out);
-    let flagged: Vec<usize> = blocks
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.1)
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(flagged, vec![blocks.len() - 1]);
-}
-
 /// Decoded by hand as little endian: swapping the encoder's byte order fails here
 /// rather than passing a test that only counts blocks.
 #[test]

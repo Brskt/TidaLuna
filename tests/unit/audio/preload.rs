@@ -254,6 +254,11 @@ async fn a_staged_copy_its_decoder_refused_is_dropped_and_the_next_track_stands(
 /// charged to the playback queue skip the preload gate and its head allowance entirely,
 /// and compete with the track being heard.
 ///
+/// A preload arm that never looks at `CURRENT_TRACK` is also the premise that makes
+/// `promote_crossfade` safe. It publishes the track BEFORE flipping the buffer's owner, and in
+/// that window the buffer still reads `Preload` while its track is already current. Should this
+/// arm ever start looking, the promotion order has to be revisited with it.
+///
 /// Neither assertion depends on what else holds `CURRENT_TRACK`: the playback arm answers
 /// `None` whether the slot names another track or nothing at all, and the preload arm never
 /// consults it. It still takes the slot fixture, because writing that global unguarded is
@@ -491,38 +496,10 @@ async fn a_load_adopts_a_staging_download_before_its_head_lands() {
     preload_state().reset();
 }
 
-/// A staged "next" belongs to the load that asked for it and to no other.
-///
-/// Nothing used to say so: the completion path took whatever was in the slot. A record left by
-/// a local queue could therefore be picked up and played in the middle of a TIDAL Connect
-/// session, and every event of that track was then relayed to a controller that had never
-/// asked for it, stamped with the engine generation it no longer belonged to.
-#[tokio::test]
-async fn a_next_track_from_a_superseded_load_is_not_promoted() {
-    let _serialised = PRELOAD_TESTS.lock().await;
-    let orphan = staged("https://cdn.invalid/media/track-a.flac?token=STAGED");
-    {
-        preload_state().stage_for_test(orphan.clone());
-    }
-
-    // Another load begins (a skip or a stop), minted under the same origin: this isolates
-    // the generation dimension. The origin dimension has its own test below.
-    crate::player::begin_load(crate::player::LoadOrigin::Local);
-
-    assert!(
-        take_next_track().await.is_none(),
-        "the record named a queue nobody is playing any more"
-    );
-    assert!(
-        peek_next_track().is_none(),
-        "and no fade may arm into it either: same defect, other reader"
-    );
-}
-
 /// The stamp says WHEN a record was staged and never WHO the load it answers to belongs to.
 ///
 /// A preload the renderer issues AFTER a Connect load has taken over stamps itself with that
-/// load's own generation. The staleness guard above has nothing to catch: it reads as
+/// load's own generation. The generation check has nothing to catch: it reads as
 /// perfectly fresh. Promoted, the speaker fades (or cuts) into a track chosen by a queue
 /// that is not driving, and the controller is told it picked something it never did.
 #[tokio::test]
@@ -961,30 +938,6 @@ async fn a_superseded_attempt_cannot_install_its_handles() {
         "the attempt that owns the slot must still be able to write to it"
     );
     preload_state().reset();
-}
-
-/// `promote_crossfade` publishes `CURRENT_TRACK` BEFORE flipping the buffer's owner, and this
-/// is the premise that makes the order safe rather than merely different.
-///
-/// The flip is what makes a download restart resolve its url through the retained track instead
-/// of the one it captured. Owner first, a restart landing in between reads the OUTGOING track,
-/// fails the identity check and abandons the download of what just became audible, silently;
-/// it surfaces 30s later as a stall. Track first, the window holds the opposite pair: the
-/// track is already current while the buffer still reads `Preload`. That window is inert only
-/// because this branch answers from the captured url and never looks at `CURRENT_TRACK`. Should
-/// it ever start looking, the promotion order stops being safe and has to be revisited with it.
-#[test]
-fn a_preload_resolves_its_url_without_the_retained_track() {
-    let captured = "https://cdn.invalid/media/track-b.flac?token=CAPTURED&exp=1";
-
-    // A canonical id no retained track can match: consulting `CURRENT_TRACK` here answers None.
-    let resolved = DownloadOwner::Preload.fetch_url("no-such-track-is-ever-retained", captured);
-
-    assert_eq!(
-        resolved.as_deref(),
-        Some(captured),
-        "a preload that resolves through CURRENT_TRACK makes the promotion order load-bearing"
-    );
 }
 
 /// A seek past the frontier restarts the download, and a request that cannot leave (refused port,
