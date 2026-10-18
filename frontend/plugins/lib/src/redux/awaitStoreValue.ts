@@ -40,9 +40,9 @@ export const awaitStoreValue = <T>(
 	const { resolve, promise } = Promise.withResolvers<T | undefined>();
 	const _unloads = new Set<LunaUnload>();
 
-	// The deadline and the subscription race, and the loser still fires. Guarded here rather
-	// than left to `unloadSet`, which clears the set only after awaiting every unload, a
-	// window the two can both pass through.
+	// One write can reach the listener twice: Redux notifies a snapshot of its listeners, and an
+	// unsubscribe during a dispatch leaves ours in it. Guarded here rather than left to
+	// `unloadSet`, which clears the set only after awaiting every unload and would tear down twice.
 	let settled = false;
 	const settle = (value: T | undefined) => {
 		if (settled) return;

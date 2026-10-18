@@ -9,8 +9,7 @@
 // sees what a saga writes, which is why the wait now reads the state instead.
 //
 // The property each test pins is what a mutation would break: delete the subscription and the
-// first test hangs to its deadline; delete the pre-read and the second does; drop the settled
-// guard and the fourth reports the wrong answer.
+// first test hangs to its deadline; delete the pre-read and the second does.
 
 import { beforeEach, expect, mock, test } from "bun:test";
 
@@ -18,6 +17,7 @@ type Listener = () => void;
 
 let state: { content: { mediaItems: Record<string, unknown> } };
 let listeners: Listener[];
+let unsubscribes: number;
 
 const storeStub = () => ({
 	store: {
@@ -25,6 +25,7 @@ const storeStub = () => ({
 		subscribe: (listener: Listener) => {
 			listeners.push(listener);
 			return () => {
+				unsubscribes++;
 				const at = listeners.indexOf(listener);
 				if (at !== -1) listeners.splice(at, 1);
 			};
@@ -32,12 +33,12 @@ const storeStub = () => ({
 	},
 });
 mock.module("../plugins/lib/src/redux/store", storeStub);
-// The real one awaits every unload and traces failures through the core; here only its
-// contract matters: run each unload once, then empty the set.
+// The real one traces failures through the core; here only its contract matters: call every
+// unload synchronously, then empty the set once they have all been awaited.
 mock.module("@luna/core", () => ({
 	unloadSet: async (unloads?: Set<() => void>) => {
 		if (unloads === undefined) return;
-		for (const unload of unloads) unload();
+		await Promise.all([...unloads].map(async (unload) => unload()));
 		unloads.clear();
 	},
 }));
@@ -64,6 +65,7 @@ const write = (id: string, value: unknown) => {
 beforeEach(() => {
 	state = { content: { mediaItems: {} } };
 	listeners = [];
+	unsubscribes = 0;
 	mock.module("../plugins/lib/src/redux/store", storeStub);
 });
 
@@ -93,15 +95,6 @@ test("a deadline with nothing written answers undefined rather than throwing", a
 	// reaches this on every call: an ordinary outcome, not an error.
 	expect(await awaitStoreValue((s: any) => s.content.mediaItems["3"], null, 20)).toBeUndefined();
 	expect(listeners).toHaveLength(0);
-});
-
-test("a write landing after the deadline does not overwrite the answer", async () => {
-	const waiting = awaitStoreValue((s: any) => s.content.mediaItems["4"], null, 20);
-	expect(await waiting).toBeUndefined();
-
-	// The subscription is gone. This cannot settle the promise a second time.
-	write("4", { type: "track", item: { id: 4 } });
-	expect(await waiting).toBeUndefined();
 });
 
 // The set a caller hands in is the plugin's own and lives as long as the plugin does. The wait
@@ -139,4 +132,23 @@ test("two waits do not block each other, whatever order they land in", async () 
 
 	write("5", { type: "track", item: { id: 5 } });
 	expect(await first).toEqual({ type: "track", item: { id: 5 } });
+});
+
+// Redux notifies a snapshot of its listeners, and an unsubscribe during a dispatch leaves a
+// listener already in it. A subscriber ahead of ours that dispatches from inside its listener
+// reaches ours twice for one write, in the nested dispatch and then in the outer one. Only the
+// first may tear down; the set still holds the unloads until they have all been awaited.
+test("a notification delivered twice for one write tears the wait down once", async () => {
+	let nested = false;
+	listeners.push(() => {
+		if (nested) return;
+		nested = true;
+		for (const listener of [...listeners]) listener();
+	});
+	const waiting = awaitStoreValue((s: any) => s.content.mediaItems["9"], null, 50);
+
+	write("9", { type: "track", item: { id: 9 } });
+
+	expect(await waiting).toEqual({ type: "track", item: { id: 9 } });
+	expect(unsubscribes).toBe(1);
 });
