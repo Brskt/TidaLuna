@@ -5,6 +5,7 @@
 
 import { afterEach, expect, test } from "bun:test";
 
+import { refusingTransport } from "./helpers/refusing-transport";
 import {
 	attachCoverCanvas,
 	decodeCoverBuffer,
@@ -249,13 +250,7 @@ test("a cover decoded after its frame was given back leaves TIDAL's artwork alon
 // not take it away.
 test("a retry for the same cover keeps the still the frame is entitled to", async () => {
 	stubWebgl();
-	(globalThis as any).fetch = () =>
-		Promise.resolve({
-			ok: false,
-			status: 503,
-			headers: { get: () => "the codec is still installing" },
-			arrayBuffer: () => Promise.reject(new Error("a refused body has none")),
-		});
+	refusingTransport();
 	const { surface, video } = mountFrame();
 	setCurrentTrack({
 		id: "retry",
@@ -280,13 +275,7 @@ test("a retry for the same cover keeps the still the frame is entitled to", asyn
 // track's gets nothing even while that track's still is sitting in the module.
 test("a frame that is not the playing track's never inherits its still", async () => {
 	stubWebgl();
-	(globalThis as any).fetch = () =>
-		Promise.resolve({
-			ok: false,
-			status: 503,
-			headers: { get: () => "the codec is still installing" },
-			arrayBuffer: () => Promise.reject(new Error("a refused body has none")),
-		});
+	refusingTransport();
 	const player = mountFrame();
 	const header = mountFrame();
 	setCurrentTrack({
