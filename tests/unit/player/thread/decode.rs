@@ -18,6 +18,7 @@ use super::{
     SeekOutcome, push_samples, push_until_settled, spawn_decode_thread,
 };
 use crate::player::buffer::RamBuffer;
+use crate::player::thread::wav_fixture::wav_s16_mono;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
@@ -327,28 +328,6 @@ fn a_stop_ends_the_run() {
 
 /// Long enough that a stuck decode thread fails the test instead of hanging the suite.
 const DEADLINE: Duration = Duration::from_secs(5);
-
-fn wav_s16_mono(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
-    let data_len = samples.len() as u32 * 2;
-    let mut wav = Vec::with_capacity(44 + data_len as usize);
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    for sample in samples {
-        wav.extend_from_slice(&sample.to_le_bytes());
-    }
-    wav
-}
 
 /// Ascending values rather than a constant tone: a gap, a repeat or a reordering in the ring is
 /// visible in the drained sequence, which a tone would hide.
