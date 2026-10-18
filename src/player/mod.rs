@@ -5,6 +5,7 @@ pub(crate) mod crossfade;
 pub(crate) mod dash;
 mod declick;
 pub(crate) mod ipc;
+mod length;
 // Compiled where it serves and where it is tested: only the two Windows engines consult it,
 // but the classification is pure and its tests earn their place on every host.
 #[cfg(any(target_os = "windows", test))]

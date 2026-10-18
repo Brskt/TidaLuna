@@ -246,10 +246,7 @@ pub(super) fn probe_audio_format(
             .as_ref()
             .map(|c| c.count() as u16)
             .unwrap_or(2),
-        duration: track
-            .num_frames
-            .map(|n| n as f64 / sample_rate as f64)
-            .unwrap_or(0.0),
+        duration: crate::player::length::track_secs(track, sample_rate, buffer),
         bit_depth: params.bits_per_sample,
         codec: codec_name(params.codec),
     })
@@ -887,3 +884,7 @@ fn remap_channels(data: &[f32], src_ch: usize, out_ch: usize, output: &mut Vec<f
 #[cfg(test)]
 #[path = "../../../tests/unit/player/thread/output.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/thread/probe_tests.rs"]
+mod probe_tests;
