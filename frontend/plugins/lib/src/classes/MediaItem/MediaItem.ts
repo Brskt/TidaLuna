@@ -1,4 +1,4 @@
-import { asyncDebounce, memoize, memoizeArgless, registerEmitter, type AddReceiver, type Emit } from "@inrixia/helpers";
+import { asyncDebounce, memoize, memoizeArgless, registerEmitter, type AddReceiver, type Emit, type Memoized } from "@inrixia/helpers";
 import type { IRecording, ITrack } from "musicbrainz-api";
 
 import { ftch, ReactiveStore, type LunaUnload, type LunaUnloads, type Tracer } from "@luna/core";
@@ -426,7 +426,7 @@ export class MediaItem extends ContentBase {
 		const nonSpatialTags = allTags.filter((q) => q !== Quality.Atmos && q !== Quality.Sony630);
 		// Spatial-only tracks need playbackInfo lookup to get real quality
 		if (hasSpatial && nonSpatialTags.length === 0 && !this.cache.actualAudioQuality) {
-			await this.playbackInfo();
+			await this.formatInfo();
 		}
 		return this.bestQuality;
 	});
@@ -455,7 +455,13 @@ export class MediaItem extends ContentBase {
 	// #endregion
 
 	// #region PlaybackInfo
-	public playbackInfo: (audioQuality?: redux.AudioQuality) => Promise<PlaybackInfo | undefined> = memoize(
+	/**
+	 * What the format questions are asked of (`updateFormat`, `fileExtension`, `fetchBestQuality`),
+	 * once per quality. Its stream urls expire; anything needing one calls `playbackInfo`, which asks
+	 * again. The one exception is `getStreamBytes`, whose request failing is
+	 * dropped and leaves the size to the player bridge.
+	 */
+	private formatInfo: Memoized<(audioQuality?: redux.AudioQuality) => Promise<PlaybackInfo | undefined>> = memoize(
 		async (audioQuality?: redux.AudioQuality) => {
 			audioQuality ??= Quality.Max.audioQuality;
 			const playbackInfo = await getPlaybackInfo(this.servedId, audioQuality);
@@ -472,6 +478,11 @@ export class MediaItem extends ContentBase {
 			return playbackInfo;
 		},
 	);
+	/** Never an answer kept from an earlier call (stream urls expire); concurrent calls share one request. */
+	public playbackInfo(audioQuality?: redux.AudioQuality): Promise<PlaybackInfo | undefined> {
+		this.formatInfo.clear(audioQuality);
+		return this.formatInfo(audioQuality);
+	}
 	// #endregion
 
 	// #region Download
@@ -490,7 +501,7 @@ export class MediaItem extends ContentBase {
 		},
 	);
 	public async fileExtension(audioQuality?: redux.AudioQuality): Promise<string> {
-		const playbackInfo = await this.playbackInfo(audioQuality);
+		const playbackInfo = await this.formatInfo(audioQuality);
 		if (!playbackInfo) throw new Error(`Track ${this.id} is not available`);
 		switch (playbackInfo.manifestMimeType) {
 			case "application/dash+xml":
@@ -567,8 +578,8 @@ export class MediaItem extends ContentBase {
 				if (!isCurrentTrack && format.codec !== undefined) return format;
 			}
 
-			const playbackInfo = await this.playbackInfo(audioQuality);
-			// Re-read format from cache: playbackInfo() replaces the cache entry with a new object,
+			const playbackInfo = await this.formatInfo(audioQuality);
+			// Re-read format from cache: formatInfo() replaces the cache entry with a new object,
 			// and the local `format` reference captured above would be stale.
 			format = this.cache.format[audioQuality] ??= {};
 			if (!playbackInfo) {

@@ -3,6 +3,7 @@ import { type Tracer } from "@luna/core";
 import { memoize, memoizeArgless, Semaphore, sleep, statusOK, type Memoized, type VoidLike } from "@inrixia/helpers";
 
 import { RateGate } from "../../helpers/RateGate";
+import { SingleFlight } from "../../helpers/SingleFlight";
 
 import type { TApiTrack, TApiTracks } from "./types/Tracks";
 
@@ -40,7 +41,9 @@ export class TidalApi {
 	 */
 	public static readonly rateGate = new RateGate(12);
 
-	public static fetch = memoize(async <T>(url: string): Promise<T | undefined> => {
+	// One request, whatever was asked before. `fetch` memoizes it for answers that stay true; an
+	// answer that expires does not go through that memo.
+	private static async request<T>(url: string): Promise<T | undefined> {
 		// Routes through Rust via tidal.fetch IPC - the OAuth token is injected
 		// server-side and never exposed to JavaScript.
 		const cid = this.clientId();
@@ -56,7 +59,9 @@ export class TidalApi {
 			retry = false;
 			await sleep(1000);
 		}
-	});
+	}
+
+	public static fetch = memoize(<T>(url: string): Promise<T | undefined> => this.request<T>(url));
 
 	public static async track(trackId: redux.ItemId) {
 		return this.fetch<redux.Track>(`https://desktop.tidal.com/v1/tracks/${trackId}?${this.queryArgs()}`);
@@ -64,12 +69,15 @@ export class TidalApi {
 
 	// Lock to two concurrent requests
 	private static readonly playbackInfoSemaphore = new Semaphore(2);
+	// The answer carries signed stream urls that stop working; none is kept once handed out.
+	// Callers asking while one is on its way share it, and a later call asks again, as TIDAL's own
+	// player does with one request per load.
+	private static readonly playbackInfoFlight = new SingleFlight<PlaybackInfoResponse | undefined>();
 	public static async playbackInfo(trackId: redux.ItemId, audioQuality: redux.AudioQuality) {
 		if (this.unavailableTracks.has(trackId)) return undefined;
-		const result = await this.playbackInfoSemaphore.with(() =>
-			this.fetch<PlaybackInfoResponse>(
-				`https://desktop.tidal.com/v1/tracks/${trackId}/playbackinfo?audioquality=${audioQuality}&playbackmode=STREAM&assetpresentation=FULL`,
-			),
+		const url = `https://desktop.tidal.com/v1/tracks/${trackId}/playbackinfo?audioquality=${audioQuality}&playbackmode=STREAM&assetpresentation=FULL`;
+		const result = await this.playbackInfoFlight.run(url, () =>
+			this.playbackInfoSemaphore.with(() => this.request<PlaybackInfoResponse>(url)),
 		);
 		if (result === undefined) this.unavailableTracks.add(trackId);
 		return result;
