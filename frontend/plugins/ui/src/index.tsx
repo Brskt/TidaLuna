@@ -16,6 +16,7 @@ import { storeUrls } from "./SettingsPage/PluginStoreTab";
 import { fetchReleases } from "./SettingsPage/SettingsTab/LunaClientUpdate";
 import { UpdateToast } from "./components/UpdateToast";
 import { wireUpdater } from "./updater/store";
+import { wireVideoCodec } from "./videoCodec/store";
 
 import { setupDeviceDialogToggles } from "./DeviceDialogToggles";
 
@@ -75,6 +76,8 @@ ipcRenderer.onOpenUrl(unloads, (reqUrl) => {
 // One attachment to the backend's updater events for every surface that shows them: the
 // toast here and the settings tab, which mount and unmount independently.
 wireUpdater(unloads);
+// Wired here too: the settings tab finds the codec's state already known.
+wireVideoCodec(unloads);
 
 // Mount update toast (always visible, driven by the shared updater state)
 const toastRoot = document.createElement("div");

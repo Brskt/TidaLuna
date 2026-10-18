@@ -393,7 +393,6 @@ wrap_browser_process_handler! {
 
             let crossfade_enabled = crate::state::boot_settings().crossfade_enabled;
             let crossfade_secs = crate::state::boot_settings().crossfade_secs;
-            let video_codec = crate::state::boot_settings().video_codec_enabled;
 
             // Join the boot-token reconcile: the restored session must be in
             // AppState before the page can consume it. An unusable blob arms a
@@ -410,7 +409,6 @@ window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
 window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
 window.__TIDALUNAR_ASIO__ = {asio};
 window.__TIDALUNAR_CONSOLE__ = {console};
-window.__TIDALUNAR_VIDEO_CODEC__ = {video_codec};
 window.__TIDALUNAR_CROSSFADE_ENABLED__ = {crossfade_enabled};
 window.__TIDALUNAR_CROSSFADE_SECS__ = {crossfade_secs};
 window.__TIDALUNAR_PERF__ = {perf};
