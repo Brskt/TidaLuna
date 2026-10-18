@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // A bare print reaches neither the LOGS gate nor <data_dir>/console.log: vprintln!
 // for what the level may silence, verr! for a failure with no other channel.
-// Crate-local: the updater has a real console and keeps its prints.
+// Crate-local: the updater has a real console and prints through its own say!.
 #![deny(clippy::print_stderr, clippy::print_stdout)]
 mod app_state;
 mod audio;

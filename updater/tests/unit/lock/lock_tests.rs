@@ -223,6 +223,10 @@ fn take_legacy_as_earlier_build(name: &[u16]) -> (HANDLE, u32) {
     }
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "the parent reads PEER_READY from the peer's stdout, with --nocapture"
+)]
 fn play_peer(role: &str, legacy: &[u16]) {
     match role {
         LEGACY_HOLDER => {

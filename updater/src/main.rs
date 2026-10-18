@@ -1,3 +1,5 @@
+// Every line goes through say!, which a dead stderr cannot turn into a panic.
+#![deny(clippy::print_stderr, clippy::print_stdout)]
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -12,6 +14,15 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// `eprintln!` without its panic. The app spawns the updater on its own stderr, and once that
+/// pipe or terminal is gone (EPIPE, ENOSPC) `eprintln!` would panic mid-install. A line that
+/// cannot be shown is dropped, as the app's own log does.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
 
 mod cleanup;
 #[cfg(target_os = "windows")]
@@ -254,7 +265,7 @@ fn main() {
     }
 
     if let Err(e) = run() {
-        eprintln!("Update failed: {e:#}");
+        say!("Update failed: {e:#}");
         show_error(&format!("TidaLunar update failed:\n{e:#}"));
         // Always try to relaunch the app even on failure
         let app_dir = std::env::args()
@@ -281,7 +292,7 @@ fn run_cleanup_stale() -> i32 {
             "--app-dir" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
-                    eprintln!("[cleanup-stale] --app-dir requires a value");
+                    say!("[cleanup-stale] --app-dir requires a value");
                     return 2;
                 };
                 app_dir = Some(PathBuf::from(v));
@@ -289,7 +300,7 @@ fn run_cleanup_stale() -> i32 {
             "--old-manifest" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
-                    eprintln!("[cleanup-stale] --old-manifest requires a value");
+                    say!("[cleanup-stale] --old-manifest requires a value");
                     return 2;
                 };
                 old_manifest = Some(PathBuf::from(v));
@@ -297,29 +308,29 @@ fn run_cleanup_stale() -> i32 {
             "--new-manifest" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
-                    eprintln!("[cleanup-stale] --new-manifest requires a value");
+                    say!("[cleanup-stale] --new-manifest requires a value");
                     return 2;
                 };
                 new_manifest = Some(PathBuf::from(v));
             }
             other => {
-                eprintln!("[cleanup-stale] unknown argument: {other}");
+                say!("[cleanup-stale] unknown argument: {other}");
                 return 2;
             }
         }
         i += 1;
     }
     let (Some(app), Some(old), Some(new)) = (app_dir, old_manifest, new_manifest) else {
-        eprintln!("[cleanup-stale] need --app-dir, --old-manifest, --new-manifest");
+        say!("[cleanup-stale] need --app-dir, --old-manifest, --new-manifest");
         return 2;
     };
     match cleanup::cleanup_stale(&app, &old, &new) {
         Ok(n) => {
-            eprintln!("[cleanup-stale] removed {n} stale file(s)");
+            say!("[cleanup-stale] removed {n} stale file(s)");
             0
         }
         Err(e) => {
-            eprintln!("[cleanup-stale] failed: {e:#}");
+            say!("[cleanup-stale] failed: {e:#}");
             1
         }
     }
@@ -342,12 +353,12 @@ fn run() -> Result<()> {
     };
 
     // 1. Wait for the app to exit
-    eprintln!("[updater] Waiting for PID {} to exit...", args.pid);
+    say!("[updater] Waiting for PID {} to exit...", args.pid);
     wait_for_pid(args.pid)?;
-    eprintln!("[updater] PID {} exited", args.pid);
+    say!("[updater] PID {} exited", args.pid);
 
     // 2. Probe exclusive access on critical files
-    eprintln!("[updater] Checking file locks...");
+    say!("[updater] Checking file locks...");
     probe_exclusive_access(&args.app_dir)?;
 
     let staging_dir = args.app_dir.join(".update-staging");
@@ -355,7 +366,7 @@ fn run() -> Result<()> {
 
     let manifest = if args.skip_download {
         // Pre-downloaded by main process - re-verify signature and validate version
-        eprintln!("[updater] Using pre-downloaded staging...");
+        say!("[updater] Using pre-downloaded staging...");
         let sig_name = format!("{manifest_name}.sig");
 
         let manifest_bytes =
@@ -388,7 +399,7 @@ fn run() -> Result<()> {
         manifest
     } else {
         // Full download path (original behavior)
-        eprintln!("[updater] Fetching release v{}...", args.version);
+        say!("[updater] Fetching release v{}...", args.version);
         let client = reqwest::blocking::Client::builder()
             .user_agent(format!("TidaLunar-Updater/{}", env!("CARGO_PKG_VERSION")))
             .build()
@@ -396,7 +407,7 @@ fn run() -> Result<()> {
 
         let release = fetch_release(&client, &args.version)?;
 
-        eprintln!("[updater] Downloading manifest...");
+        say!("[updater] Downloading manifest...");
         let manifest = download_and_verify_manifest(&client, &release)?;
 
         if manifest.target != TARGET {
@@ -430,7 +441,7 @@ fn run() -> Result<()> {
             }
             fs::create_dir_all(&staging_dir).context("failed to create staging dir")?;
 
-            eprintln!("[updater] Downloading update package...");
+            say!("[updater] Downloading update package...");
             let delta_name = delta_archive_name(&args.version);
             let (archive_name, archive_url) = {
                 let delta = if use_delta {
@@ -440,7 +451,7 @@ fn run() -> Result<()> {
                 };
                 match delta {
                     Some(a) => {
-                        eprintln!(
+                        say!(
                             "[updater] Using delta from v{}",
                             installed_version.as_deref().unwrap_or("?")
                         );
@@ -462,7 +473,7 @@ fn run() -> Result<()> {
             let archive_path = staging_dir.join(&archive_name);
             download_file(&client, &archive_url, &archive_path)?;
 
-            eprintln!("[updater] Extracting...");
+            say!("[updater] Extracting...");
             extract_archive(&archive_path, &staging_dir)?;
             fs::remove_file(&archive_path).ok();
 
@@ -471,7 +482,7 @@ fn run() -> Result<()> {
                 // Only reachable while `use_delta` holds, and the retry clears it; the
                 // fallback fires exactly once.
                 Err(what) if use_delta => {
-                    eprintln!(
+                    say!(
                         "[updater] Local base does not match the delta's assumption ({what}); \
                          re-downloading the full archive"
                     );
@@ -497,7 +508,7 @@ fn run() -> Result<()> {
         bail!("{what}");
     }
 
-    eprintln!("[updater] Comparing files...");
+    say!("[updater] Comparing files...");
     let mut files_to_update: Vec<(String, bool)> = Vec::new(); // (path, is_new)
 
     for (rel_path, entry) in &manifest.files {
@@ -536,14 +547,14 @@ fn run() -> Result<()> {
     }
 
     if files_to_update.is_empty() {
-        eprintln!("[updater] All files already up to date");
+        say!("[updater] All files already up to date");
         cleanup(&staging_dir, &args.app_dir, &[]);
         relaunch(&args.app_dir)?;
         return Ok(());
     }
 
     let file_names: Vec<&str> = files_to_update.iter().map(|(p, _)| p.as_str()).collect();
-    eprintln!(
+    say!(
         "[updater] {} files to update: {}",
         files_to_update.len(),
         file_names.join(", ")
@@ -554,7 +565,7 @@ fn run() -> Result<()> {
         .map(|old_manifest| cleanup::diff_removed(&old_manifest, &manifest, &args.app_dir))
         .unwrap_or_default();
     if !deleted_files.is_empty() {
-        eprintln!(
+        say!(
             "[updater] {} files to remove: {}",
             deleted_files.len(),
             deleted_files.join(", ")
@@ -579,7 +590,7 @@ fn run() -> Result<()> {
     write_journal(&journal_path, &journal)?;
 
     // 9. Commit phase - rename originals to .bak, move staged to final
-    eprintln!("[updater] Applying update...");
+    say!("[updater] Applying update...");
     for jf in &journal.files {
         let original = args.app_dir.join(&jf.path);
         let backup = args.app_dir.join(&jf.backup);
@@ -612,7 +623,7 @@ fn run() -> Result<()> {
     for del_path in &journal.deleted_files {
         let to_delete = args.app_dir.join(del_path);
         if fs::remove_file(&to_delete).is_ok() {
-            eprintln!("[updater] Removed obsolete: {del_path}");
+            say!("[updater] Removed obsolete: {del_path}");
         }
     }
 
@@ -626,10 +637,10 @@ fn run() -> Result<()> {
     write_journal(&journal_path, &committed)?;
 
     // 10. Cleanup and relaunch
-    eprintln!("[updater] Cleaning up...");
+    say!("[updater] Cleaning up...");
     cleanup(&staging_dir, &args.app_dir, &committed.files);
 
-    eprintln!("[updater] Update complete, relaunching...");
+    say!("[updater] Update complete, relaunching...");
     relaunch(&args.app_dir)?;
 
     Ok(())
@@ -738,7 +749,7 @@ fn probe_exclusive_access(app_dir: &Path) -> Result<()> {
                 break;
             }
             let display = path.file_name().unwrap_or_default().to_string_lossy();
-            eprintln!("[updater] {display} is locked, retry {attempt}/3...");
+            say!("[updater] {display} is locked, retry {attempt}/3...");
             thread::sleep(Duration::from_secs(2));
         }
 
@@ -841,7 +852,7 @@ fn verify_manifest_signature(manifest_bytes: &[u8], sig_b64: &str) -> Result<()>
     verifying_key
         .verify(manifest_bytes, &signature)
         .context("manifest signature verification FAILED - update rejected")?;
-    eprintln!("[updater] Manifest signature verified");
+    say!("[updater] Manifest signature verified");
     Ok(())
 }
 
@@ -1147,7 +1158,7 @@ fn show_error(msg: &str) {
 
 #[cfg(not(target_os = "windows"))]
 fn show_error(msg: &str) {
-    eprintln!("ERROR: {msg}");
+    say!("ERROR: {msg}");
 }
 
 #[cfg(test)]
