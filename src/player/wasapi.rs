@@ -26,17 +26,20 @@ use crate::player::packet_failure::{PacketFailure, classify_packet_failure};
 use crate::player::thread::output::{find_output_device, is_default_selector};
 use crate::player::throttle::{DECODE_AHEAD_SECS, throttle_decode_ahead};
 
+/// The stream a decoder opened, as the render adopts it: its identity, format and starting point.
+pub(super) struct StreamStart {
+    pub(super) stream_id: u32,
+    pub(super) sample_rate: u32,
+    pub(super) channels: u32,
+    pub(super) bits_per_sample: u32,
+    pub(super) duration_secs: f64,
+    pub(super) start_secs: f64,
+    pub(super) start_paused: bool,
+    pub(super) consumed: Arc<AtomicU64>,
+}
+
 pub(super) enum ExclusiveCommand {
-    StartStream {
-        stream_id: u32,
-        sample_rate: u32,
-        channels: u32,
-        bits_per_sample: u32,
-        duration_secs: f64,
-        start_secs: f64,
-        start_paused: bool,
-        consumed: Arc<AtomicU64>,
-    },
+    StartStream(StreamStart),
     PushPcm {
         stream_id: u32,
         pcm_data: Vec<u8>,
@@ -94,7 +97,7 @@ impl ExclusiveCommand {
     /// command inside a single iteration; the iteration alone never says which overran.
     fn label(&self) -> &'static str {
         match self {
-            Self::StartStream { .. } => "StartStream",
+            Self::StartStream(_) => "StartStream",
             Self::PushPcm { .. } => "PushPcm",
             Self::EndStream { .. } => "EndStream",
             Self::ResetForSeek { .. } => "ResetForSeek",
@@ -326,7 +329,7 @@ pub(super) fn stream_flac_reader_to_wasapi(
     // not-yet-downloaded data blocks below. The real landing position follows via
     // ResetForSeek (which needs the stream_id this sets).
     cmd_tx
-        .send(ExclusiveCommand::StartStream {
+        .send(ExclusiveCommand::StartStream(StreamStart {
             stream_id,
             sample_rate,
             channels,
@@ -335,7 +338,7 @@ pub(super) fn stream_flac_reader_to_wasapi(
             start_secs: 0.0,
             start_paused,
             consumed: consumed.clone(),
-        })
+        }))
         .map_err(|_| "failed to send StartStream".to_string())?;
 
     // Source seek AFTER StartStream, letting a forward seek past the buffered PCM move
@@ -1258,20 +1261,19 @@ impl RenderContext {
     /// Postconditions on Ok: pcm_data cleared, cursors zeroed, stream_id set,
     /// audio resources replaced, state = Playing, Duration + Active events sent.
     /// On Err: an error event was sent and render_thread must exit.
-    #[allow(clippy::too_many_arguments)]
     fn handle_start_stream(
         &mut self,
         device: &wasapi::Device,
         event_tx: &mpsc::Sender<ExclusiveEvent>,
-        stream_id: u32,
-        sample_rate: u32,
-        channels: u32,
-        bits_per_sample: u32,
-        duration_secs: f64,
-        start_secs: f64,
-        start_paused: bool,
-        consumed: Arc<AtomicU64>,
+        start: StreamStart,
     ) -> Result<(), ()> {
+        let StreamStart {
+            stream_id,
+            sample_rate,
+            channels,
+            bits_per_sample,
+            ..
+        } = start;
         // Reuse the open client on an unchanged format (reopening pops the DAC).
         // A format change needs a fresh one, but an exclusive client owns the device.
         // Release the old one first (else the new initialize fails with
@@ -1659,31 +1661,11 @@ fn render_thread_inner(
                     Err(_) => "disconnect",
                 };
                 match cmd {
-                    Ok(ExclusiveCommand::StartStream {
-                        stream_id,
-                        sample_rate,
-                        channels,
-                        bits_per_sample,
-                        duration_secs,
-                        start_secs,
-                        start_paused,
-                        consumed,
-                    }) => {
+                    Ok(ExclusiveCommand::StartStream(start)) => {
                         crate::vprintln!(
                             "[WASAPI-DBG] render: StartStream received, opening exclusive client"
                         );
-                        ctx.handle_start_stream(
-                            &device,
-                            &event_tx,
-                            stream_id,
-                            sample_rate,
-                            channels,
-                            bits_per_sample,
-                            duration_secs,
-                            start_secs,
-                            start_paused,
-                            consumed,
-                        )?;
+                        ctx.handle_start_stream(&device, &event_tx, start)?;
                     }
                     Ok(ExclusiveCommand::ReleaseDevice) => ctx.release_device(),
                     Ok(ExclusiveCommand::Shutdown) | Err(_) => break,
@@ -1765,28 +1747,8 @@ fn render_thread_inner(
                                 ));
                             }
                         }
-                        ExclusiveCommand::StartStream {
-                            stream_id,
-                            sample_rate,
-                            channels,
-                            bits_per_sample,
-                            duration_secs,
-                            start_secs,
-                            start_paused,
-                            consumed,
-                        } => {
-                            ctx.handle_start_stream(
-                                &device,
-                                &event_tx,
-                                stream_id,
-                                sample_rate,
-                                channels,
-                                bits_per_sample,
-                                duration_secs,
-                                start_secs,
-                                start_paused,
-                                consumed,
-                            )?;
+                        ExclusiveCommand::StartStream(start) => {
+                            ctx.handle_start_stream(&device, &event_tx, start)?;
                         }
                         ExclusiveCommand::PushPcm {
                             stream_id,
@@ -2173,28 +2135,8 @@ fn render_thread_inner(
                             ctx.pending_transport = Some((stream_id, false));
                         }
                     }
-                    Ok(ExclusiveCommand::StartStream {
-                        stream_id,
-                        sample_rate,
-                        channels,
-                        bits_per_sample,
-                        duration_secs,
-                        start_secs,
-                        start_paused,
-                        consumed,
-                    }) => {
-                        ctx.handle_start_stream(
-                            &device,
-                            &event_tx,
-                            stream_id,
-                            sample_rate,
-                            channels,
-                            bits_per_sample,
-                            duration_secs,
-                            start_secs,
-                            start_paused,
-                            consumed,
-                        )?;
+                    Ok(ExclusiveCommand::StartStream(start)) => {
+                        ctx.handle_start_stream(&device, &event_tx, start)?;
                     }
                     Ok(ExclusiveCommand::PushPcm {
                         stream_id,
