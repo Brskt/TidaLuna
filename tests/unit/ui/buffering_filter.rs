@@ -74,10 +74,11 @@ fn drop_fails_closed_and_never_emits_input() {
         "the plaintext token must never be emitted"
     );
 
-    // Sticky: a subsequent call still writes nothing.
+    // Sticky: a subsequent call still writes nothing, and still says it failed.
     let mut out2 = vec![0u8; 256];
     let mut w2 = 9usize;
-    run_filter(&mut state, &transform, None, None, Some(&mut out2), &mut w2);
+    let status = run_filter(&mut state, &transform, None, None, Some(&mut out2), &mut w2);
     assert_eq!(w2, 0);
     assert!(out2.iter().all(|&b| b == 0));
+    assert_eq!(status, ResponseFilterStatus::ERROR);
 }
