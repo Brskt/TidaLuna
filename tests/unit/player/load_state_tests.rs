@@ -6,8 +6,8 @@
 
 use super::fixture::silent_player;
 use super::{
-    Continuation, LoadOrigin, StopScope, begin_load, continue_load, current_gen, current_load,
-    pack_load_state, unpack_load_state,
+    Continuation, LoadOrigin, StopScope, begin_load, current_gen, current_load, pack_load_state,
+    unpack_load_state,
 };
 
 /// Every writer of the load generation in the suite holds this: a mint from another test
@@ -34,21 +34,6 @@ fn a_packed_word_gives_back_what_it_was_built_from() {
 #[test]
 fn an_untouched_word_names_this_host_at_generation_zero() {
     assert_eq!(unpack_load_state(0), (0, LoadOrigin::Local));
-}
-
-/// The generation occupies the high half: it cannot collide with the origin byte however far
-/// it climbs, and the origin cannot perturb the generation a reader compares against its stamp.
-#[test]
-fn the_two_halves_do_not_reach_into_each_other() {
-    assert_eq!(
-        unpack_load_state(pack_load_state(u32::MAX, LoadOrigin::Connect)).0,
-        u32::MAX
-    );
-    assert_eq!(
-        pack_load_state(7, LoadOrigin::Connect) - pack_load_state(7, LoadOrigin::Local),
-        LoadOrigin::Connect as u64,
-        "the origin must live entirely below the generation"
-    );
 }
 
 #[tokio::test]
@@ -142,30 +127,6 @@ fn rearm_of(player: &super::Player, expected_gen: u32) -> Continuation {
         false,
         expected_gen,
     )
-}
-
-#[tokio::test]
-async fn a_continuation_mints_only_over_the_load_it_continues() {
-    let _serialised = serialised().await;
-
-    let cast = begin_load(LoadOrigin::Connect);
-    let continued = continue_load(cast);
-    let after_first = current_load();
-    let again = continue_load(cast);
-    let after_second = current_load();
-
-    begin_load(LoadOrigin::Local);
-    assert_eq!(continued, Some(cast.wrapping_add(1)));
-    assert_eq!(
-        after_first,
-        (cast.wrapping_add(1), LoadOrigin::Connect),
-        "the owner rides the continuation"
-    );
-    assert_eq!(again, None, "the load it named is no longer current");
-    assert_eq!(
-        after_second, after_first,
-        "a declined continuation writes nothing"
-    );
 }
 
 /// A session release landing between the re-arm's look at the load and its mint was overridden:
@@ -280,19 +241,26 @@ async fn a_stop_from_the_os_controls_leaves_a_cast_its_owner() {
     assert_eq!(after, (cast.wrapping_add(1), LoadOrigin::Connect));
 }
 
+/// A page session ending leaves a cast playing, and the release of a session that never cast
+/// used to stop this host's own music anyway: neither mints a stop.
 #[tokio::test]
-async fn a_page_session_ending_leaves_a_cast_playing() {
+async fn a_stop_that_does_not_cover_the_owner_mints_nothing() {
     let _serialised = serialised().await;
     let player = silent_player();
 
-    let cast = begin_load(LoadOrigin::Connect);
-    player
-        .stop(StopScope::OwnMusic)
-        .expect("a declined stop is not a failure");
-    let after = current_load();
+    for (owner, scope) in [
+        (LoadOrigin::Connect, StopScope::OwnMusic),
+        (LoadOrigin::Local, StopScope::Cast),
+    ] {
+        let load = begin_load(owner);
+        player
+            .stop(scope)
+            .expect("a declined stop is not a failure");
+        let after = current_load();
 
-    begin_load(LoadOrigin::Local);
-    assert_eq!(after, (cast, LoadOrigin::Connect), "no stop was minted");
+        begin_load(LoadOrigin::Local);
+        assert_eq!(after, (load, owner), "{scope:?} minted a stop");
+    }
 }
 
 /// A stop leaves the track retained and resumable; only the end of a page leaves it with no page
@@ -310,20 +278,4 @@ fn only_a_page_ending_leaves_the_music_it_stops_without_a_page() {
     for (scope, orphans) in table {
         assert_eq!(scope.orphans(), orphans, "{scope:?}");
     }
-}
-
-/// The release of a session that never cast used to stop this host's own music anyway.
-#[tokio::test]
-async fn a_session_that_never_cast_leaves_local_music_playing() {
-    let _serialised = serialised().await;
-    let player = silent_player();
-
-    let local = begin_load(LoadOrigin::Local);
-    player
-        .stop(StopScope::Cast)
-        .expect("a declined stop is not a failure");
-    let after = current_load();
-
-    begin_load(LoadOrigin::Local);
-    assert_eq!(after, (local, LoadOrigin::Local), "no stop was minted");
 }

@@ -7,42 +7,21 @@ fn committed(canonical_id: &str, format: &str) -> (String, String) {
 }
 
 #[test]
-fn same_canonical_id_and_format_is_idempotent() {
+fn only_the_same_track_in_the_same_format_is_kept_and_anything_else_rebuilds() {
     // The caller strips the query before calling; both ids are canonical.
     // (Production passes canonical_track_id("…?sig=2") == "…/abc".)
     let cur = committed("https://cdn/tracks/abc", "flac");
-    assert!(is_same_active_track(
-        Some(&cur),
-        "https://cdn/tracks/abc",
-        "flac"
-    ));
-}
-
-#[test]
-fn different_format_rebuilds() {
-    let cur = committed("https://cdn/tracks/abc", "flac");
-    assert!(!is_same_active_track(
-        Some(&cur),
-        "https://cdn/tracks/abc",
-        "aac"
-    ));
-}
-
-#[test]
-fn different_track_rebuilds() {
-    let cur = committed("https://cdn/tracks/abc", "flac");
-    assert!(!is_same_active_track(
-        Some(&cur),
-        "https://cdn/tracks/xyz",
-        "flac"
-    ));
-}
-
-#[test]
-fn no_committed_track_rebuilds() {
-    assert!(!is_same_active_track(
-        None,
-        "https://cdn/tracks/abc",
-        "flac"
-    ));
+    let table = [
+        (Some(&cur), "https://cdn/tracks/abc", "flac", true),
+        (Some(&cur), "https://cdn/tracks/abc", "aac", false),
+        (Some(&cur), "https://cdn/tracks/xyz", "flac", false),
+        (None, "https://cdn/tracks/abc", "flac", false),
+    ];
+    for (current, id, format, same) in table {
+        assert_eq!(
+            is_same_active_track(current, id, format),
+            same,
+            "{current:?} against {id} as {format}"
+        );
+    }
 }
