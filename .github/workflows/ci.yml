@@ -234,6 +234,33 @@ jobs:
       - name: Test
         run: cargo test -p tidalunar -p updater
 
+  frontend-test:
+    # The suite exercises no OS-dependent path of the shipped code; Linux covers it.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cache frontend deps
+        uses: actions/cache@v5
+        with:
+          path: frontend/node_modules
+          key: js-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package.json') }}
+          restore-keys: |
+            js-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      # bunfig.toml, with its test preload, is read from the working directory.
+      - name: Test
+        working-directory: frontend
+        run: bun run test
+
   build:
     needs: version
     strategy:
@@ -547,6 +574,7 @@ jobs:
     needs:
       - lint
       - lint-test
+      - frontend-test
       - build
       - nix-check
     runs-on: ubuntu-latest
