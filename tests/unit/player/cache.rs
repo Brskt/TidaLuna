@@ -269,27 +269,19 @@ fn an_entry_larger_than_the_whole_cache_is_refused_not_stored_then_evicted() {
 /// the candidates, its bytes are not reclaimable either: counting them in ground the pass
 /// through every other row and finished over the cap regardless, an empty cache for nothing.
 #[test]
-#[cfg(unix)]
-fn an_undeletable_oversized_entry_does_not_evict_the_rest_of_the_cache() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn an_undeletable_oversized_entry_is_indexed_at_its_true_size() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cache = AudioCache::open_with_capacity(tmp.path(), 100).unwrap();
     cache.record("keeper", "flac", 50).unwrap();
 
     let oversized = cache.file_path("huge");
-    let shard = oversized.parent().unwrap().to_path_buf();
-    fs::create_dir_all(&shard).unwrap();
+    fs::create_dir_all(oversized.parent().unwrap()).unwrap();
     fs::write(&oversized, b"pcm").unwrap();
-    // Dropping write permission on the shard makes the unlink fail with something other than
-    // NotFound, the only route to `DropOutcome::FileKept`, and from there to `TooLargeRetained`.
-    let original = fs::metadata(&shard).unwrap().permissions();
-    fs::set_permissions(&shard, fs::Permissions::from_mode(0o555)).unwrap();
-
-    let outcome = cache.record("huge", "flac", 101);
-
-    // Before any assertion: a failure still leaves a removable tempdir behind.
-    fs::set_permissions(&shard, original).unwrap();
+    // An unlink that fails with something other than NotFound is the only route to
+    // `DropOutcome::FileKept`, and from there to `TooLargeRetained`.
+    let outcome = cache.record_with("huge", "flac", 101, &|_| {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    });
 
     assert_eq!(outcome.unwrap(), StoreOutcome::TooLargeRetained);
     assert!(cache.lookup_path("keeper").is_some());

@@ -280,8 +280,17 @@ impl AudioCache {
     /// reachable by accounting and eviction only through its row: losing the row while
     /// the file survives strands the bytes outside `max_bytes`.
     pub fn drop_entry(&mut self, track_id: &str) -> DropOutcome {
+        self.drop_entry_with(track_id, &|p| fs::remove_file(p))
+    }
+
+    /// [`drop_entry`](Self::drop_entry) with the unlink passed in, for tests to fail it.
+    fn drop_entry_with(
+        &mut self,
+        track_id: &str,
+        remove: &dyn Fn(&Path) -> std::io::Result<()>,
+    ) -> DropOutcome {
         let path = self.file_path(track_id);
-        match fs::remove_file(&path) {
+        match remove(&path) {
             Ok(()) => {}
             // Already gone: the row is the orphan.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -423,6 +432,17 @@ impl AudioCache {
         format: &str,
         file_size: u64,
     ) -> anyhow::Result<StoreOutcome> {
+        self.record_with(track_id, format, file_size, &|p| fs::remove_file(p))
+    }
+
+    /// [`record`](Self::record) with the unlink passed in, for tests to fail it.
+    fn record_with(
+        &mut self,
+        track_id: &str,
+        format: &str,
+        file_size: u64,
+        remove: &dyn Fn(&Path) -> std::io::Result<()>,
+    ) -> anyhow::Result<StoreOutcome> {
         if self.conn.is_none() {
             return Ok(StoreOutcome::Disabled);
         }
@@ -436,7 +456,7 @@ impl AudioCache {
         // entry that failed to decrypt being kept on purpose (`CacheReadError::Unreadable`).
         let mut unremovable = false;
         if file_size > self.max_bytes {
-            match self.drop_entry(track_id) {
+            match self.drop_entry_with(track_id, remove) {
                 // Ungated (a track that will never cache has no other channel), and the one
                 // site holding both sizes.
                 DropOutcome::Dropped | DropOutcome::NoRow => {
@@ -478,7 +498,7 @@ impl AudioCache {
 
         // An undeletable oversized row is the one thing eviction can never free. Every other
         // store hands over zero, keeping its own bytes in the measurement.
-        self.evict_if_needed(track_id, if unremovable { file_size } else { 0 })?;
+        self.evict_if_needed(track_id, if unremovable { file_size } else { 0 }, remove)?;
 
         Ok(if unremovable {
             StoreOutcome::TooLargeRetained
@@ -564,7 +584,12 @@ impl AudioCache {
     /// [`TooLargeRetained`](StoreOutcome::TooLargeRetained) sets it (an oversized file that
     /// would not delete); an ordinary store passes zero, its row being out of scope for this
     /// pass yet evictable by the next.
-    fn evict_if_needed(&mut self, keep: &str, unreclaimable: u64) -> anyhow::Result<()> {
+    fn evict_if_needed(
+        &mut self,
+        keep: &str,
+        unreclaimable: u64,
+        remove: &dyn Fn(&Path) -> std::io::Result<()>,
+    ) -> anyhow::Result<()> {
         if self.current_size <= self.max_bytes {
             return Ok(());
         }
@@ -595,7 +620,7 @@ impl AudioCache {
                 }
                 // Only a real drop frees bytes. A kept file leaves its row on purpose, and a
                 // missing row freed nothing; neither advances this pass.
-                if self.drop_entry(&evict_id) != DropOutcome::Dropped {
+                if self.drop_entry_with(&evict_id, remove) != DropOutcome::Dropped {
                     continue;
                 }
                 evicted_any = true;
