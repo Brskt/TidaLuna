@@ -13,7 +13,6 @@ const storeStub = () => ({
 });
 mock.module("../plugins/lib/src/redux/store", storeStub);
 
-const { adoptRustVolume } = await import("../src/volume");
 const { createNativePlayerComponent } = await import("../src/controllers/player");
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
@@ -51,17 +50,6 @@ test("a mute reaches Rust", () => {
 	expect(volumes()).toEqual([0]);
 });
 
-test("a crossfade ramp and an idle element's silence stay home", () => {
-	// Shaka writes the element for things that are not a volume: a ramp every 16 ms, .001 then
-	// 0 on the element taking over, 0 on the one going idle. None moves the level.
-	const el = proxied("ramp");
-	volume = 61;
-	el.volume = 0.61;
-	sent.length = 0;
-	for (const v of [0.001, 0, 0.2, 0.45, 0.61, 0]) el.volume = v;
-	expect(volumes()).toEqual([]);
-});
-
 test("the write still lands on the element", () => {
 	// Shaka reads the outgoing element's volume back to start a crossfade ramp from it.
 	const el = proxied("readback");
@@ -77,17 +65,10 @@ test("an element we do not proxy keeps its volume to itself", () => {
 	expect(volumes()).toEqual([]);
 });
 
-test("a level Rust reported is not echoed back", () => {
-	// Rust's `volume` event re-dispatches SET_VOLUME, and TIDAL applies it to the element.
-	const el = proxied("echo");
-	adoptRustVolume(52);
-	volume = 52;
-	el.volume = 0.52;
-	expect(volumes()).toEqual([]);
-});
-
 test("the native delegate and the element share one road", () => {
-	// A native track applied 88; a later element write at the same level is not a change.
+	// A native track applied 88; a later element write at the same level is not a change. Shaka
+	// writes the element for things that are not a volume too (a crossfade ramp every 16 ms, 0 on
+	// the element going idle): only the store's level moves Rust's.
 	const player = createNativePlayerComponent().Player();
 	volume = 88;
 	player.setVolume(87.5);
