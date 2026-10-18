@@ -47,7 +47,8 @@ export function refusePlayback(errorCode: string, error: string, message: string
             .NativePlayerComponent?.trigger?.("mediaerror", { error, errorCode }),
     );
     // TIDAL's own pairing for a failure on the current track. STOP is grouped with
-    // PAUSE in the reducer, never with SKIP_NEXT.
+    // PAUSE in the reducer, never with SKIP_NEXT. It also stops Rust's track when this page
+    // loaded it (the STOP interceptor in index.ts): the SDK's reset() leaves that one playing.
     attempt(() => store().dispatch({ type: "playbackControls/STOP" }));
     // Clears a STALLED already posted, without rewriting the intent the way
     // PLAYING and STALLED both do.

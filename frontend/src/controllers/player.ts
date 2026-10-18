@@ -429,6 +429,11 @@ export const createNativePlayerComponent = () => {
                     pendingStop = false;
                     loadedUrl = null;
                     loadedFmt = null;
+                    // The SDK's reset() stops the session it believes holds Rust's track, and it can
+                    // run after this page loaded another one (the announcement self-loads before the
+                    // SDK's own load gets to reset). That track is the self-load's, stopped by the
+                    // STOP interceptors in index.ts alone; read here, at the flush, not at the call.
+                    if (isSelfLoad()) return;
                     sendIpc("player.stop");
                 });
             },

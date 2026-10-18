@@ -398,6 +398,16 @@ const init = async () => {
         add("playbackControls/PAUSE", () => {
             if (!isSelfLoad()) (window.NativePlayerComponent as any)?.setDesiredPlayback?.(false);
         });
+        // TIDAL stops by resetting the SDK's players. The native player's reset() sends Rust a stop
+        // only for a session it loaded itself, and Shaka's only unloads the element. A track this
+        // page loaded (Rust's, behind an element that mirrors it) kept playing under a stopped
+        // transport. Both rails: a dispatched STOP (this page's refusals) and the one TIDAL's saga
+        // puts after a queue clear. Rust drops the stop while a cast owns the player.
+        const stopSelfLoad = () => {
+            if (isSelfLoad()) sendIpc("player.stop");
+        };
+        add("playbackControls/STOP", stopSelfLoad);
+        add("playbackControls/STOP", stopSelfLoad, putInterceptors);
         // TIDAL's "play this" signal fires BEFORE the selected track's load (async
         // getPlaybackInfo gap) while the OLD track is still committed; resuming here audibly
         // replays the OLD track (the "bleed"). Request auto-play on the SELECTED track's
