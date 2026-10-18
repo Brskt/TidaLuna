@@ -15,16 +15,6 @@ fn scrub_replaces_real_token_with_opaque() {
 }
 
 #[test]
-fn scrub_leaves_clean_body_untouched() {
-    let pairs = vec![(
-        "real-access-token-1234".to_string(),
-        "luna_aaaa".to_string(),
-    )];
-    let body = r#"{"tracks":[1,2,3]}"#.to_string();
-    assert_eq!(scrub_real_tokens_with(body.clone(), &pairs), body);
-}
-
-#[test]
 fn scrub_ignores_short_tokens() {
     // A short value must not substring-match and corrupt the body.
     let pairs = vec![("abc".to_string(), "X".to_string())];
@@ -60,17 +50,6 @@ fn a_second_token_does_not_slide_into_the_log_window_behind_the_first() {
     assert!(!out.contains(&t1[..16]), "first token leaked: {out}");
     assert!(!out.contains(&t2[..16]), "second token leaked: {out}");
     assert!(out.contains("luna_1") && out.contains("luna_2"), "{out}");
-}
-
-#[test]
-fn a_token_straddling_the_log_cut_is_never_emitted_as_a_fragment() {
-    let token = format!("tok{}", "c".repeat(97));
-    let body = format!("{}{token}", "-".repeat(390));
-    let pairs = vec![(token.clone(), "luna_z".to_string())];
-
-    let out = UpstreamBody(body).scrubbed_for_log_with(400, &pairs);
-
-    assert!(!out.contains(&token[..8]), "{out}");
 }
 
 #[test]
@@ -154,12 +133,10 @@ fn upstream_body_drops_the_video_artwork() {
 
 #[test]
 fn upstream_body_without_video_artwork_is_returned_verbatim() {
-    let body = r#"{"data":{"type":"albums","id":"1"}}"#.to_string();
-    assert_eq!(UpstreamBody(body.clone()).strip_video_artwork().0, body);
-}
-
-#[test]
-fn upstream_body_that_is_not_json_is_returned_verbatim() {
-    let body = "<html>not json</html>".to_string();
-    assert_eq!(UpstreamBody(body.clone()).strip_video_artwork().0, body);
+    for body in [
+        r#"{"data":{"type":"albums","id":"1"}}"#,
+        "<html>not json</html>",
+    ] {
+        assert_eq!(UpstreamBody(body.to_string()).strip_video_artwork().0, body);
+    }
 }

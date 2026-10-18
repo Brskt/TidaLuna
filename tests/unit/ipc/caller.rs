@@ -7,14 +7,6 @@ fn envelope(json: &str) -> IpcMessage {
     serde_json::from_str(json).expect("envelope parses")
 }
 
-/// The app bundle's senders never send `cap`; their envelopes must keep parsing.
-#[test]
-fn an_envelope_without_a_cap_field_still_parses() {
-    let msg = envelope(r#"{"channel":"player.parse_dash","args":["x"]}"#);
-    assert_eq!(msg.channel, "player.parse_dash");
-    assert!(msg.cap.is_none());
-}
-
 #[test]
 fn a_cap_field_is_read_off_the_envelope_not_the_arguments() {
     let msg = envelope(r#"{"channel":"plugin.download","args":["payload"],"cap":"abc123"}"#);

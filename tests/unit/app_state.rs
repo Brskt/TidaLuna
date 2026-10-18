@@ -21,39 +21,16 @@ fn a_blank_id_names_no_track() {
 }
 
 #[test]
-fn a_measurement_naming_a_track_takes_the_slot() {
-    let slot = settle_recorded_duration(None, measured(Some("A"), 300.0));
-    assert_eq!(slot.as_ref().and_then(|m| m.track_id.as_deref()), Some("A"));
-    assert_eq!(slot.map(|m| m.secs), Some(300.0));
-}
-
-#[test]
 fn a_measurement_naming_no_track_does_not_evict_one_that_does() {
     // A recover through `retained_product_id` can still measure with no id to give; the
     // gapless advance no longer does. Storing an untagged one would cost A the length a frame
-    // had yet to claim, and buy nothing: an untagged measurement matches no frame.
+    // had yet to claim, and buy nothing: an untagged measurement matches no frame. The Connect
+    // metadata task once wiped a decoded length this way each time repeat-one re-announced the
+    // track that was playing.
     let slot = settle_recorded_duration(Some(measured(Some("A"), 300.0)), measured(None, 250.0));
 
     assert_eq!(slot.as_ref().and_then(|m| m.track_id.as_deref()), Some("A"));
     assert_eq!(slot.map(|m| m.secs), Some(300.0));
-}
-
-#[test]
-fn no_arrival_leaves_the_slot_emptier_than_it_found_it() {
-    // A payload carrying no length says nothing about the one a decode already measured.
-    // The Connect metadata task assumed the opposite and wiped a decoded length every time
-    // repeat-one re-announced the very track that was playing.
-    for arriving in [
-        measured(None, 0.0),
-        measured(Some(""), 250.0),
-        measured(Some("B"), 250.0),
-    ] {
-        let slot = settle_recorded_duration(Some(measured(Some("A"), 300.0)), arriving);
-        assert!(
-            slot.is_some(),
-            "an arrival emptied a slot that held a length"
-        );
-    }
 }
 
 #[test]

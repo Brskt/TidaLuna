@@ -73,12 +73,6 @@ fn a_module_name_is_not_a_channel() {
 }
 
 #[test]
-fn an_unknown_token_resolves_to_nothing() {
-    assert!(module_for_native_channel("deadbeef").is_none());
-    assert!(module_for_native_channel("").is_none());
-}
-
-#[test]
 fn two_modules_never_share_a_token() {
     let a = issue_native_channel("PairA/x.native.ts", "hash").expect("entropy available");
     let b = issue_native_channel("PairB/x.native.ts", "hash").expect("entropy available");

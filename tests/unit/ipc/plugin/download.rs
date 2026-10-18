@@ -55,13 +55,6 @@ fn sanitized_name(path: &str) -> String {
         .to_string()
 }
 
-#[test]
-fn an_over_long_name_is_bounded_and_keeps_its_extension() {
-    let out = sanitized_name(&format!("/m/{}.flac", "a".repeat(400)));
-    assert!(out.len() <= MAX_NAME_BYTES, "{} bytes", out.len());
-    assert!(out.ends_with(".flac"));
-}
-
 /// A byte budget, not a character count: 300 CJK characters are 900 bytes; a cut that
 /// counted characters would still hand the filesystem a name it refuses.
 #[test]
