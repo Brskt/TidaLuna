@@ -176,14 +176,14 @@ impl DbActor {
             .spawn(move || {
                 let result = (|| -> Result<(Connection, Connection), OpenError> {
                     let plugins_path = data_dir.join("plugins.db");
-                    let settings_path = data_dir.join("settings.db");
                     let mut plugins_conn = Connection::open(&plugins_path)
                         .map_err(|e| OpenError::sqlite(&plugins_path, &e))?;
-                    let mut settings_conn = Connection::open(&settings_path)
-                        .map_err(|e| OpenError::sqlite(&settings_path, &e))?;
                     crate::plugins::store::init_schema(&mut plugins_conn)
                         .map_err(|e| OpenError::sqlite(&plugins_path, &e))?;
-                    crate::settings::init_schema(&mut settings_conn)
+                    let settings_path = data_dir.join("settings.db");
+                    // Checked and, when damaged, rebuilt: what it did waits in the store for the
+                    // page.
+                    let (settings_conn, _) = crate::settings::open(&settings_path)
                         .map_err(|e| OpenError::sqlite(&settings_path, &e))?;
                     Ok((plugins_conn, settings_conn))
                 })();
