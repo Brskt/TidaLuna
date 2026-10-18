@@ -76,10 +76,12 @@ fn captures_exported_declarations() {
     assert!(out.contains("Fragment: Fragment"));
 }
 
+/// The parser recovers from a `const` with no initializer and still yields the export; only its
+/// diagnostics keep a chunk TIDAL ships broken from being captured half-read.
 #[test]
-fn parse_failure_returns_source_unchanged() {
-    let bad = "var x = ;;;(";
-    assert_eq!(append_capture(bad, "react"), bad);
+fn a_chunk_the_parser_recovers_from_with_diagnostics_is_left_unchanged() {
+    let src = "export const a=1;const b;";
+    assert_eq!(append_capture(src, "react"), src);
 }
 
 #[test]
