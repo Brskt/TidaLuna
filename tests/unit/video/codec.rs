@@ -109,8 +109,7 @@ fn a_userinfo_prefix_does_not_impersonate_the_codec_host() {
     assert!(codec_url_allowed("https://ciscobinary.openh264.org/x.bz2"));
 }
 
-/// A table entry the policy would refuse is a feature that cannot turn on, and nothing else
-/// would catch it.
+/// A table entry the policy would refuse is a feature that cannot turn on.
 #[test]
 fn every_target_url_passes_the_codec_policy() {
     for t in TARGETS {
@@ -249,11 +248,10 @@ fn only_a_ready_phase_answers_with_a_path() {
     }
 }
 
-/// Only the digest rejection is covered: an unknown file fails `from_blob_path` before the
-/// probe. Reaching the probe needs a genuine Cisco digest on a file without Wels symbols, a
-/// manual-validation item.
+/// A file that is no shared library is refused, by its digest or by the loader. Reaching the
+/// probe needs a genuine Cisco digest on a file without Wels symbols, a manual-validation item.
 #[test]
-fn a_blob_with_an_unknown_digest_is_refused() {
+fn a_file_that_is_not_a_library_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("not-a-codec.so");
     std::fs::write(&path, b"this is not a shared library").unwrap();

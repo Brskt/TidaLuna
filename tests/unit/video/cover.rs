@@ -17,10 +17,10 @@ fn a_sample_running_past_the_buffer_is_refused() {
     assert_eq!(sample_bytes(&file, 4, 1), None);
 }
 
-/// A hostile table can name an offset no machine could address. Wrapping would turn a
-/// nonsense offset into a plausible one pointing at the wrong bytes.
+/// A hostile table can name an offset no machine could address: the end it adds up to
+/// overflows, and is refused rather than panicking.
 #[test]
-fn an_offset_that_overflows_is_refused_rather_than_wrapped() {
+fn an_offset_that_overflows_is_refused_without_panicking() {
     let file = [0u8, 1, 2, 3];
     assert_eq!(sample_bytes(&file, u64::MAX, 1), None);
     assert_eq!(sample_bytes(&file, u64::MAX - 1, 4), None);
