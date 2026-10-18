@@ -130,11 +130,16 @@ fn assert_no_credential(error: &str) {
 /// `Player::load_dash` also publishes into `CURRENT_TRACK`, whose every other writer takes its
 /// fixture: taken here after `PRELOAD_TESTS`, as `state.rs` orders them, it keeps a parallel
 /// test's fade clear.
+///
+/// The media client is built here too, before any deadline starts. Its first use reads the system
+/// root certificates inside the load task's first poll, on the runtime that drives the wait of
+/// `settled_error`, and with those files cold that outlasted the five second deadline.
 async fn serialised() -> (
     tokio::sync::MutexGuard<'static, ()>,
     crate::state::current_track_fixture::CurrentTrackSlot,
 ) {
     let preload = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let _ = &*crate::state::HTTP_CLIENT_PLAYBACK;
     (
         preload,
         crate::state::current_track_fixture::CurrentTrackSlot::clear(),
