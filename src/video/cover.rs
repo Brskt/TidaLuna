@@ -584,13 +584,13 @@ fn decode_cover(
 
 /// What a cover load produced. Four outcomes rather than a `Result`, because "no codec" is an
 /// ordinary state with a name the user is owed, not a failure: the reason has to reach the UI
-/// rather than a log line, and each `CodecStatus` wants different words in front of the user.
+/// rather than a log line, and each `NoDecoder` wants different words in front of the user.
 ///
 /// `T` is what the caller's `finish` made of the frames, never the frames themselves: see
 /// [`load_cover`] for why that last step runs inside the load.
 pub(crate) enum CoverOutcome<T> {
     Decoded(T),
-    NoCodec(crate::video::codec::CodecStatus),
+    NoCodec(crate::video::codec::NoDecoder),
     Failed(String),
     /// The request stopped wanting its answer before the work finished. Its own outcome rather
     /// than a failure: nobody is owed a reason, and logging it as an error would report the
@@ -616,9 +616,9 @@ pub(crate) async fn load_cover<T: Send + 'static>(
     interest: std::sync::Arc<CoverInterest>,
     finish: impl FnOnce(Vec<CoverFrame>) -> T + Send + 'static,
 ) -> CoverOutcome<T> {
-    let path = match crate::video::codec::ensure_available().await {
-        crate::video::codec::CodecStatus::Ready(path) => path,
-        other => return CoverOutcome::NoCodec(other),
+    let path = match crate::video::codec::decoder().await {
+        Ok(path) => path,
+        Err(why) => return CoverOutcome::NoCodec(why),
     };
     if interest.abandoned() {
         return CoverOutcome::Abandoned;
@@ -634,7 +634,14 @@ pub(crate) async fn load_cover<T: Send + 'static>(
     }
 
     let decoded = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<T>> {
-        let api = crate::video::codec::load_api(&path)?;
+        let api = match crate::video::codec::load_api(&path) {
+            Ok(api) => api,
+            Err(e) => {
+                // The supervisor proved this file loads: it changed since.
+                crate::video::codec::recheck();
+                return Err(e);
+            }
+        };
         let Some(frames) = decode_cover(&file, api, &interest)? else {
             return Ok(None);
         };

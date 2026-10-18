@@ -152,6 +152,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         "updater.status" => {
             crate::updater::handle_updater_status(callback);
         }
+        "settings.video_codec_state" => {
+            ipc_callback_ok(&callback, &crate::video::codec::state_json());
+        }
         _ => {
             plugin_ipc::handle_plugin_db(msg, &caller, callback);
         }

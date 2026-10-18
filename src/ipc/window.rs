@@ -253,14 +253,15 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             });
             crate::vprintln!("[LOGGING] Console window set to {enabled} (applies on restart)");
         }
-        // Persist only: the provisioning path reads the boot setting, and a running decode is
-        // not interrupted mid-frame by a toggle.
+        // Live: the supervisor follows once free (a download under way finishes first) and echoes
+        // the position in its snapshot. A decode already running is not interrupted mid-frame.
         "settings.set_video_codec" => {
             let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
             crate::state::db().post(move |_, conn| {
                 crate::settings::save_video_codec_enabled(conn, enabled);
             });
-            crate::vprintln!("[VIDEO]   Codec set to {enabled} (applies on restart)");
+            crate::video::codec::set_enabled(enabled);
+            crate::vprintln!("[VIDEO]   Codec set to {enabled}");
         }
         // Not Windows-gated: crossfade rides the shared cpal path, which every
         // platform uses. The exclusive and ASIO backends ignore it.

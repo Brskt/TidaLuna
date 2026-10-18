@@ -229,3 +229,7 @@ tray-item = { version = "0.10.0", default-features = false, features = [
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1.12"
+
+[dev-dependencies]
+# Paused virtual time for the codec supervisor's day-long scenarios.
+tokio = { version = "1.53.1", features = ["test-util"] }

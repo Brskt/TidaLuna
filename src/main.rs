@@ -365,6 +365,8 @@ fn main() {
         crate::vprintln!("[CACHE]  Warm thread spawn failed ({e})");
     }
 
+    crate::video::codec::start(&rt_handle, boot.video_codec_enabled);
+
     crate::vprintln!("[INIT]   TidaLunar v{}", env!("CARGO_PKG_VERSION"));
     crate::vprintln!("[INIT]   Chromium {}", state::chromium_version());
     // Guarded, not just logged: asking Bun its version spawns it, and `vprintln!`

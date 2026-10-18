@@ -162,7 +162,8 @@ impl BrowserSideHandler for IpcQueryHandler {
                     || msg.channel.starts_with("__LunaNative.")
                     || msg.channel.starts_with("updater.")
                     || msg.channel.starts_with("connect.")
-                    || msg.channel == "player.parse_dash")
+                    || msg.channel == "player.parse_dash"
+                    || msg.channel == "settings.video_codec_state")
             {
                 if msg.channel.starts_with("connect.") {
                     crate::connect::ipc::handle_connect_invoke(msg, callback);

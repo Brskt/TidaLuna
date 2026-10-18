@@ -227,15 +227,16 @@ wrap_resource_request_handler! {
                 // not help: 226 of the gateway's 242 read endpoints declare it.
                 // Recorded so the next reader does not re-run that search.
                 //
-                // With the decoder on, the video artwork is wanted through, and the identity
+                // With the decoder ready, the video artwork is wanted through, and the identity
                 // encoding forced below would only cost bandwidth.
                 let artwork_host = crate::ui::artwork_filter::arms_artwork_filter(
                     &url,
-                    crate::state::video_codec_enabled(),
+                    crate::video::codec::is_ready(),
                 );
                 self.artwork_host.store(artwork_host, Ordering::Release);
                 if artwork_host {
                     force_identity_encoding(req);
+                    crate::video::codec::note_demand();
                 }
 
                 if should_rewrite_token(&url) {

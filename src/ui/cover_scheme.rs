@@ -161,9 +161,9 @@ async fn run_cover_job(
     let (status, reason, body) = match outcome {
         CoverOutcome::Decoded(body) => (200, String::new(), body),
         // Not an error: the page keeps the still image and is told why.
-        CoverOutcome::NoCodec(st) => {
-            crate::vprintln!("[VIDEO]   Cover without a codec: {}", st.reason());
-            (503, st.reason().to_string(), Vec::new())
+        CoverOutcome::NoCodec(why) => {
+            crate::vprintln!("[VIDEO]   Cover without a codec: {}", why.phrase());
+            (503, why.phrase().to_string(), Vec::new())
         }
         // The cause stays in the log: a loader message names the codec's path on disk.
         CoverOutcome::Failed(cause) => {

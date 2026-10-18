@@ -207,11 +207,11 @@ fn strips_artwork(
     url: &crate::ui::nav::RequestUrl,
     headers: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
-    let enabled = crate::state::video_codec_enabled();
+    let ready = crate::video::codec::is_ready();
     headers
         .get("content-type")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|mime| crate::ui::artwork_filter::strips_artwork_body(url, mime, enabled))
+        .is_some_and(|mime| crate::ui::artwork_filter::strips_artwork_body(url, mime, ready))
 }
 
 /// A response body as it came off the wire. An upstream error page can reflect a real OAuth
@@ -454,6 +454,9 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
             // Read before `headers_map` is handed to the reply, and settled as a bool so the
             // borrow ends here rather than straddling that move.
             let strip_artwork = strips_artwork(&url, &headers_map);
+            if strip_artwork {
+                crate::video::codec::note_demand();
+            }
             let body = if is_token_endpoint {
                 body.transform_token_body(status, session_epoch)
             } else if strip_artwork {
