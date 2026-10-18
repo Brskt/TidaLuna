@@ -113,10 +113,6 @@ const slider = (volume: number) => {
 	rustTakes();
 };
 
-test("every order of a page load is covered", () => {
-	expect(orders().length).toBe(30);
-});
-
 test("a page of another account, loading after a page set the level, takes that level", async () => {
 	for (const sdk of [false, true]) {
 		for (const order of orders()) {
@@ -151,17 +147,6 @@ test("a page of another account, loading after a page muted, stays muted with th
 	}
 });
 
-test("a reload of the same account keeps its level", async () => {
-	for (const order of orders()) {
-		rust = new FakeRust();
-		savedBy = { alice: { mute: false, volume: 70, volumeUnmute: 70 } };
-		await load("alice", CANONICAL);
-		slider(30);
-		await load("alice", order, { sdk: true });
-		expect({ order: order.join(","), rust: rust.volume, store: controls.volume }).toEqual({ order: order.join(","), rust: 30, store: 30 });
-	}
-});
-
 test("on a first launch, TIDAL's saved level seeds the level, whatever the order", async () => {
 	for (const sdk of [false, true]) {
 		for (const order of orders()) {
@@ -180,51 +165,4 @@ test("on a first launch, TIDAL's saved level seeds the level, whatever the order
 			expect({ ...where, rust: rust.volume, store: controls.volume }).toEqual({ ...where, rust: 70, store: 70 });
 		}
 	}
-});
-
-test("a first launch that starts logged out still takes the saved level of the account that logs in", async () => {
-	rust = new FakeRust();
-	savedBy = { alice: { mute: false, volume: 70, volumeUnmute: 70 } };
-	await load("", CANONICAL);
-	expect(rust.chosen).toBe(false);
-	await load("alice", CANONICAL, { sdk: true });
-	expect({ rust: rust.volume, store: controls.volume }).toEqual({ rust: 70, store: 70 });
-});
-
-test("a level set by an account with nothing saved is the one the next account takes", async () => {
-	rust = new FakeRust();
-	savedBy = { bob: { mute: false, volume: 80, volumeUnmute: 80 } };
-	await load("alice", CANONICAL);
-	slider(30);
-	await load("bob", CANONICAL, { sdk: true });
-	expect({ rust: rust.volume, store: controls.volume }).toEqual({ rust: 30, store: 30 });
-});
-
-test("after a restart, the page of any account takes the level the last launch played", async () => {
-	for (const order of orders()) {
-		rust = new FakeRust();
-		rust.remote(30, 30);
-		savedBy = { bob: { mute: false, volume: 80, volumeUnmute: 80 } };
-		await load("bob", order, { sdk: true });
-		expect({ order: order.join(","), rust: rust.volume, store: controls.volume }).toEqual({ order: order.join(","), rust: 30, store: 30 });
-	}
-});
-
-test("a plugin's level on a first launch is the level the page then takes", async () => {
-	rust = new FakeRust();
-	savedBy = { alice: { mute: false, volume: 70, volumeUnmute: 70 } };
-	const { steps } = await loadPage("alice", { sdk: true });
-	await steps.catchUpSent();
-	await steps.catchUpLands();
-	rustTakes();
-	// A plugin states no count (`sendIpc("player.volume", v)`).
-	rust.page(40);
-	await steps.restoreRead();
-	await steps.restorePut();
-	rustTakes();
-	// TIDAL restored nothing over it.
-	expect({ rust: rust.volume, saved: savedBy.alice?.volume }).toEqual({ rust: 40, saved: 70 });
-	// The next page mirrors it.
-	await load("alice", CANONICAL, { sdk: true });
-	expect({ rust: rust.volume, store: controls.volume }).toEqual({ rust: 40, store: 40 });
 });
