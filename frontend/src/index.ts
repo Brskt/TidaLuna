@@ -15,6 +15,7 @@ import { followCastQueue } from "./connect/middleware";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyFail, isSelfLoad } from "./audio-proxy";
 import { refusePlayback } from "./refuse-playback";
+import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
 import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
@@ -170,7 +171,9 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             try {
                 const { store } = require("../plugins/lib/src/redux/store");
                 if (isOutputLevelReport(event.v)) mirrorRustLevel(store, event.v);
-            } catch (_) {}
+            } catch (e) {
+                if (!isStoreNotPublished(e)) throw e;
+            }
         } else if (type === "state") {
             const playing = event.v === "active";
             (window as any).__TL_PLAYING__ = playing;
