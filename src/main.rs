@@ -68,7 +68,7 @@ fn refuse_without_data_dir() -> ! {
     refuse_to_start(WHY)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     // Seed the live log level from the LOGS env var before anything can log.
     logging::init_env_floor();
 
@@ -267,7 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the running window to focus, then exits.
     let app_lock = match platform::app_lock::acquire_or_signal(launch_url.as_deref()) {
         Some(lock) => lock,
-        None => return Ok(()),
+        None => return,
     };
 
     // Owning the lock is what makes rotating the shared log ours to do, and this
@@ -495,11 +495,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match platform::refusal::classify_init_failure(code, &root_cache) {
             platform::refusal::InitFailure::HandedOver => {
                 crate::vprintln!("[CEF]    Another instance owns the session; exiting");
-                return Ok(());
+                return;
             }
             platform::refusal::InitFailure::Finished => {
                 crate::vprintln!("[CEF]    Chromium ended the launch early (exit code {code})");
-                return Ok(());
+                return;
             }
             platform::refusal::InitFailure::Refused(why) => refuse_to_start(&why),
         }
@@ -538,7 +538,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     crate::connect::bridge::set_active(None);
 
     shutdown();
-    Ok(())
 }
 
 /// Boot-token reconcile parked on its own thread while CEF initializes; the
