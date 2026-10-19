@@ -34,10 +34,15 @@ extend-ignore-identifiers-re = [
   "DELETEd",        # SQL DELETE, past tense, in a doc comment
   "msg_controllen", # glibc `msghdr` field: the control buffer's length
 ]
+extend-ignore-re = [
+  'caf\\u\{e9\}', # "café" spelled with a Unicode escape in a test
+]
 
 [workspace.metadata.typos.default.extend-words]
 seeked = "seeked"           # HTML media event / audio-domain term
 unparseable = "unparseable" # valid variant used in updater docs
+trak = "trak"               # ISO BMFF box name
+trun = "trun"               # ISO BMFF box name
 
 [package]
 name = "tidalunar"
