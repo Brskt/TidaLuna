@@ -12,7 +12,7 @@
 // order is deliberate (the SDK reads the outgoing track's end position synchronously on
 // `completed`), and these fixtures must keep it.
 
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, jest, mock, test } from "bun:test";
 import { bootStubs } from "./helpers/boot-stubs";
 
 type Dispatch = { type: string; payload?: unknown };
@@ -34,7 +34,19 @@ await import("../src/index");
 const push = (events: unknown[]) => (window as any).__TIDALUNAR_PLAYER_PUSH__(events);
 const times = () => dispatched.filter((d) => d.type === "playbackControls/TIME_UPDATE");
 
+// The fake clock drives `performance.now()`, which the throttle reads; a window a test arms stays
+// armed until the test moves the clock, instead of lapsing with the wall time it takes to run.
+beforeAll(() => {
+	jest.useFakeTimers();
+});
+
+afterAll(() => {
+	jest.useRealTimers();
+});
+
 beforeEach(() => {
+	// The window an earlier test armed is over, whichever order the tests run in.
+	jest.advanceTimersByTime(250);
 	dispatched = [];
 	(window as any).NativePlayerComponent = { trigger: () => {} };
 });
