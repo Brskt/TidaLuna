@@ -81,8 +81,8 @@ fn push_segment(
 /// and the closer template omits. Shaka Player, ExoPlayer and GPAC all cascade this way,
 /// Period level included.
 fn inherited<'a, T>(
-    levels: [Option<&'a dash_mpd::SegmentTemplate>; 3],
-    pick: impl Fn(&'a dash_mpd::SegmentTemplate) -> Option<T>,
+    levels: [Option<&'a dash_mpd_core::SegmentTemplate>; 3],
+    pick: impl Fn(&'a dash_mpd_core::SegmentTemplate) -> Option<T>,
 ) -> Option<T> {
     levels.into_iter().flatten().find_map(pick)
 }
@@ -109,7 +109,7 @@ fn segment_number(start_number: u64, offset: u64) -> Result<u64> {
 /// enumeration through the Periods that follow, and we only ever read the first.
 ///
 /// Absent both, the count is not computable from the manifest and the caller fails closed.
-fn period_duration_secs(mpd: &dash_mpd::MPD, period: &dash_mpd::Period) -> Option<f64> {
+fn period_duration_secs(mpd: &dash_mpd_core::MPD, period: &dash_mpd_core::Period) -> Option<f64> {
     period
         .duration
         .as_ref()
@@ -164,7 +164,8 @@ pub fn parse_dash_mpd(xml: &str) -> Result<DashManifest> {
     // TIDAL uses group="main" (string) which violates the DASH spec (expects integer).
     // Remove non-standard attributes before parsing.
     let cleaned = xml.replace(r#" group="main""#, "");
-    let mpd = dash_mpd::parse(&cleaned).map_err(|e| anyhow::anyhow!("Failed to parse MPD: {e}"))?;
+    let mpd =
+        dash_mpd_core::parse(&cleaned).map_err(|e| anyhow::anyhow!("Failed to parse MPD: {e}"))?;
 
     let period = mpd
         .periods
