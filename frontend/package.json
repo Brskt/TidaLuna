@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "bun esbuild.config.ts",
-    "test": "bun test tests/"
+    "test": "bun test --isolate tests/"
   },
   "devDependencies": {
     "@emotion/react": "^11.14.0",
