@@ -4,7 +4,7 @@
 // cast's `completed` for this page's track and advanced the local queue over the cast.
 
 import { beforeEach, expect, mock, test } from "bun:test";
-import { bootStubs } from "./helpers/boot-stubs";
+import { bootStubs, initSettled } from "./helpers/boot-stubs";
 import type { SentIpc } from "./setup";
 
 type Dispatch = { type: string; payload?: unknown };
@@ -42,6 +42,7 @@ mock.module("../plugins/lib/src/redux/store", storeStub);
 bootStubs();
 
 await import("../src/index");
+await initSettled();
 const { setSelfLoad, proxyReset } = await import("../src/audio-proxy");
 
 const push = (events: unknown[]) => (window as any).__TIDALUNAR_PLAYER_PUSH__(events);

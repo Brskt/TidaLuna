@@ -5,7 +5,7 @@
 // retries of a request it could not get answered put nothing, and are not an ask.
 
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { bootStubs } from "./helpers/boot-stubs";
+import { bootStubs, initSettled } from "./helpers/boot-stubs";
 
 type Dispatch = { type: string; payload?: unknown };
 
@@ -27,8 +27,7 @@ bootStubs();
 
 await import("../src/index");
 const { forgetRefusal, refusePlayback } = await import("../src/refuse-playback");
-// `init` registers the interceptors from a `setTimeout(0)`.
-await new Promise((r) => setTimeout(r, 50));
+await initSettled();
 
 let replays = 0;
 

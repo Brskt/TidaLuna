@@ -15,12 +15,23 @@ export type SentIpc = { channel: string; args: unknown[] };
 // Every `sendIpc` the code under test issued, in order.
 const sent: SentIpc[] = [];
 
+// Resolvers of `__LUNAR_TEST_IPC_SENT__`, by the channel each waits for.
+const waiting = new Map<string, Array<() => void>>();
+
 (window as any).cefQuery = ({ request }: { request: string }) => {
 	const { channel, args } = JSON.parse(request);
 	sent.push({ channel, args });
+	for (const resolve of waiting.get(channel) ?? []) resolve();
+	waiting.delete(channel);
 };
 
 (globalThis as any).__LUNAR_TEST_IPC__ = sent;
+
+// Settles once `channel` has been sent: at once if it already was, else at the call that sends it.
+(globalThis as any).__LUNAR_TEST_IPC_SENT__ = (channel: string): Promise<void> =>
+	sent.some((s) => s.channel === channel)
+		? Promise.resolve()
+		: new Promise((resolve) => waiting.set(channel, [...(waiting.get(channel) ?? []), resolve]));
 
 // Puts the globals back after each test. The tests of a file share its global, and bun never calls
 // a cleanup returned from `beforeEach`: a flag the code under test leaves on `window` is what the

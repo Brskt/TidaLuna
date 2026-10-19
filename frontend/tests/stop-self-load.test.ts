@@ -5,7 +5,7 @@
 // kept playing under a stopped transport: after a refusal, and after a queue clear.
 
 import { beforeEach, expect, mock, test } from "bun:test";
-import { bootStubs } from "./helpers/boot-stubs";
+import { bootStubs, initSettled } from "./helpers/boot-stubs";
 import type { SentIpc } from "./setup";
 
 type Dispatch = { type: string; payload?: unknown };
@@ -29,8 +29,7 @@ bootStubs();
 
 await import("../src/index");
 const { setSelfLoad } = await import("../src/audio-proxy");
-// `init` registers the interceptors from a `setTimeout(0)`.
-await new Promise((r) => setTimeout(r, 50));
+await initSettled();
 
 const sent = (globalThis as any).__LUNAR_TEST_IPC__ as SentIpc[];
 const stopsSent = () => sent.filter((s) => s.channel === "player.stop").length;
