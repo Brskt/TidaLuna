@@ -31,6 +31,9 @@ const src = fs.readFileSync(HOST, "utf8");
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "luna-host-probe-")));
 const dataDir = path.join(scratch, "data");
 fs.mkdirSync(dataDir);
+// What the real native call answers: on Windows it expands an 8.3 component the JS
+// realpath above keeps (a TEMP under RUNNER~1 comes back under runneradmin).
+const dataDirNative = fs.realpathSync.native(dataDir);
 fs.writeFileSync(path.join(dataDir, "inside.txt"), "x");
 
 const outsideFile = path.join(scratch, "outside.txt");
@@ -202,7 +205,7 @@ const ASSERTIONS = `
     t("realpathSync honours its options argument",
         Buffer.isBuffer(netTrusted.realpathSync(F.dataDir, "buffer")), true);
     t("realpathSync.native is present", typeof netTrusted.realpathSync.native, "function");
-    t("native answers inside the sandbox", netTrusted.realpathSync.native(F.dataDir), F.dataDir);
+    t("native answers inside the sandbox", netTrusted.realpathSync.native(F.dataDir), F.dataDirNative);
     threw("native obeys the same gate", function() { fsOnly.realpathSync.native(TMP); }, "realpath denied");
 
     // Everything else in this file calls internal helpers directly. A plugin arrives through
@@ -629,7 +632,7 @@ function run() {
         src + "\n" + ASSERTIONS,
     );
     fn(require, { exports: {} }, {}, path.dirname(HOST), HOST, {
-        scratch, dataDir, outsideFile, runtimeDir, runtimePlain,
+        scratch, dataDir, dataDirNative, outsideFile, runtimeDir, runtimePlain,
         insideSock, outsideSock, bridgedSock, bridgedToFile,
         aliasReal, aliasLink, onUnix,
     });
