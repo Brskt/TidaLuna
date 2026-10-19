@@ -29,8 +29,6 @@ function proxied(id: string) {
 
 beforeEach(() => {
 	sent.length = 0;
-	// Re-asserted per test: `mock.module` is process-global.
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 });
 
 test("a volume shaka applies to a self-loaded track reaches Rust as the store's level", () => {

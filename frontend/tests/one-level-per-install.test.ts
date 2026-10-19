@@ -10,7 +10,7 @@
 // the store's level when it is built, JDe reads the saved level and later puts it, and the
 // page's catch-up leaves and later lands.
 
-import { beforeEach, expect, mock, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { fragmentSource, runFragment } from "./helpers/early-runtime";
 import { INITIAL, playbackControls, type Saved } from "./helpers/playback-controls";
 import { FakeRust } from "./helpers/rust-level";
@@ -30,10 +30,6 @@ const tidal = playbackControls((volume) => {
 const { controls, store } = tidal;
 const storeStub = () => ({ store });
 mock.module("../plugins/lib/src/redux/store", storeStub);
-
-beforeEach(() => {
-	mock.module("../plugins/lib/src/redux/store", storeStub);
-});
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
 let rust = new FakeRust();

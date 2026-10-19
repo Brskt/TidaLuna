@@ -6,9 +6,6 @@
 //
 // Kind: the MEDIA_PRODUCT_TRANSITION payload a plugin sees is the one this closure builds, not
 // TIDAL's, and a video's fields are right only if it writes them.
-//
-// All three live here because `mock.module` is process-global in bun: a second file mocking
-// `render/src/modules` would strip `defineHostModule` from whatever runs after it.
 
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { SentIpc } from "./setup";
@@ -76,8 +73,8 @@ beforeEach(() => {
 	(window as any).__LUNAR_CURRENT_PRODUCT_ID__ = undefined;
 });
 
-// Reset even when an assertion failed: the seeded context and the self-load flag (a module global
-// the other files share) must not reach the next test.
+// Reset even when an assertion failed: the seeded context and the self-load flag must not reach
+// the next test.
 afterEach(() => {
 	state.playbackControls = { playbackContext: {}, mediaProduct: {} };
 	listeners.clear();

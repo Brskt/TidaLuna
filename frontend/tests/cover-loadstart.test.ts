@@ -6,9 +6,7 @@
 // never emits `loadstart` itself, on `load()`, on a `src` or on a `<source>` going in; each test
 // dispatches the event by hand, the way the engine does: not bubbling.
 //
-// Its own file because importing `audio-proxy` installs its hooks on `HTMLMediaElement` and the
-// document for the whole process, which `cover-canvas.test.ts` has no use for. Every test names a
-// cover of its own: `coverCache` in the module outlives the test.
+// Every test names a cover of its own: `coverCache` in the module outlives the test.
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
 

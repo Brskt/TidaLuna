@@ -66,7 +66,6 @@ beforeEach(() => {
 	state = { content: { mediaItems: {} } };
 	listeners = [];
 	unsubscribes = 0;
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 });
 
 test("a value written by someone we cannot hear still ends the wait", () => {

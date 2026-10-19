@@ -4,7 +4,7 @@
 // Rust only for a session it loaded itself. A track this page loaded (`player.load`, `player.load_dash`)
 // kept playing under a stopped transport: after a refusal, and after a queue clear.
 
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { beforeEach, expect, mock, test } from "bun:test";
 import { bootStubs } from "./helpers/boot-stubs";
 import type { SentIpc } from "./setup";
 
@@ -41,9 +41,6 @@ const runRegistry = (registry: Record<string, Set<Function>>) => {
 beforeEach(() => {
 	sent.length = 0;
 });
-
-// The flag is a module global the other files share.
-afterEach(() => setSelfLoad(false));
 
 test("a dispatched STOP stops the track this page loaded", () => {
 	setSelfLoad(true);

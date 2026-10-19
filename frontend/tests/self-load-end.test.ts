@@ -5,7 +5,7 @@
 // the repeat modes, the autoplay mix after the last track); this page decides nothing about the
 // queue, in any repeat mode.
 
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { beforeEach, expect, mock, test } from "bun:test";
 import { bootStubs } from "./helpers/boot-stubs";
 
 type Dispatch = { type: string; payload?: unknown };
@@ -53,23 +53,14 @@ const elements = () => {
 // The queue and playback moves only: `completed` also dispatches the playback state.
 const moves = () => dispatched.filter((d) => d.type.startsWith("playQueue/") || d.type.startsWith("player/"));
 
-let realPlayback: unknown;
-
 beforeEach(() => {
 	dispatched = [];
 	repeatMode = 0;
 	queueIndex = 0;
 	proxyReset();
 	(window as any).NativePlayerComponent = { trigger: () => {} };
-	realPlayback = (window as any).nativeInterface.playback;
 	(window as any).nativeInterface.playback = { setCurrentMediaItem: () => {}, replaySelfLoad: () => {} };
 	setSelfLoad(true);
-});
-
-afterEach(() => {
-	setSelfLoad(false);
-	proxyReset();
-	(window as any).nativeInterface.playback = realPlayback;
 });
 
 test("the end is told to the element that plays, and no queue move is made, in any repeat mode", async () => {

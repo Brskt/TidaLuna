@@ -5,9 +5,8 @@
 // The store runs TIDAL's own `playbackControls` rules (`helpers/playback-controls.ts`).
 // `sdkApplies` stands for Hwe reaching Rust (basePlayer `updateVolumeLevel` needs a stream info).
 
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import { type Controls, playbackControls } from "./helpers/playback-controls";
-import { standInDelegate } from "./helpers/stand-in-delegate";
 import type { SentIpc } from "./setup";
 
 let persisted: Controls | null = null;
@@ -37,34 +36,19 @@ const rustMute = (mute: boolean, volume: number, unmuteVolume: number) =>
 const rustVolume = (volume: number) =>
 	emit("connect.receiver.volume_changed", rustReport(volume, volume));
 
-// The event bus is window state every test file shares: a file that loads `src/index.ts` leaves
-// relays bound to its own fake store, and the first relay to mirror a report is the one that
-// takes it in. These tests start from their own relays alone.
-const ipcListeners = (window as any).__LUNAR_IPC_LISTENERS__;
-delete ipcListeners["connect.receiver.volume_changed"];
-delete ipcListeners["connect.receiver.mute_changed"];
-
 // Registers the listeners once; the bootstrap snapshot it then awaits never answers here.
 void setupConnectEventListeners(store);
 
 // The forwarder's last level is module state, as Rust's is: every test starts from a store and a
 // Rust that agree on a level.
 function start(volume: number, { sdk }: { sdk: boolean }) {
-	// The level is set here without a notification, which a follower subscribed earlier would take
-	// for a change: a file that loads `src/index.ts` can finish its init while this one runs and
-	// leave its follower on this store. Each test starts from the subscribers it installs.
+	// `reset` sets the level without a notification and drops the subscribers an earlier test left.
 	tidal.reset({ volume, volumeUnmute: volume, muted: false });
 	persisted = null;
 	sdkApplies = sdk;
 	adoptRustVolume(volume);
 	sent.length = 0;
 }
-
-beforeEach(() => {
-	mock.module("../plugins/lib/src/redux/store", storeStub);
-});
-// `cast()` announces through whatever delegate is on `window`.
-standInDelegate();
 
 test("a remote mute shows muted, keeps Rust's level to restore, and persists both", () => {
 	start(70, { sdk: false });

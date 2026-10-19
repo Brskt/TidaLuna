@@ -22,9 +22,9 @@ const sent: SentIpc[] = [];
 
 (globalThis as any).__LUNAR_TEST_IPC__ = sent;
 
-// Puts the shared globals back after each test. Bun runs every file of a run in one process and
-// never calls a cleanup returned from `beforeEach`: a stub a test leaves behind is what the code
-// of every file after it runs against. A property is restored to the descriptor found in
+// Puts the globals back after each test. The tests of a file share its global, and bun never calls
+// a cleanup returned from `beforeEach`: a flag the code under test leaves on `window` is what the
+// next test of the file runs against. A property is restored to the descriptor found in
 // `beforeEach` and one added since is deleted; `Reflect` reports instead of throwing on one the
 // code under test pinned as non-configurable (`window.luna`), which no test could undo anyway.
 const watched: object[] = [globalThis, console, navigator];

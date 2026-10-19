@@ -1,5 +1,5 @@
-// Tests the restore `setup.ts` runs after every test. The two tests share one process: the second
-// checks what the first left behind.
+// Tests the restore `setup.ts` runs after every test. The two tests share one file's global: the
+// second checks what the first left behind.
 
 import { expect, test } from "bun:test";
 

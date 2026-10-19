@@ -56,7 +56,6 @@ beforeEach(() => {
 	reported = [];
 	warned = 0;
 	sent.length = 0;
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 	(window as any).NativePlayerComponent = { trigger: () => {} };
 	console.error = (...args: unknown[]) => void reported.push(args);
 	console.warn = () => void warned++;

@@ -5,7 +5,6 @@
 // load raises the "controlled via another client" banner.
 
 import { expect, mock, test } from "bun:test";
-import { standInDelegate } from "./helpers/stand-in-delegate";
 
 const track = {
 	id: 77,
@@ -26,8 +25,6 @@ mock.module("../src/ipc", () => ({
 }));
 
 const { handleReceiverMediaChanged, followCastQueue } = await import("../src/connect/middleware");
-
-standInDelegate();
 
 test("the receiver's track reaches the delegate as one already playing", async () => {
 	const calls: unknown[][] = [];

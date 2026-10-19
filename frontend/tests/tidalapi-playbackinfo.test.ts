@@ -1,5 +1,5 @@
 // Tests `TidalApi.playbackInfo` (`plugins/lib/src/classes/TidalApi/index.ts`); the self-load a
-// replay sends from it is tested in `self-load-fresh-url.isolated.ts`.
+// replay sends from it is tested in `self-load-fresh-url.test.ts`.
 //
 // A playbackinfo answer carries SIGNED stream urls that stop working. TIDAL's own player asks for a
 // fresh answer on every load; this library asked once per (track, quality) and handed that

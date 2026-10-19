@@ -40,7 +40,6 @@ beforeEach(() => {
 	throwOn = null;
 	reducerThrows = false;
 	reported = [];
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 	(window as any).NativePlayerComponent = {
 		trigger: (name: string, target: unknown) => {
 			triggered.push({ name, target });

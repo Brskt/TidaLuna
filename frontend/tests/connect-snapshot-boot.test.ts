@@ -4,7 +4,7 @@
 // store. The store the script holds is the lib's proxy, which throws on its first use until the
 // store is published, and the snapshot was dropped whole with nothing to say so.
 
-import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import { beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { StoreNotPublishedError } from "../plugins/lib/src/redux/storeNotPublished";
 
 type Action = { type: string; payload?: any };
@@ -40,10 +40,6 @@ const store = new Proxy({} as never, {
 	},
 });
 
-// `setupConnectEventListeners` binds relays on the page-wide bus; later files must not find them.
-const bus = (window as any).__LUNAR_IPC_LISTENERS__;
-let busBefore: Record<string, unknown[]>;
-
 const snapshot = (devices: unknown[]) => ({
 	devices,
 	session: { sessionId: "s1", device: { id: "d1" } },
@@ -59,14 +55,6 @@ beforeEach(() => {
 	failWith = null;
 	asked = 0;
 	answers = null;
-	busBefore = Object.fromEntries(Object.entries(bus).map(([k, v]) => [k, [...(v as unknown[])]]));
-});
-afterEach(() => {
-	answers = null;
-	for (const k of Object.keys(bus)) {
-		if (busBefore[k]) bus[k] = busBefore[k];
-		else delete bus[k];
-	}
 });
 
 test("the snapshot is read once the store is published, and applied in order", async () => {

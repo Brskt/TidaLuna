@@ -3,7 +3,7 @@
 // Regression: the self-load flag names the last load THIS page issued, and a stale one took the
 // cast's `completed` for this page's track and advanced the local queue over the cast.
 
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { beforeEach, expect, mock, test } from "bun:test";
 import { bootStubs } from "./helpers/boot-stubs";
 import type { SentIpc } from "./setup";
 
@@ -49,16 +49,12 @@ const push = (events: unknown[]) => (window as any).__TIDALUNAR_PLAYER_PUSH__(ev
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const types = () => dispatched.map((d) => d.type);
 
-// The delegate every test replaces, put back after it for the files that run next.
-let realPlayback: unknown;
-
 beforeEach(() => {
 	dispatched = [];
 	triggered = [];
 	announced = [];
 	queueIndex = 0;
 	entryContext = listContext;
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 	(window as any).NativePlayerComponent = {
 		trigger: (name: string, target: unknown) => triggered.push({ name, target }),
 		refuseLoad: (id: unknown) => {
@@ -66,18 +62,11 @@ beforeEach(() => {
 			return { kind: "pick" };
 		},
 	};
-	realPlayback = (window as any).nativeInterface.playback;
 	(window as any).nativeInterface.playback = {
 		setCurrentMediaItem: (item: unknown) => announced.push(item),
 	};
 	// The last load this page issued was a self-load, and nothing a cast does resets it.
 	setSelfLoad(true);
-});
-
-// The flag is a module global the other files share.
-afterEach(() => {
-	setSelfLoad(false);
-	(window as any).nativeInterface.playback = realPlayback;
 });
 
 test("a cast's track ending does not move this page's queue", async () => {

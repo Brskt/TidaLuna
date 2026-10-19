@@ -36,7 +36,6 @@ let heardBySdk: unknown[] = [];
 beforeEach(() => {
 	dispatched = [];
 	heardBySdk = [];
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 	const component = createNativePlayerComponent();
 	(window as any).NativePlayerComponent = component;
 	component.Player().addEventListener("mediastate", (e: { target: unknown }) => heardBySdk.push(e.target));

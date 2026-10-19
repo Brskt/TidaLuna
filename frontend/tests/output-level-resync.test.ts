@@ -10,7 +10,7 @@
 // nativePlayer chunk), which our delegate's `setVolume` hands to `applyVolume`; a cold start
 // restoring a paused track builds one at boot.
 
-import { beforeEach, expect, mock, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { fragmentSource, runFragment } from "./helpers/early-runtime";
 import { StoreNotPublishedError } from "../plugins/lib/src/redux/storeNotPublished";
 import { INITIAL, playbackControls, type Saved } from "./helpers/playback-controls";
@@ -85,10 +85,6 @@ function newPage(savedLevel: Saved, { sdk = false } = {}) {
 	adoptRustVolume(-1);
 	sent.length = 0;
 }
-
-beforeEach(() => {
-	mock.module("../plugins/lib/src/redux/store", storeStub);
-});
 
 const SAVED_70: Saved = { mute: false, volume: 70, volumeUnmute: 70 };
 

@@ -55,8 +55,6 @@ const play = () => {
 };
 
 let replays = 0;
-let realPlayback: any;
-let realReplay: unknown;
 
 beforeEach(() => {
 	sent.length = 0;
@@ -64,16 +62,11 @@ beforeEach(() => {
 	productId = "";
 	prefilled = false;
 	replays = 0;
-	realPlayback = (window as any).nativeInterface.playback;
-	realReplay = realPlayback.replaySelfLoad;
-	realPlayback.replaySelfLoad = () => void replays++;
+	(window as any).nativeInterface.playback.replaySelfLoad = () => void replays++;
 	setSelfLoad(true);
 });
 
-// The flag is a module global the other files share, and the delegate is the real controller.
 afterEach(() => {
-	setSelfLoad(false);
-	realPlayback.replaySelfLoad = realReplay;
 	forgetRefusal("");
 	watchers.clear();
 });
@@ -212,8 +205,9 @@ test("the refused product announced again is the retry's own announcement and ke
 test("a load Rust failed for the current track is a refusal the Play asks again", () => {
 	// `mediaerror` naming a track this page loaded: the bridge refuses it, and Rust still holds the
 	// previous track, which the refusal's stop paused.
-	const loadOwner = realPlayback.loadOwner;
-	realPlayback.loadOwner = () => "current";
+	const playback = (window as any).nativeInterface.playback;
+	const loadOwner = playback.loadOwner;
+	playback.loadOwner = () => "current";
 	try {
 		productId = "120002099";
 		push([{ t: "mediaerror", v: { error: "HTTP 403 Forbidden", errorCode: "no_such_file", productId } }]);
@@ -225,7 +219,7 @@ test("a load Rust failed for the current track is a refusal the Play asks again"
 		expect(replays).toBe(1);
 		expect(playsSent()).toBe(0);
 	} finally {
-		realPlayback.loadOwner = loadOwner;
+		playback.loadOwner = loadOwner;
 	}
 });
 

@@ -7,7 +7,6 @@
 
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { StoreNotPublishedError } from "../plugins/lib/src/redux/storeNotPublished";
-import { standInDelegate } from "./helpers/stand-in-delegate";
 
 const track = { id: 77, title: "Cast track", duration: 200, album: { cover: "ab-cd", title: "Album" }, artists: [{ name: "Artist" }] };
 
@@ -23,8 +22,6 @@ mock.module("../src/ipc", () => ({
 }));
 
 const { handleReceiverMediaChanged } = await import("../src/connect/middleware");
-
-standInDelegate();
 
 type Action = { type: string; payload?: any };
 

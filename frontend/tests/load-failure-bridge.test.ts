@@ -5,7 +5,7 @@
 // event reaches no listener while TIDAL's native player is unbuilt. A failure of a track the SDK
 // loaded stays TIDAL's, with the payload it always had.
 
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { beforeEach, expect, mock, test } from "bun:test";
 import { bootStubs } from "./helpers/boot-stubs";
 
 type Dispatch = { type: string; payload?: unknown };
@@ -30,19 +30,14 @@ await import("../src/index");
 const push = (events: unknown[]) => (window as any).__TIDALUNAR_PLAYER_PUSH__(events);
 const types = () => dispatched.map((d) => d.type);
 
-// The delegate every test replaces, put back after it for the files that run next.
-let realPlayback: unknown;
-
 beforeEach(() => {
 	dispatched = [];
 	triggered = [];
 	asked = [];
 	verdict = "foreign";
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 	(window as any).NativePlayerComponent = {
 		trigger: (name: string, target: unknown) => triggered.push({ name, target }),
 	};
-	realPlayback = (window as any).nativeInterface.playback;
 	(window as any).nativeInterface.playback = {
 		setCurrentMediaItem: () => {},
 		loadOwner: (productId: unknown) => {
@@ -50,10 +45,6 @@ beforeEach(() => {
 			return verdict;
 		},
 	};
-});
-
-afterEach(() => {
-	(window as any).nativeInterface.playback = realPlayback;
 });
 
 const failure = { t: "mediaerror", v: { error: "HTTP 403 Forbidden", errorCode: "no_such_file", productId: "120002099" } };

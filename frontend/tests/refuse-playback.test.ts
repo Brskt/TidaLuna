@@ -54,7 +54,6 @@ beforeEach(() => {
 	storeFault = null;
 	dispatchFault = null;
 	triggerFault = null;
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 	(window as any).NativePlayerComponent = {
 		trigger: (name: string, target: unknown) => {
 			triggered.push({ name, target });

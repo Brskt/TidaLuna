@@ -36,9 +36,6 @@ const times = () => dispatched.filter((d) => d.type === "playbackControls/TIME_U
 
 beforeEach(() => {
 	dispatched = [];
-	// Re-asserted per test: `mock.module` is process-global and a sibling test file
-	// registers this same path with its own dispatch sink.
-	mock.module("../plugins/lib/src/redux/store", storeStub);
 	(window as any).NativePlayerComponent = { trigger: () => {} };
 });
 
