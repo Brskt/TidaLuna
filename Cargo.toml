@@ -10,20 +10,20 @@ getrandom = "0.4.3"
 reqwest = { version = "0.13.5", default-features = false }
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.11.0"
-zip = { version = "8.6.0", default-features = false, features = [
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+zip = { version = "9.0.5", default-features = false, features = [
   "deflate-flate2-zlib-rs",
 ] }
 flate2 = "1.1.10"
 bzip2 = "0.6.1"
 tar = "0.4.46"
-openh264 = { version = "0.9.8", default-features = false, features = [
+openh264 = { version = "0.9.9", default-features = false, features = [
   "libloading",
 ] }
 # Exact: CalVer, and a minor release may carry a [CHANGE] (breaking) entry; 2026.5.0 adds the
 # bitstream::h264 API cover.rs uses.
-shiguredo_mp4 = "=2026.5.0"
+shiguredo_mp4 = "2026.5.0"
 
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
 [workspace.metadata.typos.default]
@@ -69,17 +69,17 @@ strip = true
 aes = "0.9.3"
 aes-kw = "0.3.1"
 anyhow = { workspace = true }
-arboard = { version = "3.6.1", default-features = false }
+arboard = { version = "3.7.0", default-features = false }
 audioadapter-buffers = "5.2.0"
 base16ct = { workspace = true }
 base64 = { workspace = true }
 cbc = "0.2.1"
-cef = { version = "152.3.0", features = ["build-util"] }
+cef = { version = "154.5.0", features = ["build-util"] }
 # Already in the graph through `cef`, at this exact version; direct only so that build.rs
 # receives `DEP_CEF_DLL_WRAPPER_CEF_DIR`. Cargo passes a `links` crate's metadata to DIRECT
 # dependents alone, and that variable is the only supported way to learn where the macOS
 # framework was unpacked: a path that carries a build-script hash and changes on rebuild.
-cef-dll-sys = "152.3.0"
+cef-dll-sys = "154.5.0"
 # Pinned to the PR #1183 merge (WASAPI/CoreAudio auto-reroute on default-device
 # change + unified Error/ErrorKind). Drop back to a crates.io release once cpal 0.18 ships.
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "c6aa4592ef07968ab6b431e62acab79c72869716", version = "0.18.0" }
@@ -90,7 +90,7 @@ fnv = "1.0.7"
 futures-util = "0.3.34"
 getrandom = { workspace = true }
 oauth2 = { version = "5.0.0", default-features = false }
-oxc = { version = "0.150.0", features = ["semantic", "transformer", "codegen"] }
+oxc = { version = "0.154.0", features = ["semantic", "transformer", "codegen"] }
 pbkdf2 = "0.13.0"
 # Already in the graph through `url`; named here to decode a path segment before
 # it is matched against the deep-link allowlist.
@@ -111,10 +111,10 @@ reqwest = { workspace = true, features = [
   "deflate",
 ] }
 rtrb = "0.4.0"
-rubato = "5.0.0"
+rubato = "5.0.1"
 rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
 
-rusty-leveldb = "4.0.1"
+rusty-leveldb = "4.0.2"
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -126,7 +126,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = [
 ] }
 tempfile = "3.27.0"
 time = { version = "0.3.55", features = ["local-offset"] }
-tokio = { version = "1.53.1", features = [
+tokio = { version = "1.53.3", features = [
   "rt-multi-thread",
   "net",
   "sync",
@@ -135,7 +135,7 @@ tokio = { version = "1.53.1", features = [
   "process",
   "io-util",
 ] }
-tokio-util = { version = "0.7.19", features = ["rt"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
 tracing = "0.1.44"
 url = "2.5.8"
 bzip2 = { workspace = true }
@@ -143,29 +143,29 @@ zip = { workspace = true }
 openh264 = { workspace = true }
 # Direct only for the API trait codec::load_api calls, which openh264 does not re-export;
 # resolves to the crate openh264 pulls in, whose hashes.txt TARGETS copies.
-openh264-sys2 = { version = "0.9.8", default-features = false, features = [
+openh264-sys2 = { version = "0.9.9", default-features = false, features = [
   "libloading",
 ] }
 shiguredo_mp4 = { workspace = true }
 
 # TIDAL Connect
-arc-swap = "1.9.2"
+arc-swap = "1.9.3"
 async-trait = "0.1.92"
 gethostname = "1.1.0"
 md-5 = "0.11.0"
-mdns-sd = "0.21.3"
-rustls = "0.23.45"
+mdns-sd = "0.21.5"
+rustls = "0.23.46"
 rustls-pemfile = "2.2.0"
-tokio-rustls = "0.26.5"
+tokio-rustls = "0.26.6"
 tokio-tungstenite = { version = "0.30.0", features = [
   "rustls-tls-native-roots",
 ] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-tray-icon = { version = "0.25.0", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-wasapi = "0.24.0"
+wasapi = "0.26.0"
 windows = { version = "0.62.2", features = [
   "Win32_Media_Audio",
   "Win32_Security_Cryptography",
@@ -194,7 +194,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSAlert",
   "NSApplication",
@@ -221,7 +221,7 @@ dbus = "0.9.12"
 flate2 = { workspace = true }
 # Already resolved through the graph; named here for the `SCM_CREDENTIALS` call
 # that tells who sent a datagram, which `std` still gates behind nightly.
-libc = "0.2.189"
+libc = "0.2.191"
 tar = { workspace = true }
 tray-item = { version = "0.10.0", default-features = false, features = [
   "ksni",
@@ -232,4 +232,4 @@ winres = "0.1.12"
 
 [dev-dependencies]
 # Paused virtual time for the codec supervisor's day-long scenarios.
-tokio = { version = "1.53.1", features = ["test-util"] }
+tokio = { version = "1.53.3", features = ["test-util"] }

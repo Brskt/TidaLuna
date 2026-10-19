@@ -969,7 +969,7 @@ fn extract_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("zip entry")?;
-        let name = entry.name().to_string();
+        let name = entry.name().context("zip entry name")?.into_owned();
 
         if !is_safe_relative_path(&name, dest_dir) {
             anyhow::bail!("zip entry has unsafe path: {name}");
