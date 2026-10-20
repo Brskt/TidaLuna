@@ -32,7 +32,7 @@
 }:
 
 let
-  version = "0.0.18-alpha";
+  version = "0.0.19-alpha";
 
   # Maps each Nix system to its release-asset arch token and the tarball sha256.
   # VERSION BUMP: bump `version`, then `nix store prefetch-file <url>` per arch
@@ -40,11 +40,11 @@ let
   arches = {
     "x86_64-linux" = {
       arch = "amd64";
-      hash = "sha256-tjl0g6GhahK8TGge6xMN4vVsaoCyqvro1StS05CtMQg=";
+      hash = "sha256-WC8Z2W9Z0Hgxgup3Xu8YCRPb8JujENUlPrxMlIzF4cs=";
     };
     "aarch64-linux" = {
       arch = "arm64";
-      hash = "sha256-FnRrqr0OphL1xl29ICcugJWD3Xn2uxzMrSWAqNYTXHc=";
+      hash = "sha256-wFM6PlGzXsl80ZhpPU1m6bvWWnE4FecJjqR0O0iFiQY=";
     };
   };
 

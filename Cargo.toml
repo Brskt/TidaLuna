@@ -46,7 +46,7 @@ trun = "trun"               # ISO BMFF box name
 
 [package]
 name = "tidalunar"
-version = "0.0.18-alpha"
+version = "0.0.19-alpha"
 edition = "2024"
 description = "A native TIDAL client"
 authors = ["Inrixia"]
