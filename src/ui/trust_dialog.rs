@@ -8,7 +8,7 @@
 
 use tokio::sync::oneshot;
 
-use crate::ui::dialog::{FIT_TO_CONTENT, author_block, escape_html, show_dialog};
+use crate::ui::dialog::{FIT_TO_CONTENT, OnBlur, author_block, escape_html, show_dialog};
 
 const TRUST_SUBMIT: &str = "trust://submit/";
 const DIALOG_W: i32 = 620;
@@ -33,7 +33,13 @@ pub(crate) fn show_trust_dialog(
     manifest_json: &str,
 ) -> oneshot::Receiver<TrustReply> {
     let html = build_html(plugin_name, rows, manifest_json);
-    show_dialog(html, (DIALOG_W, DIALOG_H), parse_trust, TrustReply::Closed)
+    show_dialog(
+        html,
+        (DIALOG_W, DIALOG_H),
+        parse_trust,
+        TrustReply::Closed,
+        OnBlur::Stay,
+    )
 }
 
 /// The answers carried by a Validate navigation. The page is ours, but the count is not checked

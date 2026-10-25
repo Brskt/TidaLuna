@@ -162,7 +162,10 @@ pub(super) fn handle_plugin_install(msg: &IpcMessage, callback: IpcCallback) {
                 let json = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
                 ipc_callback_ok(&callback, &json);
             }
-            Err(e) => ipc_callback_err(&callback, 500, &e),
+            Err(InstallError::Refused(refusal)) => {
+                ipc_callback_err(&callback, refusal.code(), &refusal.to_string());
+            }
+            Err(InstallError::Failed(e)) => ipc_callback_err(&callback, 500, &e),
         }
     });
 }
@@ -770,10 +773,31 @@ async fn fetch_plugin_data(
     }
 }
 
-/// Install from `url` (`.json` manifest + `.mjs` code). Host is intentionally
-/// unrestricted (public stores + localhost dev both legit); SSRF to internal
-/// hosts is an accepted risk for this privileged, user-initiated install.
-async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, String> {
+static INSTALL_CONSENTS: std::sync::LazyLock<super::install_consent::Consents> =
+    std::sync::LazyLock::new(Default::default);
+
+enum InstallError {
+    Refused(super::install_consent::Refusal),
+    Failed(String),
+}
+
+impl From<super::install_consent::Refusal> for InstallError {
+    fn from(refusal: super::install_consent::Refusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
+impl From<String> for InstallError {
+    fn from(e: String) -> Self {
+        Self::Failed(e)
+    }
+}
+
+/// Install from `url` (`.json` manifest + `.mjs` code) from any host (stores, localhost dev). The
+/// fetch precedes the consent dialog and opens nothing `plugin.fetch_package` does not already. The
+/// sole writer of a plugin row: nothing is stored until the user confirms.
+async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, InstallError> {
+    let turn = INSTALL_CONSENTS.begin()?;
     let client = &*crate::state::HTTP_CLIENT;
     let (name, manifest, code, hash) = fetch_plugin_data(client, &url)
         .await
@@ -782,17 +806,23 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
 
     // Validate luna.type if present
     match crate::plugins::store::parse_luna_meta(&manifest) {
-        Err(msg) => return Err(msg),
+        Err(msg) => return Err(msg.into()),
         Ok(Some(ref meta)) => {
             if let Some(ref t) = meta.plugin_type
                 && t != "plugin"
                 && t != "library"
             {
-                return Err(format!("Invalid luna.type '{t}' in manifest"));
+                return Err(format!("Invalid luna.type '{t}' in manifest").into());
             }
         }
         Ok(None) => {} // no luna field - fine
     }
+
+    // The user approves the bytes in hand; the write below stores these, never a second fetch.
+    let answer = crate::ui::install_dialog::show_install_dialog(name.as_str(), &url, &manifest)
+        .await
+        .ok();
+    turn.settle(answer)?;
 
     // One actor trip: no trust write queued on the actor lands between the row and the reset.
     // Handed to the blocking pool: no tokio worker sits on the actor.

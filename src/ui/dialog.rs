@@ -1,14 +1,14 @@
-//! Shared native CEF Views dialog. Each dialog (trust / crash / message) is a
-//! separate top-level window isolated from the main renderer: its buttons
-//! navigate to a custom-scheme URL (`trust://`, `crash://`, `msgbox://`) which
+//! Shared native CEF Views dialog. Each dialog (trust / install / crash / message) is a
+//! separate top-level window isolated from the main renderer: its buttons navigate to a
+//! custom-scheme URL (`trust://`, `install://`, `crash://`, `msgbox://`) which
 //! the dialog's own RequestHandler intercepts and maps to a result. This module
 //! owns the shared skeleton (client, delegates, the UI-thread task, centering,
 //! the ALLOY runtime style, and the fire-the-oneshot-exactly-once logic); each
-//! caller supplies only its HTML, size, a `url -> Option<R>` parser, and the
-//! result to send if the window is closed without a button.
+//! caller supplies only its HTML, size, a `url -> Option<R>` parser, the
+//! result to send if the window is closed without a button, and what losing focus does.
 
 use cef::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -107,6 +107,21 @@ pub(crate) fn emphasis_html(s: &str) -> String {
         .collect()
 }
 
+/// What a dialog does when its window loses activation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum OnBlur {
+    Stay,
+    /// Answers `on_close`, as a close without a button would.
+    Close,
+}
+
+impl OnBlur {
+    /// Only a window that was active and lost it: one never activated has seen no user.
+    fn closes(self, was_active: bool, active: bool) -> bool {
+        self == OnBlur::Close && was_active && !active
+    }
+}
+
 const FIT_SCHEME: &str = "dialog-size://";
 
 /// Goes last in `<body>`, where the layout it reads is complete; the window then shrinks to the
@@ -202,6 +217,7 @@ pub(crate) fn author_block(manifest_json: &str) -> String {
         desc = desc_html
     )
 }
+
 /// Https only, whatever the resource type: the frame is a `data:` document, and Blink
 /// restricts mixed content only in an `https` one. The image gate judges images alone; this
 /// rule covers the other types a dialog could load.
@@ -220,6 +236,7 @@ struct DialogCore<R> {
     parse: fn(&str) -> Option<R>,
     /// Result sent when the window is closed without a button click.
     on_close: R,
+    on_blur: OnBlur,
     width: i32,
     height: i32,
     /// `height` until the page reports its own through `FIT_TO_CONTENT`.
@@ -241,12 +258,14 @@ pub(crate) fn show_dialog<R: Clone + Send + Sync + 'static>(
     size: (i32, i32),
     parse: fn(&str) -> Option<R>,
     on_close: R,
+    on_blur: OnBlur,
 ) -> oneshot::Receiver<R> {
     let (tx, rx) = oneshot::channel();
     let core = Arc::new(DialogCore {
         sender: Mutex::new(Some(tx)),
         parse,
         on_close,
+        on_blur,
         width: size.0,
         height: size.1,
         fitted_height: AtomicI32::new(size.1),
@@ -482,6 +501,7 @@ wrap_window_delegate! {
     struct DialogWindowDelegate<R: Clone + Send + Sync + 'static> {
         browser_view: RefCell<Option<BrowserView>>,
         core: Arc<DialogCore<R>>,
+        was_active: Cell<bool>,
     }
     impl ViewDelegate {
         fn preferred_size(&self, _view: Option<&mut View>) -> Size {
@@ -541,6 +561,21 @@ wrap_window_delegate! {
             // Closing via X without clicking a button -> the caller's default.
             self.core.send(self.core.on_close.clone());
         }
+        fn on_window_activation_changed(
+            &self,
+            window: Option<&mut Window>,
+            active: ::std::os::raw::c_int,
+        ) {
+            let active = active != 0;
+            crate::vprintln!("[DIALOG] activation changed: active={active}");
+            let was_active = self.was_active.replace(active);
+            if self.core.on_blur.closes(was_active, active)
+                && let Some(window) = window
+            {
+                self.core.send(self.core.on_close.clone());
+                window.close();
+            }
+        }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
             1
         }
@@ -591,7 +626,7 @@ wrap_task! {
             );
 
             let mut window_delegate =
-                DialogWindowDelegate::new(RefCell::new(browser_view), self.core.clone());
+                DialogWindowDelegate::new(RefCell::new(browser_view), self.core.clone(), Cell::new(false));
             window_create_top_level(Some(&mut window_delegate));
         }
     }

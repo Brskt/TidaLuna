@@ -11,6 +11,7 @@ pub(crate) mod dialog;
 pub(crate) mod early_runtime;
 pub(crate) mod file_dialog;
 pub(crate) mod flush;
+pub(crate) mod install_dialog;
 pub(crate) mod luna_modules;
 pub(crate) mod menu;
 pub(crate) mod message_dialog;

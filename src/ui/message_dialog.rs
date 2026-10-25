@@ -5,7 +5,7 @@
 
 use tokio::sync::oneshot;
 
-use crate::ui::dialog::{escape_html, show_dialog};
+use crate::ui::dialog::{OnBlur, escape_html, show_dialog};
 
 const MSGBOX_SCHEME: &str = "msgbox://";
 const DIALOG_W: i32 = 460;
@@ -23,7 +23,13 @@ pub(crate) fn show_message_dialog(
     cancel_id: i32,
 ) -> oneshot::Receiver<i32> {
     let html = build_html(title, message, detail, buttons, default_id);
-    show_dialog(html, (DIALOG_W, DIALOG_H), parse_msgbox, cancel_id)
+    show_dialog(
+        html,
+        (DIALOG_W, DIALOG_H),
+        parse_msgbox,
+        cancel_id,
+        OnBlur::Stay,
+    )
 }
 
 fn parse_msgbox(url: &str) -> Option<i32> {

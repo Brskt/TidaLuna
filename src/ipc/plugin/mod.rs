@@ -1,5 +1,6 @@
 mod download;
 mod inject;
+mod install_consent;
 mod jsrt;
 mod lib_native;
 mod native;
