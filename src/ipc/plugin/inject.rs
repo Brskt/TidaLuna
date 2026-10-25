@@ -168,6 +168,45 @@ pub(super) fn inject_plugin(
     Injected::Live { load_id }
 }
 
+/// Wait on the ready ack of `load_id`, and give the load up once it has gone idle: unload it,
+/// persist the disable, tell the page. One task per load: a load paused on its user's dialogs
+/// holds back no other plugin's.
+pub(super) async fn watch_ack(url: String, load_id: u64) {
+    use crate::plugins::manager::LoadWatch;
+    // The clock started at `mark_loading`, before the transpile and, at boot, before every later
+    // plugin of the pass; this first step restarts it.
+    with_state(|state| {
+        if let Some(progress) = state.plugin_manager.load_progress(&url, load_id) {
+            progress.step();
+        }
+    });
+    loop {
+        let watch = with_state(|state| {
+            state
+                .plugin_manager
+                .watch_load(&url, load_id, std::time::Instant::now())
+        })
+        .unwrap_or(LoadWatch::Ended);
+        match watch {
+            LoadWatch::Look(after) => tokio::time::sleep(after).await,
+            LoadWatch::Ended => return,
+            LoadWatch::Abandoned => break,
+        }
+    }
+    crate::vprintln!(
+        "[PLUGIN] Timeout: '{url}' never sent ready ack (gen={load_id}), marking failed"
+    );
+    eval_js(&crate::plugins::PluginManager::generate_unload_js(&url));
+    let url_disable = url.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::state::db().call_plugins(move |pc| {
+            let _ = crate::plugins::store::disable_failed(pc, &url_disable);
+        });
+    })
+    .await;
+    crate::app_state::emit_ipc_event_with_args("jsrt.plugin_failed", &[&url]);
+}
+
 /// Undo an injection that was dispatched and then found unwanted, for the callers whose own
 /// bookkeeping fails after this module has handed back `Live`.
 ///

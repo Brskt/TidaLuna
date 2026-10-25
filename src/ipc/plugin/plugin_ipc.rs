@@ -286,39 +286,8 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         }
     }
 
-    // 6. Timeout: if no ready ack within 10s, mark failed + notify frontend
-    {
-        let timeout_url = url.clone();
-        crate::state::rt_handle().spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            // Tested and removed under one borrow, for the same reason as the startup
-            // watchdog: the ready ack this waits for can arrive between a separate read and
-            // removal, and the cleanup below would then undo a load that had just succeeded.
-            let abandoned = with_state(|state| {
-                state
-                    .plugin_manager
-                    .abandon_if_still_loading(&timeout_url, load_id)
-            })
-            .unwrap_or(false);
-            if abandoned {
-                crate::vprintln!(
-                    "[PLUGIN] Timeout: '{}' never sent ready ack (gen={}) - marking failed",
-                    timeout_url,
-                    load_id
-                );
-                let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&timeout_url);
-                eval_js(&cleanup_js);
-                let url_disable = timeout_url.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    crate::state::db().call_plugins(move |pc| {
-                        let _ = crate::plugins::store::disable_failed(pc, &url_disable);
-                    });
-                })
-                .await;
-                crate::app_state::emit_ipc_event_with_args("jsrt.plugin_failed", &[&timeout_url]);
-            }
-        });
-    }
+    // 6. Timeout: no ready ack after ten idle seconds, mark failed + notify frontend
+    crate::state::rt_handle().spawn(super::inject::watch_ack(url, load_id));
 
     Ok(())
 }

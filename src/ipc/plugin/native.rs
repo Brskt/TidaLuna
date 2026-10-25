@@ -409,10 +409,16 @@ pub(super) fn handle_register_native(
     let live = crate::app_state::with_state(|state| {
         let declared = state.plugin_manager.name_for_url(&plugin_url)?.clone();
         let load_id = state.plugin_manager.current_load_id(&plugin_url)?;
-        Some((declared, load_id))
+        // Admission is also a step of a load still waiting on its ack, taken under the lock its
+        // watchdog looks under: either the step lands first, or the load is already gone.
+        let progress = state.plugin_manager.load_progress(&plugin_url, load_id);
+        if let Some(progress) = &progress {
+            progress.step();
+        }
+        Some((declared, load_id, progress))
     })
     .flatten();
-    let Some((declared_name, load_id)) = live else {
+    let Some((declared_name, load_id, progress)) = live else {
         crate::vprintln!(
             "[NATIVE] Rejected registerNative for '{}': plugin not active",
             name
@@ -550,6 +556,9 @@ pub(super) fn handle_register_native(
             .collect();
 
         let scanned = scanned_rows(runtime, &code).await;
+        if let Some(progress) = &progress {
+            progress.step();
+        }
         let mut attempt = RegisterAttempt {
             code,
             code_hash,
@@ -558,6 +567,7 @@ pub(super) fn handle_register_native(
             data_dir,
             plugin_url,
             load_id,
+            progress,
             reservation,
         };
         // One dialog for what the file needs, before it runs, not one per evaluation stopping at
@@ -608,6 +618,8 @@ async fn scanned_rows(runtime: &NativeRuntime, code: &str) -> Vec<&'static str> 
 /// `None` when the prompt ended unanswered (closed, abandoned, or never shown): nothing was
 /// recorded, and the next load asks again.
 async fn ask_trust(attempt: &mut RegisterAttempt, rows: &[&'static str]) -> Option<Arc<[bool]>> {
+    // Until the caller has dispatched what comes next, the ack watchdog waits on the user.
+    let _user = attempt.progress.as_ref().map(|progress| progress.wait());
     // Attempts of one load asking the same rows share a dialog. The dialog answers the prompt it
     // was opened for and no other; a prompt of another load is abandoned and re-opened.
     let entered = PENDING_TRUST.enter(
@@ -724,6 +736,8 @@ struct RegisterAttempt {
     /// admission happened before an unbounded wait.
     plugin_url: String,
     load_id: u64,
+    /// What the load's ack watchdog reads, while the load still waits on its ack.
+    progress: Option<std::sync::Arc<crate::plugins::manager::LoadProgress>>,
     /// Held from dispatch until the attempt settles, then released by `Drop`. Also the owner of the
     /// module name, read through `module()`.
     reservation: PendingRegistration,
@@ -768,7 +782,11 @@ fn do_register(
     };
 
     crate::state::rt_handle().spawn(async move {
-        match rx.await {
+        let answer = rx.await;
+        if let Some(progress) = &attempt.progress {
+            progress.step();
+        }
+        match answer {
             Ok(Ok(response)) => {
                 let exports = response
                     .get("exports")

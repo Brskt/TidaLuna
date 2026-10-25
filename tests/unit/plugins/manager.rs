@@ -164,6 +164,37 @@ fn a_watchdog_abandons_only_a_load_still_waiting_for_its_ack() {
     assert_eq!(mgr.current_load_id("q"), None);
 }
 
+/// The ack deadline slides with each step and stops while the user has a dialog open: a fixed ten
+/// seconds failed every plugin whose user took longer to read its trust dialogs.
+#[test]
+fn an_ack_deadline_slides_with_progress_and_waits_on_the_user() {
+    let start = Instant::now();
+    let idle = Duration::from_secs(10);
+    let progress = LoadProgress::new(start);
+    assert_eq!(
+        progress.next_look(start + Duration::from_secs(4), idle),
+        Some(Duration::from_secs(6)),
+        "a fresh load has the rest of its ten seconds"
+    );
+    assert_eq!(
+        progress.next_look(start + idle, idle),
+        None,
+        "ten idle seconds end it"
+    );
+
+    let user = progress.wait();
+    assert_eq!(
+        progress.next_look(start + Duration::from_secs(60), idle),
+        Some(idle),
+        "a dialog open for a minute is the user's time"
+    );
+    drop(user);
+    assert!(
+        progress.next_look(Instant::now(), idle).is_some(),
+        "the answer is a step"
+    );
+}
+
 /// Uninstall is the one removal that names no load: the DB row is gone, and a conditional
 /// removal that lost a race would strand an entry for a plugin nothing can reach again.
 #[test]

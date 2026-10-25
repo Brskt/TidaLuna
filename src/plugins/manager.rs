@@ -1,5 +1,74 @@
 use super::transpile_helper;
 use super::wrapper;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long a load may go without a step before its watchdog gives it up.
+pub(crate) const ACK_IDLE: Duration = Duration::from_secs(10);
+
+/// How far a load has come, for the watchdog waiting on its ready ack.
+///
+/// The deadline slides with each step and stops while a trust dialog is open: the user's time is
+/// not the plugin's.
+pub(crate) struct LoadProgress {
+    /// Trust dialogs the plugin is waiting on.
+    waiting: AtomicU32,
+    last_step: Mutex<Instant>,
+}
+
+impl LoadProgress {
+    fn new(now: Instant) -> Arc<Self> {
+        Arc::new(Self {
+            waiting: AtomicU32::new(0),
+            last_step: Mutex::new(now),
+        })
+    }
+
+    /// The load moved: the idle deadline starts again from now.
+    pub(crate) fn step(&self) {
+        *self.last_step.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
+
+    /// Held while the user answers a dialog; its end counts as a step.
+    pub(crate) fn wait(self: &Arc<Self>) -> UserWait {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        UserWait(self.clone())
+    }
+
+    /// How long the watchdog sleeps before it looks again, or `None` once the load has gone
+    /// `idle` without a step while waiting on no dialog.
+    fn next_look(&self, now: Instant, idle: Duration) -> Option<Duration> {
+        if self.waiting.load(Ordering::SeqCst) > 0 {
+            return Some(idle);
+        }
+        let last_step = *self.last_step.lock().unwrap_or_else(|e| e.into_inner());
+        idle.checked_sub(now.saturating_duration_since(last_step))
+            .filter(|left| !left.is_zero())
+    }
+}
+
+/// A dialog the load is waiting on, from [`LoadProgress::wait`].
+pub(crate) struct UserWait(Arc<LoadProgress>);
+
+impl Drop for UserWait {
+    fn drop(&mut self) {
+        // Stepped before the count drops: the other order shows the watchdog a load waiting on
+        // nothing with a deadline long past.
+        self.0.step();
+        self.0.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// What a watchdog found when it looked at its load.
+pub(crate) enum LoadWatch {
+    /// Still moving, or waiting on the user: look again after this long.
+    Look(Duration),
+    /// Gone idle; this look removed it.
+    Abandoned,
+    /// Acked, retired or replaced: nothing left to watch.
+    Ended,
+}
 
 /// Runtime state of a plugin in the CEF renderer.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,6 +172,8 @@ pub struct PluginManager {
     /// async `onUnload` continuing after an await still needs to be attributable. Costs nothing, since
     /// every capability for one plugin resolves to the same url (the bound is hygiene, not a control).
     capabilities: std::collections::HashMap<String, IssuedCapability>,
+    /// The progress of each load still waiting on its ack.
+    progress: std::collections::HashMap<String, Arc<LoadProgress>>,
     next_load_id: u64,
 }
 
@@ -146,6 +217,8 @@ impl PluginManager {
         self.next_load_id += 1;
         self.states
             .insert(plugin_id.to_string(), PluginState::Loading(load_id, nonce));
+        self.progress
+            .insert(plugin_id.to_string(), LoadProgress::new(Instant::now()));
         self.url_to_name.insert(plugin_id.to_string(), name.clone());
         self.capabilities.insert(
             capability.to_string(),
@@ -228,6 +301,7 @@ impl PluginManager {
             Some(PluginState::Loading(cid, cn)) if *cid == load_id && *cn == nonce => {
                 self.states
                     .insert(plugin_id.to_string(), PluginState::Ready(load_id, nonce));
+                self.progress.remove(plugin_id);
                 true
             }
             _ => false,
@@ -286,13 +360,46 @@ impl PluginManager {
     /// a plugin no path can ever reach again, which is worse than the race it avoids.
     pub fn forget_plugin(&mut self, plugin_id: &str) {
         self.states.remove(plugin_id);
+        self.progress.remove(plugin_id);
         self.url_to_name.remove(plugin_id);
     }
 
     /// [`Self::forget_plugin`] for every plugin at once, for `plugin.uninstall_all`.
     pub fn forget_all_plugins(&mut self) {
         self.states.clear();
+        self.progress.clear();
         self.url_to_name.clear();
+    }
+
+    /// The progress of `load_id` while it is still waiting on its ack.
+    pub(crate) fn load_progress(&self, plugin_id: &str, load_id: u64) -> Option<Arc<LoadProgress>> {
+        match self.states.get(plugin_id) {
+            Some(PluginState::Loading(id, _)) if *id == load_id => {
+                self.progress.get(plugin_id).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    /// A watchdog's look at `load_id`, read and acted on under one borrow: a registration
+    /// admitted under the same lock either stepped the load first or finds it gone.
+    pub(crate) fn watch_load(&mut self, plugin_id: &str, load_id: u64, now: Instant) -> LoadWatch {
+        match self.states.get(plugin_id) {
+            Some(PluginState::Loading(id, _)) if *id == load_id => {}
+            _ => return LoadWatch::Ended,
+        }
+        if let Some(look) = self
+            .progress
+            .get(plugin_id)
+            .and_then(|progress| progress.next_look(now, ACK_IDLE))
+        {
+            return LoadWatch::Look(look);
+        }
+        if self.abandon_if_still_loading(plugin_id, load_id) {
+            LoadWatch::Abandoned
+        } else {
+            LoadWatch::Ended
+        }
     }
 
     /// Every loaded plugin with the load that owns it, taken together.

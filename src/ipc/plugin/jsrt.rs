@@ -279,37 +279,9 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
         failed_urls.len()
     );
 
-    // 6. Startup timeout: check dispatched plugins for ready ack after 10s
-    if !dispatched_snapshot.is_empty() {
-        crate::state::rt_handle().spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            for (url, load_id) in &dispatched_snapshot {
-                // Tested and removed under one borrow. Read first and removed second, the ack
-                // this watchdog exists to wait for can land between the two, and the cleanup
-                // below would then tear down a plugin that had just succeeded.
-                let abandoned = with_state(|state| {
-                    state.plugin_manager.abandon_if_still_loading(url, *load_id)
-                })
-                .unwrap_or(false);
-                if abandoned {
-                    crate::vprintln!(
-                        "[PLUGIN] Startup timeout: '{}' (gen={}) never ready - marking failed",
-                        url,
-                        load_id
-                    );
-                    let cleanup_js = crate::plugins::PluginManager::generate_unload_js(url);
-                    eval_js(&cleanup_js);
-                    let url_disable = url.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        crate::state::db().call_plugins(move |pc| {
-                            let _ = crate::plugins::store::disable_failed(pc, &url_disable);
-                        });
-                    })
-                    .await;
-                    crate::app_state::emit_ipc_event_with_args("jsrt.plugin_failed", &[url]);
-                }
-            }
-        });
+    // 6. Startup timeout: each dispatched plugin's ready ack, watched on its own
+    for (url, load_id) in dispatched_snapshot {
+        crate::state::rt_handle().spawn(super::inject::watch_ack(url, load_id));
     }
 }
 
