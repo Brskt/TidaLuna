@@ -269,9 +269,11 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     };
     copy_front(&project_root.join("frontend/dist"), &front_dst)?;
 
-    // 6. Download Bun binary into bin/
-    fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin/: {e}"))?;
-    download_bun(&bin_dir)?;
+    // 6. Download Bun binary
+    let bun_dst = bun_dir(&bundle_dir, cfg!(target_os = "macos").then_some(EXE_NAME));
+    fs::create_dir_all(&bun_dst)
+        .map_err(|e| format!("failed to create {}: {e}", bun_dst.display()))?;
+    download_bun(&bun_dst)?;
 
     if release {
         strip_binaries(&bundle_dir)?;
@@ -924,6 +926,16 @@ fn copy_dir_flat(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Where Bun goes: `bin/`, the first folder the app searches. In a macOS app it is
+/// `Contents/MacOS` beside the exe, which Apple lists for helper tools; Bun stays out of the strip
+/// pass there, keeping the signature Oven ships it with.
+fn bun_dir(bundle_dir: &Path, macos_app: Option<&str>) -> PathBuf {
+    match macos_app {
+        Some(exe) => bundle_dir.join(format!("{exe}.app/Contents/MacOS")),
+        None => bundle_dir.join("bin"),
+    }
 }
 
 /// Download Bun binary from GitHub releases into the bundle directory.

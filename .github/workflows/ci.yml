@@ -375,6 +375,17 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo xtask build-updater --release
 
+      - name: Smoke test macOS app (Bun inside the bundle)
+        if: runner.os == 'macOS'
+        run: |
+          bun_bin=dist/tidalunar.app/Contents/MacOS/bun
+          test -x "$bun_bin" || { echo "bun missing from the app bundle"; exit 1; }
+          test ! -e dist/bin/bun || { echo "stray bin/bun beside the app"; exit 1; }
+          want=$(sed -n 's/.*const BUN_VERSION: &str = "\(.*\)";/\1/p' xtask/src/main.rs)
+          got=$("$bun_bin" --version)
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "bun version: got '$got', want '$want'"; exit 1; }
+          codesign --verify --strict "$bun_bin"
+
       - name: Package Linux installers
         if: startsWith(matrix.target, 'linux-')
         env:
