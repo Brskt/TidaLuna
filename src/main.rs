@@ -84,6 +84,11 @@ fn refuse_install_dir_not_text() -> ! {
 }
 
 fn main() {
+    // First of all: a helper reads a plugin's source, and must reach no log, lock, CEF or database.
+    if plugins::transpile_helper::is_helper_launch(std::env::args_os()) {
+        plugins::transpile_helper::run();
+    }
+
     // Seed the live log level from the LOGS env var before anything can log.
     logging::init_env_floor();
 

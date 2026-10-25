@@ -24,6 +24,9 @@ pub(super) enum Injected {
     RngUnavailable,
     /// The plugin's own source could not be prepared. Nothing was dispatched.
     TranspileFailed(String),
+    /// The transpile helper could not run, which says nothing about the plugin. Nothing was
+    /// dispatched.
+    HelperUnavailable(String),
     /// There was no renderer frame to take the code.
     NoFrame,
     /// The session ended while this was in flight. The injection has been undone.
@@ -47,6 +50,9 @@ pub(super) enum PassDuty {
     /// The session this pass ran for is gone. Nothing is owed and nothing may be written:
     /// whatever this pass concluded describes a plugin set the next session never asked about.
     Abandon,
+    /// Nothing went live, and the failure was this machine's, not the plugin's: its flag stays as
+    /// the user set it, and so do those of the plugins waiting on it.
+    Keep,
 }
 
 impl Injected {
@@ -63,6 +69,7 @@ impl Injected {
                 PassDuty::Reconcile
             }
             Injected::SessionChanged => PassDuty::Abandon,
+            Injected::HelperUnavailable(_) => PassDuty::Keep,
         }
     }
 }
@@ -109,10 +116,19 @@ pub(super) fn inject_plugin(url: &str, name: &str, code: &str, epoch: u64) -> In
         &capability,
     ) {
         Ok(js) => js,
-        Err(e) => {
-            crate::vprintln!("[PLUGIN] Failed to prepare '{name}': {e}");
+        Err(failure) => {
             with_state(|state| state.plugin_manager.retire_load(url, load_id));
-            return Injected::TranspileFailed(e.to_string());
+            return match failure {
+                crate::plugins::transpile_helper::Failure::Source(e) => {
+                    crate::vprintln!("[PLUGIN] Failed to prepare '{name}': {e}");
+                    Injected::TranspileFailed(e)
+                }
+                crate::plugins::transpile_helper::Failure::Helper(e) => {
+                    // Not gated: no plugin can load while this lasts, and nothing else says so.
+                    crate::verr!("[PLUGIN] Cannot prepare '{name}': {e}");
+                    Injected::HelperUnavailable(e)
+                }
+            };
         }
     };
 

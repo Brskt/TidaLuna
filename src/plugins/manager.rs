@@ -1,4 +1,4 @@
-use super::transpile;
+use super::transpile_helper;
 use super::wrapper;
 
 /// Runtime state of a plugin in the CEF renderer.
@@ -119,8 +119,8 @@ impl PluginManager {
         load_id: u64,
         nonce: u64,
         capability: &str,
-    ) -> anyhow::Result<String> {
-        let js = transpile::transpile_ts(code, &format!("{plugin_id}.mts"))?;
+    ) -> Result<String, transpile_helper::Failure> {
+        let js = transpile_helper::transpile(code, &format!("{plugin_id}.mts"))?;
         Ok(wrapper::wrap_plugin_code(
             plugin_id, &js, load_id, nonce, capability,
         ))

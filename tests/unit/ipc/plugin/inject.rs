@@ -2,69 +2,76 @@
 
 use super::*;
 
-/// A caller reads the epoch once, then transpiles, which is real CPU time holding no lock. A
-/// logout landing in that gap sweeps the manager, and its cleanup for this plugin does
-/// nothing, because `mark_loading` registered it before any code existed. The injection then
-/// lands in a session the user has left, untracked and unreachable by any later unload, until
-/// the next full page navigation. The answer has to be re-read once the injection is out,
-/// not only before it.
+/// A logout landing while a plugin is transpiled leaves its injection untracked in a session nobody
+/// is in. The epoch is re-read once the injection is out. An unreadable state (`None`) answers
+/// like a change: an absence is never consent.
 #[test]
-fn an_injection_that_outlived_its_session_is_not_recorded() {
-    assert!(
-        injection_still_current(7, Some(7)),
-        "the ordinary case: nothing changed while this plugin was being prepared"
-    );
-    assert!(
-        !injection_still_current(7, Some(8)),
-        "a logout landed mid-transpile and this code now runs for a session nobody is in"
-    );
-}
-
-/// `None` is the state being unreadable rather than an epoch that matches. Reading an absence
-/// as consent is exactly how an injection outlives its session: it answers like a change.
-#[test]
-fn an_unreadable_state_refuses_the_injection_rather_than_assuming_it_is_fine() {
-    assert!(!injection_still_current(7, None));
-}
-
-/// The boot pass reads an outcome to decide what it owes, and it used to do that through a
-/// wildcard; `SessionChanged` reached reconciliation dressed as a plugin that could not
-/// load. Reconciliation writes `enabled = 0` and leaves only a log line behind a level whose
-/// persisted default is off, which turned a logout landing on the last plugin of a pass into a
-/// plugin silently disabled for every session after it.
-#[test]
-fn a_session_that_ended_owes_no_verdict_on_the_plugin() {
-    assert!(
-        matches!(Injected::SessionChanged.pass_duty(), PassDuty::Abandon),
-        "a logout under an injection would be reconciled as the plugin's own failure"
-    );
-}
-
-/// The other side of the same rule. Three outcomes end with nothing live while the session that
-/// asked for them is still the current one, and those do owe the reconciliation their url;
-/// sorting the cancellation out must not quietly take them along.
-#[test]
-fn an_attempt_that_ended_under_its_own_session_still_owes_its_url() {
-    assert!(
-        matches!(Injected::RngUnavailable.pass_duty(), PassDuty::Reconcile),
-        "no nonce could be minted, so nothing was dispatched and the url is still owed"
-    );
-    assert!(
-        matches!(
-            Injected::TranspileFailed("unterminated string literal".to_string()).pass_duty(),
-            PassDuty::Reconcile
+fn an_injection_is_recorded_only_while_its_session_is_provably_current() {
+    for (current, expected, why) in [
+        (
+            Some(7),
+            true,
+            "the ordinary case: nothing changed while this plugin was being prepared",
         ),
-        "the plugin's own source is what failed to prepare here"
-    );
-    assert!(
-        matches!(Injected::NoFrame.pass_duty(), PassDuty::Reconcile),
-        "no frame took the code, and the session is still the one that asked for it"
-    );
-    assert!(
-        matches!(
-            Injected::Live { load_id: 7 }.pass_duty(),
-            PassDuty::Record { load_id: 7 }
+        (
+            Some(8),
+            false,
+            "a logout landed mid-transpile and this code now runs for a session nobody is in",
         ),
-        "the readiness ack and its timeout are keyed to this load, so it has to survive the sort"
-    );
+        (
+            None,
+            false,
+            "the state is unreadable, not an epoch that matches",
+        ),
+    ] {
+        assert_eq!(injection_still_current(7, current), expected, "{why}");
+    }
+}
+
+/// The boot pass sorts an outcome into what it owes. A logout under an injection owes nothing:
+/// reconciled as the plugin's own failure it wrote `enabled = 0` behind a log level that is off by
+/// default. Outcomes that end under their own session still owe their url, or their load.
+#[test]
+fn an_outcome_owes_the_boot_pass_a_verdict_only_under_its_own_session() {
+    let duty = |outcome: Injected| match outcome.pass_duty() {
+        PassDuty::Record { load_id } => format!("record {load_id}"),
+        PassDuty::Reconcile => "reconcile".to_string(),
+        PassDuty::Abandon => "abandon".to_string(),
+        PassDuty::Keep => "keep".to_string(),
+    };
+
+    for (outcome, expected, why) in [
+        (
+            Injected::SessionChanged,
+            "abandon",
+            "a logout under an injection would be reconciled as the plugin's own failure",
+        ),
+        (
+            Injected::RngUnavailable,
+            "reconcile",
+            "no nonce could be minted: nothing was dispatched and the url is still owed",
+        ),
+        (
+            Injected::TranspileFailed("unterminated string literal".to_string()),
+            "reconcile",
+            "the plugin's own source is what failed to prepare here",
+        ),
+        (
+            Injected::HelperUnavailable("cannot start the transpile helper".to_string()),
+            "keep",
+            "a helper that cannot run fails every plugin of the pass, and none of them is at fault",
+        ),
+        (
+            Injected::NoFrame,
+            "reconcile",
+            "no frame took the code, and the session is still the one that asked for it",
+        ),
+        (
+            Injected::Live { load_id: 7 },
+            "record 7",
+            "the readiness ack and its timeout are keyed to this load, which has to survive the sort",
+        ),
+    ] {
+        assert_eq!(duty(outcome), expected, "{why}");
+    }
 }

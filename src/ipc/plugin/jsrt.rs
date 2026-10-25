@@ -157,6 +157,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
         db.call_plugins(crate::plugins::store::collect_enabled_code);
     let mut loaded_names = std::collections::HashSet::new();
     let mut failed_urls = Vec::new();
+    let mut helper_failed = false;
 
     // 3. Multi-pass: load plugins whose deps are satisfied
     let mut dispatched_snapshot: Vec<(String, u64)> = Vec::new(); // (url, load_id) for timeout
@@ -215,6 +216,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                                 }
                             }
                             super::inject::PassDuty::Reconcile => failed_urls.push(p.url),
+                            super::inject::PassDuty::Keep => helper_failed = true,
                             super::inject::PassDuty::Abandon => {
                                 crate::vprintln!(
                                     "[PLUGIN] Load pass abandoned: the session changed under '{}'",
@@ -236,10 +238,13 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
         }
     }
 
-    // 4. Log + reconcile: plugins with unresolved deps
+    // 4. Log + reconcile: plugins with unresolved deps. Not once the helper failed: a dependency
+    // it could not prepare says nothing about the plugin waiting on it.
     for p in &remaining {
         crate::vprintln!("[PLUGIN] Cannot load '{}': unresolved dependencies", p.name);
-        failed_urls.push(p.url.clone());
+        if !helper_failed {
+            failed_urls.push(p.url.clone());
+        }
     }
 
     // 5. Reconciliation: auto-disable plugins that couldn't load

@@ -235,17 +235,31 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
     // epoch is read here, before any of it: it names the session this activation belongs to,
     // and `inject_plugin` re-reads it after the dispatch to decide whether the code may stay.
     // Transpiling is real CPU work holding no lock, and a logout lands on another thread.
+    // Handed to the blocking pool: the transpile waits on a helper process.
     let epoch = with_state(|state| state.session_epoch).unwrap_or_default();
-    let load_id = match super::inject::inject_plugin(&url, &plugin_name, &code, epoch) {
-        super::inject::Injected::Live { load_id } => load_id,
-        // Every failure below has already marked the plugin unloaded. What is left is what only
+    let injected = {
+        let url = url.clone();
+        tokio::task::spawn_blocking(move || {
+            super::inject::inject_plugin(&url, &plugin_name, &code, epoch)
+        })
+        .await
+    };
+    let load_id = match injected {
+        Ok(super::inject::Injected::Live { load_id }) => load_id,
+        // Every `Injected` failure below has already marked the plugin unloaded. What is left is what only
         // an enable owes: undoing the `enabled` flag this call set a few lines up.
         outcome => {
             revert_enable(&url).await;
             return Err(match outcome {
-                super::inject::Injected::RngUnavailable => "RNG unavailable".to_string(),
-                super::inject::Injected::TranspileFailed(e) => format!("Failed to prepare: {e}"),
-                super::inject::Injected::NoFrame => "No renderer frame available".to_string(),
+                Ok(super::inject::Injected::RngUnavailable) => "RNG unavailable".to_string(),
+                Ok(super::inject::Injected::TranspileFailed(e)) => {
+                    format!("Failed to prepare: {e}")
+                }
+                Ok(super::inject::Injected::HelperUnavailable(e)) => {
+                    format!("Cannot prepare plugins: {e}")
+                }
+                Ok(super::inject::Injected::NoFrame) => "No renderer frame available".to_string(),
+                Err(e) => format!("spawn_blocking failed: {e}"),
                 _ => "Session ended during activation".to_string(),
             });
         }
