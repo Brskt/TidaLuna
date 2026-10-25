@@ -199,10 +199,12 @@ pub(super) fn check_sandbox_protocol(
         anyhow::bail!(
             "Update v{} requires sandbox helper protocol {}, but system has {}. \
              Run 'sudo apt upgrade tidalunar' (or download a newer .deb from \
-             https://github.com/Brskt/TidaLuna-lunar/releases) and try again.",
+             https://github.com/{}/{}/releases) and try again.",
             manifest.version,
             required,
             system_protocol,
+            super::GITHUB_OWNER,
+            super::GITHUB_REPO,
         );
     }
     Ok(())

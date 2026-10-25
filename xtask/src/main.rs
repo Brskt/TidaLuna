@@ -297,6 +297,42 @@ macro_rules! emit_top_files {
 #[path = "../../src/frontend/files.rs"]
 mod front_files;
 
+/// The repository the app updates from, for the texts that send users to its releases.
+#[path = "../../src/updater/repo.rs"]
+mod repo;
+
+fn releases_url() -> String {
+    format!(
+        "https://github.com/{}/{}/releases",
+        repo::GITHUB_OWNER,
+        repo::GITHUB_REPO
+    )
+}
+
+/// The .deb's file name, which the tarball's README also gives.
+fn deb_file_name(version: &str, arch: &str) -> String {
+    format!("tidalunar_{version}_{arch}.deb")
+}
+
+/// The tarball's top folder, and its file name before `.tar.gz`.
+fn tarball_bundle_name(version: &str, arch: &str) -> String {
+    format!("tidalunar_{version}_linux_{arch}")
+}
+
+/// Fills each `{KEY}` of an installer template. A key the template does not hold is an error: the
+/// value would be shipped nowhere, and a template edited by hand drifts from what the code knows.
+fn render_template(template: &str, pairs: &[(&str, &str)]) -> Result<String, String> {
+    let mut out = template.to_string();
+    for (key, value) in pairs {
+        let token = format!("{{{key}}}");
+        if !out.contains(&token) {
+            return Err(format!("template has no {token}"));
+        }
+        out = out.replace(&token, value);
+    }
+    Ok(out)
+}
+
 /// Where `bun` lives: `TIDALUNAR_BUN`, then PATH, then `$BUN_INSTALL/bin` (default `~/.bun/bin`),
 /// which an IDE running cargo without a shell rc file still finds.
 fn resolve_bun() -> Result<PathBuf, String> {
@@ -1588,9 +1624,8 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
     let installer_deb = project_root.join("installer").join("linux").join("deb");
     let control_template = fs::read_to_string(installer_deb.join("control.in"))
         .map_err(|e| format!("read control.in: {e}"))?;
-    let control = control_template
-        .replace("{VERSION}", &version)
-        .replace("{ARCH}", arch);
+    let control = render_template(&control_template, &[("VERSION", &version), ("ARCH", arch)])
+        .map_err(|e| format!("control.in: {e}"))?;
     fs::write(debian_dir.join("control"), control).map_err(|e| e.to_string())?;
 
     for script in ["postinst", "postrm"] {
@@ -1609,8 +1644,11 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
     let usr_bin = stage.join("usr").join("bin");
     fs::create_dir_all(&usr_bin).map_err(|e| e.to_string())?;
     let launcher_dst = usr_bin.join("tidalunar.real");
-    fs::copy(installer_deb.join("tidalunar-launcher.sh"), &launcher_dst)
-        .map_err(|e| format!("copy launcher: {e}"))?;
+    let launcher_template = fs::read_to_string(installer_deb.join("tidalunar-launcher.sh"))
+        .map_err(|e| format!("read launcher: {e}"))?;
+    let launcher = render_template(&launcher_template, &[("RELEASES_URL", &releases_url())])
+        .map_err(|e| format!("tidalunar-launcher.sh: {e}"))?;
+    fs::write(&launcher_dst, launcher).map_err(|e| format!("write launcher: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1707,7 +1745,7 @@ fn package_linux_deb(arch: &str) -> Result<(), String> {
     //    burn time re-squeezing it for no gain. Skipping it keeps the build
     //    fast; the few MB of uncompressed control files are negligible next
     //    to the payload. (Same rationale as `SetCompress off` on Windows.)
-    let out_deb = out_dir.join(format!("tidalunar_{version}_{arch}.deb"));
+    let out_deb = out_dir.join(deb_file_name(&version, arch));
     println!("Building .deb at {}", out_deb.display());
     let status = Command::new("dpkg-deb")
         .args(["--build", "--root-owner-group", "-Znone"])
@@ -1749,23 +1787,31 @@ fn package_linux_tarball(arch: &str) -> Result<(), String> {
     if stage_root.exists() {
         fs::remove_dir_all(&stage_root).map_err(|e| e.to_string())?;
     }
-    let bundle_name = format!("tidalunar_{version}_linux_{arch}");
+    let bundle_name = tarball_bundle_name(&version, arch);
     let stage = stage_root.join(&bundle_name);
     fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
 
     // Recursively copy dist/ into stage/.
     copy_dir_all(&dist, &stage)?;
 
-    // Drop in the README.
-    fs::copy(
+    // Drop in the README, naming this archive and the .deb as they are built.
+    let readme_template = fs::read_to_string(
         project_root
             .join("installer")
             .join("linux")
             .join("tarball")
             .join("README"),
-        stage.join("README"),
     )
-    .map_err(|e| format!("copy README: {e}"))?;
+    .map_err(|e| format!("read README: {e}"))?;
+    let readme = render_template(
+        &readme_template,
+        &[
+            ("BUNDLE", &bundle_name),
+            ("DEB", &deb_file_name(&version, arch)),
+        ],
+    )
+    .map_err(|e| format!("README: {e}"))?;
+    fs::write(stage.join("README"), readme).map_err(|e| format!("write README: {e}"))?;
 
     let out_tarball = out_dir.join(format!("{bundle_name}.tar.gz"));
     let status = Command::new("tar")

@@ -196,7 +196,7 @@ fn main() {
         //   1. CHROME_DEVEL_SANDBOX env (set by /usr/bin/tidalunar.real launcher
         //      under packaged install, points at /opt/tidalunar/bin/cef/chrome-sandbox).
         //   2. exe_dir-relative bin/cef/chrome-sandbox (covers unpackaged dev runs
-        //      and the .tar.gz "no system helper" case).
+        //      and the .tar.gz, which ships the helper without the setuid bit).
         let sandbox_path: Option<PathBuf> = std::env::var_os("CHROME_DEVEL_SANDBOX")
             .map(PathBuf::from)
             .or_else(|| {
@@ -231,12 +231,9 @@ fn main() {
                     }
                 }
                 Err(_) => {
-                    // Absence is acceptable. .tar.gz installs ship no helper at
-                    // all; Chromium falls back to namespace sandbox when userns
-                    // is available, or surfaces a clear log message when it
-                    // isn't (Ubuntu 24.04+ apparmor restriction without the
-                    // .deb's profile). That's the right place for the message,
-                    // not here.
+                    // Absence is acceptable: Chromium falls back to the namespace sandbox when
+                    // userns is available, or logs a clear message when it is not (Ubuntu 24.04+
+                    // apparmor, no .deb profile); the message belongs there.
                 }
             }
         }

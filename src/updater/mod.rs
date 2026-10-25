@@ -3,6 +3,7 @@ mod download;
 mod handlers;
 mod highwater;
 mod recovery;
+mod repo;
 mod types;
 mod util;
 mod verify;
@@ -20,8 +21,7 @@ pub(crate) fn record_launch_version() {
     highwater::record(&crate::state::cache_data_dir(), env!("CARGO_PKG_VERSION"));
 }
 
-const GITHUB_OWNER: &str = "Brskt";
-const GITHUB_REPO: &str = "TidaLuna";
+use repo::{GITHUB_OWNER, GITHUB_REPO};
 
 /// Which releases the update check considers: `Stable` sees only published
 /// releases, `Dev` also sees the CI's per-push prereleases (`X.Y.Z-pre.dev.N`).

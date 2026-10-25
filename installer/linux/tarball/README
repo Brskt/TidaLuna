@@ -2,13 +2,14 @@ TidaLunar - Linux .tar.gz package
 ==================================
 
 Quick start:
-  tar -xzf tidalunar-<version>-linux-<arch>.tar.gz
-  cd tidalunar-<version>-linux-<arch>/
+  tar -xzf {BUNDLE}.tar.gz
+  cd {BUNDLE}/
   ./tidalunar
 
 Sandbox status
 ==============
-This .tar.gz package does NOT install the Chromium sandbox helper.
+This .tar.gz package ships the Chromium sandbox helper without the setuid
+bit: an archive you extract as a user cannot set it.
 Depending on your distro, TidaLunar will run with one of:
 
   * Namespace sandbox (Debian 12+, Fedora 39+, Arch, openSUSE Leap 15.5+,
@@ -20,13 +21,19 @@ Depending on your distro, TidaLunar will run with one of:
 If you want the full Chromium sandbox on Ubuntu 24.04+, install the .deb
 package instead:
 
-  sudo dpkg -i tidalunar_<version>_<arch>.deb
+  sudo apt install ./{DEB}
 
-The .deb ships a setuid sandbox helper, an AppArmor profile, and a
-runtime probe that picks the right sandbox mode at install time.
+The .deb ships a sandbox helper (made setuid when the kernel restricts
+unprivileged user namespaces), an AppArmor profile, and an install-time
+check that picks the mode.
 
 Updates
 =======
-TidaLunar self-updates silently into a copy under
-~/.local/share/tidalunar/. The .tar.gz file you ran is only used for
-the initial install; you can delete it after first launch.
+TidaLunar looks for a new version when it starts; the setting "Auto-check on
+startup" turns that off. Nothing is downloaded until you click Update (or
+Download, in the settings). The download goes into the folder you extracted,
+and the app restarts into the new version when you click "Apply & Restart".
+That folder is the installation: keep it, and keep it writable by your user,
+since updates are downloaded and installed inside it. Settings, cache and
+logs live in ~/.local/share/tidalunar/. The .tar.gz you downloaded is not
+used after extraction; you can delete it.

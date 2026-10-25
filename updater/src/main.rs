@@ -36,8 +36,9 @@ const UPDATE_PUBLIC_KEY: [u8; 32] = [
     2, 222, 95, 197, 57, 244, 218, 25, 117, 200, 42, 57,
 ];
 
-const GITHUB_OWNER: &str = "Brskt";
-const GITHUB_REPO: &str = "TidaLuna";
+#[path = "../../src/updater/repo.rs"]
+mod repo;
+use repo::{GITHUB_OWNER, GITHUB_REPO};
 
 const EXE_NAME: &str = if cfg!(target_os = "windows") {
     "tidalunar.exe"

@@ -13,4 +13,4 @@ Description: Native TIDAL desktop client
  .
  The .deb ships a small system bootstrap (sandbox helper, AppArmor profile,
  launcher) and extracts the application payload to ~/.local/share/tidalunar/
- on first launch. In-app updates apply silently to user home.
+ on first launch. In-app updates are applied there on your request.

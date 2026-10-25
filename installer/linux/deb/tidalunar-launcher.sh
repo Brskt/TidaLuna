@@ -43,7 +43,7 @@ SYS_PROTO=${SYS_PROTO:-0}
 if [ "$USER_PROTO" -gt "$SYS_PROTO" ]; then
     MSG="TidaLunar's bundled sandbox helper is older than the in-app version expects.
 Run 'sudo apt upgrade tidalunar' (or download a newer .deb from
-https://github.com/Brskt/TidaLuna-lunar/releases) and try again."
+{RELEASES_URL}) and try again."
     if hash notify-send 2>/dev/null && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
         notify-send -i tidalunar "TidaLunar update needed" "$MSG"
     fi
