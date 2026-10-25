@@ -117,7 +117,10 @@ export function exposeLoaderApi() {
     });
     onIpcEvent("jsrt.plugin_ready_confirmed", (url: string) => {
         const plugin = LunaPlugin.getByUrl(url);
-        if (plugin && plugin.loadError._) {
+        if (!plugin) return;
+        // The plugin's top level has finished: its Settings, if any, are registered now.
+        const found = plugin.extractSettings();
+        if (found || plugin.loadError._) {
             plugin.loadError._ = undefined;
             window.dispatchEvent(new Event("luna:plugins-updated"));
         }
@@ -132,12 +135,8 @@ export function exposeLoaderApi() {
             if (!LunaPlugin.plugins[p.url]) {
                 const plugin = LunaPlugin.fromPluginInfo(p);
                 (CoreLunaPlugin.plugins as any)[p.url] = plugin;
-                // Extract Settings in background for enabled plugins
-                if (plugin.enabled && plugin.installed) {
-                    plugin.extractSettings().then(() => {
-                        window.dispatchEvent(new Event("luna:plugins-updated"));
-                    });
-                }
+                // Already ready before this page listened: the ready handler above missed it.
+                if (plugin.enabled && plugin.installed) plugin.extractSettings();
             }
         }
         console.log("[luna:loader] LunaPlugin.plugins:", Object.keys(LunaPlugin.plugins).length, "total");

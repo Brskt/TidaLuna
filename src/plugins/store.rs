@@ -273,15 +273,6 @@ fn clear_enabled(conn: &Connection, url: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub(crate) fn get_code(conn: &mut Connection, url: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT code FROM plugins WHERE url = ?1",
-        params![url],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
 /// Return names of installed plugins that depend on `plugin_name`.
 /// Fail-closed: if any installed manifest has an invalid `luna` field, returns Err
 /// (we cannot guarantee the plugin isn't a dependant -> block the operation).

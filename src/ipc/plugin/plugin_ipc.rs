@@ -482,16 +482,6 @@ pub(super) fn handle_plugin_db(
                     None,
                 ))
             }
-            "plugin.get_code" => {
-                let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
-                match crate::plugins::store::get_code(pc, url) {
-                    Some(code) => Ok((
-                        serde_json::to_string(&code).unwrap_or_else(|_| "null".to_string()),
-                        None,
-                    )),
-                    None => Ok(("null".to_string(), None)),
-                }
-            }
             "plugin.uninstall" => {
                 let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
                 let name = crate::plugins::store::get_name_by_url(pc, url).unwrap_or_default();

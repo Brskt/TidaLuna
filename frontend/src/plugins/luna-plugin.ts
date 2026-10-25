@@ -10,7 +10,6 @@
 
 import { Signal } from "./signal";
 import { invokeIpc } from "../ipc";
-import { modules } from "./core";
 import { store as obyStore } from "oby";
 
 export type LunaAuthor = {
@@ -235,8 +234,8 @@ export class LunaPlugin {
                 throw enableErr;
             }
 
+            this.extractSettings();
             syncUpstream(this.url, this);
-            this.extractSettings().then(() => syncUpstream(this.url, this));
         } finally {
             this.loading._ = false;
         }
@@ -274,8 +273,8 @@ export class LunaPlugin {
             await invokeIpc("plugin.enable", this.url);
             this.enabled = true;
 
+            this.extractSettings();
             syncUpstream(this.url, this);
-            this.extractSettings().then(() => syncUpstream(this.url, this));
         } catch (e) {
             this.enabled = false;
             // On the card, not only in the console: the switch falling back to off says nothing.
@@ -338,63 +337,26 @@ export class LunaPlugin {
         this.dependants.add(plugin);
     }
 
-    // Load plugin code in CEF (as blob URL) to extract the Settings React component.
-    // Plugin .mjs files resolve deps via luna.core.modules (Quartz pattern) - no transform needed.
-    // Side effects are reversed via the plugin's unloads Set after extraction.
-    // Timeout prevents hanging on top-level awaits (ReactiveStore, observePromise, etc.).
-    async extractSettings(): Promise<void> {
+    // Read the Settings component the running plugin registered on window.__pluginExports. The
+    // wrapper registers it once the plugin's top level has finished, which is also what its ready
+    // ack waits for: read after an enable, and again when Rust confirms the ready (loader.ts).
+    // A plugin awaiting trust dialogs is ready long after its enable returns. Never throws: any
+    // plugin can rig `window.__pluginExports`, and a throw here stopped the startup loop that lists
+    // every plugin, the rigging one included.
+    extractSettings(): boolean {
+        let Settings: unknown;
         try {
-            // Try reading exports from the running plugin instance first.
-            // The security wrapper registers exports on window.__pluginExports;
-            // the Settings component shares state with the actual plugin.
-            // The plugin runs in an async IIFE: exports may not be registered yet.
-            // Wait briefly for the plugin to finish executing before falling back.
-            for (let attempt = 0; attempt < 10; attempt++) {
-                const pluginExports = (window as any).__pluginExports?.[this.url];
-                if (pluginExports?.Settings) {
-                    this.exports = { Settings: pluginExports.Settings };
-                    console.log(`[luna:plugin] Settings found for ${this.name} (from running instance)`);
-                    return;
-                }
-                await new Promise(r => setTimeout(r, 200));
-            }
-
-            // Fallback: load plugin via blob URL import (re-executes the plugin).
-            // This is used when the plugin hasn't finished loading yet or has no exports.
-            const code = await invokeIpc("plugin.get_code", this.url);
-            if (!code) return;
-            if (!/\bSettings\b/.test(code)) return;
-
-            console.log(`[luna:plugin] Extracting Settings for ${this.name} (blob import fallback)...`);
-
-            const blob = new Blob([code], { type: "application/javascript" });
-            const blobUrl = URL.createObjectURL(blob);
-            try {
-                const timeout = new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error("Settings extraction timed out")), 10000)
-                );
-                const mod = await Promise.race([import(/* @vite-ignore */ blobUrl), timeout]);
-                if (mod.Settings) {
-                    this.exports = { Settings: mod.Settings };
-                    console.log(`[luna:plugin] Settings extracted for ${this.name}`);
-                }
-                // Clean up side effects - plugin logic runs via Rust wrapper, not this import
-                if (mod.unloads instanceof Set) {
-                    const fns = Array.from(mod.unloads);
-                    for (let i = fns.length - 1; i >= 0; i--) {
-                        try { (fns[i] as () => void)(); } catch {}
-                    }
-                }
-                if (typeof mod.onUnload === "function") {
-                    try { mod.onUnload(); } catch {}
-                }
-                delete modules[this.name];
-            } finally {
-                URL.revokeObjectURL(blobUrl);
-            }
+            Settings = (window as any).__pluginExports?.[this.url]?.Settings;
         } catch (e) {
-            console.error(`[luna:plugin] Settings extraction failed for ${this.name}:`, e);
+            console.error(`[luna:plugin] Settings unreadable for ${this.name}:`, e);
+            return false;
         }
+        if (!Settings) return false;
+        if (this.exports?.Settings !== Settings) {
+            this.exports = { Settings };
+            console.log(`[luna:plugin] Settings found for ${this.name}`);
+        }
+        return true;
     }
 
     private startReloadLoop(): void {
@@ -499,8 +461,8 @@ export class LunaPlugin {
             throw enableErr;
         }
 
+        plugin.extractSettings();
         syncUpstream(cleanUrl, plugin);
-        plugin.extractSettings().then(() => syncUpstream(cleanUrl, plugin));
         return plugin;
     }
 
