@@ -46,7 +46,7 @@ fn a_secure_tidal_target_is_https_on_a_tidal_origin_and_nothing_else() {
 
 /// Covers and contributor faces need the apex and its subdomains, behind the dot boundary. TIDAL's
 /// legacy API and telemetry hosts clear `should_rewrite_token` without clearing `is_tidal_origin`
-/// and serve no image: the hoisted gate refuses them, with look-alikes and what does not parse.
+/// and serve no image: the hoisted gate refuses them, with lookalikes and what does not parse.
 #[test]
 fn an_allowed_image_host_is_an_allowed_apex_or_its_subdomain_and_nothing_else() {
     for (target, expected) in [
