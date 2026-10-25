@@ -183,19 +183,21 @@ pub(super) fn handle_plugin_enable(msg: &IpcMessage, callback: IpcCallback) {
 async fn do_plugin_enable(url: String) -> Result<(), String> {
     let db = crate::state::db();
 
-    // 1. Check deps + set enabled=1 + get code (all DB ops)
-    let (manifest, code) = {
+    // 1. Check name + deps, set enabled=1, get code (all DB ops)
+    let (plugin_name, code) = {
         let url = url.clone();
         tokio::task::spawn_blocking(move || {
             db.call_plugins(move |pc| {
-                // Get manifest and code
-                let (manifest, code): (String, String) = pc
+                // The stored name, the one the startup pass loads the plugin under.
+                let (name, manifest, code): (String, String, String) = pc
                     .query_row(
-                        "SELECT manifest, code FROM plugins WHERE url = ?1 AND installed = 1",
+                        "SELECT name, manifest, code FROM plugins WHERE url = ?1 AND installed = 1",
                         rusqlite::params![url],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(|e| format!("Plugin not found or no code: {e}"))?;
+                let name = crate::plugins::name::PluginName::parse(&name)
+                    .map_err(|refused| format!("Cannot enable: {refused}"))?;
 
                 // Check dependencies are satisfied
                 if let Err(missing) =
@@ -210,17 +212,12 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
                 // DB: set enabled=1
                 crate::plugins::store::enable(pc, &url).map_err(|e| format!("DB error: {e}"))?;
 
-                Ok((manifest, code))
+                Ok((name, code))
             })
         })
         .await
         .map_err(|e| format!("spawn_blocking failed: {e}"))?
     }?;
-
-    let plugin_name: String = serde_json::from_str::<serde_json::Value>(&manifest)
-        .ok()
-        .and_then(|v| v.get("name")?.as_str().map(String::from))
-        .unwrap_or_default();
 
     async fn revert_enable(url: &str) {
         let revert_url = url.to_string();
@@ -457,14 +454,18 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, query_id: i64, callback
 /// trust rows, tokens and capabilities.
 pub(super) enum CleanupScope {
     /// One plugin, by canonical manifest name.
-    Plugin(String),
+    Plugin(crate::plugins::name::PluginName),
     /// Everything, from `plugin.uninstall_all`.
     All,
 }
 
 /// The scope an uninstall leaves behind. No name means nothing matched, and nothing is cleared.
+/// Nor does a stored name the rule refuses: startup and enable never load such a plugin (nothing
+/// in memory belongs to it), and none can be installed under that name to inherit its rows.
 pub(super) fn cleanup_scope_for_uninstall(name: String) -> Option<CleanupScope> {
-    (!name.is_empty()).then_some(CleanupScope::Plugin(name))
+    crate::plugins::name::PluginName::parse(&name)
+        .ok()
+        .map(CleanupScope::Plugin)
 }
 
 pub(super) fn handle_plugin_db(
@@ -603,42 +604,36 @@ pub(super) fn handle_plugin_db(
 
         // Clear native trust decisions for whatever the handler said was uninstalled.
         if let Ok((_, Some(ref scope))) = result {
-            // Every prefix below follows one convention: empty owns everything.
-            let (db_name, trust_prefix, module_prefix, gone) = match scope {
-                // SQL LIKE wildcard, then the empty prefixes the in-memory clears read as "all".
-                CleanupScope::All => {
-                    ("%".to_string(), String::new(), String::new(), String::new())
-                }
-                // Delimit with "/" to avoid prefix collisions (e.g. "foo" matching "foobar/...")
-                CleanupScope::Plugin(name) => (
-                    name.clone(),
-                    format!("{name}/"),
-                    name.clone(),
-                    uninstall_target.clone(),
-                ),
-            };
+            // Every clear below matches on the scope: no name or url stands for every plugin.
             // The settings connection is already in hand here. A second `call_settings` would
             // re-enter the actor from the actor's own thread, which its re-entrancy assert
             // refuses precisely because it would wait on a reply only this thread can produce.
-            let _ = crate::native_runtime::trust::clear_trust_by_plugin(sc, &db_name);
-            super::native::clear_pending_trust(&trust_prefix);
+            let _ = match scope {
+                CleanupScope::All => crate::native_runtime::trust::clear_all_trust(sc),
+                CleanupScope::Plugin(name) => {
+                    crate::native_runtime::trust::clear_trust_by_plugin(sc, name)
+                }
+            };
+            super::native::clear_pending_trust(scope);
             // The DB trust rows are gone above; the channel tokens that would still reach those
             // modules must go with them.
-            super::native::clear_native_channels(&module_prefix);
+            super::native::clear_native_channels(scope);
             // And the capability, for the same reason. Not done on disable, where the plugin's own unload
             // handler still runs and still needs to be attributable, but uninstall is terminal. A
             // leftover renderer closure must stop writing storage as a plugin that no longer exists.
-            with_state(|state| state.plugin_manager.revoke_capabilities(&gone));
-            // Also updates the manager's loaded-state: this handler is authoritative rather than relying
-            // on callers having disabled first (which is what `registerNative`'s in-flight check reads).
-            // Idempotent; today's JS always disables already, closing the gap only for a future caller.
-            if !gone.is_empty() {
-                // Unconditional here, and only here. The DB row is gone: there is no load left
-                // to name and nothing to re-disable. A removal that lost a race to a concurrent
-                // enable would strand an entry for a plugin no path can ever reach again, worse
-                // than the race it would avoid.
-                with_state(|state| state.plugin_manager.forget_plugin(&gone));
-            }
+            with_state(|state| match scope {
+                CleanupScope::All => state.plugin_manager.revoke_all_capabilities(),
+                CleanupScope::Plugin(_) => {
+                    state.plugin_manager.revoke_capabilities(&uninstall_target)
+                }
+            });
+            // Updates the manager's loaded-state itself rather than rely on callers having disabled
+            // first (`registerNative` reads it); idempotent. Unconditional: the DB row is gone and
+            // no load is left to name (`forget_plugin` says why).
+            with_state(|state| match scope {
+                CleanupScope::All => state.plugin_manager.forget_all_plugins(),
+                CleanupScope::Plugin(_) => state.plugin_manager.forget_plugin(&uninstall_target),
+            });
         }
 
         match result {
@@ -741,7 +736,11 @@ async fn fetch_plugin_data(
     // genuinely-absent manifest (`None`) falls back to the legacy .mjs path.
     if let Some(manifest_str) = fetch_plugin_package(client, base).await? {
         let manifest: serde_json::Value = serde_json::from_str(&manifest_str)?;
-        let name = manifest["name"].as_str().unwrap_or("unknown").to_string();
+        // No "unknown" stand-in: it made every nameless plugin share one name and its data.
+        let name = manifest["name"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("plugin manifest has no name"))?
+            .to_string();
 
         let code_url = format!("{base}.mjs");
         let code = fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await?;
@@ -779,6 +778,7 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
     let (name, manifest, code, hash) = fetch_plugin_data(client, &url)
         .await
         .map_err(|e| format!("{e:#}"))?;
+    let name = crate::plugins::name::PluginName::parse(&name).map_err(|r| r.to_string())?;
 
     // Validate luna.type if present
     match crate::plugins::store::parse_luna_meta(&manifest) {
@@ -794,42 +794,47 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, St
         Ok(None) => {} // no luna field - fine
     }
 
-    let install_result = tokio::task::spawn_blocking({
-        let url = url.clone();
-        move || {
-            crate::state::db().call_plugins(move |pc| {
-                crate::plugins::store::install(pc, &url, &name, &manifest, &code, &hash).map(|()| {
-                    crate::plugins::PluginInfo {
-                        url,
-                        name,
-                        manifest,
-                        hash: Some(hash),
-                        enabled: false,
-                        installed: true,
-                    }
-                })
+    // One actor trip: no trust write queued on the actor lands between the row and the reset.
+    // Handed to the blocking pool: no tokio worker sits on the actor.
+    let installed = tokio::task::spawn_blocking(move || {
+        crate::state::db().call(move |pc, sc| {
+            commit_install(pc, sc, &url, &name, &manifest, &code, &hash).map(|()| {
+                crate::plugins::PluginInfo {
+                    url,
+                    name: name.to_string(),
+                    manifest,
+                    hash: Some(hash),
+                    enabled: false,
+                    installed: true,
+                    load_error: None,
+                }
             })
-        }
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?;
-
-    let info = install_result?;
-
-    // Clear native trust on (re)install: updated code re-prompts.
-    let trust_name = info.name.clone();
-    // Awaited, not posted: the install is only safe to report once the old grants are gone.
-    // A crash in that window would leave updated code holding trust granted to the previous
-    // bytes. Handed to the blocking pool: no tokio worker sits on the actor.
-    tokio::task::spawn_blocking(move || {
-        crate::state::db().call_settings(move |conn| {
-            let _ = crate::native_runtime::trust::clear_trust_by_plugin(conn, &trust_name);
         })
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
-    Ok(info)
+    Ok(installed?)
+}
+
+/// Stores the plugin row and resets its native trust, which only a reinstall does: a decision kept
+/// across it would answer for identical bytes. The row commits last; a failed reset leaves the
+/// previous install as it was, and a commit failing after the reset only asks again.
+fn commit_install(
+    pc: &rusqlite::Connection,
+    sc: &mut rusqlite::Connection,
+    url: &str,
+    name: &crate::plugins::name::PluginName,
+    manifest: &str,
+    code: &str,
+    hash: &str,
+) -> Result<(), String> {
+    let tx = pc
+        .unchecked_transaction()
+        .map_err(|e| format!("DB error: {e}"))?;
+    crate::plugins::store::install(&tx, url, name, manifest, code, hash)?;
+    super::native::reset_trust(sc, name).map_err(|e| format!("DB error: {e}"))?;
+    tx.commit().map_err(|e| format!("DB error: {e}"))
 }
 
 /// Running byte-total guard; `saturating_add` keeps a huge chunk from overflowing

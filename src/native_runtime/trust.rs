@@ -1,4 +1,5 @@
 use crate::db::Stable;
+use crate::plugins::name::PluginName;
 use rusqlite::{Connection, params};
 
 pub(crate) struct TrustDecision {
@@ -48,18 +49,30 @@ pub(crate) fn save_trust(
 }
 
 /// Clear ALL trust decisions for a plugin (any code hash).
-/// Called on plugin uninstall: reinstalling re-triggers trust dialogs.
-/// Uses LIKE prefix match because native module names are "{pluginName}/xxx.native.ts".
-/// The trailing '/' prevents matching "foobar" when clearing "foo".
+/// Called on plugin uninstall and reinstall: the next load asks its trust dialogs again.
+/// A plugin's modules are its bare name (the entry) and "{name}/xxx.native.ts". Matched by exact
+/// bytes rather than `LIKE`, whose `_` is a wildcard and which ignores case.
 ///
 /// The delete is on the disk before this returns: a clear that only reached the OS cache would
 /// hand an older grant back after a power cut, over any refusal given since. Grants and refusals
 /// stay on the routine sync, since a row lost with the tail only asks again.
-pub(crate) fn clear_trust_by_plugin(conn: &mut Connection, plugin: &str) -> rusqlite::Result<()> {
+pub(crate) fn clear_trust_by_plugin(
+    conn: &mut Connection,
+    plugin: &PluginName,
+) -> rusqlite::Result<()> {
     let _stable = Stable::begin(conn);
     conn.execute(
-        "DELETE FROM native_trust WHERE plugin LIKE ?1",
-        params![format!("{plugin}/%")],
+        "DELETE FROM native_trust
+         WHERE plugin = ?1 OR substr(plugin, 1, length(?1) + 1) = ?1 || '/'",
+        params![plugin.as_str()],
     )?;
+    Ok(())
+}
+
+/// Every plugin's trust decisions, for `plugin.uninstall_all`. On the disk before this returns,
+/// for the same reason as `clear_trust_by_plugin`.
+pub(crate) fn clear_all_trust(conn: &mut Connection) -> rusqlite::Result<()> {
+    let _stable = Stable::begin(conn);
+    conn.execute("DELETE FROM native_trust", [])?;
     Ok(())
 }

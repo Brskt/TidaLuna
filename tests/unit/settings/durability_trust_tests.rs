@@ -7,9 +7,14 @@ use super::durability_settings_tests::{
 use super::fixture::file_conn;
 use super::*;
 use crate::native_runtime::trust::{clear_trust_by_plugin, load_trust, save_trust};
+use crate::plugins::name::PluginName;
 use std::path::Path;
 
 const PLUGIN: &str = "net/a.native.ts";
+
+fn net() -> PluginName {
+    PluginName::parse("net").unwrap()
+}
 
 fn granted(conn: &mut Connection) -> Vec<bool> {
     load_trust(conn, PLUGIN, "h")
@@ -23,7 +28,7 @@ fn clearing_a_plugins_trust_is_written_under_a_full_sync() {
     let dir = tempfile::tempdir().unwrap();
     let mut conn = file_conn(dir.path());
     save_trust(&mut conn, "h", PLUGIN, "net", true).unwrap();
-    let statements = statements_of(&mut conn, |c| clear_trust_by_plugin(c, "net").unwrap());
+    let statements = statements_of(&mut conn, |c| clear_trust_by_plugin(c, &net()).unwrap());
     assert_in_order(
         &statements,
         &[
@@ -49,7 +54,7 @@ fn a_refusal_lost_with_the_tail_asks_again_once_the_grant_is_cleared() {
     save_trust(&mut conn, "h", PLUGIN, "net", true).unwrap();
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
-    clear_trust_by_plugin(&mut conn, "net").unwrap();
+    clear_trust_by_plugin(&mut conn, &net()).unwrap();
     let cleared = wal_len(dir.path());
     save_trust(&mut conn, "h", PLUGIN, "net", false).unwrap();
     let refused = wal_len(dir.path());

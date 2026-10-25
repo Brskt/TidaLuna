@@ -17,7 +17,8 @@ fn file_conn(dir: &Path) -> Connection {
 }
 
 fn seed(conn: &mut Connection, url: &str, name: &str) {
-    install(conn, url, name, "{}", "code", "hash").unwrap();
+    let name = crate::plugins::name::PluginName::parse(name).unwrap();
+    install(conn, url, &name, "{}", "code", "hash").unwrap();
     enable(conn, url).unwrap();
     storage_set(conn, url, "k", "v").unwrap();
 }

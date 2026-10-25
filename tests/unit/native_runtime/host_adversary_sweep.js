@@ -123,7 +123,8 @@
         try {
             var m = evalPlugin("module.exports.v = 1+1;",
                 function() { throw new Error("no require"); },
-                function() { throw new Error("no fetch"); }, { env: {} });
+                function() { throw new Error("no fetch"); }, { env: {} },
+                makeScopedTimers(makeModuleScope()));
             return { pass: m.exports.v === 2, detail: String(m.exports.v) };
         } catch (e) { return { pass: false, detail: "threw: " + String(e && e.message) }; }
     });
@@ -163,7 +164,7 @@
         var realWrite = hostStdout.write;
         hostStdout.write = function(chunk) { writes[writes.length] = chunk; return true; };
         var outer;
-        try { outer = makeIpcFetch("adversary-fetch-probe")("http://adversary.invalid/probe-path", {}); }
+        try { outer = makeIpcFetch("adversary-fetch-probe", makeModuleScope())("http://adversary.invalid/probe-path", {}); }
         catch (e) { hostStdout.write = realWrite; return { pass: false, detail: "threw synchronously: " + String(e && e.message) }; }
         await null; await null; await null; await null;
         hostStdout.write = realWrite;
@@ -236,7 +237,7 @@
         var realWrite = hostStdout.write;
         hostStdout.write = function() { return true; };
         var outer;
-        try { outer = makeIpcFetch("adversary-signal-probe")("http://adversary.invalid/signal-probe", { signal: forged }); }
+        try { outer = makeIpcFetch("adversary-signal-probe", makeModuleScope())("http://adversary.invalid/signal-probe", { signal: forged }); }
         catch (e) { hostStdout.write = realWrite; return { pass: false, detail: "threw synchronously: " + String(e && e.message) }; }
         await null; await null; await null; await null;
         hostStdout.write = realWrite;
@@ -289,7 +290,7 @@
         hostStdout.write = function(chunk) { if (captured === null) captured = chunk; return true; };
         var outer;
         try {
-            outer = makeIpcFetch("adversary-sparse-headers-probe")(
+            outer = makeIpcFetch("adversary-sparse-headers-probe", makeModuleScope())(
                 "http://adversary.invalid/sparse-headers", { headers: sparseHeaders });
         } catch (e) {
             hostStdout.write = realWrite;
@@ -512,7 +513,7 @@
             rl.emit("line", JSON.stringify({
                 type: "register", id: regId, name: "adversary-echo-plugin",
                 code: "module.exports.echo = function() { var out = []; for (var i = 0; i < arguments.length; i++) out[i] = arguments[i]; return out; };",
-                trust: {}, dataDir: null,
+                trust: {}, dataDir: F.dataDir, nativeRoot: F.scratch,
             }));
             await null; await null; await null;
             var origIter = Array.prototype[Symbol.iterator];
@@ -599,7 +600,7 @@
                 rl.emit("line", JSON.stringify({
                     type: "register", id: regId, name: pluginName,
                     code: "module.exports.probe = function(x) { return { echoed: x }; };",
-                    trust: {}, dataDir: null,
+                    trust: {}, dataDir: F.dataDir, nativeRoot: F.scratch,
                 }));
                 await null; await null; await null;
                 rl.emit("line", JSON.stringify({
@@ -687,7 +688,7 @@
                 rl.emit("line", JSON.stringify({
                     type: "register", id: regId, name: pluginName,
                     code: "module.exports.probe = function(x) { return { echoed: x }; };",
-                    trust: {}, dataDir: null,
+                    trust: {}, dataDir: F.dataDir, nativeRoot: F.scratch,
                 }));
                 await null; await null; await null;
                 rl.emit("line", JSON.stringify({
@@ -776,6 +777,50 @@
         return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
     }
 
+    // The facade over a plugin's own data dir is what stands between a module trusted with `fs`
+    // and the real one. A register that carries no data dir must be refused by the real handler,
+    // not run with the confinement left out.
+    async function bespokeRegisterWithoutDataDir() {
+        var label = "a register that carries no data dir, through the real handler";
+        if (typeof rl === "undefined" || !rl || typeof rl.emit !== "function") {
+            return { label: label, armed: false, poisonError: "no rl.emit available in this host", failedCount: 0 };
+        }
+        var failed = [];
+        var stamp = Date.now();
+        // JSON drops an undefined field: the first shape arrives without the key at all.
+        var shapes = [["absent", undefined], ["empty", ""], ["null", null]];
+        for (var si = 0; si < shapes.length; si++) {
+            var regId = "adv-nodirreg-" + si + "-" + stamp;
+            var writes = [];
+            var realWrite = hostStdout.write;
+            hostStdout.write = function(chunk) { writes[writes.length] = chunk; return true; };
+            try {
+                rl.emit("line", JSON.stringify({
+                    type: "register", id: regId, name: "adv-nodir-" + si + "-" + stamp,
+                    code: "module.exports.kind = function() { return typeof require('fs').readFileSync; };",
+                    trust: { fs: true }, dataDir: shapes[si][1], nativeRoot: F.scratch,
+                }));
+                await null; await null; await null;
+            } finally {
+                hostStdout.write = realWrite;
+            }
+            var reg = null;
+            for (var wi = 0; wi < writes.length; wi++) {
+                try {
+                    var parsed = JSON.parse(writes[wi]);
+                    if (parsed && parsed.id === regId) reg = parsed;
+                } catch (_) {}
+            }
+            if (!reg || reg.ok === true || String(reg.error).indexOf("no data dir") === -1) {
+                failed[failed.length] = {
+                    name: "a register whose data dir is " + shapes[si][0] + " must be refused",
+                    pass: false, detail: "reg=" + H_JSONStringify(reg),
+                };
+            }
+        }
+        return { label: label, armed: true, poisonError: null, failedCount: failed.length, failedOracles: failed };
+    }
+
     // The executor-capture attack (Promise), only visible if we actually drive ipcFetch's
     // internal `new Promise` while it's poisoned.
     await (async function bespokePromiseExecutorCapture() {
@@ -789,7 +834,7 @@
         var threw = null;
         try {
             globalThis.Promise = EvilPromise;
-            makeIpcFetch("bespoke-promise-probe")("http://adversary.invalid/promise-probe", {});
+            makeIpcFetch("bespoke-promise-probe", makeModuleScope())("http://adversary.invalid/promise-probe", {});
             // Same reason as the ipcFetch IPC-line oracle above: ipcFetch is `async
             // function` and does `await encodeBody(...)` BEFORE reaching `new Promise(...)`
             // (or `new _RealPromise` post-fix), so restoring globalThis.Promise right after
@@ -853,6 +898,17 @@
     };
     if (writeOptResult.failedCount) {
         report.failures[report.failures.length] = { label: writeOptResult.label, failed: writeOptResult.failedOracles };
+    }
+
+    var noDataDirResult = await bespokeRegisterWithoutDataDir();
+    report.totalPoisons++;
+    if (noDataDirResult.armed) report.armedCount++;
+    report.targets[report.targets.length] = {
+        label: noDataDirResult.label, armed: noDataDirResult.armed,
+        poisonError: noDataDirResult.poisonError, failedCount: noDataDirResult.failedCount,
+    };
+    if (noDataDirResult.failedCount) {
+        report.failures[report.failures.length] = { label: noDataDirResult.label, failed: noDataDirResult.failedOracles };
     }
 
     report.protoTargetCount = protoTargetCount;

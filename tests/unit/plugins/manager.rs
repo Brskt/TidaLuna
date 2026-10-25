@@ -1,6 +1,11 @@
 //! Tests for `src/plugins/manager.rs`, attached to it by `#[path]`.
 
 use super::*;
+use crate::plugins::name::PluginName;
+
+fn named(raw: &str) -> PluginName {
+    PluginName::parse(raw).unwrap()
+}
 
 #[test]
 fn random_nonce_is_none_on_entropy_failure() {
@@ -13,18 +18,20 @@ fn random_nonce_is_none_on_entropy_failure() {
 #[test]
 fn the_name_a_url_declared_is_what_answers_for_it() {
     let mut mgr = PluginManager::new();
-    mgr.mark_loading("https://a.invalid/a.mjs", "Shared", 1, "cap-a", 0);
-    mgr.mark_loading("https://b.invalid/b.mjs", "Shared", 2, "cap-b", 0);
+    mgr.mark_loading("https://a.invalid/a.mjs", &named("Shared"), 1, "cap-a", 0);
+    mgr.mark_loading("https://b.invalid/b.mjs", &named("Shared"), 2, "cap-b", 0);
 
-    assert_eq!(mgr.name_for_url("https://a.invalid/a.mjs"), Some("Shared"));
-    assert_eq!(mgr.name_for_url("https://b.invalid/b.mjs"), Some("Shared"));
-    assert_eq!(mgr.name_for_url("https://c.invalid/c.mjs"), None);
+    let name = |url: &str| mgr.name_for_url(url).map(PluginName::as_str);
+    assert_eq!(name("https://a.invalid/a.mjs"), Some("Shared"));
+    assert_eq!(name("https://b.invalid/b.mjs"), Some("Shared"));
+    assert_eq!(name("https://c.invalid/c.mjs"), None);
 
     // Uninstalled, the url answers for nothing: a later claim on its name must not be served from
     // a plugin that is gone.
     mgr.forget_plugin("https://a.invalid/a.mjs");
-    assert_eq!(mgr.name_for_url("https://a.invalid/a.mjs"), None);
-    assert_eq!(mgr.name_for_url("https://b.invalid/b.mjs"), Some("Shared"));
+    let name = |url: &str| mgr.name_for_url(url).map(PluginName::as_str);
+    assert_eq!(name("https://a.invalid/a.mjs"), None);
+    assert_eq!(name("https://b.invalid/b.mjs"), Some("Shared"));
 }
 
 /// Ending a session names the loads it drops in the same breath as dropping them. Listing
@@ -35,8 +42,8 @@ fn the_name_a_url_declared_is_what_answers_for_it() {
 #[test]
 fn retiring_every_load_names_exactly_what_it_dropped() {
     let mut mgr = PluginManager::new();
-    let id_a = mgr.mark_loading("https://a.invalid/a.mjs", "A", 1, "cap-a", 0);
-    let id_b = mgr.mark_loading("https://b.invalid/b.mjs", "B", 2, "cap-b", 0);
+    let id_a = mgr.mark_loading("https://a.invalid/a.mjs", &named("A"), 1, "cap-a", 0);
+    let id_b = mgr.mark_loading("https://b.invalid/b.mjs", &named("B"), 2, "cap-b", 0);
 
     let retired = mgr.retire_all_loaded();
 
@@ -63,7 +70,7 @@ fn retiring_every_load_names_exactly_what_it_dropped() {
 fn test_mark_ready_with_matching_load_id_and_nonce() {
     let mut mgr = PluginManager::new();
     let nonce = 0xABCD;
-    let load_id = mgr.mark_loading("p", "p", nonce, "cap-p", 0);
+    let load_id = mgr.mark_loading("p", &named("p"), nonce, "cap-p", 0);
     assert!(
         mgr.mark_ready("p", load_id, nonce),
         "an ack naming its own load is accepted"
@@ -80,8 +87,8 @@ fn test_mark_ready_with_matching_load_id_and_nonce() {
 fn test_mark_ready_with_stale_load_id_ignored() {
     let mut mgr = PluginManager::new();
     let nonce = 0x1111;
-    let old_id = mgr.mark_loading("p", "p", nonce, "cap-old", 0);
-    let new_id = mgr.mark_loading("p", "p", nonce, "cap-new", 0); // reload
+    let old_id = mgr.mark_loading("p", &named("p"), nonce, "cap-old", 0);
+    let new_id = mgr.mark_loading("p", &named("p"), nonce, "cap-new", 0); // reload
     assert!(
         !mgr.mark_ready("p", old_id, nonce),
         "an ack for the load the reload replaced"
@@ -95,7 +102,7 @@ fn test_mark_ready_with_stale_load_id_ignored() {
 #[test]
 fn test_mark_ready_with_wrong_nonce_rejected() {
     let mut mgr = PluginManager::new();
-    let load_id = mgr.mark_loading("p", "p", 0x4242, "cap-p", 0);
+    let load_id = mgr.mark_loading("p", &named("p"), 0x4242, "cap-p", 0);
     assert!(!mgr.mark_ready("p", load_id, 99999)); // wrong nonce
     assert!(
         mgr.mark_ready("p", load_id, 0x4242),
@@ -114,8 +121,8 @@ fn test_mark_ready_with_wrong_nonce_rejected() {
 #[test]
 fn retiring_a_stale_load_leaves_a_newer_one_standing() {
     let mut mgr = PluginManager::new();
-    let old = mgr.mark_loading("p", "p", 1, "cap-old", 0);
-    let new = mgr.mark_loading("p", "p", 2, "cap-new", 0);
+    let old = mgr.mark_loading("p", &named("p"), 1, "cap-old", 0);
+    let new = mgr.mark_loading("p", &named("p"), 2, "cap-new", 0);
 
     assert!(
         !mgr.retire_load("p", old),
@@ -136,7 +143,7 @@ fn retiring_a_stale_load_leaves_a_newer_one_standing() {
 #[test]
 fn a_watchdog_abandons_only_a_load_still_waiting_for_its_ack() {
     let mut mgr = PluginManager::new();
-    let load_id = mgr.mark_loading("p", "p", 7, "cap-p", 0);
+    let load_id = mgr.mark_loading("p", &named("p"), 7, "cap-p", 0);
     assert!(mgr.mark_ready("p", load_id, 7));
 
     assert!(
@@ -149,7 +156,7 @@ fn a_watchdog_abandons_only_a_load_still_waiting_for_its_ack() {
         "and it is left exactly as it was"
     );
 
-    let second = mgr.mark_loading("q", "q", 8, "cap-q", 0);
+    let second = mgr.mark_loading("q", &named("q"), 8, "cap-q", 0);
     assert!(
         mgr.abandon_if_still_loading("q", second),
         "one that never acked is still the watchdog's to abandon"
@@ -162,8 +169,8 @@ fn a_watchdog_abandons_only_a_load_still_waiting_for_its_ack() {
 #[test]
 fn forgetting_a_plugin_ignores_which_load_is_current() {
     let mut mgr = PluginManager::new();
-    mgr.mark_loading("p", "p", 1, "cap-old", 0);
-    mgr.mark_loading("p", "p", 2, "cap-new", 0);
+    mgr.mark_loading("p", &named("p"), 1, "cap-old", 0);
+    mgr.mark_loading("p", &named("p"), 2, "cap-new", 0);
 
     mgr.forget_plugin("p");
 
@@ -179,8 +186,8 @@ fn random_capability_is_none_on_entropy_failure() {
 #[test]
 fn a_capability_resolves_only_to_its_own_plugin() {
     let mut mgr = PluginManager::new();
-    mgr.mark_loading("https://example.test/a.js", "A", 1, "cap-a", 0);
-    mgr.mark_loading("https://example.test/b.js", "B", 2, "cap-b", 0);
+    mgr.mark_loading("https://example.test/a.js", &named("A"), 1, "cap-a", 0);
+    mgr.mark_loading("https://example.test/b.js", &named("B"), 2, "cap-b", 0);
     for (cap, plugin) in [
         ("cap-a", "https://example.test/a.js"),
         ("cap-b", "https://example.test/b.js"),
@@ -201,7 +208,7 @@ fn an_unknown_capability_resolves_to_nothing() {
 #[test]
 fn unloading_leaves_the_capability_usable_for_the_unload_handler() {
     let mut mgr = PluginManager::new();
-    let load_id = mgr.mark_loading("https://example.test/a.js", "A", 1, "cap-a", 0);
+    let load_id = mgr.mark_loading("https://example.test/a.js", &named("A"), 1, "cap-a", 0);
     mgr.retire_load("https://example.test/a.js", load_id);
     assert_eq!(
         mgr.plugin_for_capability("cap-a").as_deref(),
@@ -215,8 +222,8 @@ fn unloading_leaves_the_capability_usable_for_the_unload_handler() {
 #[test]
 fn reloading_leaves_the_previous_capability_usable() {
     let mut mgr = PluginManager::new();
-    mgr.mark_loading("https://example.test/a.js", "A", 1, "cap-old", 0);
-    mgr.mark_loading("https://example.test/a.js", "A", 2, "cap-new", 0);
+    mgr.mark_loading("https://example.test/a.js", &named("A"), 1, "cap-old", 0);
+    mgr.mark_loading("https://example.test/a.js", &named("A"), 2, "cap-new", 0);
     for cap in ["cap-old", "cap-new"] {
         assert_eq!(
             mgr.plugin_for_capability(cap).as_deref(),
@@ -231,11 +238,17 @@ fn reloading_leaves_the_previous_capability_usable() {
 #[test]
 fn reloads_beyond_the_bound_drop_only_that_plugins_oldest() {
     let mut mgr = PluginManager::new();
-    mgr.mark_loading("https://example.test/other.js", "Other", 0, "cap-other", 0);
+    mgr.mark_loading(
+        "https://example.test/other.js",
+        &named("Other"),
+        0,
+        "cap-other",
+        0,
+    );
     for i in 0..=MAX_CAPABILITIES_PER_PLUGIN {
         mgr.mark_loading(
             "https://example.test/a.js",
-            "A",
+            &named("A"),
             i as u64,
             &format!("cap-{i}"),
             0,
@@ -273,8 +286,8 @@ fn reloads_beyond_the_bound_drop_only_that_plugins_oldest() {
 #[test]
 fn a_capability_remembers_the_session_that_issued_it() {
     let mut mgr = PluginManager::new();
-    mgr.mark_loading("https://example.test/a.js", "A", 1, "cap-old", 4);
-    mgr.mark_loading("https://example.test/b.js", "B", 2, "cap-now", 5);
+    mgr.mark_loading("https://example.test/a.js", &named("A"), 1, "cap-old", 4);
+    mgr.mark_loading("https://example.test/b.js", &named("B"), 2, "cap-now", 5);
 
     assert_eq!(mgr.capability_epoch("cap-old"), Some(4));
     assert_eq!(mgr.capability_epoch("cap-now"), Some(5));
@@ -284,10 +297,38 @@ fn a_capability_remembers_the_session_that_issued_it() {
         "a capability nobody minted names no session"
     );
     // Even with a load recorded under an empty capability, which is what the guard is for.
-    mgr.mark_loading("https://example.test/c.js", "C", 3, "", 6);
+    mgr.mark_loading("https://example.test/c.js", &named("C"), 3, "", 6);
     assert_eq!(
         mgr.capability_epoch(""),
         None,
         "an empty envelope field cannot match, here as in attribution"
     );
+}
+
+#[test]
+fn revoking_a_plugin_takes_only_its_own_capabilities() {
+    let mut mgr = PluginManager::new();
+    mgr.mark_loading("https://example.test/a.js", &named("A"), 1, "cap-a", 0);
+    mgr.mark_loading("https://example.test/b.js", &named("B"), 2, "cap-b", 0);
+    mgr.revoke_capabilities("https://example.test/a.js");
+    assert!(mgr.plugin_for_capability("cap-a").is_none());
+    assert_eq!(
+        mgr.plugin_for_capability("cap-b").as_deref(),
+        Some("https://example.test/b.js")
+    );
+}
+
+/// `plugin.uninstall_all` used to skip the forget: a registration in flight then still found its
+/// load current and was handed a channel for a plugin no longer installed.
+#[test]
+fn forgetting_every_plugin_drops_its_loads_and_names() {
+    let mut mgr = PluginManager::new();
+    mgr.mark_loading("https://example.test/a.js", &named("A"), 1, "cap-a", 0);
+    mgr.mark_loading("https://example.test/b.js", &named("B"), 2, "cap-b", 0);
+    mgr.forget_all_plugins();
+    assert!(mgr.loaded_loads().is_empty());
+    for url in ["https://example.test/a.js", "https://example.test/b.js"] {
+        assert_eq!(mgr.current_load_id(url), None, "{url}");
+        assert!(mgr.name_for_url(url).is_none(), "{url}");
+    }
 }

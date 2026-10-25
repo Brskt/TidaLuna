@@ -5,6 +5,7 @@ mod lib_native;
 mod native;
 mod plugin_ipc;
 mod proxy;
+mod trust_prompt;
 
 pub(crate) use jsrt::JS_PURGE_SDK_BLOB;
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;

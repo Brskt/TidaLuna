@@ -89,7 +89,12 @@ pub(super) fn injection_still_current(pass_epoch: u64, current_epoch: Option<u64
 /// re-read happens here, after the dispatch, because that is the only point where the answer
 /// can have changed: transpiling is real CPU work that holds no lock, and a logout lands on a
 /// different thread.
-pub(super) fn inject_plugin(url: &str, name: &str, code: &str, epoch: u64) -> Injected {
+pub(super) fn inject_plugin(
+    url: &str,
+    name: &crate::plugins::name::PluginName,
+    code: &str,
+    epoch: u64,
+) -> Injected {
     let (Some(nonce), Some(capability)) = (
         crate::plugins::manager::random_nonce(),
         crate::plugins::manager::random_capability(),

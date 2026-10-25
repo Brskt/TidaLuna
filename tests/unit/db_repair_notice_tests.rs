@@ -9,7 +9,8 @@ fn damaged_plugins_db(dir: &Path) -> PathBuf {
     let path = dir.join("plugins.db");
     let mut conn = Connection::open(&path).unwrap();
     store::init_schema(&mut conn).unwrap();
-    store::install(&mut conn, "https://x/p", "p", "{}", "code", "h").unwrap();
+    let name = crate::plugins::name::PluginName::parse("p").unwrap();
+    store::install(&conn, "https://x/p", &name, "{}", "code", "h").unwrap();
     drop(conn);
     overwrite_with_ff(&path);
     path

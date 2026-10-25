@@ -278,6 +278,8 @@ export class LunaPlugin {
             this.extractSettings().then(() => syncUpstream(this.url, this));
         } catch (e) {
             this.enabled = false;
+            // On the card, not only in the console: the switch falling back to off says nothing.
+            this.loadError._ = e instanceof Error ? e.message : String(e);
             console.error(`[luna:plugin] Failed to enable '${this.name}':`, e);
         } finally {
             this.loading._ = false;
@@ -450,6 +452,9 @@ export class LunaPlugin {
         };
 
         const plugin = new LunaPlugin(store);
+        // Why Rust will not load this plugin, carried by its row: the startup pass that disables it
+        // runs before this page listens; the row is the one channel that reaches the card.
+        if (info.loadError) plugin.loadError._ = info.loadError;
         LunaPlugin.plugins[info.url] = plugin;
         return plugin;
     }

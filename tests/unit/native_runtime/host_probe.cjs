@@ -65,6 +65,22 @@ if (onUnix) {
     fs.symlinkSync(aliasReal, aliasLink);
 }
 
+// The folder Rust names as the parent of every plugin's data dir. Built from strings, the way
+// Rust's join writes them: "." and the trailing separator reach the host unnormalised.
+const nativeRoot = path.join(scratch, "native");
+fs.mkdirSync(nativeRoot);
+const nativeSelf = nativeRoot + path.sep + "Song Downloader";
+const nativeDot = nativeRoot + path.sep + ".";
+const nativeEmpty = nativeRoot + path.sep;
+// A plugin folder that is a link out of the root: unix-only, like the alias above.
+const nativeLink = onUnix ? nativeRoot + path.sep + "link" : null;
+if (onUnix) fs.symlinkSync(scratch, nativeLink);
+// The root reached through a link. The scratch is already canonical: without the link, a host
+// that handed back the dir as written would pass for one that resolves it.
+const nativeAlias = onUnix ? path.join(scratch, "nativealias") : null;
+if (onUnix) fs.symlinkSync(nativeRoot, nativeAlias);
+const nativeAliasSelf = onUnix ? nativeAlias + path.sep + "Song Downloader" : null;
+
 const ASSERTIONS = `
 ;(function probe() {
     var out = [];
@@ -235,6 +251,16 @@ const ASSERTIONS = `
     var reqFs = makeRequireProxy(new Set(["fs"]), fsOnly, F.dataDir, "Probe/mod.native.ts", mockedProcess);
     t("fs trust yields the sandboxed facade, never the real module",
         reqFs("fs") === fsOnly, true);
+    // With no facade there is nothing confined to hand over, and trust must not fall through to
+    // the real module. Every register builds one; this pins the seam that takes it as an argument.
+    var reqNoFacade = makeRequireProxy(new Set(["fs", "fs/promises"]), null, F.dataDir,
+        "Probe/mod.native.ts", mockedProcess);
+    threw("trusted fs without a facade is refused, not the real module",
+        function() { reqNoFacade("fs"); }, "no data dir sandbox");
+    threw("node:fs too",
+        function() { reqNoFacade("node:fs"); }, "no data dir sandbox");
+    threw("and fs/promises",
+        function() { reqNoFacade("fs/promises"); }, "no data dir sandbox");
 
     // The eval and Function gates at their real boundary; only the scanner was exercised.
     // Calling eval here is the assertion, not a slip: this is the sandbox's own hardened
@@ -313,7 +339,8 @@ const ASSERTIONS = `
         '};',
     ].join("\\n");
     var plug = evalPlugin(body, function() { throw new Error("no require"); },
-        function() { throw new Error("no fetch"); }, mockedProcess);
+        function() { throw new Error("no fetch"); }, mockedProcess,
+        makeScopedTimers(makeModuleScope()));
 
     plug.exports.pollute("objectProto");
     t("a planted env key does not surface", plainEnv.XDG_RUNTIME_DIR, undefined);
@@ -617,6 +644,27 @@ const ASSERTIONS = `
     t("fs containment resists a poisoned .call", callDenied, true);
     plug.exports.pollute("unCallProp");
 
+    // A plugin's data dir is its own folder strictly inside the native root. One that resolves to
+    // the root itself ("." or an empty name) would give a plugin every plugin's data.
+    t("a data dir inside the native root is confined to itself",
+        confinedDataDir(F.nativeSelf, F.nativeRoot), realFs.realpathSync(F.nativeSelf));
+    threw("the native root itself is no data dir",
+        function() { confinedDataDir(F.nativeDot, F.nativeRoot); }, "not strictly under");
+    threw("an empty plugin name is no data dir",
+        function() { confinedDataDir(F.nativeEmpty, F.nativeRoot); }, "not strictly under");
+    threw("a data dir with no native root is refused",
+        function() { confinedDataDir(F.nativeSelf, undefined); }, "no native root");
+    threw("an absent data dir is refused by name",
+        function() { confinedDataDir(undefined, F.nativeRoot); }, "no data dir");
+    threw("an empty data dir is refused by name",
+        function() { confinedDataDir("", F.nativeRoot); }, "no data dir");
+    if (F.onUnix) {
+        threw("a data dir linked out of the native root is refused",
+            function() { confinedDataDir(F.nativeLink, F.nativeRoot); }, "not strictly under");
+        t("a data dir under a linked native root comes back resolved",
+            confinedDataDir(F.nativeAliasSelf, F.nativeAlias), realFs.realpathSync(F.nativeSelf));
+    }
+
     } catch (e) {
         // A throw used to be INVISIBLE: it escaped into the net.listen callback the probe
         // runs under, which does not fail the process on its own, and then
@@ -644,6 +692,7 @@ function run() {
         scratch, dataDir, dataDirNative, outsideFile, runtimeDir, runtimePlain,
         insideSock, outsideSock, bridgedSock, bridgedToFile,
         aliasReal, aliasLink, onUnix,
+        nativeRoot, nativeSelf, nativeDot, nativeEmpty, nativeLink, nativeAlias, nativeAliasSelf,
     });
 }
 

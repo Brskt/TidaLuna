@@ -268,6 +268,13 @@ var _RealTypeError = TypeError;
 var _Buffer = require("buffer").Buffer;
 var _setTimeout = setTimeout;
 var _clearTimeout = clearTimeout;
+var _setInterval = setInterval;
+var _clearInterval = clearInterval;
+var _setImmediate = setImmediate;
+var _clearImmediate = clearImmediate;
+var _RealAbortController = AbortController;
+var _RealAbortSignalAny = AbortSignal.any.bind(AbortSignal);
+var _timersPromises = require("timers/promises");
 // Prototype methods, as uncurried-this invokers bound at load. Capturing the method
 // alone is not enough: `_m.call(x, ...)` reads `.call`, an own-settable property on the
 // extensible method object (and, failing that, the poisonable Function.prototype.call),
@@ -718,7 +725,7 @@ function warnInertStub(pluginName, canonical) {
     });
 })();
 
-function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, pluginProcess) {
+function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, pluginProcess, timers) {
     var moduleStub = null; // lazy, per plugin - see makeModuleStub
     // Asks the set, not the object. `trustedModules.has(id)` answers with whatever method
     // the object in hand carries, and this gate decides whether a plugin is handed the real
@@ -735,6 +742,10 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, plug
 
         // Return hardened console (stderr-only) - real require('console') is stdout-backed
         if (id === "console" || id === "node:console") return globalThis.console;
+
+        // The module's own timer API, not the shared one: what it starts is what its scope can stop.
+        if (id === "timers" || id === "node:timers") return timers;
+        if (id === "timers/promises" || id === "node:timers/promises") return timers.promises;
 
         if (isSafe(id)) return require(id);
 
@@ -782,6 +793,9 @@ function makeRequireProxy(trustedModules, sandboxedFs, dataDir, pluginName, plug
                     return sandboxedFs.promises;
                 throw new Error("TRUST_REQUIRED:fs");
             }
+            // No facade means nothing confined to hand over; trust never buys the real module.
+            if (canonical === "fs" || canonical === "fs/promises")
+                throw new Error("[sandbox] require('" + canonical + "') unavailable: no data dir sandbox");
             if (isTrusted(id, canonical)) {
                 return require(id);
             }
@@ -815,6 +829,27 @@ function containsDynamicImport(code) {
     } catch (e) {
         return true; // unparseable - block (fail-closed)
     }
+}
+
+// The BLOCKED modules `code` names in a literal require(), canonical (fs/promises as fs): what
+// Rust asks about up front, in one dialog rather than one per evaluation. A hint only; the require
+// proxy decides what loads, and a failed scan lists nothing (the sentinel asks one at a time).
+function blockedRequires(code) {
+    var found = [];
+    if (!transpiler) return found;
+    var imports;
+    try { imports = transpiler.scanImports(code); } catch (e) { return found; }
+    for (var i = 0; i < imports.length; i++) {
+        // require() only: an import statement does not evaluate here, and import() is refused at
+        // register; asking about either would ask for a file that cannot load.
+        if (!imports[i] || imports[i].kind !== "require-call") continue;
+        var path = imports[i].path;
+        if (typeof path !== "string" || !isBlocked(path)) continue;
+        var canonical = canonicalize(path);
+        if (canonical === "fs/promises") canonical = "fs";
+        if (_ArrayPrototypeIndexOf(found, canonical) === -1) _ArrayPrototypePush(found, canonical);
+    }
+    return found;
 }
 
 // eval("import('fs')") bypasses containsDynamicImport (AST scan of source)
@@ -1162,10 +1197,141 @@ function settle(reqId) {
     if (!entry) return null;
     pendingFetches.delete(reqId);
     _clearTimeout(entry.timer);
+    if (entry.scope) _SetPrototypeDelete(entry.scope.fetches, reqId);
     if (entry.signal && entry.onAbort) {
         try { _RemoveEventListener(entry.signal, "abort", entry.onAbort); } catch (_) {}
     }
     return entry;
+}
+
+// What a module has put in flight on this shared process, to take it down: the timer globals
+// (parameter shadows), require('timers'[/promises]) and its ipcFetch. Not covered, and cannot be:
+// globalThis.setInterval, process.nextTick, trusted net/http sockets, async loops awaiting what the
+// host never saw (one realm; only killing it unloads). Hygiene for a module that plays by the API.
+function makeModuleScope() {
+    return {
+        dead: false,
+        ac: new _RealAbortController(),
+        timers: new Set(),
+        immediates: new Set(),
+        fetches: new Set(),
+    };
+}
+
+function assertLive(scope) {
+    if (scope.dead) throw new Error("[sandbox] this module was unloaded");
+}
+
+function restArgs(a, from) {
+    var out = bareArray();
+    for (var i = from; i < a.length; i++) _ArrayPrototypePush(out, a[i]);
+    return out;
+}
+
+// The timer API as a module sees it: every handle it creates is held by its scope until
+// it fires or is cleared, and a handle that is not its own is not its to clear.
+function makeScopedTimers(scope) {
+    function once(fn, ms) {
+        assertLive(scope);
+        if (typeof fn !== "function") return Reflect.apply(_setTimeout, undefined, [fn, ms]);
+        var rest = restArgs(arguments, 2);
+        var handle = Reflect.apply(_setTimeout, undefined, [function() {
+            _SetPrototypeDelete(scope.timers, handle);
+            return Reflect.apply(fn, undefined, rest);
+        }, ms]);
+        _SetPrototypeAdd(scope.timers, handle);
+        return handle;
+    }
+    function every(fn, ms) {
+        assertLive(scope);
+        if (typeof fn !== "function") return Reflect.apply(_setInterval, undefined, [fn, ms]);
+        var rest = restArgs(arguments, 2);
+        var handle = Reflect.apply(_setInterval, undefined, [function() {
+            return Reflect.apply(fn, undefined, rest);
+        }, ms]);
+        _SetPrototypeAdd(scope.timers, handle);
+        return handle;
+    }
+    function soon(fn) {
+        assertLive(scope);
+        if (typeof fn !== "function") return Reflect.apply(_setImmediate, undefined, [fn]);
+        var rest = restArgs(arguments, 1);
+        var handle = Reflect.apply(_setImmediate, undefined, [function() {
+            _SetPrototypeDelete(scope.immediates, handle);
+            return Reflect.apply(fn, undefined, rest);
+        }]);
+        _SetPrototypeAdd(scope.immediates, handle);
+        return handle;
+    }
+    function clearT(h) {
+        if (!_SetPrototypeHas(scope.timers, h)) return;
+        _SetPrototypeDelete(scope.timers, h);
+        _clearTimeout(h);
+    }
+    function clearI(h) {
+        if (!_SetPrototypeHas(scope.immediates, h)) return;
+        _SetPrototypeDelete(scope.immediates, h);
+        _clearImmediate(h);
+    }
+    // The promise forms hold nothing the host can clear: they are cancelled through the
+    // scope's own signal, joined to the caller's when it brought one.
+    function withScopeSignal(options) {
+        var o = {};
+        if (options && typeof options === "object") {
+            var keys = _ObjectKeys(options);
+            for (var i = 0; i < keys.length; i++) o[keys[i]] = options[keys[i]];
+        }
+        o.signal = o.signal ? _RealAbortSignalAny([o.signal, scope.ac.signal]) : scope.ac.signal;
+        return o;
+    }
+    var promises = _ObjectFreeze({
+        setTimeout: function(delay, value, options) {
+            assertLive(scope);
+            return _timersPromises.setTimeout(delay, value, withScopeSignal(options));
+        },
+        setImmediate: function(value, options) {
+            assertLive(scope);
+            return _timersPromises.setImmediate(value, withScopeSignal(options));
+        },
+        setInterval: function(delay, value, options) {
+            assertLive(scope);
+            return _timersPromises.setInterval(delay, value, withScopeSignal(options));
+        },
+    });
+    // `util.promisify(setTimeout)` finds its promise form through this symbol, on the real
+    // functions; a wrapper without it is promisified as a plain callback-last function.
+    var promisifyCustom = Symbol.for("nodejs.util.promisify.custom");
+    _ObjectDefineProperty(once, promisifyCustom, { value: promises.setTimeout });
+    _ObjectDefineProperty(soon, promisifyCustom, { value: promises.setImmediate });
+    return {
+        setTimeout: once, setInterval: every, setImmediate: soon,
+        clearTimeout: clearT, clearInterval: clearT, clearImmediate: clearI,
+        promises: promises,
+    };
+}
+
+// Take a module's scope down: refuse what it would start next, stop what it started,
+// and settle the fetches it is waiting on, telling Rust to drop their egress too.
+function unloadModuleScope(scope) {
+    scope.dead = true;
+    var timers = _ArrayFrom(scope.timers);
+    for (var i = 0; i < timers.length; i++) {
+        _clearTimeout(timers[i]);
+        _clearInterval(timers[i]);
+    }
+    scope.timers = new Set();
+    var immediates = _ArrayFrom(scope.immediates);
+    for (var j = 0; j < immediates.length; j++) _clearImmediate(immediates[j]);
+    scope.immediates = new Set();
+    scope.ac.abort();
+    var reqIds = _ArrayFrom(scope.fetches);
+    for (var k = 0; k < reqIds.length; k++) {
+        var entry = settle(reqIds[k]);
+        if (entry) {
+            sendCancel(reqIds[k]);
+            entry.reject(new _RealTypeError("[sandbox] fetch aborted: the module was unloaded"));
+        }
+    }
 }
 
 // Tell Rust to drop an in-flight net.fetch (the child gave up: abort or timeout);
@@ -1176,8 +1342,9 @@ function sendCancel(reqId) {
     } catch (_) {}
 }
 
-function makeIpcFetch(pluginName) {
+function makeIpcFetch(pluginName, scope) {
     return async function ipcFetch(input, init) {
+        assertLive(scope);
         var url, method = "GET", headers = [], body, redirect, signal;
         if (_RealRequest && input instanceof _RealRequest) {
             url = input.url;
@@ -1229,6 +1396,8 @@ function makeIpcFetch(pluginName) {
         if (enc.contentType && !headersHave(headers, "content-type")) {
             _ArrayPrototypePush(headers, ["content-type", enc.contentType]);
         }
+        // Unloaded while the body was being encoded: nothing was sent, nothing to cancel.
+        assertLive(scope);
 
         return await new _RealPromise(function(resolve, reject) {
             var reqId = nextFetchId++;
@@ -1251,7 +1420,9 @@ function makeIpcFetch(pluginName) {
             }
             pendingFetches.set(reqId, {
                 resolve: resolve, reject: reject, timer: timer, signal: signal, onAbort: onAbort,
+                scope: scope,
             });
+            _SetPrototypeAdd(scope.fetches, reqId);
             try {
                 hostStdout.write(ipcLine({
                     type: "net.fetch", reqId: reqId, plugin: pluginName,
@@ -1329,6 +1500,8 @@ const SHADOW_PARAMS = [
     "Worker", "ShadowRealm",
     "process",
     "fetch",
+    "setTimeout", "setInterval", "setImmediate",
+    "clearTimeout", "clearInterval", "clearImmediate",
 ];
 const SHADOW_PARAMS_STR = SHADOW_PARAMS.join(",");
 
@@ -1363,7 +1536,7 @@ function restorePrototypes() {
     }
 }
 
-function evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess) {
+function evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess, timers) {
     var m = { exports: {} };
     // eslint-disable-next-line no-new-func -- intentional: plugin code loading
     var fn = new _RealFunction(SHADOW_PARAMS_STR, code); // NOSONAR
@@ -1373,7 +1546,9 @@ function evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess) {
             undefined,
             undefined, undefined,
             pluginProcess,
-            pluginFetch
+            pluginFetch,
+            timers.setTimeout, timers.setInterval, timers.setImmediate,
+            timers.clearTimeout, timers.clearInterval, timers.clearImmediate
         );
     } finally {
         restorePrototypes();
@@ -1467,6 +1642,22 @@ function isInDirs(real, dirs) {
             || _StringPrototypeStartsWith(real, dirs[i] + pathMod.sep)) return true;
     }
     return false;
+}
+
+// A plugin's data dir, resolved through links and strictly inside the native root (the root itself
+// would expose every plugin's data). Rust's name rule already ensures both; this is the last check
+// before the fs facade, and it fails closed without a root or a dir.
+function confinedDataDir(dataDir, nativeRoot) {
+    if (typeof nativeRoot !== "string" || !nativeRoot) throw new Error("register: no native root");
+    if (typeof dataDir !== "string" || !dataDir) throw new Error("register: no data dir");
+    realFs.mkdirSync(dataDir, { recursive: true });
+    var canonicalDataDir = realFs.realpathSync(dataDir);
+    var canonicalRoot = realFs.realpathSync(nativeRoot);
+    if (canonicalDataDir === canonicalRoot
+        || !_StringPrototypeStartsWith(canonicalDataDir, canonicalRoot + pathMod.sep)) {
+        throw new Error("register: data dir is not strictly under the native root");
+    }
+    return canonicalDataDir;
 }
 
 // Separate from assertRead because the probes below need the verdict, not a throw.
@@ -1916,6 +2107,9 @@ function getGrantStore(pluginName) {
 // name swallowed the registration (the ack still reported the real exports) and then
 // answered every later call with the attacker's function, holding the real arguments.
 const modules = _ObjectCreate(null);
+// Name -> what that module has in flight (see makeModuleScope); prototype-less like `modules`, for
+// the same reason.
+const moduleScopes = _ObjectCreate(null);
 
 // Reuse bootstrap readline if available, fall back to own instance for standalone dev usage.
 const rl = globalThis.__rl || readline.createInterface({ input: hostStdin });
@@ -1959,14 +2153,10 @@ rl.on("line", async (line) => {
                 ? probeDirsFor(cmd.runtimeDir)
                 : [];
 
-            // Build sandboxed fs restricted to plugin dataDir + grants
-            var sandboxedFs = null;
-            if (dataDir) {
-                realFs.mkdirSync(dataDir, { recursive: true });
-                var canonicalDataDir = realFs.realpathSync(dataDir);
-                var grants = getGrantStore(name);
-                sandboxedFs = makeSandboxedFs([canonicalDataDir], grants, ipcDirs);
-            }
+            // Build sandboxed fs restricted to plugin dataDir + grants. Every register gets
+            // one: fs reaches a module through it or not at all.
+            var canonicalDataDir = confinedDataDir(dataDir, cmd.nativeRoot);
+            var sandboxedFs = makeSandboxedFs([canonicalDataDir], getGrantStore(name), ipcDirs);
 
             // A register rebuilds this plugin's JS state on the same long-lived Bun
             // process (disable/re-enable, reinstall, code update all land here), so
@@ -1980,15 +2170,30 @@ rl.on("line", async (line) => {
             // the plugins that were refused it.
             var pluginProcess = endpointEnvFor(trustedModules, cmd.runtimeDir);
 
-            var proxiedRequire = makeRequireProxy(trustedModules, sandboxedFs, dataDir, name, pluginProcess);
+            var scope = makeModuleScope();
+            var scopedTimers = makeScopedTimers(scope);
+            var proxiedRequire = makeRequireProxy(trustedModules, sandboxedFs, dataDir, name, pluginProcess, scopedTimers);
             // fetch gated on network trust (require('http')/'https' group), baked per-plugin
             // into the eval env - no shared mutable state to race across concurrent calls.
             var hasNetworkTrust = _SetPrototypeHas(trustedModules, "http")
                 || _SetPrototypeHas(trustedModules, "https");
             var pluginFetch = hasNetworkTrust
-                ? makeIpcFetch(name)
+                ? makeIpcFetch(name, scope)
                 : function() { throw new Error("[sandbox] fetch requires network trust - grant http/https"); };
-            var m = evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess);
+            var m;
+            try {
+                m = evalPlugin(code, proxiedRequire, pluginFetch, pluginProcess, scopedTimers);
+            } catch (evalErr) {
+                // A module that threw while loading is not registered: what it started
+                // before throwing must not outlive the failed attempt.
+                unloadModuleScope(scope);
+                throw evalErr;
+            }
+            // The module this one replaces (disable then enable, a code update, a second evaluation
+            // of the same file) is no longer callable; what it started would run unowned.
+            var replaced = moduleScopes[name];
+            moduleScopes[name] = scope;
+            if (replaced) unloadModuleScope(replaced);
             modules[name] = m.exports;
             respond(id, { ok: true, exports: _ObjectKeys(m.exports), hash: hashCode(code) });
 
@@ -2031,10 +2236,17 @@ rl.on("line", async (line) => {
             respond(id, { ok: true });
 
         } else if (type === "cleanup") {
+            var gone = moduleScopes[cmd.name];
+            delete moduleScopes[cmd.name];
+            if (gone) unloadModuleScope(gone);
             delete modules[cmd.name];
             grantStores.delete(cmd.name);
             _warnedStubs.delete(cmd.name);
             respond(id, { ok: true });
+
+        } else if (type === "scan") {
+            // Evaluates nothing: the source is read, never run.
+            respond(id, { ok: true, required: blockedRequires(cmd.code) });
 
         } else {
             respondError(id, "unknown command type: " + type);

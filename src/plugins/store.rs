@@ -1,3 +1,4 @@
+use super::name::PluginName;
 use crate::db::{ROUTINE_SYNC, Stable};
 use rusqlite::{Connection, params};
 
@@ -9,6 +10,19 @@ pub(crate) struct PluginInfo {
     pub hash: Option<String>,
     pub enabled: bool,
     pub installed: bool,
+    /// Why this plugin cannot load, shown on its card. Carried by the row rather than sent as an
+    /// event: the startup pass that disables such a plugin runs before the page listens.
+    #[serde(rename = "loadError", skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
+}
+
+/// Why a stored plugin cannot load, read off its own row: the same refusal an enable meets, and
+/// still there after the restart that disabled it.
+fn load_refusal(name: &str, manifest: &str) -> Option<String> {
+    match PluginName::parse(name) {
+        Err(refused) => Some(refused.to_string()),
+        Ok(_) => parse_luna_meta(manifest).err(),
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -155,10 +169,13 @@ pub(crate) fn list(conn: &mut Connection) -> Vec<PluginInfo> {
         }
     };
     match stmt.query_map([], |row| {
+        let name: String = row.get(1)?;
+        let manifest: String = row.get(2)?;
         Ok(PluginInfo {
             url: row.get(0)?,
-            name: row.get(1)?,
-            manifest: row.get(2)?,
+            load_error: load_refusal(&name, &manifest),
+            name,
+            manifest,
             hash: row.get(3)?,
             enabled: row.get::<_, i32>(4)? != 0,
             installed: row.get::<_, i32>(5)? != 0,
@@ -174,11 +191,12 @@ pub(crate) fn list(conn: &mut Connection) -> Vec<PluginInfo> {
 
 /// Store a plugin in the DB as installed but NOT enabled.
 /// Activation happens separately via the `plugin.enable` IPC handler.
-/// Returns an error if another installed plugin already has this name at a different URL.
+/// Returns an error if another installed plugin already has this name, in any case, at a
+/// different URL.
 pub(crate) fn install(
-    conn: &mut Connection,
+    conn: &Connection,
     url: &str,
-    name: &str,
+    name: &PluginName,
     manifest: &str,
     code: &str,
     hash: &str,
@@ -191,7 +209,7 @@ pub(crate) fn install(
     conn.execute(
         "INSERT OR REPLACE INTO plugins (url, name, manifest, code, hash, enabled, installed)
          VALUES (?1, ?2, ?3, ?4, ?5, 0, 1)",
-        params![url, name, manifest, code, hash],
+        params![url, name.as_str(), manifest, code, hash],
     )
     .map_err(|e| format!("DB error: {e}"))?;
     Ok(())
@@ -368,11 +386,26 @@ pub(crate) fn get_name_by_url(conn: &mut Connection, url: &str) -> Option<String
     .ok()
 }
 
-/// Check if another installed plugin (different URL) already has this name.
-pub(crate) fn is_name_taken(conn: &mut Connection, name: &str, exclude_url: &str) -> bool {
+/// Check if another installed plugin (different URL) already has this name. Case is ignored:
+/// Windows and macOS give `Foo` and `foo` one data dir (each would read the other's data).
+pub(crate) fn is_name_taken(conn: &Connection, name: &PluginName, exclude_url: &str) -> bool {
     conn.query_row(
-        "SELECT COUNT(*) FROM plugins WHERE name = ?1 AND url != ?2 AND installed = 1",
-        params![name, exclude_url],
+        "SELECT COUNT(*) FROM plugins
+         WHERE name = ?1 COLLATE NOCASE AND url != ?2 AND installed = 1",
+        params![name.as_str(), exclude_url],
+        |row| row.get::<_, i32>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+/// Another installed plugin whose name differs from `name` by case only: a pair installed before
+/// `is_name_taken` ignored case. Read where a data dir is handed out, which such a pair would share.
+pub(crate) fn case_twin_installed(conn: &mut Connection, name: &PluginName) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM plugins
+         WHERE name = ?1 COLLATE NOCASE AND name != ?1 AND installed = 1",
+        params![name.as_str()],
         |row| row.get::<_, i32>(0),
     )
     .unwrap_or(0)
@@ -470,12 +503,19 @@ pub(crate) fn storage_set(
     value: &str,
 ) -> Result<(), String> {
     enforce_storage_quota(conn, namespace, key, value, &STORAGE_LIMITS)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO plugin_storage (namespace, key, value)
-         VALUES (?1, ?2, ?3)",
-        params![namespace, key, value],
-    )
-    .map_err(|e| format!("DB error: {e}"))?;
+    // The statement that writes checks the owner: a write let through before an uninstall and run
+    // after it must not recreate rows under a url that no longer has a plugin.
+    let written = conn
+        .execute(
+            "INSERT OR REPLACE INTO plugin_storage (namespace, key, value)
+             SELECT ?1, ?2, ?3
+             WHERE EXISTS (SELECT 1 FROM plugins WHERE url = ?1 AND installed = 1)",
+            params![namespace, key, value],
+        )
+        .map_err(|e| format!("DB error: {e}"))?;
+    if written == 0 {
+        return Err("plugin is not installed".to_string());
+    }
     Ok(())
 }
 
@@ -535,9 +575,18 @@ pub(crate) fn collect_enabled_code(conn: &mut Connection) -> Vec<EnabledPlugin> 
     }
 }
 
+/// A name the row's own manifest declares and the rule accepts. The "unknown" older builds stored
+/// for a manifest that named nothing says nothing about which plugin a row is.
+fn declared_name(name: &str, manifest: &str) -> bool {
+    PluginName::parse(name).is_ok()
+        && serde_json::from_str::<serde_json::Value>(manifest)
+            .is_ok_and(|m| m["name"].as_str() == Some(name))
+}
+
 /// Deduplicate same-name plugins at startup.
 /// Winner policy: prefer enabled=1 over enabled=0, then highest rowid (most recent).
-/// Losers are DELETEd from both `plugins` and `plugin_storage`.
+/// Losers are DELETEd from both `plugins` and `plugin_storage`. Only rows that declare the
+/// name take part: two plugins sharing a stand-in are two plugins, not a duplicate.
 /// Returns `(url, name)` pairs of deleted duplicates.
 pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
     // Collect (name, url) pairs for losers - must finish all borrows before mutating
@@ -561,15 +610,22 @@ pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
         let mut result = Vec::new();
         for dup_name in &dup_names {
             let mut rows_stmt = match conn.prepare(
-                "SELECT url FROM plugins WHERE installed = 1 AND name = ?1 ORDER BY enabled DESC, rowid DESC",
+                "SELECT url, manifest FROM plugins WHERE installed = 1 AND name = ?1 ORDER BY enabled DESC, rowid DESC",
             ) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
             let urls: Vec<String> = rows_stmt
-                .query_map(params![dup_name], |row| row.get(0))
+                .query_map(params![dup_name], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
                 .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .map(|rows| {
+                    rows.filter_map(|r| r.ok())
+                        .filter(|(_, manifest)| declared_name(dup_name, manifest))
+                        .map(|(url, _)| url)
+                        .collect()
+                })
                 .unwrap_or_default();
             // Skip the winner (first), collect losers
             for loser_url in urls.into_iter().skip(1) {

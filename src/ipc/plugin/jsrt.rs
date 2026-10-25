@@ -175,6 +175,16 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                 crate::vprintln!("[PLUGIN] Load pass abandoned: the session changed under it");
                 return;
             }
+            // Checked here rather than when the row is read: that read skips a row it cannot
+            // decode without a word, and a refused name has to reach the reconciliation below.
+            let name = match crate::plugins::name::PluginName::parse(&p.name) {
+                Ok(name) => name,
+                Err(refused) => {
+                    crate::vprintln!("[PLUGIN] Skipping {}: {refused}", p.url);
+                    failed_urls.push(p.url);
+                    continue;
+                }
+            };
             match crate::plugins::store::parse_luna_meta(&p.manifest) {
                 Err(msg) => {
                     crate::vprintln!("[PLUGIN] Skipping '{}': invalid manifest: {msg}", p.name);
@@ -193,7 +203,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                         // three duties are not interchangeable: a session that ended under an
                         // injection is not a plugin that failed to load, and reconciling on it
                         // would disable something nothing was wrong with.
-                        let outcome = super::inject::inject_plugin(&p.url, &p.name, &p.code, epoch);
+                        let outcome = super::inject::inject_plugin(&p.url, &name, &p.code, epoch);
                         match outcome.pass_duty() {
                             super::inject::PassDuty::Record { load_id } => {
                                 // Critical: persist ever_dispatched flag
@@ -255,7 +265,9 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                 if let Err(e) = crate::plugins::store::disable_failed(pc, url) {
                     crate::vprintln!("[PLUGIN] Failed to auto-disable '{url}': {e}");
                 } else {
-                    crate::vprintln!("[PLUGIN] Auto-disabled '{url}': failed to load at startup");
+                    // Not gated: the user did not ask for this, and the flag stays off on disk.
+                    // Debug-quoted, since the url comes from the plugin's own row.
+                    crate::verr!("[PLUGIN] Auto-disabled {url:?}: failed to load at startup");
                 }
             }
         });

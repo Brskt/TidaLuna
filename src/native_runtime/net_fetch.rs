@@ -184,9 +184,18 @@ struct PluginClients {
     manual: reqwest::Client,
 }
 
-/// Per-plugin clients, keyed by plugin id. Cookies never link two plugins.
+/// Per-module clients, keyed by the native module's name: cookies never link two modules.
 static PLUGIN_CLIENTS: LazyLock<Mutex<HashMap<String, PluginClients>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Drop a module's cookie jar. A reinstall reuses the key (the module name) and would send the old
+/// install's cookies.
+pub(crate) fn forget_clients(module: &str) {
+    PLUGIN_CLIENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(module);
+}
 
 /// Bound concurrent egress: a plugin firing many fetches would otherwise spawn
 /// unbounded 25 MB buffers at once.

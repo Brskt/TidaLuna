@@ -96,7 +96,7 @@ pub struct PluginManager {
     /// Keyed by the url because that is the half that is unique: a manifest name is whatever a
     /// plugin's `package.json` says, and keyed by the name the second plugin to load took the
     /// entry, leaving the first with none and refusing a legitimate registration.
-    url_to_name: std::collections::HashMap<String, String>,
+    url_to_name: std::collections::HashMap<String, super::name::PluginName>,
     /// Capability to the load it was issued for. Dropped at uninstall, or past the per-plugin bound.
     ///
     /// A reload deliberately does NOT supersede: `disable()` only dispatches the cleanup JS; an
@@ -134,10 +134,10 @@ impl PluginManager {
     ///
     /// The capability is registered here rather than through a method of its own: it cannot
     /// exist for a load that does not.
-    pub fn mark_loading(
+    pub(crate) fn mark_loading(
         &mut self,
         plugin_id: &str,
-        name: &str,
+        name: &super::name::PluginName,
         nonce: u64,
         capability: &str,
         session_epoch: u64,
@@ -146,8 +146,7 @@ impl PluginManager {
         self.next_load_id += 1;
         self.states
             .insert(plugin_id.to_string(), PluginState::Loading(load_id, nonce));
-        self.url_to_name
-            .insert(plugin_id.to_string(), name.to_string());
+        self.url_to_name.insert(plugin_id.to_string(), name.clone());
         self.capabilities.insert(
             capability.to_string(),
             IssuedCapability {
@@ -160,17 +159,17 @@ impl PluginManager {
         load_id
     }
 
-    /// Drop a plugin's capabilities, on UNINSTALL only (empty id means all, as `clear_pending_trust`
-    /// and `clear_native_channels` also read it). Not on disable, where `onUnload` still needs to be
-    /// attributable. Races that handler since `uninstall()` awaits `disable()` first (accepted,
-    /// because uninstall deletes the plugin's storage rows anyway).
+    /// Drop a plugin's capabilities, on UNINSTALL only: on disable, `onUnload` still needs them to
+    /// be attributable. An async `onUnload` can outlive `disable()` (accepted: uninstall deletes
+    /// the plugin's storage rows, and a write served after that finds no plugin to write for).
     pub fn revoke_capabilities(&mut self, plugin_id: &str) {
-        if plugin_id.is_empty() {
-            self.capabilities.clear();
-            return;
-        }
         self.capabilities
             .retain(|_, issued| issued.plugin_id != plugin_id);
+    }
+
+    /// Every plugin's capabilities, for `plugin.uninstall_all`.
+    pub fn revoke_all_capabilities(&mut self) {
+        self.capabilities.clear();
     }
 
     /// Drop this plugin's oldest capabilities past the bound.
@@ -219,8 +218,8 @@ impl PluginManager {
 
     /// The manifest name this url declared for itself, which is the only thing a caller's claim may
     /// be checked against: a name that arrives as an argument says what the caller wants to be.
-    pub fn name_for_url(&self, plugin_id: &str) -> Option<&str> {
-        self.url_to_name.get(plugin_id).map(|s| s.as_str())
+    pub(crate) fn name_for_url(&self, plugin_id: &str) -> Option<&super::name::PluginName> {
+        self.url_to_name.get(plugin_id)
     }
 
     /// Transition Loading -> Ready if load_id AND nonce match. Returns true if accepted.
@@ -288,6 +287,12 @@ impl PluginManager {
     pub fn forget_plugin(&mut self, plugin_id: &str) {
         self.states.remove(plugin_id);
         self.url_to_name.remove(plugin_id);
+    }
+
+    /// [`Self::forget_plugin`] for every plugin at once, for `plugin.uninstall_all`.
+    pub fn forget_all_plugins(&mut self) {
+        self.states.clear();
+        self.url_to_name.clear();
     }
 
     /// Every loaded plugin with the load that owns it, taken together.

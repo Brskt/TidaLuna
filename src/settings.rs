@@ -1358,5 +1358,9 @@ pub(crate) mod durability_settings_tests;
 mod durability_trust_tests;
 
 #[cfg(test)]
+#[path = "../tests/unit/settings/trust_scope_tests.rs"]
+mod trust_scope_tests;
+
+#[cfg(test)]
 #[path = "../tests/unit/settings/store_damage_tests.rs"]
 mod store_damage_tests;

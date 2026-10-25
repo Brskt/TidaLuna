@@ -10,9 +10,13 @@ fn beside(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+fn plugin(raw: &str) -> crate::plugins::name::PluginName {
+    crate::plugins::name::PluginName::parse(raw).unwrap()
+}
+
 fn seed(conn: &mut Connection) {
     crate::plugins::store::init_schema(conn).unwrap();
-    crate::plugins::store::install(conn, "https://x/p", "p", "{}", "code", "h").unwrap();
+    crate::plugins::store::install(conn, "https://x/p", &plugin("p"), "{}", "code", "h").unwrap();
     crate::plugins::store::storage_set(conn, "https://x/p", "k", "v").unwrap();
 }
 
@@ -35,7 +39,7 @@ fn left_by_a_session(dir: &Path, session: Session) -> PathBuf {
     let live_path = live.path().join("plugins.db");
     let mut conn = Connection::open(&live_path).unwrap();
     crate::plugins::store::init_schema(&mut conn).unwrap();
-    crate::plugins::store::install(&mut conn, "https://x/p", "p", "{}", "code", "h").unwrap();
+    crate::plugins::store::install(&conn, "https://x/p", &plugin("p"), "{}", "code", "h").unwrap();
     if folded {
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .unwrap();
@@ -132,7 +136,8 @@ fn a_damaged_plugins_db_is_replaced_by_an_empty_store_and_the_launch_goes_on() {
                 "{session:?}: the copy is the damaged file"
             );
             db.call_plugins(|c| {
-                crate::plugins::store::install(c, "https://x/q", "q", "{}", "code", "h").unwrap();
+                crate::plugins::store::install(c, "https://x/q", &plugin("q"), "{}", "code", "h")
+                    .unwrap();
             });
             drop(db);
 

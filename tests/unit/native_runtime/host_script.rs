@@ -74,6 +74,20 @@ fn the_adversary_sweep_finds_no_open_gate() {
     assert!(ok, "a poisoned intrinsic broke a gate:\n{report}");
 }
 
+/// An uninstalled module is taken down in the child: the intervals, timeouts and fetches it
+/// started stop, and a load that is replaced or fails leaves nothing running. The probe drives the
+/// real line handler with the `cleanup` line `unload_in_child` sends.
+#[test]
+fn the_host_script_unloads_what_a_module_started() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let host = root.join("frontend/scripts/native-host.cjs");
+    let bun = bun_path(&root);
+    let probe = root.join("tests/unit/native_runtime/host_unload.cjs");
+
+    let (ok, report) = run_harness(&bun, &probe, &host);
+    assert!(ok, "a module outlived its unload:\n{report}");
+}
+
 /// The probe's green is only worth what its red is worth, and that was never checked. A
 /// containment gate removed from the host has to make it fail. Before this existed, deleting
 /// `assertDelete`'s check left the whole suite at 100% pass, because the promises arms only

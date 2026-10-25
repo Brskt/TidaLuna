@@ -270,6 +270,10 @@ impl NativeRuntime {
     }
 }
 
+pub(crate) fn forget_module_cookies(module: &str) {
+    net_fetch::forget_clients(module);
+}
+
 /// Version the bundled Bun reports, or `None` when it is absent or refuses to answer.
 /// Asked of the binary rather than baked from the build: a stale `dist/` is exactly the
 /// case worth logging, and a constant would state the intent instead of the fact. Spawns;
