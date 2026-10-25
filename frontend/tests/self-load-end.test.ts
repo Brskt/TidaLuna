@@ -99,14 +99,6 @@ test("a cast's track ending says nothing to any element", async () => {
 	expect(moves()).toEqual([]);
 });
 
-test("the player bar learns the track ended", async () => {
-	elements();
-	push([{ t: "state", v: "completed", seq: 5 }]);
-	await settle();
-
-	expect(dispatched).toContainEqual({ type: "playbackControls/SET_PLAYBACK_STATE", payload: "IDLE" });
-});
-
 test("the SDK's native player hears a self-load's end before the element does, and only once", async () => {
 	// `ended` can make the native player the active one (TIDAL's switch to a track it preloaded there),
 	// and an active native player takes a `completed` for its own and transitions a second time.

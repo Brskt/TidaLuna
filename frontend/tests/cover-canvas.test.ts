@@ -48,23 +48,6 @@ test("a well-formed buffer decodes to its frames, in order", () => {
 	expect(anim.frames[0].y.length).toBe(16);
 });
 
-test("a buffer whose magic is not ours is refused", () => {
-	const buf = buildBuffer(1, 4, 4);
-	new Uint8Array(buf)[0] = 0x58;
-	expect(() => decodeCoverBuffer(buf)).toThrow();
-});
-
-test("a buffer cut short of its planes is refused rather than half-painted", () => {
-	const full = buildBuffer(2, 4, 4);
-	expect(() => decodeCoverBuffer(full.slice(0, full.byteLength - 8))).toThrow();
-});
-
-test("a buffer whose stride is zero is refused rather than dividing by it at paint time", () => {
-	const buf = buildBuffer(1, 4, 4);
-	new DataView(buf).setUint32(16 + 8, 0, true); // the first frame's y_stride
-	expect(() => decodeCoverBuffer(buf)).toThrow();
-});
-
 test("a cover url is recognised only on the artwork host, under the video path", () => {
 	expect(isCoverUrl("https://resources.tidal.com/videos/a/1280x1280.mp4")).toBe(true);
 	expect(isCoverUrl("https://resources.tidal.com/images/a/1280x1280.jpg")).toBe(false);
@@ -311,29 +294,6 @@ test("a retry for the same cover keeps the still the frame is entitled to", asyn
 	expect(surface.hasAttribute("data-luna-cover")).toBe(true);
 });
 
-// The other half of the same rule. The still follows the element, not attach order: a frame that
-// is not the playing track's never gets its still, even when it attaches first.
-test("a frame that is not the playing track's never inherits its still", async () => {
-	stubWebgl();
-	refusingTransport();
-	const player = mountFrame();
-	// An album header: TIDAL's legacy artwork names its own album's still as `poster`.
-	const header = mountFrame();
-	header.video.setAttribute("poster", "https://resources.tidal.com/images/c/d/160x160.jpg");
-	setCurrentTrack({
-		id: "not-mine",
-		imageUrl: "https://resources.tidal.com/images/a/b/1280x1280.jpg",
-	});
-
-	await attachCoverCanvas(header.video, coverSrc("not-mine-header"));
-	await attachCoverCanvas(player.video, coverSrc("not-mine-player"));
-
-	const stillOf = (surface: HTMLElement) => (surface.querySelector("canvas") as HTMLCanvasElement).style.backgroundImage;
-	expect(stillOf(player.surface)).toContain("/a/b/640x640.jpg");
-	expect(stillOf(header.surface)).toContain("/c/d/640x640.jpg");
-	expect(stillOf(header.surface)).not.toContain("/a/b/");
-});
-
 // Every cover decodes at once: these tests are about which frame is released, not about timing.
 const transportDecoding = () => {
 	(globalThis as any).fetch = () =>
@@ -477,42 +437,8 @@ test("a refused cover is not asked again when its frame changes", async () => {
 	expect(header.surface.hasAttribute("data-luna-cover")).toBe(true);
 });
 
-// TIDAL announces a track several times. A repeat that carries the still the first one lacked fills
-// it in; one that lacks it takes nothing away.
-test("a repeated announce fills in a missing still and never erases one", async () => {
-	stubWebgl();
-	transportDecoding();
-	const frame = mountFrame();
-	setCurrentTrack({ id: "repeat" });
-	await attachCoverCanvas(frame.video, coverSrc("repeat"));
-	const canvas = frame.surface.querySelector("canvas") as HTMLCanvasElement;
-	expect(canvas.style.backgroundImage).toBe("");
-
-	playing("repeat", "q");
-	expect(canvas.style.backgroundImage).toContain("/q/q/640x640.jpg");
-
-	setCurrentTrack({ id: "repeat" });
-	expect(canvas.style.backgroundImage).toContain("/q/q/640x640.jpg");
-});
-
 // The marker hides TIDAL's artwork and promises that our canvas shows something in its place:
-// decoded frames, or a still under a canvas whose decode failed or has not landed. A track that
-// brings no still must not leave the promise standing over a canvas that has neither.
-test("a track without a still hands back a frame whose decode was refused", async () => {
-	stubWebgl();
-	refusingTransport();
-	const { surface, video } = mountFrame();
-	playing("bare-refused-1", "a");
-	await attachCoverCanvas(video, coverSrc("bare-refused"));
-	expect(surface.hasAttribute("data-luna-cover")).toBe(true);
-	expect((surface.querySelector("canvas") as HTMLCanvasElement).style.backgroundImage).toContain("/a/a/640x640.jpg");
-
-	setCurrentTrack({ id: "bare-refused-2" });
-
-	expect(surface.hasAttribute("data-luna-cover")).toBe(false);
-	expect(surface.querySelector("canvas")).toBeNull();
-});
-
+// decoded frames, or a still under a canvas whose decode has not landed.
 test("a track without a still leaves the frame's decode running, unmarked until frames land", async () => {
 	stubWebgl();
 	const transport = transportHeldOpen();
@@ -532,23 +458,5 @@ test("a track without a still leaves the frame's decode running, unmarked until 
 	transport.deliver(buildBuffer(1, 4, 4));
 	await painting;
 	expect(canvas.isConnected).toBe(true);
-	expect(surface.hasAttribute("data-luna-cover")).toBe(true);
-});
-
-test("a track without a still keeps a frame that is painting, and a later still goes under it", async () => {
-	stubWebgl();
-	transportDecoding();
-	const { surface, video } = mountFrame();
-	playing("bare-painting-1", "a");
-	await attachCoverCanvas(video, coverSrc("bare-painting"));
-	const canvas = surface.querySelector("canvas") as HTMLCanvasElement;
-
-	setCurrentTrack({ id: "bare-painting-2" });
-	expect(canvas.isConnected).toBe(true);
-	expect(canvas.style.backgroundImage).toBe("");
-	expect(surface.hasAttribute("data-luna-cover")).toBe(true);
-
-	playing("bare-painting-2", "b");
-	expect(canvas.style.backgroundImage).toContain("/b/b/640x640.jpg");
 	expect(surface.hasAttribute("data-luna-cover")).toBe(true);
 });

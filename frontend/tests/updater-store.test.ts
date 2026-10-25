@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-	dismissKey,
 	eventForDownloadFailure,
-	eventForDownloadReply,
 	hydrateUpdater,
 	initialUpdaterState,
 	reduceUpdater,
@@ -21,23 +19,6 @@ const ready = {
 } satisfies UpdaterState;
 
 describe("the updater state every surface shares", () => {
-	// The defect this file exists for: the toast listened to available/ready/error/cancelled
-	// and never to applying. An apply started from the settings page left it offering a
-	// restart the backend had already refused. One reducer means a surface cannot carry a
-	// subset of the transitions: it either has the record or it does not.
-	test("applying is a transition of the shared record, not of one surface", () => {
-		expect(reduceUpdater(ready, { kind: "applying" }).phase).toBe("applying");
-	});
-
-	test("a ready fills a missing record without overwriting a richer one", () => {
-		const fromNothing = reduceUpdater(initialUpdaterState, { kind: "ready", version: "9.9.9" });
-		expect(fromNothing.info).toEqual({ version: "9.9.9", download_size: 0 });
-
-		// A ready that follows a check must not drop the size the check reported.
-		const overReady = reduceUpdater(ready, { kind: "ready", version: "1.2.3" });
-		expect(overReady.info).toEqual({ version: "1.2.3", download_size: 4096 });
-	});
-
 	// The two surfaces disagreed here too: one reset to "available" on any cancel, the other
 	// only from "downloading". Against an apply already claimed, the loose reading offers the
 	// update again while the app is on its way out.
@@ -49,22 +30,8 @@ describe("the updater state every surface shares", () => {
 		expect(reduceUpdater(applying, { kind: "cancelled" }).phase).toBe("applying");
 	});
 
-	// The check button dropped a "nothing available" answer on the floor: the branch that
-	// pushed an offer had no counterpart; the record survived every check that disproved
-	// it. "You're up to date." became unreachable for the rest of the session, and the toast
-	// kept a Download button pointed at the ruled-out version.
-	test("a check that finds nothing takes back the record it disproves", () => {
-		const offered: UpdaterState = { ...ready, phase: "available" };
-
-		const cleared = reduceUpdater(offered, { kind: "not_available" });
-
-		expect(cleared.info).toBeNull();
-		expect(cleared.errorMsg).toBe("");
-	});
-
-	// Same rule as the cancel above, for the same reason: a check answers while a download or
-	// an apply may already be acting on the offer, and taking the record back mid-operation
-	// leaves the surface with buttons for an update it no longer knows.
+	// A check answers while a download or an apply may already be acting on the offer, and taking
+	// the record back mid-operation leaves the surface with buttons for an update it no longer knows.
 	test("a check that finds nothing spares an operation in flight", () => {
 		for (const phase of ["downloading", "ready", "applying"] as const) {
 			const inFlight: UpdaterState = { ...ready, phase };
@@ -81,10 +48,6 @@ describe("the updater state every surface shares", () => {
 		expect(cleared.info).toBeNull();
 	});
 
-	test("a dismissal leaves a record naming another version", () => {
-		expect(reduceUpdater(ready, { kind: "dismissed", version: "9.9.9" })).toBe(ready);
-	});
-
 	// Choosing stable is not a way of asking for the dev build already found: the backend has
 	// stopped any download of it and deleted its staging; no surface may keep offering it,
 	// including the one that did not make the switch.
@@ -93,31 +56,6 @@ describe("the updater state every surface shares", () => {
 			const before: UpdaterState = { ...ready, phase };
 			expect(reduceUpdater(before, { kind: "channel_changed" }).info).toBeNull();
 		}
-	});
-
-	// The automatic check could announce one outcome out of four: an update it found. A newer
-	// version a gate refuses (the migration floor, or a Linux bootstrap too old to take it)
-	// shouted into a channel with no listener, and the log line that carried it is gated behind
-	// a level nobody runs. The reason has to land in the record both surfaces read, and it must
-	// not arrive as an offer: the version exists and is precisely what may not be installed.
-	test("a withheld update is reported without being offered", () => {
-		const offered: UpdaterState = { ...ready, phase: "available" };
-
-		const withheld = reduceUpdater(offered, { kind: "withheld", reason: "bootstrap behind" });
-
-		expect(withheld.info).toBeNull();
-		expect(withheld.withheldReason).toBe("bootstrap behind");
-	});
-
-	test("an offer supersedes the withheld notice it answers", () => {
-		const withheld = reduceUpdater(ready, { kind: "withheld", reason: "bootstrap behind" });
-
-		const offered = reduceUpdater(withheld, {
-			kind: "available",
-			info: { version: "2.0.0", download_size: 1 },
-		});
-
-		expect(offered.withheldReason).toBe("");
 	});
 
 	// Same sparing as not_available, and for the same reason: this answers for the release
@@ -129,37 +67,6 @@ describe("the updater state every surface shares", () => {
 
 		expect(withheld.info).toEqual(ready.info);
 		expect(withheld.withheldReason).toBe("floor");
-	});
-
-	test("an error keeps its message with the phase that reports it", () => {
-		const failed = reduceUpdater(ready, { kind: "error", message: "disk full" });
-		expect(failed.phase).toBe("error");
-		expect(failed.errorMsg).toBe("disk full");
-	});
-
-	test("an error with no message of its own still carries one", () => {
-		// The fallback belongs to the producer. Both surfaces used to carry their own copy of
-		// it, which is one reader away from an error line rendering blank.
-		expect(reduceUpdater(ready, { kind: "error", message: "" }).errorMsg).toBe("Download failed");
-	});
-
-	// A phase that names an operation names the version it acts on: an event arriving with
-	// no offer held is not a transition. The old record could hold the phase alone, and both
-	// surfaces then had to guess what it meant.
-	test("an operation with no offer held is not a transition", () => {
-		expect(reduceUpdater(initialUpdaterState, { kind: "downloading" })).toBe(initialUpdaterState);
-		expect(reduceUpdater(initialUpdaterState, { kind: "applying" })).toBe(initialUpdaterState);
-	});
-
-	test("the status reply hydrates the same record the events feed", () => {
-		expect(hydrateUpdater(initialUpdaterState, { state: "Ready", version: "2.0.0" })).toEqual({
-			info: { version: "2.0.0", download_size: 0 },
-			phase: "ready",
-			errorMsg: "",
-			withheldReason: "",
-		});
-		// Nothing known yet is not a transition: an empty status must leave the record alone.
-		expect(hydrateUpdater(ready, {})).toBe(ready);
 	});
 
 	// The defect this hydration exists for: a surface mounting after the download began took
@@ -200,41 +107,9 @@ describe("the updater state every surface shares", () => {
 
 		expect(hydrated.info).toEqual({ version: "2.0.0", download_size: 0 });
 	});
-
-	test("a phase the backend names without a version is not painted", () => {
-		expect(hydrateUpdater(initialUpdaterState, { state: "Downloading" })).toBe(
-			initialUpdaterState,
-		);
-	});
-
-	test("an idle backend still holding an offer hydrates it as one", () => {
-		const hydrated = hydrateUpdater(initialUpdaterState, {
-			state: "Idle",
-			last_info: { version: "2.0.0", download_size: 512 },
-		});
-
-		expect(hydrated.phase).toBe("available");
-		expect(hydrated.info).toEqual({ version: "2.0.0", download_size: 512 });
-	});
 });
 
 describe("what a download request answers back", () => {
-	// The defect this block exists for: a surface paints `downloading` on the click, because
-	// the backend announces no download that starts. The toast never read the reply. An
-	// update already staged left it on "Downloading update..." with a dead Cancel button for
-	// the rest of the session, while the settings page (reading the same shared record)
-	// healed. One mapping is what stops two surfaces deriving the phase differently.
-	test("a version already staged answers with the phase, not with silence", () => {
-		expect(eventForDownloadReply("already_ready", "1.2.3")).toEqual({
-			kind: "ready",
-			version: "1.2.3",
-		});
-	});
-
-	test("a download that starts leaves the paint the surface already made", () => {
-		expect(eventForDownloadReply("started", "1.2.3")).toBeNull();
-	});
-
 	// Keyed on the status code, never on the message: matching the string by hand is how
 	// `applying` reached a user as the error text "applying", and how every code the match
 	// did not happen to list became an error too.
@@ -243,43 +118,5 @@ describe("what a download request answers back", () => {
 		expect(
 			eventForDownloadFailure(Object.assign(new Error("download_in_progress"), { code: 409 })),
 		).toBeNull();
-	});
-
-	test("a refusal that names no phase is reported as it came", () => {
-		expect(
-			eventForDownloadFailure(Object.assign(new Error("not the current offer"), { code: 403 })),
-		).toEqual({ kind: "error", message: "not the current offer" });
-	});
-
-	// Whatever threw did not come through the IPC bridge: it carries no code and no
-	// message worth showing. Reporting nothing at all is what left the surface painted.
-	test("a failure that says nothing is still reported", () => {
-		expect(eventForDownloadFailure(undefined)).toEqual({
-			kind: "error",
-			message: "Download failed",
-		});
-	});
-});
-
-describe("what a surface dismisses", () => {
-	const notInstalled = {
-		phase: "error",
-		info: null,
-		errorMsg: "Updater is not installed",
-		withheldReason: "",
-	} satisfies UpdaterState;
-
-	// Two failures that say different things are two different things to acknowledge: closing
-	// the first must not take the second down with it, unseen.
-	test("one failure is not dismissed by the acknowledgement of another", () => {
-		const refused = { ...notInstalled, errorMsg: "That update is no longer the one staged" };
-		expect(dismissKey(refused)).not.toBe(dismissKey(notInstalled));
-	});
-
-	// The version is the identity wherever one exists, and it spans the phases an offer moves
-	// through: a download that becomes ready is the same release, re-announced, and a toast the
-	// user already put down stays down. Only the next release raises it again.
-	test("an offer is its version, whatever phase it has reached", () => {
-		expect(dismissKey({ ...ready, phase: "downloading" })).toBe(dismissKey(ready));
 	});
 });

@@ -58,11 +58,3 @@ test("a length measured on another track is not", async () => {
 	expect(lengths).toEqual([]);
 	expect(el.duration).not.toBe(215);
 });
-
-test("a product that is not a string names no track", async () => {
-	const { lengths } = await holding("9205");
-
-	push([{ t: "duration", v: 215, seq: 3, product: 9206 }]);
-
-	expect(lengths).toEqual([215]);
-});

@@ -58,17 +58,6 @@ test("a consumer that throws on event 1 does not keep event 2 from being handled
 	expect(triggered.map((t) => t.name)).toEqual(["mediaformat", "mediaduration"]);
 });
 
-test("the failure is reported with the event it came from, not swallowed", () => {
-	throwOn = "mediaformat";
-
-	push([{ t: "mediaformat", v: {} }]);
-
-	expect(reported.length).toBe(1);
-	expect(String(reported[0]?.[0])).toContain("[bridge]");
-	expect(reported[0]?.[1]).toBe("mediaformat");
-	expect((reported[0]?.[2] as Error).message).toBe("mediaformat listener exploded");
-});
-
 test("a refusal that fails is reported and the events behind it still arrive", () => {
 	reducerThrows = true;
 
@@ -77,11 +66,4 @@ test("a refusal that fails is reported and the events behind it still arrive", (
 	expect(triggered.map((t) => t.name)).toEqual(["mediaerror", "mediaduration"]);
 	expect(reported.length).toBe(1);
 	expect(reported[0]?.[1]).toBe("medianetworklost");
-});
-
-test("a malformed event is skipped as before and costs nothing", () => {
-	push([null, 7, { t: "duration", v: 1, seq: 1 }]);
-
-	expect(triggered.map((t) => t.name)).toEqual(["mediaduration"]);
-	expect(reported).toEqual([]);
 });

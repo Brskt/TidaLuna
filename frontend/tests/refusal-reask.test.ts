@@ -57,28 +57,40 @@ test("the refused product loaded again by TIDAL is asked for again, once", () =>
 	expect(replays).toBe(1);
 });
 
-test("nothing refused, nothing asked for; nor for a product another refusal does not name", () => {
-	prefill("9304");
-	refused("9302");
-	prefill("9303");
-
-	expect(replays).toBe(0);
-});
-
-test("a prefill that names no product asks for nothing", () => {
-	refused("9305");
-
-	for (const payload of [undefined, {}, { mediaProduct: {} }, { mediaProduct: { productId: undefined } }]) {
-		for (const cb of putInterceptors[PREFILL] ?? []) cb(payload, PREFILL);
+test("a prefill asks for a refused product again only when it names that product", () => {
+	for (const [what, steps, expected] of [
+		[
+			"nothing refused, nothing asked for; nor for a product another refusal does not name",
+			() => {
+				prefill("9304");
+				refused("9302");
+				prefill("9303");
+			},
+			0,
+		],
+		[
+			"a prefill that names no product",
+			() => {
+				refused("9305");
+				for (const payload of [undefined, {}, { mediaProduct: {} }, { mediaProduct: { productId: undefined } }]) {
+					for (const cb of putInterceptors[PREFILL] ?? []) cb(payload, PREFILL);
+				}
+			},
+			0,
+		],
+		[
+			"a product id TIDAL holds as a number",
+			() => {
+				refused("9306");
+				prefill(9306);
+			},
+			1,
+		],
+	] as const) {
+		forgetRefusal("");
+		replays = 0;
+		current = "";
+		steps();
+		expect(replays, what).toBe(expected);
 	}
-
-	expect(replays).toBe(0);
-});
-
-test("a product id TIDAL holds as a number is the refusal's product", () => {
-	refused("9306");
-
-	prefill(9306);
-
-	expect(replays).toBe(1);
 });

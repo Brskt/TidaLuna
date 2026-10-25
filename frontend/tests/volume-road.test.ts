@@ -31,21 +31,20 @@ beforeEach(() => {
 	sent.length = 0;
 });
 
-test("a volume shaka applies to a self-loaded track reaches Rust as the store's level", () => {
-	// The keys and the mute button: a saga puts SET_VOLUME, the reducer settles the level, the
-	// SDK scales it by ReplayGain and shaka writes the result to the element.
-	const el = proxied("keys");
-	volume = 40;
-	el.volume = 0.33;
-	expect(volumes()).toEqual([40]);
-});
-
-test("a mute reaches Rust", () => {
-	// TOGGLE_MUTE ends on SET_VOLUME {volume: 0}, then on an element write of 0.
-	const el = proxied("mute");
-	volume = 0;
-	el.volume = 0;
-	expect(volumes()).toEqual([0]);
+test("a volume shaka applies to a self-loaded track reaches Rust as the store's level, a mute too", () => {
+	// The keys and the mute button: a saga puts SET_VOLUME, the reducer settles the level, the SDK scales it
+	// by ReplayGain and shaka writes the result to the element. TOGGLE_MUTE ends on SET_VOLUME {volume: 0},
+	// then on an element write of 0.
+	for (const [id, level, written] of [
+		["keys", 40, 0.33],
+		["mute", 0, 0],
+	] as const) {
+		sent.length = 0;
+		const el = proxied(id);
+		volume = level;
+		el.volume = written;
+		expect(volumes(), id).toEqual([level]);
+	}
 });
 
 test("the write still lands on the element", () => {

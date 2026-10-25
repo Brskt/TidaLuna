@@ -68,16 +68,23 @@ beforeEach(() => {
 	unsubscribes = 0;
 });
 
-test("a value written by someone we cannot hear still ends the wait", () => {
-	// The defect this replaced: nothing dispatches an action we can intercept, and the old
-	// wait had no other way to learn the load had landed.
-	const waiting = awaitStoreValue((s: any) => s.content.mediaItems["1"], null, 50);
-	write("1", { type: "track", item: { id: 1 } });
+// A saga's write reaches us only through `subscribe`; the wait must end on it and, once
+// ended, leave nothing of its teardown in the caller's set, which lives as long as the plugin.
+test("a value written by someone we cannot hear ends the wait and leaves nothing behind", async () => {
+	for (const [id, unloads] of [
+		["1", null],
+		["7", new Set<any>()],
+	] as const) {
+		const value = { type: "track", item: { id: Number(id) } };
+		const waiting = awaitStoreValue((s: any) => s.content.mediaItems[id], unloads, 50);
+		if (unloads) expect(unloads.size, id).toBeGreaterThan(0);
 
-	return waiting.then((value) => {
-		expect(value).toEqual({ type: "track", item: { id: 1 } });
-		expect(listeners).toHaveLength(0);
-	});
+		write(id, value);
+
+		expect(await waiting, id).toEqual(value);
+		expect(listeners, id).toHaveLength(0);
+		if (unloads) expect(unloads.size, id).toBe(0);
+	}
 });
 
 test("a value already in the store is not waited for", async () => {
@@ -89,35 +96,17 @@ test("a value already in the store is not waited for", async () => {
 	expect(listeners).toHaveLength(0);
 });
 
-test("a deadline with nothing written answers undefined rather than throwing", async () => {
-	// The caller has somewhere else to go (a direct fetch), and a region-blocked track
-	// reaches this on every call: an ordinary outcome, not an error.
-	expect(await awaitStoreValue((s: any) => s.content.mediaItems["3"], null, 20)).toBeUndefined();
-	expect(listeners).toHaveLength(0);
-});
-
-// The set a caller hands in is the plugin's own and lives as long as the plugin does. The wait
-// puts its teardown there for a plugin unloading mid-wait to reach it; a wait that has ended
-// has nothing left to tear down, and this path runs once per uncached row of a list.
-test("a wait that has ended leaves nothing in the caller's set", async () => {
-	const unloads = new Set<any>();
-	const waiting = awaitStoreValue((s: any) => s.content.mediaItems["7"], unloads, 50);
-	expect(unloads.size).toBeGreaterThan(0);
-
-	write("7", { type: "track", item: { id: 7 } });
-	await waiting;
-
-	expect(unloads.size).toBe(0);
-});
-
-// The deadline is the other way in to the same settle, and the way a region-blocked track always
-// leaves: it must clean up the same.
-test("a wait that ran out of time leaves nothing in the caller's set", async () => {
-	const unloads = new Set<any>();
-
-	expect(await awaitStoreValue((s: any) => s.content.mediaItems["8"], unloads, 20)).toBeUndefined();
-
-	expect(unloads.size).toBe(0);
+// The caller has somewhere else to go (a direct fetch), and a region-blocked track reaches this
+// on every call: an ordinary outcome, not an error, and it cleans up as any settle does.
+test("a deadline with nothing written answers undefined and leaves nothing behind", async () => {
+	for (const [id, unloads] of [
+		["3", null],
+		["8", new Set<any>()],
+	] as const) {
+		expect(await awaitStoreValue((s: any) => s.content.mediaItems[id], unloads, 20), id).toBeUndefined();
+		expect(listeners, id).toHaveLength(0);
+		if (unloads) expect(unloads.size, id).toBe(0);
+	}
 });
 
 test("two waits do not block each other, whatever order they land in", async () => {

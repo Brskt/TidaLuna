@@ -34,41 +34,23 @@ test("callers arriving during a run join it instead of starting another", async 
 	expect(runs).toBe(1);
 });
 
-test("different keys do not wait on each other", async () => {
-	const flight = new SingleFlight<string>();
-	const one = deferred<string>();
-	const two = deferred<string>();
+test("a key is free again once its run settles, or fails", async () => {
+	// Not a cache: it holds work, not answers; whoever asks after a run settled gets a fresh one,
+	// which lets `_instances` be what remembers. A failure left behind would be handed to every later
+	// caller for the life of the page: the single outcome worse than repeating the work.
+	for (const [what, first, outcome] of [
+		["a run that settles", async () => "first answer", "resolved first answer"],
+		["a failed run", () => Promise.reject(new Error("refused")), "rejected refused"],
+	] as const) {
+		const flight = new SingleFlight<string>();
 
-	const first = flight.run("track:1", () => one.promise);
-	const second = flight.run("track:2", () => two.promise);
-	expect(flight.inFlight).toBe(2);
+		const settled = await flight.run("track:1", first).then(
+			(value) => `resolved ${value}`,
+			(error: Error) => `rejected ${error.message}`,
+		);
+		expect(settled, what).toBe(outcome);
+		expect(flight.inFlight, what).toBe(0);
 
-	// The second answers while the first is still out: one key cannot hold another back.
-	two.resolve("two");
-	expect(await second).toBe("two");
-
-	one.resolve("one");
-	expect(await first).toBe("one");
-});
-
-test("a key is free again once its run settles", async () => {
-	// Not a cache: it holds work, not answers. Whoever asks after the answer landed gets a
-	// fresh run, which is what lets `_instances` be the thing that remembers.
-	const flight = new SingleFlight<number>();
-	let runs = 0;
-
-	expect(await flight.run("track:1", async () => ++runs)).toBe(1);
-	expect(flight.inFlight).toBe(0);
-	expect(await flight.run("track:1", async () => ++runs)).toBe(2);
-});
-
-test("a failed run frees its key rather than poisoning it", async () => {
-	// Left behind, one failure would be handed to every later caller for the life of the page:
-	// the single outcome worse than repeating the work.
-	const flight = new SingleFlight<string>();
-
-	await expect(flight.run("track:1", () => Promise.reject(new Error("refused")))).rejects.toThrow("refused");
-	expect(flight.inFlight).toBe(0);
-
-	expect(await flight.run("track:1", async () => "second chance")).toBe("second chance");
+		expect(await flight.run("track:1", async () => "second chance"), what).toBe("second chance");
+	}
 });

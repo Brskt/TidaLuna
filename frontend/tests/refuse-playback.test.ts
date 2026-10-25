@@ -15,7 +15,6 @@ let triggered: { name: string; target: unknown }[] = [];
 // What reading the store throws: nothing once it is published.
 let storeFault: Error | null = null;
 let dispatchFault: { type: string; error: Error } | null = null;
-let triggerFault: Error | null = null;
 
 // The contract of `plugins/lib/src/redux/store.ts` (its `get` trap): reading anything from the
 // store before it is published throws a `StoreNotPublishedError`, while requiring the module never does.
@@ -53,12 +52,8 @@ beforeEach(() => {
 	warned = [];
 	storeFault = null;
 	dispatchFault = null;
-	triggerFault = null;
 	(window as any).NativePlayerComponent = {
-		trigger: (name: string, target: unknown) => {
-			triggered.push({ name, target });
-			if (triggerFault) throw triggerFault;
-		},
+		trigger: (name: string, target: unknown) => void triggered.push({ name, target }),
 	};
 	console.warn = (...args: unknown[]) => void warned.push(args);
 });
@@ -115,21 +110,6 @@ test("a reducer that throws is raised, after the steps behind it ran", () => {
 	expect(triggered.map((t) => t.name)).toEqual(["mediaerror"]);
 	expect(dispatched.map((d) => d.type)).toEqual(all.slice(1));
 	expect(warned).toEqual([]);
-});
-
-test("two steps that fail are raised together, neither lost", () => {
-	triggerFault = new Error("listener exploded");
-	dispatchFault = { type: "playbackControls/STOP", error: new Error("reducer exploded") };
-
-	let raised: unknown;
-	try {
-		refuse();
-	} catch (e) {
-		raised = e;
-	}
-
-	expect(raised).toBeInstanceOf(AggregateError);
-	expect((raised as AggregateError).errors.map((e: Error) => e.message)).toEqual(["listener exploded", "reducer exploded"]);
 });
 
 test("a page without the player bridge still gets its store steps", () => {

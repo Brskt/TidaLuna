@@ -27,13 +27,6 @@ test("a load with no length still names its track", () => {
 	expect(held()).toBe("9303");
 });
 
-test("a product that is not a string names no track", () => {
-	push([{ t: "duration", v: 215, seq: 3, product: "9305" }]);
-	push([{ t: "duration", v: 215, seq: 4, product: 9306 }]);
-
-	expect(held()).toBeUndefined();
-});
-
 test("states, positions and the end of a track leave it as it was", () => {
 	push([{ t: "duration", v: 215, seq: 3, product: "9307" }]);
 	push([

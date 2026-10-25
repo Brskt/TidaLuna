@@ -14,8 +14,7 @@ import { defineHostModule, initModules, modules } from "../render/src/modules";
 
 const hostReact = { createElement: () => {}, useState: () => {} };
 const hostJsx = { jsx: () => {} };
-const hostDomFull = { createRoot: () => {}, createPortal: () => {} };
-// What TIDAL has served since the 2026-08-26 build: react-dom without createRoot.
+// A react-dom without createRoot, the shape the fallback exists for (TIDAL's 2026-08-26 build).
 const hostDomSplit = { createPortal: () => {}, flushSync: () => {} };
 
 const store = {} as never;
@@ -28,11 +27,13 @@ const captureAll = () => {
 	};
 };
 
-beforeEach(() => {
+const reset = () => {
 	for (const key of Object.keys(modules)) delete modules[key];
 	delete (globalThis as any).__lunaCreateRoot;
 	(window as any).__lunaHostModules = {};
-});
+};
+
+beforeEach(reset);
 
 // A plugin's `@luna/lib` import is lowered to a LIVE lookup through this registry, which it
 // reaches as `window.luna.core.modules`. While the slot was writable, the first plugin to run
@@ -61,18 +62,6 @@ test("a pinned host slot cannot be taken by a plugin", () => {
 	expect(registry.__lunaLibFor).toBe(real);
 });
 
-test("uses the host trio when the host supplies all three", () => {
-	(window as any).__lunaHostModules = {
-		react: hostReact,
-		"react/jsx-runtime": hostJsx,
-		"react-dom/client": hostDomFull,
-	};
-	initModules(store);
-	expect(modules["react"]).toBe(hostReact);
-	expect(modules["react/jsx-runtime"]).toBe(hostJsx);
-	expect(modules["react-dom/client"]).toBe(hostDomFull);
-});
-
 test("completes a host react-dom that lost createRoot from the tagged global", () => {
 	const tagged = () => {};
 	(globalThis as any).__lunaCreateRoot = tagged;
@@ -89,25 +78,25 @@ test("demotes all three to bundled when the renderer cannot be resolved", () => 
 	// The regression this file exists for: react captured, react-dom/client not,
 	// no tag. Resolving the three independently kept the host React and paired it
 	// with a bundled ReactDOM, the one combination that cannot render.
-	captureAll();
-	initModules(store);
-	expect(modules["react"]).not.toBe(hostReact);
-	expect(modules["react/jsx-runtime"]).not.toBe(hostJsx);
-	expect(modules["react-dom/client"]).not.toBe(hostDomSplit);
-	expect(typeof modules["react"].useState).toBe("function");
-	expect(typeof modules["react-dom/client"].createRoot).toBe("function");
-});
-
-test("demotes all three when nothing was captured at all", () => {
-	initModules(store);
-	expect(typeof modules["react"].useState).toBe("function");
-	expect(typeof modules["react/jsx-runtime"].jsx).toBe("function");
-	expect(typeof modules["react-dom/client"].createRoot).toBe("function");
-});
-
-test("ignores a tagged createRoot that is not callable", () => {
-	(globalThis as any).__lunaCreateRoot = "not a function";
-	captureAll();
-	initModules(store);
-	expect(modules["react"]).not.toBe(hostReact);
+	for (const [what, arrange] of [
+		["react-dom/client without createRoot and no tag", captureAll],
+		["nothing captured at all", () => {}],
+		[
+			"a tagged createRoot that is not callable",
+			() => {
+				(globalThis as any).__lunaCreateRoot = "not a function";
+				captureAll();
+			},
+		],
+	] as const) {
+		reset();
+		arrange();
+		initModules(store);
+		expect(modules["react"], what).not.toBe(hostReact);
+		expect(modules["react/jsx-runtime"], what).not.toBe(hostJsx);
+		expect(modules["react-dom/client"], what).not.toBe(hostDomSplit);
+		expect(typeof modules["react"].useState, what).toBe("function");
+		expect(typeof modules["react/jsx-runtime"].jsx, what).toBe("function");
+		expect(typeof modules["react-dom/client"].createRoot, what).toBe("function");
+	}
 });

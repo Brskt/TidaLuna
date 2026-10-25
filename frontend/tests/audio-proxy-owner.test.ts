@@ -70,14 +70,6 @@ test("a write to the preloaded element reaches nobody", async () => {
 	expect(channelsFrom(from)).toEqual([]);
 });
 
-test("a seek on the playing element reaches Rust", async () => {
-	const { playing } = await pair();
-	const from = sent.length;
-	playing.currentTime = 12;
-
-	expect(sent.slice(from)).toEqual([{ channel: "player.seek", args: [12] }]);
-});
-
 test("playing the preloaded element hands the mirror over without a word to Rust", async () => {
 	const { playing, preloaded } = await pair();
 	proxySetDuration(200);

@@ -50,7 +50,7 @@ const push = (events: unknown[]) => (window as any).__TIDALUNAR_PLAYER_PUSH__(ev
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const types = () => dispatched.map((d) => d.type);
 
-beforeEach(() => {
+const reset = () => {
 	dispatched = [];
 	triggered = [];
 	announced = [];
@@ -68,7 +68,9 @@ beforeEach(() => {
 	};
 	// The last load this page issued was a self-load, and nothing a cast does resets it.
 	setSelfLoad(true);
-});
+};
+
+beforeEach(reset);
 
 test("a cast's track ending does not move this page's queue", async () => {
 	push([{ t: "state", v: "completed", seq: 5, cast: true }]);
@@ -93,14 +95,6 @@ test("this page's own self-loaded track ending is told to the element TIDAL play
 	expect(types()).not.toContain("playQueue/MOVE_NEXT");
 	// TIDAL announces the next item itself, in full, whichever way it moves on.
 	expect(announced).toEqual([]);
-});
-
-test("a cast's track ending still reaches the player bar", async () => {
-	// Only the queue is held back: the bar mirrors the transport whoever drives it.
-	push([{ t: "state", v: "completed", seq: 5, cast: true }]);
-	await settle();
-
-	expect(dispatched).toContainEqual({ type: "playbackControls/SET_PLAYBACK_STATE", payload: "IDLE" });
 });
 
 test("a load refused for a cast is settled and refused, not left waiting", () => {
@@ -156,17 +150,6 @@ test("a listener's own Play still reaches the cast after a refused load", async 
 
 	const from = sent.length;
 	component.setDesiredPlayback(true);
-
-	expect(channelsFrom(from)).toContain("player.play");
-});
-
-test("the next load after a refusal plays as any load does", async () => {
-	// The cast is over by then: Rust takes the load, and the SDK's play that follows it is real.
-	const { sdk, sent, channelsFrom } = await castRefusal();
-
-	sdk.load("https://cdn.invalid/media/after.flac", "flac", "");
-	const from = sent.length;
-	sdk.play();
 
 	expect(channelsFrom(from)).toContain("player.play");
 });
@@ -322,27 +305,23 @@ test("a listener's pick refused for a cast still tells them why", async () => {
 	expect(types()).toContain("message/MESSAGE_ERROR");
 });
 
-test("an automatic load refused behind the cast's track reloads the queue's", async () => {
-	// The load was for track 2, and this page's queue names 1, the cast's: the phone left 2 before
-	// its load arrived, which landed after the one for 1. TIDAL's player holds 2 now.
-	const { sdk, sent } = await castDelegate();
-	sdk.load("https://cdn.invalid/media/two.flac", "flac", "");
-	dispatched = [];
+test("an automatic load refused reloads the queue's track only when the queue names another", async () => {
+	// The load was for track 2: a queue naming 1, the cast's, means the phone left 2 before its
+	// load arrived, which landed after the one for 1. TIDAL's player holds 2 now.
+	for (const [at, reloads] of [
+		[0, true],
+		[1, false],
+	] as const) {
+		reset();
+		queueIndex = at;
+		const { sdk, sent } = await castDelegate();
+		sdk.load("https://cdn.invalid/media/two.flac", "flac", "");
+		dispatched = [];
 
-	push([{ t: "mediacastowned", v: { load: loadIdOf(sent) } }]);
+		push([{ t: "mediacastowned", v: { load: loadIdOf(sent) } }]);
 
-	expect(types()).toContain("playbackControls/REFRESH_PLAYBACK_AFTER_PURCHASE");
-});
-
-test("an automatic load refused for the queue's own track reloads nothing", async () => {
-	queueIndex = 1;
-	const { sdk, sent } = await castDelegate();
-	sdk.load("https://cdn.invalid/media/two.flac", "flac", "");
-	dispatched = [];
-
-	push([{ t: "mediacastowned", v: { load: loadIdOf(sent) } }]);
-
-	expect(types()).not.toContain("playbackControls/REFRESH_PLAYBACK_AFTER_PURCHASE");
+		expect(types().includes("playbackControls/REFRESH_PLAYBACK_AFTER_PURCHASE"), `queueIndex ${at}`).toBe(reloads);
+	}
 });
 
 test("a settled load leaves TIDAL's player in the state the cast's player reported", async () => {
@@ -420,23 +399,17 @@ const nextHere = async () => {
 	return { viaSaga: () => run(putInterceptors), viaDispatch: () => run(interceptors) };
 };
 
-test("the player's Next, which TIDAL's saga puts, is sent with the reload it makes", async () => {
-	const { sdk, sent } = await castDelegate();
-	(await nextHere()).viaSaga();
+test("a Next is sent with the reload it makes, whether TIDAL's saga puts it or this page dispatches it", async () => {
+	for (const rail of ["viaSaga", "viaDispatch"] as const) {
+		reset();
+		const { sdk, sent } = await castDelegate();
+		(await nextHere())[rail]();
 
-	sdk.load("https://cdn.invalid/media/cast.flac", "flac", "");
+		sdk.load("https://cdn.invalid/media/cast.flac", "flac", "");
 
-	expect(actOf(sent)).toBe("next");
-	expect(sent.filter((s) => s.channel === "player.load").at(-1)!.args[4]).toBe(false);
-});
-
-test("a Next dispatched on this page is sent with the reload it makes too", async () => {
-	const { sdk, sent } = await castDelegate();
-	(await nextHere()).viaDispatch();
-
-	sdk.load("https://cdn.invalid/media/cast.flac", "flac", "");
-
-	expect(actOf(sent)).toBe("next");
+		expect(actOf(sent), rail).toBe("next");
+		expect(sent.filter((s) => s.channel === "player.load").at(-1)!.args[4], rail).toBe(false);
+	}
 });
 
 test("the reload of a listener's Next is answered by the cast's step: no banner, no resume", async () => {

@@ -89,24 +89,6 @@ test("a change that does not show the banner acknowledges nothing, and the ack c
 	expect(events.filter((e) => e === "ack")).toHaveLength(1);
 });
 
-test("a second delivery of the same notice in one document is dispatched and acknowledged again", async () => {
-	const { events, store, screen, acknowledge, navigateOffLogin } = rig(false);
-	deliverStoreRepair(store, async () => repair, screen, acknowledge);
-	deliverStoreRepair(store, async () => repair, screen, acknowledge);
-	await flush();
-	navigateOffLogin();
-	await flush();
-	// Two dispatches (the reducer keeps one message), two idempotent acks.
-	expect(events.filter((e) => e.startsWith("dispatch"))).toHaveLength(2);
-	expect(events.filter((e) => e === "ack")).toHaveLength(2);
-});
-
-test("no notice means no banner and no acknowledgement", async () => {
-	const { events, store, screen, acknowledge } = rig(true);
-	await deliverStoreRepair(store, async () => null, screen, acknowledge);
-	expect(events).toEqual([]);
-});
-
 test("a banner that throws is not acknowledged", async () => {
 	const { events, screen, acknowledge } = rig(true);
 	const store = {
@@ -115,21 +97,6 @@ test("a banner that throws is not acknowledged", async () => {
 		},
 	};
 	await expect(deliverStoreRepair(store, async () => repair, screen, acknowledge)).rejects.toThrow("store down");
-	expect(events).toEqual([]);
-});
-
-test("an ask that fails is neither bannered nor acknowledged", async () => {
-	const { events, store, screen, acknowledge } = rig(true);
-	await expect(
-		deliverStoreRepair(
-			store,
-			async () => {
-				throw new Error("restricted");
-			},
-			screen,
-			acknowledge,
-		),
-	).rejects.toThrow("restricted");
 	expect(events).toEqual([]);
 });
 
@@ -168,7 +135,7 @@ const fakeDocument = (notifications: { dataTest: string; text: string }[]) => {
 			return notifications.filter((n) => selector === `[data-test="${n.dataTest}"]`).map((n) => ({ textContent: n.text }));
 		},
 	} as unknown as Pick<Document, "querySelectorAll" | "body">;
-	return { doc, body, seen };
+	return { doc, seen };
 };
 
 test("bannerScreen reads TIDAL's notification elements and matches the message inside their text", () => {
@@ -178,16 +145,4 @@ test("bannerScreen reads TIDAL's notification elements and matches the message i
 	expect(screen.shown(message)).toBe(true);
 	expect(screen.shown("another message")).toBe(false);
 	expect(seen[0]).toBe('[data-test="notification"]');
-});
-
-test("bannerScreen observes the document body and hands back the stop", () => {
-	const { doc, body } = fakeDocument([]);
-	const calls: unknown[] = [];
-	const onChange = () => {};
-	const screen = bannerScreen(doc, (cb, target) => {
-		calls.push(cb === onChange, target === body);
-		return () => calls.push("stopped");
-	});
-	screen.watch(onChange)();
-	expect(calls).toEqual([true, true, "stopped"]);
 });

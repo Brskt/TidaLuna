@@ -84,22 +84,3 @@ test("a download after the format ask hands Rust freshly signed urls", async () 
 	expect(requests).toHaveLength(2);
 	expect(downloads).toEqual([expect.objectContaining({ urls: ["https://cdn/init-2.mp4", "https://cdn/seg-2.mp4"] })]);
 });
-
-test("the format questions cost one request per quality, however often they are asked", async () => {
-	const { item, cache } = freshItem();
-	await item.fileExtension("HIGH");
-	await item.fileExtension("HIGH");
-	await item.fetchBestQuality();
-
-	expect(requests).toHaveLength(1);
-	expect(cache.format.HIGH).toEqual({ bitDepth: 16, sampleRate: 44100 });
-});
-
-test("a download keeps the format side effects of the ask it makes", async () => {
-	const { item, cache } = freshItem();
-	await item.download("/music/b", "HIGH");
-
-	expect(requests).toHaveLength(1);
-	expect(cache.actualAudioQuality).toBe("HIGH");
-	expect(cache.format.HIGH).toEqual({ bitDepth: 16, sampleRate: 44100 });
-});

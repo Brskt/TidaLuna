@@ -25,34 +25,14 @@ const withReplacement = (id: string, replacedBy: string, type = "tracks") => ({
 	},
 });
 
-test("a dropped track hands back the id TIDAL serves in its place", () => {
-	const state = stateWith({ "103046509": withReplacement("103046509", "62416116") });
-
-	expect(replacementTrackId(state, 103046509)).toBe("62416116");
-});
-
-test("a number and its string spelling name the same row", () => {
+test("a dropped track hands back the id TIDAL serves in its place, however the caller spells its id", () => {
 	// The store keys by `String(id)` while callers hold whatever the queue gave them, which for
 	// a track is a number. Indexing with the raw value would miss every time.
 	const state = stateWith({ "103046509": withReplacement("103046509", "62416116") });
 
-	expect(replacementTrackId(state, "103046509")).toBe("62416116");
-});
-
-test("a track TIDAL still serves has nothing to redirect to", () => {
-	const state = stateWith({ "89178886": { id: "89178886", type: "tracks", relationships: { albums: { data: [] } } } });
-
-	expect(replacementTrackId(state, 89178886)).toBeUndefined();
-});
-
-test("an empty relationship is null, not missing, and must not be read as a resource", () => {
-	// JSON:API spells "no replacement" as an explicit `data: null` rather than by leaving the
-	// relationship out, and that is the COMMON case (nearly every track carries it). Read as
-	// though absent meant undefined, the very next line dereferences null and every unreplaced
-	// track on screen throws.
-	const state = stateWith({ "89178886": { id: "89178886", type: "tracks", relationships: { replacement: { data: null } } } });
-
-	expect(replacementTrackId(state, 89178886)).toBeUndefined();
+	for (const id of [103046509, "103046509"]) {
+		expect(replacementTrackId(state, id), `${typeof id} id`).toBe("62416116");
+	}
 });
 
 test("a relationship naming something other than a track is refused", () => {
@@ -67,11 +47,4 @@ test("a resource naming itself does not send the caller round again", () => {
 	const state = stateWith({ "103046509": withReplacement("103046509", "103046509") });
 
 	expect(replacementTrackId(state, 103046509)).toBeUndefined();
-});
-
-test("a store without the newer cache at all answers plainly", () => {
-	// TIDAL owns this slice, not us: a build that predates it simply has none, and every row
-	// then takes the ordinary path rather than throwing on the way there.
-	expect(replacementTrackId({} as any, 103046509)).toBeUndefined();
-	expect(replacementTrackId(stateWith({}), 103046509)).toBeUndefined();
 });

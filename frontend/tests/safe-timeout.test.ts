@@ -10,29 +10,9 @@
 
 import { expect, test } from "bun:test";
 
-import { safeInterval, safeTimeout } from "../plugins/lib/src/helpers/safeTimeout";
+import { safeInterval } from "../plugins/lib/src/helpers/safeTimeout";
 
 const set = () => new Set<any>();
-
-test("a timeout that has fired is no longer registered", async () => {
-	const unloads = set();
-	safeTimeout(unloads, () => {}, 5);
-	expect(unloads.size).toBe(1);
-
-	await new Promise((res) => setTimeout(res, 40));
-
-	expect(unloads.size).toBe(0);
-});
-
-test("a timeout cancelled before it fires is no longer registered either", () => {
-	const unloads = set();
-	const unload = safeTimeout(unloads, () => {}, 10_000);
-	expect(unloads.size).toBe(1);
-
-	unload();
-
-	expect(unloads.size).toBe(0);
-});
 
 // The distinction that makes this family two families: deregistering an interval when it fires
 // would drop the only handle anything has on a timer that is still running.

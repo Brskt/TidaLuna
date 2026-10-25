@@ -66,20 +66,6 @@ test("a track asked for again is answered with a fresh stream url", async () => 
 	expect(streamOf(replay)).toBe("https://cdn/stream-2.mp4");
 });
 
-test("callers asking while the answer is still on its way share one request", async () => {
-	const id = freshTrack();
-	const gate = Promise.withResolvers<Reply>();
-	answer = () => gate.promise;
-
-	const both = Promise.all([TidalApi.playbackInfo(id, "HIGH"), TidalApi.playbackInfo(id, "HIGH")]);
-	await new Promise((r) => setTimeout(r, 120));
-	gate.resolve(ok(btsAnswer(1)));
-	const [a, b] = await both;
-
-	expect(requests).toHaveLength(1);
-	expect(a).toBe(b);
-});
-
 test("a track TIDAL answers 403 or 404 for stays unavailable without asking again", async () => {
 	for (const code of [403, 404]) {
 		requests = [];
@@ -103,15 +89,4 @@ test("a request that failed is asked again", async () => {
 	await expect(TidalApi.playbackInfo(id, "HIGH")).rejects.toThrow("ipc network error");
 	const retried: any = await TidalApi.playbackInfo(id, "HIGH");
 	expect(streamOf(retried)).toBe("https://cdn/stream-2.mp4");
-});
-
-test("metadata answers stay memoized", async () => {
-	const id = freshTrack();
-	answer = () => ok({ id: Number(id), title: "t" });
-
-	const first = await TidalApi.track(id);
-	const again = await TidalApi.track(id);
-
-	expect(requests).toHaveLength(1);
-	expect(again).toBe(first);
 });

@@ -57,25 +57,19 @@ afterEach(() => {
 	setSelfLoad(false);
 });
 
-test("a device TIDAL switches to during a self-loaded track reaches Rust", () => {
-	const store = fakeStore("guid-a");
-	follow(store);
-	store.commit({ activeDeviceId: "guid-b", activeDeviceMode: "shared" });
-	expect(deviceSets()).toEqual([["Headphones (B)", "shared"]]);
-});
-
-test("an exclusive mode TIDAL commits on a chosen device reaches Rust", () => {
-	const store = fakeStore("guid-b");
-	follow(store);
-	store.commit({ activeDeviceMode: "exclusive" });
-	expect(deviceSets()).toEqual([["Headphones (B)", "exclusive"]]);
-});
-
-test("an exclusive mode TIDAL commits on the system default reaches Rust shared", () => {
-	const store = fakeStore("guid-a");
-	follow(store);
-	store.commit({ activeDeviceId: "default", activeDeviceMode: "exclusive" });
-	expect(deviceSets()).toEqual([["auto", "shared"]]);
+test("a device or exclusive mode TIDAL commits during a self-loaded track reaches Rust", () => {
+	for (const [what, initial, commit, expected] of [
+		["a device TIDAL switches to", "guid-a", { activeDeviceId: "guid-b", activeDeviceMode: "shared" }, [["Headphones (B)", "shared"]]],
+		["an exclusive mode on a chosen device", "guid-b", { activeDeviceMode: "exclusive" }, [["Headphones (B)", "exclusive"]]],
+		["an exclusive mode on the system default, which reaches Rust shared", "guid-a", { activeDeviceId: "default", activeDeviceMode: "exclusive" }, [["auto", "shared"]]],
+	] as const) {
+		sent.length = 0;
+		const store = fakeStore(initial);
+		follow(store);
+		store.commit(commit);
+		expect(deviceSets(), what).toEqual(expected);
+		unsubscribe?.();
+	}
 });
 
 test("ASIO stays on across a device switch", () => {
@@ -86,18 +80,18 @@ test("ASIO stays on across a device switch", () => {
 	expect(deviceSets()).toEqual([["Headphones (B)", "asio"]]);
 });
 
-test("a device only Chromium lists sends Rust nothing", () => {
-	const store = fakeStore("guid-a");
-	follow(store);
-	store.commit({ activeDeviceId: "guid-c" });
-	expect(deviceSets()).toEqual([]);
-});
-
-test("the device at install and every unrelated action send nothing", () => {
-	const store = fakeStore("guid-b");
-	follow(store);
-	for (let i = 0; i < 5; i++) store.commit();
-	expect(deviceSets()).toEqual([]);
+test("a commit that names no device Rust knows, or changes nothing, sends Rust nothing", () => {
+	for (const [what, initial, commits] of [
+		["a device only Chromium lists", "guid-a", [{ activeDeviceId: "guid-c" }]],
+		["the device at install and every unrelated action", "guid-b", [{}, {}, {}, {}, {}]],
+	] as const) {
+		sent.length = 0;
+		const store = fakeStore(initial);
+		follow(store);
+		for (const commit of commits) store.commit(commit);
+		expect(deviceSets(), what).toEqual([]);
+		unsubscribe?.();
+	}
 });
 
 test("a native track is left to the delegate", () => {

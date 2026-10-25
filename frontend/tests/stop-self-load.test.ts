@@ -41,16 +41,15 @@ beforeEach(() => {
 	sent.length = 0;
 });
 
-test("a dispatched STOP stops the track this page loaded", () => {
-	setSelfLoad(true);
-	runRegistry(interceptors);
+test("a STOP stops the track this page loaded, on the dispatch rail and on the saga's put rail", () => {
+	for (const [rail, registry] of [
+		["a dispatched STOP", interceptors],
+		["a STOP TIDAL's saga puts, after a queue clear", putInterceptors],
+	] as const) {
+		sent.length = 0;
+		setSelfLoad(true);
+		runRegistry(registry);
 
-	expect(stopsSent()).toBe(1);
-});
-
-test("a STOP TIDAL's saga puts, after a queue clear, stops it too", () => {
-	setSelfLoad(true);
-	runRegistry(putInterceptors);
-
-	expect(stopsSent()).toBe(1);
+		expect(stopsSent(), rail).toBe(1);
+	}
 });

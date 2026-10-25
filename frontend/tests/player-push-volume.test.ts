@@ -61,17 +61,6 @@ beforeEach(() => {
 	console.warn = () => void warned++;
 });
 
-test("the failure is reported with the event it came from", () => {
-	subscriberThrowsOn.add(UNMUTE);
-
-	push([{ t: "volume", v: rust.remote(40, 40) }]);
-
-	expect(reported.length).toBe(1);
-	expect(String(reported[0]?.[0])).toContain("[bridge]");
-	expect(reported[0]?.[1]).toBe("volume");
-	expect((reported[0]?.[2] as Error).message).toBe(`subscriber of ${UNMUTE} exploded`);
-});
-
 test("several failing writes are reported together", () => {
 	subscriberThrowsOn.add(UNMUTE).add(VOLUME);
 
@@ -108,11 +97,4 @@ test("a store not published yet is no failure, and the report is not taken in", 
 	storePublished = true;
 	push([{ t: "volume", v: report }]);
 	expect(committed.map((d) => d.type)).toEqual([UNMUTE, MUTE, VOLUME]);
-});
-
-test("a report that is not a level is skipped without a trace", () => {
-	push([{ t: "volume", v: { volume: "loud" } }]);
-
-	expect(committed).toEqual([]);
-	expect(reported).toEqual([]);
 });

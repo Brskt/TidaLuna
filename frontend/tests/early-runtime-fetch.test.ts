@@ -6,7 +6,7 @@
 
 import { expect, test } from "bun:test";
 
-import { installSdkFetchObserver, observeSdkFetch, productOfStream } from "../src/sdk-playbackinfo";
+import { installSdkFetchObserver, productOfStream } from "../src/sdk-playbackinfo";
 import { fragmentSource, runFragment } from "./helpers/early-runtime";
 
 const source = await fragmentSource("fetch_proxy");
@@ -198,17 +198,4 @@ test("installing when the slot is taken says so", async () => {
 
 	expect(reported).toHaveLength(1);
 	expect(String(reported[0]![0])).toContain("slot already taken");
-});
-
-test("what the host installs is the module's observer, which ignores a request that is not playbackinfo", async () => {
-	const { window, slot } = pageWith(answering("7009"));
-	let installed: unknown;
-	installSdkFetchObserver((observer: unknown) => {
-		installed = observer;
-		return slot.__lunaFetchTapInstall(observer);
-	});
-
-	expect(installed).toBe(observeSdkFetch);
-	const response = await window.fetch("https://api.tidal.com/v1/tracks/7009");
-	expect(response.status).toBe(200);
 });

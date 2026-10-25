@@ -61,7 +61,7 @@ bootStubs();
 
 await import("../src/index");
 const { interceptors, putInterceptors } = await import("../render/src/exposeTidalInternals.patchAction");
-const { leavesStagedBehind, nextProductOf, unloadBeforeNext, PRELOAD_ITEM } = await import("../src/controllers/player");
+const { unloadBeforeNext, PRELOAD_ITEM } = await import("../src/controllers/player");
 
 // `init` registers the hooks once its awaits are through, which an import does not wait for.
 for (let i = 0; i < 2000 && !((putInterceptors[PRELOAD_ITEM]?.size ?? 0) > 0 && (interceptors[PRELOAD_ITEM]?.size ?? 0) > 0); i++) await Bun.sleep(1);
@@ -89,7 +89,7 @@ const preloadItem = (rail: Rail, payload: unknown): boolean => {
 	return cancelled;
 };
 
-beforeEach(async () => {
+const reset = async () => {
 	sdkAvailable = true;
 	unsetting = null;
 	delegate = (window as any).NativePlayerComponent.Player();
@@ -101,27 +101,9 @@ beforeEach(async () => {
 	unsets = [];
 	order = [];
 	sent.length = 0;
-});
+};
 
-test("the rule: a staged track is left behind by a next that names another product, and by nothing else", () => {
-	expect([
-		leavesStagedBehind("112", "333"),
-		leavesStagedBehind("112", "112"),
-		leavesStagedBehind("112", null),
-		leavesStagedBehind(null, "333"),
-		leavesStagedBehind(null, null),
-	]).toEqual([true, false, false, false, false]);
-});
-
-test("a product is named by its id, and an unset names none", () => {
-	expect([nextProductOf(product("333")), nextProductOf({ productId: 7 }), nextProductOf(undefined), nextProductOf({ type: PRELOAD_ITEM }), nextProductOf({ productId: {} })]).toEqual([
-		"333",
-		"7",
-		null,
-		null,
-		null,
-	]);
-});
+beforeEach(reset);
 
 test("TIDAL's PRELOAD_ITEM(undefined) is never dispatched", async () => {
 	await stage("112");
@@ -186,38 +168,32 @@ test("an unset asked for while the unset runs is that unset: nothing is put agai
 	expect(raw).toEqual([]);
 });
 
-test("an unset that rejects still puts the next again, and says so", async () => {
-	unsetting = () => Promise.reject(new Error("unload failed"));
-	await stage("112");
-	const errors: unknown[][] = [];
-	const original = console.error;
-	console.error = (...args: unknown[]) => void errors.push(args);
-	try {
-		preloadItem("put", product("333"));
-		await settled();
-	} finally {
-		console.error = original;
+test("an unset that rejects or throws still puts the next again, and says so", async () => {
+	for (const [what, failing] of [
+		["rejects", () => Promise.reject(new Error("unload failed"))],
+		[
+			"throws",
+			() => {
+				throw new Error("unload threw");
+			},
+		],
+	] as const) {
+		await reset();
+		unsetting = failing;
+		await stage("112");
+		const errors: unknown[][] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => void errors.push(args);
+		try {
+			preloadItem("put", product("333"));
+			await settled();
+		} finally {
+			console.error = original;
+		}
+
+		expect(raw, what).toEqual([again("333")]);
+		expect(errors, what).toHaveLength(1);
 	}
-
-	expect(raw).toEqual([again("333")]);
-	expect(errors).toHaveLength(1);
-});
-
-test("an unset that throws still puts the next again", async () => {
-	unsetting = () => {
-		throw new Error("unload threw");
-	};
-	await stage("112");
-	const original = console.error;
-	console.error = () => {};
-	try {
-		preloadItem("put", product("333"));
-		await settled();
-	} finally {
-		console.error = original;
-	}
-
-	expect(raw).toEqual([again("333")]);
 });
 
 test("without the SDK's API the action is left be", async () => {

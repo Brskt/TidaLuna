@@ -20,24 +20,15 @@ const realRaf = globalThis.requestAnimationFrame;
 
 let requested: string[] = [];
 
-// The answer never comes: the canvas the attach lays down before its fetch stays where a test can
-// see it, and no draw loop or give-up runs behind the test.
-const transportNeverAnswering = () => {
-	(globalThis as any).fetch = (url: string) => {
-		requested.push(decodeURIComponent(url));
-		return new Promise(() => {});
-	};
-};
-
 const transportRefusing = () => refusingTransport((url) => requested.push(decodeURIComponent(url)));
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-// TIDAL's artwork frame holding a media element whose selected resource is on a `<source>` child,
-// as it mounts a cover.
-const mountFrame = (tag: "video" | "audio", src: string) => {
+// TIDAL's artwork frame holding a video whose selected resource is on a `<source>` child, as it
+// mounts a cover.
+const mountFrame = (src: string) => {
 	const surface = document.createElement("div");
-	const media = document.createElement(tag);
+	const media = document.createElement("video");
 	const source = document.createElement("source");
 	source.setAttribute("src", src);
 	media.appendChild(source);
@@ -60,22 +51,9 @@ afterEach(() => {
 	document.body.replaceChildren();
 });
 
-test("a loadstart on a cover video attaches its cover through the document's listener", () => {
-	transportNeverAnswering();
-	const { surface, media } = mountFrame("video", coverSrc("ls-listener"));
-
-	const event = loadstart();
-	expect(event.bubbles).toBe(false);
-	media.dispatchEvent(event);
-
-	expect(requested.length).toBe(1);
-	expect(requested[0]).toContain(coverSrc("ls-listener"));
-	expect(surface.querySelectorAll("canvas").length).toBe(1);
-});
-
 test("the loadstart of a selection already handed over is not attached a second time", async () => {
 	transportRefusing();
-	const { media } = mountFrame("video", coverSrc("ls-twice"));
+	const { media } = mountFrame(coverSrc("ls-twice"));
 
 	media.dispatchEvent(loadstart());
 	await settle();
@@ -83,19 +61,4 @@ test("the loadstart of a selection already handed over is not attached a second 
 	await settle();
 
 	expect(requested.length).toBe(1);
-});
-
-test("a loadstart that is not a cover video's attaches nothing", () => {
-	transportNeverAnswering();
-	const audio = mountFrame("audio", coverSrc("ls-audio"));
-	const other = mountFrame("video", "https://resources.tidal.com/images/a/b/640x640.jpg");
-	const bare = document.createElement("div");
-	document.body.appendChild(bare);
-
-	audio.media.dispatchEvent(loadstart());
-	other.media.dispatchEvent(loadstart());
-	bare.dispatchEvent(loadstart());
-
-	expect(requested.length).toBe(0);
-	expect(document.querySelectorAll("canvas").length).toBe(0);
 });

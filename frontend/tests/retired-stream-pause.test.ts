@@ -47,15 +47,10 @@ const loadTwoStarted = [
 	{ t: "state", v: "ready", seq: 2 },
 ];
 
-test("the pause of the previous load still reaches Redux", () => {
+test("the pause of the previous load reaches Redux but is no state of the SDK's current load", () => {
 	push([...loadTwoStarted, { t: "state", v: "paused", seq: 1 }]);
 
 	expect(playbackStates()).toEqual(["NOT_PLAYING"]);
-});
-
-test("the pause of the previous load is not a state of the SDK's current load", () => {
-	push([...loadTwoStarted, { t: "state", v: "paused", seq: 1 }]);
-
 	expect(heardBySdk).toEqual(["ready"]);
 });
 

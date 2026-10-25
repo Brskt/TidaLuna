@@ -55,7 +55,7 @@ const play = () => {
 
 let replays = 0;
 
-beforeEach(() => {
+const setup = () => {
 	sent.length = 0;
 	dispatched = [];
 	productId = "";
@@ -63,12 +63,21 @@ beforeEach(() => {
 	replays = 0;
 	(window as any).nativeInterface.playback.replaySelfLoad = () => void replays++;
 	setSelfLoad(true);
-});
+};
 
-afterEach(() => {
+const teardown = () => {
 	forgetRefusal("");
 	watchers.clear();
-});
+};
+
+beforeEach(setup);
+afterEach(teardown);
+
+// A row of a table starts where a test of its own would.
+const freshRow = () => {
+	teardown();
+	setup();
+};
 
 const refuse = (id?: string) => {
 	refusePlayback("tidalunar_load_failed", "boom", "could not load", id);
@@ -85,22 +94,10 @@ test("a Play on the product this page refused asks TIDAL to reload it: its trans
 	productId = "222";
 	refuse("222");
 
-	play();
-
-	expect(dispatched).toEqual([{ type: RELOAD }]);
-});
-
-test("a Play on the product this page refused is cancelled: TIDAL's PLAY saga would wait for the pending transition and start whatever loads next", () => {
-	productId = "222";
-	refuse("222");
-
+	// Cancelled too: TIDAL's PLAY saga would wait for the pending transition and start whatever
+	// loads next.
 	expect(play()).toBe(true);
-});
-
-test("a Play on a track nothing refused is not cancelled", () => {
-	productId = "222";
-
-	expect(play()).toBe(false);
+	expect(dispatched).toEqual([{ type: RELOAD }]);
 });
 
 test("a Play while the retry has not reached Rust waits: it resumes nothing and asks for nothing twice", () => {
@@ -117,54 +114,26 @@ test("a Play while the retry has not reached Rust waits: it resumes nothing and 
 	expect(dispatched).toEqual([]);
 });
 
-test("a Play after Rust reported the length of the track it loaded is Rust's again", () => {
-	productId = "222";
-	refuse("222");
-	play();
-	lengthOfLoaded(215);
-	sent.length = 0;
+test("a Play after a refusal is Rust's again only once the refused product's own length was reported", () => {
+	for (const [what, event, plays] of [
+		["the length of the track it loaded", { t: "duration", v: 215 }, 1],
+		["a zero length, a load that failed", { t: "duration", v: 0 }, 0],
+		// Rust re-reports the length of the track it kept (a same-track re-assert) while the retry is in flight.
+		["a length measured on another track than the refused one", { t: "duration", v: 215, product: "111" }, 0],
+		["a length measured on the refused track", { t: "duration", v: 215, product: "222" }, 1],
+	] as const) {
+		freshRow();
+		productId = "222";
+		refuse("222");
+		play();
+		push([event]);
+		sent.length = 0;
 
-	play();
+		play();
 
-	expect(replays).toBe(1);
-	expect(playsSent()).toBe(1);
-});
-
-test("a zero length is a load that failed: the Play still waits", () => {
-	productId = "222";
-	refuse("222");
-	play();
-	lengthOfLoaded(0);
-	sent.length = 0;
-
-	play();
-
-	expect(playsSent()).toBe(0);
-});
-
-test("a length measured on another track than the refused one is not the retry's: the Play still waits", () => {
-	// Rust re-reports the length of the track it kept (a same-track re-assert) while the retry is in flight.
-	productId = "222";
-	refuse("222");
-	play();
-	push([{ t: "duration", v: 215, product: "111" }]);
-	sent.length = 0;
-
-	play();
-
-	expect(playsSent()).toBe(0);
-});
-
-test("a length measured on the refused track is the retry's", () => {
-	productId = "222";
-	refuse("222");
-	play();
-	push([{ t: "duration", v: 215, product: "222" }]);
-	sent.length = 0;
-
-	play();
-
-	expect(playsSent()).toBe(1);
+		expect(replays, what).toBe(1);
+		expect(playsSent(), what).toBe(plays);
+	}
 });
 
 test("a retry that fails again leaves the refusal standing: the next Play asks again, and resumes nothing", () => {
@@ -225,7 +194,7 @@ test("a load Rust failed for the current track is a refusal the Play asks again"
 test("a Play on a track this page did not refuse goes out at once, and its length dispatches nothing", () => {
 	productId = "222";
 
-	play();
+	expect(play()).toBe(false);
 	lengthOfLoaded(215);
 
 	expect(replays).toBe(0);
@@ -337,21 +306,40 @@ test("a seek on the product this page refused is not sent to Rust: its track is 
 	expect(seeksSent()).toBe(0);
 });
 
-test("a seek on a track nothing refused reaches Rust", () => {
-	productId = "222";
+test("a seek reaches Rust when no refusal stands on the product the listener has", () => {
+	for (const [what, arrange] of [
+		[
+			"another product than the refused one",
+			() => {
+				productId = "333";
+				refuse("222");
+			},
+		],
+		[
+			"the retried product once Rust loaded it",
+			() => {
+				productId = "222";
+				refuse("222");
+				play();
+				lengthOfLoaded(215);
+				sent.length = 0;
+			},
+		],
+		[
+			"a refusal that names no product (a cast, a lost network)",
+			() => {
+				productId = "222";
+				refuse();
+			},
+		],
+	] as const) {
+		freshRow();
+		arrange();
 
-	seek();
+		seek();
 
-	expect(seeksSent()).toBe(1);
-});
-
-test("a seek on another product than the refused one reaches Rust", () => {
-	productId = "333";
-	refuse("222");
-
-	seek();
-
-	expect(seeksSent()).toBe(1);
+		expect(seeksSent(), what).toBe(1);
+	}
 });
 
 test("a seek while the retry has not reached Rust is not sent", () => {
@@ -363,27 +351,6 @@ test("a seek while the retry has not reached Rust is not sent", () => {
 	seek();
 
 	expect(seeksSent()).toBe(0);
-});
-
-test("a seek after Rust loaded the retried product reaches Rust", () => {
-	productId = "222";
-	refuse("222");
-	play();
-	lengthOfLoaded(215);
-	sent.length = 0;
-
-	seek();
-
-	expect(seeksSent()).toBe(1);
-});
-
-test("a seek after a refusal that names no product (a cast, a lost network) reaches Rust", () => {
-	productId = "222";
-	refuse();
-
-	seek();
-
-	expect(seeksSent()).toBe(1);
 });
 
 test("the SDK loading the refused product again is the refusal asked for again, once", () => {

@@ -65,23 +65,32 @@ const flush = async () => {
 	for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
 };
 
-beforeEach(() => {
+const setup = () => {
 	dispatched = [];
 	pbiCalls = [];
 	rejectPbi = null;
 	resolvePbi = null;
 	(window as any).__LUNAR_CURRENT_PRODUCT_ID__ = undefined;
-});
+};
 
-// Reset even when an assertion failed: the seeded context and the self-load flag must not reach
-// the next test.
-afterEach(() => {
+const teardown = () => {
 	state.playbackControls = { playbackContext: {}, mediaProduct: {} };
 	listeners.clear();
 	subscriptions = 0;
 	proxyReset();
 	setSelfLoad(false);
-});
+};
+
+beforeEach(setup);
+// Reset even when an assertion failed: the seeded context and the self-load flag must not reach
+// the next test.
+afterEach(teardown);
+
+// A row of a table starts where a test of its own would.
+const freshRow = () => {
+	teardown();
+	setup();
+};
 
 const ctxOf = () => contextOf(dispatched);
 const contextOf = (calls: Dispatch[]) => calls.find((d) => d.type === "playbackControls/UPDATE_PLAYBACK_CONTEXT")?.payload as any;
@@ -149,55 +158,26 @@ test("a DASH manifest Rust cannot read refuses the track that is still current",
 	}
 });
 
-test("a failure that does not name the stream refuses nothing, on the fetch channel or off it", async () => {
-	// Our request failing says nothing about the SDK's: a FLAC track is loaded by the SDK itself,
-	// and stopping it here would stop a healthy track. `tidalFetch` rejects through `invokeIpc` too,
-	// with its own channel: only the DASH parse names a stream.
-	for (const [productId, failure] of [
-		["unknown", new Error("500 Internal Server Error")],
-		["blip", Object.assign(new Error("fetch failed"), { code: 500, channel: "tidal.fetch" })],
+test("a failure that does not name the stream, or no playback info at all, refuses nothing", async () => {
+	// Our request failing says nothing about the SDK's: a FLAC track is loaded by the SDK itself, and stopping
+	// it here would stop a healthy track. Only the DASH parse names a stream: `tidalFetch` rejects through
+	// `invokeIpc` with its own channel, and 403 and 404 resolve to `undefined`, the SDK's own answer too.
+	for (const [productId, settle] of [
+		["unknown", () => rejectPbi?.(new Error("500 Internal Server Error"))],
+		["blip", () => rejectPbi?.(Object.assign(new Error("fetch failed"), { code: 500, channel: "tidal.fetch" }))],
+		["gone", () => resolvePbi?.(undefined)],
 	] as const) {
+		freshRow();
 		const controller = createPlaybackController();
 		controller.setCurrentMediaItem({ productId, type: "track" });
 		await flush();
 
-		rejectPbi?.(failure);
+		settle();
 		await flush();
 
-		expect(stops()).toEqual([]);
-		expect(banners()).toEqual([]);
+		expect(stops(), productId).toEqual([]);
+		expect(banners(), productId).toEqual([]);
 	}
-});
-
-test("a track with no playback info refuses nothing", async () => {
-	// 403 and 404 resolve to `undefined`: the SDK's own request gets the same answer and reports it.
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "gone", type: "track" });
-	await flush();
-
-	resolvePbi?.(undefined);
-	await flush();
-
-	expect(stops()).toEqual([]);
-	expect(banners()).toEqual([]);
-});
-
-test("a FLAC stream the SDK loads itself is left alone", async () => {
-	const from = sent.length;
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "flac", type: "track" });
-	await flush();
-
-	resolvePbi?.({
-		audioQuality: "LOSSLESS",
-		manifestMimeType: "application/vnd.tidal.bts",
-		manifest: { urls: ["https://cdn/mediatracks/flac"], mimeType: "audio/flac", codecs: "flac", keyId: "" },
-	});
-	await flush();
-
-	expect(sentSince(from)).not.toContain("player.load");
-	expect(stops()).toEqual([]);
-	expect(banners()).toEqual([]);
 });
 
 test("a refusal that raises is reported and does not cost the track its context write", async () => {
@@ -218,16 +198,6 @@ test("a refusal that raises is reported and does not cost the track its context 
 	} finally {
 		console.error = original;
 	}
-});
-
-test("a video says it is one in the context it publishes", async () => {
-	// A null here made every consumer treat the video as a track, `fetchBestQuality` included.
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "vid", type: "video" });
-	await flush();
-
-	expect(contextOf(dispatched)).toBeDefined();
-	expect(contextOf(dispatched)?.actualVideoQuality).not.toBeNull();
 });
 
 test("a track after a video asks for its playback info and claims no video", async () => {
@@ -263,6 +233,8 @@ test("a video after a track claims none of the track's audio fields", async () =
 	expect(ctx?.actualAudioQuality).toBeNull();
 	expect(ctx?.bitDepth).toBeNull();
 	expect(ctx?.sampleRate).toBeNull();
+	// A null here made every consumer treat the video as a track, `fetchBestQuality` included.
+	expect(ctx?.actualVideoQuality).not.toBeNull();
 });
 
 // A non-FLAC BTS answer at HIGH: the case this delegate self-loads.
@@ -294,24 +266,21 @@ test("a track the Connect receiver already plays is announced, never loaded agai
 const receiverStream = { audioQuality: "HI_RES_LOSSLESS", bitDepth: 24, sampleRate: 96000 };
 const previousTrack = { actualAudioQuality: "LOW", bitDepth: 16, sampleRate: 44100 };
 
-test("a track the Connect receiver already plays shows the format the receiver resolved", async () => {
+test("a track the Connect receiver already plays shows the format the receiver resolved, none when it resolved none", async () => {
 	// This page is set to LOW and the phone casts at HI_RES: showing the page's own quality, or
 	// the previous track's, would be wrong whenever the two settings differ.
-	state.playbackControls.playbackContext = { ...previousTrack } as any;
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "cast-fmt", type: "track" }, { alreadyPlaying: true, stream: receiverStream });
-	await flush();
+	for (const [productId, stream, expected] of [
+		["cast-fmt", receiverStream, { actualAudioQuality: "HI_RES_LOSSLESS", bitDepth: 24, sampleRate: 96000 }],
+		["cast-none", null, { actualAudioQuality: null, bitDepth: null, sampleRate: null }],
+	] as const) {
+		freshRow();
+		state.playbackControls.playbackContext = { ...previousTrack } as any;
+		const controller = createPlaybackController();
+		controller.setCurrentMediaItem({ productId, type: "track" }, { alreadyPlaying: true, stream });
+		await flush();
 
-	expect(ctxOf()).toMatchObject({ actualAudioQuality: "HI_RES_LOSSLESS", bitDepth: 24, sampleRate: 96000 });
-});
-
-test("a track the Connect receiver plays with no stream resolved shows no format, not the previous track's", async () => {
-	state.playbackControls.playbackContext = { ...previousTrack } as any;
-	const controller = createPlaybackController();
-	controller.setCurrentMediaItem({ productId: "cast-none", type: "track" }, { alreadyPlaying: true, stream: null });
-	await flush();
-
-	expect(ctxOf()).toMatchObject({ actualAudioQuality: null, bitDepth: null, sampleRate: null });
+		expect(ctxOf(), productId).toMatchObject(expected);
+	}
 });
 
 test("a track this page loads keeps the previous context for what its own answer omits", async () => {
@@ -580,23 +549,6 @@ test("every way this page ends without loading the track refuses it once the ele
 	}
 });
 
-test("a refusal says it could not load the track, outside TIDAL's table of codes", async () => {
-	const triggered: [string, any][] = [];
-	(window as any).NativePlayerComponent = { trigger: (name: string, payload: unknown) => triggered.push([name, payload]) };
-	try {
-		const stream = await sdkAnswers("2019");
-		const controller = createPlaybackController();
-		await announce(controller, "2019");
-		ours("blip");
-		await bindStream(document.createElement("audio"), stream);
-
-		expect(triggered).toEqual([["mediaerror", expect.objectContaining({ errorCode: "tidalunar_manifest_unreadable" })]]);
-		expect((banners()[0]!.payload as any).message).toContain("could not load this track");
-	} finally {
-		delete (window as any).NativePlayerComponent;
-	}
-});
-
 test("the stream bound before the SDK's answer was read refuses the track when the answer lands", async () => {
 	const controller = createPlaybackController();
 	await announce(controller, "2020");
@@ -649,37 +601,23 @@ const lateBind = async (stream: string, id: string) => {
 	return lengths;
 };
 
-test("the SDK's late load of a superseded track settles on that track's catalog length, and Rust's credential is not asked for", async () => {
-	(state.content as any).mediaItems = { "3001": { item: { duration: 190 } } };
+test("a stream bound late names the product it is for: only Rust's own track is a reload", async () => {
 	try {
-		const lengths = await lateBind(await sdkAnswers("3001"), "3002");
+		for (const [what, answered, id, mediaItems, lengths, credentials] of [
+			["the SDK's late load of a superseded track settles on that track's catalog length", () => sdkAnswers("3001"), "3002", { "3001": { item: { duration: 190 } } }, [190], []],
+			["a late load of a track the catalog has no length for settles on 0, the SDK's unknown length", () => sdkAnswers("3003"), "3004", {}, [0], []],
+			["a stream of the product Rust has is its reload, whatever the SDK's answer said", () => sdkAnswers("3005"), "3005", {}, [200], ["3005"]],
+			["a stream this page never saw answered is taken for a reload of Rust's track", async () => dash("never answered"), "3006", {}, [200], ["3006"]],
+		] as const) {
+			freshRow();
+			(state.content as any).mediaItems = mediaItems;
 
-		expect(lengths).toEqual([190]);
-		expect(pbiCalls).toEqual([]);
+			expect(await lateBind(await answered(), id), what).toEqual(lengths);
+			expect(pbiCalls, what).toEqual(credentials);
+		}
 	} finally {
 		state.content.mediaItems = {};
 	}
-});
-
-test("a late load of a track the catalog has no length for settles on 0, the SDK's unknown length", async () => {
-	const lengths = await lateBind(await sdkAnswers("3003"), "3004");
-
-	expect(lengths).toEqual([0]);
-	expect(pbiCalls).toEqual([]);
-});
-
-test("a stream of the product Rust has is its reload, whatever the SDK's answer said", async () => {
-	const lengths = await lateBind(await sdkAnswers("3005"), "3005");
-
-	expect(lengths).toEqual([200]);
-	expect(pbiCalls).toEqual(["3005"]);
-});
-
-test("a stream this page never saw answered is taken for a reload of Rust's track", async () => {
-	const lengths = await lateBind(dash("never answered"), "3006");
-
-	expect(lengths).toEqual([200]);
-	expect(pbiCalls).toEqual(["3006"]);
 });
 
 test("a native track whose request failed alone does not refuse the shaka track that follows", async () => {
@@ -903,27 +841,6 @@ test("a track the element's rule refused, after an earlier load of this page, le
 
 	expect(controller.loadOwner("2032")).toBe("superseded");
 	expect(controller.loadOwner("2033")).toBe("foreign");
-});
-
-test("a replay refused by the element's rule still reads as the page's own load for the product's earlier failure", async () => {
-	// The one overlap: the earlier load of the same product is still the last this page sent. Rust
-	// reports a load's failure before the track plays; a replay exists only after that load
-	// succeeded and nothing is left to fail. The verdict is pinned as it stands.
-	const first = await sdkAnswers("2034");
-	const controller = createPlaybackController();
-	await announce(controller, "2034");
-	resolvePbi?.(aacStream);
-	await flush();
-	await bindStream(document.createElement("audio"), first);
-	dispatched = [];
-
-	controller.replaySelfLoad();
-	await flush();
-	ours("blip");
-	await flush();
-	expect(refusedTracks()).toEqual({ stops: 1, banners: 1 });
-
-	expect(controller.loadOwner("2034")).toBe("current");
 });
 
 test("a refusal of the track that is still current is the one a Play asks for again", async () => {

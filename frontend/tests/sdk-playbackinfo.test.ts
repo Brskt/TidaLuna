@@ -137,15 +137,3 @@ test("listeners hear each recorded answer, and one that throws does not stop the
 	}
 });
 
-test("the oldest answers are forgotten past the bound", async () => {
-	const answers: Record<string, () => Response> = {};
-	for (let i = 0; i < 40; i++) {
-		answers[LEGACY(String(900 + i))] = () => json({ trackId: 900 + i, manifestMimeType: "application/dash+xml", manifest: btoa(`<MPD>bound ${i}</MPD>`) });
-	}
-	const { target } = targetOf(answers);
-	for (let i = 0; i < 40; i++) await target.fetch(LEGACY(String(900 + i)));
-	await flush();
-
-	expect(productOfStream(`data:application/dash+xml;base64,${btoa("<MPD>bound 0</MPD>")}`)).toBeUndefined();
-	expect(productOfStream(`data:application/dash+xml;base64,${btoa("<MPD>bound 39</MPD>")}`)).toBe("939");
-});

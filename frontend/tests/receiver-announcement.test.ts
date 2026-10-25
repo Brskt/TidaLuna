@@ -26,27 +26,23 @@ mock.module("../src/ipc", () => ({
 
 const { handleReceiverMediaChanged, followCastQueue } = await import("../src/connect/middleware");
 
-test("the receiver's track reaches the delegate as one already playing", async () => {
-	const calls: unknown[][] = [];
-	(window as any).nativeInterface = { playback: { setCurrentMediaItem: (...args: unknown[]) => calls.push(args) } };
-	const store = { dispatch: () => {}, getState: () => ({ session: { countryCode: "FR" }, playbackControls: {} }) };
-
-	await handleReceiverMediaChanged(store, { mediaId: "77" } as any);
-
-	expect(calls).toHaveLength(1);
-	expect(calls[0][0]).toMatchObject({ productId: 77, type: "track" });
-	expect(calls[0][1]).toEqual({ alreadyPlaying: true });
-});
-
-test("the stream the receiver resolved rides with the announcement", async () => {
-	const calls: unknown[][] = [];
-	(window as any).nativeInterface = { playback: { setCurrentMediaItem: (...args: unknown[]) => calls.push(args) } };
-	const store = { dispatch: () => {}, getState: () => ({ session: { countryCode: "FR" }, playbackControls: {} }) };
+test("the receiver's track reaches the delegate as one already playing, with the stream it resolved", async () => {
 	const stream = { audioQuality: "LOSSLESS", bitDepth: 16, sampleRate: 44100 };
+	for (const [announcement, options] of [
+		[{ mediaId: "77" }, { alreadyPlaying: true }],
+		[{ mediaId: "77", stream }, { alreadyPlaying: true, stream }],
+	] as const) {
+		const calls: unknown[][] = [];
+		(window as any).nativeInterface = { playback: { setCurrentMediaItem: (...args: unknown[]) => calls.push(args) } };
+		const store = { dispatch: () => {}, getState: () => ({ session: { countryCode: "FR" }, playbackControls: {} }) };
 
-	await handleReceiverMediaChanged(store, { mediaId: "77", stream } as any);
+		await handleReceiverMediaChanged(store, announcement as any);
 
-	expect(calls[0][1]).toEqual({ alreadyPlaying: true, stream });
+		const row = JSON.stringify(announcement);
+		expect(calls, row).toHaveLength(1);
+		expect(calls[0][0], row).toMatchObject({ productId: 77, type: "track" });
+		expect(calls[0][1], row).toEqual(options);
+	}
 });
 
 // Regression: announced alone, the cast's track never reached TIDAL's player, and a Play after

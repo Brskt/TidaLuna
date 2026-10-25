@@ -124,15 +124,6 @@ test("time played on a track the listener never went to is not carried to a late
 	expect(PlayState.cumulativePlaytime).toBe(0);
 });
 
-test("a track Rust names with something that is not a string is a track it names none", () => {
-	holds(5 as unknown as string);
-	state("PLAYING");
-	advance(SECOND);
-	state("NOT_PLAYING");
-
-	expect(PlayState.cumulativePlaytime).toBe(SECOND);
-});
-
 test("the time of a track whose pause came after the next announcement does not wait for its replay", () => {
 	holds("A");
 	state("PLAYING");

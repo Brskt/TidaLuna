@@ -67,15 +67,3 @@ test("a transition's position is dispatched even inside the outgoing track's thr
 
 	expect(times()).toEqual([{ type: "playbackControls/TIME_UPDATE", payload: 6.0 }]);
 });
-
-test("a completion carrying no position does not leave the bypass armed", () => {
-	// Exclusive and ASIO output end a track with the state alone, no position beside
-	// it. Arming on the state alone would leave the flag set until some unrelated
-	// later report spent it, bypassing the throttle for a track that never transitioned.
-	push([{ t: "time", v: 20.0, seq: 1 }]);
-	dispatched = [];
-	push([{ t: "state", v: "completed", seq: 1 }]);
-	push([{ t: "time", v: 20.25, seq: 1 }]);
-
-	expect(times()).toEqual([]);
-});

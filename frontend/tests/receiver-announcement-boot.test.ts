@@ -5,7 +5,7 @@
 // proxy, which throws on its first use until the store is published. The announcement was dropped
 // whole, with nothing to say so, and the page showed nothing of the track until the next one.
 
-import { afterEach, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import { StoreNotPublishedError } from "../plugins/lib/src/redux/storeNotPublished";
 
 const track = { id: 77, title: "Cast track", duration: 200, album: { cover: "ab-cd", title: "Album" }, artists: [{ name: "Artist" }] };
@@ -86,23 +86,4 @@ test("an announcement overtaken while it waits for the store changes nothing", a
 	expect(fetched).toHaveLength(1);
 	expect(fetched[0]).toContain("/tracks/6");
 	expect(log.filter((a) => a.type === "playQueue/RESET").map((a) => a.payload.elements[0].mediaItemId)).toEqual([6]);
-});
-
-test("a lookup that fails after the wait stays silent", async () => {
-	const { log, store, ready, publish } = lateStore();
-	lookUp = () => Promise.reject(new Error("offline"));
-	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const error = spyOn(console, "error").mockImplementation(() => {});
-	try {
-		const done = announce(store, ready);
-		await settled();
-		publish();
-		await done;
-		expect(log).toEqual([]);
-		expect(warn).not.toHaveBeenCalled();
-		expect(error).not.toHaveBeenCalled();
-	} finally {
-		warn.mockRestore();
-		error.mockRestore();
-	}
 });

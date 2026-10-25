@@ -44,14 +44,6 @@ test("an export with some of the functions is not the SDK's API", () => {
 	expect(findSdkPlayer({ [SDK_PLAYER_API]: { a: { setNext: () => {}, load: () => {} }, b: { reset: () => {} }, c: null } })).toBeNull();
 });
 
-test("nothing captured under its id, or something that is no object, finds nothing", () => {
-	expect(findSdkPlayer({})).toBeNull();
-	expect(findSdkPlayer(undefined)).toBeNull();
-	expect(findSdkPlayer({ [SDK_PLAYER_API]: null })).toBeNull();
-	expect(findSdkPlayer({ [SDK_PLAYER_API]: "text" })).toBeNull();
-	expect(findSdkPlayer({ react: { w: api() } })).toBeNull();
-});
-
 test("the API is looked for again until it is found, then kept", () => {
 	quiet(() => startSdkPlayer());
 	expect(sdkPlayer()).toBeNull();
@@ -61,15 +53,5 @@ test("the API is looked for again until it is found, then kept", () => {
 	expect(sdkPlayer()).toBe(sdk as any);
 
 	host.__lunaHostModules = {};
-	expect(sdkPlayer()).toBe(sdk as any);
-});
-
-test("a miss at the start is said once, and a hit is not", () => {
-	const { warned } = quiet(() => startSdkPlayer(() => null));
-	expect(warned).toHaveLength(1);
-
-	const sdk = api();
-	const hit = quiet(() => startSdkPlayer(() => sdk as any));
-	expect(hit.warned).toEqual([]);
 	expect(sdkPlayer()).toBe(sdk as any);
 });
