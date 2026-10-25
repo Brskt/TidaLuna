@@ -8,6 +8,7 @@ pub(crate) mod clipboard;
 #[cfg(target_os = "linux")]
 pub(crate) mod desktop_entry;
 pub(crate) mod durable_fs;
+pub(crate) mod install_guard;
 pub(crate) mod js_actions;
 pub(crate) mod media_controls;
 pub(crate) mod process_args;

@@ -503,7 +503,13 @@ pub(super) fn handle_register_native(
             let declared = declared_name.clone();
             let plugin = name.clone();
             let hash = code_hash.clone();
+            let dir = data_dir_path.clone();
             move || {
+                // Off the UI thread (judging it stats every ancestor). A data dir inside the app's
+                // own files would hand a plugin write access to them.
+                if crate::platform::install_guard::get().is_some_and(|g| g.covers(&dir)) {
+                    return Err(DataDirRefusal::InsideTheApp);
+                }
                 crate::state::db().call(move |pc, sc| {
                     // A case twin installed before names were unique in any case shares this
                     // folder wherever the file system ignores case.
@@ -526,6 +532,14 @@ pub(super) fn handle_register_native(
 
         let (manifest_json, decisions) = match read {
             Ok(Ok(pair)) => pair,
+            Ok(Err(DataDirRefusal::InsideTheApp)) => {
+                crate::verr!(
+                    "[NATIVE] Refused a plugin data dir inside TidaLunar's own files: {}",
+                    data_dir_path.display()
+                );
+                ipc_callback_err(&callback, 403, "registerNative: data dir is not usable");
+                return;
+            }
             Ok(Err(DataDirRefusal::SharedByCase)) => {
                 crate::verr!(
                     "[NATIVE] Refused the data dir of {:?}: another installed plugin has the same name in another case",
@@ -721,9 +735,11 @@ async fn ask_trust(attempt: &mut RegisterAttempt, rows: &[&'static str]) -> Opti
 
 /// Why a plugin's data dir cannot be handed out.
 enum DataDirRefusal {
+    InsideTheApp,
     /// Another installed plugin's name differs only by case: one folder where case is ignored.
     SharedByCase,
 }
+
 /// One registration attempt. These values all travel together through the trust retry, and the
 /// reservation has to travel with them: the slot is held for the whole attempt chain, not per call.
 struct RegisterAttempt {

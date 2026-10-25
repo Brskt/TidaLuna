@@ -160,7 +160,7 @@ pub(super) fn handle_download(msg: &IpcMessage, callback: IpcCallback) {
                 return;
             }
         };
-        match run(req).await {
+        match run(req, crate::platform::install_guard::get()).await {
             Ok(()) => ipc_callback_ok(&callback, "true"),
             Err(e) => ipc_callback_err(&callback, status_for(&e), &format!("{e:#}")),
         }
@@ -177,7 +177,13 @@ fn status_for(e: &anyhow::Error) -> i32 {
     }
 }
 
-async fn run(req: Request) -> anyhow::Result<()> {
+/// What a plugin hears when a download targets the app's own files.
+const IN_THE_INSTALL: &str = "destination is inside TidaLunar's own files";
+
+async fn run(
+    req: Request,
+    guard: Option<&'static crate::platform::install_guard::Protected>,
+) -> anyhow::Result<()> {
     let dest = sanitized_destination(&req.path)?;
     // Auth and identity are matched, not spent; a failed fetch must not cost the user their answer.
     // A symlink swap of an ancestor between here and the rename is an accepted window: closing it
@@ -186,17 +192,23 @@ async fn run(req: Request) -> anyhow::Result<()> {
     // thread on a stalled network mount.
     // The snapshot is taken after the download permit: an already-finished sibling's write must be
     // visible here, and anchoring at dialog time would flag our own queued write as tampering.
-    let (auth, before) = {
+    let (auth, before, protected) = {
         let dest = dest.clone();
         tokio::task::spawn_blocking(move || {
             (
                 crate::ui::file_dialog::authorisation_for(&dest),
                 FileIdentity::of(&dest),
+                guard.is_some_and(|g| g.covers(&dest)),
             )
         })
         .await?
     };
     let auth = auth.ok_or(Refused("destination was not chosen in a save dialog"))?;
+    // Judged before the fetch and before the existing-file check: an install file answers alike
+    // present or absent. `write_file` judges again at the rename.
+    if protected {
+        return Err(Refused(IN_THE_INSTALL).into());
+    }
 
     // Settled before anything is fetched, from the same policy the write applies: the two cannot
     // disagree. Asking here rather than at the rename is what keeps a doomed download from pulling
@@ -264,7 +276,14 @@ async fn run(req: Request) -> anyhow::Result<()> {
 
     let size = finished.len() as u64;
     let shown = dest.display().to_string();
-    let outcome = write_file(dest, finished, OnExisting::for_authorisation(&auth), before).await?;
+    let outcome = write_file(
+        dest,
+        finished,
+        OnExisting::for_authorisation(&auth),
+        before,
+        guard,
+    )
+    .await?;
     // Spent only now: one save dialog answer buys one file on disk, and a failure above leaves the
     // answer usable for the retry. A folder grant is not spent at all.
     crate::ui::file_dialog::consume(auth);
@@ -560,13 +579,20 @@ async fn write_file(
     data: Vec<u8>,
     on_existing: OnExisting,
     before: Option<FileIdentity>,
+    guard: Option<&'static crate::platform::install_guard::Protected>,
 ) -> anyhow::Result<WriteOutcome> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<WriteOutcome> {
         use std::io::Write;
 
+        // The app's own files are never a download's to touch, whatever the dialog answered.
+        // Judged before a directory is created, then again right before the rename.
+        let protected = |path: &std::path::Path| guard.is_some_and(|g| g.covers(path));
         let dir = dest
             .parent()
             .ok_or_else(|| anyhow::anyhow!("destination has no directory: {}", dest.display()))?;
+        if protected(&dest) {
+            return Err(Refused(IN_THE_INSTALL).into());
+        }
         std::fs::create_dir_all(dir)?;
 
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
@@ -576,6 +602,9 @@ async fn write_file(
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))?;
+        }
+        if protected(&dest) {
+            return Err(Refused(IN_THE_INSTALL).into());
         }
         // Replaces only what the user was actually asked about. A file that appeared after they
         // answered, or one whose sanitised rename meant the dialog asked about a different name, was

@@ -1,7 +1,8 @@
 //! Tests for `src/ipc/plugin/lib_native.rs`, attached to it by `#[path]`.
 
 use super::{
-    asked_for_a_directory, build_send_to_render_js, names_a_directory, record_save_answer,
+    asked_for_a_directory, build_send_to_render_js, record_save_answer, vet_folder_answer,
+    vet_save_answer,
 };
 use serde_json::json;
 
@@ -38,7 +39,7 @@ fn a_save_answer_is_recorded_under_its_sanitised_name() {
     let raw = dir.path().join("Title: B?.flac");
     let sanitised = dir.path().join("Title_ B_.flac");
 
-    record_save_answer(&raw.to_string_lossy());
+    record_save_answer(&raw.to_string_lossy()).unwrap();
 
     let auth = authorisation_for(&sanitised).expect("the sanitised name is authorised");
     consume(auth);
@@ -46,4 +47,46 @@ fn a_save_answer_is_recorded_under_its_sanitised_name() {
         authorisation_for(&raw).is_none(),
         "the raw answer is not a name the download will write"
     );
+}
+
+/// The guard judges the name the download writes. Windows strips the trailing dot: `install.`
+/// is written as the install folder itself, which the raw spelling does not name on Linux.
+#[test]
+fn a_save_answer_is_judged_under_its_sanitised_name() {
+    use crate::platform::install_guard::Protected;
+    use crate::ui::file_dialog::NotRecorded;
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("install");
+    std::fs::create_dir(&root).unwrap();
+    let guard = Protected::new(&root, &parent.path().join("data/native"));
+
+    assert_eq!(
+        vet_save_answer(Some(&guard), &parent.path().join("install.")),
+        Err(NotRecorded::Protected)
+    );
+    assert_eq!(
+        vet_save_answer(Some(&guard), &parent.path().join("Title: B?.flac")),
+        Ok(())
+    );
+}
+
+/// The install folder is refused as a folder, a folder beside it is not.
+#[test]
+fn a_protected_folder_answer_is_still_refused() {
+    use crate::platform::install_guard::Protected;
+    use crate::ui::file_dialog::NotRecorded;
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("install");
+    std::fs::create_dir(&root).unwrap();
+    let guard = Protected::new(&root, &parent.path().join("data/native"));
+
+    assert_eq!(
+        vet_folder_answer(Some(&guard), &root),
+        Err(NotRecorded::Protected)
+    );
+    let music = parent.path().join("Music");
+    std::fs::create_dir(&music).unwrap();
+    assert_eq!(vet_folder_answer(Some(&guard), &music), Ok(()));
 }

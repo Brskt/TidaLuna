@@ -233,19 +233,57 @@ wrap_download_handler! {
                 .unwrap_or(false);
             if allowed { 1 } else { 0 }
         }
+        // Our own dialog picks the destination, not CEF's: a plugin chooses the blob's bytes, and
+        // ours refuses a path inside the app's files and asks again. Returning 1 and calling `cont`
+        // later is the documented async use; a dropped callback cancels.
         fn on_before_download(
             &self,
             _browser: Option<&mut Browser>,
             _download_item: Option<&mut DownloadItem>,
-            _suggested_name: Option<&CefString>,
+            suggested_name: Option<&CefString>,
             callback: Option<&mut BeforeDownloadCallback>,
         ) -> ::std::os::raw::c_int {
-            if let Some(cb) = callback {
-                let empty = CefString::from("");
-                cb.cont(Some(&empty), 1);
-                return 1;
-            }
-            0
+            let Some(cb) = callback.cloned() else {
+                return 0;
+            };
+            let request = crate::ui::destination_dialog::Request {
+                mode: FileDialogMode::SAVE,
+                title: None,
+                default_path: suggested_name.map(|name| name.to_string()),
+                filters: Vec::new(),
+            };
+            crate::state::rt_handle().spawn(async move {
+                let guard = crate::platform::install_guard::get();
+                // The raw answer is judged: CEF writes the path as given.
+                let answer = crate::ui::destination_dialog::choose_destination(
+                    &crate::ui::destination_dialog::Native,
+                    request,
+                    move |answer| {
+                        crate::ui::destination_dialog::classify(answer, |path| {
+                            crate::ui::file_dialog::vet_destination(guard, path).map(drop)
+                        })
+                    },
+                )
+                .await;
+                if let Some(path) = answer.into_iter().next() {
+                    let mut task = ContinueDownloadTask::new(cb, std::path::PathBuf::from(path));
+                    post_task(ThreadId::UI, Some(&mut task));
+                }
+            });
+            1
+        }
+    }
+}
+
+wrap_task! {
+    struct ContinueDownloadTask {
+        callback: BeforeDownloadCallback,
+        path: std::path::PathBuf,
+    }
+    impl Task {
+        fn execute(&self) {
+            let path = CefString::from(self.path.to_string_lossy().as_ref());
+            self.callback.cont(Some(&path), 0);
         }
     }
 }

@@ -83,6 +83,29 @@ fn refuse_install_dir_not_text() -> ! {
     )
 }
 
+/// Guards the install folder against plugin writes, except the native plugins' data dirs.
+fn install_protected_root(root: &std::path::Path, recovered: &updater::Recovered) {
+    platform::install_guard::install(
+        platform::install_guard::Protected::new(root, &ipc::plugin::native_data_dirs()),
+        recovered,
+    );
+}
+
+/// The whole `.app`, or the exe's folder for a build run from outside one.
+#[cfg(target_os = "macos")]
+fn install_protected_bundle(recovered: &updater::Recovered) {
+    let Some(root) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| platform::install_guard::bundle_root(&exe))
+    else {
+        crate::verr!(
+            "[GUARD]  Cannot locate the .app bundle; plugin writes into it are not refused"
+        );
+        return;
+    };
+    install_protected_root(&root, recovered);
+}
+
 fn main() {
     // First of all: a helper reads a plugin's source, and must reach no log, lock, CEF or database.
     if plugins::transpile_helper::is_helper_launch(std::env::args_os()) {
@@ -340,6 +363,12 @@ fn main() {
     let front = frontend::load::load(&front_dir)
         .unwrap_or_else(|e| refuse_to_start(&e.refusal(&front_dir)));
     frontend::load::install(front);
+    #[cfg(not(target_os = "macos"))]
+    if let Some(dir) = exe_dir.as_deref() {
+        install_protected_root(dir, &recovered);
+    }
+    #[cfg(target_os = "macos")]
+    install_protected_bundle(&recovered);
 
     // Validated and held; the startup navigation drains it in place of the home page.
     if let Some(raw) = &launch_url {

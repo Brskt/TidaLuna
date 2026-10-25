@@ -95,15 +95,67 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Whether a dialog answer may become an authorisation at all: never one inside the app's own
+/// files, whatever the user clicked, since the plugin that opened the dialog chose its default.
+/// A grant that merely contains them stays: each write under it is judged again.
+fn admissible(guard: Option<&crate::platform::install_guard::Protected>, path: &Path) -> bool {
+    guard.is_none_or(|guard| !guard.covers(path))
+}
+
+/// Why a dialog answer did not become an authorisation. The caller answers the two differently: an
+/// unresolvable path fails later at the download, a protected one is refused to the plugin now.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotRecorded {
+    Unresolvable,
+    Protected,
+}
+
+/// A file answer as the write will resolve it, unless it lies inside the app's own files. Shared by
+/// the dialog that asks again on a refusal and by the record that mints the authorisation.
+pub(crate) fn vet_destination(
+    guard: Option<&crate::platform::install_guard::Protected>,
+    path: &Path,
+) -> Result<PathBuf, NotRecorded> {
+    let resolved = resolved(path).ok_or(NotRecorded::Unresolvable)?;
+    if !admissible(guard, &resolved) {
+        return Err(NotRecorded::Protected);
+    }
+    Ok(resolved)
+}
+
+/// The same for a folder answer. Canonicalised outright rather than through `resolved`: the user
+/// just picked it, and it exists. The key is the directory itself rather than a directory plus a
+/// final component.
+pub(crate) fn vet_folder(
+    guard: Option<&crate::platform::install_guard::Protected>,
+    dir: &Path,
+) -> Result<PathBuf, NotRecorded> {
+    let canonical = dir.canonicalize().map_err(|_| NotRecorded::Unresolvable)?;
+    if !admissible(guard, &canonical) {
+        return Err(NotRecorded::Protected);
+    }
+    Ok(canonical)
+}
+
 /// Record what a dialog answered. Called on the dialog's own result: nothing the renderer
 /// says can put a path in here.
-pub(crate) fn record_user_choice(path: &Path, replace_confirmed: bool) {
-    let Some(resolved) = resolved(path) else {
-        crate::verr!(
-            "[DIALOG] Cannot resolve the chosen destination: {}",
-            path.display()
-        );
-        return;
+pub(crate) fn record_user_choice(path: &Path, replace_confirmed: bool) -> Result<(), NotRecorded> {
+    let resolved = match vet_destination(crate::platform::install_guard::get(), path) {
+        Ok(resolved) => resolved,
+        Err(NotRecorded::Unresolvable) => {
+            crate::verr!(
+                "[DIALOG] Cannot resolve the chosen destination: {}",
+                path.display()
+            );
+            return Err(NotRecorded::Unresolvable);
+        }
+        Err(NotRecorded::Protected) => {
+            crate::verr!(
+                "[DIALOG] Refused a destination inside TidaLunar's own files: {}",
+                path.display()
+            );
+            return Err(NotRecorded::Protected);
+        }
     };
     let mut choices = USER_CHOICES.lock().unwrap_or_else(|e| e.into_inner());
     record_bounded(
@@ -114,6 +166,7 @@ pub(crate) fn record_user_choice(path: &Path, replace_confirmed: bool) {
             replace_confirmed,
         },
     );
+    Ok(())
 }
 
 /// Replaces any entry for the same destination, then bounds (in that order). One entry per
@@ -173,19 +226,27 @@ pub(crate) fn consume(auth: Authorisation) {
 
 /// Record a directory a folder dialog answered. Called on the dialog's own result, like
 /// `record_user_choice`. Nothing the renderer says can put a path in here.
-///
-/// Canonicalised outright rather than through `resolved`: the user just picked it, and it exists.
-/// The key is the directory itself rather than a directory plus a final component.
-pub(crate) fn record_folder_grant(dir: &Path) {
-    let Ok(canonical) = dir.canonicalize() else {
-        crate::verr!(
-            "[DIALOG] Cannot resolve the chosen folder, downloads to it will be refused: {}",
-            dir.display()
-        );
-        return;
+pub(crate) fn record_folder_grant(dir: &Path) -> Result<(), NotRecorded> {
+    let canonical = match vet_folder(crate::platform::install_guard::get(), dir) {
+        Ok(canonical) => canonical,
+        Err(NotRecorded::Unresolvable) => {
+            crate::verr!(
+                "[DIALOG] Cannot resolve the chosen folder, downloads to it will be refused: {}",
+                dir.display()
+            );
+            return Err(NotRecorded::Unresolvable);
+        }
+        Err(NotRecorded::Protected) => {
+            crate::verr!(
+                "[DIALOG] Refused a folder inside TidaLunar's own files: {}",
+                dir.display()
+            );
+            return Err(NotRecorded::Protected);
+        }
     };
     let mut granted = GRANTED_FOLDERS.lock().unwrap_or_else(|e| e.into_inner());
     push_bounded(&mut granted, canonical);
+    Ok(())
 }
 
 /// Deduplicate and bound. Kept off the global; the rule can be tested without evicting grants a

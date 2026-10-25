@@ -8,7 +8,7 @@ use super::*;
 fn an_authorisation_survives_until_it_is_consumed() {
     let dir = tempfile::tempdir().unwrap();
     let chosen = dir.path().join("song.flac");
-    record_user_choice(&chosen, false);
+    record_user_choice(&chosen, false).unwrap();
 
     assert!(authorisation_for(&chosen).is_some(), "checked once");
     let auth = authorisation_for(&chosen).expect("a failed attempt must not burn it");
@@ -28,7 +28,7 @@ fn a_traversal_that_lands_on_the_authorised_file_is_still_refused() {
     let inner = dir.path().join("inner");
     std::fs::create_dir(&inner).unwrap();
     let chosen = inner.join("song.flac");
-    record_user_choice(&chosen, false);
+    record_user_choice(&chosen, false).unwrap();
 
     assert!(authorisation_for(&inner.join("..").join("inner").join("song.flac")).is_none());
     assert!(
@@ -44,12 +44,12 @@ fn whether_replacement_was_confirmed_travels_with_the_entry() {
     let dir = tempfile::tempdir().unwrap();
 
     let unconfirmed = dir.path().join("new.flac");
-    record_user_choice(&unconfirmed, false);
+    record_user_choice(&unconfirmed, false).unwrap();
     assert!(!authorisation_for(&unconfirmed).unwrap().replace_confirmed());
 
     let confirmed = dir.path().join("old.flac");
     std::fs::write(&confirmed, b"there first").unwrap();
-    record_user_choice(&confirmed, true);
+    record_user_choice(&confirmed, true).unwrap();
     assert!(authorisation_for(&confirmed).unwrap().replace_confirmed());
 }
 
@@ -61,8 +61,8 @@ fn a_fresh_answer_supersedes_an_unspent_one_for_the_same_path() {
     let dest = dir.path().join("song.flac");
     std::fs::write(&dest, b"there first").unwrap();
 
-    record_user_choice(&dest, false);
-    record_user_choice(&dest, true);
+    record_user_choice(&dest, false).unwrap();
+    record_user_choice(&dest, true).unwrap();
 
     assert!(
         authorisation_for(&dest)
@@ -87,7 +87,7 @@ fn a_symlinks_authorisation_does_not_reach_its_target() {
     let link = dir.path().join("link.flac");
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
-    record_user_choice(&link, true);
+    record_user_choice(&link, true).unwrap();
 
     assert!(
         authorisation_for(&link).is_some(),
@@ -106,9 +106,9 @@ fn a_newer_answer_for_the_same_path_is_not_spent_by_an_older_download() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("song.flac");
 
-    record_user_choice(&dest, false);
+    record_user_choice(&dest, false).unwrap();
     let in_flight = authorisation_for(&dest).expect("matched before the write");
-    record_user_choice(&dest, true);
+    record_user_choice(&dest, true).unwrap();
 
     consume(in_flight);
     assert!(
@@ -127,7 +127,7 @@ fn a_newer_answer_for_the_same_path_is_not_spent_by_an_older_download() {
 fn a_path_that_is_not_absolute_is_refused() {
     let name = "a-relative-spelling-of-an-answer.flac";
     let chosen = std::env::current_dir().unwrap().join(name);
-    record_user_choice(&chosen, false);
+    record_user_choice(&chosen, false).unwrap();
 
     assert!(authorisation_for(&std::path::Path::new(".").join(name)).is_none());
     assert!(
@@ -188,7 +188,7 @@ fn a_held_destination_needs_no_slot_and_a_new_one_at_capacity_costs_the_oldest()
 #[test]
 fn a_folder_grant_never_confirms_a_replacement() {
     let dir = tempfile::tempdir().unwrap();
-    record_folder_grant(dir.path());
+    record_folder_grant(dir.path()).unwrap();
 
     let auth = authorisation_for(&dir.path().join("song.flac")).expect("covered by the folder");
     assert!(!auth.replace_confirmed());
@@ -202,8 +202,8 @@ fn a_file_answer_wins_over_a_folder_grant_for_the_same_path() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("song.flac");
     std::fs::write(&dest, b"there first").unwrap();
-    record_folder_grant(dir.path());
-    record_user_choice(&dest, true);
+    record_folder_grant(dir.path()).unwrap();
+    record_user_choice(&dest, true).unwrap();
 
     let auth = authorisation_for(&dest).expect("authorised");
     assert!(auth.replace_confirmed(), "the save dialog asked about it");
@@ -215,7 +215,7 @@ fn a_file_answer_wins_over_a_folder_grant_for_the_same_path() {
 #[test]
 fn consuming_a_folder_grant_leaves_it_usable() {
     let dir = tempfile::tempdir().unwrap();
-    record_folder_grant(dir.path());
+    record_folder_grant(dir.path()).unwrap();
 
     let first = authorisation_for(&dir.path().join("one.flac")).expect("covered");
     consume(first);
@@ -234,7 +234,7 @@ fn a_traversal_cannot_reach_a_granted_folder() {
     let root = tempfile::tempdir().unwrap();
     let granted = root.path().join("music");
     std::fs::create_dir(&granted).unwrap();
-    record_folder_grant(&granted);
+    record_folder_grant(&granted).unwrap();
 
     assert!(authorisation_for(&granted.join("..").join("music").join("song.flac")).is_none());
     assert!(
@@ -251,7 +251,7 @@ fn a_sibling_directory_sharing_a_prefix_is_not_covered() {
     let sibling = root.path().join("musicX");
     std::fs::create_dir(&granted).unwrap();
     std::fs::create_dir(&sibling).unwrap();
-    record_folder_grant(&granted);
+    record_folder_grant(&granted).unwrap();
 
     let dest = resolved(&sibling.join("song.flac")).expect("resolvable");
     assert!(!folder_grant_covers(&dest));
@@ -263,7 +263,7 @@ fn a_sibling_directory_sharing_a_prefix_is_not_covered() {
 fn a_folder_that_does_not_exist_is_not_granted() {
     let dir = tempfile::tempdir().unwrap();
     let absent = dir.path().join("absent");
-    record_folder_grant(&absent);
+    let _ = record_folder_grant(&absent);
 
     let dest = resolved(&absent.join("song.flac")).expect("resolvable");
     assert!(!folder_grant_covers(&dest));
@@ -311,10 +311,73 @@ fn a_traversal_after_a_symlink_does_not_match_the_link_side() {
     std::fs::create_dir_all(other.join("child")).unwrap();
     std::os::unix::fs::symlink(other.join("child"), safe.join("link")).unwrap();
 
-    record_user_choice(&safe.join("song.flac"), false);
+    record_user_choice(&safe.join("song.flac"), false).unwrap();
 
     assert!(
         authorisation_for(&safe.join("link").join("..").join("song.flac")).is_none(),
         "the write would land beside the link's target, not beside the link"
     );
+}
+
+/// An install folder holding `frontend/`, beside the data dir as on Windows, and the guard built
+/// over it.
+fn guarded_install() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    crate::platform::install_guard::Protected,
+) {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("install");
+    std::fs::create_dir_all(root.join("frontend")).unwrap();
+    let guard =
+        crate::platform::install_guard::Protected::new(&root, &parent.path().join("data/native"));
+    (parent, root, guard)
+}
+
+/// A page builds the blob: its bytes are a plugin's as much as TIDAL's, and never land in the
+/// app's own files, whatever the user browsed to. Windows loads a DLL from the exe's folder before
+/// System32: a blob saved there runs with the app.
+#[test]
+fn a_destination_inside_the_install_folder_is_refused() {
+    let (_parent, root, guard) = guarded_install();
+    for inside in ["frontend/native-host.cjs", "version.dll"] {
+        assert_eq!(
+            vet_destination(Some(&guard), &root.join(inside)),
+            Err(NotRecorded::Protected),
+            "{inside}"
+        );
+    }
+}
+
+/// `dir` reached through a symlink on unix. A temp dir there is already canonical; without the
+/// link, a verdict that hands back the path as written would pass for the resolved one.
+fn through_a_link(dir: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        let link = dir.with_extension("link");
+        std::os::unix::fs::symlink(dir, &link).unwrap();
+        link
+    }
+    #[cfg(not(unix))]
+    {
+        dir.to_path_buf()
+    }
+}
+
+#[test]
+fn an_ordinary_destination_is_kept_as_the_write_resolves_it() {
+    let (parent, _root, guard) = guarded_install();
+    let exports = parent.path().join("exports");
+    std::fs::create_dir(&exports).unwrap();
+    let answer = through_a_link(&exports).join("export.json");
+    assert_eq!(
+        vet_destination(Some(&guard), &answer),
+        Ok(exports.canonicalize().unwrap().join("export.json"))
+    );
+}
+
+#[test]
+fn the_install_folder_is_refused_as_a_folder() {
+    let (_parent, root, guard) = guarded_install();
+    assert_eq!(vet_folder(Some(&guard), &root), Err(NotRecorded::Protected));
 }

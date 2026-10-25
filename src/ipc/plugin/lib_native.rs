@@ -4,7 +4,8 @@
 
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, is_safe_open_url, open_in_os};
-use crate::ui::file_dialog::show_file_dialog;
+use crate::ui::destination_dialog::{Native, Request, choose_destination, classify};
+use crate::ui::file_dialog::{show_file_dialog, vet_folder};
 use crate::ui::message_dialog::show_message_dialog;
 use cef::FileDialogMode;
 use serde_json::{Value, json};
@@ -160,20 +161,43 @@ pub(super) fn handle_show_open_dialog(msg: &IpcMessage, callback: IpcCallback) {
         FileDialogMode::OPEN
     };
 
-    let rx = show_file_dialog(mode, title, default_path, filters);
     crate::state::rt_handle().spawn(async move {
-        let paths = rx.await.unwrap_or_default();
+        // Only a folder grants writes; a dialog opened to read a file is answered as is.
+        let paths = if wants_directory {
+            let guard = crate::platform::install_guard::get();
+            let request = Request {
+                mode,
+                title,
+                default_path,
+                filters,
+            };
+            choose_destination(&Native, request, move |answer| {
+                classify(answer, |dir| vet_folder_answer(guard, dir))
+            })
+            .await
+        } else {
+            show_file_dialog(mode, title, default_path, filters)
+                .await
+                .unwrap_or_default()
+        };
         // A picked directory authorises the per-track writes an album makes into it, which no save
         // dialog ever sees. Taken from the dialog's own answer; the renderer cannot name the folder
         // itself, and off the async worker since canonicalising could block on a stalled mount.
         if wants_directory {
             let granted = paths.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                for path in &granted {
-                    crate::ui::file_dialog::record_folder_grant(std::path::Path::new(path));
-                }
+            let protected = tokio::task::spawn_blocking(move || {
+                granted.iter().any(|path| {
+                    crate::ui::file_dialog::record_folder_grant(std::path::Path::new(path))
+                        == Err(crate::ui::file_dialog::NotRecorded::Protected)
+                })
             })
-            .await;
+            .await
+            .unwrap_or(false);
+            // Refused here only if the location changed since the dialog judged it.
+            if protected {
+                ipc_callback_err(&callback, 403, PROTECTED_ANSWER);
+                return;
+            }
         }
         let result = json!({ "canceled": paths.is_empty(), "filePaths": paths });
         ipc_callback_ok(&callback, &result.to_string());
@@ -236,24 +260,44 @@ pub(super) fn handle_show_save_dialog(msg: &IpcMessage, callback: IpcCallback) {
                 }
             }
         };
-        let rx = show_file_dialog(FileDialogMode::SAVE, title, default_path, filters);
-        let paths = rx.await.unwrap_or_default();
+        let guard = crate::platform::install_guard::get();
+        let request = Request {
+            mode: FileDialogMode::SAVE,
+            title,
+            default_path,
+            filters,
+        };
+        let paths = choose_destination(&Native, request, move |answer| {
+            classify(answer, |path| vet_save_answer(guard, path))
+        })
+        .await;
         let file_path = paths.into_iter().next().unwrap_or_default();
         // Recorded the way the download will resolve it, sanitised, since recording the raw answer
         // would never match; JS still gets the raw path unchanged. Off the async worker because the
         // existence test and the recording both touch the filesystem.
         if !file_path.is_empty() {
             let answered = file_path.clone();
-            let _ = tokio::task::spawn_blocking(move || record_save_answer(&answered)).await;
+            let recorded = tokio::task::spawn_blocking(move || record_save_answer(&answered)).await;
+            // Refused here only if the location changed since the dialog judged it.
+            if matches!(
+                recorded,
+                Ok(Err(crate::ui::file_dialog::NotRecorded::Protected))
+            ) {
+                ipc_callback_err(&callback, 403, PROTECTED_ANSWER);
+                return;
+            }
         }
         let result = json!({ "canceled": file_path.is_empty(), "filePath": file_path });
         ipc_callback_ok(&callback, &result.to_string());
     });
 }
 
+/// What a plugin hears when the user picked a path inside the app's own files.
+const PROTECTED_ANSWER: &str = "the chosen location is inside TidaLunar's own files";
+
 /// Authorise the download that follows a save dialog's answer, under the sanitised name it will
 /// write to.
-fn record_save_answer(answered: &str) {
+fn record_save_answer(answered: &str) -> Result<(), crate::ui::file_dialog::NotRecorded> {
     match super::download::sanitized_destination(answered) {
         Ok(dest) => {
             // The OS prompts about replacing only when the file is already there, and
@@ -261,11 +305,37 @@ fn record_save_answer(answered: &str) {
             // prompt then said nothing about what gets written.
             let confirmed =
                 dest.as_os_str() == std::path::Path::new(answered).as_os_str() && dest.exists();
-            crate::ui::file_dialog::record_user_choice(&dest, confirmed);
+            crate::ui::file_dialog::record_user_choice(&dest, confirmed)
         }
         Err(e) => {
-            crate::verr!("[DIALOG] Unusable destination, download not authorised: {e:#}")
+            crate::verr!("[DIALOG] Unusable destination, download not authorised: {e:#}");
+            Err(crate::ui::file_dialog::NotRecorded::Unresolvable)
         }
+    }
+}
+
+/// The save dialog's own judgement, on the sanitised destination: what `record_save_answer` records
+/// and the download writes, never the raw name.
+fn vet_save_answer(
+    guard: Option<&crate::platform::install_guard::Protected>,
+    answered: &std::path::Path,
+) -> Result<(), crate::ui::file_dialog::NotRecorded> {
+    let dest = super::download::sanitized_destination(&answered.to_string_lossy())
+        .map_err(|_| crate::ui::file_dialog::NotRecorded::Unresolvable)?;
+    crate::ui::file_dialog::vet_destination(guard, &dest).map(drop)
+}
+
+/// The folder dialog's own judgement. Only a protected folder is refused. One that cannot be
+/// resolved gets no grant (`record_folder_grant`) and the download into it is what fails; refusing
+/// it here would loop the dialog until the user gave up.
+fn vet_folder_answer(
+    guard: Option<&crate::platform::install_guard::Protected>,
+    dir: &std::path::Path,
+) -> Result<(), crate::ui::file_dialog::NotRecorded> {
+    use crate::ui::file_dialog::NotRecorded;
+    match vet_folder(guard, dir) {
+        Err(NotRecorded::Protected) => Err(NotRecorded::Protected),
+        Ok(_) | Err(NotRecorded::Unresolvable) => Ok(()),
     }
 }
 
