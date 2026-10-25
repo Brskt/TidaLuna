@@ -47,7 +47,7 @@ self.__LUNAR_IPC_EMIT__ = function(channel) {
     var cbs = listeners[channel];
     if (!cbs) return;
     for (var j = 0; j < cbs.length; j++) {
-        try { cbs[j].apply(null, args); } catch(e) {}
+        try { cbs[j].apply(null, args); } catch(e) { console.error('[luna:ipc] event handler error:', channel, e); }
     }
 };
 self.__LUNAR_IPC_ON__ = function(channel, callback) {
