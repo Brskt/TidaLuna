@@ -7,14 +7,14 @@
 // Injected as part of `init_script` (see app_bootstrap.rs): runs on every real
 // navigation, before the bundle.
 (function () {
-    // Announced, never silent: this drops every cache the origin has, and its effect only
-    // shows on the NEXT launch; a run that busts and a run that recovers are two different
-    // logs. The reason travels with the call to keep one line for both callers.
-    // Resolves once the registrations and the caches are gone; null when there was nothing to
-    // bust, or it threw.
+    // Announced, never silent: this drops every cache of the origin and only the NEXT launch shows
+    // the effect. Every bust sets `__luna_busted`, whoever asks: this session keeps the old chunks
+    // and no later verdict of it counts. Resolves once the caches are gone; null if nothing to bust or it threw.
     function bust(reason) {
         try {
             if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller || !window.caches) return null;
+            sessionStorage.setItem('__luna_busted', '1');
+            localStorage.setItem('__luna_heal_spent', '1');
             console.warn('[luna:heal] ' + reason + ' - dropping the service worker and its caches, the next launch refetches them');
             return Promise.all([
                 navigator.serviceWorker.getRegistrations().then(function (rs) {
@@ -42,7 +42,10 @@
 
     function heal(ready) {
         try {
-            if (sessionStorage.getItem('__luna_react_heal')) return;
+            // A session some bust already condemned runs stale chunks. The verdict always
+            // comes after the busts: those run at DOMContentLoaded, while the bundle that
+            // reports is injected once the page has loaded (client.rs, `is_loading == 0`).
+            if (sessionStorage.getItem('__luna_busted')) return;
             // A whole capture leaves nothing to heal and nothing to remember. This comes
             // BEFORE the controller test: the session right after a bust runs uncontrolled
             // (the re-registered worker never claims the page that outlived it), and that
@@ -59,8 +62,6 @@
                 console.warn('[luna:heal] host React capture still incomplete after a bust: a rewrite no longer matches TIDAL\'s bundle, bundled React stands in');
                 return;
             }
-            localStorage.setItem('__luna_heal_spent', '1');
-            sessionStorage.setItem('__luna_react_heal', '1');
             bust('host React capture incomplete');
         } catch (e) {}
     }

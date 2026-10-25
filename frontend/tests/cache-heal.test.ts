@@ -63,13 +63,16 @@ function load(controller: boolean): Harness {
 
 const report = (ok: boolean) => (globalThis as any).__lunaHostReady(ok);
 
-beforeEach(() => {
+const reset = () => {
 	sessionStorage.clear();
 	localStorage.clear();
 	delete (globalThis as any).__lunaCreateRoot;
 	delete (window as any).__lunaHostModules;
 	delete (globalThis as any).__lunaHostReady;
-});
+	delete (self as any).__lunaRewriteEpoch;
+};
+
+beforeEach(reset);
 
 test("a whole verdict clears the spent marker and never busts, even uncontrolled", async () => {
 	// The session right after a bust runs uncontrolled, and it is the one that proves the
@@ -89,7 +92,7 @@ test("an incomplete verdict busts once and records the attempt", async () => {
 	expect(h.deleted).toEqual(["workbox-precache-v2"]);
 	expect(h.unregistered.n).toBe(1);
 	expect(localStorage.getItem("__luna_heal_spent")).toBe("1");
-	expect(sessionStorage.getItem("__luna_react_heal")).toBe("1");
+	expect(sessionStorage.getItem("__luna_busted")).toBe("1");
 	// A bust drops every cache the origin has and only pays off next launch; it is never
 	// allowed to happen silently.
 	expect(h.warned.join("\n")).toContain("host React capture incomplete");
@@ -108,55 +111,71 @@ test("busts when react and the tag are present but the trio did not resolve", as
 	expect(localStorage.getItem("__luna_heal_spent")).toBe("1");
 });
 
-test("does not bust without a controlling worker", async () => {
-	const h = load(false);
-	report(false);
-	await flush();
-	expect(h.deleted).toEqual([]);
-	expect(localStorage.getItem("__luna_heal_spent")).toBeNull();
+// The spent warning is the only sign that a rewrite stopped matching TIDAL's bundle: without it
+// the app silently runs on bundled React forever and nobody finds out.
+test("does not bust without a controller, once the attempt is spent, or twice in one session", async () => {
+	for (const { what, controller, local, session, spent, warns } of [
+		{ what: "no controlling worker", controller: false, spent: null },
+		{ what: "attempt already spent", controller: true, local: "1", spent: "1", warns: "no longer matches" },
+		{ what: "already busted this session", controller: true, session: "1", spent: null },
+	]) {
+		reset();
+		if (local) localStorage.setItem("__luna_heal_spent", local);
+		if (session) sessionStorage.setItem("__luna_busted", session);
+		const h = load(controller);
+		report(false);
+		await flush();
+		expect(h.deleted, what).toEqual([]);
+		expect(localStorage.getItem("__luna_heal_spent"), what).toBe(spent);
+		if (warns) expect(h.warned.join("\n"), what).toContain(warns);
+	}
 });
 
-test("does not bust a second time once the attempt is spent", async () => {
+test("a verdict in the session an epoch bust condemned judges nothing", async () => {
+	// The page keeps running the chunks the old cache served it: an incomplete capture says
+	// nothing about the current rewrites, whatever an earlier launch left behind.
+	(self as any).__lunaRewriteEpoch = "new";
+	localStorage.setItem("__luna_rewrite_epoch", "old");
 	localStorage.setItem("__luna_heal_spent", "1");
 	const h = load(true);
 	report(false);
 	await flush();
-	expect(h.deleted).toEqual([]);
-	// This is the only warning that a rewrite stopped matching TIDAL's bundle: without it
-	// the app silently runs on bundled React forever and nobody finds out.
-	expect(h.warned.join("\n")).toContain("no longer matches");
+	expect(h.unregistered.n).toBe(1);
+	expect(h.warned.join("\n")).not.toContain("still incomplete");
 });
 
-test("does not bust twice in one session", async () => {
-	sessionStorage.setItem("__luna_react_heal", "1");
+test("an epoch bust spends the one bust a stale cache needs", async () => {
+	// That bust refetched everything through the current rewrites: a later miss means a
+	// pattern stopped matching, and a second bust would only repeat the first.
+	(self as any).__lunaRewriteEpoch = "new";
+	localStorage.setItem("__luna_rewrite_epoch", "old");
+	load(true);
+	await flush();
+	sessionStorage.clear();
 	const h = load(true);
 	report(false);
 	await flush();
 	expect(h.deleted).toEqual([]);
+	expect(h.warned.join("\n")).toContain("no longer matches");
 });
 
-test("the fallback stays out of the way once a verdict arrived", async () => {
-	const h = load(true);
-	report(true);
-	h.fallback();
-	await flush();
-	expect(h.deleted).toEqual([]);
-});
-
-test("the fallback busts on a raw capture miss when the bundle never reported", async () => {
-	// initCore can stall indefinitely on a wedged worker; no verdict ever arrives. The
-	// capture side effects land as TIDAL's own chunks execute and do not depend on it.
-	const h = load(true);
-	h.fallback();
-	await flush();
-	expect(h.deleted).toEqual(["workbox-precache-v2"]);
-});
-
-test("the fallback stays put when the raw capture looks whole", async () => {
-	(window as any).__lunaHostModules = { react: {} };
-	(globalThis as any).__lunaCreateRoot = () => {};
-	const h = load(true);
-	h.fallback();
-	await flush();
-	expect(h.deleted).toEqual([]);
+// initCore can stall indefinitely on a wedged worker and no verdict ever arrives. The capture
+// side effects land as TIDAL's own chunks execute and do not depend on it.
+test("the fallback busts only when no verdict arrived and the raw capture is incomplete", async () => {
+	for (const { what, verdict, capture, deleted } of [
+		{ what: "a verdict arrived", verdict: true, capture: false, deleted: [] },
+		{ what: "no verdict, capture missing", verdict: false, capture: false, deleted: ["workbox-precache-v2"] },
+		{ what: "no verdict, capture whole", verdict: false, capture: true, deleted: [] },
+	]) {
+		reset();
+		if (capture) {
+			(window as any).__lunaHostModules = { react: {} };
+			(globalThis as any).__lunaCreateRoot = () => {};
+		}
+		const h = load(true);
+		if (verdict) report(true);
+		h.fallback();
+		await flush();
+		expect(h.deleted, what).toEqual(deleted);
+	}
 });
