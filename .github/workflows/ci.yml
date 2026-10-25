@@ -232,7 +232,7 @@ jobs:
         run: cargo xtask clippy
 
       - name: Test
-        run: cargo test -p tidalunar -p updater
+        run: cargo test --workspace
 
   frontend-test:
     # The suite exercises no OS-dependent path of the shipped code; Linux covers it.

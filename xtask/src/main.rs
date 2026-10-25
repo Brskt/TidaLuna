@@ -86,25 +86,21 @@ fn usage() {
 }
 
 fn clippy() -> Result<(), String> {
-    // The updater is a separate workspace member that the default invocation
-    // skips; lint it explicitly with the same flags.
-    for pkg in ["tidalunar", "updater"] {
-        run(
-            "cargo",
-            &[
-                "clippy",
-                "--package",
-                pkg,
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-                "-D",
-                "clippy::all",
-            ],
-        )?;
-    }
-    Ok(())
+    // A bare invocation lints the root package alone. A new member is linted without
+    // being named here: `--workspace` follows the members list.
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+            "-D",
+            "clippy::all",
+        ],
+    )
 }
 
 fn fmt() -> Result<(), String> {
@@ -220,10 +216,10 @@ fn bundle(flags: &[String]) -> Result<(), String> {
                 }
                 // Remove empty dirs left behind
                 for old_path in old_files.keys() {
-                    if let Some(parent) = Path::new(old_path).parent() {
-                        if !parent.as_os_str().is_empty() {
-                            let _ = fs::remove_dir(bundle_dir.join(parent));
-                        }
+                    if let Some(parent) = Path::new(old_path).parent()
+                        && !parent.as_os_str().is_empty()
+                    {
+                        let _ = fs::remove_dir(bundle_dir.join(parent));
                     }
                 }
                 if cleaned > 0 {
@@ -351,10 +347,10 @@ fn read_workspace_version() -> Result<String, String> {
     // Simple parse - look for version = "x.y.z" in [package] section
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("version") {
-            if let Some(v) = trimmed.split('"').nth(1) {
-                return Ok(v.to_string());
-            }
+        if trimmed.starts_with("version")
+            && let Some(v) = trimmed.split('"').nth(1)
+        {
+            return Ok(v.to_string());
         }
     }
     Err("version not found in root Cargo.toml".to_string())
@@ -990,10 +986,10 @@ fn strip_macos_app(bundle_dir: &Path, strip_args: &[&str]) -> Result<(), String>
                 walk_strip(&path, strip_args)?;
             } else if path.is_file() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".dylib") || name == "Chromium Embedded Framework" {
-                    if run_strip(&path, strip_args)? {
-                        println!("  Stripped {name}");
-                    }
+                if (name.ends_with(".dylib") || name == "Chromium Embedded Framework")
+                    && run_strip(&path, strip_args)?
+                {
+                    println!("  Stripped {name}");
                 }
             }
         }
