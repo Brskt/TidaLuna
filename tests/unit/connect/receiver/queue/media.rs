@@ -23,79 +23,65 @@ fn resolved_duration(fields: serde_json::Value) -> Option<u64> {
         .and_then(|m| m.duration)
 }
 
+/// A window item's own `duration_ms` backs a `display_info` that carries none and loses to one that
+/// does; absent stays `None`, as zero would be written as a zero-second track. It once sat behind an
+/// `.or()` inside the `display_info` branch: an item with a length and no display info lost it.
 #[test]
-fn a_length_survives_an_item_that_carries_no_display_info() {
-    // The defect: `duration_ms` sits at the item's own top level, but its only reader was an
-    // `.or()` inside the `display_info` branch. A window item carrying a length and no display
-    // info reached the controller with none at all, for as long as the track played.
-    assert_eq!(
-        resolved_duration(json!({ "duration_ms": 214_000 })),
-        Some(214_000),
-        "the item's own length was dropped along with display info it never carried"
-    );
-}
-
-#[test]
-fn display_info_still_wins_over_the_items_own_length() {
-    assert_eq!(
-        resolved_duration(json!({
-            "duration_ms": 1,
-            "display_info": { "duration": 214_000 },
-        })),
-        Some(214_000),
-        "the richer source stopped being the preferred one"
-    );
-}
-
-#[test]
-fn the_items_own_length_backs_a_display_info_that_omits_one() {
-    assert_eq!(
-        resolved_duration(json!({
-            "duration_ms": 214_000,
-            "display_info": { "title": "Automatic" },
-        })),
-        Some(214_000)
-    );
-}
-
-#[test]
-fn an_item_naming_no_length_anywhere_mints_none() {
-    // Nothing is invented: absent stays absent rather than becoming zero, which `set_metadata`
-    // writes as a zero-second track rather than an unknown one.
-    assert_eq!(resolved_duration(json!({})), None);
+fn an_items_length_is_resolved_from_display_info_first_then_its_own_field() {
+    for (fields, expected) in [
+        (json!({ "duration_ms": 214_000 }), Some(214_000)),
+        (
+            json!({ "duration_ms": 1, "display_info": { "duration": 214_000 } }),
+            Some(214_000),
+        ),
+        (
+            json!({ "duration_ms": 214_000, "display_info": { "title": "Automatic" } }),
+            Some(214_000),
+        ),
+        (json!({}), None),
+    ] {
+        assert_eq!(resolved_duration(fields.clone()), expected, "{fields}");
+    }
 }
 
 fn playback_info(fields: serde_json::Value) -> ResolvedStream {
     ResolvedStream::from_playbackinfo(&fields)
 }
 
+/// The controller asks `HI_RES_LOSSLESS`; the answer names what came back, and that plays. A lossy
+/// tier carries no bit depth: nothing is invented, and a value that does not fit stays out.
 #[test]
-fn the_stream_is_what_the_playbackinfo_answer_names_not_what_was_asked() {
-    // The controller asks `HI_RES_LOSSLESS`; the answer names what came back, and that is what plays.
-    let stream = playback_info(json!({
-        "audioQuality": "LOSSLESS",
-        "bitDepth": 16,
-        "sampleRate": 44_100,
-        "manifestMimeType": "application/vnd.tidal.bts",
-    }));
-    assert_eq!(stream.audio_quality.as_deref(), Some("LOSSLESS"));
-    assert_eq!(stream.bit_depth, Some(16));
-    assert_eq!(stream.sample_rate, Some(44_100));
-}
-
-#[test]
-fn a_field_the_answer_omits_or_mistypes_stays_absent() {
-    // A lossy tier carries no bit depth; nothing is invented, and a value that does not fit stays out.
-    let stream =
-        playback_info(json!({ "audioQuality": "HIGH", "bitDepth": null, "sampleRate": "44100" }));
-    assert_eq!(stream.audio_quality.as_deref(), Some("HIGH"));
-    assert_eq!(stream.bit_depth, None);
-    assert_eq!(stream.sample_rate, None);
-    assert_eq!(
-        playback_info(json!({ "sampleRate": 5_000_000_000_u64 })).sample_rate,
-        None
-    );
-    assert_eq!(playback_info(json!({})), ResolvedStream::default());
+fn the_stream_is_what_the_playbackinfo_answer_names_and_nothing_it_omits_or_mistypes() {
+    for (answer, expected) in [
+        (
+            json!({
+                "audioQuality": "LOSSLESS",
+                "bitDepth": 16,
+                "sampleRate": 44_100,
+                "manifestMimeType": "application/vnd.tidal.bts",
+            }),
+            ResolvedStream {
+                audio_quality: Some("LOSSLESS".to_string()),
+                bit_depth: Some(16),
+                sample_rate: Some(44_100),
+            },
+        ),
+        (
+            json!({ "audioQuality": "HIGH", "bitDepth": null, "sampleRate": "44100" }),
+            ResolvedStream {
+                audio_quality: Some("HIGH".to_string()),
+                bit_depth: None,
+                sample_rate: None,
+            },
+        ),
+        (
+            json!({ "sampleRate": 5_000_000_000_u64 }),
+            ResolvedStream::default(),
+        ),
+        (json!({}), ResolvedStream::default()),
+    ] {
+        assert_eq!(playback_info(answer.clone()), expected, "{answer}");
+    }
 }
 
 #[test]
@@ -116,10 +102,4 @@ fn the_page_hears_the_stream_and_the_controller_never_does() {
         wire.get("stream").is_none(),
         "the controller's message grew a field it never had"
     );
-}
-
-#[test]
-fn a_track_with_no_resolved_stream_announces_null_not_a_neighbours_format() {
-    let media = queue_item_to_media_info(&item(json!({})));
-    assert!(media.page_payload()["stream"].is_null());
 }

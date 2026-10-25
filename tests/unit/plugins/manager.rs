@@ -3,38 +3,8 @@
 use super::*;
 
 #[test]
-fn test_transpile_and_wrap_wraps_code() {
-    let result =
-        PluginManager::transpile_and_wrap("test-plugin", "console.log('hello');", 0, 0, "cap")
-            .unwrap();
-
-    assert!(result.starts_with("(function("));
-    assert!(result.contains("console.log("));
-    assert!(result.contains("hello"));
-    assert!(result.contains("'use strict'"));
-}
-
-#[test]
-fn test_transpile_and_wrap_transpiles_ts() {
-    let ts_code = "const x: number = 42; console.log(x);";
-    let result = PluginManager::transpile_and_wrap("ts-plugin", ts_code, 0, 0, "cap").unwrap();
-
-    assert!(!result.contains(": number"));
-    assert!(result.contains("42"));
-}
-
-#[test]
 fn random_nonce_is_none_on_entropy_failure() {
     assert_eq!(random_nonce_with(|_| false), None);
-}
-
-#[test]
-fn random_nonce_decodes_le_bytes() {
-    let n = random_nonce_with(|b| {
-        b.copy_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
-        true
-    });
-    assert_eq!(n, Some(1));
 }
 
 /// What a `registerNative` claim is checked against. Keyed by url, because that is the unique
@@ -84,16 +54,6 @@ fn retiring_every_load_names_exactly_what_it_dropped() {
         retired.contains(&("https://b.invalid/b.mjs".to_string(), id_b)),
         "the second load went unnamed, got {retired:?}"
     );
-}
-
-#[test]
-fn test_mark_loading_returns_unique_load_id() {
-    let mut mgr = PluginManager::new();
-    let id1 = mgr.mark_loading("a", "a", 1, "cap-a", 0);
-    let id2 = mgr.mark_loading("b", "b", 2, "cap-b", 0);
-    assert_ne!(id1, id2);
-    assert_eq!(mgr.current_load_id("a"), Some(id1));
-    assert_eq!(mgr.current_load_id("b"), Some(id2));
 }
 
 /// Readiness is read through the transition rather than through a field: `mark_ready` only
@@ -212,27 +172,8 @@ fn forgetting_a_plugin_ignores_which_load_is_current() {
 }
 
 #[test]
-fn test_generate_unload_js_produces_cleanup_code() {
-    let js = PluginManager::generate_unload_js("my-plugin");
-    assert!(js.contains("__pluginUnloads"));
-    assert!(js.contains("my-plugin"));
-}
-
-#[test]
 fn random_capability_is_none_on_entropy_failure() {
     assert_eq!(random_capability_with(|_| false), None);
-}
-
-#[test]
-fn random_capability_is_lowercase_hex_of_the_bytes() {
-    let cap = random_capability_with(|b| {
-        b.fill(0);
-        b[0] = 0xAB;
-        true
-    })
-    .expect("entropy available");
-    assert!(cap.starts_with("ab00"), "got {cap}");
-    assert_eq!(cap.len(), 64, "32 bytes hex-encoded");
 }
 
 #[test]

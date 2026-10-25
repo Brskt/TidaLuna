@@ -20,43 +20,47 @@ fn elevated() -> OwnIdentity {
     }
 }
 
+/// Our elevated token stamps the Administrators owner, as another admin account's elevated
+/// process does, and a limited token of ours never does. Another account's pipe, a SID that
+/// merely starts like ours and an unreadable owner are not ours either.
 #[test]
-fn a_link_pipe_our_account_created_is_ours() {
-    assert_eq!(classify_owner(Some(USER), &limited()), ObjectOwner::Ours);
-}
-
-#[test]
-fn a_link_pipe_our_elevated_token_created_is_ours() {
-    assert_eq!(
-        classify_owner(Some(ADMINISTRATORS), &elevated()),
-        ObjectOwner::Ours
-    );
-}
-
-/// Another admin account's elevated process stamps the same owner; a limited token of ours
-/// never does.
-#[test]
-fn an_administrators_owned_pipe_is_foreign_to_a_limited_token() {
-    assert_eq!(
-        classify_owner(Some(ADMINISTRATORS), &limited()),
-        ObjectOwner::Foreign(ADMINISTRATORS.into())
-    );
-}
-
-/// Another account's pipe, and a SID that merely starts like ours.
-#[test]
-fn a_link_pipe_another_account_created_is_foreign() {
-    for sid in [OTHER.to_string(), format!("{USER}0")] {
-        assert_eq!(
-            classify_owner(Some(&sid), &limited()),
-            ObjectOwner::Foreign(sid.clone())
-        );
+fn a_link_pipe_is_ours_only_when_our_own_token_created_it() {
+    let lookalike = format!("{USER}0");
+    for (what, owner, identity, expected) in [
+        ("our account", Some(USER), limited(), ObjectOwner::Ours),
+        (
+            "our elevated token",
+            Some(ADMINISTRATORS),
+            elevated(),
+            ObjectOwner::Ours,
+        ),
+        (
+            "administrators beside a limited token",
+            Some(ADMINISTRATORS),
+            limited(),
+            ObjectOwner::Foreign(ADMINISTRATORS.into()),
+        ),
+        (
+            "another account",
+            Some(OTHER),
+            limited(),
+            ObjectOwner::Foreign(OTHER.into()),
+        ),
+        (
+            "a SID that starts like ours",
+            Some(lookalike.as_str()),
+            limited(),
+            ObjectOwner::Foreign(lookalike.clone()),
+        ),
+        (
+            "an owner that could not be read",
+            None,
+            limited(),
+            ObjectOwner::Unattributed,
+        ),
+    ] {
+        assert_eq!(classify_owner(owner, &identity), expected, "{what}");
     }
-}
-
-#[test]
-fn a_link_pipe_whose_owner_could_not_be_read_is_unattributed() {
-    assert_eq!(classify_owner(None, &limited()), ObjectOwner::Unattributed);
 }
 
 /// Real kernel objects, one account. Every name carries a `Test` infix and the pid, never

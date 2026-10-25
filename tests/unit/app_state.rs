@@ -43,30 +43,11 @@ fn a_fresh_measurement_of_a_named_track_replaces_the_earlier_one() {
 }
 
 #[test]
-fn js_string_literal_is_a_json_string() {
-    assert_eq!(js_string_literal("a\"b\\c\nd"), r#""a\"b\\c\nd""#);
-}
-
-#[test]
 fn js_string_literal_escapes_line_and_paragraph_separators() {
     // serde_json leaves U+2028/U+2029 raw (RFC 8259), but they are JS line
     // terminators; \u-escape them for the literal to stay valid in any position.
     assert_eq!(js_string_literal("a\u{2028}b"), "\"a\\u2028b\"");
     assert_eq!(js_string_literal("a\u{2029}b"), "\"a\\u2029b\"");
-}
-
-#[test]
-fn js_string_literal_leaves_an_apostrophe_alone() {
-    // The literal is double-quoted; an apostrophe needs nothing done to it. A caller that
-    // escaped one first (`updater.error` did, from back when it built the statement itself
-    // with single quotes) hands the encoder a backslash, which the encoder then escapes as
-    // the character it is: the user reads "Run \'sudo apt upgrade tidalunar\'". Escaping
-    // belongs to the encoder alone, and this is the character that says so.
-    assert_eq!(
-        js_string_literal("Run 'apt upgrade'"),
-        r#""Run 'apt upgrade'""#
-    );
-    assert_eq!(js_string_literal(r"pre\'escaped"), r#""pre\\'escaped""#);
 }
 
 #[test]

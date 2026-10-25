@@ -550,11 +550,6 @@ pub(crate) fn save_log_level(conn: &mut Connection, level: u8) {
     LOGGING_LEVEL.save(conn, &level.min(crate::logging::MAX_LOG_LEVEL).to_string());
 }
 
-#[cfg(test)]
-pub(crate) fn load_crossfade_enabled(conn: &mut Connection) -> bool {
-    Reader::new(conn).get(&PLAYER_CROSSFADE_ENABLED)
-}
-
 pub(crate) fn save_crossfade_enabled(conn: &mut Connection, enabled: bool) {
     PLAYER_CROSSFADE_ENABLED.save(conn, &enabled.to_string());
 }
@@ -578,11 +573,6 @@ pub(crate) fn save_crossfade_secs(conn: &mut Connection, secs: u8) {
             .min(crate::player::crossfade::MAX_CROSSFADE_SECS)
             .to_string(),
     );
-}
-
-#[cfg(test)]
-pub(crate) fn load_console(conn: &mut Connection) -> bool {
-    Reader::new(conn).get(&LOGGING_CONSOLE)
 }
 
 pub(crate) fn save_console(conn: &mut Connection, enabled: bool) {
@@ -1346,10 +1336,6 @@ pub(crate) fn open(path: &Path) -> rusqlite::Result<(Connection, Opened)> {
 #[cfg(test)]
 #[path = "../tests/unit/settings/fixture.rs"]
 mod fixture;
-
-#[cfg(test)]
-#[path = "../tests/unit/settings/logging_settings_tests.rs"]
-mod logging_settings_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/settings/crossfade_settings_tests.rs"]

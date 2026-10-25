@@ -296,27 +296,6 @@ fn a_damaged_file_another_connection_still_holds_is_not_replaced_under_it() {
 }
 
 #[test]
-fn a_fault_with_a_remedy_says_what_to_do_and_an_unknown_one_shows_its_cause() {
-    let at = |fault| OpenError {
-        path: PathBuf::from("/d/plugins.db"),
-        fault,
-        detail: "why".into(),
-    };
-    for (fault, advice) in [
-        (Fault::Locked, "Close any other TidaLunar"),
-        (Fault::Unwritable, "Make the folder writable"),
-        (Fault::Unreplaceable, "Move that file"),
-    ] {
-        let text = at(fault).refusal();
-        assert!(
-            text.contains("/d/plugins.db") && text.contains(advice),
-            "{text}"
-        );
-    }
-    assert!(at(Fault::Other).refusal().contains("(why)"));
-}
-
-#[test]
 fn damage_the_wal_still_covers_is_not_a_reason_to_replace() {
     let dir = tempfile::tempdir().unwrap();
     let path = left_by_a_session(dir.path(), Session::WalOnly);

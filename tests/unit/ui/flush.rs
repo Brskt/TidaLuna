@@ -16,12 +16,12 @@ fn announced(id: &str) -> TrackMetadata {
     }
 }
 
+/// A length is recorded under the track it was measured on, never the one announced since: the
+/// tag was read from the shared slot at delivery time. A's length then became B's once B announced
+/// itself. Publishing 71.8s beside B's name is the hardware-reproduced symptom.
 #[test]
-fn the_tag_is_the_measurements_own_track_not_the_announced_one() {
-    // The defect: the tag was read from the shared slot at delivery time, so a length
-    // measured on A was recorded as B's the moment B announced itself first. Reading the
-    // slot here again would put "B" below.
-    let (measured, _) =
+fn a_length_keeps_its_own_track_and_is_not_published_beside_the_announced_one() {
+    let (measured, action) =
         settle_measured_duration(71.8, Some("A".to_string()), Some(&announced("B")));
 
     assert_eq!(
@@ -30,14 +30,6 @@ fn the_tag_is_the_measurements_own_track_not_the_announced_one() {
         "the measurement was recorded under the announced track instead of its own"
     );
     assert_eq!(measured.secs, 71.8);
-}
-
-#[test]
-fn a_length_measured_on_another_track_is_never_published() {
-    // 71.8s belonged to the previous track; publishing it beside this one's name is the
-    // hardware-reproduced symptom.
-    let (_, action) = settle_measured_duration(71.8, Some("A".to_string()), Some(&announced("B")));
-
     assert!(
         matches!(action, MediaControlAction::None),
         "a length went out beside a track it was not measured on"

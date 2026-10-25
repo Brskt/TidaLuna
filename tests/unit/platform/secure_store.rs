@@ -22,42 +22,22 @@ fn generation(refresh_token: &str, opaque_rt: &str) -> TokenGeneration {
     }
 }
 
+/// Without the real refresh token a generation serves the running session and is worth nothing
+/// stored: nothing in it outlives the access token. The opaque nonce alone is no substitute, the
+/// real token behind it being gone, and the next launch could not redeem it.
 #[test]
-fn a_generation_carrying_a_refresh_token_is_durable() {
-    assert!(generation("real-refresh-token", "luna_bbbb").is_durable());
-}
-
-#[test]
-fn a_generation_without_a_refresh_token_is_not_durable() {
-    // Exactly what both token paths mint when a response carries no
-    // refresh_token and no prior generation is in memory to reuse one from: the
-    // `(String::new(), String::new())` arm. It serves the running session from
-    // memory and is worth nothing on disk, because nothing in it outlives the
-    // access token's expiry.
-    assert!(!generation("", "").is_durable());
-}
-
-#[test]
-fn a_live_token_still_reads_as_live_on_the_millisecond_clock_the_sdk_uses() {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before the epoch")
-        .as_secs();
-    let mut cur_gen = generation("real-refresh-token", "luna_bbbb");
-    cur_gen.access_expires = now_secs + 3600;
-
-    // The raw field, in seconds, is what used to be seeded: against this clock an hour
-    // of life left read as decades expired.
-    let now_ms = now_secs * 1000;
-    assert!(cur_gen.access_expires_ms() > now_ms);
-}
-
-#[test]
-fn an_opaque_refresh_nonce_alone_does_not_make_a_generation_durable() {
-    // The renderer only ever sees the opaque nonce; a generation could carry
-    // one while the real token behind it is gone. Storing that would hand the
-    // next launch a credential it cannot redeem.
-    assert!(!generation("", "luna_bbbb").is_durable());
+fn a_generation_is_durable_only_with_a_refresh_token() {
+    for (refresh_token, opaque_rt, durable) in [
+        ("real-refresh-token", "luna_bbbb", true),
+        ("", "", false),
+        ("", "luna_bbbb", false),
+    ] {
+        assert_eq!(
+            generation(refresh_token, opaque_rt).is_durable(),
+            durable,
+            "{refresh_token:?} / {opaque_rt:?}"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]

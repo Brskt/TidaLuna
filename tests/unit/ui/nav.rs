@@ -6,117 +6,65 @@ fn u(s: &str) -> RequestUrl {
     RequestUrl::new(s.to_string())
 }
 
+/// What does not parse falls back to a relative path, which is same-origin. `//evil.example/x` is
+/// a protocol-relative reference to a foreign host that `starts_with('/')` alone cannot tell apart.
 #[test]
-fn tidal_origin_matches_the_apex_and_subdomains() {
-    assert!(is_tidal_origin(&u("https://tidal.com/")));
-    assert!(is_tidal_origin(&u("https://listen.tidal.com/v1/x")));
-    assert!(!is_tidal_origin(&u("https://eviltidal.com/")));
-    assert!(!is_tidal_origin(&u("https://tidal.com.evil.io/")));
+fn a_tidal_origin_is_the_apex_a_subdomain_or_a_relative_path() {
+    for (target, expected) in [
+        ("https://tidal.com/", true),
+        ("https://listen.tidal.com/v1/x", true),
+        ("https://eviltidal.com/", false),
+        ("https://tidal.com.evil.io/", false),
+        ("//evil.example/x", false),
+        ("//tidal.com.evil.io/x", false),
+        ("not a url", false),
+        ("/v1/tracks/1", true),
+    ] {
+        assert_eq!(is_tidal_origin(&u(target)), expected, "{target}");
+    }
 }
 
-/// The fallback for what does not parse keeps a relative path same-origin. `//evil.example/x` is
-/// a protocol-relative absolute reference, not a same-origin path, and `starts_with('/')` alone
-/// cannot tell the two apart. `fetch_proxy.js:57` already draws the line on the JS side; this
-/// fallback did not, and answered same-origin for a foreign host.
+/// `proxy.fetch` puts the real refresh token in a token-endpoint body and hands it to reqwest,
+/// which has no https_only: a plaintext target never passes. Fail closed: a url that carries no
+/// transport (`fetch_proxy.js:57` diverts real bare paths first), or a foreign host, is refused.
 #[test]
-fn tidal_origin_refuses_a_protocol_relative_url() {
-    assert!(!is_tidal_origin(&u("//evil.example/x")));
-    assert!(!is_tidal_origin(&u("//tidal.com.evil.io/x")));
-    assert!(!is_tidal_origin(&u("not a url")));
-    assert!(is_tidal_origin(&u("/v1/tracks/1")));
+fn a_secure_tidal_target_is_https_on_a_tidal_origin_and_nothing_else() {
+    for (target, expected) in [
+        ("http://auth.tidal.com/v1/oauth2/token", false),
+        ("http://listen.tidal.com/v1/tracks", false),
+        ("http://tidal.com/", false),
+        ("https://listen.tidal.com/v1/tracks", true),
+        ("https://auth.tidal.com/v1/oauth2/token", true),
+        ("//evil.example/x", false),
+        ("/v1/tracks/1", false),
+        ("https://evil.example/v1/tracks", false),
+        ("not a url", false),
+    ] {
+        assert_eq!(is_secure_tidal_target(&u(target)), expected, "{target}");
+    }
 }
 
+/// Covers and contributor faces need the apex and its subdomains, behind the dot boundary. TIDAL's
+/// legacy API and telemetry hosts clear `should_rewrite_token` without clearing `is_tidal_origin`
+/// and serve no image: the hoisted gate refuses them, with look-alikes and what does not parse.
 #[test]
-fn secure_tidal_target_refuses_plaintext() {
-    // THE LEAK. `proxy.fetch` substitutes the real refresh token into a token-endpoint body
-    // and hands it to reqwest, which has no https_only and never sees Blink. Worse, Blink
-    // blocking the page's own plaintext fetch is what raises the TypeError that sends the
-    // request down this path in the first place.
-    assert!(!is_secure_tidal_target(&u(
-        "http://auth.tidal.com/v1/oauth2/token"
-    )));
-    assert!(!is_secure_tidal_target(&u(
-        "http://listen.tidal.com/v1/tracks"
-    )));
-    assert!(!is_secure_tidal_target(&u("http://tidal.com/")));
-}
-
-#[test]
-fn secure_tidal_target_keeps_every_legitimate_caller() {
-    assert!(is_secure_tidal_target(&u(
-        "https://listen.tidal.com/v1/tracks"
-    )));
-    assert!(is_secure_tidal_target(&u(
-        "https://auth.tidal.com/v1/oauth2/token"
-    )));
-}
-
-/// Fail closed, like every other predicate in this file. `fetch_proxy.js:57` diverts real bare
-/// paths to `nativeFetch` before they reach `proxy.fetch`, and nothing here ever joins one to a
-/// base, so the string reaching reqwest is the string this gate read. A transport rule cannot
-/// answer for a URL that carries no transport.
-#[test]
-fn secure_tidal_target_refuses_what_it_cannot_parse() {
-    assert!(!is_secure_tidal_target(&u("//evil.example/x")));
-    assert!(!is_secure_tidal_target(&u("/v1/tracks/1")));
-}
-
-#[test]
-fn secure_tidal_target_still_refuses_a_foreign_host() {
-    assert!(!is_secure_tidal_target(&u(
-        "https://evil.example/v1/tracks"
-    )));
-    assert!(!is_secure_tidal_target(&u("not a url")));
-}
-
-#[test]
-fn allowed_image_host_takes_the_apex_and_its_subdomains() {
-    // resources.tidal.com serves every cover, avatars.githubusercontent.com every
-    // contributor face: exact-host matching would empty the UI.
-    assert!(is_allowed_image_host(&u("https://tidal.com/favicon.png")));
-    assert!(is_allowed_image_host(&u(
-        "https://resources.tidal.com/images/a/1280x1280.jpg"
-    )));
-    assert!(is_allowed_image_host(&u(
-        "https://avatars.githubusercontent.com/u/1?v=4"
-    )));
-    assert!(is_allowed_image_host(&u(
-        "https://images.captcha-delivery.com/challenge.png"
-    )));
-}
-
-#[test]
-fn allowed_image_host_refuses_a_registrable_look_alike() {
-    // Both carry the allowed string; the dot boundary is what separates them.
-    assert!(!is_allowed_image_host(&u("https://eviltidal.com/p.png")));
-    assert!(!is_allowed_image_host(&u(
-        "https://tidal.com.evil.io/p.png"
-    )));
-}
-
-#[test]
-fn allowed_image_host_refuses_an_allowed_name_carried_elsewhere_in_the_url() {
-    assert!(!is_allowed_image_host(&u(
-        "https://evil.example/p.png?ref=tidal.com"
-    )));
-    assert!(!is_allowed_image_host(&u(
-        "https://evil.example/tidal.com/p.png"
-    )));
-}
-
-/// TIDAL's own legacy API host and its telemetry collectors clear `should_rewrite_token` without
-/// clearing `is_tidal_origin`, which used to carry the whole dispatch past this rule. The shipped
-/// bundle serves no image from either (artwork comes from `images.tidal.com`/`resources.tidal.com`;
-/// telemetry posts by `fetch`, not by pixel), so the allowlist stays as arbitrated and the hoisted
-/// gate refuses them.
-#[test]
-fn allowed_image_host_refuses_tidals_legacy_api_and_telemetry_domains() {
-    assert!(!is_allowed_image_host(&u(
-        "https://api.tidalhifi.com/x.jpg"
-    )));
-    assert!(!is_allowed_image_host(&u(
-        "https://event-collector.eu.tidalhi.fi/x.gif"
-    )));
+fn an_allowed_image_host_is_an_allowed_apex_or_its_subdomain_and_nothing_else() {
+    for (target, expected) in [
+        ("https://tidal.com/favicon.png", true),
+        ("https://resources.tidal.com/images/a/1280x1280.jpg", true),
+        ("https://avatars.githubusercontent.com/u/1?v=4", true),
+        ("https://images.captcha-delivery.com/challenge.png", true),
+        ("https://eviltidal.com/p.png", false),
+        ("https://tidal.com.evil.io/p.png", false),
+        ("https://evil.example/p.png?ref=tidal.com", false),
+        ("https://evil.example/tidal.com/p.png", false),
+        ("https://api.tidalhifi.com/x.jpg", false),
+        ("https://event-collector.eu.tidalhi.fi/x.gif", false),
+        ("not a url", false),
+        ("", false),
+    ] {
+        assert_eq!(is_allowed_image_host(&u(target)), expected, "{target:?}");
+    }
 }
 
 /// Not every allowed host is HSTS-preloaded: the host alone cannot admit a plaintext URL.
@@ -133,13 +81,6 @@ fn secure_image_target_needs_an_allowed_host_over_https() {
     )));
     assert!(!is_secure_image_target(&u("https://evil.example/p.png")));
     assert!(!is_secure_image_target(&u("not a url")));
-}
-
-#[test]
-fn allowed_image_host_refuses_what_it_cannot_parse() {
-    // Fail closed: a string that will not parse says nothing about its target.
-    assert!(!is_allowed_image_host(&u("not a url")));
-    assert!(!is_allowed_image_host(&u("")));
 }
 
 /// `is_secure_tidal_target` admits on `is_tidal_origin` alone, which is only sound while every

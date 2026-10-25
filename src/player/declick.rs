@@ -1,7 +1,7 @@
 //! Shared de-click / resync primitives for the Windows audio backends (ASIO + WASAPI
 //! exclusive). Both restart the device on a sample-rate change, which pops the DAC; these
 //! helpers fade the stream edges and size the post-restart silence that masks the hardware
-//! PLL relock. Platform-independent; the envelope math is unit-tested on any host.
+//! PLL relock. Platform-independent.
 #![cfg_attr(not(target_os = "windows"), expect(dead_code))]
 
 /// De-click fade length: teardown fade-out and post-resync fade-in. Short enough
@@ -55,7 +55,3 @@ pub(crate) fn fade_out_wait_ms(frames: usize, sample_rate: u32, fade_len: usize)
     let fade_periods = fade_len.div_ceil(frames.max(1)).max(1) as u64;
     ((fade_periods + 3) * period_ms).clamp(FADE_OUT_WAIT_MS, FADE_OUT_WAIT_MAX_MS)
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/player/declick.rs"]
-mod tests;

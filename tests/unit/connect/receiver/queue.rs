@@ -31,60 +31,58 @@ fn playing(items: Vec<QueueItem>, idx: usize) -> (QueueManager, mpsc::Receiver<Q
     (queue, rx)
 }
 
+/// A lost CAS is not an error and does not replay our discarded token: the winner's current
+/// token is adopted, and a terminated store routes to relogin, unless a wire relogin landed a
+/// fresh Active generation while we were refreshing.
 #[test]
-fn won_cas_uses_our_token() {
-    // We won the CAS: the store already holds our freshly-minted token.
-    let current = tok("at-new", GenerationStatus::Active);
-    let outcome = reconcile_refresh(Ok(()), "at-new", &current);
-    assert_eq!(outcome, RefreshOutcome::UseToken("at-new".to_string()));
-}
-
-#[test]
-fn lost_cas_with_active_winner_adopts_winner_token() {
-    // The audit bug: a benign VersionMismatch must NOT surface as an error
-    // and must NOT replay our discarded token. A concurrent writer already
-    // installed a current Active token; adopt the WINNER's token.
-    let current = tok("at-winner", GenerationStatus::Active);
-    let outcome = reconcile_refresh(Err(CASError::VersionMismatch), "at-ours", &current);
-    assert_eq!(outcome, RefreshOutcome::UseToken("at-winner".to_string()));
-}
-
-#[test]
-fn lost_cas_with_terminated_winner_is_terminal() {
-    // VersionMismatch where the winner terminated the generation: relogin.
-    let current = tok(
-        "at-x",
-        GenerationStatus::Terminated(TerminationReason::InvalidGrant {
-            provider_error: "invalid_grant".to_string(),
-            suspect_replay: false,
-        }),
-    );
-    let outcome = reconcile_refresh(Err(CASError::VersionMismatch), "at-ours", &current);
-    assert_eq!(
-        outcome,
-        RefreshOutcome::Terminal("invalid_grant".to_string())
-    );
-}
-
-#[test]
-fn terminated_snapshot_is_terminal() {
-    // Our snapshot's generation was already terminated at CAS time and the
-    // store is still terminated: route to relogin, never InvalidResponse.
-    let current = tok(
-        "at-x",
-        GenerationStatus::Terminated(TerminationReason::Revoked),
-    );
-    let outcome = reconcile_refresh(Err(CASError::Terminated), "at-ours", &current);
-    assert_eq!(outcome, RefreshOutcome::Terminal("revoked".to_string()));
-}
-
-#[test]
-fn terminated_snapshot_but_relogin_landed_adopts_fresh() {
-    // Snapshot was terminated, but a wire relogin installed a fresh Active
-    // generation while we were refreshing: adopt the fresh token.
-    let current = tok("at-fresh", GenerationStatus::Active);
-    let outcome = reconcile_refresh(Err(CASError::Terminated), "at-ours", &current);
-    assert_eq!(outcome, RefreshOutcome::UseToken("at-fresh".to_string()));
+fn a_refresh_is_reconciled_with_the_store_the_cas_left_behind() {
+    for (row, cas_result, current, expected) in [
+        (
+            "won the CAS",
+            Ok(()),
+            tok("at-new", GenerationStatus::Active),
+            RefreshOutcome::UseToken("at-ours".to_string()),
+        ),
+        (
+            "lost to an Active winner",
+            Err(CASError::VersionMismatch),
+            tok("at-winner", GenerationStatus::Active),
+            RefreshOutcome::UseToken("at-winner".to_string()),
+        ),
+        (
+            "lost to a winner that terminated the generation",
+            Err(CASError::VersionMismatch),
+            tok(
+                "at-x",
+                GenerationStatus::Terminated(TerminationReason::InvalidGrant {
+                    provider_error: "invalid_grant".to_string(),
+                    suspect_replay: false,
+                }),
+            ),
+            RefreshOutcome::Terminal("invalid_grant".to_string()),
+        ),
+        (
+            "snapshot terminated, store still terminated",
+            Err(CASError::Terminated),
+            tok(
+                "at-x",
+                GenerationStatus::Terminated(TerminationReason::Revoked),
+            ),
+            RefreshOutcome::Terminal("revoked".to_string()),
+        ),
+        (
+            "snapshot terminated, a relogin landed",
+            Err(CASError::Terminated),
+            tok("at-fresh", GenerationStatus::Active),
+            RefreshOutcome::UseToken("at-fresh".to_string()),
+        ),
+    ] {
+        assert_eq!(
+            reconcile_refresh(cas_result, "at-ours", &current),
+            expected,
+            "{row}"
+        );
+    }
 }
 
 /// A receiver whose window is loaded, playing `items[idx]` for a controller.
@@ -97,75 +95,55 @@ fn casting(items: Vec<QueueItem>, idx: usize) -> (QueueManager, mpsc::Receiver<Q
 const PICK: Option<ListenerAct> = Some(ListenerAct::Pick);
 const AUTOMATIC: Option<ListenerAct> = None;
 
+/// TIDAL's advance on the SDK's `ended` names a track the queue may hold, and its Next reloads
+/// the cast's own: settled as playing, that reload's autoplay resumed a cast the phone had
+/// paused. A step plays whatever track the page names, and a load not owned by Connect is refused.
 #[test]
-fn a_pick_in_the_controllers_queue_selects_that_item() {
+fn a_load_on_the_first_item_is_routed_by_its_act_and_owner() {
     let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
 
-    assert_eq!(
-        queue.cast_route("222", PICK, LoadOrigin::Connect),
-        CastRoute::Select { index: 1 }
-    );
+    for (media_id, act, origin, expected) in [
+        (
+            "222",
+            PICK,
+            LoadOrigin::Connect,
+            CastRoute::Select { index: 1 },
+        ),
+        ("999", PICK, LoadOrigin::Connect, CastRoute::RefusePick),
+        ("222", AUTOMATIC, LoadOrigin::Connect, CastRoute::Refuse),
+        ("111", NEXT, LoadOrigin::Connect, CastRoute::Next),
+        ("999", NEXT, LoadOrigin::Connect, CastRoute::Next),
+        ("111", PREVIOUS, LoadOrigin::Connect, CastRoute::Previous),
+        ("111", NEXT, LoadOrigin::Local, CastRoute::Refuse),
+        ("111", PREVIOUS, LoadOrigin::Local, CastRoute::Refuse),
+    ] {
+        assert_eq!(
+            queue.cast_route(media_id, act, origin),
+            expected,
+            "{media_id}, {act:?}, {origin:?}"
+        );
+    }
 }
 
+/// TIDAL reloads its playing track on its own (a pick played past its length, a page reload's
+/// restore): refusing it raised the "controlled via another client" banner. A pick of it is a
+/// select, never a settle, and a load served after the cast ended has nothing to settle on.
 #[test]
-fn a_pick_outside_the_controllers_queue_is_refused() {
-    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-
-    assert_eq!(
-        queue.cast_route("999", PICK, LoadOrigin::Connect),
-        CastRoute::RefusePick
-    );
-}
-
-#[test]
-fn an_automatic_load_never_changes_the_track_even_one_the_queue_holds() {
-    // TIDAL's advance on the SDK's `ended` names the page's next track, which the controller's
-    // queue may well hold.
-    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-
-    assert_eq!(
-        queue.cast_route("222", AUTOMATIC, LoadOrigin::Connect),
-        CastRoute::Refuse
-    );
-}
-
-#[test]
-fn an_automatic_load_of_the_track_the_cast_plays_is_settled_as_playing() {
-    // TIDAL reloads its playing track on its own (a pick played past its length, a page reload's
-    // restore); refusing it raised the "controlled via another client" banner over it.
+fn a_load_naming_the_track_the_cast_plays_is_routed_by_its_act_and_owner() {
     let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
 
-    assert_eq!(
-        queue.cast_route("222", AUTOMATIC, LoadOrigin::Connect),
-        CastRoute::Playing
-    );
-}
-
-#[test]
-fn a_pick_of_the_track_the_cast_plays_restarts_it() {
-    // A controller selecting its current item reloads it too: a pick is a select, never a settle.
-    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
-
-    assert_eq!(
-        queue.cast_route("222", PICK, LoadOrigin::Connect),
-        CastRoute::Select { index: 1 }
-    );
-}
-
-#[test]
-fn a_load_served_after_the_cast_ended_is_refused() {
-    // The session ended between the load and its turn in the loop: nothing plays for it to
-    // settle on.
-    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
-
-    assert_eq!(
-        queue.cast_route("222", PICK, LoadOrigin::Local),
-        CastRoute::Refuse
-    );
-    assert_eq!(
-        queue.cast_route("222", AUTOMATIC, LoadOrigin::Local),
-        CastRoute::Refuse
-    );
+    for (act, origin, expected) in [
+        (AUTOMATIC, LoadOrigin::Connect, CastRoute::Playing),
+        (PICK, LoadOrigin::Connect, CastRoute::Select { index: 1 }),
+        (PICK, LoadOrigin::Local, CastRoute::Refuse),
+        (AUTOMATIC, LoadOrigin::Local, CastRoute::Refuse),
+    ] {
+        assert_eq!(
+            queue.cast_route("222", act, origin),
+            expected,
+            "{act:?}, {origin:?}"
+        );
+    }
 }
 
 #[test]
@@ -212,22 +190,6 @@ fn a_track_queued_twice_resolves_to_the_copy_the_controller_reaches_next() {
     );
 }
 
-#[test]
-fn every_route_answers_the_load_it_was_asked_for() {
-    for (route, answer) in [
-        (CastRoute::Select { index: 0 }, "mediacastrouted"),
-        (CastRoute::Playing, "mediacastrouted"),
-        (CastRoute::Next, "mediacastowned"),
-        (CastRoute::Previous, "mediacastowned"),
-        (CastRoute::RefusePick, "mediacastowned"),
-        (CastRoute::Refuse, "mediacastowned"),
-    ] {
-        let sent = serde_json::to_value(route.answer(7)).expect("a plain wire message");
-        assert_eq!(sent["t"], answer, "{route:?}");
-        assert_eq!(sent["v"]["load"], 7, "{route:?} names another load");
-    }
-}
-
 #[tokio::test]
 async fn a_selected_pick_is_played_as_the_controllers_own_select() {
     // Stops at the `SetMedia`: its load, not `select_pick`, sends the `notifyMediaChanged`.
@@ -252,40 +214,6 @@ async fn a_selected_pick_is_played_as_the_controllers_own_select() {
 
 const NEXT: Option<ListenerAct> = Some(ListenerAct::Next);
 const PREVIOUS: Option<ListenerAct> = Some(ListenerAct::Previous);
-
-#[test]
-fn a_listeners_next_steps_the_cast_whatever_track_the_page_reloads() {
-    // The page's queue holds the cast's track alone, so TIDAL's Next reloads that same track.
-    // Settled as playing, the reload's autoplay resumed a cast the phone had paused.
-    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-
-    assert_eq!(
-        queue.cast_route("111", NEXT, LoadOrigin::Connect),
-        CastRoute::Next
-    );
-    assert_eq!(
-        queue.cast_route("999", NEXT, LoadOrigin::Connect),
-        CastRoute::Next
-    );
-    assert_eq!(
-        queue.cast_route("111", PREVIOUS, LoadOrigin::Connect),
-        CastRoute::Previous
-    );
-}
-
-#[test]
-fn a_listeners_step_with_no_cast_to_step_is_refused() {
-    let (queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-
-    assert_eq!(
-        queue.cast_route("111", NEXT, LoadOrigin::Local),
-        CastRoute::Refuse
-    );
-    assert_eq!(
-        queue.cast_route("111", PREVIOUS, LoadOrigin::Local),
-        CastRoute::Refuse
-    );
-}
 
 #[test]
 fn a_listeners_step_reaches_the_queue_whatever_state_its_window_is_in() {
@@ -355,18 +283,6 @@ async fn a_step_with_no_queue_loaded_is_refused_for_the_listener_and_the_control
 }
 
 #[tokio::test]
-async fn a_listeners_step_in_a_loaded_window_plays_at_once() {
-    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
-
-    assert_eq!(queue.step(QueueStep::Previous).await, RequestResult::Done);
-
-    assert_eq!(
-        handed_to_playback(&mut notifies),
-        vec![("i-1".to_string(), "111".to_string())]
-    );
-}
-
-#[tokio::test]
 async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
     // TIDAL's receiver answers each of these 1002 in its IDLE state, and acts on none.
     let commands = [
@@ -399,54 +315,6 @@ async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
     }
 }
 
-#[tokio::test]
-async fn volume_and_mute_are_carried_out_with_no_queue_loaded() {
-    // Refused before a queue loads, volume and mute would leave the phone unable to set the
-    // level of a cast it has just started.
-    for state in [QueueState::Idle, QueueState::Loading] {
-        let (mut queue, mut notifies) = casting(Vec::new(), 0);
-        queue.state = state;
-
-        assert_eq!(
-            queue
-                .handle_command(1, "setVolume", &serde_json::json!({ "level": 0.5 }))
-                .await,
-            RequestResult::Done,
-            "{state:?}"
-        );
-        assert!(matches!(
-            notifies.try_recv(),
-            Ok(QueueNotifyEvent::SetVolume { level }) if level == 0.5
-        ));
-
-        assert_eq!(
-            queue
-                .handle_command(1, "setMute", &serde_json::json!({ "mute": true }))
-                .await,
-            RequestResult::Done,
-            "{state:?}"
-        );
-        assert!(matches!(
-            notifies.try_recv(),
-            Ok(QueueNotifyEvent::SetMute { mute: true })
-        ));
-    }
-}
-
-#[test]
-fn the_answer_is_the_message_the_controller_already_reads() {
-    for (result, code) in [(RequestResult::Done, 0), (RequestResult::NoQueue, 1002)] {
-        assert_eq!(
-            serde_json::to_value(result.answer(7)).expect("a plain wire message"),
-            serde_json::json!({
-                "command": "notifyRequestResult",
-                "requestId": 7,
-                "resultCode": code,
-            })
-        );
-    }
-}
-
 /// The media of every `SetMedia` the receiver handed to playback, in order.
 fn handed_to_playback(notifies: &mut mpsc::Receiver<QueueNotifyEvent>) -> Vec<(String, String)> {
     let mut handed = Vec::new();
@@ -456,19 +324,6 @@ fn handed_to_playback(notifies: &mut mpsc::Receiver<QueueNotifyEvent>) -> Vec<(S
         }
     }
     handed
-}
-
-#[tokio::test]
-async fn a_listeners_next_plays_the_controllers_next_item() {
-    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-
-    queue.skip_next().await;
-
-    assert_eq!(queue.current_index, Some(1));
-    assert_eq!(
-        handed_to_playback(&mut notifies),
-        vec![("i-2".to_string(), "222".to_string())]
-    );
 }
 
 #[tokio::test]

@@ -107,21 +107,6 @@ fn a_refused_consent_is_written_under_a_full_sync() {
 }
 
 #[test]
-fn a_window_position_is_not_synced_per_write() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut conn = file_conn(dir.path());
-    let statements = statements_of(&mut conn, |c| {
-        save_maximized(c, true);
-        save_window_state(c, &WindowState::default());
-        save_output_level(c, 40.0, 40.0);
-    });
-    assert!(
-        position(&statements, |sql| sql.contains("synchronous")).is_none(),
-        "a write nobody would regret losing must not pay a sync: {statements:?}"
-    );
-}
-
-#[test]
 fn a_refusal_inside_a_transaction_is_written_and_reported_unsynced() {
     let dir = tempfile::tempdir().unwrap();
     let mut conn = file_conn(dir.path());

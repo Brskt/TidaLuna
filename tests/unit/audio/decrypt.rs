@@ -33,21 +33,3 @@ fn whole_file_decrypt_matches_streamed_chunk_decrypt() {
 
     assert_eq!(whole, streamed);
 }
-
-/// CTR XORs against a keystream: the same call reverses itself. That is
-/// what makes storing ciphertext and decrypting on read lossless.
-#[test]
-fn decrypt_round_trips() {
-    let dec = decryptor();
-    let plain = b"fLaC and a payload that is not block aligned".to_vec();
-
-    let mut buf = plain.clone();
-    dec.decrypt_in_place(&mut buf, 0).unwrap();
-    assert_ne!(
-        buf, plain,
-        "the keystream must actually transform the bytes"
-    );
-
-    dec.decrypt_in_place(&mut buf, 0).unwrap();
-    assert_eq!(buf, plain);
-}

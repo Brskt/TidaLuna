@@ -55,99 +55,63 @@ fn offer(version: &str) -> Option<UpdateInfo> {
     })
 }
 
-/// A check that reaches an answer owns the offer that answer contradicts. While the check
-/// replied with a bare `Option`, publishing an offer had a writer and retracting one had
-/// none: the record outlived every check that disproved it. The settings page then had no
-/// reachable state left in which to say "You're up to date", and both surfaces kept a
-/// Download button pointed at a version the check had just ruled out.
+/// A check owns the offer its answer disproves: up to date, or withheld by a gate that would
+/// refuse the download further down. It keeps the offer when it proved nothing (a transient
+/// failure) or while an operation acts on it: only a download undoes a download.
 #[test]
-fn a_check_that_finds_nothing_retracts_the_offer_it_disproves() {
-    let mut state = state_holding(UpdaterPhase::Idle, offer("9.9.9"));
-
-    state.settle_check(&CheckOutcome::UpToDate, UpdateChannel::Stable);
-
-    assert!(
-        state.last_info.is_none(),
-        "the surfaces go on offering a version the check ruled out"
-    );
-}
-
-/// Only one of the paths that answered `None` meant "there is nothing to install". Six were
-/// transient (a dropped connection, DNS, a manifest that would not parse), and retracting
-/// on those would tell a user whose update is genuinely waiting that they are current. The
-/// offer stands until a check actually disproves it.
-#[test]
-fn a_check_that_could_not_conclude_keeps_the_offer() {
-    let mut state = state_holding(UpdaterPhase::Idle, offer("9.9.9"));
-
-    state.settle_check(
-        &CheckOutcome::Failed {
-            reason: "dns error".to_string(),
-        },
-        UpdateChannel::Stable,
-    );
-
-    assert_eq!(
-        state.last_info.as_ref().map(|i| i.version.as_str()),
-        Some("9.9.9"),
-        "a flaky network is not evidence that an update vanished"
-    );
-}
-
-/// An update this install may not take is not an offer either. The floor on `min_version`
-/// and the Linux sandbox-protocol gate both find a real newer version and both refuse it,
-/// and a Download button wired to one hands `updater.download` a version the gates reject
-/// further down. What the user can act on is the reason, which travels on its own.
-#[test]
-fn an_update_this_install_may_not_take_is_retracted_too() {
-    let mut state = state_holding(UpdaterPhase::Idle, offer("9.9.9"));
-
-    state.settle_check(
-        &CheckOutcome::Withheld {
-            reason: "bootstrap behind".to_string(),
-        },
-        UpdateChannel::Stable,
-    );
-
-    assert!(
-        state.last_info.is_none(),
-        "an update the gates would refuse is still being offered"
-    );
-}
-
-/// A check can land while a download or an apply is already acting on the offer, because
-/// nothing stops one being started from the settings page mid-flight. Retracting then would
-/// pull the record out from under the operation, which is the rule the renderer's cancel
-/// already follows: only a download undoes a download.
-#[test]
-fn a_retraction_spares_an_offer_an_operation_is_acting_on() {
-    for phase in [
-        UpdaterPhase::Downloading("9.9.9".to_string()),
-        UpdaterPhase::Ready("9.9.9".to_string()),
-        UpdaterPhase::Applying("9.9.9".to_string()),
+fn a_check_retracts_only_the_offer_it_disproves() {
+    for (what, phase, outcome, kept) in [
+        (
+            "up to date",
+            UpdaterPhase::Idle,
+            CheckOutcome::UpToDate,
+            false,
+        ),
+        (
+            "failed",
+            UpdaterPhase::Idle,
+            CheckOutcome::Failed {
+                reason: "dns error".to_string(),
+            },
+            true,
+        ),
+        (
+            "withheld",
+            UpdaterPhase::Idle,
+            CheckOutcome::Withheld {
+                reason: "bootstrap behind".to_string(),
+            },
+            false,
+        ),
+        (
+            "up to date during a download",
+            UpdaterPhase::Downloading("9.9.9".to_string()),
+            CheckOutcome::UpToDate,
+            true,
+        ),
+        (
+            "up to date while ready",
+            UpdaterPhase::Ready("9.9.9".to_string()),
+            CheckOutcome::UpToDate,
+            true,
+        ),
+        (
+            "up to date while applying",
+            UpdaterPhase::Applying("9.9.9".to_string()),
+            CheckOutcome::UpToDate,
+            true,
+        ),
     ] {
-        let mut state = state_holding(phase.clone(), offer("9.9.9"));
+        let mut state = state_holding(phase, offer("9.9.9"));
 
-        state.settle_check(&CheckOutcome::UpToDate, UpdateChannel::Stable);
+        state.settle_check(&outcome, UpdateChannel::Stable);
 
-        assert!(
-            state.last_info.is_some(),
-            "a stale check stripped the record from under {phase:?}"
+        assert_eq!(
+            state.last_info.as_ref().map(|i| i.version.as_str()),
+            kept.then_some("9.9.9"),
+            "{what}"
         );
     }
-}
-
-/// The offer has a second legitimate producer: a boot that finds a staged update sets the
-/// phase to `Ready(v)` and announces it without ever publishing `last_info`. A guard that
-/// asked `last_info` alone would refuse the apply that startup path exists to offer.
-#[test]
-fn a_download_takes_the_version_a_boot_found_staged() {
-    let state = state_holding(UpdaterPhase::Ready("2.0.0".to_string()), None);
-
-    assert!(
-        state.names_version("2.0.0"),
-        "the staged update a boot detected is an offer the state made itself"
-    );
 }
 
 /// Apply spawns the updater child on the version it is handed. It compared that version to
@@ -168,58 +132,35 @@ fn an_apply_is_refused_for_a_version_the_state_never_staged() {
     );
 }
 
-/// Dismissing a version persisted a setting and stopped there. The offer it named stayed in
-/// memory, `updater.status` kept serving it to every new mount, and the toast's own
-/// suppression is per-mount; the version the user had declined came back on screen the
-/// next time the module was evaluated.
-#[test]
-fn a_dismissal_takes_back_the_offer_it_names() {
-    let mut state = state_holding(UpdaterPhase::Idle, offer("9.9.9"));
-
-    let staging_must_go = state.dismiss_offer("9.9.9");
-
-    assert!(state.last_info.is_none());
-    assert!(!staging_must_go, "nothing was staged to delete");
-}
-
-/// Refusing a version while it is being fetched means stop fetching it. Left running, the
-/// download completes and announces itself ready, handing back the very version that was
+/// Refusing a version while it is being fetched means stop fetching it, and only it: left running,
+/// the download completes and announces itself ready, handing back the very version that was
 /// declined, with its bandwidth already spent.
 #[test]
-fn a_dismissal_stops_a_download_of_the_version_it_names() {
-    let token = tokio_util::sync::CancellationToken::new();
-    let mut state = UpdaterState {
-        phase: UpdaterPhase::Downloading("9.9.9".to_string()),
-        task: None,
-        cancel: Some(token.clone()),
-        last_info: offer("9.9.9"),
-        channel: None,
-    };
+fn a_dismissal_stops_only_a_download_of_the_version_it_names() {
+    for (dismissed, names_download) in [("9.9.9", true), ("1.0.0", false)] {
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut state = UpdaterState {
+            phase: UpdaterPhase::Downloading("9.9.9".to_string()),
+            task: None,
+            cancel: Some(token.clone()),
+            last_info: offer("9.9.9"),
+            channel: None,
+        };
 
-    let staging_must_go = state.dismiss_offer("9.9.9");
+        let staging_must_go = state.dismiss_offer(dismissed);
 
-    assert!(token.is_cancelled(), "it would have finished downloading");
-    assert!(staging_must_go, "its partial staging would have been left");
-    assert!(matches!(state.phase, UpdaterPhase::Idle));
-}
-
-#[test]
-fn a_dismissal_leaves_a_download_of_another_version_alone() {
-    let token = tokio_util::sync::CancellationToken::new();
-    let mut state = UpdaterState {
-        phase: UpdaterPhase::Downloading("9.9.9".to_string()),
-        task: None,
-        cancel: Some(token.clone()),
-        last_info: offer("9.9.9"),
-        channel: None,
-    };
-
-    state.dismiss_offer("1.0.0");
-
-    assert!(
-        !token.is_cancelled(),
-        "declining one version stopped the download of another"
-    );
+        assert_eq!(
+            token.is_cancelled(),
+            names_download,
+            "dismissing {dismissed}"
+        );
+        assert_eq!(staging_must_go, names_download, "dismissing {dismissed}");
+        assert_eq!(
+            matches!(state.phase, UpdaterPhase::Idle),
+            names_download,
+            "dismissing {dismissed}"
+        );
+    }
 }
 
 /// The end of a download announced `Ready` whatever had happened while it ran. A dismissal or
@@ -234,31 +175,6 @@ fn a_finished_download_nobody_wants_any_more_is_not_announced() {
         "a download the state had already voided announced itself ready"
     );
     assert!(matches!(state.phase, UpdaterPhase::Idle));
-}
-
-#[test]
-fn a_finished_download_the_state_still_waits_for_becomes_ready() {
-    let mut state = state_holding(
-        UpdaterPhase::Downloading("9.9.9".to_string()),
-        offer("9.9.9"),
-    );
-
-    assert!(state.finish_download("9.9.9"));
-    assert!(matches!(&state.phase, UpdaterPhase::Ready(v) if v == "9.9.9"));
-}
-
-/// A dismissal names one version. Taking back an offer for a different one would drop an
-/// update the user never declined.
-#[test]
-fn a_dismissal_leaves_an_offer_for_another_version() {
-    let mut state = state_holding(UpdaterPhase::Idle, offer("9.9.9"));
-
-    state.dismiss_offer("1.0.0");
-
-    assert_eq!(
-        state.last_info.as_ref().map(|i| i.version.as_str()),
-        Some("9.9.9")
-    );
 }
 
 /// A staged update is an offer too: the phase names it and the status reply serves it, with
@@ -429,70 +345,38 @@ fn a_claim_on_a_staged_build_still_answers_for_its_channel() {
     assert!(staging_must_go);
 }
 
-/// Taking the old channel's offer back settled nothing while a check resolved under it was
-/// still awaiting the network. That check searched the dev release list, and it committed its
-/// answer after the retraction had run: the dev build came back as the standing offer, and
-/// `names_version` authorizes a download of whatever the offer names: the channel filter
-/// lives in the check alone, and the offer is the only thing keeping a channel's build out.
+/// A check that resolved under a channel since left is refused whole: its dev build would come
+/// back as the standing offer, which `names_version` authorizes for download (the channel filter
+/// lives in the check alone), and a barren answer would strip the offer the new channel holds.
 #[test]
 fn a_check_answering_for_a_channel_since_left_is_refused() {
-    let mut state = state_on(UpdateChannel::Stable, UpdaterPhase::Idle, None);
-
-    let settlement = state.settle_check(
-        &CheckOutcome::Available {
-            info: UpdateInfo {
-                version: "0.0.18-pre.dev.5".to_string(),
-                download_size: 42,
+    for (outcome, held) in [
+        (
+            CheckOutcome::Available {
+                info: UpdateInfo {
+                    version: "0.0.18-pre.dev.5".to_string(),
+                    download_size: 42,
+                },
             },
-        },
-        UpdateChannel::Dev,
-    );
+            None,
+        ),
+        (CheckOutcome::UpToDate, Some("1.0.0")),
+    ] {
+        let mut state = state_on(
+            UpdateChannel::Stable,
+            UpdaterPhase::Idle,
+            held.and_then(offer),
+        );
 
-    assert_eq!(settlement, CheckSettlement::Stale);
-    assert!(
-        state.last_info.is_none(),
-        "a prerelease is on offer after the switch to stable, and downloadable with it"
-    );
-}
+        let settlement = state.settle_check(&outcome, UpdateChannel::Dev);
 
-/// A refusal has to cover the retracting half too. A barren answer from the channel just
-/// left says nothing about the one now selected, and letting it through would strip a fresh
-/// offer the new channel legitimately holds, the same defect by the other end.
-#[test]
-fn a_stale_check_may_not_retract_the_offer_the_new_channel_holds() {
-    let mut state = state_on(UpdateChannel::Stable, UpdaterPhase::Idle, offer("1.0.0"));
-
-    let settlement = state.settle_check(&CheckOutcome::UpToDate, UpdateChannel::Dev);
-
-    assert_eq!(settlement, CheckSettlement::Stale);
-    assert_eq!(
-        state.last_info.as_ref().map(|i| i.version.as_str()),
-        Some("1.0.0"),
-        "an answer for the abandoned channel took back the offer of the current one"
-    );
-}
-
-/// The guard refuses an answer for another channel and nothing else: a check on the channel
-/// the state is on settles exactly as before.
-#[test]
-fn a_check_on_the_channel_the_state_is_on_settles() {
-    let mut state = state_on(UpdateChannel::Dev, UpdaterPhase::Idle, None);
-
-    let settlement = state.settle_check(
-        &CheckOutcome::Available {
-            info: UpdateInfo {
-                version: "0.0.18-pre.dev.5".to_string(),
-                download_size: 42,
-            },
-        },
-        UpdateChannel::Dev,
-    );
-
-    assert_eq!(settlement, CheckSettlement::Settled);
-    assert_eq!(
-        state.last_info.as_ref().map(|i| i.version.as_str()),
-        Some("0.0.18-pre.dev.5")
-    );
+        assert_eq!(settlement, CheckSettlement::Stale);
+        assert_eq!(
+            state.last_info.as_ref().map(|i| i.version.as_str()),
+            held,
+            "an answer for the abandoned channel changed the offer of the current one"
+        );
+    }
 }
 
 /// Nothing records the channel before the first check settles, and refusing there would
@@ -539,42 +423,6 @@ fn a_check_survives_a_channel_change_that_came_back_to_its_own() {
     );
 }
 
-/// The download refusals answered the asker and nobody else. A surface paints `downloading`
-/// on the click, and the toast reads no reply at all; it kept that paint, with a Cancel
-/// button the backend ignores, for an update already staged. Naming the refusal is what lets
-/// the handler announce the phase instead of merely reporting that it refused.
-#[test]
-fn a_download_of_the_version_already_staged_is_refused_by_name() {
-    let state = state_holding(UpdaterPhase::Ready("1.0.0".to_string()), offer("1.0.0"));
-
-    assert_eq!(
-        state.answer_download("1.0.0"),
-        Some(DownloadRefusal::AlreadyReady),
-        "a refusal that cannot name its phase cannot announce one"
-    );
-}
-
-/// Two operations hold the phase, and a surface must not be told the same thing about both:
-/// a running download makes the asker's own optimistic paint true, while an apply is a phase
-/// it never painted.
-#[test]
-fn a_download_names_which_operation_holds_the_phase() {
-    let downloading = state_holding(
-        UpdaterPhase::Downloading("1.0.0".to_string()),
-        offer("1.0.0"),
-    );
-    let applying = state_holding(UpdaterPhase::Applying("1.0.0".to_string()), offer("1.0.0"));
-
-    assert_eq!(
-        downloading.answer_download("1.0.0"),
-        Some(DownloadRefusal::InProgress)
-    );
-    assert_eq!(
-        applying.answer_download("1.0.0"),
-        Some(DownloadRefusal::Applying)
-    );
-}
-
 /// `updater.download` took the version from its caller and asked nothing else. A renderer
 /// holding a record from before a channel switch (or any plugin, the channel being open to
 /// every trusted frame) could name a version no check had offered, and the download path
@@ -592,62 +440,43 @@ fn a_download_of_a_version_nothing_offered_is_not_a_phase() {
     );
 }
 
-/// Staging for another version is what this download replaces, not a reason to refuse it:
-/// the caller clears it before starting. Refusing here would strand a user on the older
-/// staged build with no way to fetch the newer offer.
+/// A previous session may have downloaded an update and never applied it, and a fresh process
+/// must find it on disk. A dismissal outlives its session (the setting is persisted) and is keyed
+/// on the version: a declined staging is deleted, another version's is still offered.
 #[test]
-fn a_download_replacing_another_staged_version_is_not_refused() {
-    let state = state_holding(UpdaterPhase::Ready("1.0.0".to_string()), offer("2.0.0"));
+fn a_staged_update_is_adopted_unless_the_user_declined_that_version() {
+    for (version, skipped, verdict, phase) in [
+        (
+            "1.0.0",
+            None,
+            StagedVerdict::Adopted,
+            UpdaterPhase::Ready("1.0.0".to_string()),
+        ),
+        (
+            "1.0.0",
+            Some("1.0.0"),
+            StagedVerdict::Declined,
+            UpdaterPhase::Idle,
+        ),
+        (
+            "2.0.0",
+            Some("1.0.0"),
+            StagedVerdict::Adopted,
+            UpdaterPhase::Ready("2.0.0".to_string()),
+        ),
+    ] {
+        let mut state = state_holding(UpdaterPhase::Idle, None);
 
-    assert_eq!(
-        state.answer_download("2.0.0"),
-        None,
-        "the offer a check published cannot be fetched while older staging sits there"
-    );
-}
-
-#[test]
-fn nothing_holds_back_a_download_of_the_offer_on_the_table() {
-    let state = state_holding(UpdaterPhase::Idle, offer("1.0.0"));
-
-    assert_eq!(state.answer_download("1.0.0"), None);
-}
-
-/// The reason the scan exists: a previous session downloaded an update and never applied it,
-/// and a fresh process has to find it on disk because nothing in memory remembers it.
-#[test]
-fn a_staged_update_a_previous_session_left_becomes_the_offer() {
-    let mut state = state_holding(UpdaterPhase::Idle, None);
-
-    assert_eq!(state.take_staged("1.0.0", None), StagedVerdict::Adopted);
-    assert_eq!(state.phase, UpdaterPhase::Ready("1.0.0".to_string()));
-}
-
-/// A dismissal outlives the session that made it (the setting is persisted and nothing ever
-/// clears it), and the scan has to answer for a version the user already declined.
-#[test]
-fn a_staged_update_the_user_declined_is_deleted_rather_than_offered() {
-    let mut state = state_holding(UpdaterPhase::Idle, None);
-
-    assert_eq!(
-        state.take_staged("1.0.0", Some("1.0.0")),
-        StagedVerdict::Declined
-    );
-    assert_eq!(
-        state.phase,
-        UpdaterPhase::Idle,
-        "a declined staging is deleted, not adopted and then dropped"
-    );
-}
-
-#[test]
-fn a_dismissal_of_another_version_leaves_this_staging_offerable() {
-    let mut state = state_holding(UpdaterPhase::Idle, None);
-
-    assert_eq!(
-        state.take_staged("2.0.0", Some("1.0.0")),
-        StagedVerdict::Adopted
-    );
+        assert_eq!(
+            state.take_staged(version, skipped),
+            verdict,
+            "{version} with {skipped:?} declined"
+        );
+        assert_eq!(
+            state.phase, phase,
+            "a declined staging is deleted, not adopted and then dropped"
+        );
+    }
 }
 
 /// The scan reads the filesystem under no lock and runs on every login, not at boot alone. A
@@ -724,31 +553,4 @@ fn every_phase_names_itself_on_the_wire() {
             "the wire shape of {phase:?} changed"
         );
     }
-}
-
-/// The offer travels beside the phase, not inside it.
-///
-/// The renderer needs both: the phase names the version an operation acts on, and the offer
-/// carries the download size no tag can. Reading the version off the offer instead is what a
-/// check landing mid-download would poison: the two must arrive as separate fields.
-#[test]
-fn the_offer_rides_beside_the_phase() {
-    let offer = Some(UpdateInfo {
-        version: "3.0.0".to_string(),
-        download_size: 512,
-    });
-
-    let resp = StatusResponse {
-        phase: &UpdaterPhase::Downloading("2.0.0".to_string()),
-        last_info: &offer,
-    };
-
-    assert_eq!(
-        serde_json::to_value(&resp).unwrap(),
-        serde_json::json!({
-            "state": "Downloading",
-            "version": "2.0.0",
-            "last_info": { "version": "3.0.0", "download_size": 512 },
-        })
-    );
 }

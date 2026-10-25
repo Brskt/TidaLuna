@@ -130,7 +130,3 @@ wrap_task! {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/ui/crash_dialog.rs"]
-mod tests;

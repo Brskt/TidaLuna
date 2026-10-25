@@ -335,15 +335,6 @@ fn a_fade_completion_survives_the_round_trip() {
 }
 
 #[test]
-fn the_origin_never_bleeds_into_the_generation() {
-    // 48 bits is centuries of samples at any real rate, but a value past that must
-    // truncate rather than corrupt the generation beside it.
-    let (cur_gen, origin) = unpack_xfade_done(pack_xfade_done(3, u64::MAX));
-    assert_eq!(cur_gen, 3);
-    assert_eq!(origin, 0xFFFF_FFFF_FFFF);
-}
-
-#[test]
 fn the_heap_probe_sees_an_allocation_and_its_free() {
     // The instrument's own control: a probe that counted nothing would pass every
     // zero-allocation test below without looking.

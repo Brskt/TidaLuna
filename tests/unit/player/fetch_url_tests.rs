@@ -12,9 +12,7 @@ fn track(url: &str) -> TrackInfo {
     }
 }
 
-/// The slot's shape, paired with the generation that published it. The credential tests below
-/// never read that generation; the rule it obeys (a refresh is not a load, so it does not move)
-/// has its own test at the end of this file.
+/// The slot's shape, paired with the generation that published it.
 fn retained_at(url: &str, load_gen: u32) -> Option<crate::state::RetainedTrack> {
     Some(crate::state::RetainedTrack {
         track: track(url),
@@ -22,51 +20,59 @@ fn retained_at(url: &str, load_gen: u32) -> Option<crate::state::RetainedTrack> 
     })
 }
 
-/// The whole point: the signed query is refreshed under a running download, and the reconnect must
-/// use the new one. Keeping the captured copy is what 403'd a track dead after its signature lapsed.
+/// The signed query is refreshed under a running download and the reconnect must use the new one:
+/// keeping the captured copy 403'd a track dead after its signature lapsed. A task whose track is
+/// no longer the retained one, or none retained, gets nothing: it would download ANOTHER track's
+/// audio into this track's buffer.
 #[test]
-fn a_refreshed_signature_is_handed_to_the_running_download() {
-    let retained = track("https://cdn.test/mediatracks/abc?sig=FRESH");
-
-    assert_eq!(
-        refreshed_fetch_url("https://cdn.test/mediatracks/abc", Some(&retained)).as_deref(),
-        Some("https://cdn.test/mediatracks/abc?sig=FRESH")
-    );
+fn a_running_download_gets_the_refreshed_signature_only_for_its_own_retained_track() {
+    for (retained, expected) in [
+        (
+            Some(track("https://cdn.test/mediatracks/abc?sig=FRESH")),
+            Some("https://cdn.test/mediatracks/abc?sig=FRESH"),
+        ),
+        (
+            Some(track("https://cdn.test/mediatracks/other?sig=FRESH")),
+            None,
+        ),
+        (None, None),
+    ] {
+        assert_eq!(
+            refreshed_fetch_url("https://cdn.test/mediatracks/abc", retained.as_ref()).as_deref(),
+            expected,
+            "{retained:?}"
+        );
+    }
 }
 
-/// A task whose track is no longer the retained one is stale and must stop, not fetch. Without this
-/// the reconnect would download a DIFFERENT track's audio into this track's buffer.
+/// The refresh takes the new signature for the track it was asked about, and the id with it, so that a
+/// later replay of this source still knows its track. It is not a new load: it mints no generation,
+/// and moving the stamp would hand a stale retained track the freshness of whatever load is current.
 #[test]
-fn a_task_for_another_track_gets_nothing() {
-    let retained = track("https://cdn.test/mediatracks/other?sig=FRESH");
+fn a_credential_refresh_takes_the_new_signature_and_id_and_leaves_the_generation() {
+    for id in [None, Some("120002099")] {
+        let mut retained = retained_at("https://cdn.test/mediatracks/abc?sig=OLD", 41);
 
-    assert!(refreshed_fetch_url("https://cdn.test/mediatracks/abc", Some(&retained)).is_none());
-}
+        refresh_retained_credential(
+            retained.as_mut(),
+            "https://cdn.test/mediatracks/abc",
+            "https://cdn.test/mediatracks/abc?sig=NEW",
+            "key",
+            id,
+        );
 
-#[test]
-fn no_retained_track_yields_nothing() {
-    assert!(refreshed_fetch_url("https://cdn.test/mediatracks/abc", None).is_none());
-}
-
-/// The refresh takes the new signature for the track it was asked about.
-#[test]
-fn the_retained_credential_is_refreshed_for_its_own_track() {
-    let mut retained = retained_at("https://cdn.test/mediatracks/abc?sig=OLD", 7);
-
-    refresh_retained_credential(
-        retained.as_mut(),
-        "https://cdn.test/mediatracks/abc",
-        "https://cdn.test/mediatracks/abc?sig=NEW",
-        "key",
-        None,
-    );
-
-    let refreshed = retained.expect("still retained");
-    assert_eq!(
-        refreshed.track.url,
-        "https://cdn.test/mediatracks/abc?sig=NEW"
-    );
-    assert_eq!(refreshed.track.key, "key");
+        let refreshed = retained.expect("still retained");
+        assert_eq!(
+            refreshed.track.url, "https://cdn.test/mediatracks/abc?sig=NEW",
+            "id {id:?}"
+        );
+        assert_eq!(refreshed.track.key, "key", "id {id:?}");
+        assert_eq!(refreshed.track.product_id.as_deref(), id, "id {id:?}");
+        assert_eq!(
+            refreshed.load_gen, 41,
+            "a credential refresh moved the generation; a stale source can now pass a replay guard"
+        );
+    }
 }
 
 /// The caller's guard reads the COMMITTED track, which the player thread sets, while this record is
@@ -91,29 +97,6 @@ fn a_stale_load_cannot_overwrite_a_newer_tracks_credential() {
         "the newer track's credential must survive"
     );
     assert!(untouched.track.key.is_empty(), "and its key too");
-}
-
-/// The id refreshes with the credential, so a later replay of this source still knows its track.
-#[test]
-fn the_retained_id_is_refreshed_alongside_the_credential() {
-    let mut retained = retained_at("https://cdn.test/mediatracks/abc?sig=OLD", 7);
-
-    refresh_retained_credential(
-        retained.as_mut(),
-        "https://cdn.test/mediatracks/abc",
-        "https://cdn.test/mediatracks/abc?sig=NEW",
-        "key",
-        Some("120002099"),
-    );
-
-    assert_eq!(
-        retained
-            .expect("still retained")
-            .track
-            .product_id
-            .as_deref(),
-        Some("120002099")
-    );
 }
 
 /// A load carrying no id must not blank the one already retained. A quality swap arrives without
@@ -144,33 +127,6 @@ fn a_load_without_an_id_leaves_the_retained_one_alone() {
             .as_deref(),
         Some("120002099"),
         "an id-less load erased the identity a replay needs"
-    );
-}
-
-/// A refresh re-signs a credential; it is not a new load, it mints no generation, and the
-/// replay this source still authorises belongs to the generation that published it. Moving the
-/// stamp here would hand a stale retained track the freshness of whatever load happened to be
-/// current, which is exactly the pairing the slot exists to make impossible.
-#[test]
-fn a_credential_refresh_leaves_the_generation_where_it_was() {
-    let mut retained = retained_at("https://cdn.test/mediatracks/abc?sig=OLD", 41);
-
-    refresh_retained_credential(
-        retained.as_mut(),
-        "https://cdn.test/mediatracks/abc",
-        "https://cdn.test/mediatracks/abc?sig=NEW",
-        "key",
-        Some("120002099"),
-    );
-
-    let refreshed = retained.expect("still retained");
-    assert_eq!(
-        refreshed.track.url, "https://cdn.test/mediatracks/abc?sig=NEW",
-        "the refresh must still take the new credential"
-    );
-    assert_eq!(
-        refreshed.load_gen, 41,
-        "a credential refresh moved the generation, so a stale source can now pass a replay guard"
     );
 }
 

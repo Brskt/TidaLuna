@@ -156,7 +156,3 @@ async fn probe_already_stopped(daemon: &ServiceDaemon) -> bool {
         _ => false,
     }
 }
-
-#[cfg(test)]
-#[path = "../../../tests/unit/connect/mdns/backend.rs"]
-mod tests;

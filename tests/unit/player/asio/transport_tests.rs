@@ -38,33 +38,26 @@ fn adopted() -> (
 }
 
 #[test]
-fn an_adopted_stream_starts_under_the_load_that_opened_it() {
-    let (mut ctx, event_tx, event_rx) = adopted();
+fn an_adopted_stream_reports_its_start_state_under_the_load_that_opened_it() {
+    for (start_paused, expected) in [
+        (false, PlaybackState::Active),
+        (true, PlaybackState::Paused),
+    ] {
+        let (mut ctx, event_tx, event_rx) = adopted();
 
-    ctx.settle_transport(false, &event_tx);
+        ctx.settle_transport(start_paused, &event_tx);
 
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(AsioEvent::StateChange {
-            opened_under: OPENED_UNDER,
-            state: PlaybackState::Active
-        })
-    ));
-}
-
-#[test]
-fn a_stream_that_starts_paused_reports_the_pause_under_its_load() {
-    let (mut ctx, event_tx, event_rx) = adopted();
-
-    ctx.settle_transport(true, &event_tx);
-
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(AsioEvent::StateChange {
-            opened_under: OPENED_UNDER,
-            state: PlaybackState::Paused
-        })
-    ));
+        assert!(
+            matches!(
+                event_rx.try_recv(),
+                Ok(AsioEvent::StateChange {
+                    opened_under: OPENED_UNDER,
+                    state
+                }) if state == expected
+            ),
+            "start_paused {start_paused}"
+        );
+    }
 }
 
 #[test]

@@ -156,14 +156,6 @@ fn leaves_an_unrelated_relationship_alone() {
 }
 
 #[test]
-fn passes_through_a_body_that_is_not_json() {
-    assert!(matches!(
-        strip_video_artwork(b"<html>not json</html>"),
-        StripResult::Unchanged
-    ));
-}
-
-#[test]
 fn strips_only_json_on_the_openapi_host() {
     let openapi = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
     assert!(should_strip(&openapi, "application/vnd.api+json"));

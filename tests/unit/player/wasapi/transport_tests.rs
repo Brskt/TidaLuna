@@ -79,37 +79,39 @@ fn adopting(start_paused: bool) -> (RenderContext, mpsc::Receiver<ExclusiveEvent
 }
 
 #[test]
-fn an_adopted_stream_announces_its_length_then_starts_under_the_load_that_opened_it() {
-    let (ctx, event_rx) = adopting(false);
+fn an_adopted_stream_announces_its_length_then_its_start_state_under_its_load() {
+    for (start_paused, reported) in [
+        (false, PlaybackState::Active),
+        (true, PlaybackState::Paused),
+    ] {
+        let (ctx, event_rx) = adopting(start_paused);
 
-    assert!(matches!(ctx.state, RenderState::Playing));
-    assert_eq!(ctx.opened_under, OPENED_UNDER);
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(ExclusiveEvent::Duration { stream_id: 7, .. })
-    ));
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(ExclusiveEvent::StateChange {
-            opened_under: OPENED_UNDER,
-            state: PlaybackState::Active
-        })
-    ));
-}
-
-#[test]
-fn a_stream_adopted_paused_reports_the_pause_under_the_load_that_opened_it() {
-    let (ctx, event_rx) = adopting(true);
-
-    assert!(matches!(ctx.state, RenderState::Paused));
-    let _length = event_rx.try_recv();
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(ExclusiveEvent::StateChange {
-            opened_under: OPENED_UNDER,
-            state: PlaybackState::Paused
-        })
-    ));
+        assert_eq!(
+            matches!(ctx.state, RenderState::Paused),
+            start_paused,
+            "start_paused {start_paused}"
+        );
+        assert_eq!(
+            matches!(ctx.state, RenderState::Playing),
+            !start_paused,
+            "start_paused {start_paused}"
+        );
+        assert_eq!(ctx.opened_under, OPENED_UNDER);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ExclusiveEvent::Duration { stream_id: 7, .. })
+        ));
+        assert!(
+            matches!(
+                event_rx.try_recv(),
+                Ok(ExclusiveEvent::StateChange {
+                    opened_under: OPENED_UNDER,
+                    state
+                }) if state == reported
+            ),
+            "start_paused {start_paused}"
+        );
+    }
 }
 
 #[test]
@@ -122,24 +124,6 @@ fn a_pause_latched_before_the_adoption_starts_the_stream_paused_under_its_load()
 
     assert!(ctx.pending_transport.is_none());
     let _length = event_rx.try_recv();
-    assert!(matches!(
-        event_rx.try_recv(),
-        Ok(ExclusiveEvent::StateChange {
-            opened_under: OPENED_UNDER,
-            state: PlaybackState::Paused
-        })
-    ));
-}
-
-#[test]
-fn a_pause_after_the_adoption_reports_the_load_the_adoption_recorded() {
-    // The two halves meet here: what `adopt_stream` records is what `apply_pause` reports.
-    let (mut ctx, event_rx) = adopting(false);
-    while event_rx.try_recv().is_ok() {}
-    let (event_tx, event_rx) = mpsc::channel();
-
-    ctx.apply_pause(&event_tx, 7);
-
     assert!(matches!(
         event_rx.try_recv(),
         Ok(ExclusiveEvent::StateChange {

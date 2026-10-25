@@ -2,36 +2,29 @@
 
 use super::*;
 
+/// A hostile table can name an offset no machine could address: the end it adds up to overflows,
+/// and is refused rather than panicking. A zero-length sample carries no NAL, and an empty slice
+/// would read as a decode failure further down.
 #[test]
-fn a_sample_inside_the_buffer_is_returned() {
+fn a_sample_is_returned_only_when_wholly_inside_the_buffer() {
     let file = [0u8, 1, 2, 3, 4, 5, 6, 7];
-    assert_eq!(sample_bytes(&file, 2, 3), Some(&file[2..5]));
-    // Ending exactly on the last byte is still inside.
-    assert_eq!(sample_bytes(&file, 5, 3), Some(&file[5..8]));
-}
 
-#[test]
-fn a_sample_running_past_the_buffer_is_refused() {
-    let file = [0u8, 1, 2, 3];
-    assert_eq!(sample_bytes(&file, 2, 9), None);
-    assert_eq!(sample_bytes(&file, 4, 1), None);
-}
-
-/// A hostile table can name an offset no machine could address: the end it adds up to
-/// overflows, and is refused rather than panicking.
-#[test]
-fn an_offset_that_overflows_is_refused_without_panicking() {
-    let file = [0u8, 1, 2, 3];
-    assert_eq!(sample_bytes(&file, u64::MAX, 1), None);
-    assert_eq!(sample_bytes(&file, u64::MAX - 1, 4), None);
-}
-
-/// A zero-length sample carries no NAL. Returning an empty slice would hand the decoder
-/// nothing and read as a decode failure further down.
-#[test]
-fn a_zero_length_sample_is_refused() {
-    let file = [0u8, 1, 2, 3];
-    assert_eq!(sample_bytes(&file, 1, 0), None);
+    for (offset, size, expected) in [
+        (2, 3, Some(2usize..5)),
+        // Ending exactly on the last byte is still inside.
+        (5, 3, Some(5..8)),
+        (6, 9, None),
+        (8, 1, None),
+        (u64::MAX, 1, None),
+        (u64::MAX - 1, 4, None),
+        (1, 0, None),
+    ] {
+        assert_eq!(
+            sample_bytes(&file, offset, size),
+            expected.map(|range| &file[range]),
+            "{offset}+{size}"
+        );
+    }
 }
 
 use shiguredo_mp4::bitstream::h264::LengthSize;
@@ -110,65 +103,57 @@ fn avcc(length_size_minus_one: u8, sps: Vec<Vec<u8>>, pps: Vec<Vec<u8>>) -> Avcc
 }
 
 /// `parameter_sets` itself must refuse the reserved length-prefix width, not just the crate
-/// function it calls: an `unwrap_or(FourBytes)` regression here would otherwise pass silently.
+/// function it calls (an `unwrap_or(FourBytes)` regression would pass silently), and the narrower
+/// widths must come through too: four bytes is also what a reader falls back on.
 #[test]
-fn parameter_sets_refuses_a_reserved_length_prefix_width() {
-    let avcc_box = avcc(2, vec![vec![0x67]], vec![vec![0x68]]);
-    assert!(parameter_sets(&avcc_box).is_err());
-}
-
-#[test]
-fn parameter_sets_carries_the_length_size_and_parameter_sets_through() {
-    let avcc_box = avcc(
-        3,
-        vec![vec![0x67, 0x42, 0x00, 0x1E]],
-        vec![vec![0x68, 0xCE, 0x3C, 0x80]],
-    );
-    let sets = parameter_sets(&avcc_box).unwrap();
-    assert!(matches!(sets.length_size, LengthSize::FourBytes));
-    assert_eq!(sets.sps, vec![vec![0x67, 0x42, 0x00, 0x1E]]);
-    assert_eq!(sets.pps, vec![vec![0x68, 0xCE, 0x3C, 0x80]]);
-
-    // Four bytes is also what a reader falls back on: the narrower widths must come through too.
-    for (minus_one, width) in [(0, LengthSize::OneByte), (1, LengthSize::TwoBytes)] {
-        let sets = parameter_sets(&avcc(minus_one, vec![vec![0x67]], vec![vec![0x68]])).unwrap();
+fn parameter_sets_refuses_the_reserved_width_and_carries_the_legal_ones_through() {
+    let sps = vec![vec![0x67, 0x42, 0x00, 0x1E]];
+    let pps = vec![vec![0x68, 0xCE, 0x3C, 0x80]];
+    for (minus_one, expected) in [
+        (2, None),
+        (3, Some(LengthSize::FourBytes)),
+        (0, Some(LengthSize::OneByte)),
+        (1, Some(LengthSize::TwoBytes)),
+    ] {
+        let sets = parameter_sets(&avcc(minus_one, sps.clone(), pps.clone()));
+        let Some(width) = expected else {
+            assert!(sets.is_err(), "length_size_minus_one {minus_one}");
+            continue;
+        };
+        let sets = sets.unwrap();
         assert_eq!(sets.length_size, width, "length_size_minus_one {minus_one}");
+        assert_eq!(sets.sps, sps);
+        assert_eq!(sets.pps, pps);
     }
 }
 
+/// A label-boundary match, never a substring (both lookalikes are registrable). The host comes
+/// from the parsed url, plaintext is refused outright, and the static `images/` covers never pass.
 #[test]
-fn a_cover_url_on_the_artwork_host_is_accepted() {
-    assert!(is_cover_url(
-        "https://resources.tidal.com/videos/a/b/c/1280x1280.mp4"
-    ));
-}
-
-/// A label-boundary match, never a substring: both of these are registrable.
-#[test]
-fn lookalike_artwork_hosts_are_refused() {
-    assert!(!is_cover_url(
-        "https://resources.tidal.com.evil.example/videos/a.mp4"
-    ));
-    assert!(!is_cover_url(
-        "https://evil-resources.tidal.com/videos/a.mp4"
-    ));
-}
-
-/// The host comes from the parsed url, and plaintext is refused outright.
-#[test]
-fn a_userinfo_prefix_does_not_impersonate_the_artwork_host() {
-    assert!(!is_cover_url(
-        "https://resources.tidal.com@evil.example/videos/a.mp4"
-    ));
-    assert!(!is_cover_url("http://resources.tidal.com/videos/a.mp4"));
-    assert!(!is_cover_url("not a url"));
-}
-
-#[test]
-fn a_still_image_url_is_not_a_cover_video() {
-    assert!(!is_cover_url(
-        "https://resources.tidal.com/images/a/b/c/1280x1280.jpg"
-    ));
+fn only_an_https_video_url_on_the_artwork_host_is_a_cover_url() {
+    for (url, expected) in [
+        (
+            "https://resources.tidal.com/videos/a/b/c/1280x1280.mp4",
+            true,
+        ),
+        (
+            "https://resources.tidal.com.evil.example/videos/a.mp4",
+            false,
+        ),
+        ("https://evil-resources.tidal.com/videos/a.mp4", false),
+        (
+            "https://resources.tidal.com@evil.example/videos/a.mp4",
+            false,
+        ),
+        ("http://resources.tidal.com/videos/a.mp4", false),
+        ("not a url", false),
+        (
+            "https://resources.tidal.com/images/a/b/c/1280x1280.jpg",
+            false,
+        ),
+    ] {
+        assert_eq!(is_cover_url(url), expected, "{url}");
+    }
 }
 
 /// Not a decode test: decoding needs Cisco's library, which is downloaded at runtime and is
@@ -187,22 +172,23 @@ fn a_file_that_is_not_an_mp4_is_refused_before_a_decoder_is_needed() {
     assert!(demux_cover_samples(&truncated).is_err());
 }
 
+/// A decode timestamp that does not fit a signed value, or sits at the signed boundary beside a
+/// positive composition offset, is refused rather than overflowing an unchecked addition, which
+/// panics in a debug build.
 #[test]
-fn a_timestamp_that_does_not_fit_a_signed_value_is_refused() {
-    assert!(presentation_time(u64::MAX, None).is_err());
-}
-
-/// A decode timestamp near the signed boundary plus a positive composition offset must be
-/// refused rather than overflow an unchecked addition, which panics in a debug build.
-#[test]
-fn a_presentation_time_that_overflows_is_refused() {
-    assert!(presentation_time(i64::MAX as u64, Some(1)).is_err());
-}
-
-#[test]
-fn an_ordinary_presentation_time_is_computed() {
-    assert_eq!(presentation_time(1_000, Some(200)).unwrap(), 1_200);
-    assert_eq!(presentation_time(1_000, None).unwrap(), 1_000);
+fn a_presentation_time_is_computed_or_refused_never_wrapped() {
+    for (timestamp, offset, expected) in [
+        (u64::MAX, None, None),
+        (i64::MAX as u64, Some(1), None),
+        (1_000, Some(200), Some(1_200)),
+        (1_000, None, Some(1_000)),
+    ] {
+        assert_eq!(
+            presentation_time(timestamp, offset).ok(),
+            expected,
+            "{timestamp} + {offset:?}"
+        );
+    }
 }
 
 /// Driven on `SampleBudget` directly: an MP4 under `MAX_COVER_SAMPLES` bytes meets the byte
@@ -265,19 +251,22 @@ fn decoded_frame(width: usize, height: usize) -> CoverFrame {
     }
 }
 
-#[test]
-fn a_frame_that_changes_resolution_mid_stream_is_refused() {
-    let frames = vec![decoded_frame(640, 640)];
-
-    assert!(refuse_resolution_change(&frames, 640, 640).is_ok());
-    assert!(refuse_resolution_change(&frames, 640, 480).is_err());
-    assert!(refuse_resolution_change(&frames, 320, 640).is_err());
-}
-
 /// The first frame is what the header will state; it has nothing to disagree with.
 #[test]
-fn the_first_frame_sets_the_size_rather_than_being_checked() {
-    assert!(refuse_resolution_change(&[], 640, 640).is_ok());
+fn a_frame_that_changes_resolution_mid_stream_is_refused() {
+    for (frames, width, height, accepted) in [
+        (vec![decoded_frame(640, 640)], 640, 640, true),
+        (vec![decoded_frame(640, 640)], 640, 480, false),
+        (vec![decoded_frame(640, 640)], 320, 640, false),
+        (Vec::new(), 640, 640, true),
+    ] {
+        assert_eq!(
+            refuse_resolution_change(&frames, width, height).is_ok(),
+            accepted,
+            "{width}x{height} after {} frames",
+            frames.len()
+        );
+    }
 }
 
 /// The five sizes TIDAL publishes for an album cover are 80, 160, 320, 640 and 1280 on a side,

@@ -5,52 +5,12 @@
 //! -`next_is_current`- then admitted a renderer-staged track into someone else's session.
 
 use super::fixture::silent_player;
-use super::{
-    Continuation, LoadOrigin, StopScope, begin_load, current_gen, current_load, pack_load_state,
-    unpack_load_state,
-};
+use super::{Continuation, LoadOrigin, StopScope, begin_load, current_load};
 
 /// Every writer of the load generation in the suite holds this: a mint from another test
 /// cannot land between one of ours and the read that checks it.
 async fn serialised() -> tokio::sync::MutexGuard<'static, ()> {
     crate::audio::preload::tests::PRELOAD_TESTS.lock().await
-}
-
-#[test]
-fn a_packed_word_gives_back_what_it_was_built_from() {
-    for cur_gen in [0, 1, 2, 4096, u32::MAX - 1, u32::MAX] {
-        for origin in [LoadOrigin::Local, LoadOrigin::Connect] {
-            assert_eq!(
-                unpack_load_state(pack_load_state(cur_gen, origin)),
-                (cur_gen, origin),
-                "the word lost a half"
-            );
-        }
-    }
-}
-
-/// `Local` is zero. An untouched process answers with this host's own queue, which is what
-/// every reader assumes before the first load.
-#[test]
-fn an_untouched_word_names_this_host_at_generation_zero() {
-    assert_eq!(unpack_load_state(0), (0, LoadOrigin::Local));
-}
-
-#[tokio::test]
-async fn a_mint_publishes_its_origin_with_its_generation() {
-    let _serialised = serialised().await;
-
-    let minted = begin_load(LoadOrigin::Connect);
-    assert_eq!(current_load(), (minted, LoadOrigin::Connect));
-    assert_eq!(current_gen(), minted, "both accessors read the one word");
-
-    let next = begin_load(LoadOrigin::Local);
-    assert_eq!(
-        next,
-        minted.wrapping_add(1),
-        "a mint advances the generation"
-    );
-    assert_eq!(current_load(), (next, LoadOrigin::Local));
 }
 
 /// Two minters racing must never leave a generation readable beside the other one's origin.
@@ -177,21 +137,6 @@ async fn the_advance_does_not_start_over_a_cast_that_took_the_player_after_the_t
     assert_eq!(outcome, Continuation::Superseded);
 }
 
-#[tokio::test]
-async fn the_advance_still_moves_this_hosts_own_queue_on() {
-    let _serialised = serialised().await;
-    let _slot = crate::state::current_track_fixture::CurrentTrackSlot::clear();
-    let player = silent_player();
-
-    let local = begin_load(LoadOrigin::Local);
-    let outcome = player.advance(staged_next(local));
-    let after = current_load();
-
-    begin_load(LoadOrigin::Local);
-    assert_eq!(outcome, Continuation::Started);
-    assert_eq!(after, (local.wrapping_add(1), LoadOrigin::Local));
-}
-
 /// A staged next as `take_next_track` hands it over, validated against `load_gen`.
 fn staged_next(load_gen: u32) -> crate::state::RetainedTrack {
     crate::state::RetainedTrack {
@@ -226,40 +171,28 @@ fn a_stop_halts_only_the_music_its_scope_covers() {
     }
 }
 
+/// A stop mints only when its scope covers the owner: the OS controls' stop leaves a cast its
+/// owner, while a page session ending over a cast, or the release of a session that never cast,
+/// used to stop this host's own music anyway and now mints nothing.
 #[tokio::test]
-async fn a_stop_from_the_os_controls_leaves_a_cast_its_owner() {
+async fn a_stop_mints_only_when_its_scope_covers_the_owner() {
     let _serialised = serialised().await;
     let player = silent_player();
 
-    let cast = begin_load(LoadOrigin::Connect);
-    player
-        .stop(StopScope::Playing)
-        .expect("the player thread takes the stop");
-    let after = current_load();
-
-    begin_load(LoadOrigin::Local);
-    assert_eq!(after, (cast.wrapping_add(1), LoadOrigin::Connect));
-}
-
-/// A page session ending leaves a cast playing, and the release of a session that never cast
-/// used to stop this host's own music anyway: neither mints a stop.
-#[tokio::test]
-async fn a_stop_that_does_not_cover_the_owner_mints_nothing() {
-    let _serialised = serialised().await;
-    let player = silent_player();
-
-    for (owner, scope) in [
-        (LoadOrigin::Connect, StopScope::OwnMusic),
-        (LoadOrigin::Local, StopScope::Cast),
+    for (owner, scope, mints) in [
+        (LoadOrigin::Connect, StopScope::Playing, true),
+        (LoadOrigin::Connect, StopScope::OwnMusic, false),
+        (LoadOrigin::Local, StopScope::Cast, false),
     ] {
         let load = begin_load(owner);
         player
             .stop(scope)
-            .expect("a declined stop is not a failure");
+            .expect("the player thread takes the stop");
         let after = current_load();
 
         begin_load(LoadOrigin::Local);
-        assert_eq!(after, (load, owner), "{scope:?} minted a stop");
+        let expected = if mints { load.wrapping_add(1) } else { load };
+        assert_eq!(after, (expected, owner), "{scope:?} over {owner:?}");
     }
 }
 

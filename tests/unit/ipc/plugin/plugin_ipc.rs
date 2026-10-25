@@ -2,29 +2,29 @@
 
 use super::{CleanupScope, bump_capped, cleanup_scope_for_uninstall, manifest_absent};
 
+/// The plugin-driven byte cap holds exactly at the boundary and cannot be wrapped past:
+/// `usize::MAX + 2` would read as 1, well under the cap, if the sum did not saturate.
 #[test]
-fn bump_capped_accumulates_under_cap() {
-    assert_eq!(bump_capped(0, 100, 1000).unwrap(), 100);
-    assert_eq!(bump_capped(100, 50, 1000).unwrap(), 150);
-}
-
-#[test]
-fn bump_capped_allows_exactly_at_cap() {
-    assert_eq!(bump_capped(60, 4, 64).unwrap(), 64);
-}
-
-#[test]
-fn bump_capped_rejects_over_cap() {
-    let err = bump_capped(60, 5, 64).unwrap_err();
-    assert!(err.to_string().contains("cap"), "got: {err}");
-}
-
-#[test]
-fn bump_capped_saturates_instead_of_wrapping() {
-    // A running total at the top of the range must not wrap into a pass: wrapped,
-    // this sum would read as 1, well under the cap.
-    let err = bump_capped(usize::MAX, 2, 1024).unwrap_err();
-    assert!(err.to_string().contains("cap"), "got: {err}");
+fn bump_capped_stops_at_the_cap_and_never_wraps() {
+    for (running, add, max, expected) in [
+        (0, 100, 1000, Some(100)),
+        (100, 50, 1000, Some(150)),
+        (60, 4, 64, Some(64)),
+        (60, 5, 64, None),
+        (usize::MAX, 2, 1024, None),
+    ] {
+        let outcome = bump_capped(running, add, max);
+        match expected {
+            Some(total) => assert_eq!(outcome.unwrap(), total, "{running} + {add} under {max}"),
+            None => {
+                let err = outcome.unwrap_err();
+                assert!(
+                    err.to_string().contains("cap"),
+                    "{running} + {add} under {max}: got {err}"
+                );
+            }
+        }
+    }
 }
 
 /// An url the database does not know yields no canonical name. Read as the `uninstall_all` sentinel,

@@ -12,21 +12,20 @@ fn sign(seed: [u8; 32], msg: &[u8]) -> ([u8; 32], String) {
 }
 
 #[test]
-fn accepts_a_valid_signature() {
-    let (key, sig_b64) = sign([7u8; 32], b"manifest");
-    assert!(verify_with_key(&key, b"manifest", &sig_b64).is_ok());
-}
-
-#[test]
-fn rejects_a_tampered_manifest() {
-    let (key, sig_b64) = sign([7u8; 32], b"manifest");
-    assert!(verify_with_key(&key, b"manifest-TAMPERED", &sig_b64).is_err());
-}
-
-#[test]
-fn rejects_a_wrong_or_malformed_signature() {
-    let (key, _) = sign([7u8; 32], b"manifest");
+fn only_the_manifest_signed_by_the_key_verifies() {
+    let (key, signature) = sign([7u8; 32], b"manifest");
     let (_other, wrong) = sign([9u8; 32], b"manifest");
-    assert!(verify_with_key(&key, b"manifest", &wrong).is_err());
-    assert!(verify_with_key(&key, b"manifest", "!!notb64!!").is_err());
+    let cases: [(&str, &[u8], &str, bool); 4] = [
+        ("valid", b"manifest", &signature, true),
+        ("tampered manifest", b"manifest-TAMPERED", &signature, false),
+        ("signed by another key", b"manifest", &wrong, false),
+        ("malformed base64", b"manifest", "!!notb64!!", false),
+    ];
+    for (what, manifest, sig_b64, valid) in cases {
+        assert_eq!(
+            verify_with_key(&key, manifest, sig_b64).is_ok(),
+            valid,
+            "{what}"
+        );
+    }
 }

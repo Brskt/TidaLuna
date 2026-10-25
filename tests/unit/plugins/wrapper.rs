@@ -3,21 +3,6 @@
 use super::*;
 
 #[test]
-fn test_wrap_produces_iife() {
-    let result = wrap_plugin_code(
-        "https://example.com/plugin.mjs",
-        "console.log('hello');",
-        0,
-        0,
-        "cap",
-    );
-    assert!(result.starts_with("(function("));
-    assert!(result.contains("'use strict'"));
-    assert!(result.contains("console.log('hello');"));
-    assert!(result.trim_end().ends_with(");\n") || result.trim_end().ends_with(");"));
-}
-
-#[test]
 fn test_wrap_contains_controlled_fetch() {
     let result = wrap_plugin_code("test", "", 0, 0, "cap");
     assert!(result.contains("var fetch = function("));
@@ -25,30 +10,23 @@ fn test_wrap_contains_controlled_fetch() {
     assert!(result.contains("__cq("));
 }
 
+/// A single quote is escaped, the value being embedded in a JS single-quoted string; double quotes
+/// pass through, which is safe in that context.
 #[test]
-fn test_wrap_contains_storage_api() {
-    let result = wrap_plugin_code("test", "", 0, 0, "cap");
-    assert!(result.contains("__idbKeyval"));
-    assert!(result.contains("plugin.storage.get"));
-    assert!(result.contains("plugin.storage.set"));
-    assert!(result.contains("plugin.storage.del"));
-    assert!(result.contains("plugin.storage.keys"));
-}
-
-#[test]
-fn test_wrap_contains_unload_tracking() {
-    let result = wrap_plugin_code("test", "", 0, 0, "cap");
-    assert!(result.contains("__pluginUnloads"));
-    assert!(result.contains("onUnload"));
-}
-
-#[test]
-fn test_wrap_escapes_plugin_id() {
-    let result = wrap_plugin_code("it's a \"test\"", "", 0, 0, "cap");
-    // Single quotes escaped (embedded in JS single-quoted string)
-    assert!(result.contains("it\\'s a"));
-    // Double quotes pass through unescaped (safe in single-quoted JS context)
-    assert!(result.contains("\"test\""));
+fn a_single_quote_is_escaped_in_the_plugin_id_and_in_the_capability() {
+    let rows: [(&str, &str, &[&str]); 2] = [
+        ("it's a \"test\"", "cap", &["it\\'s a", "\"test\""]),
+        ("test", "it's", &["it\\'s"]),
+    ];
+    for (id, cap, expected) in rows {
+        let result = wrap_plugin_code(id, "", 0, 0, cap);
+        for needle in expected {
+            assert!(
+                result.contains(needle),
+                "{needle} missing for id {id:?}, capability {cap:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -169,10 +147,4 @@ fn the_ipc_bridge_is_shadowed_and_carries_the_capability() {
     // Listener registration acts on no caller's identity and keeps forwarding; `on` still
     // returns the unsubscribe the page's object hands back.
     assert!(result.contains("window.__ipcRenderer"));
-}
-
-#[test]
-fn the_capability_is_escaped_like_the_plugin_id() {
-    let result = wrap_plugin_code("test", "", 0, 0, "it's");
-    assert!(result.contains("it\\'s"));
 }

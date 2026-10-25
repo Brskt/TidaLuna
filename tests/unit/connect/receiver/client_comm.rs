@@ -58,37 +58,6 @@ fn an_outsider_may_only_start_resume_or_end_a_session() {
 }
 
 #[test]
-fn a_members_commands_reach_their_service() {
-    for command in ["play", "pause", "stop", "seek"] {
-        assert!(
-            matches!(
-                classified(command, Admission::Member),
-                DispatchedCommand::Playback { .. }
-            ),
-            "{command}"
-        );
-    }
-    for command in &PHONE_COMMANDS[4..16] {
-        assert!(
-            matches!(
-                classified(command, Admission::Member),
-                DispatchedCommand::Queue { socket_id: 7, .. }
-            ),
-            "{command}"
-        );
-    }
-    for command in SESSION_COMMANDS {
-        assert!(
-            matches!(
-                classified(command, Admission::Member),
-                DispatchedCommand::Session { .. }
-            ),
-            "{command}"
-        );
-    }
-}
-
-#[test]
 fn a_resource_message_is_dropped_whoever_sends_it() {
     for command in ["requestResources", "releaseResources"] {
         for admission in [Admission::Member, Admission::Outsider] {

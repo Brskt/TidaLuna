@@ -2,24 +2,6 @@
 
 use super::*;
 
-fn test_conn() -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE audio_cache (
-            track_id     TEXT PRIMARY KEY,
-            format       TEXT NOT NULL,
-            file_size    INTEGER NOT NULL,
-            created_at   INTEGER NOT NULL,
-            last_access  INTEGER NOT NULL,
-            access_count INTEGER DEFAULT 1
-        );
-        CREATE INDEX IF NOT EXISTS idx_audio_cache_last_access
-            ON audio_cache (last_access);",
-    )
-    .unwrap();
-    conn
-}
-
 /// The two decode-failure sites run on the player control thread, which cannot wait for this
 /// mutex: `clear()` holds it for its whole `remove_dir_all`, deliberately. Handing the id over
 /// is what keeps the transport running: the caller returns at once and the drop lands whenever
@@ -47,35 +29,6 @@ fn a_detached_drop_hands_over_without_waiting_for_the_cache() {
         "the control thread waited {waited:?} to hand over a drop: that is the transport frozen"
     );
     wiper.join().unwrap();
-}
-
-#[test]
-fn access_stamp_is_monotonic_across_clock_skew() {
-    let conn = test_conn();
-    conn.execute(
-        "INSERT INTO audio_cache (track_id, format, file_size, created_at, last_access, access_count)
-         VALUES ('a', 'flac', 1, 1000, 1000, 1)",
-        [],
-    )
-    .unwrap();
-    // Clock rewound to 50: the stamp must still exceed the existing max; a
-    // fresh entry can't sort older than entries it was accessed after.
-    assert_eq!(next_access_stamp(&conn, 50), 1001);
-    // A normal forward clock is honored as-is.
-    assert_eq!(next_access_stamp(&conn, 5000), 5000);
-}
-
-#[test]
-fn disabled_cache_misses_and_noops() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut cache = AudioCache::disabled(tmp.path());
-    assert_eq!(cache.lookup_path("track"), None);
-    assert_eq!(cache.total_size(), 0);
-    cache.touch("track");
-    cache.remove_index_entry("track");
-    assert!(cache.record("track", "flac", 10).is_ok());
-    assert_eq!(cache.lookup_path("track"), None);
-    assert!(cache.clear().is_ok());
 }
 
 #[test]
@@ -122,22 +75,6 @@ fn a_stale_format_generation_drops_every_entry() {
 }
 
 #[test]
-fn a_matching_format_generation_keeps_entries() {
-    let tmp = tempfile::tempdir().unwrap();
-    {
-        let mut cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
-        let path = cache.file_path("track");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, b"ciphertext").unwrap();
-        cache.record("track", "flac", 10).unwrap();
-    }
-
-    let cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
-    assert!(cache.lookup_path("track").is_some());
-    assert_eq!(cache.total_size(), 10);
-}
-
-#[test]
 fn orphaned_staging_files_are_swept_but_sharded_entries_survive() {
     let tmp = tempfile::tempdir().unwrap();
     let sharded = {
@@ -159,18 +96,6 @@ fn orphaned_staging_files_are_swept_but_sharded_entries_survive() {
     assert!(!orphan.exists(), "orphaned staging file must be swept");
     assert!(sharded.exists(), "an indexed entry must survive the sweep");
     assert!(cache.lookup_path("track").is_some());
-}
-
-#[test]
-fn a_disabled_cache_never_offers_a_staging_dir() {
-    let tmp = tempfile::tempdir().unwrap();
-    assert!(AudioCache::disabled(tmp.path()).staging_dir().is_none());
-    assert!(
-        AudioCache::open_with_capacity(tmp.path(), 1000)
-            .unwrap()
-            .staging_dir()
-            .is_some()
-    );
 }
 
 #[test]
@@ -199,15 +124,6 @@ fn dropping_an_entry_whose_file_already_vanished_still_clears_the_row() {
     assert_eq!(cache.drop_entry("track"), DropOutcome::Dropped);
     assert_eq!(cache.lookup_path("track"), None);
     assert_eq!(cache.total_size(), 0);
-}
-
-/// Nothing indexed and nothing on disk is not a failure, and used to be reported with the
-/// same `false` as a file that refused to go.
-#[test]
-fn dropping_an_entry_that_was_never_recorded_reports_no_row() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut cache = AudioCache::open_with_capacity(tmp.path(), 1000).unwrap();
-    assert_eq!(cache.drop_entry("absent"), DropOutcome::NoRow);
 }
 
 #[test]

@@ -174,22 +174,52 @@ async fn a_refused_connection_publishes_no_credential() {
     assert_no_credential(&error);
 }
 
+/// What a DASH fetch meets: port 1 refuses the connection, the others answer whole or cut short.
+#[derive(Clone, Copy)]
+enum Server {
+    Refusing,
+    Complete,
+    Truncated,
+}
+
+async fn port(server: Server) -> u16 {
+    match server {
+        Server::Refusing => 1,
+        Server::Complete => complete_response_port().await,
+        Server::Truncated => truncated_response_port().await,
+    }
+}
+
+/// A DASH load's failure text never carries the signed url, whichever fetch fails: a refused
+/// connection or a truncated body, on the init or on its one segment (also the safe count, since
+/// `buffered` returns on the first error without draining the rest). The credential rides the
+/// failing side only.
 #[tokio::test]
-async fn a_refused_dash_init_publishes_no_credential() {
-    let _serialised = serialised().await;
-    let (player, events) = spying_player();
+async fn a_failed_dash_load_publishes_no_credential_on_any_arm() {
+    const SIGNED: &str = "?token=SECRET&exp=1";
+    for ((init_server, init_query), (segment_server, segment_query)) in [
+        ((Server::Refusing, SIGNED), (Server::Refusing, "")),
+        ((Server::Truncated, SIGNED), (Server::Refusing, "")),
+        ((Server::Complete, ""), (Server::Refusing, SIGNED)),
+        ((Server::Complete, ""), (Server::Truncated, SIGNED)),
+    ] {
+        let _serialised = serialised().await;
+        let (player, events) = spying_player();
+        let init = port(init_server).await;
+        let segment = port(segment_server).await;
 
-    // The segment list is never fetched on this arm, but it cannot be empty: `SegmentUrls` does
-    // not build from an empty one.
-    player.load_dash(
-        "http://127.0.0.1:1/init.mp4?token=SECRET&exp=1".to_string(),
-        one_segment("http://127.0.0.1:1/seg-0.m4s".to_string()),
-        "flac".to_string(),
-        None,
-        LoadOrigin::Local,
-    );
+        player.load_dash(
+            format!("http://127.0.0.1:{init}/init.mp4{init_query}"),
+            one_segment(format!(
+                "http://127.0.0.1:{segment}/seg-0.m4s{segment_query}"
+            )),
+            "flac".to_string(),
+            None,
+            LoadOrigin::Local,
+        );
 
-    assert_no_credential(&settled_error(&events).await);
+        assert_no_credential(&settled_error(&events).await);
+    }
 }
 
 /// The Connect receiver tells its own load's events from a previous load's by the seq the load
@@ -218,62 +248,6 @@ async fn a_failed_load_names_the_seq_the_load_answered() {
             _ => None,
         });
     assert_eq!(failure_seq, Some(seq), "the failure named another load");
-}
-
-#[tokio::test]
-async fn a_truncated_dash_init_publishes_no_credential() {
-    let _serialised = serialised().await;
-    let (player, events) = spying_player();
-    let init = truncated_response_port().await;
-
-    player.load_dash(
-        format!("http://127.0.0.1:{init}/init.mp4?token=SECRET&exp=1"),
-        one_segment("http://127.0.0.1:1/seg-0.m4s".to_string()),
-        "flac".to_string(),
-        None,
-        LoadOrigin::Local,
-    );
-
-    assert_no_credential(&settled_error(&events).await);
-}
-
-#[tokio::test]
-async fn a_refused_dash_segment_publishes_no_credential() {
-    let _serialised = serialised().await;
-    let (player, events) = spying_player();
-    let init = complete_response_port().await;
-
-    // One segment is enough, and it is also the safe count: `buffered` holds up to six futures
-    // at once, and the loop returns on the first error without draining the rest.
-    player.load_dash(
-        format!("http://127.0.0.1:{init}/init.mp4"),
-        one_segment("http://127.0.0.1:1/seg-0.m4s?token=SECRET&exp=1".to_string()),
-        "flac".to_string(),
-        None,
-        LoadOrigin::Local,
-    );
-
-    assert_no_credential(&settled_error(&events).await);
-}
-
-#[tokio::test]
-async fn a_truncated_dash_segment_publishes_no_credential() {
-    let _serialised = serialised().await;
-    let (player, events) = spying_player();
-    let init = complete_response_port().await;
-    let segment = truncated_response_port().await;
-
-    player.load_dash(
-        format!("http://127.0.0.1:{init}/init.mp4"),
-        one_segment(format!(
-            "http://127.0.0.1:{segment}/seg-0.m4s?token=SECRET&exp=1"
-        )),
-        "flac".to_string(),
-        None,
-        LoadOrigin::Local,
-    );
-
-    assert_no_credential(&settled_error(&events).await);
 }
 
 /// Binds a listener that answers one request with a 429 and closes.

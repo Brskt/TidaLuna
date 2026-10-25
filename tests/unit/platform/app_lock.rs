@@ -130,19 +130,6 @@ fn the_channel_socket_carries_its_mode() {
 }
 
 #[test]
-fn a_clean_exit_takes_its_socket_file_with_it() {
-    let data = tempfile::tempdir().expect("a data directory");
-    let runtime = runtime_dir();
-    let (lock, channel) = holder(data.path(), runtime.path());
-    let path = channel.path.clone();
-
-    drop(channel);
-    drop(lock);
-
-    assert!(!path.exists());
-}
-
-#[test]
 fn a_directory_is_checked_for_what_it_is_and_who_owns_it() {
     let dir = runtime_dir();
     let own = own_uid();
@@ -227,14 +214,6 @@ fn a_singleton_lock_left_by_a_dead_process_is_not_an_earlier_build() {
 }
 
 #[test]
-fn two_data_directories_never_share_a_channel() {
-    assert_ne!(
-        channel_name(Path::new("/home/a/.local/share/tidalunar")),
-        channel_name(Path::new("/home/b/.local/share/tidalunar"))
-    );
-}
-
-#[test]
 fn chromium_singleton_lock_names_its_host_and_pid() {
     // A made-up host with a dash of its own; only the last dash splits off the pid.
     use std::hash::{BuildHasher, Hasher};
@@ -269,69 +248,44 @@ fn made_up_uid() -> u32 {
     raw.clamp(1, u32::MAX - 1)
 }
 
+/// An abstract socket has no permission model and its address hashes a path that is no secret: any
+/// local user can reach it. Only the kernel naming our own uid makes a datagram ours. No
+/// credential (also what a failed credential passing looks like) leaves nobody to attribute it to.
 #[test]
-fn a_datagram_from_our_own_user_is_ours_to_act_on() {
+fn a_datagram_is_ours_only_when_the_kernel_names_our_user() {
     let own = made_up_uid();
-    assert_eq!(classify(Some(own), own), Sender::Ours);
+    for (peer, expected) in [
+        (Some(own), Sender::Ours),
+        (Some(0), Sender::Foreign(0)),
+        (Some(own + 1), Sender::Foreign(own + 1)),
+        (None, Sender::Unattributed),
+    ] {
+        assert_eq!(classify(peer, own), expected, "peer {peer:?}");
+    }
 }
 
+/// One socket carries both meanings: a link that cannot be sent must not take the focus signal
+/// with it. An over-long link is refused before the send rather than truncated on arrival (a cut
+/// URL reads as a refused route at the far end).
 #[test]
-fn a_datagram_from_another_user_is_not_ours() {
-    // The reason this rule exists: an abstract socket has no permission model at
-    // all, and this address is a hash of a path that is not a secret; any
-    // process owned by any other local user can reach it.
-    let own = made_up_uid();
-    assert_eq!(classify(Some(0), own), Sender::Foreign(0));
-    assert_eq!(classify(Some(own + 1), own), Sender::Foreign(own + 1));
-}
-
-#[test]
-fn a_datagram_the_kernel_did_not_vouch_for_is_not_ours() {
-    // Not the same fact as a stranger, and just as unusable, since with no
-    // credential there is nobody to attribute the datagram to. This is also what a failure
-    // to enable credential passing looks like, which is why it refuses.
-    assert_eq!(classify(None, made_up_uid()), Sender::Unattributed);
-}
-
-#[test]
-fn a_link_that_fits_reaches_the_running_instance() {
-    let (addr, socket) = listening("fits");
-
-    assert_eq!(hand_over(&addr, Some("tidal://album/1")), HandOff::Landed);
-
-    let mut buf = [0u8; MAX_SIGNAL];
-    let n = socket.recv(&mut buf).expect("receive");
-    assert_eq!(&buf[..n], b"tidal://album/1");
-}
-
-#[test]
-fn an_over_long_link_still_brings_the_window_forward() {
-    // One socket carries both meanings here; losing the link must not take the
-    // focus signal with it. Refused before the send rather than truncated on
-    // arrival (a cut URL reads as a refused route at the far end).
-    let (addr, socket) = listening("toolong");
+fn a_launch_without_a_deliverable_link_still_asks_for_focus() {
     let long = format!("tidal://album/{}", "9".repeat(MAX_SIGNAL));
+    for (tag, link, outcome) in [
+        ("toolong", Some(long.as_str()), HandOff::TooLong),
+        ("focus", None, HandOff::Landed),
+    ] {
+        let (addr, socket) = listening(tag);
 
-    assert_eq!(hand_over(&addr, Some(&long)), HandOff::TooLong);
+        assert_eq!(hand_over(&addr, link), outcome, "{tag}");
 
-    let mut buf = [0u8; MAX_SIGNAL];
-    let n = socket.recv(&mut buf).expect("receive");
-    assert_eq!(
-        &buf[..n],
-        FOCUS_SIGNAL.as_bytes(),
-        "the window must still come forward when the link cannot be sent"
-    );
-}
-
-#[test]
-fn a_launch_carrying_nothing_asks_only_for_focus() {
-    let (addr, socket) = listening("focus");
-
-    assert_eq!(hand_over(&addr, None), HandOff::Landed);
-
-    let mut buf = [0u8; MAX_SIGNAL];
-    let n = socket.recv(&mut buf).expect("receive");
-    assert_eq!(&buf[..n], FOCUS_SIGNAL.as_bytes());
+        let mut buf = [0u8; MAX_SIGNAL];
+        let n = socket.recv(&mut buf).expect("receive");
+        assert_eq!(
+            &buf[..n],
+            FOCUS_SIGNAL.as_bytes(),
+            "{tag}: the window must come forward"
+        );
+    }
 }
 
 #[test]

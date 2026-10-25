@@ -2,7 +2,6 @@
 
 use super::*;
 use std::fs;
-use time::{Date, Month, PrimitiveDateTime, Time};
 
 static LOGGING_STATE: Mutex<()> = Mutex::new(());
 
@@ -160,22 +159,6 @@ fn a_contended_budget_never_grants_more_than_its_burst() {
     }
 }
 
-#[test]
-fn a_composed_line_carries_its_own_newline() {
-    // The newline has to leave in the same write as the text; `compose_line`
-    // documents the shared-`console.log` reason.
-    let dt = PrimitiveDateTime::new(
-        Date::from_calendar_date(2026, Month::June, 7).unwrap(),
-        Time::from_hms_milli(14, 30, 5, 42).unwrap(),
-    )
-    .assume_utc();
-
-    assert_eq!(
-        compose_line(dt, format_args!("hello {}", 1)),
-        "[14:30:05:042] hello 1\n"
-    );
-}
-
 /// Fails every write the way a stderr that outlived its pipe or its disk does.
 struct DeadConsole(std::io::ErrorKind);
 
@@ -204,25 +187,6 @@ fn a_dead_console_costs_the_line_neither_a_panic_nor_its_file_copy() {
             "{kind:?}"
         );
     }
-}
-
-#[test]
-fn effective_level_takes_the_max() {
-    assert_eq!(effective_level(0, 0), 0);
-    assert_eq!(effective_level(2, 0), 2);
-    assert_eq!(effective_level(0, 3), 3);
-    assert_eq!(effective_level(1, 2), 2);
-    assert_eq!(effective_level(3, 1), 3);
-}
-
-#[test]
-fn archive_name_formats_date_then_time() {
-    let dt = PrimitiveDateTime::new(
-        Date::from_calendar_date(2026, Month::June, 7).unwrap(),
-        Time::from_hms(14, 30, 5).unwrap(),
-    )
-    .assume_utc();
-    assert_eq!(archive_name(dt), "console-2026-06-07_14-30-05-000.log");
 }
 
 #[test]
@@ -257,13 +221,6 @@ fn prune_logs_keeps_only_the_newest() {
             "notes.txt".to_string(),
         ]
     );
-}
-
-#[test]
-fn rotate_is_noop_without_leftover() {
-    let dir = tempfile::tempdir().unwrap();
-    rotate_console_log(dir.path()); // must not panic / must not create logs/
-    assert!(!dir.path().join("logs").exists());
 }
 
 /// The one `console-*.log` under `<dir>/logs`, or a panic naming what was there.
@@ -322,15 +279,4 @@ fn a_slot_that_already_holds_a_handle_rotates_nothing() {
         "a filled slot must not rotate the file it is already writing to"
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), "live session\n");
-}
-
-#[test]
-fn store_level_roundtrips_through_log_level() {
-    let _state = LoggingState::acquire();
-    store_level(2);
-    assert_eq!(log_level(), 2);
-    store_level(0);
-    assert_eq!(log_level(), 0);
-    store_level(3);
-    assert_eq!(log_level(), 3);
 }

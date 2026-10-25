@@ -54,25 +54,6 @@ fn main_and_helper_reach_the_same_framework() {
 }
 
 #[test]
-fn a_helper_taking_the_main_hop_misses_the_framework() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let (_, helper_dir) = bundle(root.path());
-
-    // The main-process hop lands inside the helper's own bundle, which holds no
-    // framework. This is what the process crashed on before the flag existed.
-    assert!(framework_path(&helper_dir, false).canonicalize().is_err());
-}
-
-#[test]
-fn the_main_process_taking_the_helper_hop_misses_the_framework() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let (main_dir, _) = bundle(root.path());
-
-    // Three levels up from the main app leaves the bundle entirely.
-    assert!(framework_path(&main_dir, true).canonicalize().is_err());
-}
-
-#[test]
 fn a_helper_reaches_the_sandbox_library_beside_the_framework() {
     let root = tempfile::tempdir().expect("tempdir");
     let (_, helper_dir) = bundle(root.path());

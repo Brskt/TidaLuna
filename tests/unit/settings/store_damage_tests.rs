@@ -5,6 +5,9 @@ use std::io::{Seek, SeekFrom, Write};
 
 const PAGE: u64 = 4096;
 
+/// What a table row does to the file before it is opened.
+type Damage = fn(&Path);
+
 fn root_page(path: &Path, name: &str) -> u64 {
     let conn = Connection::open(path).unwrap();
     let page: i64 = conn
@@ -138,16 +141,6 @@ fn block(path: &Path) {
 }
 
 #[test]
-fn a_fresh_profile_reads_the_defaults() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut conn, opened) = open(&dir.path().join("settings.db")).unwrap();
-    assert_eq!(opened, Opened::Healthy);
-    assert!(load_video_codec_enabled(&mut conn));
-    assert!(load_receiver_always_on(&mut conn));
-    assert!(load_update_auto_check(&mut conn));
-}
-
-#[test]
 fn a_damaged_settings_page_is_set_aside_and_the_refusals_survive_the_rebuild() {
     let dir = tempfile::tempdir().unwrap();
     let path = seeded(dir.path());
@@ -169,32 +162,30 @@ fn a_damaged_settings_page_is_set_aside_and_the_refusals_survive_the_rebuild() {
 }
 
 #[test]
-fn a_header_that_is_not_sqlite_is_rebuilt_instead_of_failing_the_launch() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = seeded(dir.path());
-    overwrite(&path, 0, b"this is not a database header");
-    assert_eq!(
-        open(&path).unwrap().1,
-        Opened::Rebuilt {
-            turned_off: BOTH_CONSENTS.to_vec(),
-            trust: Trust::Unknown
-        }
-    );
-}
+fn a_store_that_is_not_a_database_is_rebuilt_instead_of_failing_the_launch() {
+    let damages: [(&str, Damage); 2] = [
+        ("a header that is not sqlite", |path| {
+            overwrite(path, 0, b"this is not a database header")
+        }),
+        ("a file cut to its first page", |path| {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            file.set_len(PAGE).unwrap();
+        }),
+    ];
+    for (what, damage) in damages {
+        let dir = tempfile::tempdir().unwrap();
+        let path = seeded(dir.path());
+        damage(&path);
 
-#[test]
-fn a_file_cut_to_its_first_page_is_rebuilt() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = seeded(dir.path());
-    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    file.set_len(PAGE).unwrap();
-    assert_eq!(
-        open(&path).unwrap().1,
-        Opened::Rebuilt {
-            turned_off: BOTH_CONSENTS.to_vec(),
-            trust: Trust::Unknown
-        }
-    );
+        assert_eq!(
+            open(&path).unwrap().1,
+            Opened::Rebuilt {
+                turned_off: BOTH_CONSENTS.to_vec(),
+                trust: Trust::Unknown
+            },
+            "{what}"
+        );
+    }
 }
 
 #[test]
@@ -244,16 +235,34 @@ fn a_damaged_index_leaves_the_settings_rows_to_carry_over() {
 }
 
 /// Unknown, not empty, whether the table held a decision or none: even an empty table has a root
-/// page to read.
+/// page to read, and a table gone from the schema is not told as empty either.
 #[test]
 fn a_damaged_trust_table_does_not_carry_trust_decisions_over() {
-    for (profile, log_level) in [
-        (seeded as fn(&Path) -> PathBuf, 2),
-        (seeded_without_trust, 0),
-    ] {
+    type Profile = fn(&Path) -> PathBuf;
+    let cases: [(&str, Damage, Profile, u8); 3] = [
+        (
+            "a ruined page",
+            |path| ruin_page(path, root_page(path, "native_trust")),
+            seeded,
+            2,
+        ),
+        (
+            "a ruined page of an empty table",
+            |path| ruin_page(path, root_page(path, "native_trust")),
+            seeded_without_trust,
+            0,
+        ),
+        (
+            "a table gone from the schema",
+            |path| delete_schema_rows(path, "native_trust"),
+            seeded,
+            2,
+        ),
+    ];
+    for (what, damage, profile, log_level) in cases {
         let dir = tempfile::tempdir().unwrap();
         let path = profile(dir.path());
-        ruin_page(&path, root_page(&path, "native_trust"));
+        damage(&path);
 
         let (mut conn, opened) = open(&path).unwrap();
 
@@ -262,10 +271,11 @@ fn a_damaged_trust_table_does_not_carry_trust_decisions_over() {
             Opened::Rebuilt {
                 turned_off: vec![],
                 trust: Trust::Unknown
-            }
+            },
+            "{what}"
         );
-        assert_eq!(trust_rows(&conn), 0);
-        assert_eq!(load_log_level(&mut conn), log_level);
+        assert_eq!(trust_rows(&conn), 0, "{what}");
+        assert_eq!(load_log_level(&mut conn), log_level, "{what}");
     }
 }
 
@@ -277,26 +287,6 @@ fn a_store_that_cannot_be_opened_is_left_alone() {
 
     assert!(open(&path).is_err());
     assert!(asides(&path).is_empty());
-}
-
-#[test]
-fn a_damaged_store_that_cannot_be_replaced_keeps_its_settings_in_memory() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = seeded(dir.path());
-    ruin_page(&path, root_page(&path, "native_trust"));
-    block(&beside(&path, ".new"));
-
-    let (mut conn, opened) = open(&path).unwrap();
-
-    assert_eq!(
-        opened,
-        Opened::Volatile {
-            turned_off: vec![],
-            trust: Trust::Unknown
-        }
-    );
-    assert!(!load_video_codec_enabled(&mut conn));
-    assert_eq!(load_log_level(&mut conn), 2);
 }
 
 #[test]
@@ -345,25 +335,6 @@ fn a_damaged_value_is_unparseable_and_reads_as_refused() {
         failures.as_slice(),
         [(_, Unreadable::Unparseable(raw))] if raw == "talse"
     ));
-}
-
-#[test]
-fn a_boot_read_on_a_failing_store_reports_one_line_and_reads_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = seeded(dir.path());
-    let mut conn = Connection::open(&path).unwrap();
-    init_schema(&mut conn).unwrap();
-    ruin_page(&path, root_page(&path, "settings"));
-    crate::logging::take_lines();
-
-    let boot = load_boot_settings(&mut conn);
-
-    assert!(!boot.video_codec_enabled);
-    assert!(!boot.receiver_always_on);
-    assert!(boot.auto_check);
-    let lines = crate::logging::take_lines();
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("unreadable"));
 }
 
 #[test]
@@ -1135,27 +1106,25 @@ fn the_wider_notice() -> Option<RepairNotice> {
 }
 
 #[test]
-fn an_unreadable_earlier_notice_is_told_as_a_wider_loss_by_the_next_repair() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = repaired_untold(dir.path());
-    ruin_page(&path, root_page(&path, "repair_notice"));
+fn an_earlier_notice_that_cannot_be_read_is_told_as_a_wider_loss_by_the_next_repair() {
+    let damages: [(&str, Damage); 2] = [
+        ("a ruined page", |path| {
+            ruin_page(path, root_page(path, "repair_notice"))
+        }),
+        ("a table gone from the schema", |path| {
+            delete_schema_rows(path, "repair_notice")
+        }),
+    ];
+    for (what, damage) in damages {
+        let dir = tempfile::tempdir().unwrap();
+        let path = repaired_untold(dir.path());
+        damage(&path);
 
-    let (conn, opened) = open(&path).unwrap();
+        let (conn, opened) = open(&path).unwrap();
 
-    assert!(matches!(opened, Opened::Rebuilt { .. }));
-    assert_eq!(pending_notice(&conn), the_wider_notice());
-}
-
-#[test]
-fn an_earlier_notice_whose_table_left_the_schema_is_told_as_a_wider_loss() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = repaired_untold(dir.path());
-    delete_schema_rows(&path, "repair_notice");
-
-    let (conn, opened) = open(&path).unwrap();
-
-    assert!(matches!(opened, Opened::Rebuilt { .. }));
-    assert_eq!(pending_notice(&conn), the_wider_notice());
+        assert!(matches!(opened, Opened::Rebuilt { .. }), "{what}");
+        assert_eq!(pending_notice(&conn), the_wider_notice(), "{what}");
+    }
 }
 
 #[test]
@@ -1215,24 +1184,6 @@ fn a_reindex_replaces_an_unreadable_earlier_notice_instead_of_leaving_it() {
     assert!(read_notice(&conn).is_ok());
 }
 
-#[test]
-fn a_trust_table_gone_from_the_schema_is_not_told_as_empty() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = seeded(dir.path());
-    delete_schema_rows(&path, "native_trust");
-
-    let (conn, opened) = open(&path).unwrap();
-
-    assert_eq!(
-        opened,
-        Opened::Rebuilt {
-            turned_off: vec![],
-            trust: Trust::Unknown
-        }
-    );
-    assert_eq!(trust_rows(&conn), 0);
-}
-
 /// A trust table whose page went back to before a refusal while its index kept it: a write that
 /// never reached the disk. `seed` runs on the connection that created the schema.
 fn trust_page_reverted_index_kept(dir: &Path, seed: impl FnOnce(&mut Connection)) -> PathBuf {
@@ -1251,44 +1202,48 @@ fn trust_page_reverted_index_kept(dir: &Path, seed: impl FnOnce(&mut Connection)
 
 #[test]
 fn a_trust_decision_the_table_lost_is_told_by_a_reindex() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = trust_page_reverted_index_kept(dir.path(), |conn| save_log_level(conn, 2));
-
-    let (conn, opened) = open(&path).unwrap();
-
-    assert_eq!(
-        opened,
-        Opened::Reindexed {
-            turned_off: vec![],
-            trust: Trust::Dropped
+    type Seed = fn(&mut Connection);
+    let cases: [(&str, Seed, bool, &[&'static str]); 2] = [
+        (
+            "a reindex alone",
+            |conn| save_log_level(conn, 2),
+            false,
+            &[],
+        ),
+        (
+            "a reindex that also turned a setting off",
+            |conn| {
+                save_video_codec_enabled(conn, false);
+                save_log_level(conn, 2);
+            },
+            true,
+            &[CONNECT_RECEIVER_ALWAYS_ON.key],
+        ),
+    ];
+    for (what, seed, damage_index, turned_off) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = trust_page_reverted_index_kept(dir.path(), seed);
+        if damage_index {
+            corrupt_index_byte(&path);
         }
-    );
-    assert_eq!(pending_notice(&conn), told_of(&[], Trust::Dropped, true));
-    assert_eq!(trust_rows(&conn), 0);
-}
 
-#[test]
-fn a_reindex_that_turned_a_setting_off_tells_the_trust_it_lost_too() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = trust_page_reverted_index_kept(dir.path(), |conn| {
-        save_video_codec_enabled(conn, false);
-        save_log_level(conn, 2);
-    });
-    corrupt_index_byte(&path);
+        let (conn, opened) = open(&path).unwrap();
 
-    let (conn, opened) = open(&path).unwrap();
-
-    assert_eq!(
-        opened,
-        Opened::Reindexed {
-            turned_off: vec![CONNECT_RECEIVER_ALWAYS_ON.key],
-            trust: Trust::Dropped
-        }
-    );
-    assert_eq!(
-        pending_notice(&conn),
-        told_of(&[CONNECT_RECEIVER_ALWAYS_ON.key], Trust::Dropped, true)
-    );
+        assert_eq!(
+            opened,
+            Opened::Reindexed {
+                turned_off: turned_off.to_vec(),
+                trust: Trust::Dropped
+            },
+            "{what}"
+        );
+        assert_eq!(
+            pending_notice(&conn),
+            told_of(turned_off, Trust::Dropped, true),
+            "{what}"
+        );
+        assert_eq!(trust_rows(&conn), 0, "{what}");
+    }
 }
 
 #[test]

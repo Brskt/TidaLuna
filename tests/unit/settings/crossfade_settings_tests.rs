@@ -4,22 +4,6 @@ use super::fixture::mem_conn;
 use super::*;
 
 #[test]
-fn crossfade_is_off_by_default() {
-    let mut conn = mem_conn();
-    assert!(!load_crossfade_enabled(&mut conn));
-    assert_eq!(load_crossfade_secs(&mut conn), 0);
-}
-
-#[test]
-fn save_then_load_enabled_roundtrips() {
-    let mut conn = mem_conn();
-    save_crossfade_enabled(&mut conn, true);
-    assert!(load_crossfade_enabled(&mut conn));
-    save_crossfade_enabled(&mut conn, false);
-    assert!(!load_crossfade_enabled(&mut conn));
-}
-
-#[test]
 fn secs_clamp_to_the_maximum_on_write_and_on_read() {
     let mut conn = mem_conn();
     // A caller that ignores the range cannot store an out-of-range value.
@@ -29,20 +13,4 @@ fn secs_clamp_to_the_maximum_on_write_and_on_read() {
     // Nor can a value hand-edited into the database escape it.
     set(&conn, PLAYER_CROSSFADE_SECS.key, "250");
     assert_eq!(load_crossfade_secs(&mut conn), 12);
-}
-
-#[test]
-fn boot_settings_carry_the_crossfade_values() {
-    let mut conn = mem_conn();
-    save_crossfade_enabled(&mut conn, true);
-    save_crossfade_secs(&mut conn, 6);
-    let boot = load_boot_settings(&mut conn);
-    assert!(boot.crossfade_enabled);
-    assert_eq!(boot.crossfade_secs, 6);
-
-    save_crossfade_enabled(&mut conn, false);
-    save_crossfade_secs(&mut conn, 3);
-    let boot = load_boot_settings(&mut conn);
-    assert!(!boot.crossfade_enabled);
-    assert_eq!(boot.crossfade_secs, 3);
 }

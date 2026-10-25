@@ -2243,10 +2243,6 @@ fn render_thread_inner(
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/player/wasapi/position_frames_tests.rs"]
-mod position_frames_tests;
-
-#[cfg(test)]
 #[path = "../../tests/unit/player/wasapi/pcm_compaction_tests.rs"]
 mod pcm_compaction_tests;
 

@@ -39,19 +39,24 @@ fn args(items: &[&str]) -> Vec<std::ffi::OsString> {
     items.iter().map(std::ffi::OsString::from).collect()
 }
 
+/// Chromium always spells it `--type=<kind>`: a bare `--type`, or the text inside another switch's
+/// value, is the browser.
 #[test]
 fn a_chromium_subprocess_is_told_by_its_type_switch() {
-    assert!(super::is_helper_process(
-        args(&["/path/to/exe", "--type=renderer", "--lang=en-US"]).into_iter()
-    ));
-}
-
-#[test]
-fn a_switch_that_only_resembles_the_type_switch_is_the_browser() {
-    // Chromium always spells it `--type=<kind>`; neither of these is that.
-    assert!(!super::is_helper_process(
-        args(&["/path/to/exe", "--type", "--user-agent=x--type=renderer"]).into_iter()
-    ));
+    let cases: [(&[&str], bool); 2] = [
+        (&["/path/to/exe", "--type=renderer", "--lang=en-US"], true),
+        (
+            &["/path/to/exe", "--type", "--user-agent=x--type=renderer"],
+            false,
+        ),
+    ];
+    for (items, helper) in cases {
+        assert_eq!(
+            super::is_helper_process(args(items).into_iter()),
+            helper,
+            "{items:?}"
+        );
+    }
 }
 
 #[cfg(not(target_os = "windows"))]

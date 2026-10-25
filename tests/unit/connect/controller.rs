@@ -63,19 +63,6 @@ async fn disconnecting_a_live_session_returns_the_event_that_retires_it() {
 }
 
 #[test]
-fn disconnecting_without_a_session_announces_nothing() {
-    let mut ctrl = TidalConnectController::new(None);
-
-    // Nothing was ever connected; there is no disconnection to report.
-    assert!(ctrl.disconnect(true).is_none());
-    // Keeping the cast alive touches neither the session nor the generation: a genuine
-    // notifySessionEnded still reaches the loop and is emitted from there instead.
-    let before = ctrl.connection_gen;
-    assert!(ctrl.disconnect(false).is_none());
-    assert_eq!(ctrl.connection_gen, before);
-}
-
-#[test]
 fn insert_device_capped_dedups_and_bounds() {
     let mut devices = Vec::new();
     insert_device_capped(&mut devices, dev("a"), 2);

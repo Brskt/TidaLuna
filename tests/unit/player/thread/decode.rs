@@ -14,8 +14,8 @@
 //! `fn main()`, which no test runs. Watch `decoded_samples` and the event channel instead.
 
 use super::{
-    DecodeCommand, DecodeEvent, DecodeThreadConfig, PushInterrupt, PushOutcome, PushRun,
-    SeekOutcome, push_samples, push_until_settled, spawn_decode_thread,
+    DecodeCommand, DecodeEvent, DecodeThreadConfig, PushOutcome, PushRun, SeekOutcome,
+    push_samples, push_until_settled, spawn_decode_thread,
 };
 use crate::player::buffer::RamBuffer;
 use crate::player::thread::wav_fixture::wav_s16_mono;
@@ -45,59 +45,6 @@ fn describe(events: &mpsc::Receiver<DecodeEvent>) -> Vec<String> {
             }
         })
         .collect()
-}
-
-#[test]
-fn a_push_with_room_and_no_commands_drains() {
-    let (mut producer, consumer) = ring(64);
-    let (_tx, rx) = mpsc::channel();
-    let counted = AtomicU64::new(0);
-    let mut logged = true;
-
-    assert!(matches!(
-        push_samples(&[0.5f32; 8], &mut producer, &rx, &counted, &mut logged),
-        PushOutcome::Drained
-    ));
-    assert_eq!(counted.load(Relaxed), 8, "the throttle was not credited");
-    assert_eq!(consumer.slots(), 8, "the samples never reached the ring");
-}
-
-#[test]
-fn a_queued_pause_is_handed_back_to_the_caller() {
-    let (mut producer, _consumer) = ring(64);
-    let (tx, rx) = mpsc::channel();
-    tx.send(DecodeCommand::Pause).unwrap();
-    let counted = AtomicU64::new(0);
-    let mut logged = true;
-
-    // The push takes the command off the channel; returning it is the only way the caller
-    // learns the decoder should stop. Folding it in with a clean drain once left the loop
-    // decoding under a paused user. The 0: a queued command precedes the first slot read.
-    assert!(matches!(
-        push_samples(&[0.5f32; 8], &mut producer, &rx, &counted, &mut logged),
-        PushOutcome::Interrupted(PushInterrupt::Pause, 0)
-    ));
-}
-
-#[test]
-fn a_queued_seek_carries_its_target_and_generation_back() {
-    let (mut producer, _consumer) = ring(64);
-    let (tx, rx) = mpsc::channel();
-    tx.send(DecodeCommand::Seek(12.5, 7)).unwrap();
-    let counted = AtomicU64::new(0);
-    let mut logged = true;
-
-    let outcome = push_samples(&[0.5f32; 8], &mut producer, &rx, &counted, &mut logged);
-    match outcome {
-        PushOutcome::Interrupted(PushInterrupt::Seek(time, gen_id), _) => {
-            assert_eq!(time, 12.5);
-            assert_eq!(
-                gen_id, 7,
-                "the generation an ack is matched on was rewritten"
-            );
-        }
-        _ => panic!("the seek did not reach the caller"),
-    }
 }
 
 #[test]

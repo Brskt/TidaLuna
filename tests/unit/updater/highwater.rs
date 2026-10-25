@@ -3,9 +3,23 @@
 use super::*;
 
 #[test]
-fn load_absent_is_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(load(dir.path()), "0.0.0");
+fn load_without_a_usable_mark_is_zero() {
+    let cases: [(&str, Option<&[u8]>); 3] = [
+        ("absent", None),
+        ("not json", Some(b"{ not json")),
+        // Inside valid JSON, it must not stick and block updates.
+        (
+            "garbage version",
+            Some(br#"{"max_version":"garbage","recorded_at":123}"#),
+        ),
+    ];
+    for (what, mark) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(bytes) = mark {
+            std::fs::write(mark_path(dir.path()), bytes).unwrap();
+        }
+        assert_eq!(load(dir.path()), "0.0.0", "{what}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -36,35 +50,4 @@ fn record_is_monotonic() {
     assert_eq!(load(dir.path()), "0.0.9-alpha");
     record(dir.path(), "0.0.10-alpha"); // higher -> updates
     assert_eq!(load(dir.path()), "0.0.10-alpha");
-}
-
-#[test]
-fn corrupt_mark_loads_as_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(mark_path(dir.path()), b"{ not json").unwrap();
-    assert_eq!(load(dir.path()), "0.0.0");
-}
-
-#[test]
-fn non_semver_version_loads_as_zero() {
-    // Valid JSON but a garbage version must not stick and block updates.
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        mark_path(dir.path()),
-        br#"{"max_version":"garbage","recorded_at":123}"#,
-    )
-    .unwrap();
-    assert_eq!(load(dir.path()), "0.0.0");
-}
-
-#[test]
-fn non_semver_mark_is_repaired_on_next_record() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        mark_path(dir.path()),
-        br#"{"max_version":"garbage","recorded_at":123}"#,
-    )
-    .unwrap();
-    record(dir.path(), "0.0.8-alpha");
-    assert_eq!(load(dir.path()), "0.0.8-alpha");
 }

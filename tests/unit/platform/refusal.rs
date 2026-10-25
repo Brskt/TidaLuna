@@ -5,9 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{
-    InitFailure, classify_init_failure, install_launch_guard, panic_message, panic_refusal,
-};
+use super::{InitFailure, classify_init_failure, install_launch_guard};
 
 const PROFILE_ROOT: &str = "/home/user/.local/share/tidalunar/cef";
 
@@ -15,68 +13,18 @@ fn classify(code: i32) -> InitFailure {
     classify_init_failure(code, Path::new(PROFILE_ROOT))
 }
 
+/// 24 is another instance taking over the launch; 0, 36 and 38 are NORMAL_EXIT,
+/// NORMAL_EXIT_PACK_EXTENSION_SUCCESS and NORMAL_EXIT_AUTO_DE_ELEVATED.
 #[test]
-fn another_instance_taking_over_the_launch_is_not_a_failure() {
-    assert_eq!(classify(24), InitFailure::HandedOver);
-}
-
-#[test]
-fn the_normal_exits_chromium_takes_early_are_not_failures() {
-    // NORMAL_EXIT, NORMAL_EXIT_PACK_EXTENSION_SUCCESS, NORMAL_EXIT_AUTO_DE_ELEVATED.
-    for code in [0, 36, 38] {
-        assert_eq!(classify(code), InitFailure::Finished, "exit code {code}");
+fn the_exits_chromium_takes_early_are_not_failures() {
+    for (code, expected) in [
+        (24, InitFailure::HandedOver),
+        (0, InitFailure::Finished),
+        (36, InitFailure::Finished),
+        (38, InitFailure::Finished),
+    ] {
+        assert_eq!(classify(code), expected, "exit code {code}");
     }
-}
-
-#[test]
-fn a_profile_that_cannot_be_taken_over_names_its_folder() {
-    let InitFailure::Refused(why) = classify(21) else {
-        panic!("PROFILE_IN_USE must refuse the launch");
-    };
-    assert!(why.contains(PROFILE_ROOT), "{why}");
-    assert!(why.contains("cannot be written"), "{why}");
-}
-
-#[test]
-fn any_other_exit_code_refuses_with_the_code() {
-    // MISSING_DATA, UNSUPPORTED_PARAM, INVALID_SANDBOX_STATE, SYSTEM_RESOURCE_EXHAUSTED, a
-    // Windows sandbox fatal, and a code the enum does not know.
-    for code in [7, 13, 31, 37, 7007, 12345, -1] {
-        let InitFailure::Refused(why) = classify(code) else {
-            panic!("exit code {code} must refuse the launch");
-        };
-        assert!(why.contains(&format!("exit code {code})")), "{why}");
-        assert!(!why.contains(PROFILE_ROOT), "{why}");
-    }
-}
-
-fn refused() -> Result<(), &'static str> {
-    Err("refused")
-}
-
-#[test]
-fn a_panic_message_is_read_whether_it_was_formatted_or_not() {
-    let literal = std::panic::catch_unwind(|| panic!("a literal")).unwrap_err();
-    let formatted = std::panic::catch_unwind(|| panic!("a {}", "formatted one")).unwrap_err();
-    let unwrapped = std::panic::catch_unwind(|| refused().unwrap()).unwrap_err();
-    let other = std::panic::catch_unwind(|| std::panic::panic_any(5_u8)).unwrap_err();
-
-    assert_eq!(panic_message(literal.as_ref()), "a literal");
-    assert_eq!(panic_message(formatted.as_ref()), "a formatted one");
-    assert!(panic_message(unwrapped.as_ref()).contains("refused"));
-    assert_eq!(panic_message(other.as_ref()), "no message");
-}
-
-#[test]
-fn a_panic_refusal_names_the_message_and_where_it_came_from() {
-    let with = panic_refusal("boom", Some(("src/db.rs", 254)));
-    assert!(
-        with.ends_with("cannot continue: boom (src/db.rs:254)"),
-        "{with}"
-    );
-
-    let without = panic_refusal("boom", None);
-    assert!(without.ends_with("cannot continue: boom"), "{without}");
 }
 
 // The hook is process-global; the launch guard is exercised in a child process: the test

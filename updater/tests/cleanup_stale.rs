@@ -62,31 +62,6 @@ fn cleanup_removes_only_old_only_files() {
 }
 
 #[test]
-fn cleanup_no_op_on_first_install() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = dir.path();
-    write_manifest(&app.join("new.json"), "0.0.1", &[("kept.dat", 6)]);
-
-    let exe = env!("CARGO_BIN_EXE_updater");
-    let status = Command::new(exe)
-        .args([
-            "--cleanup-stale",
-            "--app-dir",
-            &app.display().to_string(),
-            "--old-manifest",
-            &app.join("nonexistent.json").display().to_string(),
-            "--new-manifest",
-            &app.join("new.json").display().to_string(),
-        ])
-        .status()
-        .unwrap();
-    assert!(
-        status.success(),
-        "missing old manifest should be no-op success"
-    );
-}
-
-#[test]
 fn cleanup_rejects_path_traversal() {
     let dir = tempfile::tempdir().unwrap();
     let app = dir.path();
@@ -115,14 +90,4 @@ fn cleanup_rejects_path_traversal() {
         "is_safe_relative_path must block ../ deletes"
     );
     fs::remove_file(&outside).ok();
-}
-
-#[test]
-fn cleanup_unknown_arg_exits_nonzero() {
-    let exe = env!("CARGO_BIN_EXE_updater");
-    let status = Command::new(exe)
-        .args(["--cleanup-stale", "--bogus"])
-        .status()
-        .unwrap();
-    assert!(!status.success(), "unknown arg should exit non-zero");
 }

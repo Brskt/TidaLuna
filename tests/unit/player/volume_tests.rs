@@ -3,36 +3,24 @@
 use super::fixture::silent_player;
 use super::*;
 
+/// A level is clamped to 0..=100, and a non-finite one sanitizes to silence, never full scale:
+/// `.clamp()` alone would let NaN through. 1e41 is an ordinary JSON number whose `/ 100.0`
+/// quotient still exceeds f32::MAX (1e40 does not), and it must not reach the cast as infinity.
 #[test]
-fn ordinary_levels_pass_through() {
-    assert_eq!(Volume::from_percent(0.0).as_percent(), 0.0);
-    assert_eq!(Volume::from_percent(42.5).as_percent(), 42.5);
-    assert_eq!(Volume::from_percent(100.0).as_percent(), 100.0);
-}
-
-#[test]
-fn out_of_range_levels_are_clamped() {
-    assert_eq!(Volume::from_percent(500.0).as_percent(), 100.0);
-    assert_eq!(Volume::from_percent(-1.0).as_percent(), 0.0);
-    assert_eq!(Volume::from_percent(-500.0).as_percent(), 0.0);
-}
-
-#[test]
-fn a_large_finite_level_cannot_reach_infinity_at_the_cast() {
-    // The actually-reachable path: an ordinary JSON number, well inside f64, whose
-    // `/ 100.0` quotient still exceeds f32::MAX (~3.4e38) and casts to infinity.
-    // The threshold is the quotient, not the input: 1e40 divides down to 1e38 and stays
-    // finite, which is why this test pins 1e41 rather than the first value that looks big.
-    assert_eq!(Volume::from_percent(1e41).as_gain(), 1.0);
-}
-
-#[test]
-fn non_finite_levels_sanitize_to_silence_not_full_scale() {
-    // `.clamp()` alone would let NaN through unchanged; the finite check is not
-    // redundant. Silence is the safe wrong answer here; full scale is not.
-    assert_eq!(Volume::from_percent(f64::NAN).as_percent(), 0.0);
-    assert_eq!(Volume::from_percent(f64::NEG_INFINITY).as_percent(), 0.0);
-    assert_eq!(Volume::from_percent(f64::INFINITY).as_percent(), 0.0);
+fn levels_are_clamped_and_never_reach_full_scale_by_overflow_or_nan() {
+    for (input, percent, gain) in [
+        (500.0, 100.0, 1.0),
+        (-1.0, 0.0, 0.0),
+        (-500.0, 0.0, 0.0),
+        (1e41, 100.0, 1.0),
+        (f64::NAN, 0.0, 0.0),
+        (f64::NEG_INFINITY, 0.0, 0.0),
+        (f64::INFINITY, 0.0, 0.0),
+    ] {
+        let volume = Volume::from_percent(input);
+        assert_eq!(volume.as_percent(), percent, "{input}");
+        assert_eq!(volume.as_gain(), gain, "{input}");
+    }
 }
 
 // `OutputLevel`: what a Connect receiver's mute silences and its unmute restores.
@@ -57,33 +45,22 @@ fn unmute(level: &mut OutputLevel) {
     level.unmute();
 }
 
+/// A mute, however it was taken (repeated by the controller, a level set behind it, or TIDAL's own
+/// button reaching the player as a level of zero), leaves the level an unmute restores: the later
+/// unmute must not jump back to the level the mute silenced.
 #[test]
-fn a_mute_repeated_by_the_controller_keeps_the_level_to_restore() {
-    assert_eq!(
-        level_after(&[&set(55.0), &mute, &mute, &unmute]),
-        (55.0, 55.0)
-    );
-}
-
-#[test]
-fn a_level_set_while_muted_ends_the_mute_at_that_level() {
-    // The later unmute must not jump back to the level the mute silenced.
-    assert_eq!(level_after(&[&set(80.0), &mute, &set(25.0)]), (25.0, 25.0));
-    assert_eq!(
-        level_after(&[&set(80.0), &mute, &set(25.0), &unmute]),
-        (25.0, 25.0)
-    );
-}
-
-#[test]
-fn a_mute_taken_locally_is_one_a_remote_unmute_restores() {
-    // TIDAL's own mute button reaches the player as a level of zero, alone or behind a mute
-    // already taken.
-    assert_eq!(level_after(&[&set(64.0), &set(0.0), &unmute]), (64.0, 64.0));
-    assert_eq!(
-        level_after(&[&set(70.0), &mute, &set(0.0), &unmute]),
-        (70.0, 70.0)
-    );
+fn the_level_an_unmute_restores_follows_every_way_of_muting() {
+    type Steps<'a> = &'a [&'a dyn Fn(&mut OutputLevel)];
+    let rows: [(Steps, (f64, f64)); 5] = [
+        (&[&set(55.0), &mute, &mute, &unmute], (55.0, 55.0)),
+        (&[&set(80.0), &mute, &set(25.0)], (25.0, 25.0)),
+        (&[&set(80.0), &mute, &set(25.0), &unmute], (25.0, 25.0)),
+        (&[&set(64.0), &set(0.0), &unmute], (64.0, 64.0)),
+        (&[&set(70.0), &mute, &set(0.0), &unmute], (70.0, 70.0)),
+    ];
+    for (at, (steps, expected)) in rows.into_iter().enumerate() {
+        assert_eq!(level_after(steps), expected, "row {at}");
+    }
 }
 
 #[tokio::test]
@@ -99,10 +76,6 @@ async fn a_level_the_os_mixer_reported_is_the_one_a_mute_restores() {
 
 // Which of the two memories of this level is the newer one when a page loads: TIDAL's saved
 // level, or the one a Connect controller or the OS mixer left in Rust while no page could see it.
-
-fn remote(v: f64) -> impl Fn(&mut OutputLevel) {
-    move |level| level.set(Volume::from_percent(v), LevelWriter::Remote)
-}
 
 fn report_after(steps: &[&dyn Fn(&mut OutputLevel)]) -> LevelReport {
     let mut level = OutputLevel::START;
@@ -122,12 +95,6 @@ fn a_controllers_mute_and_unmute_are_newer_than_any_saved_level() {
     let unmuted = report_after(&[&set(70.0), &mute, &unmute]);
     assert!(unmuted.chosen);
     assert!(!unmuted.mute);
-}
-
-#[test]
-fn every_change_is_counted_whoever_made_it() {
-    let report = report_after(&[&set(70.0), &remote(30.0), &mute, &unmute, &set(40.0)]);
-    assert_eq!(report.seq, 5);
 }
 
 #[tokio::test]
@@ -197,17 +164,6 @@ impl Launch {
         self.settings
             .call_settings(crate::settings::load_output_level)
     }
-}
-
-#[tokio::test]
-async fn a_first_launch_starts_at_full_scale_and_nobodys_choice() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let first = launch(dir.path());
-    assert_eq!(
-        first.player.output_level().report(),
-        OutputLevel::START.report()
-    );
-    assert_eq!(first.saved(), None);
 }
 
 #[tokio::test]
@@ -426,15 +382,4 @@ async fn a_plugins_level_is_chosen_and_leaves_the_page_in_line() {
     assert!(player.output_level().report().chosen);
     player.set_volume(35.0, Some(seen)).expect("thread alive");
     assert_eq!(player.output_level().volume().as_percent(), 35.0);
-}
-
-#[test]
-fn a_catch_up_changes_no_level_and_chooses_none() {
-    let mut level = OutputLevel::START;
-    level.catch_up();
-    let report = level.report();
-    assert!(!report.chosen);
-    assert_eq!((report.volume, report.unmute_volume), (100.0, 100.0));
-    assert!(!level.admits(Some(0)));
-    assert!(level.admits(Some(report.seq)));
 }

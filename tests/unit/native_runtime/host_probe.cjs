@@ -249,6 +249,15 @@ const ASSERTIONS = `
         function() { globalThis.process.binding("fs"); }, "is not allowed");
     t("Bun.spawn is neutered", typeof globalThis.Bun.spawn, "undefined");
     t("Bun.write is neutered", typeof globalThis.Bun.write, "undefined");
+    // Bun's net, tls, http, https and http2 servers reach these through the global at call
+    // time; once neutered, no plugin listens on a socket path at all. A Bun that kept its own
+    // reference would reopen every path in silence.
+    ["listen", "serve", "connect"].forEach(function(name) {
+        var d = _ObjectGetOwnPropertyDescriptor(globalThis.Bun, name);
+        t("Bun." + name + " stays neutered and pinned",
+            d ? [d.value === undefined, d.writable, d.configurable] : "no own property",
+            [true, false, false]);
+    });
     threw("the ambient fetch refuses and points at the trusted path",
         function() { globalThis.fetch("http://x"); }, "fetch is not available");
 

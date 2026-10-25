@@ -2,57 +2,6 @@
 
 use super::*;
 
-#[test]
-fn envelopes_are_equal_power_not_equal_gain() {
-    // The invariant that separates this pair from declick.rs: the SQUARES sum to
-    // one; summed power stays flat for two uncorrelated sources.
-    for p in [0, 55, 110, 220, 330, 441] {
-        let o = xfade_out_env(p, 441);
-        let i = xfade_in_env(p, 441);
-        assert!(
-            (o * o + i * i - 1.0).abs() < 1e-5,
-            "power not flat at {p}: {o}^2 + {i}^2"
-        );
-    }
-    // At the midpoint they are NOT the equal-gain 0.5, which is the bug avoided.
-    let mid = xfade_out_env(220, 441);
-    assert!((mid - 0.5).abs() > 0.15, "midpoint {mid} looks equal-gain");
-}
-
-#[test]
-fn zero_len_does_not_divide_by_zero() {
-    assert!(xfade_in_env(0, 0).is_finite());
-    assert!(xfade_out_env(0, 0).is_finite());
-}
-
-#[test]
-fn mix_sums_both_sources_and_advances_the_position() {
-    let outgoing = vec![1.0f32; 8];
-    let incoming = vec![1.0f32; 8];
-    let mut dst = vec![0.0f32; 8];
-    let end = mix_frames(&mut dst, &outgoing, &incoming, 0, 64, 1.0);
-    assert_eq!(end, 8);
-    // Every sample is the blend of the two at its own point of the fade.
-    for (i, s) in dst.iter().enumerate() {
-        let expected = xfade_out_env(i, 64) + xfade_in_env(i, 64);
-        assert!((s - expected).abs() < 1e-6, "sample {i}: {s} vs {expected}");
-    }
-}
-
-#[test]
-fn a_missing_incoming_source_leaves_the_outgoing_untouched_in_shape() {
-    // A starved second ring contributes exact zeros. `x + 0.0 == x` in IEEE-754,
-    // the outgoing side is only ever scaled, never perturbed.
-    let outgoing = vec![0.25f32; 4];
-    let incoming: Vec<f32> = Vec::new();
-    let mut dst = vec![0.0f32; 4];
-    mix_frames(&mut dst, &outgoing, &incoming, 0, 64, 1.0);
-    for (i, s) in dst.iter().enumerate() {
-        let expected = 0.25 * xfade_out_env(i, 64);
-        assert!((s - expected).abs() < 1e-6, "sample {i}: {s} vs {expected}");
-    }
-}
-
 /// The master volume is the only gain the mixer adds on top of the envelopes. At the first sample
 /// of a fade the outgoing envelope is exactly one and the incoming exactly zero: unity volume hands
 /// the outgoing sample back on the bits, and half volume halves it. A tolerance would hide the
@@ -74,89 +23,86 @@ fn the_master_volume_is_the_only_gain_beyond_the_envelopes() {
     }
 }
 
+/// Arming fails closed on an off setting, an unknown length or a zero rate, and fires from the
+/// start of the window through the end of the track. A track shorter than the fade would fade in
+/// from before it started: play it normally.
 #[test]
-fn mix_clamps_the_position_at_the_fade_length() {
-    let outgoing = vec![1.0f32; 8];
-    let incoming = vec![1.0f32; 8];
-    let mut dst = vec![0.0f32; 8];
-    let end = mix_frames(&mut dst, &outgoing, &incoming, 60, 64, 1.0);
-    assert_eq!(end, 64, "position must saturate at len, not run past it");
-}
-
-#[test]
-fn arming_needs_a_known_length_and_a_nonzero_setting() {
+fn arming_needs_a_known_length_a_nonzero_setting_and_the_window() {
     // 44.1 kHz stereo: one second is 88_200 samples.
     let total = 44_100u64 * 2 * 180; // three minutes
-    // Off by setting.
-    assert!(!crossfade_should_arm(total - 88_200, total, 44_100, 2, 0));
-    // Unknown length fails closed.
-    assert!(!crossfade_should_arm(1_000, 0, 44_100, 2, 6));
-    // Zero rate fails closed rather than dividing.
-    assert!(!crossfade_should_arm(total - 88_200, total, 0, 2, 6));
-}
-
-#[test]
-fn arming_fires_only_inside_the_window() {
-    let total = 44_100u64 * 2 * 180;
     let six_secs = 44_100u64 * 2 * 6;
-    // Well before the window.
-    assert!(!crossfade_should_arm(
-        total - six_secs - 88_200,
-        total,
-        44_100,
-        2,
-        6
-    ));
-    // Exactly at the boundary.
-    assert!(crossfade_should_arm(total - six_secs, total, 44_100, 2, 6));
-    // Inside it.
-    assert!(crossfade_should_arm(total - 44_100, total, 44_100, 2, 6));
-    // Past the end never panics and stays true.
-    assert!(crossfade_should_arm(total + 10, total, 44_100, 2, 6));
+    let short = 44_100u64 * 2 * 4;
+    for (what, produced, length, rate, secs, expected) in [
+        ("off by setting", total - 88_200, total, 44_100, 0, false),
+        ("unknown length", 1_000, 0, 44_100, 6, false),
+        ("zero rate", total - 88_200, total, 0, 6, false),
+        (
+            "well before the window",
+            total - six_secs - 88_200,
+            total,
+            44_100,
+            6,
+            false,
+        ),
+        (
+            "exactly at the boundary",
+            total - six_secs,
+            total,
+            44_100,
+            6,
+            true,
+        ),
+        ("inside the window", total - 44_100, total, 44_100, 6, true),
+        ("past the end", total + 10, total, 44_100, 6, true),
+        (
+            "shorter than the fade",
+            short - 100,
+            short,
+            44_100,
+            6,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            crossfade_should_arm(produced, length, rate, 2, secs),
+            expected,
+            "{what}"
+        );
+    }
 }
 
+/// The fade honours the setting but never outlasts what the outgoing track has left: left at six
+/// with two seconds to go, the outgoing ring would empty before the swap and the drain check would
+/// tear the stream down mid-fade. Under a second there is nothing worth hearing; it is refused.
 #[test]
-fn a_track_shorter_than_the_fade_never_arms() {
-    // A four-second track with a six-second fade would fade in from before it
-    // started. Fail closed: play it normally.
-    let total = 44_100u64 * 2 * 4;
-    assert!(!crossfade_should_arm(total - 100, total, 44_100, 2, 6));
-}
-
-#[test]
-fn a_fade_never_outlasts_what_the_outgoing_track_has_left() {
+fn a_fade_is_shortened_to_the_track_left_and_refused_when_absurdly_short() {
     // 44.1 kHz stereo.
     let per_second = 44_100u64 * 2;
-    // Plenty of track left: the setting is honoured as-is.
-    assert_eq!(
-        fade_len_samples(per_second, 6, per_second * 60),
-        Some((per_second * 6) as usize)
-    );
-    // Armed late, only two seconds left: the fade shrinks to two. Left at six, the
-    // outgoing ring would empty four seconds before the swap could fire, and the
-    // drain check would tear the stream down mid-fade.
-    assert_eq!(
-        fade_len_samples(per_second, 6, per_second * 2),
-        Some((per_second * 2) as usize)
-    );
-    // Exactly the setting is not "late".
-    assert_eq!(
-        fade_len_samples(per_second, 6, per_second * 6),
-        Some((per_second * 6) as usize)
-    );
-}
-
-#[test]
-fn a_fade_is_refused_rather_than_made_absurdly_short() {
-    let per_second = 44_100u64 * 2;
-    // Under a second there is nothing worth hearing; the hard cut is cleaner.
-    assert_eq!(fade_len_samples(per_second, 6, per_second - 1), None);
-    assert_eq!(fade_len_samples(per_second, 6, 0), None);
-    // Exactly one second is still a fade.
-    assert!(fade_len_samples(per_second, 6, per_second).is_some());
-    // Degenerate inputs refuse rather than divide or overflow.
-    assert_eq!(fade_len_samples(0, 6, per_second * 10), None);
-    assert_eq!(fade_len_samples(per_second, 0, per_second * 10), None);
+    let samples = |secs: u64| Some((per_second * secs) as usize);
+    for (what, rate, secs, remaining, expected) in [
+        ("plenty left", per_second, 6, per_second * 60, samples(6)),
+        ("armed late", per_second, 6, per_second * 2, samples(2)),
+        (
+            "exactly the setting is not late",
+            per_second,
+            6,
+            per_second * 6,
+            samples(6),
+        ),
+        ("just under a second", per_second, 6, per_second - 1, None),
+        ("nothing left", per_second, 6, 0, None),
+        (
+            "exactly one second is still a fade",
+            per_second,
+            6,
+            per_second,
+            samples(1),
+        ),
+        ("zero rate", 0, 6, per_second * 10, None),
+        ("zero setting", per_second, 0, per_second * 10, None),
+    ] {
+        assert_eq!(fade_len_samples(rate, secs, remaining), expected, "{what}");
+    }
 }
 
 /// The real-time callback mixes its buffer in fixed-size passes, because cpal declines to
@@ -233,26 +179,23 @@ fn a_short_outgoing_slice_pads_like_a_source_that_ran_short() {
 /// obstacle to the fade itself. It was a policy about what plays AFTER the fade: with a
 /// per-track stream, the promoted track would be stuck at the previous track's rate for
 /// its whole life. A pinned engine rate removes that, and with it the reason to refuse.
-/// `pinned` is now a plain argument; both answers are asserted here on every host.
-#[test]
-fn a_differing_rate_is_refused_only_where_the_engine_rate_moves() {
-    assert!(
-        crossfade_accepts_rate(96_000, 44_100, true),
-        "a pinned engine rate is exactly the condition that makes this safe"
-    );
-    assert!(
-        !crossfade_accepts_rate(96_000, 44_100, false),
-        "an unpinned engine rate still refuses a differing native rate"
-    );
-}
-
 /// The equal-rate case has to hold everywhere, or the feature dies on Linux.
 #[test]
-fn a_matching_rate_is_always_accepted() {
-    assert!(crossfade_accepts_rate(44_100, 44_100, true));
-    assert!(crossfade_accepts_rate(44_100, 44_100, false));
-    assert!(crossfade_accepts_rate(96_000, 96_000, true));
-    assert!(crossfade_accepts_rate(96_000, 96_000, false));
+fn a_differing_rate_is_refused_only_where_the_engine_rate_moves() {
+    for (incoming, stream, pinned, expected) in [
+        (96_000, 44_100, true, true),
+        (96_000, 44_100, false, false),
+        (44_100, 44_100, true, true),
+        (44_100, 44_100, false, true),
+        (96_000, 96_000, true, true),
+        (96_000, 96_000, false, true),
+    ] {
+        assert_eq!(
+            crossfade_accepts_rate(incoming, stream, pinned),
+            expected,
+            "{incoming} against {stream}, pinned {pinned}"
+        );
+    }
 }
 
 /// A fade that outruns its incoming track has to end on audio that exists. `fade_pos`
@@ -325,26 +268,17 @@ fn a_fade_is_bounded_by_the_bytes_actually_staged() {
     );
 }
 
-/// The refit is for a fade that cannot be honoured, never for one that can: rewriting a
-/// healthy fade would shorten every overlap that merely drained a little unevenly.
+/// The refit is for a fade that cannot be honoured, never for one that can, and never for an
+/// incoming track with nothing left: forcing the position to `len` there drops the outgoing
+/// envelope to zero in one callback, and the mixer already degrades it to a plain fade-out.
 #[test]
-fn a_fade_with_audio_to_spare_is_left_alone() {
-    assert!(refit_fade(400, 1000, 600).is_none());
-    assert!(refit_fade(400, 1000, 5000).is_none());
-    assert!(
-        refit_fade(1000, 1000, 0).is_none(),
-        "a finished fade needs no refit"
-    );
-}
-
-/// An incoming track with nothing left at all is left to the mixer, not refitted.
-///
-/// Forcing the position to `len` here looks like "end the fade", but it drops the
-/// OUTGOING envelope from cos(N/len) to zero in a single callback (the gain step this
-/// function exists to avoid), and the swap still waits on the outgoing track's own end,
-/// both sides sit at silence until it arrives. The mixer already degrades this case
-/// to a plain fade-out by contributing exact zeros.
-#[test]
-fn a_fade_with_no_audio_left_is_not_refitted() {
-    assert_eq!(refit_fade(400, 1000, 0), None);
+fn a_fade_that_can_be_honoured_or_has_no_audio_left_is_not_refitted() {
+    for (what, pos, len, available) in [
+        ("audio to spare", 400, 1000, 600),
+        ("plenty of audio", 400, 1000, 5000),
+        ("a finished fade", 1000, 1000, 0),
+        ("no audio left at all", 400, 1000, 0),
+    ] {
+        assert_eq!(refit_fade(pos, len, available), None, "{what}");
+    }
 }

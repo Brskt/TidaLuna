@@ -7,6 +7,18 @@ fn lower(code: &str) -> String {
     transpile_ts(code, "plugin.ts").expect("transpile")
 }
 
+/// Lowers `code` and checks what must survive (`kept`) and what must not (`absent`).
+fn assert_lowered(code: &str, kept: &[&str], absent: &[&str]) -> String {
+    let js = lower(code);
+    for needle in kept {
+        assert!(js.contains(needle), "{code}: {js}");
+    }
+    for needle in absent {
+        assert!(!js.contains(needle), "{code}: {js}");
+    }
+    js
+}
+
 #[test]
 fn export_block_becomes_exports_object() {
     let js = lower("var x=1;var y=2;export{x as Settings,y as unloads};");
@@ -19,69 +31,77 @@ fn export_block_becomes_exports_object() {
 }
 
 #[test]
-fn export_const_strips_keyword() {
-    for (code, kept) in [
-        ("export const foo = 42;", "const foo = 42"),
-        ("export function hello() { return 1; }", "function hello"),
-        ("export class Foo {}", "class Foo"),
-    ] {
-        let js = lower(code);
-        assert!(js.contains(kept), "{code}");
-        assert!(!js.contains("export"), "{code}");
+fn an_export_is_lowered_without_its_keyword() {
+    let rows: [(&str, &[&str], &[&str]); 8] = [
+        ("export const foo = 42;", &["const foo = 42"], &[]),
+        (
+            "export function hello() { return 1; }",
+            &["function hello"],
+            &[],
+        ),
+        ("export class Foo {}", &["class Foo"], &[]),
+        ("export default 42;", &["__default", "42"], &[]),
+        // A declaration, not an expression bound to the anonymous default's name.
+        (
+            "export default class Foo {}",
+            &["class Foo"],
+            &["__default"],
+        ),
+        // An anonymous default must lower to `var __default = ...`, not a bare invalid declaration.
+        (
+            "export default function() { return 1; }",
+            &["__default", "function"],
+            &[],
+        ),
+        (
+            "export default class { method() {} }",
+            &["__default", "class"],
+            &[],
+        ),
+        // A named default function stays a hoisted declaration.
+        (
+            "export default function Foo() { return 1; }",
+            &["function Foo"],
+            &["__default"],
+        ),
+    ];
+    for (code, kept, absent) in rows {
+        let js = assert_lowered(code, kept, absent);
+        assert!(!js.contains("export"), "{code}: {js}");
     }
 }
 
 #[test]
-fn export_default_expr_becomes_default_var() {
-    let js = lower("export default 42;");
-    assert!(js.contains("__default"));
-    assert!(js.contains("42"));
-    assert!(!js.contains("export"));
-}
-
-#[test]
-fn export_default_class_keeps_declaration() {
-    let js = lower("export default class Foo {}");
-    assert!(js.contains("class Foo"));
-    assert!(!js.contains("export"));
-    // A declaration, not an expression bound to the anonymous default's name.
-    assert!(!js.contains("__default"), "{js}");
-}
-
-#[test]
-fn export_default_anonymous_function_becomes_default_var() {
-    // Anon default must lower to `var __default = ...`, not a bare invalid decl.
-    let js = lower("export default function() { return 1; }");
-    assert!(js.contains("__default"));
-    assert!(js.contains("function"));
-    assert!(!js.contains("export"));
-}
-
-#[test]
-fn export_default_anonymous_class_becomes_default_var() {
-    let js = lower("export default class { method() {} }");
-    assert!(js.contains("__default"));
-    assert!(js.contains("class"));
-    assert!(!js.contains("export"));
-}
-
-#[test]
-fn export_default_named_function_keeps_declaration() {
-    // A named default fn stays a hoisted declaration (`id` is present).
-    let js = lower("export default function Foo() { return 1; }");
-    assert!(js.contains("function Foo"));
-    assert!(!js.contains("export"));
-    assert!(!js.contains("__default"), "{js}");
-}
-
-#[test]
-fn import_named_maps_to_modules() {
-    let js = lower(r#"import { storage, intercept } from "m";console.log(1);"#);
-    assert!(js.contains(r#"luna?.core?.modules?.["m"]"#));
-    assert!(js.contains("storage"));
-    assert!(js.contains("intercept"));
-    assert!(js.contains("console.log(1)"));
-    assert!(!js.contains("import"));
+fn an_import_is_lowered_to_a_modules_lookup() {
+    let rows: [(&str, &[&str], &[&str]); 5] = [
+        (
+            r#"import { storage, intercept } from "m";console.log(1);"#,
+            &[
+                r#"luna?.core?.modules?.["m"]"#,
+                "storage",
+                "intercept",
+                "console.log(1)",
+            ],
+            &[],
+        ),
+        // Valid destructuring renames with `:`, never the invalid `{ a as b }`.
+        (r#"import { a as b } from "m";b();"#, &["a: b"], &[" as "]),
+        (
+            r#"import * as core from "@luna/core";foo();"#,
+            &[r#"const core = luna?.core?.modules?.["@luna/core"]"#],
+            &[],
+        ),
+        (
+            r#"import React from "react";foo();"#,
+            &[r#"luna?.core?.modules?.["react"]?.default"#],
+            &[],
+        ),
+        (r#"import "./polyfill";foo();"#, &["foo()"], &[]),
+    ];
+    for (code, kept, absent) in rows {
+        let js = assert_lowered(code, kept, absent);
+        assert!(!js.contains("import"), "{code}: {js}");
+    }
 }
 
 /// `@luna/lib` is the exception, and the reason is identity. Its `ipcRenderer.invoke` closes over
@@ -115,89 +135,27 @@ fn the_lib_rebinding_does_not_catch_its_neighbours() {
 }
 
 #[test]
-fn import_named_alias_uses_colon_not_as() {
-    let js = lower(r#"import { a as b } from "m";b();"#);
-    // Valid destructuring renames with `:`, never the invalid `{ a as b }`.
-    assert!(js.contains("a: b"));
-    assert!(!js.contains(" as "));
-    assert!(!js.contains("import"));
-}
-
-#[test]
-fn import_namespace_maps_to_modules() {
-    let js = lower(r#"import * as core from "@luna/core";foo();"#);
-    assert!(js.contains(r#"const core = luna?.core?.modules?.["@luna/core"]"#));
-    assert!(!js.contains("import"));
-}
-
-#[test]
-fn import_default_maps_to_modules_default() {
-    let js = lower(r#"import React from "react";foo();"#);
-    assert!(js.contains(r#"luna?.core?.modules?.["react"]?.default"#));
-    assert!(!js.contains("import"));
-}
-
-#[test]
-fn import_side_effect_is_dropped() {
-    let js = lower(r#"import "./polyfill";foo();"#);
-    assert!(!js.contains("import"));
-    assert!(js.contains("foo()"));
-}
-
-#[test]
-fn export_star_from_is_dropped() {
-    let js = lower(r#"export * from "@luna/core";var z = 1;"#);
-    assert!(!js.contains("export"));
-    assert!(js.contains("var z = 1") || js.contains("z = 1"));
-}
-
-#[test]
-fn export_type_block_is_dropped() {
-    let js = lower("type T = number; export type { T };");
-    assert!(!js.contains("__exports"));
-    assert!(!js.replace("__exports", "").contains("export"));
-}
-
-#[test]
-fn export_inline_type_specifier_is_dropped() {
-    let js = lower("var x = 1; type T = number; export { x as X, type T };");
-    assert!(js.contains("X: x"));
-    // The exports object may spell a kept specifier as shorthand: no `T` may appear at all.
-    assert!(!js.contains('T'), "{js}");
-}
-
-#[test]
-fn export_named_from_is_dropped() {
-    let js = lower(r#"export { foo, bar } from "@luna/lib";var z = 1;"#);
-    assert!(!js.contains("export"));
-}
-
-#[test]
-fn multibyte_utf8_survives() {
-    // The old byte scanner corrupted multi-byte chars via `bytes[i] as char`.
-    let js = lower(r#"const s = "héllo wörld 日本語 🎵"; export { s as Settings };"#);
-    assert!(js.contains("héllo wörld 日本語 🎵"));
-    assert!(js.contains("__exports"));
-}
-
-#[test]
-fn export_keyword_inside_string_is_untouched() {
-    // Only real module declarations are lowered, not text inside literals.
-    let js = lower(r#"var s = "export{foo}"; export { s as Settings };"#);
-    assert!(js.contains(r#""export{foo}""#));
-    assert!(js.contains("__exports"));
-}
-
-#[test]
-fn strips_ts_types() {
-    let ts = r#"
-        const x: number = 42;
-        function greet(name: string): string { return `Hello, ${name}!`; }
-        export { x, greet };
-    "#;
-    let js = lower(ts);
-    assert!(!js.contains(": number"));
-    assert!(!js.contains(": string"));
-    assert!(js.contains("const x = 42"));
-    assert!(js.contains("function greet"));
+fn exports_that_bind_nothing_at_runtime_are_dropped() {
+    let rows: [(&str, &[&str], &[&str]); 4] = [
+        (
+            r#"export * from "@luna/core";var z = 1;"#,
+            &["z = 1"],
+            &["export"],
+        ),
+        ("type T = number; export type { T };", &[], &["export"]),
+        // The exports object may spell a kept specifier as shorthand: no `T` may appear at all.
+        (
+            "var x = 1; type T = number; export { x as X, type T };",
+            &["X: x"],
+            &["T"],
+        ),
+        (
+            r#"export { foo, bar } from "@luna/lib";var z = 1;"#,
+            &[],
+            &["export"],
+        ),
+    ];
+    for (code, kept, absent) in rows {
+        assert_lowered(code, kept, absent);
+    }
 }

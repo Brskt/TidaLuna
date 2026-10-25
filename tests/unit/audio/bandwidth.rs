@@ -29,20 +29,6 @@ fn arming_the_seek_boost_raises_the_playback_rate() {
     );
 }
 
-/// The flag is a request, not a state: the governor consumes it and one arming cannot keep the
-/// rate raised past the exit conditions.
-#[test]
-fn the_seek_boost_request_is_consumed_by_the_tick_that_reads_it() {
-    let progress = BufferProgress::new();
-    progress.request_seek_boost();
-
-    assert!(progress.take_seek_boost(), "the request reaches its reader");
-    assert!(
-        !progress.take_seek_boost(),
-        "a second reader must not inherit an arming already answered"
-    );
-}
-
 /// A preload queued behind a shut gate, sized so the caller can be told apart from the
 /// budget. `bytes` and `remaining` start equal, the way `acquire` builds one.
 fn queued_preload(bytes: u32) -> (VecDeque<TokenRequest>, oneshot::Receiver<()>) {

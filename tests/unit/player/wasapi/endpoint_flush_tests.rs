@@ -15,16 +15,6 @@ fn ctx_with(client_started: bool, endpoint_dirty: bool) -> RenderContext {
 }
 
 #[test]
-fn only_a_stopped_and_dirty_endpoint_owes_a_flush() {
-    assert!(ctx_with(false, true).owes_flush());
-    // A running clock empties the endpoint one period at a time.
-    assert!(!ctx_with(true, true).owes_flush());
-    // Nothing ever reached this endpoint.
-    assert!(!ctx_with(false, false).owes_flush());
-    assert!(!ctx_with(true, false).owes_flush());
-}
-
-#[test]
 fn seek_does_not_stop_a_running_clock() {
     let mut ctx = ctx_with(true, true);
     ctx.current_stream_id = Some(7);

@@ -1,7 +1,7 @@
 //! ASIO driver discovery: enumerate `HKLM\SOFTWARE\ASIO\<name>` and parse each
 //! `CLSID`. The CLSID is a `u128`, keeping the parsing platform-independent; the
 //! Windows loader turns it into a `GUID` at the COM boundary.
-#![cfg_attr(all(not(target_os = "windows"), not(test)), expect(dead_code))]
+#![cfg_attr(not(target_os = "windows"), expect(dead_code))]
 
 /// An installed ASIO driver: its display name and class id.
 #[derive(Clone, Debug, PartialEq, Eq)]

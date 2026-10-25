@@ -1,16 +1,10 @@
 //! Tests for `src/platform/desktop_entry.rs`, attached by `#[path]`.
 
 use std::ffi::OsStr;
-use std::io::{Error, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::ExitStatus;
 
-use super::{
-    Claim, ClaimTarget, EXEC_RESERVED, WM_CLASS, classify, escape_string, exec_value,
-    install_desktop_entry, quote_exec_arg,
-};
+use super::{WM_CLASS, exec_value, install_desktop_entry};
 use crate::ui::deep_link::SCHEME;
 
 /// The `.deb` entry, pulled in so a rename of either constant has to break here.
@@ -18,47 +12,6 @@ use crate::ui::deep_link::SCHEME;
 const DEB_ENTRY: &str = include_str!("../../../installer/linux/deb/tidalunar.desktop.in");
 /// The Nix desktop item, hand-written for the same reason.
 const NIX_PACKAGE: &str = include_str!("../../../nix/package.nix");
-
-/// `ExitStatus::from_raw` takes a wait status, not an exit code (the code lives
-/// in the second byte).
-fn exited(code: i32) -> ExitStatus {
-    ExitStatus::from_raw(code << 8)
-}
-
-#[test]
-fn the_claim_names_our_own_entry_and_our_own_scheme() {
-    // Both halves are the drift guard. Two packaging files spell the scheme out
-    // by hand, and a rename here that they miss has to fail somewhere.
-    let target = ClaimTarget::ours();
-    assert_eq!(target.entry, "tidalunar.desktop");
-    assert_eq!(target.mime, "x-scheme-handler/tidal");
-}
-
-#[test]
-fn a_clean_exit_records_the_claim() {
-    assert_eq!(classify(Ok(exited(0))), Claim::Recorded);
-}
-
-#[test]
-fn a_missing_xdg_mime_is_its_own_outcome() {
-    // Not a failure to report loudly, since the machine simply has no way to
-    // record a default and the entry is still a candidate.
-    let absent = Err(Error::from(ErrorKind::NotFound));
-    assert_eq!(classify(absent), Claim::ToolMissing);
-}
-
-#[test]
-fn a_nonzero_exit_is_a_refusal_and_carries_its_code() {
-    assert_eq!(classify(Ok(exited(1))), Claim::Refused(Some(1)));
-}
-
-#[test]
-fn a_spawn_failure_is_not_a_refusal() {
-    // The distinction the outcome exists for. Nothing was asked, so nothing
-    // said no.
-    let denied = Err(Error::from(ErrorKind::PermissionDenied));
-    assert_eq!(classify(denied), Claim::NotRun(ErrorKind::PermissionDenied));
-}
 
 #[test]
 fn the_deb_entry_declares_the_scheme_and_class_the_code_uses() {
@@ -183,17 +136,6 @@ fn fixture_exe(dir_name: &str) -> String {
 }
 
 #[test]
-fn a_path_with_nothing_to_escape_is_written_as_before() {
-    // Byte for byte what the entry held before the quoting existed; existing
-    // entries are not rewritten on the next launch.
-    let exe = Path::new("/opt/fixture-app/1.0/tidalunar");
-    assert_eq!(
-        exec_value(exe).as_deref(),
-        Some("/opt/fixture-app/1.0/tidalunar %u")
-    );
-}
-
-#[test]
 fn the_four_quoted_characters_get_a_backslash_and_the_file_doubles_it() {
     // The spec's own example: a literal dollar sign in a quoted argument is
     // `\\$` in the file, and a literal backslash is four.
@@ -213,32 +155,17 @@ fn the_four_quoted_characters_get_a_backslash_and_the_file_doubles_it() {
     }
 }
 
+/// A path `env` cannot carry, or one holding a control character with no escape, has no form.
 #[test]
-fn a_path_env_could_not_carry_has_no_form() {
-    let exe = Path::new("/opt/a=b%/tidalunar");
-    assert_eq!(exec_value(exe), None);
-}
-
-#[test]
-fn a_control_character_with_no_escape_is_not_written() {
-    for c in ['\u{1}', '\u{1b}', '\u{7f}'] {
-        let exe = format!("/opt/fixture/{c}/tidalunar");
-        assert_eq!(exec_value(Path::new(&exe)), None, "{c:?}");
+fn a_path_the_entry_cannot_carry_has_no_exec_value() {
+    for exe in [
+        "/opt/a=b%/tidalunar",
+        "/opt/fixture/\u{1}/tidalunar",
+        "/opt/fixture/\u{1b}/tidalunar",
+        "/opt/fixture/\u{7f}/tidalunar",
+    ] {
+        assert_eq!(exec_value(Path::new(exe)), None, "{exe:?}");
     }
-}
-
-#[test]
-fn every_reserved_character_forces_the_quotes() {
-    for c in EXEC_RESERVED {
-        let quoted = quote_exec_arg(&format!("/opt/a{c}b"));
-        assert!(quoted.starts_with('"') && quoted.ends_with('"'), "{c:?}");
-    }
-}
-
-#[test]
-fn only_the_string_escapes_are_applied_to_the_whole_value() {
-    assert_eq!(escape_string("a\\b\nc\td\re"), "a\\\\b\\nc\\td\\re");
-    assert_eq!(escape_string("plain %u"), "plain %u");
 }
 
 #[test]

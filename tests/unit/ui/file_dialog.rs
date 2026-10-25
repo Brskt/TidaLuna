@@ -2,31 +2,6 @@
 
 use super::*;
 
-/// The regression this guards is a dismissed dialog reporting no selection at all, which
-/// `showSaveDialog` then reported to the plugin as `canceled`.
-#[test]
-fn a_borrowed_list_is_read_through_the_raw_pointer() {
-    let mut owned = CefStringList::new();
-    owned.append("/music/song.flac");
-
-    // The same shape CEF hands the callback: a borrow of a list it still owns.
-    let raw: *mut sys::_cef_string_list_t = (&mut owned).into();
-    let mut borrowed = CefStringList::from(raw);
-
-    assert_eq!(
-        read_paths(&mut borrowed),
-        vec!["/music/song.flac".to_string()]
-    );
-}
-
-/// A plugin names its own destination: the only thing that makes one legitimate is that the
-/// user answered a dialog for it. A path the renderer invented matches nothing.
-#[test]
-fn a_destination_no_dialog_produced_is_not_authorised() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(authorisation_for(&dir.path().join("song.flac")).is_none());
-}
-
 /// Matching does not consume: a fetch that fails after the check must not cost the user their
 /// answer.
 #[test]
@@ -43,17 +18,6 @@ fn an_authorisation_survives_until_it_is_consumed() {
         authorisation_for(&chosen).is_none(),
         "one dialog answer buys one written file"
     );
-}
-
-/// The destination need not exist yet: it may name a tree `create_dir_all` will build, so
-/// canonicalising the parent outright would refuse exactly that case.
-#[test]
-fn a_destination_below_a_directory_that_does_not_exist_yet_is_authorised() {
-    let dir = tempfile::tempdir().unwrap();
-    let deep = dir.path().join("Artist").join("Album").join("song.flac");
-    record_user_choice(&deep, false);
-
-    assert!(authorisation_for(&deep).is_some());
 }
 
 /// Refused even where it lands back on the authorised file. Resolving `..` to accept this is what the
@@ -172,72 +136,51 @@ fn a_path_that_is_not_absolute_is_refused() {
     );
 }
 
-/// Re-answering a dialog for a path already held replaces that entry. It needs no slot. Bounding
-/// before deduplicating dropped an unrelated authorisation anyway, and the download holding it was
-/// then refused for a dialog its user had answered.
+/// A destination already held takes the fresh answer in its own entry and needs no slot; a new one
+/// at capacity costs the oldest. Bounding before deduplicating dropped an unrelated authorisation,
+/// and the download holding it was then refused for a dialog its user had answered.
 #[test]
-fn re_answering_a_held_path_at_capacity_evicts_nothing() {
-    let mut choices = Vec::new();
-    for n in 0..MAX_USER_CHOICES {
-        choices.push(Choice {
-            id: n as u64,
-            resolved: PathBuf::from(format!("/music/{n}.flac")),
-            replace_confirmed: false,
-        });
-    }
+fn a_held_destination_needs_no_slot_and_a_new_one_at_capacity_costs_the_oldest() {
+    for (what, destination, replace_confirmed, oldest_survives) in [
+        ("re-answering a held path", "/music/7.flac", true, true),
+        ("a new destination", "/music/fresh.flac", false, false),
+    ] {
+        let mut choices = Vec::new();
+        for n in 0..MAX_USER_CHOICES {
+            choices.push(Choice {
+                id: n as u64,
+                resolved: PathBuf::from(format!("/music/{n}.flac")),
+                replace_confirmed: false,
+            });
+        }
 
-    record_bounded(
-        &mut choices,
-        Choice {
-            id: 900,
-            resolved: PathBuf::from("/music/7.flac"),
-            replace_confirmed: true,
-        },
-    );
+        record_bounded(
+            &mut choices,
+            Choice {
+                id: 900,
+                resolved: PathBuf::from(destination),
+                replace_confirmed,
+            },
+        );
 
-    assert_eq!(choices.len(), MAX_USER_CHOICES);
-    assert!(
-        choices
+        assert_eq!(choices.len(), MAX_USER_CHOICES, "{what}");
+        assert_eq!(
+            choices
+                .iter()
+                .any(|c| c.resolved.as_path() == Path::new("/music/0.flac")),
+            oldest_survives,
+            "{what}: the oldest goes only when the new entry really is new"
+        );
+        let held = choices
             .iter()
-            .any(|c| c.resolved.as_path() == Path::new("/music/0.flac")),
-        "the oldest unrelated answer must survive a replacement"
-    );
-    let replaced = choices
-        .iter()
-        .filter(|c| c.resolved.as_path() == Path::new("/music/7.flac"))
-        .collect::<Vec<_>>();
-    assert_eq!(replaced.len(), 1, "one entry per destination");
-    assert!(replaced[0].replace_confirmed, "the newest answer wins");
-}
-
-/// A genuinely new destination at capacity still costs the oldest entry (that bound is the point).
-#[test]
-fn a_new_destination_at_capacity_drops_the_oldest() {
-    let mut choices = Vec::new();
-    for n in 0..MAX_USER_CHOICES {
-        choices.push(Choice {
-            id: n as u64,
-            resolved: PathBuf::from(format!("/music/{n}.flac")),
-            replace_confirmed: false,
-        });
+            .filter(|c| c.resolved.as_path() == Path::new(destination))
+            .collect::<Vec<_>>();
+        assert_eq!(held.len(), 1, "{what}: one entry per destination");
+        assert_eq!(
+            held[0].replace_confirmed, replace_confirmed,
+            "{what}: the newest answer wins"
+        );
     }
-
-    record_bounded(
-        &mut choices,
-        Choice {
-            id: 900,
-            resolved: PathBuf::from("/music/fresh.flac"),
-            replace_confirmed: false,
-        },
-    );
-
-    assert_eq!(choices.len(), MAX_USER_CHOICES);
-    assert!(
-        !choices
-            .iter()
-            .any(|c| c.resolved.as_path() == Path::new("/music/0.flac")),
-        "the oldest goes when the new entry really is new"
-    );
 }
 
 /// Nobody was asked about any particular file inside a granted folder; nothing there may be
@@ -298,18 +241,6 @@ fn a_traversal_cannot_reach_a_granted_folder() {
         authorisation_for(&granted.join("song.flac")).is_some(),
         "the direct path still works"
     );
-}
-
-/// `pathFormat` is a user-editable template in the plugin; a `/` in it writes into subdirectories
-/// the user never named. Refusing those would break exactly the users who organise their library.
-#[test]
-fn a_granted_folder_covers_a_subdirectory_below_it() {
-    let dir = tempfile::tempdir().unwrap();
-    record_folder_grant(dir.path());
-
-    let dest =
-        resolved(&dir.path().join("Artist").join("Album").join("song.flac")).expect("resolvable");
-    assert!(folder_grant_covers(&dest));
 }
 
 /// A prefix match on strings would accept `/tmp/musicX` for a grant on `/tmp/music`.

@@ -142,29 +142,43 @@ fn declared(num_frames: Option<u64>, duration: Option<u64>, timescale: u32) -> T
     track
 }
 
+/// A frame count is the length, and so is a declared duration in another timescale: an MP4 whose
+/// media timescale is not the sample rate has no frame count in symphonia, and its declared
+/// duration is the only length it has. A zero, a missing declaration or a zero rate is none.
 #[test]
-fn a_frame_count_is_the_length() {
-    let track = declared(Some(441_000), Some(1), 44_100);
-    assert_eq!(declared_secs(&track, SAMPLE_RATE), 10.0);
-}
-
-#[test]
-fn a_duration_in_another_timescale_is_the_length() {
-    // An MP4 whose media timescale is not the sample rate has no frame count in symphonia, and
-    // its declared duration is the only length it has.
-    let track = declared(None, Some(220_500), 22_050);
-    assert_eq!(declared_secs(&track, SAMPLE_RATE), 10.0);
-}
-
-#[test]
-fn a_zero_is_no_declaration() {
-    assert_eq!(
-        declared_secs(&declared(Some(0), Some(0), 44_100), SAMPLE_RATE),
-        0.0
-    );
-    assert_eq!(
-        declared_secs(&declared(None, None, 44_100), SAMPLE_RATE),
-        0.0
-    );
-    assert_eq!(declared_secs(&declared(Some(100), None, 44_100), 0), 0.0);
+fn a_declared_frame_count_or_duration_is_the_length_and_a_zero_is_no_declaration() {
+    for (what, track, rate, expected) in [
+        (
+            "a frame count",
+            declared(Some(441_000), Some(1), 44_100),
+            SAMPLE_RATE,
+            10.0,
+        ),
+        (
+            "a duration in another timescale",
+            declared(None, Some(220_500), 22_050),
+            SAMPLE_RATE,
+            10.0,
+        ),
+        (
+            "a zero frame count and duration",
+            declared(Some(0), Some(0), 44_100),
+            SAMPLE_RATE,
+            0.0,
+        ),
+        (
+            "nothing declared",
+            declared(None, None, 44_100),
+            SAMPLE_RATE,
+            0.0,
+        ),
+        (
+            "a zero sample rate",
+            declared(Some(100), None, 44_100),
+            0,
+            0.0,
+        ),
+    ] {
+        assert_eq!(declared_secs(&track, rate), expected, "{what}");
+    }
 }

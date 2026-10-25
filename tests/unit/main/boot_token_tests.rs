@@ -57,67 +57,55 @@ fn blob_with(at: &str, rt: &str) -> Box<RawSdkBlob> {
     raw_from_entries(entries)
 }
 
+/// `Some(false)` restores without a refresh, `Some(true)` restores with one, `None` abandons.
 #[test]
-fn current_opaque_match_restores_without_refresh() {
-    let cur = generation("cur");
-    let raw = blob_with(&cur.opaque_at, &cur.opaque_rt);
-    let BootTokenOutcome::Restore { needs_refresh, .. } =
-        reconcile_sdk_blob(raw, stored(cur, None))
-    else {
-        panic!("expected Restore");
-    };
-    assert!(!needs_refresh);
-}
-
-#[test]
-fn current_real_match_needs_refresh() {
-    let cur = generation("cur");
-    let raw = blob_with(&cur.access_token, &cur.refresh_token);
-    let BootTokenOutcome::Restore { needs_refresh, .. } =
-        reconcile_sdk_blob(raw, stored(cur, None))
-    else {
-        panic!("expected Restore");
-    };
-    assert!(needs_refresh);
-}
-
-#[test]
-fn previous_opaque_match_restores_with_refresh() {
-    let prev = generation("old");
-    let cur = generation("new");
-    let raw = blob_with(&prev.opaque_at, &prev.opaque_rt);
-    let BootTokenOutcome::Restore { needs_refresh, .. } =
-        reconcile_sdk_blob(raw, stored(cur, Some(prev)))
-    else {
-        panic!("expected Restore");
-    };
-    assert!(needs_refresh);
-}
-
-#[test]
-fn previous_real_match_restores_with_refresh() {
-    let prev = generation("old");
-    let cur = generation("new");
-    let raw = blob_with(&prev.access_token, &prev.refresh_token);
-    let BootTokenOutcome::Restore { needs_refresh, .. } =
-        reconcile_sdk_blob(raw, stored(cur, Some(prev)))
-    else {
-        panic!("expected Restore");
-    };
-    assert!(needs_refresh);
-}
-
-#[test]
-fn unknown_blob_abandons() {
-    let raw = blob_with("stranger_at", "stranger_rt");
-    let outcome = reconcile_sdk_blob(raw, stored(generation("cur"), Some(generation("old"))));
-    assert!(matches!(outcome, BootTokenOutcome::Abandon));
-}
-
-#[test]
-fn corrupt_blob_abandons() {
-    let mut raw = blob_with("at", "rt");
-    raw.wrapped_key[0] ^= 0xFF;
-    let outcome = reconcile_sdk_blob(raw, stored(generation("cur"), None));
-    assert!(matches!(outcome, BootTokenOutcome::Abandon));
+fn a_boot_blob_is_restored_or_abandoned_by_the_generation_it_holds() {
+    let (cur, new, old) = (generation("cur"), generation("new"), generation("old"));
+    let mut corrupt = blob_with("at", "rt");
+    corrupt.wrapped_key[0] ^= 0xFF;
+    let rows = [
+        (
+            "current opaque",
+            blob_with(&cur.opaque_at, &cur.opaque_rt),
+            cur.clone(),
+            None,
+            Some(false),
+        ),
+        (
+            "current real",
+            blob_with(&cur.access_token, &cur.refresh_token),
+            cur.clone(),
+            None,
+            Some(true),
+        ),
+        (
+            "previous opaque",
+            blob_with(&old.opaque_at, &old.opaque_rt),
+            new.clone(),
+            Some(old.clone()),
+            Some(true),
+        ),
+        (
+            "previous real",
+            blob_with(&old.access_token, &old.refresh_token),
+            new.clone(),
+            Some(old.clone()),
+            Some(true),
+        ),
+        (
+            "an unknown blob",
+            blob_with("stranger_at", "stranger_rt"),
+            cur.clone(),
+            Some(old.clone()),
+            None,
+        ),
+        ("a corrupt blob", corrupt, cur.clone(), None, None),
+    ];
+    for (what, raw, current, previous, expected) in rows {
+        let restored = match reconcile_sdk_blob(raw, stored(current, previous)) {
+            BootTokenOutcome::Restore { needs_refresh, .. } => Some(needs_refresh),
+            BootTokenOutcome::Abandon => None,
+        };
+        assert_eq!(restored, expected, "{what}");
+    }
 }

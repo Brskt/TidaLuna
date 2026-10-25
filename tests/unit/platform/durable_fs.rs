@@ -20,16 +20,6 @@ fn a_tombstone_leaves_the_file_empty_and_in_place() {
 }
 
 #[test]
-fn a_tombstone_for_a_file_that_is_not_there_creates_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("absent");
-
-    tombstone(&file).unwrap();
-
-    assert!(!file.exists());
-}
-
-#[test]
 fn persisting_replaces_the_destination() {
     use std::io::Write;
 

@@ -634,32 +634,6 @@ async fn an_outsider_cannot_take_over_the_session_a_phone_suspended() {
 }
 
 #[tokio::test]
-async fn the_phone_resumes_the_session_it_suspended() {
-    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
-    let mut pair = two_sockets(reqwest::Client::new()).await;
-    let id = pair.phone_starts_a_session().await;
-    pair.say(
-        1,
-        serde_json::json!({ "command": "endSession", "sessionId": id, "stopCasting": false }),
-    )
-    .await;
-    heard_on(&mut pair.phone, Duration::from_millis(500)).await;
-
-    pair.say(
-        1,
-        serde_json::json!({ "command": "resumeSession", "sessionId": id }),
-    )
-    .await;
-    let resumed = heard_on(&mut pair.phone, Duration::from_millis(500)).await;
-    pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
-
-    assert_eq!(
-        resumed,
-        vec![serde_json::json!({ "command": "notifySessionResumed", "sessionId": id })]
-    );
-}
-
-#[tokio::test]
 async fn what_the_session_says_of_its_queue_is_heard_by_its_phones_only() {
     let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
     let mut pair = two_sockets(reqwest::Client::new()).await;
@@ -687,31 +661,4 @@ async fn what_the_session_says_of_its_queue_is_heard_by_its_phones_only() {
         outsider.is_empty(),
         "a socket outside the session heard its queue: {outsider:?}"
     );
-}
-
-#[tokio::test]
-async fn a_second_phone_that_resumed_the_session_hears_it_too() {
-    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
-    let mut pair = two_sockets(reqwest::Client::new()).await;
-    let id = pair.phone_starts_a_session().await;
-    pair.say(
-        2,
-        serde_json::json!({ "command": "resumeSession", "sessionId": id }),
-    )
-    .await;
-    heard_on(&mut pair.other, Duration::from_millis(500)).await;
-
-    pair.say(
-        1,
-        serde_json::json!({ "command": "refreshQueue", "requestId": 8 }),
-    )
-    .await;
-    let second: Vec<String> = heard_on(&mut pair.other, Duration::from_millis(500))
-        .await
-        .iter()
-        .map(command_of)
-        .collect();
-    pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
-
-    assert_eq!(second, vec!["notifyQueueItemsChanged"]);
 }

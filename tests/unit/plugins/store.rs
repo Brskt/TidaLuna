@@ -16,17 +16,12 @@ const TINY: StorageLimits = StorageLimits {
 };
 
 #[test]
-fn quota_rejects_oversized_value() {
-    let mut conn = mem();
-    let err = enforce_storage_quota(&mut conn, "ns", "k", "123456789", &TINY).unwrap_err();
-    assert!(err.contains("per-value"), "got: {err}");
-}
-
-#[test]
-fn quota_rejects_oversized_key() {
-    let mut conn = mem();
-    let err = enforce_storage_quota(&mut conn, "ns", "toolong", "v", &TINY).unwrap_err();
-    assert!(err.contains("per-key"), "got: {err}");
+fn quota_rejects_an_oversized_value_or_key() {
+    for (key, value, limit) in [("k", "123456789", "per-value"), ("toolong", "v", "per-key")] {
+        let mut conn = mem();
+        let err = enforce_storage_quota(&mut conn, "ns", key, value, &TINY).unwrap_err();
+        assert!(err.contains(limit), "key {key:?}: got: {err}");
+    }
 }
 
 #[test]

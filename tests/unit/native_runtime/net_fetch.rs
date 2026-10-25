@@ -3,35 +3,34 @@
 use super::*;
 use serde_json::json;
 
+/// `data:`/`blob:` are resolved in the child; only http(s) reaches Rust. Also refused: CONNECT,
+/// TRACE and TRACK in any case, and an oversized body (on its base64 length, before any decode).
 #[test]
-fn parse_rejects_non_http_scheme() {
-    // data:/blob: are resolved in the child; only http(s) reaches Rust.
-    let req = json!({ "reqId": 1, "plugin": "P", "url": "file:///etc/passwd" });
-    assert!(parse_fetch_request(&req).is_err());
-}
+fn a_fetch_request_outside_the_allowed_shape_is_rejected() {
+    let with_method =
+        |m: &str| json!({ "reqId": 1, "plugin": "P", "url": "https://h/p", "method": m });
+    let oversized = "A".repeat(MAX_BODY_BYTES / 3 * 4 + 8);
 
-#[test]
-fn parse_rejects_missing_url() {
-    let req = json!({ "reqId": 1, "plugin": "P" });
-    assert!(parse_fetch_request(&req).is_err());
-}
-
-#[test]
-fn parse_defaults_method_get() {
-    let req = json!({ "reqId": 7, "plugin": "CoverTheme", "url": "https://h/p" });
-    let p = parse_fetch_request(&req).expect("valid");
-    assert_eq!(p.method, "GET");
-    assert_eq!(p.plugin, "CoverTheme");
-    assert!(p.body.is_none());
-}
-
-#[test]
-fn parse_rejects_connect_and_trace_methods() {
-    for m in ["CONNECT", "connect", "TRACE", "trace", "TRACK"] {
-        let req = json!({ "reqId": 1, "plugin": "P", "url": "https://h/p", "method": m });
+    for (what, req) in [
+        (
+            "a file: url",
+            json!({ "reqId": 1, "plugin": "P", "url": "file:///etc/passwd" }),
+        ),
+        ("method CONNECT", with_method("CONNECT")),
+        ("method connect", with_method("connect")),
+        ("method TRACE", with_method("TRACE")),
+        ("method trace", with_method("trace")),
+        ("method TRACK", with_method("TRACK")),
+        (
+            "a body over the cap",
+            json!({
+                "reqId": 1, "plugin": "P", "url": "https://h/p", "method": "POST", "body": oversized
+            }),
+        ),
+    ] {
         assert!(
             parse_fetch_request(&req).is_err(),
-            "method {m} must be rejected"
+            "{what} must be rejected"
         );
     }
 }

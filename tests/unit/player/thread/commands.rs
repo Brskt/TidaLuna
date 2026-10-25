@@ -4,10 +4,7 @@
 
 #[cfg(target_os = "windows")]
 use super::queued_seek_survives;
-use super::{
-    IncomingFailure, LoadRequest, PlayAction, ResumePolicy, decide_play, resolve_start_position,
-    settle_load,
-};
+use super::{IncomingFailure, LoadRequest, PlayAction, ResumePolicy, decide_play, settle_load};
 #[cfg(target_os = "windows")]
 use crate::player::asio::host::{AsioEvent, AsioHandle};
 use crate::player::resume::ResumeStore;
@@ -23,97 +20,69 @@ use std::sync::{Arc, Mutex};
 /// What the incoming track has played at a promotion, in samples.
 const SIX_SECONDS: u64 = 44_100 * 2 * 6;
 
+/// A load in flight wins even when a retained source also exists.
 #[test]
-fn play_with_live_track_resumes() {
-    assert_eq!(decide_play(true, None, false), PlayAction::Resume);
-    assert_eq!(decide_play(true, Some(7), true), PlayAction::Resume);
+fn a_play_follows_the_live_track_then_the_load_then_the_retained_source() {
+    for (has_track, loading_gen, retained, expected) in [
+        (true, None, false, PlayAction::Resume),
+        (true, Some(7), true, PlayAction::Resume),
+        (false, Some(7), true, PlayAction::DeferTo(7)),
+        (false, Some(3), false, PlayAction::DeferTo(3)),
+        (false, None, true, PlayAction::ReArm),
+        (false, None, false, PlayAction::Ignore),
+    ] {
+        assert_eq!(
+            decide_play(has_track, loading_gen, retained),
+            expected,
+            "decide_play({has_track}, {loading_gen:?}, {retained})"
+        );
+    }
 }
 
+/// A stale settle must not clear a newer in-flight load. A load that failed delivered no
+/// `handle_load`; the play deferred on its generation must not dangle either.
 #[test]
-fn play_while_loading_defers_to_that_generation() {
-    assert_eq!(decide_play(false, Some(7), true), PlayAction::DeferTo(7));
-    // a load in flight wins even when a retained source also exists
-    assert_eq!(decide_play(false, Some(3), false), PlayAction::DeferTo(3));
+fn a_settle_clears_only_what_waits_on_its_own_generation() {
+    for (loading_gen, pending_play, generation, expected) in [
+        (Some(6), None, 5, (Some(6), None)),
+        (Some(5), Some(5), 5, (None, None)),
+        (None, Some(9), 5, (None, Some(9))),
+    ] {
+        assert_eq!(
+            settle_load(loading_gen, pending_play, generation),
+            expected,
+            "settle_load({loading_gen:?}, {pending_play:?}, {generation})"
+        );
+    }
 }
 
-#[test]
-fn play_with_no_load_but_retained_source_rearms() {
-    assert_eq!(decide_play(false, None, true), PlayAction::ReArm);
-}
-
-#[test]
-fn play_cold_empty_is_ignored() {
-    assert_eq!(decide_play(false, None, false), PlayAction::Ignore);
-}
-
-#[test]
-fn settle_ignores_a_mismatched_gen() {
-    // a stale settle for an old gen must not clear a newer in-flight load
-    assert_eq!(settle_load(Some(6), None, 5), (Some(6), None));
-}
-
-#[test]
-fn settle_clears_a_deferred_play_waiting_on_a_failed_load() {
-    // the load failed (no handle_load delivered); the deferred play
-    // tagged with that gen must not dangle
-    assert_eq!(settle_load(Some(5), Some(5), 5), (None, None));
-}
-
-#[test]
-fn settle_leaves_a_deferred_play_for_a_different_gen() {
-    assert_eq!(settle_load(None, Some(9), 5), (None, Some(9)));
-}
-
-/// The teardown used to clear the queued seek whatever track was loading next.
+/// The teardown used to clear the queued seek whatever track was loading next. A restart
+/// contracts to position 0 and discards the seek whatever the tag still holds.
 #[cfg(target_os = "windows")]
 #[test]
-fn a_queued_seek_survives_the_re_arm_of_its_own_track() {
-    assert!(queued_seek_survives(
-        Some("track-1"),
-        "track-1",
-        ResumePolicy::Explicit(12.0)
-    ));
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn a_queued_seek_does_not_follow_the_listener_to_another_track() {
-    assert!(!queued_seek_survives(
-        Some("track-1"),
-        "track-2",
-        ResumePolicy::Explicit(12.0)
-    ));
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn a_restart_discards_a_queued_seek_for_its_own_track() {
-    // A fresh play instance contracts to start at 0, whatever the tag still holds.
-    assert!(!queued_seek_survives(
-        Some("track-1"),
-        "track-1",
-        ResumePolicy::Restart
-    ));
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn no_queued_seek_leaves_nothing_to_carry() {
-    assert!(!queued_seek_survives(
-        None,
-        "track-1",
-        ResumePolicy::Explicit(12.0)
-    ));
-}
-
-/// The load's announcement and the stream it opens read the same pair a few lines apart.
-/// Answering here, once, is what keeps the two from naming different positions.
-#[test]
-fn a_queued_seek_outranks_an_auto_resume() {
-    assert_eq!(resolve_start_position(Some(10.0), Some(45.0)), Some(10.0));
-    assert_eq!(resolve_start_position(None, Some(45.0)), Some(45.0));
-    assert_eq!(resolve_start_position(Some(10.0), None), Some(10.0));
-    assert_eq!(resolve_start_position(None, None), None);
+fn a_queued_seek_survives_only_the_re_arm_of_its_own_track() {
+    for (queued_track, track_id, resume_policy, expected) in [
+        (
+            Some("track-1"),
+            "track-1",
+            ResumePolicy::Explicit(12.0),
+            true,
+        ),
+        (
+            Some("track-1"),
+            "track-2",
+            ResumePolicy::Explicit(12.0),
+            false,
+        ),
+        (Some("track-1"), "track-1", ResumePolicy::Restart, false),
+        (None, "track-1", ResumePolicy::Explicit(12.0), false),
+    ] {
+        assert_eq!(
+            queued_seek_survives(queued_track, track_id, resume_policy),
+            expected,
+            "queued for {queued_track:?}, loading {track_id:?}, {resume_policy:?}"
+        );
+    }
 }
 
 // The transport methods are plain `&mut self` functions. A test drives them directly:
@@ -292,45 +261,32 @@ async fn a_probe_failure_names_the_track_its_load_carried() {
 }
 
 /// A fetch that failed never reached `handle_load`: the thread still holds the previous track,
-/// and the id has to come from the command.
+/// and the id has to come from the command. A load a newer one superseded reports nothing (the
+/// renderer is never told that a track it has since replaced failed).
 #[tokio::test]
-async fn a_fetch_failure_names_the_track_its_load_carried() {
+async fn a_fetch_failure_names_the_track_its_load_carried_unless_superseded() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.current_product_id = Some("previous".to_string());
+    for (generations_behind, expected) in
+        [(0u32, Some((9, Some("120002099".to_string())))), (1, None)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(dir.path());
+        h.player.current_product_id = Some("previous".to_string());
 
-    h.player.handle_command(PlayerCommand::LoadFailed {
-        error: "HTTP 403 Forbidden".to_string(),
-        code: crate::player::MediaErrorCode::NoSuchFile,
-        seq: 9,
-        load_gen: crate::player::current_gen(),
-        product_id: Some("120002099".to_string()),
-    });
+        h.player.handle_command(PlayerCommand::LoadFailed {
+            error: "HTTP 403 Forbidden".to_string(),
+            code: crate::player::MediaErrorCode::NoSuchFile,
+            seq: 9,
+            load_gen: crate::player::current_gen().wrapping_sub(generations_behind),
+            product_id: Some("120002099".to_string()),
+        });
 
-    assert_eq!(
-        last_media_error(&h.events),
-        Some((9, Some("120002099".to_string())))
-    );
-}
-
-/// The counterweight: a load a newer one superseded reports nothing (the renderer is never
-/// told that a track it has since replaced failed).
-#[tokio::test]
-async fn a_superseded_fetch_failure_names_nobody() {
-    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-
-    h.player.handle_command(PlayerCommand::LoadFailed {
-        error: "HTTP 403 Forbidden".to_string(),
-        code: crate::player::MediaErrorCode::NoSuchFile,
-        seq: 9,
-        load_gen: crate::player::current_gen().wrapping_sub(1),
-        product_id: Some("120002099".to_string()),
-    });
-
-    assert_eq!(last_media_error(&h.events), None);
+        assert_eq!(
+            last_media_error(&h.events),
+            expected,
+            "a load {generations_behind} generations behind"
+        );
+    }
 }
 
 /// The re-assert is the one load path that never reaches `handle_load`; it is the only one that
@@ -446,94 +402,77 @@ impl ReplayableTrack {
     }
 }
 
+/// A dead bypass decoder hands the device back, drops the seek sender and keeps the resume point
+/// whatever killed it. Only the report differs: an unreadable source is a `MediaError`, a stall
+/// is `NetworkLost` and never an error code, which the SDK answers by advancing the queue.
 #[cfg(target_os = "windows")]
 #[test]
 fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.is_exclusive_mode = true;
-    h.player.resume_store.set("track-1", 42.0);
+    use crate::player::packet_failure::PacketFailure;
+    for (what, cause, error, network_lost) in [
+        (
+            "an unreadable source",
+            PacketFailure::Source,
+            "decode packet error: truncated frame",
+            false,
+        ),
+        (
+            "a stalled download",
+            PacketFailure::Network,
+            "decode packet error: no data from the download for 30s",
+            true,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(dir.path());
+        h.player.is_exclusive_mode = true;
+        h.player.resume_store.set("track-1", 42.0);
 
-    h.player.settle_bypass_decode_failure(
-        "decode packet error: truncated frame".to_string(),
-        crate::player::packet_failure::PacketFailure::Source,
-    );
+        h.player
+            .settle_bypass_decode_failure(error.to_string(), cause);
 
-    assert!(
-        h.player.exclusive_release_at.is_some(),
-        "nothing else hands the device back: no EndStream means no completion path"
-    );
-    assert_eq!(
-        h.player.resume_store.get("track-1"),
-        Some(42.0),
-        "clearing it here would be treating a dead decoder as a finished track"
-    );
-    assert!(!h.player.has_track);
-    assert!(!h.player.is_playing);
-    assert!(!h.player.seeking);
-    assert!(
-        h.player.exclusive_seek_tx.is_none(),
-        "the sender points at a receiver the dead decoder dropped"
-    );
-    assert_eq!(h.player.idle_state, PlaybackState::Stopped);
-    assert_eq!(last_state(&h.events), Some(PlaybackState::Stopped));
-    assert!(
-        h.events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|ev| matches!(ev, PlayerEvent::MediaError { .. })),
-        "a terminal state with no error leaves the SDK without a reason"
-    );
-}
-
-/// The same death, blamed on the connection instead of the file. Every `mediaerror` code the SDK
-/// maps advances the queue, so reporting a stall as an unreadable file walks the listener past
-/// tracks they never heard. What must NOT change with the cause: the device is still handed back,
-/// the seek pin cleared, the resume point kept.
-#[cfg(target_os = "windows")]
-#[test]
-fn a_bypass_network_loss_holds_the_queue_and_still_frees_the_device() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.is_exclusive_mode = true;
-    h.player.resume_store.set("track-1", 42.0);
-
-    h.player.settle_bypass_decode_failure(
-        "decode packet error: no data from the download for 30s".to_string(),
-        crate::player::packet_failure::PacketFailure::Network,
-    );
-
-    assert!(
-        h.events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
-        "a stall has to raise the no-connection banner, not blame the track"
-    );
-    assert!(
-        !h.events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|ev| matches!(ev, PlayerEvent::MediaError { .. })),
-        "any code the SDK maps advances the queue, which a stall has not earned"
-    );
-    assert!(
-        h.player.exclusive_release_at.is_some(),
-        "the device is owed back whatever killed the decoder"
-    );
-    assert_eq!(
-        h.player.resume_store.get("track-1"),
-        Some(42.0),
-        "the listener never reached the end, and will retry this same track"
-    );
-    assert!(
-        h.player.exclusive_seek_tx.is_none(),
-        "the sender points at a receiver the dead decoder dropped"
-    );
-    assert_eq!(last_state(&h.events), Some(PlaybackState::Stopped));
+        let (media_error, lost) = {
+            let events = h.events.lock().unwrap();
+            (
+                events
+                    .iter()
+                    .any(|ev| matches!(ev, PlayerEvent::MediaError { .. })),
+                events
+                    .iter()
+                    .any(|ev| matches!(ev, PlayerEvent::NetworkLost(_))),
+            )
+        };
+        assert_eq!(
+            lost, network_lost,
+            "{what}: a stall raises the no-connection banner"
+        );
+        assert_eq!(
+            media_error, !network_lost,
+            "{what}: any code the SDK maps advances the queue, which a stall has not earned"
+        );
+        assert!(
+            h.player.exclusive_release_at.is_some(),
+            "{what}: the device is owed back whatever killed the decoder"
+        );
+        assert_eq!(
+            h.player.resume_store.get("track-1"),
+            Some(42.0),
+            "{what}: a dead decoder is not a finished track"
+        );
+        assert!(!h.player.has_track, "{what}");
+        assert!(!h.player.is_playing, "{what}");
+        assert!(!h.player.seeking, "{what}");
+        assert!(
+            h.player.exclusive_seek_tx.is_none(),
+            "{what}: the sender points at a receiver the dead decoder dropped"
+        );
+        assert_eq!(h.player.idle_state, PlaybackState::Stopped, "{what}");
+        assert_eq!(
+            last_state(&h.events),
+            Some(PlaybackState::Stopped),
+            "{what}"
+        );
+    }
 }
 
 /// `LoadStarted` lands the moment a load begins, its `Load` only once the fetch resolves, and
@@ -671,24 +610,9 @@ fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
     );
 }
 
-/// A decode failure drops the track identity before the SDK's recovery reload. Queuing an
-/// untagged seek there would hand it to whichever track loads next.
-#[cfg(target_os = "windows")]
-#[test]
-fn a_seek_with_no_track_to_tag_is_not_queued() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.is_asio_mode = true;
-    h.player.has_track = false;
-    h.player.current_track_id = None;
-
-    h.player.handle_seek(30.0);
-
-    assert!(h.player.user_seek_override.is_none());
-}
-
-/// Dropping the untagged seek is the deliberate half; the silence was not. With no tag the seek
-/// is gone; nothing will ever make the target the transport already took come true.
+/// A decode failure drops the track identity before the SDK's recovery reload: an untagged seek
+/// queued there would reach whichever track loads next. Dropping it is the deliberate half; the
+/// silence was not, and nothing will ever make the target the transport already took come true.
 #[cfg(target_os = "windows")]
 #[test]
 fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
@@ -722,32 +646,37 @@ fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
     );
 }
 
-/// Taking only the winner leaves the loser armed for the next read of that slot.
+/// Both candidates compete for one slot: taking only the winner leaves the loser armed for the
+/// next read. A load announces where it will open before the backend is chosen: the
+/// announced position has to be the one the stream opens at.
 #[cfg(target_os = "windows")]
 #[test]
-fn taking_the_queued_seek_retires_the_auto_resume() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.user_seek_override = Some(("track-1".to_string(), 10.0));
-    h.player.pending_resume_seek = Some(45.0);
+fn the_start_position_is_the_queued_seek_else_the_auto_resume_and_taking_retires_both() {
+    for (queued, auto_resume, expected) in [
+        (Some(10.0), Some(45.0), Some(10.0)),
+        (None, Some(45.0), Some(45.0)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(dir.path());
+        h.player.user_seek_override = queued.map(|time| ("track-1".to_string(), time));
+        h.player.pending_resume_seek = auto_resume;
 
-    assert_eq!(h.player.take_start_position(), Some(10.0));
-    assert_eq!(
-        h.player.pending_resume_seek, None,
-        "left armed, the next play seeks back to 45 and the queued seek is lost twice over"
-    );
-    assert!(h.player.user_seek_override.is_none());
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn the_auto_resume_is_taken_when_no_seek_was_queued() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.pending_resume_seek = Some(45.0);
-
-    assert_eq!(h.player.take_start_position(), Some(45.0));
-    assert_eq!(h.player.pending_resume_seek, None);
+        assert_eq!(
+            h.player.start_position(),
+            expected,
+            "announced, queued {queued:?} auto-resume {auto_resume:?}"
+        );
+        assert_eq!(
+            h.player.take_start_position(),
+            expected,
+            "opened at, queued {queued:?} auto-resume {auto_resume:?}"
+        );
+        assert_eq!(
+            h.player.pending_resume_seek, None,
+            "left armed, the next play seeks back to the auto-resume: queued {queued:?}"
+        );
+        assert!(h.player.user_seek_override.is_none(), "queued {queued:?}");
+    }
 }
 
 /// The whole chain a queued seek has to survive, which nothing exercised in one piece: a
@@ -1013,24 +942,6 @@ fn a_switch_on_a_streaming_track_replays_its_retained_source() {
         PlayerEvent::ReplayRequest { track, play: true, .. }
             if track.url == "https://example.invalid/track-1.flac"
     )));
-}
-
-/// A load announces where it will open before the backend that consumes the pair is chosen.
-/// Reading only the auto-resume there told the bar 45s while the stream opened at 10s.
-#[cfg(target_os = "windows")]
-#[test]
-fn the_announced_start_position_is_the_one_the_stream_opens_at() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.user_seek_override = Some(("track-1".to_string(), 10.0));
-    h.player.pending_resume_seek = Some(45.0);
-
-    assert_eq!(h.player.start_position(), Some(10.0));
-    assert_eq!(
-        h.player.take_start_position(),
-        Some(10.0),
-        "announcing one position and opening at another is the defect itself"
-    );
 }
 
 /// A refused seek moved nothing, and decoding runs a ring ahead of the speakers. Persisting
@@ -1765,93 +1676,42 @@ fn asio_harness(
     (h, asio_events, cancel)
 }
 
-/// A rate refusal from a stream already superseded must not reach the track that replaced it.
-/// The exclusive twin re-arms shared on any refusal, and may: its own takes the one render
-/// thread down whichever stream it judged, and the re-arm is owed either way. No ASIO refusal
-/// does that, `finish_rebuild` and the reset give-up both leaving the control thread alive.
+/// A refusal from a stream already superseded must not reach the track that replaced it (the
+/// format half reads the TRACK's channel count); named for the stream still live it keeps every
+/// effect, a rate refusal also barring the track from re-engaging ASIO. The exclusive twin
+/// re-arms shared on any refusal, and may: no ASIO refusal takes the control thread down.
 #[cfg(target_os = "windows")]
 #[test]
-fn a_superseded_asio_rate_refusal_leaves_the_live_track_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
+fn an_asio_refusal_acts_only_for_the_stream_still_live() {
+    for (rate, refused_stream, acts, skipped) in [
+        (true, 1, false, None),
+        (false, 1, false, None),
+        (false, 2, true, None),
+        (true, 2, true, Some("track-1")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
+        let stream_id = Some(refused_stream);
+        let refusal = if rate {
+            AsioEvent::RateUnsupported { stream_id }
+        } else {
+            AsioEvent::FormatUnsupported { stream_id }
+        };
 
-    asio_events
-        .send(AsioEvent::RateUnsupported { stream_id: Some(1) })
-        .unwrap();
-    h.player.poll_asio_events();
+        asio_events.send(refusal).unwrap();
+        h.player.poll_asio_events();
 
-    assert!(
-        h.player.is_asio_mode,
-        "a stale refusal turned ASIO off for the track that replaced the refused one"
-    );
-    assert!(
-        !cancel.load(Relaxed),
-        "a stale refusal cancelled the decoder of a track nothing refused"
-    );
-    assert_eq!(
-        h.player.asio_skip_track, None,
-        "a stale refusal condemned the live track"
-    );
-}
-
-/// A format refusal is scoped for the same reason: its channel-count half reads the TRACK's
-/// channel count, and a superseded stream's verdict must not condemn the track that replaced it.
-#[cfg(target_os = "windows")]
-#[test]
-fn a_superseded_asio_format_refusal_leaves_the_live_track_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
-
-    asio_events
-        .send(AsioEvent::FormatUnsupported { stream_id: Some(1) })
-        .unwrap();
-    h.player.poll_asio_events();
-
-    assert!(
-        h.player.is_asio_mode,
-        "a stale refusal turned ASIO off for the track that replaced the refused one"
-    );
-    assert!(
-        !cancel.load(Relaxed),
-        "a stale refusal cancelled the decoder of a track nothing refused"
-    );
-}
-
-/// The same refusal, named for the stream still live, keeps every effect it ever had.
-#[cfg(target_os = "windows")]
-#[test]
-fn the_live_streams_asio_format_refusal_still_falls_back_to_shared() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
-
-    asio_events
-        .send(AsioEvent::FormatUnsupported { stream_id: Some(2) })
-        .unwrap();
-    h.player.poll_asio_events();
-
-    assert!(!h.player.is_asio_mode, "the refused track stayed on ASIO");
-    assert!(cancel.load(Relaxed), "the refused stream's decoder ran on");
-}
-
-/// The same for a rate refusal, which also condemns the track against re-engaging ASIO.
-#[cfg(target_os = "windows")]
-#[test]
-fn the_live_streams_asio_rate_refusal_still_falls_back_to_shared() {
-    let dir = tempfile::tempdir().unwrap();
-    let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
-
-    asio_events
-        .send(AsioEvent::RateUnsupported { stream_id: Some(2) })
-        .unwrap();
-    h.player.poll_asio_events();
-
-    assert!(!h.player.is_asio_mode, "the refused track stayed on ASIO");
-    assert!(cancel.load(Relaxed), "the refused stream's decoder ran on");
-    assert_eq!(
-        h.player.asio_skip_track.as_deref(),
-        Some("track-1"),
-        "the refused track was left free to re-engage ASIO and refuse again"
-    );
+        let row = format!("rate: {rate}, refused stream {refused_stream} of live 2");
+        assert_eq!(!h.player.is_asio_mode, acts, "ASIO state after {row}");
+        assert_eq!(cancel.load(Relaxed), acts, "decoder cancel after {row}");
+        if rate {
+            assert_eq!(
+                h.player.asio_skip_track.as_deref(),
+                skipped,
+                "skip after {row}"
+            );
+        }
+    }
 }
 
 fn load_req_of(buffer: crate::player::buffer::RamBuffer, seq: u32, track: &str) -> LoadRequest {
@@ -1892,38 +1752,39 @@ fn state_stamps(events: &Spy) -> Vec<(PlaybackState, u32)> {
 }
 
 /// Track A's stream is paused by the skip that loads B, and the backend reports it only once
-/// the stop and reset of a dirty endpoint are done, after B has loaded and moved the seq. The
-/// pause is the page's only NOT_PLAYING in this mode and must still arrive, but under A's
-/// seq: under B's, the Connect receiver hears it as B's own and pauses itself.
+/// the stop and reset of a dirty endpoint are done, after B has loaded and moved the seq. Under
+/// B's seq the Connect receiver hears it as B's own; the seq rides with the state whatever order
+/// the reports arrive in.
 #[cfg(target_os = "windows")]
 #[tokio::test]
-async fn a_retired_asio_streams_pause_keeps_the_seq_of_its_load() {
+async fn an_asio_state_keeps_the_seq_of_its_load_in_whatever_order_the_reports_arrive() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
-    let _ = h.player.handle_load(load_req(1, "track-1"), false);
-    let _ = h.player.handle_load(load_req(2, "track-2"), false);
-    h.events.lock().unwrap().clear();
+    for reports in [
+        [(1, PlaybackState::Paused), (2, PlaybackState::Active)],
+        [(2, PlaybackState::Active), (1, PlaybackState::Paused)],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
+        let _ = h.player.handle_load(load_req(1, "track-1"), false);
+        let _ = h.player.handle_load(load_req(2, "track-2"), false);
+        h.events.lock().unwrap().clear();
 
-    asio_events
-        .send(AsioEvent::StateChange {
-            opened_under: 1,
-            state: PlaybackState::Paused,
-        })
-        .unwrap();
-    asio_events
-        .send(AsioEvent::StateChange {
-            opened_under: 2,
-            state: PlaybackState::Active,
-        })
-        .unwrap();
-    h.player.poll_asio_events();
+        for (opened_under, state) in reports {
+            asio_events
+                .send(AsioEvent::StateChange {
+                    opened_under,
+                    state,
+                })
+                .unwrap();
+        }
+        h.player.poll_asio_events();
 
-    assert_eq!(
-        state_stamps(&h.events),
-        vec![(PlaybackState::Paused, 1), (PlaybackState::Active, 2)],
-        "A's pause is B's, or B's own state lost its seq"
-    );
+        assert_eq!(
+            state_stamps(&h.events),
+            reports.map(|(seq, state)| (state, seq)).to_vec(),
+            "A's pause is B's, or B's own state lost its seq: {reports:?}"
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1958,38 +1819,6 @@ async fn a_retired_exclusive_streams_pause_keeps_the_seq_of_its_load() {
         state_stamps(&h.events),
         vec![(PlaybackState::Paused, 1), (PlaybackState::Active, 2)],
         "A's pause is B's, or B's own state lost its seq"
-    );
-}
-
-/// The seq rides with the state. No order the backend's reports reach the player in changes
-/// whose they are: a retired stream's state behind a newer stream's is still the retired one's.
-#[cfg(target_os = "windows")]
-#[tokio::test]
-async fn a_states_seq_does_not_depend_on_the_order_the_reports_arrive_in() {
-    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
-    let _ = h.player.handle_load(load_req(1, "track-1"), false);
-    let _ = h.player.handle_load(load_req(2, "track-2"), false);
-    h.events.lock().unwrap().clear();
-
-    asio_events
-        .send(AsioEvent::StateChange {
-            opened_under: 2,
-            state: PlaybackState::Active,
-        })
-        .unwrap();
-    asio_events
-        .send(AsioEvent::StateChange {
-            opened_under: 1,
-            state: PlaybackState::Paused,
-        })
-        .unwrap();
-    h.player.poll_asio_events();
-
-    assert_eq!(
-        state_stamps(&h.events),
-        vec![(PlaybackState::Active, 2), (PlaybackState::Paused, 1)]
     );
 }
 
@@ -2395,42 +2224,6 @@ async fn a_stale_load_leaves_a_live_fade_armed() {
     );
 }
 
-/// The refusal memo names the track a fade was already refused for, and `arm_crossfade` is its
-/// only reader: it exists to keep the refused decision from being re-run four times a second
-/// for the rest of a track's tail. A Load that changes nothing supersedes no refusal: clearing
-/// it there buys back the work the memo was written to avoid.
-#[tokio::test]
-async fn a_stale_load_keeps_the_refusal_it_did_not_supersede() {
-    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    let refused = "https://example.invalid/refused";
-    h.player.xfade_refused_url = Some(refused.to_string());
-
-    let superseded = crate::player::current_gen().wrapping_sub(1);
-
-    h.player.handle_load(
-        LoadRequest {
-            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
-            load_gen: superseded,
-            seq: 12,
-            track_id: "track-superseded".to_string(),
-            product_id: None,
-            resume_policy: ResumePolicy::Restart,
-            load_start: std::time::Instant::now(),
-            cached: true,
-            format: "flac".to_string(),
-        },
-        false,
-    );
-
-    assert_eq!(
-        h.player.xfade_refused_url.as_deref(),
-        Some(refused),
-        "a Load the gate discards forgot a refusal it never superseded"
-    );
-}
-
 /// Arming polls four times a second for the whole tail of every track, and each tick asks the
 /// cache whether the next track is on disk. `MenuCommand::ClearCache` holds that same mutex for
 /// its entire `remove_dir_all`, deliberately, to keep the wipe atomic against
@@ -2575,39 +2368,6 @@ fn a_stalled_counter_does_not_complete_a_track_that_is_still_fading() {
             .iter()
             .any(|ev| matches!(ev, PlayerEvent::StateChange(PlaybackState::Completed, _))),
         "the track was announced completed while its fade was still running: {events:?}"
-    );
-}
-
-/// The overlap is bounded by what remained of the OUTGOING track and never by the
-/// incoming track's own length, and `state.duration` is only a probe estimate: a
-/// container that undercounts its frames drains more than it declared. The periodic
-/// emitter clamps for this reason; the promotion's own report has to as well, or
-/// the bar jumps past the end of a track that just started.
-#[test]
-fn a_promotion_never_reports_a_position_past_the_incoming_duration() {
-    let dir = tempfile::tempdir().unwrap();
-    let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
-    // A five-second incoming track, six seconds of it drained during the overlap.
-    let _incoming_cmds = arm_for_promotion(&mut h, 5.0);
-    // The clock the swapping tick left behind. Without it the fixture's outgoing
-    // total is what gets clamped, and the assertion would pass on saturation instead
-    // of on the overlap it means to describe.
-    h.player.played_samples.store(SIX_SECONDS, Relaxed);
-
-    h.player.promote_crossfade(SIX_SECONDS);
-
-    let events = h.events.lock().unwrap();
-    let reported = events
-        .iter()
-        .find_map(|ev| match ev {
-            PlayerEvent::TimeUpdate(secs, _) => Some(*secs),
-            _ => None,
-        })
-        .expect("the promotion must report the incoming track's position");
-    assert!(
-        (reported - 5.0).abs() < 1e-6,
-        "the report must be clamped to the incoming duration, got {reported}"
     );
 }
 
@@ -3125,79 +2885,50 @@ fn the_page_that_follows_finds_the_retained_track_stopped_not_to_be_resumed() {
     assert!(!h.player.resume_on_reassert);
 }
 
-/// After a load names a track again, a Play is a Play of that track.
+/// After a load names a track again, a Play is a Play of that track; a load a newer one
+/// superseded names nothing, and leaves the track as orphaned as it was.
 #[tokio::test]
-async fn a_load_lifts_the_orphaning() {
+async fn a_load_lifts_the_orphaning_unless_a_newer_one_superseded_it() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.handle_command(PlayerCommand::Stop(1));
-    h.player.handle_command(PlayerCommand::Orphan);
+    for (generations_behind, orphaned) in [(0u32, false), (1, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(dir.path());
+        h.player.handle_command(PlayerCommand::Stop(1));
+        h.player.handle_command(PlayerCommand::Orphan);
 
-    h.player.handle_load(load_req(2, "track-2"), false);
+        h.player.handle_load(
+            LoadRequest {
+                load_gen: crate::player::current_gen().wrapping_sub(generations_behind),
+                ..load_req(2, "track-2")
+            },
+            false,
+        );
 
-    assert!(!h.player.orphaned);
-}
-
-/// A load a newer one superseded names nothing, and leaves the track as orphaned as it was.
-#[tokio::test]
-async fn a_superseded_load_leaves_the_orphaning() {
-    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.handle_command(PlayerCommand::Stop(1));
-    h.player.handle_command(PlayerCommand::Orphan);
-
-    h.player.handle_load(
-        LoadRequest {
-            buffer: crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
-            load_gen: crate::player::current_gen().wrapping_sub(1),
-            seq: 2,
-            track_id: "track-2".to_string(),
-            product_id: None,
-            resume_policy: ResumePolicy::Restart,
-            load_start: std::time::Instant::now(),
-            cached: true,
-            format: "flac".to_string(),
-        },
-        false,
-    );
-
-    assert!(h.player.orphaned);
+        assert_eq!(
+            h.player.orphaned, orphaned,
+            "a load {generations_behind} generations behind"
+        );
+    }
 }
 
 /// A page that loads the retained track again, by the idempotent branch of `Player::load`, names
-/// it: the re-assert lifts the orphaning and, the page being new, resumes nothing by itself.
+/// it: the re-assert lifts the orphaning and, the page being new, resumes nothing by itself. One
+/// that names another track than the committed one names nothing of this one's.
 #[test]
-fn a_reassert_lifts_the_orphaning_and_resumes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.handle_command(PlayerCommand::Stop(1));
-    h.player.handle_command(PlayerCommand::Orphan);
+fn a_reassert_lifts_the_orphaning_only_for_the_committed_track() {
+    for (track_id, orphaned) in [("track-1", false), ("another", true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = harness(dir.path());
+        h.player.handle_command(PlayerCommand::Stop(1));
+        h.player.handle_command(PlayerCommand::Orphan);
 
-    h.player.handle_command(PlayerCommand::ReassertResume {
-        want_play: false,
-        product_id: None,
-        track_id: "track-1".to_string(),
-    });
+        h.player.handle_command(PlayerCommand::ReassertResume {
+            want_play: false,
+            product_id: None,
+            track_id: track_id.to_string(),
+        });
 
-    assert!(!h.player.orphaned);
-    assert!(!h.player.is_playing);
-}
-
-/// A re-assert that names another track than the committed one names nothing of this one's.
-#[test]
-fn a_reassert_for_another_track_leaves_the_orphaning() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
-    h.player.handle_command(PlayerCommand::Stop(1));
-    h.player.handle_command(PlayerCommand::Orphan);
-
-    h.player.handle_command(PlayerCommand::ReassertResume {
-        want_play: false,
-        product_id: None,
-        track_id: "another".to_string(),
-    });
-
-    assert!(h.player.orphaned);
+        assert_eq!(h.player.orphaned, orphaned, "re-assert of {track_id:?}");
+        assert!(!h.player.is_playing, "re-assert of {track_id:?} resumed");
+    }
 }

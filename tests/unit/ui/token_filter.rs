@@ -58,52 +58,25 @@ fn token_response_drops_on_entropy_failure_never_passthrough() {
     ));
 }
 
+/// A new refresh token binds the client id of its own exchange, never the stale prior: an
+/// authorization_code after a client_credentials generation adopts "user", not "app". Without a
+/// new refresh token, or with no client id observed, the prior is kept rather than blanked.
 #[test]
-fn new_refresh_token_binds_this_exchange_client_id_not_prior() {
-    // The bug: authorization_code (new refresh_token, client_id "user")
-    // arriving after a client_credentials gen (client_id "app") must adopt
-    // "user", not stay stuck on the prior "app".
-    assert_eq!(
-        resolve_generation_client_id(true, Some("user"), Some("app")),
-        "user"
-    );
-}
-
-#[test]
-fn no_new_refresh_token_keeps_prior_client_id() {
-    // client_credentials (no refresh_token) must not overwrite the user
-    // client_id already held.
-    assert_eq!(
-        resolve_generation_client_id(false, Some("app"), Some("user")),
-        "user"
-    );
-}
-
-#[test]
-fn empty_exchange_falls_back_to_prior_on_new_refresh() {
-    // Defensive: a new refresh_token with no observed client_id keeps the
-    // prior rather than blanking it.
-    assert_eq!(
-        resolve_generation_client_id(true, None, Some("user")),
-        "user"
-    );
-    assert_eq!(
-        resolve_generation_client_id(true, Some(""), Some("user")),
-        "user"
-    );
-}
-
-#[test]
-fn first_gen_with_no_prior_takes_exchange() {
-    // First persist after a session clear: no prior, take the exchange's.
-    assert_eq!(
-        resolve_generation_client_id(true, Some("user"), None),
-        "user"
-    );
-    assert_eq!(
-        resolve_generation_client_id(false, Some("app"), None),
-        "app"
-    );
+fn a_generation_takes_the_exchange_client_id_only_with_a_new_refresh_token() {
+    for (has_new_refresh_token, exchange, prior, expected) in [
+        (true, Some("user"), Some("app"), "user"),
+        (false, Some("app"), Some("user"), "user"),
+        (true, None, Some("user"), "user"),
+        (true, Some(""), Some("user"), "user"),
+        (true, Some("user"), None, "user"),
+        (false, Some("app"), None, "app"),
+    ] {
+        assert_eq!(
+            resolve_generation_client_id(has_new_refresh_token, exchange, prior),
+            expected,
+            "new refresh: {has_new_refresh_token}, exchange: {exchange:?}, prior: {prior:?}"
+        );
+    }
 }
 
 fn generation(tag: &str) -> crate::platform::secure_store::TokenGeneration {
@@ -132,116 +105,114 @@ fn stored(
     }
 }
 
+/// An opaque access token never leaves raw: past the window, or with no previous generation, it
+/// resolves to the current real one.
 #[test]
-fn resolve_access_current_and_previous_within_window() {
-    let ts = stored(generation("new"), Some(generation("old")), Some(100));
-    // current opaque -> current real
-    assert_eq!(resolve_opaque_access(&ts, "luna_at_new", 50), "real_at_new");
-    // previous opaque, still in window -> previous real
-    assert_eq!(resolve_opaque_access(&ts, "luna_at_old", 50), "real_at_old");
+fn an_opaque_access_resolves_to_its_generation_within_the_window_else_the_current_one() {
+    let windowed = stored(generation("new"), Some(generation("old")), Some(100));
+    let alone = stored(generation("new"), None, None);
+    for (state, opaque, now, expected) in [
+        (&windowed, "luna_at_new", 50, "real_at_new"),
+        (&windowed, "luna_at_old", 50, "real_at_old"),
+        (&windowed, "luna_at_old", 200, "real_at_new"),
+        (&alone, "luna_at_new", 0, "real_at_new"),
+        (&alone, "luna_at_whatever", 0, "real_at_new"),
+    ] {
+        assert_eq!(
+            resolve_opaque_access(state, opaque, now),
+            expected,
+            "{opaque} at {now}"
+        );
+    }
 }
 
+/// An opaque_rt the SDK held past our window must resolve to the current real refresh token,
+/// never leave raw.
 #[test]
-fn resolve_access_out_of_window_previous_falls_back_to_current() {
-    let ts = stored(generation("new"), Some(generation("old")), Some(100));
-    // previous opaque, past the window -> current (not left raw)
-    assert_eq!(
-        resolve_opaque_access(&ts, "luna_at_old", 200),
-        "real_at_new"
-    );
-}
-
-#[test]
-fn resolve_refresh_unknown_opaque_falls_back_to_current() {
-    // The ~1h bug: an opaque_rt the SDK held past our window must resolve to
-    // the current real refresh token, never leave raw.
-    let ts = stored(generation("new"), Some(generation("old")), Some(100));
-    assert_eq!(
-        resolve_opaque_refresh(&ts, "luna_rt_ancient", 50),
-        "real_rt_new"
-    );
-    // previous rt within window still maps to the matching real rt
-    assert_eq!(
-        resolve_opaque_refresh(&ts, "luna_rt_old", 50),
-        "real_rt_old"
-    );
-    // and to current once out of window
-    assert_eq!(
-        resolve_opaque_refresh(&ts, "luna_rt_old", 200),
-        "real_rt_new"
-    );
-}
-
-#[test]
-fn resolve_no_previous_maps_everything_to_current() {
-    let ts = stored(generation("new"), None, None);
-    assert_eq!(resolve_opaque_access(&ts, "luna_at_new", 0), "real_at_new");
-    assert_eq!(
-        resolve_opaque_access(&ts, "luna_at_whatever", 0),
-        "real_at_new"
-    );
-    assert_eq!(
-        resolve_opaque_refresh(&ts, "luna_rt_whatever", 0),
-        "real_rt_new"
-    );
+fn an_opaque_refresh_resolves_to_its_generation_within_the_window_else_the_current_one() {
+    let windowed = stored(generation("new"), Some(generation("old")), Some(100));
+    let alone = stored(generation("new"), None, None);
+    for (state, opaque, now, expected) in [
+        (&windowed, "luna_rt_ancient", 50, "real_rt_new"),
+        (&windowed, "luna_rt_old", 50, "real_rt_old"),
+        (&windowed, "luna_rt_old", 200, "real_rt_new"),
+        (&alone, "luna_rt_whatever", 0, "real_rt_new"),
+    ] {
+        assert_eq!(
+            resolve_opaque_refresh(state, opaque, now),
+            expected,
+            "{opaque} at {now}"
+        );
+    }
 }
 
 /// The gate's rule, lifted off the handler so it can be exercised at all: the refusal branch ends
 /// in an ungated `verr!`, and calling that from a test opens the real `console.log`.
 #[test]
-fn image_verdict_refuses_only_a_disallowed_image() {
-    let evil = RequestUrl::new("https://evil.example/p.png".to_string());
-    let allowed = RequestUrl::new("https://resources.tidal.com/p.png".to_string());
-
-    assert_eq!(
-        image_verdict(ResourceType::IMAGE, &evil, None),
-        ImageVerdict::Refused
-    );
-    assert_eq!(
-        image_verdict(ResourceType::IMAGE, &allowed, None),
-        ImageVerdict::Allowed
-    );
-    // Every other resource type funnels through the same three dispatches; the gate must let
-    // them pass untouched rather than judge them by a rule written for images.
-    assert_eq!(
-        image_verdict(ResourceType::MAIN_FRAME, &evil, None),
-        ImageVerdict::NotAnImage
-    );
-}
-
-#[test]
-fn image_verdict_refuses_a_plaintext_image_on_an_allowed_host() {
-    let plaintext = RequestUrl::new("http://avatars.githubusercontent.com/u/1?v=4".to_string());
-    assert_eq!(
-        image_verdict(ResourceType::IMAGE, &plaintext, None),
-        ImageVerdict::Refused
-    );
-}
-
-#[test]
-fn image_verdict_admits_only_an_internal_surface_loading_itself() {
-    let devtools = RequestUrl::new("devtools://devtools/bundled/i.svg".to_string());
-    let elsewhere = RequestUrl::new("https://evil.example/p.png".to_string());
-    let own = CefString::from("devtools://devtools");
-
-    assert_eq!(
-        image_verdict(ResourceType::IMAGE, &devtools, Some(&own)),
-        ImageVerdict::Allowed
-    );
-    assert_eq!(
-        image_verdict(ResourceType::IMAGE, &elsewhere, Some(&own)),
-        ImageVerdict::Refused
-    );
-    let page = CefString::from("https://desktop.tidal.com");
-    assert_eq!(
-        image_verdict(ResourceType::IMAGE, &devtools, Some(&page)),
-        ImageVerdict::Refused
-    );
-    // The trust dialog's avatar over https: an https initiator earns no self-load pass.
-    let avatar = RequestUrl::new("https://evil.example/a.png".to_string());
-    let dialog = CefString::from("https://evil.example");
-    assert_eq!(
-        image_verdict(ResourceType::IMAGE, &avatar, Some(&dialog)),
-        ImageVerdict::Refused
-    );
+fn image_verdict_refuses_a_disallowed_image_and_admits_an_internal_surface_loading_itself() {
+    for (what, resource_type, target, initiator, expected) in [
+        (
+            "an image on a foreign host",
+            ResourceType::IMAGE,
+            "https://evil.example/p.png",
+            None,
+            ImageVerdict::Refused,
+        ),
+        (
+            "an image on an allowed host",
+            ResourceType::IMAGE,
+            "https://resources.tidal.com/p.png",
+            None,
+            ImageVerdict::Allowed,
+        ),
+        (
+            "any other resource type passes untouched",
+            ResourceType::MAIN_FRAME,
+            "https://evil.example/p.png",
+            None,
+            ImageVerdict::NotAnImage,
+        ),
+        (
+            "a plaintext image on an allowed host",
+            ResourceType::IMAGE,
+            "http://avatars.githubusercontent.com/u/1?v=4",
+            None,
+            ImageVerdict::Refused,
+        ),
+        (
+            "an internal surface loading itself",
+            ResourceType::IMAGE,
+            "devtools://devtools/bundled/i.svg",
+            Some(CefString::from("devtools://devtools")),
+            ImageVerdict::Allowed,
+        ),
+        (
+            "a foreign image beside an internal initiator",
+            ResourceType::IMAGE,
+            "https://evil.example/p.png",
+            Some(CefString::from("devtools://devtools")),
+            ImageVerdict::Refused,
+        ),
+        (
+            "an internal url under a page initiator",
+            ResourceType::IMAGE,
+            "devtools://devtools/bundled/i.svg",
+            Some(CefString::from("https://desktop.tidal.com")),
+            ImageVerdict::Refused,
+        ),
+        (
+            "an https initiator earns no self-load pass",
+            ResourceType::IMAGE,
+            "https://evil.example/a.png",
+            Some(CefString::from("https://evil.example")),
+            ImageVerdict::Refused,
+        ),
+    ] {
+        let url = RequestUrl::new(target.to_string());
+        assert_eq!(
+            image_verdict(resource_type, &url, initiator.as_ref()),
+            expected,
+            "{what}"
+        );
+    }
 }

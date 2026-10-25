@@ -5,101 +5,69 @@ use super::{
 };
 use crate::ui::nav::PageKind;
 
+/// The memo follows the direct classification for every url, through a hit and a thrash.
 #[test]
-fn trust_memo_matches_direct_classification() {
-    let urls = [
-        "https://desktop.tidal.com/",
-        "https://desktop.tidal.com/login",
-        "https://desktop.tidal.com/login/auth",
-        "https://login.tidal.com/authorize",
-        "tidal://login/auth",
-        "https://evil.example.com/",
-        "not a url",
-    ];
+fn trust_memo_keeps_the_direct_classification_across_hits_and_thrash() {
     let mut memo = None;
-    for url in urls {
+    for (url, trusted) in [
+        ("https://desktop.tidal.com/", true),
+        ("https://desktop.tidal.com/login", true),
+        ("https://desktop.tidal.com/login/auth", true),
+        ("https://login.tidal.com/authorize", true),
+        ("tidal://login/auth", true),
+        ("https://evil.example.com/", false),
+        ("not a url", false),
+        ("https://desktop.tidal.com/", true),
+        ("https://desktop.tidal.com/", true),
+        ("https://evil.example.com/", false),
+        ("https://desktop.tidal.com/", true),
+        ("https://evil.example.com/", false),
+    ] {
         let direct = !matches!(PageKind::classify(url), PageKind::External);
+        let verdict = trusted_via_memo(&mut memo, url.to_string());
+        assert_eq!(verdict, direct, "memoized verdict diverged for {url}");
+        assert_eq!(verdict, trusted, "{url}");
+    }
+}
+
+/// A privileged channel called with an id (invoke) from an untrusted frame gets a 403, not a
+/// silent ok, whatever the dispatch list says. With no id there is no JS consumer: drop with an ack.
+#[test]
+fn an_untrusted_frame_is_refused_a_privileged_channel_and_nothing_else() {
+    for (privileged, trusted, has_id, expected) in [
+        (true, false, true, PrivilegedGate::Refuse403),
+        (true, false, false, PrivilegedGate::DropAck),
+        (true, true, true, PrivilegedGate::Allow),
+        (true, true, false, PrivilegedGate::Allow),
+        (false, false, true, PrivilegedGate::Allow),
+        (false, false, false, PrivilegedGate::Allow),
+    ] {
         assert_eq!(
-            trusted_via_memo(&mut memo, url.to_string()),
-            direct,
-            "memoized verdict diverged for {url}"
+            privileged_gate(privileged, trusted, has_id),
+            expected,
+            "privileged: {privileged}, trusted: {trusted}, has id: {has_id}"
         );
     }
 }
 
+/// `parse_dash` (frame-gated in cefQuery; the frame-less console bridge must drop it too), the
+/// token, `window.navigate_self`, `window.open_url` and `player.devices.*` (which switch the OS
+/// output, `set` can ask for exclusive mode) are refused; playback and page chrome stay open.
 #[test]
-fn trust_memo_hit_and_thrash_keep_the_verdict() {
-    let mut memo = None;
-    let trusted = "https://desktop.tidal.com/";
-    let external = "https://evil.example.com/";
-    assert!(trusted_via_memo(&mut memo, trusted.to_string()));
-    assert!(trusted_via_memo(&mut memo, trusted.to_string()));
-    assert!(!trusted_via_memo(&mut memo, external.to_string()));
-    assert!(trusted_via_memo(&mut memo, trusted.to_string()));
-    assert!(!trusted_via_memo(&mut memo, external.to_string()));
-}
-
-#[test]
-fn privileged_untrusted_req_resp_is_refused() {
-    // A privileged channel called with an id (invoke) from an untrusted frame
-    // must get a 403, not a silent "ok" - regardless of the dispatch list.
-    assert_eq!(
-        privileged_gate(true, false, true),
-        PrivilegedGate::Refuse403
-    );
-}
-
-#[test]
-fn privileged_untrusted_fire_and_forget_is_dropped() {
-    // No id = no JS consumer: drop with an ack rather than a 403.
-    assert_eq!(privileged_gate(true, false, false), PrivilegedGate::DropAck);
-}
-
-#[test]
-fn privileged_trusted_is_allowed() {
-    assert_eq!(privileged_gate(true, true, true), PrivilegedGate::Allow);
-    assert_eq!(privileged_gate(true, true, false), PrivilegedGate::Allow);
-}
-
-#[test]
-fn benign_channel_is_always_allowed() {
-    assert_eq!(privileged_gate(false, false, true), PrivilegedGate::Allow);
-    assert_eq!(privileged_gate(false, false, false), PrivilegedGate::Allow);
-}
-
-#[test]
-fn parse_dash_is_privileged() {
-    // Dispatched by the plugin-IPC handler and frame-gated in cefQuery, so
-    // the frame-less console bridge must drop it too.
-    assert!(is_privileged_channel("player.parse_dash"));
-}
-
-#[test]
-fn benign_player_controls_stay_open() {
-    // Playback controls are fire-and-forget on the console bridge; only
-    // parse_dash is gated, not the whole `player.*` namespace.
-    assert!(!is_privileged_channel("player.play"));
-    assert!(!is_privileged_channel("player.load_dash"));
-}
-
-#[test]
-fn auth_and_window_self_are_privileged() {
-    assert!(is_privileged_channel("jsrt.set_token"));
-    assert!(is_privileged_channel("window.navigate_self"));
-    assert!(!is_privileged_channel("window.minimize"));
-}
-
-#[test]
-fn open_url_and_device_control_are_privileged() {
-    // window.open_url pops an OS-browser URL; player.devices.* switches the OS
-    // audio output (set can request exclusive mode). Both must be refused from
-    // untrusted frames and dropped on the frame-less console bridge.
-    assert!(is_privileged_channel("window.open_url"));
-    assert!(is_privileged_channel("player.devices.get"));
-    assert!(is_privileged_channel("player.devices.set"));
-    // Benign page-chrome stays reachable.
-    assert!(!is_privileged_channel("window.minimize"));
-    assert!(!is_privileged_channel("player.play"));
+fn only_the_channels_that_reach_the_token_the_os_or_the_dash_parser_are_privileged() {
+    for (channel, privileged) in [
+        ("player.parse_dash", true),
+        ("player.play", false),
+        ("player.load_dash", false),
+        ("jsrt.set_token", true),
+        ("window.navigate_self", true),
+        ("window.minimize", false),
+        ("window.open_url", true),
+        ("player.devices.get", true),
+        ("player.devices.set", true),
+    ] {
+        assert_eq!(is_privileged_channel(channel), privileged, "{channel}");
+    }
 }
 
 #[test]

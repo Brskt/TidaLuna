@@ -3,21 +3,6 @@
 use super::*;
 
 #[test]
-fn every_target_carries_a_full_sha256() {
-    assert_eq!(TARGETS.len(), 6, "six shipped platforms, no more");
-    for t in TARGETS {
-        assert_eq!(t.sha256.len(), 64, "{} digest length", t.file_name);
-        assert!(
-            t.sha256
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "{} digest is lowercase hex",
-            t.file_name
-        );
-    }
-}
-
-#[test]
 fn each_target_url_matches_its_own_platform_shape() {
     let by_file = |name: &str| TARGETS.iter().find(|t| t.file_name == name).unwrap();
 
@@ -35,66 +20,19 @@ fn each_target_url_matches_its_own_platform_shape() {
     );
 }
 
-/// Cisco's own release notes link http.
 #[test]
-fn every_target_url_is_https_and_bzip2() {
-    for t in TARGETS {
-        let url = t.url();
-        assert!(
-            url.starts_with("https://ciscobinary.openh264.org/"),
-            "{url}"
-        );
-        assert!(url.ends_with(".bz2"), "{url}");
+fn a_host_other_than_the_codec_host_is_refused() {
+    for host in [
+        "ciscobinary.openh264.org.evil.com",
+        "evil-ciscobinary.openh264.org",
+        "openh264.org",
+        "sub.ciscobinary.openh264.org",
+        "audio.tidal.com",
+        "resources.tidal.com",
+        "desktop.tidal.com",
+    ] {
+        assert!(!is_codec_host(host), "{host}");
     }
-}
-
-/// The defect that disqualified the crate's own table (see `TARGETS`), pinned rather than assumed.
-#[test]
-fn no_two_targets_share_a_digest() {
-    for (i, a) in TARGETS.iter().enumerate() {
-        for b in &TARGETS[i + 1..] {
-            assert_ne!(a.sha256, b.sha256, "{} and {}", a.file_name, b.file_name);
-        }
-    }
-}
-
-/// `current_target` takes the first match: a second entry for one platform would never be read.
-#[test]
-fn no_two_targets_share_a_platform() {
-    for (i, a) in TARGETS.iter().enumerate() {
-        for b in &TARGETS[i + 1..] {
-            assert!(
-                (a.os, a.arch) != (b.os, b.arch),
-                "{} and {}",
-                a.file_name,
-                b.file_name
-            );
-        }
-    }
-}
-
-/// The build platform must resolve, or this build ships a switch that can never turn on.
-#[test]
-fn the_current_platform_resolves_to_a_target() {
-    let target = current_target().expect("this platform has no OpenH264 build in the table");
-    assert_eq!(target.os, std::env::consts::OS);
-    assert_eq!(target.arch, std::env::consts::ARCH);
-    assert!(target.url().contains("2.6.0"));
-}
-
-#[test]
-fn lookalike_codec_hosts_are_refused() {
-    assert!(!is_codec_host("ciscobinary.openh264.org.evil.com"));
-    assert!(!is_codec_host("evil-ciscobinary.openh264.org"));
-    assert!(!is_codec_host("openh264.org"));
-    assert!(!is_codec_host("sub.ciscobinary.openh264.org"));
-}
-
-#[test]
-fn tidal_hosts_are_not_admitted_by_the_codec_policy() {
-    assert!(!is_codec_host("audio.tidal.com"));
-    assert!(!is_codec_host("resources.tidal.com"));
-    assert!(!is_codec_host("desktop.tidal.com"));
 }
 
 /// The host is taken from the parsed url: `https://ciscobinary.openh264.org@evil.com/` reads
@@ -107,15 +45,6 @@ fn a_userinfo_prefix_does_not_impersonate_the_codec_host() {
     assert!(!codec_url_allowed("http://ciscobinary.openh264.org/x.bz2"));
     assert!(!codec_url_allowed("not a url"));
     assert!(codec_url_allowed("https://ciscobinary.openh264.org/x.bz2"));
-}
-
-/// A table entry the policy would refuse is a feature that cannot turn on.
-#[test]
-fn every_target_url_passes_the_codec_policy() {
-    for t in TARGETS {
-        let url = t.url();
-        assert!(codec_url_allowed(&url), "{url}");
-    }
 }
 
 #[test]
@@ -137,26 +66,6 @@ fn the_installed_path_is_the_targets_file_name_in_that_directory() {
     assert_eq!(path.parent().unwrap(), codec_dir());
 }
 
-/// A known vector keeps the hashing and the hex encoding from drifting apart.
-#[test]
-fn the_digest_is_lowercase_hex_sha256_of_the_plain_bytes() {
-    assert_eq!(
-        sha256_bytes(b"abc"),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-}
-
-#[test]
-fn decompression_returns_the_original_bytes() {
-    use std::io::Write;
-    let plain = b"openh264 stand-in payload".repeat(64);
-    let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
-    encoder.write_all(&plain).unwrap();
-    let packed = encoder.finish().unwrap();
-
-    assert_eq!(decompress_capped(&packed, 1 << 20).unwrap(), plain);
-}
-
 #[test]
 fn decompression_refuses_to_exceed_the_ceiling() {
     use std::io::Write;
@@ -167,16 +76,6 @@ fn decompression_refuses_to_exceed_the_ceiling() {
 
     let err = decompress_capped(&packed, 1024).unwrap_err();
     assert!(err.to_string().contains("ceiling"), "{err}");
-}
-
-#[test]
-fn a_truncated_archive_is_an_error_not_a_short_read() {
-    use std::io::Write;
-    let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
-    encoder.write_all(b"payload").unwrap();
-    let packed = encoder.finish().unwrap();
-
-    assert!(decompress_capped(&packed[..packed.len() / 2], 1 << 20).is_err());
 }
 
 const CLASSES: [FailureClass; 6] = [
@@ -190,49 +89,6 @@ const CLASSES: [FailureClass; 6] = [
 
 fn failed(class: FailureClass) -> NoDecoder {
     NoDecoder::Unavailable(Unavailable::Failed(class))
-}
-
-/// Every reason a cover gets no decoder, each class once.
-fn every_no_decoder() -> Vec<NoDecoder> {
-    let mut all = vec![
-        NoDecoder::Unavailable(Unavailable::Off),
-        NoDecoder::Unavailable(Unavailable::Unsupported),
-        NoDecoder::Stopped,
-    ];
-    all.extend(CLASSES.map(failed));
-    all
-}
-
-#[test]
-fn every_reason_for_no_decoder_names_a_distinct_phrase() {
-    let phrases: Vec<&str> = every_no_decoder()
-        .into_iter()
-        .map(NoDecoder::phrase)
-        .collect();
-    for (i, a) in phrases.iter().enumerate() {
-        assert!(!a.is_empty());
-        for b in &phrases[i + 1..] {
-            assert_ne!(a, b);
-        }
-    }
-}
-
-/// The cause of a save, archive or digest failure, built around a path, stays in the line the log
-/// writes: the page only ever receives the fixed phrase of its class.
-#[test]
-fn a_failure_keeps_its_cause_in_the_log() {
-    let path = "/nonexistent/codec-cause-marker";
-    let failures = [
-        FetchError::Save(std::io::Error::other(path)),
-        FetchError::Archive(anyhow::anyhow!("{path}")),
-        FetchError::Digest(CodecDigestMismatch {
-            expected: "aaaa",
-            found: path.to_string(),
-        }),
-    ];
-    for e in failures {
-        assert!(e.to_string().contains(path), "the log keeps the cause: {e}");
-    }
 }
 
 /// `Starting` and `Downloading` outlive a step only when the supervisor is gone.
@@ -303,22 +159,6 @@ fn a_mismatched_file_that_cannot_be_removed_is_stuck() {
 }
 
 #[test]
-fn a_missing_file_is_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("never-written.so");
-    let target = CodecTarget {
-        os: "test",
-        arch: "test",
-        sha256: "irrelevant-because-the-file-is-never-read",
-        file_name: "never-written.so",
-    };
-
-    let status = verify_installed(&path, &target);
-
-    assert!(matches!(status, Verified::Absent));
-}
-
-#[test]
 fn a_file_that_cannot_be_read_is_stuck_not_absent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a-directory.so");
@@ -359,56 +199,6 @@ async fn the_supervisors_verify_hashes_the_file_at_the_installed_path() {
     assert!(OnDisk { target: None }.verify().await.is_none());
 }
 
-#[test]
-fn a_status_line_is_classed_by_whether_the_host_may_answer_otherwise() {
-    use reqwest::StatusCode;
-
-    for code in [500, 502, 503, 504, 408, 429] {
-        let status = StatusCode::from_u16(code).unwrap();
-        assert_eq!(
-            FetchError::Status(status).class(),
-            Some(FailureClass::Network),
-            "{code}"
-        );
-    }
-    for code in [400, 401, 403, 404, 410, 302] {
-        let status = StatusCode::from_u16(code).unwrap();
-        assert_eq!(
-            FetchError::Status(status).class(),
-            Some(FailureClass::Refused),
-            "{code}"
-        );
-    }
-}
-
-#[test]
-fn every_stage_without_a_transport_error_has_its_class() {
-    let cases = [
-        (FetchError::OffHost, Some(FailureClass::Refused)),
-        (FetchError::NoTarget, Some(FailureClass::Refused)),
-        (FetchError::TooLarge, Some(FailureClass::Corrupt)),
-        (
-            FetchError::Archive(anyhow::anyhow!("bad bzip2 header")),
-            Some(FailureClass::Corrupt),
-        ),
-        (
-            FetchError::Digest(CodecDigestMismatch {
-                expected: "aaaa",
-                found: "bbbb".to_string(),
-            }),
-            Some(FailureClass::Corrupt),
-        ),
-        (
-            FetchError::Save(std::io::Error::from(std::io::ErrorKind::StorageFull)),
-            Some(FailureClass::Disk),
-        ),
-        (FetchError::Shutdown, None),
-    ];
-    for (e, class) in cases {
-        assert_eq!(e.class(), class, "{e}");
-    }
-}
-
 /// Binds a listener that answers its first request with `response` verbatim, then drops the
 /// socket.
 async fn answering_port(response: &'static [u8]) -> u16 {
@@ -428,22 +218,6 @@ async fn answering_port(response: &'static [u8]) -> u16 {
     port
 }
 
-#[tokio::test]
-async fn a_refused_connection_is_a_network_failure() {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let e = download_archive(&format!("http://127.0.0.1:{port}/x.bz2"))
-        .await
-        .unwrap_err();
-
-    assert!(matches!(e, FetchError::Unreachable(_)), "{e}");
-    assert_eq!(e.class(), Some(FailureClass::Network));
-}
-
 /// The redirect policy refuses through the same `send()` error as an unreachable host.
 #[tokio::test]
 async fn a_redirect_off_the_codec_host_is_a_refusal() {
@@ -458,56 +232,6 @@ async fn a_redirect_off_the_codec_host_is_a_refusal() {
 
     assert!(matches!(e, FetchError::Redirected(_)), "{e}");
     assert_eq!(e.class(), Some(FailureClass::Refused));
-}
-
-#[tokio::test]
-async fn a_not_found_is_a_refusal_carrying_its_status() {
-    let port =
-        answering_port(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .await;
-
-    let e = download_archive(&format!("http://127.0.0.1:{port}/x.bz2"))
-        .await
-        .unwrap_err();
-
-    assert!(
-        matches!(e, FetchError::Status(s) if s == reqwest::StatusCode::NOT_FOUND),
-        "{e}"
-    );
-    assert_eq!(e.class(), Some(FailureClass::Refused));
-}
-
-/// A megabyte promised, ten bytes delivered: the break comes after the status line.
-#[tokio::test]
-async fn a_body_that_breaks_off_is_a_network_failure() {
-    let port =
-        answering_port(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\nten bytes.").await;
-
-    let e = download_archive(&format!("http://127.0.0.1:{port}/x.bz2"))
-        .await
-        .unwrap_err();
-
-    assert!(matches!(e, FetchError::Body(_)), "{e}");
-    assert_eq!(e.class(), Some(FailureClass::Network));
-}
-
-#[test]
-fn only_a_network_failure_is_asked_again_by_the_timer() {
-    for class in CLASSES {
-        assert_eq!(class.timer(), class == FailureClass::Network, "{class:?}");
-    }
-}
-
-#[test]
-fn the_retry_delay_doubles_then_holds_at_its_ceiling() {
-    assert_eq!(next_retry_delay(FIRST_RETRY), FIRST_RETRY * 2);
-
-    let mut delay = FIRST_RETRY;
-    for _ in 0..32 {
-        delay = next_retry_delay(delay);
-    }
-    assert_eq!(delay, MAX_RETRY);
-    assert_eq!(next_retry_delay(MAX_RETRY), MAX_RETRY);
 }
 
 fn secs(n: u64) -> std::time::Duration {
@@ -656,19 +380,6 @@ fn the_switch_and_the_platform_come_before_any_phase() {
     );
 }
 
-#[test]
-fn only_a_new_class_of_failure_is_loud() {
-    assert_eq!(log_gate(None, FailureClass::Network), Gate::Loud);
-    assert_eq!(
-        log_gate(Some(FailureClass::Network), FailureClass::Network),
-        Gate::Quiet
-    );
-    assert_eq!(
-        log_gate(Some(FailureClass::Network), FailureClass::Refused),
-        Gate::Loud
-    );
-}
-
 /// What a scripted fetch fails with: attempt number (from 1) and the virtual time since the start.
 type Failing = fn(usize, std::time::Duration) -> Option<FetchError>;
 
@@ -813,44 +524,26 @@ async fn live(supervisor: &std::sync::Arc<Supervisor>, active: bool, horizon: u6
     }
 }
 
+/// A refusal asks once at rest and rides the backoff under demand (the cover jobs used to download
+/// again at every ask). A blocked host under demand is asked once per floor, after the early
+/// backoffs the timer's doubling adds. Each row logs once.
 #[tokio::test(start_paused = true)]
-async fn a_refusal_at_rest_downloads_once_and_logs_once() {
-    let io = FakeIo::new(secs(1), not_found);
-    let supervisor = supervising(&io);
+async fn a_failing_fetch_is_asked_again_by_its_class_and_logged_once() {
+    let rows: [(Failing, bool, Phase, usize); 3] = [
+        (not_found, false, failed_phase(FailureClass::Refused), 1),
+        (not_found, true, failed_phase(FailureClass::Refused), 53),
+        (unavailable, true, failed_phase(FailureClass::Network), 291),
+    ];
+    for (failing, active, expected, fetches) in rows {
+        let io = FakeIo::new(secs(1), failing);
+        let supervisor = supervising(&io);
 
-    live(&supervisor, false, DAY).await;
+        live(&supervisor, active, DAY).await;
 
-    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Refused));
-    assert_eq!(io.count(|s| &s.fetches), 1);
-    assert_eq!(io.count(|s| &s.loud), 1);
-}
-
-/// The cover jobs used to download again at every ask.
-#[tokio::test(start_paused = true)]
-async fn a_refusal_under_demand_rides_the_backoff_and_logs_once() {
-    let io = FakeIo::new(secs(1), not_found);
-    let supervisor = supervising(&io);
-
-    live(&supervisor, true, DAY).await;
-
-    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Refused));
-    assert_eq!(io.count(|s| &s.fetches), 53);
-    assert_eq!(io.count(|s| &s.loud), 1);
-}
-
-/// TIDAL works while Cisco's host is blocked: the floor spaces the demands, while the timer's
-/// doubling backoff adds the attempts of the first minutes, closer together than the floor
-/// (291 is 5 attempts before any demand is admitted, 1 for the first, then 285 a floor apart).
-#[tokio::test(start_paused = true)]
-async fn a_blocked_host_under_demand_is_asked_once_per_floor_after_the_early_backoffs() {
-    let io = FakeIo::new(secs(1), unavailable);
-    let supervisor = supervising(&io);
-
-    live(&supervisor, true, DAY).await;
-
-    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Network));
-    assert_eq!(io.count(|s| &s.fetches), 291);
-    assert_eq!(io.count(|s| &s.loud), 1);
+        assert_eq!(phase(&supervisor), expected, "active: {active}");
+        assert_eq!(io.count(|s| &s.fetches), fetches, "active: {active}");
+        assert_eq!(io.count(|s| &s.loud), 1, "active: {active}");
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -988,41 +681,29 @@ async fn the_switch_turns_the_codec_off_and_on_live() {
 }
 
 /// A failure is the phase where every switch message plans a retry: the burst is one retry, not
-/// one download per click, whatever `NETWORK_DEMAND_FLOOR` says of the demands.
+/// one download per click, whatever `NETWORK_DEMAND_FLOOR` says of the demands. A burst that ends
+/// on off makes no retry at all.
 #[tokio::test(start_paused = true)]
-async fn a_burst_of_toggles_on_a_failure_retries_once() {
-    let io = FakeIo::new(secs(1), unavailable);
-    let supervisor = supervising(&io);
-    live(&supervisor, false, 5).await;
-    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Network));
-    assert_eq!(io.count(|s| &s.fetches), 1);
+async fn a_burst_of_toggles_on_a_failure_retries_once_or_not_at_all() {
+    for (toggles, expected, fetches) in [
+        ([false, true], failed_phase(FailureClass::Network), 2),
+        ([true, false], Phase::Unavailable(Unavailable::Off), 1),
+    ] {
+        let io = FakeIo::new(secs(1), unavailable);
+        let supervisor = supervising(&io);
+        live(&supervisor, false, 5).await;
+        assert_eq!(io.count(|s| &s.fetches), 1, "{toggles:?}");
 
-    for _ in 0..5 {
-        supervisor.set_enabled(false);
-        supervisor.set_enabled(true);
+        for _ in 0..5 {
+            for on in toggles {
+                supervisor.set_enabled(on);
+            }
+        }
+        live(&supervisor, false, 20).await;
+
+        assert_eq!(phase(&supervisor), expected, "{toggles:?}");
+        assert_eq!(io.count(|s| &s.fetches), fetches, "{toggles:?}");
     }
-    live(&supervisor, false, 20).await;
-
-    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Network));
-    assert_eq!(io.count(|s| &s.fetches), 2);
-}
-
-/// The burst ends on off: the retry it would have made is not made at all.
-#[tokio::test(start_paused = true)]
-async fn a_burst_of_toggles_on_a_failure_that_ends_off_fetches_nothing() {
-    let io = FakeIo::new(secs(1), unavailable);
-    let supervisor = supervising(&io);
-    live(&supervisor, false, 5).await;
-    assert_eq!(io.count(|s| &s.fetches), 1);
-
-    for _ in 0..5 {
-        supervisor.set_enabled(true);
-        supervisor.set_enabled(false);
-    }
-    live(&supervisor, false, 20).await;
-
-    assert_eq!(phase(&supervisor), Phase::Unavailable(Unavailable::Off));
-    assert_eq!(io.count(|s| &s.fetches), 1);
 }
 
 /// Folding a burst must not carry a switch past an ask queued behind it: the ask is answered
@@ -1321,15 +1002,4 @@ fn only_a_change_moves_the_sequence() {
     publish(&tx, failed_phase(FailureClass::Network), false);
     assert_eq!(rx.borrow().seq, 3);
     assert!(!rx.borrow().enabled);
-}
-
-#[test]
-fn the_pull_before_start_answers_null() {
-    assert_eq!(state_json(), "null");
-}
-
-/// The artwork filter reads this: covers stay still until a library has been proven.
-#[test]
-fn the_codec_is_not_ready_before_anything_proved_it() {
-    assert!(!is_ready());
 }

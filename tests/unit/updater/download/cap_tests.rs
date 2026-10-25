@@ -3,18 +3,20 @@
 use super::bump_capped;
 
 #[test]
-fn bump_capped_accumulates_under_cap() {
-    assert_eq!(bump_capped(0, 100, 1000).unwrap(), 100);
-    assert_eq!(bump_capped(100, 50, 1000).unwrap(), 150);
-}
-
-#[test]
-fn bump_capped_allows_exactly_at_cap() {
-    assert_eq!(bump_capped(60, 4, 64).unwrap(), 64);
-}
-
-#[test]
-fn bump_capped_rejects_over_cap() {
-    let err = bump_capped(60, 5, 64).unwrap_err();
-    assert!(err.to_string().contains("cap"), "got: {err}");
+fn bump_capped_accepts_up_to_the_cap_and_rejects_beyond_it() {
+    for (used, add, cap, total) in [
+        (0, 100, 1000, Some(100)),
+        (100, 50, 1000, Some(150)),
+        (60, 4, 64, Some(64)),
+        (60, 5, 64, None),
+    ] {
+        let result = bump_capped(used, add, cap);
+        match total {
+            Some(total) => assert_eq!(result.unwrap(), total, "{used} + {add} under {cap}"),
+            None => {
+                let err = result.unwrap_err();
+                assert!(err.to_string().contains("cap"), "got: {err}");
+            }
+        }
+    }
 }

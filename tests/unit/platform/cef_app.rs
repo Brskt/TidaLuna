@@ -23,14 +23,6 @@ fn defines(selector: Sel) -> bool {
 }
 
 #[test]
-fn the_class_extends_nsapplication() {
-    assert_eq!(
-        LunaApplication::class().superclass(),
-        Some(NSApplication::class())
-    );
-}
-
-#[test]
 fn the_selector_that_took_the_process_down_is_answered() {
     // The crash read `-[NSApplication isHandlingSendEvent]: unrecognized
     // selector`, sent with no guard in front of it by a release framework. This

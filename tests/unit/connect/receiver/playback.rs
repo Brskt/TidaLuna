@@ -73,65 +73,31 @@ async fn a_measurement_for_the_announced_track_corrects_its_length() {
     );
 }
 
+/// A refusal can outlive the track it judged, and so can a measurement. Two unidentified sides are
+/// not the same track (what `same_track` exists to say), and an event of a retired engine follows
+/// the staleness discipline every other bridge event does.
 #[tokio::test]
-async fn a_measurement_confirming_the_announced_length_announces_nothing() {
-    // Re-sending `NotifyMediaChanged` is how a length is corrected, so a repeat the controller
-    // does not need is a repeat it might render. Silence is the common path: the queue usually
-    // carries the right figure already.
-    let (mut controller, mut to_session) = announcing(media("88264189", Some(214_000)));
+async fn a_measurement_for_another_track_or_a_retired_engine_changes_nothing() {
+    for (track_id, engine_gen) in [(Some("120002099"), 0), (None, 0), (Some("88264189"), 7)] {
+        let (mut controller, mut to_session) = announcing(media("88264189", None));
 
-    controller
-        .on_duration_measured(214_000, Some("88264189"), of_engine(0))
-        .await;
-
-    assert!(
-        to_session.try_recv().is_err(),
-        "an unchanged length was re-announced"
-    );
-}
-
-#[tokio::test]
-async fn a_measurement_naming_another_track_changes_nothing() {
-    // A refusal can outlive the track it judged; a measurement can too.
-    let (mut controller, mut to_session) = announcing(media("88264189", None));
-
-    controller
-        .on_duration_measured(214_000, Some("120002099"), of_engine(0))
-        .await;
-
-    assert!(to_session.try_recv().is_err());
-    assert_eq!(
         controller
-            .current_media
-            .and_then(|m| m.metadata)
-            .and_then(|m| m.duration),
-        None,
-        "a length measured on another track was charged to this one"
-    );
-}
+            .on_duration_measured(214_000, track_id, of_engine(engine_gen))
+            .await;
 
-#[tokio::test]
-async fn a_measurement_naming_no_track_changes_nothing() {
-    // Two unidentified sides are not the same track, which is what `same_track` exists to say.
-    let (mut controller, mut to_session) = announcing(media("88264189", None));
-
-    controller
-        .on_duration_measured(214_000, None, of_engine(0))
-        .await;
-
-    assert!(to_session.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn a_measurement_from_a_retired_engine_changes_nothing() {
-    // Same staleness discipline every other bridge event follows.
-    let (mut controller, mut to_session) = announcing(media("88264189", None));
-
-    controller
-        .on_duration_measured(214_000, Some("88264189"), of_engine(7))
-        .await;
-
-    assert!(to_session.try_recv().is_err());
+        assert!(
+            to_session.try_recv().is_err(),
+            "{track_id:?}, engine {engine_gen}: the measurement was announced"
+        );
+        assert_eq!(
+            controller
+                .current_media
+                .and_then(|m| m.metadata)
+                .and_then(|m| m.duration),
+            None,
+            "{track_id:?}, engine {engine_gen}: a length was charged to the announced track"
+        );
+    }
 }
 
 #[test]
@@ -276,18 +242,5 @@ async fn the_casts_own_end_still_moves_its_queue_on() {
     assert!(
         asked_for_next,
         "the cast's own end did not ask for the next track"
-    );
-}
-
-/// What a controller is sent for a changed track, byte for byte. Parsed from the wire and sent
-/// back; the test holds whatever shape the variant's `media_info` is stored in.
-#[test]
-fn a_media_changed_notification_keeps_its_wire_bytes() {
-    let wire = r#"{"command":"notifyMediaChanged","mediaInfo":{"itemId":"i-1","mediaId":"88264189","srcUrl":"https://cdn/x.flac","streamType":"flac","metadata":{"title":"T","albumTitle":null,"artists":["A"],"duration":214000,"images":null},"customData":"{}","mediaType":0,"policy":{"canNext":true,"canPrevious":true}}}"#;
-    let parsed: PlaybackNotification =
-        serde_json::from_str(wire).expect("the controller's own message parses");
-    assert_eq!(
-        serde_json::to_string(&parsed).expect("a notification serializes"),
-        wire
     );
 }

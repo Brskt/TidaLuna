@@ -22,65 +22,41 @@ fn jfile(path: &str, backup: &str, is_new: bool) -> JournalFile {
     }
 }
 
+/// The journal is unsigned on-disk state: a path or backup climbing out of the app dir must
+/// neither delete nor rename the file it reaches, in rollback and in cleanup. One row per guard.
 #[test]
-fn pending_rollback_skips_path_traversal_delete() {
-    let root = tempfile::tempdir().unwrap();
-    let app_dir = root.path().join("app");
-    fs::create_dir(&app_dir).unwrap();
-    let victim = root.path().join("victim.txt");
-    fs::write(&victim, b"keep me").unwrap();
+fn a_journal_entry_that_leaves_the_app_dir_touches_nothing_outside_it() {
+    for (guard, state, entry) in [
+        (
+            "the rollback delete of a new file",
+            "pending",
+            jfile("../outside.txt", "", true),
+        ),
+        (
+            "the rollback rename of a backup",
+            "pending",
+            jfile("app.bin", "../outside.txt", false),
+        ),
+        (
+            "the cleanup delete of a backup",
+            "committed",
+            jfile("app.bin", "../outside.txt", false),
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let app_dir = root.path().join("app");
+        fs::create_dir(&app_dir).unwrap();
+        let outside = root.path().join("outside.txt");
+        fs::write(&outside, b"keep me").unwrap();
 
-    // is_new=true -> an unguarded rollback would remove app_dir/../victim.txt
-    apply_journal(
-        &app_dir,
-        &journal("pending", vec![jfile("../victim.txt", "", true)]),
-    );
+        apply_journal(&app_dir, &journal(state, vec![entry]));
 
-    assert!(
-        victim.exists(),
-        "traversal path must not delete a file outside app_dir"
-    );
-}
-
-#[test]
-fn pending_rollback_skips_backup_traversal_rename() {
-    let root = tempfile::tempdir().unwrap();
-    let app_dir = root.path().join("app");
-    fs::create_dir(&app_dir).unwrap();
-    let secret = root.path().join("secret.txt");
-    fs::write(&secret, b"secret").unwrap();
-
-    // path safe, backup escapes; unguarded code would rename it into app_dir
-    apply_journal(
-        &app_dir,
-        &journal("pending", vec![jfile("app.bin", "../secret.txt", false)]),
-    );
-
-    assert!(secret.exists(), "escaping backup must stay in place");
-    assert!(
-        !app_dir.join("app.bin").exists(),
-        "escaping backup must not be pulled into app_dir"
-    );
-}
-
-#[test]
-fn committed_cleanup_skips_backup_traversal_delete() {
-    let root = tempfile::tempdir().unwrap();
-    let app_dir = root.path().join("app");
-    fs::create_dir(&app_dir).unwrap();
-    let victim = root.path().join("victim.txt");
-    fs::write(&victim, b"keep me").unwrap();
-
-    // unguarded committed cleanup would remove app_dir/../victim.txt
-    apply_journal(
-        &app_dir,
-        &journal("committed", vec![jfile("app.bin", "../victim.txt", false)]),
-    );
-
-    assert!(
-        victim.exists(),
-        "traversal backup must not be deleted during cleanup"
-    );
+        assert!(outside.exists(), "{guard} reached a file outside app_dir");
+        assert!(
+            !app_dir.join("app.bin").exists(),
+            "{guard} pulled a file into app_dir"
+        );
+    }
 }
 
 #[test]

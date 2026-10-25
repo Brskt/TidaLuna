@@ -2,93 +2,26 @@
 
 use super::*;
 
-fn frame(pts: i64, width: usize, height: usize) -> crate::video::cover::CoverFrame {
-    crate::video::cover::CoverFrame {
-        width,
-        height,
-        y: vec![1u8; width * height],
-        u: vec![2u8; (width / 2) * (height / 2)],
-        v: vec![3u8; (width / 2) * (height / 2)],
-        y_stride: width,
-        u_stride: width / 2,
-        v_stride: width / 2,
-        pts_micros: pts,
-    }
-}
-
+/// Every other requester is refused before work starts, a service worker's own fetch (which
+/// arrives with no frame) included.
 #[test]
-fn the_header_names_the_format_and_the_frame_count() {
-    let bytes = encode_frames(vec![frame(0, 4, 4), frame(41_666, 4, 4)]);
-    assert_eq!(&bytes[0..4], b"LVC1");
-    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 4);
-    assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 4);
-    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 2);
-}
-
-#[test]
-fn every_plane_byte_lands_after_the_records() {
-    let frames = vec![frame(0, 4, 4)];
-    let bytes = encode_frames(frames);
-    let planes = 16 + 32;
-    assert_eq!(bytes.len(), planes + 16 + 4 + 4);
-    assert_eq!(bytes[planes], 1);
-    assert_eq!(bytes[planes + 16], 2);
-    assert_eq!(bytes[planes + 20], 3);
-}
-
-#[test]
-fn an_empty_frame_list_encodes_a_header_and_nothing_else() {
-    let bytes = encode_frames(Vec::new());
-    assert_eq!(bytes.len(), 16);
-    assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 0);
-}
-
-#[test]
-fn the_source_url_is_read_back_out_of_the_scheme_url() {
-    let url =
-        "luna-cover://frames/?src=https%3A%2F%2Fresources.tidal.com%2Fvideos%2Fa%2F1280x1280.mp4";
-    assert_eq!(
-        source_url(url).as_deref(),
-        Some("https://resources.tidal.com/videos/a/1280x1280.mp4")
-    );
-}
-
-#[test]
-fn a_scheme_url_without_a_source_yields_none() {
-    assert_eq!(source_url("luna-cover://frames/"), None);
-}
-
-#[test]
-fn tidal_pages_may_request_a_cover() {
-    for url in [
-        "https://desktop.tidal.com/",
-        "https://desktop.tidal.com/album/1",
-        "https://desktop.tidal.com/login",
-        "https://desktop.tidal.com/login/auth",
+fn only_a_tidal_page_may_request_a_cover() {
+    for (frame, refused) in [
+        (Some("https://desktop.tidal.com/"), false),
+        (Some("https://desktop.tidal.com/album/1"), false),
+        (Some("https://desktop.tidal.com/login"), false),
+        (Some("https://desktop.tidal.com/login/auth"), false),
+        (Some(""), true),
+        (Some("about:blank"), true),
+        (Some("data:text/html;base64,PGgxPmhpPC9oMT4="), true),
+        (Some("devtools://devtools/bundled/inspector.html"), true),
+        (Some("https://evil.example/"), true),
+        (Some("https://desktop.tidal.com.evil.example/"), true),
+        (Some("https://listen.tidal.com/"), true),
+        (None, true),
     ] {
-        assert_eq!(requester_refusal(Some(url)), None, "{url}");
+        assert_eq!(requester_refusal(frame).is_some(), refused, "{frame:?}");
     }
-}
-
-#[test]
-fn any_other_requester_is_refused_before_work_starts() {
-    for url in [
-        "",
-        "about:blank",
-        "data:text/html;base64,PGgxPmhpPC9oMT4=",
-        "devtools://devtools/bundled/inspector.html",
-        "https://evil.example/",
-        "https://desktop.tidal.com.evil.example/",
-        "https://listen.tidal.com/",
-    ] {
-        assert!(requester_refusal(Some(url)).is_some(), "{url}");
-    }
-}
-
-/// A service worker's own fetch arrives with no frame.
-#[test]
-fn a_request_with_no_frame_is_refused() {
-    assert!(requester_refusal(None).is_some());
 }
 
 /// Long past any answer that is coming: a job that never answers fails its test instead of

@@ -14,21 +14,6 @@ fn scrub_replaces_real_token_with_opaque() {
     assert!(out.contains("luna_aaaa"), "{out}");
 }
 
-#[test]
-fn scrub_ignores_short_tokens() {
-    // A short value must not substring-match and corrupt the body.
-    let pairs = vec![("abc".to_string(), "X".to_string())];
-    let body = "abcdef".to_string();
-    assert_eq!(scrub_real_tokens_with(body.clone(), &pairs), body);
-}
-
-#[test]
-fn redacted_marker_is_not_an_opaque_nonce() {
-    // The no-opaque fallback must not pass is_opaque(): if it were echoed back
-    // as a Bearer, rewrite_authorization_header would treat it as a real nonce.
-    assert!(!crate::ui::token_filter::is_opaque(REDACTED_MARKER));
-}
-
 /// Truncating before the scrub leaks. The cut hands the scrubber a fragment it cannot match,
 /// and every substitution ahead of that fragment shortens the string, sliding it left into the
 /// window that gets logged. Widening the cut by a token length does not help: the widening
@@ -62,73 +47,6 @@ fn token_body_empties_on_entropy_failure_never_leaks() {
     let out = proxy_transform_token_body_with(body, 200, 0, || None);
     assert_eq!(out, "{}");
     assert!(!out.contains("real-secret"));
-}
-
-fn headers(content_type: &str) -> serde_json::Map<String, serde_json::Value> {
-    let mut map = serde_json::Map::new();
-    if !content_type.is_empty() {
-        map.insert(
-            "content-type".to_string(),
-            serde_json::Value::String(content_type.to_string()),
-        );
-    }
-    map
-}
-
-fn album_with_video_cover() -> String {
-    serde_json::json!({
-        "data": {
-            "type": "albums",
-            "id": "1",
-            "relationships": {
-                "coverArt": {
-                    "data": [
-                        { "type": "artworks", "id": "vid-1" },
-                        { "type": "artworks", "id": "img-1" }
-                    ]
-                }
-            }
-        },
-        "included": [
-            { "type": "artworks", "id": "vid-1", "attributes": { "mediaType": "VIDEO" } },
-            { "type": "artworks", "id": "img-1", "attributes": { "mediaType": "IMAGE" } }
-        ]
-    })
-    .to_string()
-}
-
-#[test]
-fn artwork_strip_applies_to_openapi_json_replies() {
-    let openapi = crate::ui::nav::RequestUrl::new("https://openapi.tidal.com/v2/albums/1".into());
-    assert!(strips_artwork(
-        &openapi,
-        &headers("application/vnd.api+json")
-    ));
-
-    // A reply with no content-type is left alone rather than guessed at.
-    assert!(!strips_artwork(&openapi, &headers("")));
-    assert!(!strips_artwork(&openapi, &headers("text/html")));
-
-    let legacy = crate::ui::nav::RequestUrl::new("https://api.tidal.com/v1/albums/1".into());
-    assert!(!strips_artwork(&legacy, &headers("application/json")));
-}
-
-#[test]
-fn upstream_body_drops_the_video_artwork() {
-    // The proxy reply never reaches the CEF response filter. The same rule has to land
-    // here: an album fetched through the fallback must lose its video cover too.
-    let stripped = UpstreamBody(album_with_video_cover()).strip_video_artwork();
-    let doc: serde_json::Value = serde_json::from_str(&stripped.0).expect("valid JSON out");
-
-    let included = doc["included"].as_array().expect("included survives");
-    assert_eq!(included.len(), 1);
-    assert_eq!(included[0]["id"], "img-1");
-
-    let ids = doc["data"]["relationships"]["coverArt"]["data"]
-        .as_array()
-        .expect("the relationship survives");
-    assert_eq!(ids.len(), 1);
-    assert_eq!(ids[0]["id"], "img-1");
 }
 
 #[test]

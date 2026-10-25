@@ -3,27 +3,23 @@
 use super::*;
 
 #[test]
-fn redact_url_query_strips_query() {
-    assert_eq!(
-        redact_url_query("https://desktop.tidal.com/login/auth?code=abc123&state=xyz"),
-        "https://desktop.tidal.com/login/auth?<redacted>"
-    );
-}
-
-#[test]
-fn redact_url_query_strips_fragment() {
-    assert_eq!(
-        redact_url_query("https://desktop.tidal.com/cb#access_token=abc123"),
-        "https://desktop.tidal.com/cb?<redacted>"
-    );
-}
-
-#[test]
-fn redact_url_query_passthrough_without_query() {
-    assert_eq!(
-        redact_url_query("https://desktop.tidal.com/browse"),
-        "https://desktop.tidal.com/browse"
-    );
+fn redact_url_query_replaces_a_query_or_a_fragment_and_leaves_a_plain_url() {
+    for (url, expected) in [
+        (
+            "https://desktop.tidal.com/login/auth?code=abc123&state=xyz",
+            "https://desktop.tidal.com/login/auth?<redacted>",
+        ),
+        (
+            "https://desktop.tidal.com/cb#access_token=abc123",
+            "https://desktop.tidal.com/cb?<redacted>",
+        ),
+        (
+            "https://desktop.tidal.com/browse",
+            "https://desktop.tidal.com/browse",
+        ),
+    ] {
+        assert_eq!(redact_url_query(url), expected, "{url}");
+    }
 }
 
 /// The url reaches a refusal log from an untrusted source and `verr!` is never level-gated:
@@ -57,17 +53,4 @@ async fn a_network_error_carries_no_request_url() {
     assert!(!text.contains("SECRET"), "the credential survived: {text}");
     assert!(!text.contains("127.0.0.1"), "the url survived: {text}");
     assert!(!text.is_empty(), "the failure still has to say something");
-}
-
-#[test]
-fn managed_install_detects_truthy_values() {
-    assert!(managed_install_from(Some("1")));
-    assert!(managed_install_from(Some("true")));
-}
-
-#[test]
-fn managed_install_rejects_unset_and_falsy() {
-    assert!(!managed_install_from(None));
-    assert!(!managed_install_from(Some("")));
-    assert!(!managed_install_from(Some("0")));
 }

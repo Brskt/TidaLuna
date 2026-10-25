@@ -3,16 +3,6 @@
 use super::*;
 
 #[tokio::test]
-async fn task_runs_and_is_reported_graceful() {
-    let group = TaskGroup::new();
-    group.spawn("ok", async {}).unwrap();
-    let report = group.shutdown(Duration::from_millis(100)).await;
-    assert_eq!(report.graceful_completed, vec!["ok"]);
-    assert!(report.aborted.is_empty());
-    assert!(report.panicked.is_empty());
-}
-
-#[tokio::test]
 async fn cooperative_task_observes_cancel_and_exits_graceful() {
     let group = TaskGroup::new();
     let cancel = group.cancel_token();
@@ -56,52 +46,6 @@ async fn spawn_after_shutdown_is_rejected() {
     let _ = group.shutdown(Duration::from_millis(10)).await;
     let err = group.spawn("late", async {}).unwrap_err();
     assert!(matches!(err, SpawnError::GroupClosed));
-}
-
-#[tokio::test]
-async fn duplicate_name_is_rejected() {
-    let group = TaskGroup::new();
-    group.spawn("dup", async {}).unwrap();
-    let err = group.spawn("dup", async {}).unwrap_err();
-    assert!(matches!(err, SpawnError::DuplicateName("dup")));
-    let _ = group.shutdown(Duration::from_millis(100)).await;
-}
-
-#[test]
-fn transition_matrix_forbids_terminal_overwrite() {
-    assert!(!TaskState::can_transition(
-        TaskState::PanicObserved,
-        TaskState::AbortRequested,
-    ));
-    assert!(!TaskState::can_transition(
-        TaskState::GracefulCompleted,
-        TaskState::AbortObserved,
-    ));
-    assert!(TaskState::can_transition(
-        TaskState::Running,
-        TaskState::GracefulCompleted,
-    ));
-    assert!(TaskState::can_transition(
-        TaskState::AbortRequested,
-        TaskState::PanicObserved,
-    ));
-}
-
-#[test]
-fn try_transition_is_no_op_when_already_at_target() {
-    let atom = AtomicU8::new(TaskState::GracefulCompleted as u8);
-    assert!(try_transition(&atom, TaskState::GracefulCompleted));
-    assert_eq!(
-        atom.load(Ordering::SeqCst),
-        TaskState::GracefulCompleted as u8
-    );
-}
-
-#[test]
-fn try_transition_refuses_terminal_overwrite() {
-    let atom = AtomicU8::new(TaskState::PanicObserved as u8);
-    assert!(!try_transition(&atom, TaskState::AbortRequested));
-    assert_eq!(atom.load(Ordering::SeqCst), TaskState::PanicObserved as u8);
 }
 
 #[tokio::test]

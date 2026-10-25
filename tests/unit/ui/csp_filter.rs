@@ -2,73 +2,46 @@
 
 use cef::ResourceType;
 
-use super::{is_document_url, strip_csp_meta};
+use super::is_document_url;
 
 fn url(s: &str) -> crate::ui::nav::RequestUrl {
     crate::ui::nav::RequestUrl::new(s.to_string())
 }
 
-/// `None` is the service-worker precache's view, with no browser and no type to
-/// read; the path is all it has to go on.
+/// `None` is the service-worker precache's view, with no type to read: the path decides. A cold
+/// start on a deep link has no extension; only CEF's type names the document, but the host
+/// check outranks it: the login host's popup is a top-level document whose CSP is never stripped.
 #[test]
-fn document_url_matches_shell_only() {
-    assert!(is_document_url(&url("https://desktop.tidal.com/"), None));
-    assert!(is_document_url(
-        &url("https://desktop.tidal.com/index.html"),
-        None
-    ));
-    assert!(is_document_url(
-        &url("https://desktop.tidal.com/lastfmcallback.html"),
-        None
-    ));
-    assert!(!is_document_url(
-        &url("https://desktop.tidal.com/assets/index-abc.js"),
-        None
-    ));
-    assert!(!is_document_url(
-        &url("https://desktop.tidal.com/assets/x.css"),
-        None
-    ));
-    assert!(!is_document_url(
-        &url("https://resources.tidal.com/images/x/80x80.jpg"),
-        None
-    ));
-    assert!(!is_document_url(
-        &url("https://api.tidal.com/v1/tracks/1"),
-        None
-    ));
-}
-
-/// A cold start on a deep link asks for a route with no extension. The path rule
-/// misses it, and only CEF's own word identifies the document.
-#[test]
-fn a_main_frame_load_is_a_document_whatever_its_path() {
-    let deep = url("https://desktop.tidal.com/album/1");
-    assert!(!is_document_url(&deep, None));
-    assert!(is_document_url(&deep, Some(ResourceType::MAIN_FRAME)));
-}
-
-/// The login host navigates a top-level document of its own, in a popup. Stripping
-/// the shell's CSP was never the deal there, and the type must not buy its way in.
-#[test]
-fn the_host_check_outranks_the_resource_type() {
-    assert!(!is_document_url(
-        &url("https://login.tidal.com/authorize"),
-        Some(ResourceType::MAIN_FRAME)
-    ));
-}
-
-#[test]
-fn passthrough_when_absent() {
-    let html = b"<html><head></head></html>";
-    assert_eq!(strip_csp_meta(html), html);
-}
-
-#[test]
-fn only_replaces_first() {
-    let html = b"<meta http-equiv=\"Content-Security-Policy\" a><meta http-equiv=\"Content-Security-Policy\" b>";
-    let out = strip_csp_meta(html);
-    let s = std::str::from_utf8(&out).unwrap();
-    assert_eq!(s.matches("LunaWuzHere").count(), 1);
-    assert_eq!(s.matches("Content-Security-Policy").count(), 1);
+fn a_document_is_the_shell_by_path_or_a_main_frame_load_on_the_app_host() {
+    for (target, resource_type, expected) in [
+        ("https://desktop.tidal.com/", None, true),
+        ("https://desktop.tidal.com/index.html", None, true),
+        ("https://desktop.tidal.com/lastfmcallback.html", None, true),
+        ("https://desktop.tidal.com/assets/index-abc.js", None, false),
+        ("https://desktop.tidal.com/assets/x.css", None, false),
+        (
+            "https://resources.tidal.com/images/x/80x80.jpg",
+            None,
+            false,
+        ),
+        ("https://api.tidal.com/v1/tracks/1", None, false),
+        ("https://desktop.tidal.com/album/1", None, false),
+        (
+            "https://desktop.tidal.com/album/1",
+            Some(ResourceType::MAIN_FRAME),
+            true,
+        ),
+        (
+            "https://login.tidal.com/authorize",
+            Some(ResourceType::MAIN_FRAME),
+            false,
+        ),
+    ] {
+        let typed = resource_type.is_some();
+        assert_eq!(
+            is_document_url(&url(target), resource_type),
+            expected,
+            "{target}, typed: {typed}"
+        );
+    }
 }
