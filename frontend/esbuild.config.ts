@@ -2,14 +2,17 @@
  * Centralized esbuild configuration - single entry point for all frontend builds.
  *
  * Built one at a time, in this order:
- *   Phase 1: Luna's plugins (luna-ui, luna-dev) as .mjs, baked in by luna_modules.rs
+ *   Phase 1: Luna's plugins (luna-ui, luna-dev) as .mjs, served by luna_modules.rs
  *   Phase 2: Main bundle (bundle.js)
  *   Phase 3: Standalone ESM modules (luna-core, luna-lib, oby, helpers)
+ * Then native-host.cjs, early-runtime/ (copied as is) and frontend.json are placed beside the
+ * bundles: dist/ has the layout of the shipped frontend/ folder, which TIDALUNAR_FRONTEND_DIR
+ * can point at.
  */
 import { type BuildOptions } from "esbuild";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { mkdirSync, readFileSync } from "fs";
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { build, defaultBuildOptions, RUNTIME_EXTERNALS, TYPE_ONLY_PACKAGES, getLunaDependencyExternals } from "./build";
 import { dynamicExternalsPlugin } from "./build/plugins/dynamicExternals";
 import { typeOnlyPlugin } from "./build/plugins/typeOnly";
@@ -24,8 +27,6 @@ const appVersion = cargoToml.match(/^version\s*=\s*"(.+)"/m)?.[1] ?? "unknown";
 const versionDefine = { __TIDALUNAR_VERSION__: JSON.stringify(appVersion) };
 
 mkdirSync(resolve(root, "dist"), { recursive: true });
-mkdirSync(resolve(root, "plugins/ui/dist"), { recursive: true });
-mkdirSync(resolve(root, "plugins/dev/dist"), { recursive: true });
 
 // Shared config for Luna's own plugin builds (Phase 1)
 const pluginDefaults: Partial<BuildOptions> = {
@@ -38,8 +39,8 @@ const pluginDefaults: Partial<BuildOptions> = {
 	define: { ...versionDefine },
 };
 
-const uiOutfile = resolve(root, "plugins/ui/dist/luna-ui.mjs");
-const devOutfile = resolve(root, "plugins/dev/dist/luna-dev.mjs");
+const uiOutfile = resolve(root, "dist/luna-ui.mjs");
+const devOutfile = resolve(root, "dist/luna-dev.mjs");
 
 // Phase 1, Luna's plugins (luna-ui, luna-dev).
 
@@ -150,5 +151,16 @@ await build([
 	oby,
 	inrixiaHelpers,
 ]);
+
+// Emptied first so a script removed from the source cannot linger in dist/.
+const earlyOut = resolve(root, "dist/early-runtime");
+rmSync(earlyOut, { recursive: true, force: true });
+mkdirSync(earlyOut);
+for (const name of readdirSync(resolve(root, "early-runtime"))) {
+	if (name.endsWith(".js")) copyFileSync(resolve(root, "early-runtime", name), resolve(earlyOut, name));
+}
+copyFileSync(resolve(root, "scripts/native-host.cjs"), resolve(root, "dist/native-host.cjs"));
+// The binary refuses a shipped folder whose version differs from its own.
+writeFileSync(resolve(root, "dist/frontend.json"), JSON.stringify({ version: appVersion }) + "\n");
 
 console.log("\nAll builds complete.");

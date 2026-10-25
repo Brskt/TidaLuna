@@ -1,4 +1,4 @@
-// Fragment 1/5 - IPC via cefQuery + event bus
+// IPC via cefQuery + event bus
 // Guard (__LUNAR_EARLY_RUNTIME__) and cefQuery check are in the Rust preload assembler.
 
 // Capture cefQuery once at early-runtime init - before any plugin or app code runs.

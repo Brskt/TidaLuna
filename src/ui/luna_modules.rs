@@ -1,24 +1,23 @@
 //! Serves Luna's own plugin ES modules (`luna-ui.mjs`, `luna-dev.mjs`) to the renderer.
 //!
-//! Baked into the binary (`include_bytes!`) and served on a synthetic same-origin `/__luna__/*.mjs`
-//! path for the loader to `import()` them, instead of `bundle.js` carrying them as escaped string
-//! literals. Same `ResourceHandler` pattern as `store_proxy`, but synchronous (bytes are resident:
-//! no fetch/callback/`Task`).
+//! Read from the front folder at launch (`crate::frontend`) and served on a synthetic same-origin
+//! `/__luna__/*.mjs` path for the loader to `import()` them. Same `ResourceHandler` pattern as
+//! `store_proxy`, but synchronous (bytes are resident: no fetch/callback/`Task`).
 
 use std::sync::{Arc, Mutex};
 
 use cef::*;
 
-static LUNA_UI_MJS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/luna-ui.mjs"));
-static LUNA_DEV_MJS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/luna-dev.mjs"));
-
-/// Map a synthetic `/__luna__/*.mjs` path to its baked bytes (any host; query/fragment ignored).
+/// Map a synthetic `/__luna__/*.mjs` path to its loaded bytes (any host; query/fragment ignored).
+/// None before the front is loaded: the request then falls through instead of panicking inside a
+/// CEF callback.
 fn resolve(url: &str) -> Option<&'static [u8]> {
     let path = url.split(['?', '#']).next().unwrap_or(url);
+    let front = crate::frontend::load::get()?;
     if path.ends_with("/__luna__/ui.mjs") {
-        Some(LUNA_UI_MJS)
+        Some(&front.luna_ui)
     } else if path.ends_with("/__luna__/dev.mjs") {
-        Some(LUNA_DEV_MJS)
+        Some(&front.luna_dev)
     } else {
         None
     }
@@ -85,7 +84,7 @@ wrap_resource_handler! {
     }
 
     impl ResourceHandler {
-        // Synchronous: the bytes are resident (`include_bytes!`). Signal handled-now and let
+        // Synchronous: the bytes are resident (loaded at launch). Signal handled-now and let
         // response_headers/read serve straight from the slice, no async fetch/callback needed.
         fn open(
             &self,
@@ -112,7 +111,7 @@ wrap_resource_handler! {
             resp.set_status(200);
             // Must be a JS MIME for Chromium's module loader to accept an import() target.
             resp.set_mime_type(Some(&CefString::from("text/javascript")));
-            // Served fresh from the binary; never cache, or a rebuilt module ends up shadowed by
+            // Served fresh from memory; never cache, or a rebuilt module ends up shadowed by
             // a stale copy at the stable path.
             resp.set_header_by_name(
                 Some(&CefString::from("Cache-Control")),

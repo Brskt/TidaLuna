@@ -1,4 +1,4 @@
-// Fragment 6/6 - Exfiltration guard: lock sendBeacon
+// Exfiltration guard: lock sendBeacon
 // Defence-in-depth: ExfilBlockHandler cancels an RT_PING bound for a non-Tidal origin and is
 // the structural guarantee; this lock only raises the bar for plugins escaping the IIFE wrapper.
 //

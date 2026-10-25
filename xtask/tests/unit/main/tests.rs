@@ -1,33 +1,44 @@
 //! Tests for `xtask/src/main.rs`, attached to it by `#[path]`.
 
-use super::numeric_version;
+use super::copy_front;
+use super::front_files::TOP_FILES;
 
-#[test]
-fn drops_prerelease_suffix() {
-    assert_eq!(numeric_version("0.0.4-alpha", 4), "0.0.4.0");
-    assert_eq!(numeric_version("1.2.3-rc.1", 4), "1.2.3.0");
-    assert_eq!(numeric_version("0.0.4-alpha", 3), "0.0.4");
+/// A fresh directory under the system temp dir; xtask carries no `tempfile`.
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("xtask-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
+/// A script added to `frontend/early-runtime/` reaches the bundle without a second list to update
+/// (the app refuses to start when a script is missing).
 #[test]
-fn drops_build_metadata() {
-    assert_eq!(numeric_version("1.2.3+build.42", 4), "1.2.3.0");
-}
+fn copy_front_takes_every_early_runtime_script_the_build_produced() {
+    let src = scratch("front-src");
+    for top in TOP_FILES {
+        std::fs::write(src.join(top), "x").unwrap();
+    }
+    std::fs::create_dir(src.join("early-runtime")).unwrap();
+    for script in ["a_known.js", "a_new_one.js"] {
+        std::fs::write(src.join("early-runtime").join(script), "x").unwrap();
+    }
+    std::fs::write(src.join("quickjs-dom.js"), "stale").unwrap();
+    let out = scratch("front-dst");
+    let dst = out.join("frontend");
 
-#[test]
-fn pads_missing_parts() {
-    assert_eq!(numeric_version("1", 4), "1.0.0.0");
-    assert_eq!(numeric_version("1.2", 4), "1.2.0.0");
-    assert_eq!(numeric_version("1.2", 3), "1.2.0");
-}
+    let copied = copy_front(&src, &dst);
+    let new_one = dst.join("early-runtime/a_new_one.js").is_file();
+    let known = dst.join("early-runtime/a_known.js").is_file();
+    let bundle = dst.join("bundle.js").is_file();
+    let stale = dst.join("quickjs-dom.js").exists();
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&out);
 
-#[test]
-fn truncates_extra_parts() {
-    assert_eq!(numeric_version("1.2.3.4.5", 4), "1.2.3.4");
-    assert_eq!(numeric_version("1.2.3.4", 3), "1.2.3");
-}
-
-#[test]
-fn handles_garbage_suffix_per_part() {
-    assert_eq!(numeric_version("1abc.2def.3ghi", 4), "1.2.3.0");
+    copied.expect("copies");
+    assert!(new_one && known && bundle);
+    assert!(!stale, "only the allowlist ships");
 }

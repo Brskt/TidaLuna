@@ -1,6 +1,5 @@
-// Tests `src/ui/early_runtime/cache_heal.js`, the Service Worker cache self-heal injected
-// by `init_script`. It lived as an escaped string inside a Rust `format!` until now, which
-// is why it had no coverage and why a wrong readiness criterion went unnoticed.
+// Tests `early-runtime/cache_heal.js`, the Service Worker cache self-heal injected
+// by `init_script`, by running the shipped source.
 //
 // The criterion is the point: the heal must NOT re-derive whether the host React capture
 // is usable. `initModules` owns that verdict (it alone knows presence, validity and the

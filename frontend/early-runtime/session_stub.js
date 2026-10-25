@@ -1,4 +1,4 @@
-// Fragment 5/5 - Minimal nativeInterface stub + session delegate
+// Minimal nativeInterface stub + session delegate
 // Depends on: sendIpc, _cfg (from ipc.js)
 
 if (!window.nativeInterface) {

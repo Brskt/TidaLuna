@@ -8,6 +8,7 @@ pub(crate) mod crash_dialog;
 pub(crate) mod csp_filter;
 pub(crate) mod deep_link;
 pub(crate) mod dialog;
+pub(crate) mod early_runtime;
 pub(crate) mod file_dialog;
 pub(crate) mod flush;
 pub(crate) mod luna_modules;

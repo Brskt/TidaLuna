@@ -220,14 +220,6 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
 
-      - name: Cache frontend deps
-        uses: actions/cache@v5
-        with:
-          path: frontend/node_modules
-          key: js-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package.json') }}
-          restore-keys: |
-            js-${{ runner.os }}-${{ runner.arch }}-
-
       - name: Clippy
         run: cargo xtask clippy
 
@@ -257,6 +249,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: bun install --frozen-lockfile
+
+      - name: Build
+        working-directory: frontend
+        run: bun esbuild.config.ts
 
       # bunfig.toml, with its test preload, is read from the working directory.
       - name: Test
@@ -398,6 +394,7 @@ jobs:
           test -f /opt/tidalunar/bin/cef/chrome-sandbox || { echo "chrome-sandbox missing"; exit 1; }
           test -f /etc/apparmor.d/tidalunar || { echo "apparmor profile missing"; exit 1; }
           test -f /usr/lib/tidalunar/payload.tar.zst || { echo "payload missing"; exit 1; }
+          tar --zstd -tf /usr/lib/tidalunar/payload.tar.zst | grep -qx './frontend/bundle.js\|frontend/bundle.js' || { echo "front missing from payload"; exit 1; }
           test -f /usr/share/applications/tidalunar.desktop || { echo "desktop entry missing"; exit 1; }
           proto=$(cat /usr/lib/tidalunar/SANDBOX_PROTOCOL_VERSION)
           [ "$proto" = "1" ] || { echo "unexpected protocol version: $proto"; exit 1; }
@@ -472,6 +469,9 @@ jobs:
           }
           if (-not (Test-Path "$env:LOCALAPPDATA\Programs\TidaLunar\manifest.json")) {
             throw "Installer ran but manifest.json missing in install dir"
+          }
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\TidaLunar\frontend\bundle.js")) {
+            throw "Installer ran but the front is missing in install dir"
           }
           if (-not (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\TidaLunar" -ErrorAction SilentlyContinue)) {
             throw "Installer ran but registry entry missing"

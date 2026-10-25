@@ -1,4 +1,4 @@
-// Tests `src/ui/early_runtime/host_modules.js`, the sink the Rust capture filter appends
+// Tests `early-runtime/host_modules.js`, the sink the Rust capture filter appends
 // `__LUNA_CAP(id, ns)` to. It had no coverage at all, which is how a policy that silently
 // discarded half of a split module survived: the id assignment looked correct, and it is;
 // nothing pointed at the writer.

@@ -1,4 +1,4 @@
-// Reuse the shared listener store created by early_runtime.js.
+// Reuse the shared listener store created by the early runtime's ipc.js.
 
 const sharedListeners: Record<string, Array<(...args: any[]) => void>> =
     (window as any).__LUNAR_IPC_LISTENERS__ ??= {};

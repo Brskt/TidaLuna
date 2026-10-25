@@ -64,6 +64,7 @@ fn usage() {
     eprintln!("  fmt              Check formatting");
     eprintln!("  bundle           Build and create distributable bundle (dev by default)");
     eprintln!("                   --release  Build in release mode (optimized, slower)");
+    eprintln!("                   --prebuilt-front  Reuse frontend/dist instead of running bun");
     eprintln!("  build-updater    Build the updater crate and copy to dist/updater/");
     eprintln!("                   --release  Build in release mode");
     eprintln!("  package          Build a platform installer from dist/");
@@ -143,9 +144,14 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     };
 
     let release = flags.iter().any(|f| f == "--release");
+    let prebuilt_front = flags.iter().any(|f| f == "--prebuilt-front");
     let profile = if release { "release" } else { "dev" };
+    let project_root = project_root()?;
 
-    // 1. Build
+    // 1. Build the front, then the binary (neither needs the other).
+    if !prebuilt_front {
+        build_front(project_root)?;
+    }
     println!("Building {profile}...");
     let mut args = vec!["build"];
     if release {
@@ -153,8 +159,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     }
     run("cargo", &args)?;
 
-    // 2. Locate project root and target dir
-    let project_root = project_root()?;
+    // 2. Locate target dir
     let target_dir = project_root
         .join("target")
         .join(if release { "release" } else { "debug" });
@@ -182,7 +187,7 @@ fn bundle(flags: &[String]) -> Result<(), String> {
                 let new_layout_prefixes: &[&str] = if cfg!(target_os = "macos") {
                     &[] // macOS uses .app bundle, no flat layout
                 } else {
-                    &["bin/bun", "bin/native-host"]
+                    &["bin/bun"]
                 };
                 let new_layout_roots: &[&str] = if cfg!(target_os = "macos") {
                     &[]
@@ -256,6 +261,14 @@ fn bundle(flags: &[String]) -> Result<(), String> {
         }
     }
 
+    // 5b. The front folder, read by the app at launch.
+    let front_dst = if cfg!(target_os = "macos") {
+        bundle_dir.join(format!("{EXE_NAME}.app/Contents/Resources/frontend"))
+    } else {
+        bundle_dir.join("frontend")
+    };
+    copy_front(&project_root.join("frontend/dist"), &front_dst)?;
+
     // 6. Download Bun binary into bin/
     fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin/: {e}"))?;
     download_bun(&bin_dir)?;
@@ -268,6 +281,109 @@ fn bundle(flags: &[String]) -> Result<(), String> {
     generate_manifest(&bundle_dir)?;
 
     println!("Bundle created in: {}", bundle_dir.display());
+    Ok(())
+}
+
+/// `files.rs` as xtask reads it: the list of files it ships.
+macro_rules! emit_top_files {
+    ($($name:ident = $file:literal,)*) => {
+        pub(crate) const TOP_FILES: [&str; [$($file),*].len()] = [$($file),*];
+    };
+}
+/// The allowlist `src/frontend/load.rs` reads: a copy of all of `frontend/dist` would ship
+/// whatever a past build left there, hashed into the manifest.
+#[path = "../../src/frontend/files.rs"]
+mod front_files;
+
+/// Where `bun` lives: `TIDALUNAR_BUN`, then PATH, then `$BUN_INSTALL/bin` (default `~/.bun/bin`),
+/// which an IDE running cargo without a shell rc file still finds.
+fn resolve_bun() -> Result<PathBuf, String> {
+    if let Some(explicit) = std::env::var_os("TIDALUNAR_BUN")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        return Ok(explicit);
+    }
+    if Command::new("bun").arg("--version").output().is_ok() {
+        return Ok(PathBuf::from("bun"));
+    }
+    let candidate = std::env::var_os("BUN_INSTALL")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| Path::new(&home).join(".bun"))
+        })
+        .map(|root| {
+            root.join("bin")
+                .join(if cfg!(windows) { "bun.exe" } else { "bun" })
+        })
+        .filter(|p| p.is_file());
+    candidate.ok_or_else(|| {
+        "bun not found: install it from https://bun.sh, set TIDALUNAR_BUN to its full path, \
+         or pass --prebuilt-front to reuse frontend/dist"
+            .to_string()
+    })
+}
+
+fn build_front(project_root: &Path) -> Result<(), String> {
+    let front = project_root.join("frontend");
+    let bun = resolve_bun()?;
+    if !front.join("node_modules").exists() {
+        println!("Installing front dependencies...");
+        run_in(&bun, &["install"], &front)?;
+    }
+    println!("Building the front...");
+    run_in(&bun, &["esbuild.config.ts"], &front)
+}
+
+fn run_in(cmd: &Path, args: &[&str], dir: &Path) -> Result<(), String> {
+    let status = Command::new(cmd)
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .map_err(|e| format!("failed to run {}: {e}", cmd.display()))?;
+    if !status.success() {
+        return Err(format!("{} {} failed", cmd.display(), args.join(" ")));
+    }
+    Ok(())
+}
+
+/// Emptied first, then filled by allowlist. A missing file fails the bundle (the app would
+/// refuse to start without it).
+fn copy_front(src: &Path, dst: &Path) -> Result<(), String> {
+    if dst.exists() {
+        fs::remove_dir_all(dst).map_err(|e| format!("failed to empty {}: {e}", dst.display()))?;
+    }
+    let missing = |path: &Path| {
+        format!(
+            "{} is missing: build the front first (bun esbuild.config.ts in frontend/)",
+            path.display()
+        )
+    };
+    let early_src = src.join("early-runtime");
+    let mut files: Vec<PathBuf> = front_files::TOP_FILES.iter().map(PathBuf::from).collect();
+    let entries = fs::read_dir(&early_src).map_err(|_| missing(&early_src))?;
+    for entry in entries {
+        let name = entry
+            .map_err(|e| format!("failed to read {}: {e}", early_src.display()))?
+            .file_name();
+        if name.to_string_lossy().ends_with(".js") {
+            files.push(Path::new("early-runtime").join(name));
+        }
+    }
+    for rel in &files {
+        let from = src.join(rel);
+        if !from.is_file() {
+            return Err(missing(&from));
+        }
+        let to = dst.join(rel);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        }
+        fs::copy(&from, &to).map_err(|e| format!("failed to copy {}: {e}", from.display()))?;
+    }
+    println!("  Copied the front into {}", dst.display());
     Ok(())
 }
 

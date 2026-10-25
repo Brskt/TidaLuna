@@ -13,6 +13,13 @@ wrap_render_process_handler! {
         router: Arc<RendererSideRouter>,
     }
     impl RenderProcessHandler {
+        fn on_browser_created(
+            &self,
+            _browser: Option<&mut Browser>,
+            extra_info: Option<&mut DictionaryValue>,
+        ) {
+            crate::ui::early_runtime::receive(extra_info);
+        }
         fn on_context_created(
             &self,
             browser: Option<&mut Browser>,
@@ -26,57 +33,25 @@ wrap_render_process_handler! {
             if let Some(ref frame) = frame_for_inject {
                 let url = frame.url();
                 let url_str = crate::ui::token_filter::userfree_to_string(&url);
-                use crate::ui::nav::{self, NavigationPolicy, PageKind};
+                use crate::ui::nav::{NavigationPolicy, PageKind};
                 if NavigationPolicy::for_page(PageKind::classify(&url_str)).inject_early_runtime {
-                    // Skip the fallback bar in auth popups: its window.* buttons hit the
-                    // main window (AppWindow::current), and the popup is OS-framed anyway.
-                    let titlebar = if is_popup {
-                        ""
-                    } else {
-                        include_str!("early_runtime/fallback_titlebar.js")
-                    };
-                    let preload = format!(
-                        "(function(){{\
-                        if(self.__LUNAR_EARLY_RUNTIME__)return;\
-                        if(typeof window.cefQuery!=='function')return;\
-                        self.__LUNAR_CONFIG__={{\
-                            desktopHost:\"{desktop}\",\
-                            loginHost:\"{login}\",\
-                            authHost:\"{auth}\",\
-                            apiHost:\"{api}\",\
-                            redirectUri:\"{redirect}\",\
-                            loginCallbackPath:\"/login/auth\",\
-                            authHosts:[\"{login}\",\"{auth}\"]\
-                        }};\
-                        {host_modules}\
-                        {saga_put}\
-                        {ipc}\
-                        {volume_restore}\
-                        {token}\
-                        {fetch}\
-                        {open}\
-                        {session}\
-                        {exfil}\
-                        {titlebar}\
-                        self.__LUNAR_EARLY_RUNTIME__=true;\
-                        }})();",
-                        desktop = nav::HOST_DESKTOP,
-                        login = nav::HOST_LOGIN,
-                        auth = nav::HOST_AUTH,
-                        api = nav::HOST_API,
-                        redirect = nav::REDIRECT_URI,
-                        host_modules = include_str!("early_runtime/host_modules.js"),
-                        saga_put = include_str!("early_runtime/saga_put.js"),
-                        ipc = include_str!("early_runtime/ipc.js"),
-                        volume_restore = include_str!("early_runtime/volume_restore.js"),
-                        token = include_str!("early_runtime/token_capture.js"),
-                        fetch = include_str!("early_runtime/fetch_proxy.js"),
-                        open = include_str!("early_runtime/window_open.js"),
-                        session = include_str!("early_runtime/session_stub.js"),
-                        exfil = include_str!("early_runtime/exfil_guard.js"),
-                        titlebar = titlebar,
-                    );
-                    crate::app_state::exec_js_on_frame(frame, &preload);
+                    use crate::ui::early_runtime;
+                    match early_runtime::received() {
+                        Some(payload) => crate::app_state::exec_js_on_frame(
+                            frame,
+                            &early_runtime::preload_script(payload, is_popup),
+                        ),
+                        // The guards did not arrive: the page must not run without them.
+                        None => {
+                            crate::app_state::exec_js_on_frame(frame, early_runtime::FAIL_CLOSED_JS);
+                            crate::verr!("[EARLY]  No early-runtime payload in this renderer; page stopped");
+                            if let Some(mut msg) = process_message_create(Some(&CefString::from(
+                                early_runtime::EARLY_RUNTIME_MISSING,
+                            ))) {
+                                frame.send_process_message(ProcessId::BROWSER, Some(&mut msg));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -336,11 +311,15 @@ wrap_browser_process_handler! {
 
             let data_dir = crate::state::cache_data_dir();
             let pkce_credentials = crate::platform::auth::load_or_create_pkce_credentials(&data_dir);
-            let pkce_credentials_json =
-                serde_json::to_string(&pkce_credentials).unwrap_or_else(|e| {
-                    crate::verr!("[PKCE]   Failed to encode credentials for JS: {e}");
-                    format!("{{\"credentialsStorageKey\":\"tidal\",\"codeChallenge\":\"\",\"redirectUri\":\"{}\",\"codeVerifier\":\"\"}}", crate::ui::nav::REDIRECT_URI)
-                });
+            let credentials = serde_json::to_value(&pkce_credentials).unwrap_or_else(|e| {
+                crate::verr!("[PKCE]   Failed to encode credentials for JS: {e}");
+                serde_json::json!({
+                    "credentialsStorageKey": "tidal",
+                    "codeChallenge": "",
+                    "redirectUri": crate::ui::nav::REDIRECT_URI,
+                    "codeVerifier": "",
+                })
+            });
 
             let platform = if cfg!(target_os = "linux") {
                 "linux"
@@ -380,12 +359,9 @@ wrap_browser_process_handler! {
             // real Linux UA for network traffic (CefSettings.user_agent) but
             // expose a Windows-like UA to JavaScript for the titlebar to render.
             #[cfg(target_os = "linux")]
-            let ua_override = format!(
-                r#"(function(){{try{{var UA={ua:?};var AV=UA.replace('Mozilla/','');Object.defineProperty(Navigator.prototype,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(navigator,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(Navigator.prototype,'appVersion',{{get:function(){{return AV;}},configurable:true}});Object.defineProperty(navigator,'appVersion',{{get:function(){{return AV;}},configurable:true}});}}catch(e){{}}}})();"#,
-                ua = crate::state::JS_USER_AGENT.as_str(),
-            );
+            let user_agent = Some(crate::state::JS_USER_AGENT.to_string());
             #[cfg(not(target_os = "linux"))]
-            let ua_override = String::new();
+            let user_agent = None;
 
             let perf = crate::debug::perf_monitor::enabled();
             let window_maximized = crate::state::boot_settings().window_maximized;
@@ -400,63 +376,32 @@ wrap_browser_process_handler! {
             // prefix that would replay on every reload.
             crate::finish_boot_tokens();
 
+            // `main` refuses to start without the front, before CEF exists.
+            let Some(front) = crate::frontend::load::get() else {
+                crate::platform::refusal::refuse_to_start("TidaLunar's front files were not loaded.");
+            };
+            let globals = crate::frontend::prologue::InitGlobals {
+                platform,
+                close_to_tray,
+                auto_check,
+                update_channel,
+                receiver_always_on,
+                volume_sync,
+                asio,
+                console,
+                crossfade_enabled,
+                crossfade_secs,
+                perf,
+                window_maximized,
+                credentials,
+                rewrite_epoch: crate::ui::module_capture::REWRITE_EPOCH,
+                user_agent,
+            };
             let init_script = format!(
-                r#"{ua_override}window.__TIDALUNAR_PLATFORM__ = '{platform}';
-window.__TIDALUNAR_CLOSE_TO_TRAY__ = {close_to_tray};
-window.__TIDALUNAR_AUTO_CHECK__ = {auto_check};
-window.__TIDALUNAR_UPDATE_CHANNEL__ = '{update_channel}';
-window.__TIDALUNAR_RECEIVER_ALWAYS_ON__ = {receiver_always_on};
-window.__TIDALUNAR_VOLUME_SYNC__ = {volume_sync};
-window.__TIDALUNAR_ASIO__ = {asio};
-window.__TIDALUNAR_CONSOLE__ = {console};
-window.__TIDALUNAR_CROSSFADE_ENABLED__ = {crossfade_enabled};
-window.__TIDALUNAR_CROSSFADE_SECS__ = {crossfade_secs};
-window.__TIDALUNAR_PERF__ = {perf};
-window.__TIDALUNAR_WINDOW_STATE__ = {{
-    isMaximized: {window_maximized},
-    isFullscreen: false
-}};
-window.__TIDALUNAR_CREDENTIALS__ = {pkce_credentials_json};
-var _cfgTarget = {{ enableDesktopFeatures: true }};
-var _cfgProxy = new Proxy(_cfgTarget, {{
-    get: function(t, p) {{ return p === 'enableDesktopFeatures' ? true : t[p]; }},
-    set: function(t, p, v) {{ if (p !== 'enableDesktopFeatures') t[p] = v; return true; }}
-}});
-Object.defineProperty(window, 'TIDAL_CONFIG', {{
-    get: function() {{ return _cfgProxy; }},
-    set: function(v) {{
-        var src = (v && typeof v === 'object') ? v : {{}};
-        var keys = Object.keys(src);
-        for (var i = 0; i < keys.length; i++) {{
-            if (keys[i] !== 'enableDesktopFeatures') _cfgTarget[keys[i]] = src[keys[i]];
-        }}
-    }},
-    configurable: true
-}});
-document.title = "TidaLunar - A TIDAL client";
-(function() {{
-    var css = '[class*="_bar_"] > [class*="_title_"] {{ font-size:0 !important; }} [class*="_bar_"] > [class*="_title_"]::after {{ content:"TidaLunar - A TIDAL client"; font-size:0.75rem; }} header, [role="banner"], nav[class*="bar"] {{ -webkit-app-region: drag; }} header a, header button, header input, header [role="button"], header img, header svg, [role="banner"] a, [role="banner"] button, [role="banner"] input, [role="banner"] [role="button"], nav[class*="bar"] a, nav[class*="bar"] button, nav[class*="bar"] input, nav[class*="bar"] [role="button"] {{ -webkit-app-region: no-drag; }}';
-    function inject() {{
-        if (document.getElementById('tidalunar-branding')) return;
-        var s = document.createElement('style');
-        s.id = 'tidalunar-branding';
-        s.textContent = css;
-        document.head.prepend(s);
-    }}
-    if (document.head) {{
-        inject();
-    }} else {{
-        document.addEventListener('DOMContentLoaded', inject);
-    }}
-}})();
-self.__lunaRewriteEpoch="{rewrite_epoch:016x}";
-{cache_heal}"#,
-                ua_override = ua_override,
-                platform = platform,
-                close_to_tray = close_to_tray,
-                pkce_credentials_json = pkce_credentials_json,
-                rewrite_epoch = crate::ui::module_capture::REWRITE_EPOCH,
-                cache_heal = include_str!("early_runtime/cache_heal.js")
+                "{}{}\n{}",
+                crate::frontend::prologue::init_globals_js(&globals),
+                front.early.init_static,
+                front.early.cache_heal
             );
 
             // Precompose the guard-wrapped injection once (this runs a single time at boot); the
@@ -468,7 +413,7 @@ self.__lunaRewriteEpoch="{rewrite_epoch:016x}";
             // sentinel exactly when the bundle does need to run again.
             let bundle_script = format!(
                 "if(!window.__TL_INJECTED__){{window.__TL_INJECTED__=true;{}}}",
-                include_str!(concat!(env!("OUT_DIR"), "/bundle.js"))
+                front.bundle
             );
 
             let config = MessageRouterConfig::default();
@@ -521,11 +466,12 @@ self.__lunaRewriteEpoch="{rewrite_epoch:016x}";
                         Some(&mut doc_ctx_handler),
                     )
                 });
+            let mut early_runtime = crate::ui::early_runtime::extra_info();
             let browser_view = browser_view_create(
                 client_ref.as_mut(),
                 Some(&url),
                 Some(&settings),
-                None,
+                early_runtime.as_mut(),
                 request_context.as_mut(),
                 Some(&mut bv_delegate),
             );

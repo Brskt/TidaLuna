@@ -4,14 +4,25 @@ use std::path::Path;
 use super::types::Journal;
 use super::util::{exe_dir, is_safe_relative_path};
 
+/// Proof that the install folder holds no half-applied update; only [`recover_interrupted_update`]
+/// makes one. The front folder, install guard and Bun probe demand it: the updater swaps
+/// `frontend/frontend.json` ahead of the exe, and a front check run first would refuse the state
+/// the rollback repairs. It does not cover libcef (loaded earlier by the OS loader: Windows
+/// delay-load, Linux RUNPATH) nor the Linux chrome-sandbox check; CEF `initialize` follows the
+/// recovery by position alone.
+pub(crate) struct Recovered(());
+
 /// Check for and resolve any interrupted update journal.
 /// Must be called early in main(), before CEF init.
-pub(crate) fn recover_interrupted_update() {
-    let app_dir = match exe_dir() {
-        Some(d) => d,
-        None => return,
-    };
+pub(crate) fn recover_interrupted_update() -> Recovered {
+    if let Some(app_dir) = exe_dir() {
+        recover_in(&app_dir);
+    }
+    Recovered(())
+}
 
+/// Resolve the update journal in `app_dir`, if there is one.
+fn recover_in(app_dir: &Path) {
     let journal_path = app_dir.join(".update-journal.json");
     if !journal_path.exists() {
         return;
@@ -37,7 +48,7 @@ pub(crate) fn recover_interrupted_update() {
         }
     };
 
-    apply_journal(&app_dir, &journal);
+    apply_journal(app_dir, &journal);
 
     // Clean up staging and journal
     let staging = app_dir.join(".update-staging");

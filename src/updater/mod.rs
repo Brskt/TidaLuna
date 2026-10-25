@@ -12,7 +12,7 @@ pub(crate) use handlers::{
     channel_changed, handle_updater_apply, handle_updater_cancel, handle_updater_check,
     handle_updater_dismiss, handle_updater_download, handle_updater_status,
 };
-pub(crate) use recovery::recover_interrupted_update;
+pub(crate) use recovery::{Recovered, recover_interrupted_update};
 
 /// Record the running build's version as the anti-rollback high-water mark.
 /// Call once at startup after a successful boot.

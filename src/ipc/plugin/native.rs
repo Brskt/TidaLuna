@@ -192,7 +192,10 @@ fn ensure_native_runtime() -> Result<&'static NativeRuntime, String> {
     if let Some(rt) = NATIVE_RUNTIME.get() {
         return Ok(rt);
     }
-    let rt = NativeRuntime::spawn(crate::state::rt_handle())
+    let front = crate::frontend::load::get().ok_or_else(|| {
+        "Failed to start native runtime: the front files were not loaded".to_string()
+    })?;
+    let rt = NativeRuntime::spawn(crate::state::rt_handle(), &front.native_host)
         .map_err(|e| format!("Failed to start native runtime: {e}"))?;
     crate::vprintln!("[NATIVE] Bun process started");
     if NATIVE_RUNTIME.set(rt).is_err() {

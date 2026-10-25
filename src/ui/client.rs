@@ -324,6 +324,16 @@ wrap_client! {
             source_process: ProcessId,
             message: Option<&mut ProcessMessage>,
         ) -> i32 {
+            // A renderer stopped a page that arrived without its token and network guards. An
+            // install that cannot deliver them is broken; refuse like one.
+            if let Some(msg) = message.as_ref()
+                && crate::ui::token_filter::userfree_to_string(&msg.name())
+                    == crate::ui::early_runtime::EARLY_RUNTIME_MISSING
+            {
+                crate::platform::refusal::refuse_to_start(
+                    "TidaLunar could not hand its page guards to the page. Reinstall TidaLunar.",
+                );
+            }
             if self.router.on_process_message_received(
                 browser.cloned(),
                 frame.cloned(),
@@ -372,7 +382,7 @@ wrap_life_span_handler! {
             _window_info: Option<&mut WindowInfo>,
             _client: Option<&mut Option<Client>>,
             _settings: Option<&mut BrowserSettings>,
-            _extra_info: Option<&mut Option<DictionaryValue>>,
+            extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
             let url_str = target_url.as_ref().map(|u| u.to_string()).unwrap_or_default();
@@ -395,6 +405,12 @@ wrap_life_span_handler! {
                             wi.style = 0x00CF0000; // WS_OVERLAPPEDWINDOW
                         }
                         wi.runtime_style = RuntimeStyle::ALLOY;
+                    }
+                    // The popup's renderer runs the early runtime too (AuthHost injects it).
+                    if crate::ui::early_runtime::COVERED_KINDS.contains(&kind)
+                        && let Some(extra) = extra_info
+                    {
+                        *extra = crate::ui::early_runtime::extra_info();
                     }
                     return 0;
                 }
@@ -818,8 +834,8 @@ wrap_request_handler! {
                 return Some(h);
             }
 
-            // Luna's own plugin ES modules, baked into the binary and served on /__luna__/*.mjs
-            // (bundle.js no longer carries them as inline strings).
+            // Luna's own plugin ES modules, read from the front folder and served on
+            // /__luna__/*.mjs.
             if let Some(h) =
                 crate::ui::luna_modules::intercept(url.as_str(), is_navigation, is_download)
             {

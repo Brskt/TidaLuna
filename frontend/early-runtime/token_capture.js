@@ -1,4 +1,4 @@
-// Fragment 2/5 - Bearer token capture from XHR headers
+// Bearer token capture from XHR headers
 // Depends on: sendIpc (from ipc.js), _cfg (from ipc.js)
 
 var _lastToken = '';

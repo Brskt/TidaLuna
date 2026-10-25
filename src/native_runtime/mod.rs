@@ -33,15 +33,13 @@ pub struct NativeRuntime {
 }
 
 impl NativeRuntime {
-    /// The native-host sandbox script, embedded at compile time.
-    /// Never written to disk - sent to Bun via stdin at spawn.
-    const HOST_SCRIPT: &str = include_str!("../../frontend/scripts/native-host.cjs");
-
     /// Bootstrap: Function() wrapper provides a proper CJS module scope
     /// (require/module/exports) that direct execution wouldn't have.
     const BOOTSTRAP: &str = r#"let b=[];const r=require("readline").createInterface({input:process.stdin});globalThis.__rl=r;r.on("line",function h(l){if(l==="__END__"){r.removeListener("line",h);new Function("require","module","exports","__dirname","__filename",b.join("\n"))(require,{exports:{}},{},"/","[stdin]")}else b.push(l)})"#;
 
-    pub fn spawn(rt: &tokio::runtime::Handle) -> anyhow::Result<Self> {
+    /// `host_script` is the native-host sandbox script, read from the front folder at launch
+    /// (`frontend/native-host.cjs`). Bun gets it over stdin, never from a path of its own.
+    pub fn spawn(rt: &tokio::runtime::Handle, host_script: &'static str) -> anyhow::Result<Self> {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -50,7 +48,9 @@ impl NativeRuntime {
         // Find bundled Bun binary - no PATH fallback (fail closed)
         let bun_path = find_binary(&exe_dir, if cfg!(windows) { "bun.exe" } else { "bun" })
             .ok_or_else(|| {
-                anyhow::anyhow!("Bun binary not found. Native plugin modules require Bun in bin/.")
+                anyhow::anyhow!(
+                    "Bun binary not found beside the app. Native plugin modules require the bundled Bun."
+                )
             })?;
 
         crate::vprintln!("[BUN]    Spawning: {}", bun_path.display());
@@ -114,15 +114,11 @@ impl NativeRuntime {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
 
-        // Task: send embedded sandbox script, then relay IPC commands to stdin
+        // Task: send the sandbox script, then relay IPC commands to stdin
         rt.spawn(async move {
             let mut writer = BufWriter::new(stdin);
 
-            // Send the embedded native-host.cjs sandbox script
-            if writer
-                .write_all(Self::HOST_SCRIPT.as_bytes())
-                .await
-                .is_err()
+            if writer.write_all(host_script.as_bytes()).await.is_err()
                 || writer.write_all(b"\n__END__\n").await.is_err()
                 || writer.flush().await.is_err()
             {
@@ -277,8 +273,9 @@ impl NativeRuntime {
 /// Version the bundled Bun reports, or `None` when it is absent or refuses to answer.
 /// Asked of the binary rather than baked from the build: a stale `dist/` is exactly the
 /// case worth logging, and a constant would state the intent instead of the fact. Spawns;
-/// callers gate on the log level, because `vprintln!` evaluates its arguments either way.
-pub(crate) fn bundled_bun_version() -> Option<String> {
+/// callers gate on the log level, because `vprintln!` evaluates its arguments either way. Runs
+/// after the update recovery, which may roll that binary back.
+pub(crate) fn bundled_bun_version(_: &crate::updater::Recovered) -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let bun = find_binary(exe.parent()?, if cfg!(windows) { "bun.exe" } else { "bun" })?;
     let out = std::process::Command::new(bun)

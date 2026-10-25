@@ -1,4 +1,4 @@
-// Tests `src/ui/early_runtime/exfil_guard.js`. The image allowlist that used to live here now
+// Tests `early-runtime/exfil_guard.js`. The image allowlist that used to live here now
 // sits in Rust (`nav::is_allowed_image_host`, wired into all three resource dispatches): a DOM
 // accessor only ever sees the `src` property, while React commits an image source through
 // setAttribute. What remains is the sendBeacon lock, which had no coverage at all; its CEF-level

@@ -105,9 +105,9 @@ Release build (optimized, strips debug symbols from CEF binaries):
 cargo xtask bundle --release
 ```
 
-The bundle is created in `dist/` with the executable, CEF files, and Bun runtime.
+The bundle is created in `dist/` with the executable, CEF files, the front in `frontend/`, and Bun runtime.
 
-`build.rs` rebuilds the frontend (`bun esbuild.config.ts`) automatically on Linux and macOS. On Windows it reuses an existing `frontend/dist/bundle.js`, so after editing `frontend/src`, `frontend/render`, or `frontend/plugins`, run `bun esbuild.config.ts` from `frontend/` before `cargo xtask bundle`.
+The front is not compiled into the executable: `bun esbuild.config.ts` in `frontend/` builds it into `frontend/dist`, and `TIDALUNAR_FRONTEND_DIR=<absolute path to frontend/dist>` runs the app on it without rebuilding Rust. `cargo xtask bundle --prebuilt-front` packages an existing `frontend/dist` without running bun.
 
 ### Faster rebuilds (optional)
 

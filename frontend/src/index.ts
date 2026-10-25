@@ -350,7 +350,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
 };
 console.log("Native Interface exposed (sync)");
 
-// Fetch proxy, XHR patch, and token capture live in early_runtime.js (on_context_created).
+// Fetch proxy, XHR patch, and token capture live in frontend/early-runtime/ (on_context_created).
 
 const init = async () => {
     const now = performance.now();

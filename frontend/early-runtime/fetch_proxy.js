@@ -1,4 +1,4 @@
-// Fragment 3/5 - Fetch proxy with CORS fallback via Rust
+// Fetch proxy with CORS fallback via Rust
 // Depends on: invokeIpc, captureToken, _tidalDomain (from previous fragments)
 
 var nativeFetch = window.fetch.bind(window);

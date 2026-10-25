@@ -10,6 +10,7 @@ mod bridge;
 mod connect;
 mod db;
 mod debug;
+mod frontend;
 mod ipc;
 mod logging;
 mod native_runtime;
@@ -319,6 +320,25 @@ fn main() {
         attach_or_alloc_console();
     }
 
+    // After the log level, for its lines to reach the log; `Recovered` says what waits on it.
+    let recovered = updater::recover_interrupted_update();
+
+    // The front files, read once here: before CEF (no CEF thread waits on the disk), and after
+    // the log level, which gates the folder line below.
+    let front_dir =
+        frontend::dir::frontend_dir(&recovered).unwrap_or_else(|e| refuse_to_start(&e.refusal()));
+    if front_dir.origin == frontend::dir::DirOrigin::Override {
+        crate::verr!(
+            "[FRONT]  Running the front from {} ({})",
+            front_dir.path.display(),
+            frontend::dir::OVERRIDE_ENV
+        );
+    }
+    crate::vprintln!("[FRONT]  Front folder: {}", front_dir.path.display());
+    let front = frontend::load::load(&front_dir)
+        .unwrap_or_else(|e| refuse_to_start(&e.refusal(&front_dir)));
+    frontend::load::install(front);
+
     // Validated and held; the startup navigation drains it in place of the home page.
     if let Some(raw) = &launch_url {
         ui::deep_link::deliver(raw);
@@ -373,14 +393,11 @@ fn main() {
     // Guarded, not just logged: asking Bun its version spawns it, and `vprintln!`
     // evaluates arguments before the level check.
     if crate::logging::log_level() >= 1 {
-        match native_runtime::bundled_bun_version() {
+        match native_runtime::bundled_bun_version(&recovered) {
             Some(v) => crate::vprintln!("[INIT]   Bun v{v}"),
             None => crate::vprintln!("[INIT]   Bun not found in bin/"),
         }
     }
-
-    // Recover from any interrupted update before continuing startup
-    updater::recover_interrupted_update();
 
     let player = Arc::new(Player::new(
         move |event: PlayerEvent| {

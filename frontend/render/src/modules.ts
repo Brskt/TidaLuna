@@ -140,7 +140,7 @@ export function initModules(store: Store): void {
 		modules["react/jsx-runtime"] = { ...jsxRuntime, default: jsxRuntime };
 		modules["react-dom/client"] = { ...ReactDOMClient, default: ReactDOMClient };
 	}
-	// The cache heal (src/ui/early_runtime/cache_heal.js) has to know whether the host
+	// The cache heal (frontend/early-runtime/cache_heal.js) has to know whether the host
 	// capture came back whole, and it cannot re-derive it: presence, validity and the CJS
 	// unwrap all live here, for all three modules. It used to guess from two of them and
 	// read a react-dom capture that never registered as healthy. Hand it the verdict.

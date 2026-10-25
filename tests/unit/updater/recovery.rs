@@ -3,7 +3,10 @@
 use std::fs;
 
 use super::super::types::{Journal, JournalFile};
-use super::apply_journal;
+use super::{apply_journal, recover_in};
+use crate::frontend::dir::{DirOrigin, FrontendDir};
+use crate::frontend::fixture::write_front;
+use crate::frontend::load::{FrontendError, load};
 
 fn journal(state: &str, files: Vec<JournalFile>) -> Journal {
     Journal {
@@ -89,6 +92,42 @@ fn pending_rollback_removes_new_file() {
     );
 
     assert!(!app_dir.join("added.bin").exists());
+}
+
+#[test]
+fn a_rolled_back_update_leaves_a_front_that_loads() {
+    // The updater swaps `frontend.json` before the exe. An update interrupted in between leaves
+    // the running exe beside the next version's front, which the version check refuses.
+    let root = tempfile::tempdir().unwrap();
+    let app_dir = root.path();
+    let front = app_dir.join("frontend");
+    fs::create_dir(&front).unwrap();
+    write_front(&front, env!("CARGO_PKG_VERSION"));
+    fs::rename(front.join("frontend.json"), front.join("frontend.json.bak")).unwrap();
+    fs::write(front.join("frontend.json"), "{\"version\":\"9.9.9-test\"}").unwrap();
+    let journal = journal(
+        "pending",
+        vec![jfile(
+            "frontend/frontend.json",
+            "frontend/frontend.json.bak",
+            false,
+        )],
+    );
+    let journal_path = app_dir.join(".update-journal.json");
+    fs::write(&journal_path, serde_json::to_string(&journal).unwrap()).unwrap();
+    let dir = FrontendDir {
+        path: front,
+        origin: DirOrigin::Shipped,
+    };
+    assert!(matches!(
+        load(&dir),
+        Err(FrontendError::VersionMismatch { .. })
+    ));
+
+    recover_in(app_dir);
+
+    assert!(load(&dir).is_ok(), "the rolled back front loads");
+    assert!(!journal_path.exists(), "the journal is resolved");
 }
 
 #[test]

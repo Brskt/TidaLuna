@@ -1,5 +1,6 @@
-// Tests `src/ui/early_runtime/fetch_proxy.js`, which pins `window.fetch` for the whole page. Run for
-// real, on a stand-in `window` and `globalThis`: the pins it makes (non-configurable by design) land on an object this file throws away rather than on the one every other test shares.
+// Tests `early-runtime/fetch_proxy.js`, which pins `window.fetch` for the whole page. Run for
+// real, on a stand-in `window` and `globalThis`: the pins it makes (non-configurable by design)
+// land on an object this file throws away rather than on the one every other test shares.
 //
 // The pin is why the observer slot exists: the accessor's setter swallows every assignment. A
 // host that wrapped `window.fetch` by assigning to it was installed and blind, with nothing failing.
