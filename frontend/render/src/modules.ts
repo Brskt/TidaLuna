@@ -74,11 +74,9 @@ function resolveHost<T>(id: string, valid: (m: any) => boolean): T | undefined {
 	return undefined;
 }
 
-// TIDAL assigns createRoot onto a CJS exports object inside its entry chunk, and that
-// chunk exports nothing: no import reaches it and the capture cannot see it either. The
-// Rust filter tags the assignment into globalThis.__lunaCreateRoot; graft it onto the
-// captured react-dom namespace (createPortal, flushSync, ...). The module is then whole,
-// every part of it bound to the host React.
+// TIDAL assigns createRoot onto a CJS exports object that the captured react-dom namespace can
+// lack. The Rust filter tags that assignment into globalThis.__lunaCreateRoot; graft it onto the
+// namespace so the module is whole, every part bound to the host React.
 function resolveHostDomClient(): any | undefined {
 	// createPortal marks the react-dom namespace whether or not it still carries
 	// createRoot: one lookup covers the chunk shape before and after the split.

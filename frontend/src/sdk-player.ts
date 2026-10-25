@@ -1,12 +1,6 @@
-// The player SDK's own API (`setNext`, `load`, `reset`, ...), for the one call TIDAL's actions cannot make:
-// unloading the native player's preload without TIDAL's `Bat` saga, whose `put(PRELOAD_SUCCESS)` also
-// releases the fallback TIDAL's `Wat` keeps for a preload that did not finish.
-//
-// The Rust filter captures the exports of the chunk that defines it as the page's own modules evaluate
-// that chunk (`module_capture.rs`, `capture_sdk_api`). This is the instance TIDAL's code runs on, with
-// no second evaluation of it. The API is the one export that carries the functions below under their own
-// names (the namespace TIDAL's entry chunk imports as `sdk`): found by that shape, not by the minified
-// name of its export, which changes with every build.
+// The player SDK's API, to unload the native player's preload without TIDAL's `Bat` saga, whose
+// `put(PRELOAD_SUCCESS)` also releases the fallback `Wat` keeps. Captured by the Rust filter from
+// the instance TIDAL runs on (`module_capture.rs`), found by shape: the minified name changes.
 
 export type SdkPlayer = { setNext(product?: unknown): Promise<unknown> };
 

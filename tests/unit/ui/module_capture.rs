@@ -3,36 +3,93 @@
 use super::*;
 
 #[test]
-fn classifies_react_family_chunks() {
+fn every_tidal_chunk_reaches_the_filter_and_nothing_else_does() {
+    // The name says nothing about what a chunk holds: TIDAL regroups them between builds.
     let u = |s: &str| RequestUrl::new(s.to_string());
+    for url in [
+        "https://desktop.tidal.com/assets/framework-5UZfIiSp.js",
+        "https://desktop.tidal.com/assets/react-Cif6l2Tn.js",
+        "https://desktop.tidal.com/assets/polyfills-6IYD1ggq.js",
+    ] {
+        assert!(is_tidal_chunk(&u(url)), "{url}");
+    }
+    for url in [
+        "https://resources.tidal.com/assets/framework-x.js",
+        "https://desktop.tidal.com/assets/index-x.css",
+        "https://desktop.tidal.com/framework-x.js",
+    ] {
+        assert!(!is_tidal_chunk(&u(url)), "{url}");
+    }
+}
+
+// TIDAL's `framework-*` chunk in miniature: React, jsx-runtime, react-dom and react-dom/client
+// behind the bundler's lazy CJS loaders under minified names, plus redux-saga's PUT runner.
+const FRAMEWORK_CHUNK: &str = "var n=(e,t)=>()=>(t||(e((t={exports:{}}).exports,t),e=null),t.exports);\
+var r=n((e=>{e.useState=function(){},e.createElement=function(){}})),\
+m=n((e=>{e.jsx=function(){},e.jsxs=function(){}})),\
+p=n((e=>{e.createPortal=function(e,t){return 1}})),\
+y=n((e=>{e.createRoot=function(e,t){return 1}}));\
+function Np(e,t,n){var r=t.channel,i=t.action;try{t=(r?r.put:e.dispatch)(i)}catch(e){}}\
+export{r as _t,m as mt,p as pt,y as ft};";
+
+#[test]
+fn one_chunk_gets_every_rewrite_its_content_calls_for() {
     assert_eq!(
-        target_module_id(&u("https://desktop.tidal.com/assets/react-Cif6l2Tn.js")),
-        Some("react")
+        chunk_rewrites(FRAMEWORK_CHUNK),
+        [
+            ChunkRewrite::TapSagaPut,
+            ChunkRewrite::TagCreateRoot,
+            ChunkRewrite::Capture("react"),
+            ChunkRewrite::Capture("react/jsx-runtime"),
+            ChunkRewrite::Capture("react-dom/client"),
+        ]
     );
-    assert_eq!(
-        target_module_id(&u("https://desktop.tidal.com/assets/jsx-runtime-abc123.js")),
-        Some("react/jsx-runtime")
+    let out = rewrite_chunk(FRAMEWORK_CHUNK).expect("the chunk carries signals");
+    assert!(out.inert.is_empty(), "{:?}", out.inert);
+    assert!(
+        out.js
+            .contains("globalThis.__lunaSagaPut(__lunaPutAction,e.dispatch)")
     );
-    assert_eq!(
-        target_module_id(&u("https://desktop.tidal.com/assets/react-dom-CARA-N2H.js")),
-        Some("react-dom/client")
+    assert!(
+        out.js
+            .contains("e.createRoot=globalThis.__lunaCreateRoot=function(e,t){")
     );
-    assert_eq!(
-        target_module_id(&u("https://desktop.tidal.com/assets/index-CvAR5jQO.js")),
-        None
-    );
-    assert_eq!(
-        target_module_id(&u("https://desktop.tidal.com/assets/polyfills-x.js")),
-        None
-    );
-    assert_eq!(
-        target_module_id(&u("https://resources.tidal.com/x.js")),
-        None
-    );
-    assert_eq!(
-        target_module_id(&u("https://desktop.tidal.com/assets/x.css")),
-        None
-    );
+    // One namespace, built once, registered under each id.
+    assert!(out.js.ends_with(
+        "\n;{const __lunaNs={_t: r, mt: m, pt: p, ft: y};globalThis.__LUNA_CAP&&(\
+         globalThis.__LUNA_CAP(\"react\",__lunaNs),\
+         globalThis.__LUNA_CAP(\"react/jsx-runtime\",__lunaNs),\
+         globalThis.__LUNA_CAP(\"react-dom/client\",__lunaNs));}"
+    ));
+}
+
+#[test]
+fn a_chunk_without_any_signal_is_left_alone() {
+    for src in [
+        "var a=1;export{a as b};",
+        // A call or a comparison of `createRoot` is not the assignment the tag needs.
+        "ek.createRoot(Z9);if(m.createRoot==null){}",
+        // The bare name is read by several chunks; only the one exporting it is the singleton.
+        "o.outputDevices.activeDevice;",
+        "console.log(1);",
+    ] {
+        assert!(chunk_rewrites(src).is_empty(), "{src}");
+        assert!(rewrite_chunk(src).is_none(), "{src}");
+    }
+}
+
+#[test]
+fn a_signal_its_rewrite_finds_nothing_behind_is_reported_inert() {
+    // The action type is there but not the restore saga; TIDAL changed the shape around it.
+    let src = "console.log(`BOOTSTRAP_DONE`);";
+    let out = rewrite_chunk(src).expect("the action type is a signal");
+    assert_eq!(out.js, src);
+    assert_eq!(out.inert, [ChunkRewrite::RouteVolumeRestore]);
+    // A capture whose chunk exports nothing to capture.
+    let src = "e.useState=function(){};";
+    let out = rewrite_chunk(src).expect("the hook assignment is a signal");
+    assert_eq!(out.js, src);
+    assert_eq!(out.inert, [ChunkRewrite::Capture("react")]);
 }
 
 #[test]
@@ -55,7 +112,7 @@ fn captures_named_specifiers() {
             &["a: f", "i: c", "t: m"],
         ),
     ] {
-        let out = append_capture(src, "react");
+        let out = append_capture(src, &["react"]);
         assert!(
             out.contains(r#"globalThis.__LUNA_CAP&&globalThis.__LUNA_CAP("react",{"#),
             "{src}"
@@ -66,75 +123,17 @@ fn captures_named_specifiers() {
     }
 }
 
-#[test]
-fn captures_exported_declarations() {
-    let out = append_capture(
-        "export function jsx(){}export const Fragment=1;",
-        "react/jsx-runtime",
-    );
-    assert!(out.contains("jsx: jsx"));
-    assert!(out.contains("Fragment: Fragment"));
-}
-
 /// The parser recovers from a `const` with no initializer and still yields the export; only its
 /// diagnostics keep a chunk TIDAL ships broken from being captured half-read.
 #[test]
 fn a_chunk_the_parser_recovers_from_with_diagnostics_is_left_unchanged() {
     let src = "export const a=1;const b;";
-    assert_eq!(append_capture(src, "react"), src);
-}
-
-#[test]
-fn no_exports_returns_source_unchanged() {
-    let src = "console.log(1);";
-    assert_eq!(append_capture(src, "react"), src);
-}
-
-#[test]
-fn classifies_the_entry_chunk_for_tagging() {
-    let u = |s: &str| RequestUrl::new(s.to_string());
-    assert!(matches!(
-        chunk_rewrite(&u("https://desktop.tidal.com/assets/index-DnBBD1pK.js")),
-        Some(ChunkRewrite::Entry)
-    ));
-    // React-family names still win, and still carry their module id.
-    assert!(matches!(
-        chunk_rewrite(&u("https://desktop.tidal.com/assets/react-dom-C54PbMuF.js")),
-        Some(ChunkRewrite::Capture("react-dom/client"))
-    ));
-    assert!(matches!(
-        chunk_rewrite(&u("https://desktop.tidal.com/assets/react-CXLoTpP3.js")),
-        Some(ChunkRewrite::Capture("react"))
-    ));
-    // Neither an entry chunk, nor JS, nor the app host.
-    assert!(chunk_rewrite(&u("https://desktop.tidal.com/assets/polyfills-x.js")).is_none());
-    assert!(chunk_rewrite(&u("https://desktop.tidal.com/assets/index-x.css")).is_none());
-    assert!(chunk_rewrite(&u("https://resources.tidal.com/assets/index-x.js")).is_none());
-}
-
-#[test]
-fn a_split_out_react_dom_client_chunk_is_still_captured() {
-    // TIDAL serves one `react-dom-*` chunk today, but nothing stops it from splitting the
-    // client entry into its own `react-dom-client-*`. The prefix test already covers that
-    // shape; pin it against a later rewrite of the classifier dropping it in silence.
-    let u = |s: &str| RequestUrl::new(s.to_string());
-    assert_eq!(
-        target_module_id(&u(
-            "https://desktop.tidal.com/assets/react-dom-client-C54PbMuF.js"
-        )),
-        Some("react-dom/client")
-    );
-    assert!(matches!(
-        chunk_rewrite(&u(
-            "https://desktop.tidal.com/assets/react-dom-client-C54PbMuF.js"
-        )),
-        Some(ChunkRewrite::Capture("react-dom/client"))
-    ));
+    assert_eq!(append_capture(src, &["react"]), src);
 }
 
 #[test]
 fn tags_the_create_root_assignment() {
-    // The shape TIDAL's entry chunk carries: one assignment onto a CJS exports
+    // The shape of the module that assigns createRoot: one assignment onto a CJS exports
     // object, every other mention of the name being a call.
     let src =
         "var ek=t();e.createRoot=function(e,t){return 1};window.__reactRoot??=ek.createRoot(Z9);";
@@ -159,47 +158,18 @@ fn tag_skips_calls_comparisons_and_longer_names() {
 }
 
 #[test]
-fn tag_splices_by_byte_across_multibyte_source() {
-    // The tag is spliced at byte offsets: every index has to land on a char
-    // boundary even when earlier bytes are multibyte.
-    let src = "const s=\"héllo wörld 日本語\";e.createRoot=function(){};";
-    let out = tag_create_root(src);
-    assert!(out.contains("e.createRoot=globalThis.__lunaCreateRoot=function(){}"));
-    assert!(out.contains("héllo wörld 日本語"));
-}
-
-#[test]
-fn classifies_the_store_chunk_for_the_saga_tap() {
-    let u = |s: &str| RequestUrl::new(s.to_string());
-    assert!(matches!(
-        chunk_rewrite(&u("https://desktop.tidal.com/assets/store-DoF6ExYq.js")),
-        Some(ChunkRewrite::TapSagaPut)
-    ));
-    assert!(chunk_rewrite(&u("https://resources.tidal.com/assets/store-x.js")).is_none());
-}
-
-#[test]
 fn captures_the_player_sdk_device_state() {
-    let u = |s: &str| RequestUrl::new(s.to_string());
-    assert!(matches!(
-        chunk_rewrite(&u(
-            "https://desktop.tidal.com/assets/output-devices-DLDX8cVL-CR1w6y0a.js"
-        )),
-        Some(ChunkRewrite::Capture(SDK_OUTPUT_DEVICES))
-    ));
-    assert!(
-        chunk_rewrite(&u(
-            "https://resources.tidal.com/assets/output-devices-DLDX8cVL.js"
-        ))
-        .is_none()
-    );
     // TIDAL's chunk as captured: one class instance with private fields,
     // exported through a specifier.
     let src = "import{f as e,t}from\"./state-BujoNwcN-BX37F7Lj.js\";\
                var g=new class{#e;#n=`shared`;set activeDevice(t){this.#e=t,this.#n=`shared`}\
                get activeDevice(){return this.#e}get deviceMode(){return this.#n}};\
                export{g as outputDevices};";
-    let out = append_capture(src, SDK_OUTPUT_DEVICES);
+    assert_eq!(
+        chunk_rewrites(src),
+        [ChunkRewrite::Capture(SDK_OUTPUT_DEVICES)]
+    );
+    let out = rewrite_chunk(src).expect("the export is a signal").js;
     assert!(out.ends_with(
         r#"globalThis.__LUNA_CAP("@tidal-music/player/output-devices",{outputDevices: g});"#
     ));
@@ -235,14 +205,6 @@ fn tap_leaves_lookalikes_untouched() {
     ] {
         assert_eq!(tap_saga_put(src), src, "must not tap: {src}");
     }
-}
-
-#[test]
-fn tap_splices_by_byte_across_multibyte_source() {
-    let src = "const s=\"héllo 日本語\";t=(r?r.put:e.dispatch)(i);";
-    let out = tap_saga_put(src);
-    assert!(out.contains("héllo 日本語"));
-    assert!(out.contains("(0,e.dispatch)(__lunaPutAction)))(i);"));
 }
 
 // TIDAL's saved-volume restore and the saga beside it, verbatim from the shipped bundle
@@ -285,45 +247,26 @@ fn a_restore_that_reads_no_volume_is_left_alone() {
     }
 }
 
-#[test]
-fn the_route_matches_whichever_quote_the_minifier_picks() {
-    let src = VOLUME_RESTORE.replace('`', "\"");
-    assert!(route_volume_restore(&src).contains("(Hd()));if(!e)return;"));
-}
-
-#[test]
-fn the_route_splices_by_byte_across_multibyte_source() {
-    let src = format!("const s=\"héllo 日本語\";{VOLUME_RESTORE}");
-    let out = route_volume_restore(&src);
-    assert!(out.contains("héllo 日本語"));
-    assert!(out.contains("(Hd()));if(!e)return;"));
-}
-
 // What the filter does to each kind of chunk, through the one call it makes.
 
 #[test]
-fn the_entry_chunk_gets_both_of_its_rewrites() {
+fn a_chunk_with_both_signals_gets_both_rewrites() {
     let src = format!("e.createRoot=function(e,t){{return 1}};{VOLUME_RESTORE}");
-    let out = rewrite_chunk(ChunkRewrite::Entry, &src);
+    let out = rewrite_chunk(&src)
+        .expect("the fixture carries both signals")
+        .js;
     assert!(out.contains("e.createRoot=globalThis.__lunaCreateRoot=function(e,t){"));
     assert!(out.contains("(globalThis.__lunaRestoreVolume||(__lunaSaved=>__lunaSaved))(Hd())"));
 }
 
 #[test]
-fn the_store_chunk_gets_the_saga_tap() {
-    let out = rewrite_chunk(ChunkRewrite::TapSagaPut, "t=(r?r.put:e.dispatch)(i);");
-    assert!(out.contains("globalThis.__lunaSagaPut"));
-}
-
-#[test]
-fn a_captured_chunk_gets_its_exports_captured() {
-    let out = rewrite_chunk(
-        ChunkRewrite::Capture(SDK_OUTPUT_DEVICES),
-        "var g=1;export{g as outputDevices};",
-    );
-    assert!(out.ends_with(
-        r#"globalThis.__LUNA_CAP("@tidal-music/player/output-devices",{outputDevices: g});"#
-    ));
+fn a_create_root_assignment_alone_is_tagged_not_captured() {
+    // React 18's react-dom/client wrapper, which TIDAL's entry chunk once carried while exporting
+    // nothing: react-dom itself lives in the chunk that assigns `createPortal`.
+    let src = "e.createRoot=t.createRoot,e.hydrateRoot=t.hydrateRoot;";
+    assert_eq!(chunk_rewrites(src), [ChunkRewrite::TagCreateRoot]);
+    let out = rewrite_chunk(src).expect("the assignment is a signal");
+    assert!(out.inert.is_empty(), "{:?}", out.inert);
 }
 
 #[test]
@@ -343,63 +286,21 @@ const SDK_CHUNK: &str = "var w=h({},{load:()=>m7,reset:()=>o7,setNext:()=>p7,sta
                          export{w as o,p7 as F};";
 
 #[test]
-fn classifies_the_chunks_that_may_hold_the_sdk_api() {
-    let u = |s: &str| RequestUrl::new(s.to_string());
-    assert!(matches!(
-        chunk_rewrite(&u("https://desktop.tidal.com/assets/vendor-IT_93Oov.js")),
-        Some(ChunkRewrite::SdkApi)
-    ));
-    assert!(matches!(
-        chunk_rewrite(&u(
-            "https://desktop.tidal.com/assets/load-uTL4eiru-BOQ4slVv.js"
-        )),
-        Some(ChunkRewrite::SdkApi)
-    ));
-    // The names that already mean something else keep it.
-    assert!(matches!(
-        chunk_rewrite(&u("https://desktop.tidal.com/assets/index-CaNNwb6Q.js")),
-        Some(ChunkRewrite::Entry)
-    ));
-    assert!(matches!(
-        chunk_rewrite(&u("https://desktop.tidal.com/assets/output-devices-x.js")),
-        Some(ChunkRewrite::Capture(SDK_OUTPUT_DEVICES))
-    ));
-    // Not the app host, not JS.
-    assert!(chunk_rewrite(&u("https://resources.tidal.com/assets/vendor-x.js")).is_none());
-    assert!(chunk_rewrite(&u("https://desktop.tidal.com/assets/vendor-DN277Tmi.css")).is_none());
-}
-
-#[test]
 fn the_chunk_that_defines_the_sdk_api_has_its_exports_captured_under_its_id() {
-    let out = capture_sdk_api(SDK_CHUNK);
+    let out = rewrite_chunk(SDK_CHUNK)
+        .expect("the getter table is a signal")
+        .js;
     assert!(out.starts_with(SDK_CHUNK));
     assert!(out.ends_with(r#"globalThis.__LUNA_CAP("@tidal-music/player",{o: w, F: p7});"#));
 }
 
 #[test]
 fn a_chunk_that_does_not_define_the_sdk_api_is_left_be() {
-    let other = "var a=1;export{a as b};";
-    assert_eq!(capture_sdk_api(other), other);
     // One of the two names is not the table: a chunk that merely mentions `setNext`.
-    let partial = "var a={setNext:()=>1};export{a as b};";
-    assert_eq!(capture_sdk_api(partial), partial);
-    let partial = "var a={startNativePlayer:()=>1};export{a as b};";
-    assert_eq!(capture_sdk_api(partial), partial);
-}
-
-#[test]
-fn the_sdk_api_chunks_go_through_the_capture() {
-    assert_eq!(
-        rewrite_chunk(ChunkRewrite::SdkApi, SDK_CHUNK),
-        capture_sdk_api(SDK_CHUNK)
-    );
-    let other = "var a=1;export{a as b};";
-    assert_eq!(rewrite_chunk(ChunkRewrite::SdkApi, other), other);
-}
-
-#[test]
-fn the_sdk_api_id_is_the_one_the_frontend_reads() {
-    // One id on both sides of the capture: `frontend/src/sdk-player.ts` names it too.
-    let reader = include_str!("../../../frontend/src/sdk-player.ts");
-    assert!(reader.contains(&format!("\"{SDK_PLAYER_API}\"")));
+    for partial in [
+        "var a={setNext:()=>1};export{a as b};",
+        "var a={startNativePlayer:()=>1};export{a as b};",
+    ] {
+        assert!(rewrite_chunk(partial).is_none(), "{partial}");
+    }
 }

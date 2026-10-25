@@ -1,24 +1,13 @@
-//! Capture TIDAL's real React module exports as a side effect of its own chunk
-//! execution. The React-family `/assets/*.js` chunks are rewritten (matched by
-//! path): each is parsed with oxc, every export enumerated, and one
-//! `globalThis.__LUNA_CAP(id, {...exports})` call appended. TIDAL runs the chunk
-//! normally: the call registers the live namespace, and plugins share the host
-//! React instance (correct hooks/context/elements). No script neutralization,
-//! no blob eval, no double-run; any parse/validation miss falls back to bundled
-//! React. Mirrors the buffering/dual-handler shape of `csp_filter`. The player
-//! SDK's `output-devices-*` chunk is captured the same way, for the host's own
-//! native-player delegate rather than for plugins, and so is the chunk that defines the SDK's API
-//! object (`capture_sdk_api`).
+//! Capture TIDAL's real React exports, for plugins to share, as a side effect of running its own
+//! chunks: each chunk's content picks its rewrites (`chunk_rewrites`), and a chunk to capture is
+//! oxc-parsed and gets a `globalThis.__LUNA_CAP(id, {...exports})` call per module id.
 //!
-//! Export capture cannot reach everything. `createRoot` is assigned onto a CJS
-//! exports object inside the entry chunk, which exports nothing at all. No import
-//! of any kind resolves it. That one gets a second, cheaper rewrite: tagging the
-//! assignment itself makes evaluating the chunk bind the host's own root factory
-//! to a global (`tag_create_root`). Both rewrites are no-ops when their pattern
-//! is absent, and the renderer degrades on its own from there.
+//! Export capture misses `createRoot`: TIDAL assigns it onto a CJS exports object, and the bundler
+//! decides whether the captured react-dom carries it. `tag_create_root` tags that assignment to
+//! bind the host's root factory to a global instead. Both rewrites are no-ops on a miss.
 //!
 //! `tap_saga_put` reaches what no export carries either, the one path a saga's `put` takes
-//! to the store; `route_volume_restore`, on the entry chunk, hands the page-load choice between
+//! to the store; `route_volume_restore` hands the page-load choice between
 //! TIDAL's saved volume and Rust's level to the early runtime. Both are no-ops on a miss too.
 
 use std::path::Path;
@@ -44,19 +33,11 @@ fn asset_name(url: &RequestUrl) -> Option<&str> {
         .filter(|n| n.ends_with(".js"))
 }
 
-/// Map a TIDAL asset URL to the module id plugins import, or `None` if the chunk
-/// is not one we capture. Order matters: `react-dom-` before bare `react-`.
-pub(crate) fn target_module_id(url: &RequestUrl) -> Option<&'static str> {
-    let name = asset_name(url)?;
-    if name.starts_with("react-dom-") {
-        Some("react-dom/client")
-    } else if name.starts_with("jsx-runtime-") {
-        Some("react/jsx-runtime")
-    } else if name.starts_with("react-") {
-        Some("react")
-    } else {
-        None
-    }
+/// Every TIDAL chunk goes through the filter, and its content decides what it gets: TIDAL regroups
+/// its modules into differently named chunks between builds (2026.10.14 merged the `react-`,
+/// `jsx-runtime-`, `react-dom-` and `store-` ones into `framework-`).
+pub(crate) fn is_tidal_chunk(url: &RequestUrl) -> bool {
+    asset_name(url).is_some()
 }
 
 /// Names the set of rewrites this binary applies to the assets TIDAL's service worker precaches.
@@ -87,22 +68,19 @@ const fn fnv1a64(parts: &[&str]) -> u64 {
     hash
 }
 
-/// What rewrite a TIDAL chunk needs on its way to the renderer.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChunkRewrite {
-    /// React-family chunk: append a capture of its exports under this module id.
-    Capture(&'static str),
-    /// Entry chunk: tag the `createRoot` assignment, which no export carries, and route the
-    /// saved-volume restore through the early runtime.
-    Entry,
     /// Vendored redux-saga: route its PUT runner through the host's tap.
     TapSagaPut,
-    /// A chunk that may hold the player SDK's API: capture its exports under [`SDK_PLAYER_API`] when
-    /// it does, and leave it be when it does not.
-    SdkApi,
+    /// Tag the `createRoot` assignment, making the host's root factory reachable whatever the
+    /// captured namespaces hold.
+    TagCreateRoot,
+    RouteVolumeRestore,
+    /// Append a capture of the chunk's exports under this module id.
+    Capture(&'static str),
 }
 
-/// Module id the player SDK's `output-devices-*` chunk is captured under. Its one export is the
+/// Module id the player SDK's output-devices module is captured under. Its one export is the
 /// `outputDevices` singleton the SDK decides device calls from; `frontend/src/output-device.ts`
 /// reads it under the same id.
 pub(crate) const SDK_OUTPUT_DEVICES: &str = "@tidal-music/player/output-devices";
@@ -113,35 +91,46 @@ pub(crate) const SDK_OUTPUT_DEVICES: &str = "@tidal-music/player/output-devices"
 /// name of the export changes with every build.
 pub(crate) const SDK_PLAYER_API: &str = "@tidal-music/player";
 
-/// Classify a TIDAL asset URL, or `None` when the chunk is left untouched. The
-/// React-family names are tried first; `index-` is Vite's entry chunk, the only
-/// one that assigns `createRoot`, `store-` the one that vendors redux-saga, and
-/// `output-devices-` the player SDK's device state. `vendor-` and `load-` are where the SDK's
-/// package is bundled (the API object moved from `load-` to `vendor-` across builds). Both are
-/// looked at, and only the one carrying it is rewritten.
-pub(crate) fn chunk_rewrite(url: &RequestUrl) -> Option<ChunkRewrite> {
-    if let Some(id) = target_module_id(url) {
-        return Some(ChunkRewrite::Capture(id));
+/// The rewrites a chunk's content calls for, splices first and capture last (its parse reads the
+/// spliced body). Each signal is a substring the minifier keeps: a React module's assignment onto
+/// its CJS exports (`createRoot` only tags, its chunk can export nothing), or an SDK export name.
+pub(crate) fn chunk_rewrites(js: &str) -> Vec<ChunkRewrite> {
+    let assigns_create_root = js
+        .match_indices(".createRoot=")
+        .any(|(at, m)| js.as_bytes().get(at + m.len()) != Some(&b'='));
+    let mut out = Vec::new();
+    if js.contains(SAGA_PUT) && js.contains(SAGA_DISPATCH) {
+        out.push(ChunkRewrite::TapSagaPut);
     }
-    let name = asset_name(url)?;
-    if name.starts_with("index-") {
-        Some(ChunkRewrite::Entry)
-    } else if name.starts_with("output-devices-") {
-        Some(ChunkRewrite::Capture(SDK_OUTPUT_DEVICES))
-    } else if name.starts_with("store-") {
-        Some(ChunkRewrite::TapSagaPut)
-    } else if name.starts_with("vendor-") || name.starts_with("load-") {
-        Some(ChunkRewrite::SdkApi)
-    } else {
-        None
+    if assigns_create_root {
+        out.push(ChunkRewrite::TagCreateRoot);
     }
+    if js.contains(RESTORE_ACTION) {
+        out.push(ChunkRewrite::RouteVolumeRestore);
+    }
+    for (carries, id) in [
+        (js.contains(".useState="), "react"),
+        (js.contains(".jsxs="), "react/jsx-runtime"),
+        (js.contains(".createPortal="), "react-dom/client"),
+        (
+            js.contains("setNext:()=>") && js.contains("startNativePlayer:()=>"),
+            SDK_PLAYER_API,
+        ),
+        (js.contains(" as outputDevices"), SDK_OUTPUT_DEVICES),
+    ] {
+        if carries {
+            out.push(ChunkRewrite::Capture(id));
+        }
+    }
+    out
 }
 
 /// Append `globalThis.__LUNA_CAP(id, { <export>: <local>, ... })` capturing every
-/// locally-bound export of the chunk. Returns `js` unchanged on parse failure or
+/// locally-bound export of the chunk, once per id. Several ids share one namespace
+/// object, built once. Returns `js` unchanged on parse failure or
 /// when there is nothing to capture (safe no-op -> bundled fallback). Re-exports
 /// (`export ... from`) have no local binding and are skipped.
-pub(crate) fn append_capture(js: &str, module_id: &str) -> String {
+pub(crate) fn append_capture(js: &str, module_ids: &[&str]) -> String {
     let allocator = oxc::allocator::Allocator::default();
     // `.mjs` forces module mode for `export`/`import` to parse (chunks are ESM).
     let Ok(source_type) = oxc::span::SourceType::from_path(Path::new("chunk.mjs")) else {
@@ -186,23 +175,26 @@ pub(crate) fn append_capture(js: &str, module_id: &str) -> String {
         return js.to_string();
     }
 
-    let id = serde_json::to_string(module_id).unwrap_or_else(|_| "\"\"".to_string());
+    let id = |m: &str| serde_json::to_string(m).unwrap_or_else(|_| "\"\"".to_string());
     let fields: Vec<String> = entries.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-    format!(
-        "{js}\n;globalThis.__LUNA_CAP&&globalThis.__LUNA_CAP({id},{{{}}});",
-        fields.join(", ")
-    )
-}
-
-/// [`append_capture`] for the chunk that defines the SDK's API object, `js` unchanged for any other.
-/// The object is built by the bundler's export helper from a table of getters named as the SDK's
-/// public functions (`setNext:()=>p7`), which survive minification; a chunk without both `setNext` and
-/// `startNativePlayer` is not it. Only the chunk that carries them is parsed.
-pub(crate) fn capture_sdk_api(js: &str) -> String {
-    if js.contains("setNext:()=>") && js.contains("startNativePlayer:()=>") {
-        append_capture(js, SDK_PLAYER_API)
-    } else {
-        js.to_string()
+    match module_ids {
+        [] => js.to_string(),
+        [one] => format!(
+            "{js}\n;globalThis.__LUNA_CAP&&globalThis.__LUNA_CAP({},{{{}}});",
+            id(one),
+            fields.join(", ")
+        ),
+        many => {
+            let calls: Vec<String> = many
+                .iter()
+                .map(|m| format!("globalThis.__LUNA_CAP({},__lunaNs)", id(m)))
+                .collect();
+            format!(
+                "{js}\n;{{const __lunaNs={{{}}};globalThis.__LUNA_CAP&&({});}}",
+                fields.join(", "),
+                calls.join(",")
+            )
+        }
     }
 }
 
@@ -247,12 +239,12 @@ fn export_default_name(kind: &ExportDefaultDeclarationKind) -> Option<String> {
 
 /// Bind TIDAL's own `createRoot` to a global by tagging the assignment that
 /// defines it: `X.createRoot=` becomes `X.createRoot=globalThis.__lunaCreateRoot=`.
-/// Evaluating the chunk then leaves the host's root factory reachable, which no
-/// import can do: it sits on a CJS exports object the entry chunk never exports;
-/// a renderer that needs a root has no other way to obtain the host's. Only the
+/// Evaluating the module then leaves the host's root factory reachable whichever chunk the
+/// bundler put it in: `render/src/modules.ts` completes a captured react-dom that lacks
+/// `createRoot` from it, and `cache_heal.js` reads it as the sign that root factory ran. Only the
 /// first assignment is tagged; the other mentions of the name are calls. Returns
-/// `js` unchanged when the pattern is absent (a chunk that merely matched the
-/// name costs nothing).
+/// `js` unchanged when the pattern is absent (a chunk that merely carries the
+/// signal costs nothing).
 pub(crate) fn tag_create_root(js: &str) -> String {
     const NEEDLE: &str = ".createRoot";
     const TAG: &str = "globalThis.__lunaCreateRoot=";
@@ -307,6 +299,10 @@ fn ident_end(bytes: &[u8], start: usize) -> usize {
     end
 }
 
+/// The two halves of redux-saga's PUT runner `tap_saga_put` keys on, the signal for it as well.
+const SAGA_PUT: &str = ".put:";
+const SAGA_DISPATCH: &str = ".dispatch)(";
+
 /// Route redux-saga's PUT effect through `globalThis.__lunaSagaPut` (why: `installSagaPutTap`,
 /// exposeTidalInternals.ts).
 ///
@@ -315,13 +311,11 @@ fn ident_end(bytes: &[u8], start: usize) -> usize {
 /// called unbound as the pick called it. The first match is taken; `js` comes back unchanged
 /// when there is none, and the host warns once no put ever arrived.
 pub(crate) fn tap_saga_put(js: &str) -> String {
-    const NEEDLE: &str = ".put:";
-    const CALL: &str = ".dispatch)(";
     let bytes = js.as_bytes();
     let mut from = 0;
-    while let Some(rel) = js[from..].find(NEEDLE) {
+    while let Some(rel) = js[from..].find(SAGA_PUT) {
         let put = from + rel;
-        from = put + NEEDLE.len();
+        from = put + SAGA_PUT.len();
         // `(` channel `?` channel `.put:`, both channels the same name.
         let chan_start = ident_start(bytes, put);
         if chan_start == put || chan_start < 2 || bytes[chan_start - 1] != b'?' {
@@ -337,10 +331,10 @@ pub(crate) fn tap_saga_put(js: &str) -> String {
         }
         // `env` `.dispatch)(` action `)`.
         let env_end = ident_end(bytes, from);
-        if env_end == from || !js[env_end..].starts_with(CALL) {
+        if env_end == from || !js[env_end..].starts_with(SAGA_DISPATCH) {
             continue;
         }
-        let action_start = env_end + CALL.len();
+        let action_start = env_end + SAGA_DISPATCH.len();
         let action_end = ident_end(bytes, action_start);
         if action_end == action_start || bytes.get(action_end) != Some(&b')') {
             continue;
@@ -362,6 +356,9 @@ pub(crate) fn tap_saga_put(js: &str) -> String {
     js.to_string()
 }
 
+/// The action the volume restore saga takes first, the signal for `route_volume_restore`.
+const RESTORE_ACTION: &str = "BOOTSTRAP_DONE";
+
 /// Route TIDAL's page-load volume restore through `globalThis.__lunaRestoreVolume`.
 ///
 /// After `take(BOOTSTRAP_DONE)` one saga reads the account's saved level
@@ -372,15 +369,14 @@ pub(crate) fn tap_saga_put(js: &str) -> String {
 /// three fields, which the minifier keeps (the sibling saga that takes the same action first reads
 /// no `volumeUnmute`). With no slot the read passes through; `js` comes back unchanged on no match.
 pub(crate) fn route_volume_restore(js: &str) -> String {
-    const ACTION: &str = "BOOTSTRAP_DONE";
     const TAKE_END: &str = ");let ";
     const YIELD: &str = "=yield ";
     const GUARD_END: &str = ")return;";
     let bytes = js.as_bytes();
     let mut from = 0;
-    while let Some(rel) = js[from..].find(ACTION) {
+    while let Some(rel) = js[from..].find(RESTORE_ACTION) {
         let action = from + rel;
-        from = action + ACTION.len();
+        from = action + RESTORE_ACTION.len();
         // The quote closing the action type, whichever one the minifier chose.
         if !matches!(bytes.get(from), Some(b'`' | b'"' | b'\''))
             || !js[from + 1..].starts_with(TAKE_END)
@@ -439,16 +435,52 @@ pub(crate) fn route_volume_restore(js: &str) -> String {
     js.to_string()
 }
 
-/// The filter below calls nothing else: what each variant does to a chunk is testable without a
-/// CEF response.
-pub(crate) fn rewrite_chunk(rewrite: ChunkRewrite, js: &str) -> String {
-    match rewrite {
-        ChunkRewrite::Capture(id) => append_capture(js, id),
-        ChunkRewrite::Entry => route_volume_restore(&tag_create_root(js)),
-        ChunkRewrite::TapSagaPut => tap_saga_put(js),
-        ChunkRewrite::SdkApi => capture_sdk_api(js),
-    }
+#[derive(Debug)]
+pub(crate) struct RewrittenChunk {
+    pub(crate) js: String,
+    /// The rewrites whose signal was there but whose pattern was not: TIDAL changed the code
+    /// around a signal, and that rewrite left the chunk as it came.
+    pub(crate) inert: Vec<ChunkRewrite>,
 }
+
+/// The filter below calls nothing else: what it does to a chunk is testable without a CEF
+/// response. `None` for a chunk that carries no signal, which goes through as it came.
+pub(crate) fn rewrite_chunk(js: &str) -> Option<RewrittenChunk> {
+    let rewrites = chunk_rewrites(js);
+    if rewrites.is_empty() {
+        return None;
+    }
+    let mut body = js.to_string();
+    let mut inert = Vec::new();
+    let mut ids = Vec::new();
+    for rewrite in rewrites {
+        let splice: fn(&str) -> String = match rewrite {
+            ChunkRewrite::TapSagaPut => tap_saga_put,
+            ChunkRewrite::TagCreateRoot => tag_create_root,
+            ChunkRewrite::RouteVolumeRestore => route_volume_restore,
+            ChunkRewrite::Capture(id) => {
+                ids.push(id);
+                continue;
+            }
+        };
+        let spliced = splice(&body);
+        if spliced == body {
+            inert.push(rewrite);
+        }
+        body = spliced;
+    }
+    if !ids.is_empty() {
+        let captured = append_capture(&body, &ids);
+        if captured == body {
+            inert.extend(ids.into_iter().map(ChunkRewrite::Capture));
+        }
+        body = captured;
+    }
+    Some(RewrittenChunk { js: body, inert })
+}
+
+/// Sizes the first allocation only; the buffer itself grows unbounded.
+const CHUNK_CAPACITY: usize = 256 * 1024;
 
 wrap_resource_request_handler! {
     pub(crate) struct CaptureRequestHandler;
@@ -491,22 +523,22 @@ wrap_resource_request_handler! {
                     .map(|r| userfree_to_string(&r.url()))
                     .unwrap_or_default(),
             );
-            let rewrite = chunk_rewrite(&url)?;
-            // The entry chunk is megabytes and a captured chunk kilobytes, the redux-saga one in
-            // between. This only sizes the first allocation: the buffer itself grows unbounded.
-            let capacity = match rewrite {
-                ChunkRewrite::Capture(_) => 128 * 1024,
-                ChunkRewrite::Entry => 2 * 1024 * 1024,
-                ChunkRewrite::TapSagaPut => 256 * 1024,
-                ChunkRewrite::SdkApi => 2 * 1024 * 1024,
-            };
+            let name = asset_name(&url)?.to_string();
             Some(new_buffering_filter(
-                capacity,
+                CHUNK_CAPACITY,
                 Arc::new(move |body| {
-                    FilterOutcome::Emit(match std::str::from_utf8(&body) {
-                        Ok(js) => rewrite_chunk(rewrite, js).into_bytes(),
-                        Err(_) => body,
-                    })
+                    let Ok(js) = std::str::from_utf8(&body) else {
+                        return FilterOutcome::Emit(body);
+                    };
+                    let Some(out) = rewrite_chunk(js) else {
+                        return FilterOutcome::Emit(body);
+                    };
+                    for rewrite in &out.inert {
+                        crate::verr!(
+                            "[CAPTURE] {name}: {rewrite:?} found its signal but not its pattern"
+                        );
+                    }
+                    FilterOutcome::Emit(out.js.into_bytes())
                 }),
             ))
         }

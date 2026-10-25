@@ -27,7 +27,7 @@ wrap_request_context_handler! {
             _disable_default_handling: Option<&mut ::std::os::raw::c_int>,
         ) -> Option<ResourceRequestHandler> {
             // The SW precache fetch is browser-less (is_navigation=0) and reaches
-            // only the context handler. Scope to HTML docs, leaving assets gzipped.
+            // only the context handler. Scope this one to HTML docs.
             let url = RequestUrl::new(
                 request
                     .as_ref()
@@ -37,9 +37,9 @@ wrap_request_context_handler! {
             if is_document_url(&url, None) {
                 return Some(DocumentHandler::new());
             }
-            // SW precache of a chunk we rewrite: do it here too (browser-less), so
-            // the cached chunk carries the capture and the tag on warm loads.
-            if crate::ui::module_capture::chunk_rewrite(&url).is_some() {
+            // SW precache of a TIDAL chunk, filtered here too (browser-less): the
+            // cached chunk then carries the capture and the tag on warm loads.
+            if crate::ui::module_capture::is_tidal_chunk(&url) {
                 return Some(crate::ui::module_capture::CaptureRequestHandler::new());
             }
             // Store fetches routed through the service worker reach only this context

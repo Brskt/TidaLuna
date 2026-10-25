@@ -819,10 +819,10 @@ wrap_request_handler! {
                 return Some(crate::ui::csp_filter::DocumentHandler::new());
             }
 
-            // Rewrite React-family chunks to capture TIDAL's real React exports,
-            // and the entry chunk to tag its `createRoot`, letting plugins share
-            // the host instance (hooks/context) and mount roots against it.
-            if crate::ui::module_capture::chunk_rewrite(&url).is_some() {
+            // Every TIDAL chunk goes through the capture filter, which picks its rewrites from the
+            // content (`chunk_rewrites`); plugins then share the host React instance
+            // (hooks/context) and mount roots against it.
+            if crate::ui::module_capture::is_tidal_chunk(&url) {
                 return Some(crate::ui::module_capture::CaptureRequestHandler::new());
             }
 

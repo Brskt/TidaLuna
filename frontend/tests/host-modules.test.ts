@@ -29,13 +29,38 @@ const sink = () => (window as any).__lunaHostModules as Record<string, Record<st
 beforeEach(() => {
 	delete (Object.prototype as any).createRoot;
 	delete (Object.prototype as any).flushSync;
+	delete (Object.prototype as any)["react-dom/client"];
 });
 
-test("the first capture of an id lands whole", () => {
+test("one object captured under several ids is stored once per id", () => {
+	// The Rust filter hands one namespace to every id a chunk carries (TIDAL bundles React,
+	// jsx-runtime and react-dom/client together). A later capture under one of them must
+	// reach that id alone, and the chunk's own object is never written to.
 	const cap = load();
-	const ns = { createPortal() {}, flushSync() {} };
+	const ns = { createElement() {}, jsx() {}, createPortal() {} };
+	cap("react", ns);
+	cap("react/jsx-runtime", ns);
 	cap("react-dom/client", ns);
-	expect(sink()["react-dom/client"]).toBe(ns);
+	cap("react-dom/client", { createRoot() {} });
+	expect(Object.keys(sink().react)).toEqual(["createElement", "jsx", "createPortal"]);
+	expect(Object.keys(sink()["react/jsx-runtime"])).toEqual(["createElement", "jsx", "createPortal"]);
+	expect(Object.keys(sink()["react-dom/client"]).sort()).toEqual([
+		"createElement",
+		"createPortal",
+		"createRoot",
+		"jsx",
+	]);
+	expect(Object.keys(ns)).toEqual(["createElement", "jsx", "createPortal"]);
+});
+
+test("an id a plugin left on Object.prototype does not swallow the first capture", () => {
+	// The sink reads its own entries only: an inherited one would send the first capture of
+	// that id down the merge, into an object the sink does not hold.
+	const cap = load();
+	(Object.prototype as any)["react-dom/client"] = {};
+	cap("react-dom/client", { createPortal() {} });
+	const own = Object.getOwnPropertyDescriptor(sink(), "react-dom/client");
+	expect(Object.keys(own?.value ?? {})).toEqual(["createPortal"]);
 });
 
 test("a second chunk under one id adds its exports instead of being dropped", () => {
@@ -53,8 +78,8 @@ test("a second chunk under one id adds its exports instead of being dropped", ()
 });
 
 test("the first writer still wins a name it already holds", () => {
-	// What the original policy existed to protect: the real react chunk is modulepreloaded
-	// and runs first, and a lazy vendor chunk must not take its exports over.
+	// What the original policy existed to protect: the first capture of a module registers
+	// its exports, and a later capture under the same id must not take them over.
 	const cap = load();
 	const real = () => "real";
 	cap("react", { createElement: real });

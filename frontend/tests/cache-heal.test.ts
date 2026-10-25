@@ -97,7 +97,7 @@ test("an incomplete verdict busts once and records the attempt", async () => {
 
 test("busts when react and the tag are present but the trio did not resolve", async () => {
 	// THE REGRESSION. This is exactly the state the old two-boolean check read as healthy:
-	// react captured, entry chunk tagged, but the react-dom/client capture never
+	// react captured, createRoot tagged, but the react-dom/client capture never
 	// registered; initModules demoted all three and nothing ever healed it.
 	(window as any).__lunaHostModules = { react: { createElement() {}, useState() {} } };
 	(globalThis as any).__lunaCreateRoot = () => {};

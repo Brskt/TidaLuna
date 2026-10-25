@@ -7,21 +7,22 @@ window.__lunaHostModules = window.__lunaHostModules || {};
     // against the sink would then read them as the object's own.
     var ownNames = Object.keys;
     var ownDesc = Object.getOwnPropertyDescriptor;
-    // First writer wins each NAME it already holds: the real react chunk is modulepreloaded and
-    // runs before any lazy vendor chunk; a later same-id capture cannot clobber a valid one.
-    // The names it does not hold are taken from the later chunk instead of dropped, because one
-    // id can legitimately name several chunks: react-dom's exports have already been split
-    // once, and replacing rather than unioning leaves a namespace that satisfies its validator
-    // with an export missing, which surfaces as a bare TypeError inside a plugin.
+    var define = Object.defineProperty;
+    // Defined, not assigned; an assignment would run a setter left on Object.prototype
+    // for that name instead of storing the value.
+    function put(into, name, value) {
+        define(into, name, { value: value, writable: true, enumerable: true, configurable: true });
+    }
+    // Each id owns an object filled by copy: the Rust filter hands one namespace to every id of a
+    // chunk, and sharing it would let one capture reach the others. First writer wins a name, missing
+    // ones merge in; an id can span several chunks (react-dom was split), and replacing drops exports.
     globalThis.__LUNA_CAP = function (id, ns) {
-        var existing = window.__lunaHostModules[id];
-        if (existing === undefined) {
-            window.__lunaHostModules[id] = ns;
-            return;
-        }
+        var held = ownDesc(window.__lunaHostModules, id);
+        var into = held === undefined ? {} : held.value;
+        if (held === undefined) put(window.__lunaHostModules, id, into);
         var names = ownNames(ns);
         for (var i = 0; i < names.length; i++) {
-            if (ownDesc(existing, names[i]) === undefined) existing[names[i]] = ns[names[i]];
+            if (ownDesc(into, names[i]) === undefined) put(into, names[i], ns[names[i]]);
         }
     };
 })();

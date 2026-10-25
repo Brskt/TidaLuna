@@ -6,7 +6,7 @@
 // React #321, which empties the entire root, not one component. `initModules`
 // therefore resolves the three React modules as a unit. It also completes a host
 // react-dom that no longer carries `createRoot` (TIDAL's 2026-08 chunk split) from
-// the global the Rust filter tags onto the entry chunk.
+// the global the Rust filter tags on the module that assigns it.
 
 import { beforeEach, expect, test } from "bun:test";
 

@@ -146,7 +146,7 @@ function installSagaPutTap(): void {
 		return;
 	}
 	if (!(globalThis as any).__lunaSagaPutSeen()) {
-		console.warn("[luna:redux] no saga put has reached the tap: the store chunk rewrite did not match; saga-put interceptors are inert");
+		console.warn("[luna:redux] no saga put has reached the tap: its rewrite did not match; saga-put interceptors are inert");
 	}
 }
 
