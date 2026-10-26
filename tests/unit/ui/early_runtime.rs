@@ -24,6 +24,7 @@ fn frontend() -> Frontend {
             session_stub: s("session_stub"),
             exfil_guard: s("exfil_guard"),
             plugin_loads: s("plugin_loads"),
+            cover_error: s("cover_error"),
             fallback_titlebar: s("fallback_titlebar"),
             cache_heal: s("cache_heal"),
             init_static: s("init_static"),
@@ -46,6 +47,7 @@ fn the_preload_runs_the_scripts_in_this_order() {
         "/*session_stub*/",
         "/*exfil_guard*/",
         "/*plugin_loads*/",
+        "/*cover_error*/",
         "/*fallback_titlebar*/",
     ];
     let positions: Vec<usize> = order

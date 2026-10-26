@@ -1,8 +1,8 @@
 //! Drop TIDAL's video album covers from JSON:API responses.
 //!
-//! The CEF binary we ship carries no H.264 decoder; Chromium's codec allowlist
-//! refuses the `.mp4` artwork before a decoder is ever picked, and TIDAL answers
-//! that failure with a near-blank placeholder rather than the cover it owns.
+//! The CEF binary we ship carries no H.264 decoder: Chromium's codec allowlist refuses the `.mp4`
+//! artwork before one is ever picked. While the downloaded decoder is not ready, the video artwork
+//! is dropped and TIDAL mounts its still cover instead of a `<video>` that can only fail.
 //!
 //! Both artworks travel in the same compound document: `included` carries an
 //! `IMAGE` resource next to the `VIDEO` one, and TIDAL already holds a selector

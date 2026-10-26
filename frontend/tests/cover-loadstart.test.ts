@@ -1,9 +1,9 @@
 // Tests the `loadstart` entry of the animated cover: `src/audio-proxy.ts` listens for it on the
 // document and hands the element to `coverSelected` (`src/video/cover-canvas.ts`).
 //
-// This is the only way a `<video>` that TIDAL remounts WITHOUT a `load()` (after an error) reaches
-// the cover canvas: nothing else in the page observes it before its surface is held. happy-dom
-// never emits `loadstart` itself, on `load()`, on a `src` or on a `<source>` going in; each test
+// It reaches a `<video>` whose selection no `load()` started (a `<source>` inserted into a fresh
+// one) and has not been seen by its frame's observer yet. happy-dom never emits `loadstart`
+// itself, on `load()`, on a `src` or on a `<source>` going in; each test
 // dispatches the event by hand, the way the engine does: not bubbling.
 //
 // Every test names a cover of its own: `coverCache` in the module outlives the test.

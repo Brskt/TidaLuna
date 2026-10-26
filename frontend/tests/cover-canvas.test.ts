@@ -193,13 +193,6 @@ const tidalStill = () => {
 	return img;
 };
 
-// What TIDAL renders when its cover `<video>` fails: `imageFallback(...)`, a `data:` image.
-const tidalFallback = () => {
-	const img = document.createElement("img");
-	img.setAttribute("src", "data:image/svg+xml;base64,PHN2Zy8+");
-	return img;
-};
-
 // A cover `<video>` as TIDAL mounts one, its cover on a `<source>` child.
 const coverVideo = (src: string) => {
 	const video = document.createElement("video");
@@ -375,28 +368,40 @@ test("a remounted now-playing frame takes the still, the frame it replaced is le
 	expect((second.surface.querySelector("canvas") as HTMLCanvasElement).style.backgroundImage).toContain("/z/z/640x640.jpg");
 });
 
-// When the cover `<video>` fails, TIDAL renders its placeholder in its place: that is our failed
-// element's stand-in, not a still of TIDAL's to give the frame back to.
-test("TIDAL's error placeholder does not take the frame back, its own still does", async () => {
+// An `<img>` as TIDAL's now-playing artwork writes it for an animated item: `srcset=""`, its
+// still, or a `data:` placeholder when the still is gone.
+const tidalImage = (src: string) => {
+	const img = document.createElement("img");
+	img.setAttribute("src", src);
+	img.setAttribute("srcset", "");
+	return img;
+};
+
+// Our cover `<video>`'s failure never reaches TIDAL (`early-runtime/cover_error.js`); an
+// `<img>` in its place is always TIDAL's own choice, never a stand-in to keep the frame through.
+test("any <img> TIDAL mounts in place of the cover takes the frame back", async () => {
 	stubWebgl();
 	transportDecoding();
-	const frame = mountFrame();
-	playing("fallback", "f");
-	await attachCoverCanvas(frame.video, coverSrc("fallback"));
+	playing("any-img", "f");
+	const images = [
+		tidalStill(),
+		tidalImage("https://resources.tidal.com/images/f/f/1280x1280.jpg"),
+		tidalImage("data:image/svg+xml;base64,PHN2Zy8+"),
+	];
+	for (const [i, img] of images.entries()) {
+		const frame = mountFrame();
+		await attachCoverCanvas(frame.video, coverSrc(`any-img-${i}`));
+		expect(frame.surface.hasAttribute("data-luna-cover")).toBe(true);
 
-	replaceArtwork(frame, tidalFallback());
-	await settle();
-	expect(frame.surface.querySelector("canvas")).not.toBeNull();
-	expect(frame.surface.hasAttribute("data-luna-cover")).toBe(true);
-
-	replaceArtwork(frame, tidalStill());
-	await settle();
-	expect(frame.surface.querySelector("canvas")).toBeNull();
-	expect(frame.surface.hasAttribute("data-luna-cover")).toBe(false);
+		replaceArtwork(frame, img);
+		await settle();
+		expect(frame.surface.querySelector("canvas")).toBeNull();
+		expect(frame.surface.hasAttribute("data-luna-cover")).toBe(false);
+	}
 });
 
-// After an error TIDAL mounts the next cover's `<video>` fresh and never calls `load()` on it:
-// the `<source>` going in starts the selection by itself.
+// TIDAL's `load()` comes from an effect after the commit: a fresh cover `<video>` in a frame we
+// hold is attached by the frame's observer before it.
 test("a fresh cover video mounted in a held frame is attached without a load()", async () => {
 	stubWebgl();
 	const requested: string[] = [];
@@ -407,8 +412,6 @@ test("a fresh cover video mounted in a held frame is attached without a load()",
 	const frame = mountFrame();
 	playing("fresh-1", "a");
 	await attachCoverCanvas(frame.video, coverSrc("fresh-a"));
-	replaceArtwork(frame, tidalFallback());
-	await settle();
 
 	replaceArtwork(frame, coverVideo(coverSrc("fresh-b")));
 	await settle();

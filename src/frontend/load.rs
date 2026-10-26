@@ -44,6 +44,7 @@ early_runtime! {
     session_stub,
     exfil_guard,
     plugin_loads,
+    cover_error,
     fallback_titlebar,
     cache_heal,
     init_static,

@@ -187,10 +187,10 @@ let coverCache: { src: string; anim: CoverAnimation } | null = null;
 
 /**
  * TIDAL's artwork frame holds ONE in-flow artwork (`<img>` or `<video>`, `width:100%;
- * height:auto`) and takes its height from it; a second square would stack below. While we paint,
- * theirs is hidden by a rule, not an inline style: React replaces the now-playing artwork's failed
- * `<video>` with an `<img>`, and the rule matches whatever comes next. The rule's (0,1,1) beats
- * their single class without `!important`.
+ * height:auto`) and takes its height from it; a second square would stack below. Theirs is hidden
+ * by a rule on the frame, not an inline style: TIDAL re-creates that element (a `<video>`, an
+ * `<img>` or nothing), and the rule hides whichever stands there. Its (0,1,1) beats their single
+ * class without `!important`.
  */
 const MARKER = "data-luna-cover";
 const STYLE_ID = "luna-cover-invariant";
@@ -317,10 +317,10 @@ const layStill = (canvas: HTMLCanvasElement, still: string | null) => {
 };
 
 /**
- * The still that belongs under this frame, told by the element rather than by attach order. TIDAL
- * paints animated covers through two components: the legacy one (album header, enlarge modal)
- * carries its own album's still as `poster`, and the now-playing artwork has none, its still being
- * the playing track's. Only the latter follows the announce.
+ * The still that belongs under this frame, told by the element rather than by attach order. A
+ * cover `<video>` names its own still as `poster`, both in the legacy component (album header,
+ * enlarge modal) and the now-playing one. One without it takes the playing track's still, and only
+ * that one follows the announce.
  */
 const stillFor = (el: HTMLMediaElement, surface: HTMLElement): string | null => {
 	const poster = el.getAttribute("poster");
@@ -331,9 +331,8 @@ const stillFor = (el: HTMLMediaElement, surface: HTMLElement): string | null => 
 
 /**
  * A resource selection on `el`, as its `loadstart` reports one: attached unless this very
- * selection already was. Every selection fires it, whatever started it: `load()`, a `src`, or a
- * `<source>` inserted into a fresh `<video>`, which is how TIDAL remounts the now-playing cover
- * after an error, with no `load()` to hook.
+ * selection already was. Every selection fires it, whatever started it (`load()`, a `src`, a
+ * `<source>` inserted into a fresh `<video>`). An element no `load()` hook saw still gets here.
  */
 export const coverSelected = (el: HTMLMediaElement) => {
 	const src = el.currentSrc;
@@ -348,28 +347,21 @@ export const coverSelected = (el: HTMLMediaElement) => {
  * surface shows decides, never the order of the records:
  * - a `<video>` keeps the frame, and attaches its cover if this element was never handed over,
  *   in the commit's own microtask rather than at its `loadstart`, one task later;
- * - TIDAL's error fallback keeps it, being our failed `<video>`'s stand-in: always a `data:`
- *   image with no `srcset` (`imageFallback`), which a real still never is;
- * - any other `<img>` is a still of TIDAL's own, and takes the frame back;
+ * - an `<img>` is a still of TIDAL's own, and takes the frame back: TIDAL never learns our
+ *   `<video>` failed (`early-runtime/cover_error.js`) and mounts no stand-in for it;
  * - no artwork at all takes it back too: a swap of artwork is one commit; an empty surface is
  *   TIDAL showing nothing (a cover-less track, an entity not loaded yet), never a step between two.
  */
 const evaluateSurface = (surface: HTMLElement) => {
 	if (!(surface as any)._lunarCoverCanvas) return;
 	const artwork = Array.from(surface.children).find((c) => c.localName === "video" || c.localName === "img");
-	if (!artwork) {
+	if (artwork?.localName !== "video") {
 		releaseSurface(surface);
 		return;
 	}
-	if (artwork.localName === "video") {
-		const media = artwork as HTMLMediaElement;
-		const next = media.querySelector("source")?.src || media.src;
-		if (isCoverUrl(next) && (media as any)._lunarCoverAttached !== next) attachCoverCanvas(media, next);
-		return;
-	}
-	const src = artwork.getAttribute("src") ?? "";
-	const fallback = (src === "" || src.startsWith("data:")) && !artwork.hasAttribute("srcset");
-	if (!fallback) releaseSurface(surface);
+	const media = artwork as HTMLMediaElement;
+	const next = media.querySelector("source")?.src || media.src;
+	if (isCoverUrl(next) && (media as any)._lunarCoverAttached !== next) attachCoverCanvas(media, next);
 };
 
 /**
@@ -495,10 +487,9 @@ export const attachCoverCanvas = async (el: HTMLMediaElement, src: string) => {
 	// where the artwork belongs: with our canvas gone the frame falls back to whatever TIDAL makes
 	// of it.
 	const giveUp = (why: string) => {
-		// With a still, the canvas STAYS and TIDAL's artwork stays hidden. On the now-playing frame
-		// TIDAL holds `imageFallback(...)`, the near-blank placeholder `artwork_filter` exists to
-		// avoid; on a legacy frame its `<video>` shows its poster, the same still at a smaller
-		// size. Every path here (no codec yet, refused body, network, no WebGL) is better served by
+		// With a still, the canvas STAYS and TIDAL's artwork stays hidden: its `<video>`, never told
+		// of its failure, shows its poster, the same still or a near-blank placeholder when it has
+		// none. Every path here (no codec yet, refused body, network, no WebGL) is better served by
 		// the still. Read off the canvas, not the attach's own: a now-playing frame takes the
 		// announce's still whenever it arrives.
 		if (canvas.style.backgroundImage && canvas.isConnected) {

@@ -52,6 +52,7 @@ pub(crate) fn payload_from_frontend(f: &Frontend) -> EarlyRuntimePayload {
         &e.session_stub,
         &e.exfil_guard,
         &e.plugin_loads,
+        &e.cover_error,
     ]
     .join("\n");
     EarlyRuntimePayload {
