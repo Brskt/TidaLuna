@@ -1,4 +1,5 @@
 use rusqlite::{Connection, ErrorCode};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::{JoinHandle, ThreadId};
@@ -271,7 +272,7 @@ impl Drop for ActorThread {
             return;
         }
         if let Some(handle) = self.handle.take() {
-            // A panicking closure already reported itself through the panic hook.
+            // The loop catches its operations' panics: the thread ends once every sender is gone.
             let _ = handle.join();
         }
     }
@@ -311,8 +312,17 @@ impl DbActor {
                     }
                 };
 
+                // A panicking operation is abandoned, not the thread: dead, it would drop every
+                // later write and hang every caller. The unwind rolls back its transaction and
+                // drops its `Stable`, which leaves the connections usable; its other work is lost.
                 while let Ok(f) = rx.recv() {
-                    f(&mut plugins_conn, &mut settings_conn);
+                    let run = AssertUnwindSafe(|| f(&mut plugins_conn, &mut settings_conn));
+                    if let Err(payload) = std::panic::catch_unwind(run) {
+                        crate::verr!(
+                            "[DB]     A queued operation panicked and was abandoned: {}",
+                            crate::platform::refusal::panic_message(&*payload)
+                        );
+                    }
                 }
             })
             .expect("failed to spawn db-actor thread");
@@ -349,7 +359,9 @@ impl DbActor {
                 let _ = resp_tx.send(f(pc, sc));
             }))
             .expect("db-actor thread is dead");
-        resp_rx.recv().expect("db-actor thread is dead")
+        resp_rx
+            .recv()
+            .expect("the db-actor operation panicked and was abandoned")
     }
 
     /// Queue a closure on the actor thread without waiting for its result.
