@@ -95,20 +95,6 @@ export class LunaPlugin {
 	// Static list of Luna plugins that should be separate from user plugins
 	public static readonly corePlugins: Set<string> = new Set(["@luna/lib", "@luna/lib.native", "@luna/ui", "@luna/dev", "@luna/linux"]);
 
-	static {
-		// TidaLunar: window.close is handled by CEF lifecycle, not IPC.
-		// Unload plugins on page unload instead.
-		window.addEventListener("beforeunload", () => {
-			for (const plugin of Object.values(LunaPlugin.plugins)) {
-				if (typeof plugin.unload === "function") {
-					plugin.unload().catch((err) => {
-						console.error(`[Luna] Failed to unload plugin ${plugin.name}!`, err);
-					});
-				}
-			}
-		});
-	}
-
 	/**
 	 * Create a plugin instance from a store:LunaPluginStorage, if package is not populated it will be fetched using the url so we can get the name
 	 */

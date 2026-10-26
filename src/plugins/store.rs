@@ -215,6 +215,92 @@ pub(crate) fn install(
     Ok(())
 }
 
+/// An installed plugin as stored, the base an update compares the source against.
+pub(crate) struct StoredPlugin {
+    pub name: String,
+    pub manifest: String,
+    pub code: String,
+}
+
+/// `Ok(None)` for a url with no installed row; a read that failed is an `Err`, not an uninstall.
+pub(crate) fn stored(conn: &mut Connection, url: &str) -> rusqlite::Result<Option<StoredPlugin>> {
+    use rusqlite::OptionalExtension as _;
+    conn.query_row(
+        "SELECT name, manifest, code FROM plugins WHERE url = ?1 AND installed = 1",
+        params![url],
+        |row| {
+            Ok(StoredPlugin {
+                name: row.get(0)?,
+                manifest: row.get(1)?,
+                code: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum UpdateOutcome {
+    Updated,
+    UpToDate,
+    /// The source now declares another name: the data dir, the trust rows and the dependants all
+    /// hang on the name, which only a reinstall may change.
+    Renamed {
+        stored: String,
+    },
+    /// Uninstalled while the source was being fetched.
+    Gone,
+    /// An enabled plugin whose new version needs plugins that are not enabled.
+    MissingDependencies(Vec<String>),
+}
+
+/// Swaps an installed plugin's manifest and code for a new version, keeping `enabled` and
+/// `ever_dispatched`, which `install`'s replace resets. Compares text, not the hash: the hash
+/// covers the code only, and a new manifest alone (its dependencies) is an update too.
+pub(crate) fn update(
+    conn: &mut Connection,
+    url: &str,
+    name: &str,
+    manifest: &str,
+    code: &str,
+    hash: &str,
+) -> rusqlite::Result<UpdateOutcome> {
+    let row = conn.query_row(
+        "SELECT name, manifest, code, enabled FROM plugins WHERE url = ?1 AND installed = 1",
+        params![url],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)? != 0,
+            ))
+        },
+    );
+    let (stored_name, stored_manifest, stored_code, enabled) = match row {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(UpdateOutcome::Gone),
+        Err(e) => return Err(e),
+    };
+    if stored_name != name {
+        return Ok(UpdateOutcome::Renamed {
+            stored: stored_name,
+        });
+    }
+    if stored_manifest == manifest && stored_code == code {
+        return Ok(UpdateOutcome::UpToDate);
+    }
+    if enabled && let Err(missing) = check_dependencies_satisfied(conn, manifest) {
+        return Ok(UpdateOutcome::MissingDependencies(missing));
+    }
+    conn.execute(
+        "UPDATE plugins SET manifest = ?3, code = ?4, hash = ?5
+         WHERE url = ?1 AND name = ?2 AND installed = 1",
+        params![url, name, manifest, code, hash],
+    )?;
+    Ok(UpdateOutcome::Updated)
+}
+
 /// Removes the plugin and its storage, on the disk before this returns: a removal a power cut took
 /// back would bring the plugin back, code and enabled flag included. One transaction: the two
 /// deletes are one commit and one sync.

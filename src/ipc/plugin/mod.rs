@@ -7,6 +7,7 @@ mod native;
 mod plugin_ipc;
 mod proxy;
 mod trust_prompt;
+mod update;
 
 pub(crate) use jsrt::JS_PURGE_SDK_BLOB;
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
@@ -136,6 +137,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         }
         "plugin.check_hash" => {
             plugin_ipc::handle_plugin_check_hash(&msg, query_id, callback);
+        }
+        "plugin.update" => {
+            update::handle_plugin_update(&msg, callback);
         }
         "plugin.enable" => {
             plugin_ipc::handle_plugin_enable(&msg, callback);

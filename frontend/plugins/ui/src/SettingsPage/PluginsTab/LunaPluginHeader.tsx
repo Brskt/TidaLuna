@@ -13,13 +13,14 @@ export interface LunaPluginComponentProps extends PropsWithChildren {
 	version?: string;
 	link?: string;
 	loadError?: string;
+	note?: string;
 	author?: LunaAuthor | string;
 	desc?: ReactNode;
 	sx?: BoxProps["sx"];
 	isLibrary?: boolean;
 	dependsOn?: string[];
 }
-export const LunaPluginHeader = React.memo(({ name, version, loadError, author, desc, children, sx, link, isLibrary, dependsOn }: LunaPluginComponentProps) => (
+export const LunaPluginHeader = React.memo(({ name, version, loadError, note, author, desc, children, sx, link, isLibrary, dependsOn }: LunaPluginComponentProps) => (
 	<Box sx={sx}>
 		<Stack direction="row" alignItems="center" spacing={1}>
 			<Typography variant="h6">
@@ -41,6 +42,7 @@ export const LunaPluginHeader = React.memo(({ name, version, loadError, author, 
 					children={loadError}
 				/>
 			)}
+			{note && <Typography variant="caption" sx={{ opacity: 0.7 }} children={note} />}
 			<Box sx={{ flexGrow: 1 }} />
 			{author && <LunaAuthorDisplay author={author} />}
 		</Stack>

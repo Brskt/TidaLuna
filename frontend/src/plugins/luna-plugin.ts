@@ -75,6 +75,31 @@ function syncUpstream(url: string, plugin: LunaPlugin | null) {
     window.dispatchEvent(new Event("luna:plugins-updated"));
 }
 
+// What `plugin.update` found at the plugin's source (Rust `Pulled`). It stores and never restarts:
+// the Reload button restarts what is stored unless `busy` or `gone`, the poll only on `updated`.
+type Pulled =
+    | { outcome: "updated"; hash: string; manifest: string }
+    | { outcome: "upToDate"; hash: string }
+    | { outcome: "refused"; hash: string; reason: string }
+    | { outcome: "blocked" | "unavailable"; reason: string }
+    | { outcome: "busy" | "gone" };
+
+function pullNote(pulled: Pulled): string {
+    switch (pulled.outcome) {
+        case "updated": return "Updated to the latest version";
+        case "upToDate": return "Already up to date";
+        case "refused": return `The source's version is refused: ${pulled.reason}`;
+        case "blocked": return pulled.reason;
+        case "unavailable": return `Not updated, the installed version runs: ${pulled.reason}`;
+        case "busy": return "An update of this plugin is already running";
+        case "gone": return "This plugin is no longer installed";
+    }
+}
+
+// The live-reload poll's pace, and its ceiling for a failing source or a blocked update.
+const POLL_MS = 1000;
+const POLL_MAX_MS = 30000;
+
 export class LunaPlugin {
     // Static registry
     static plugins: Record<string, LunaPlugin> = {};
@@ -94,8 +119,15 @@ export class LunaPlugin {
 
     // Private
     private reloadTimeout: ReturnType<typeof setTimeout> | null = null;
+    // Bumped by each start and stop: a poll of a loop since stopped does not schedule another.
+    private pollLoop = 0;
+    // The last source hash the poll had a verdict on; only a different one is pulled again.
+    private seenHash: string | undefined;
     private enabledListeners = new Set<(enabled: boolean) => void>();
     private liveReloadListeners = new Set<(liveReload: boolean) => void>();
+    // What a Reload found, or why the live reload did not take a version; a failed start is a
+    // loadError. Each note is told, even one equal to the last: a Signal would drop it.
+    private noteListeners = new Set<(note: string | undefined) => void>();
 
     constructor(store: LunaPluginStore) {
         this.store = obyStore(store);
@@ -178,6 +210,24 @@ export class LunaPlugin {
         return () => {
             this.liveReloadListeners.delete(callback);
         };
+    }
+
+    // `undefined` hides the note shown.
+    onUpdateNote(callback: (note: string | undefined) => void): () => void {
+        this.noteListeners.add(callback);
+        return () => {
+            this.noteListeners.delete(callback);
+        };
+    }
+
+    private note(text: string | undefined): void {
+        for (const fn of this.noteListeners) {
+            try {
+                fn(text);
+            } catch (e) {
+                console.error(e);
+            }
+        }
     }
 
     // All actions follow: update local state -> persist to Rust DB -> route to Rust -> notify UI
@@ -286,9 +336,15 @@ export class LunaPlugin {
     }
 
     async disable(): Promise<void> {
+        this.stopReloadLoop();
+        await this.stop();
+    }
+
+    // `disable()` without stopping the live-reload loop: a restart runs it right before
+    // `enable()`, and the loop must outlive that.
+    private async stop(): Promise<void> {
         this.loading._ = true;
         try {
-            this.stopReloadLoop();
             // Atomic: guard dependants + unload + persist (Rust handles everything)
             await invokeIpc("plugin.disable", this.url);
             // Only after Rust confirms:
@@ -304,16 +360,68 @@ export class LunaPlugin {
         // NO catch - errors propagate to caller (reload, uninstall, UI)
     }
 
+    // Stores the version the plugin's url serves now, then restarts the plugin from what is
+    // stored, unless another run holds it or it is gone. Core plugins have no url to fetch from.
     async reload(): Promise<void> {
         this.loading._ = true;
+        this.note(undefined);
         try {
-            await this.disable(); // throws if Rust refuses (dependants)
-            await this.enable();
-        } catch (e) {
-            console.error(`[luna:plugin] Failed to reload '${this.name}':`, e);
+            let pulled: Pulled | undefined;
+            if (!LunaPlugin.corePlugins.has(this.name)) {
+                pulled = await this.pullUpdate();
+                this.note(pullNote(pulled));
+                // Busy: the live-reload poll or another Reload holds the plugin's turn, and a
+                // restart now would run alongside theirs.
+                if (pulled.outcome === "busy" || pulled.outcome === "gone") return;
+            }
+            await this.restart(pulled);
         } finally {
             this.loading._ = false;
         }
+    }
+
+    // Stores the source's version. Its hash and manifest are applied here rather than on
+    // `jsrt.plugin_updated`: the poll compares against them on its next tick.
+    private async pullUpdate(): Promise<Pulled> {
+        let pulled: Pulled;
+        try {
+            pulled = (await invokeIpc("plugin.update", this.url)) ?? { outcome: "unavailable", reason: "no answer" };
+        } catch (e) {
+            pulled = { outcome: "unavailable", reason: e instanceof Error ? e.message : String(e) };
+        }
+        if (pulled.outcome === "updated") this.applyUpdate(pulled);
+        return pulled;
+    }
+
+    // Stops the plugin and starts it again from its stored version, as `disable()` then `enable()`
+    // do: a plugin that was not running starts, and a failed start is enable()'s loadError. Rust
+    // refuses the stop while enabled plugins depend on this one, which then runs as it was.
+    private async restart(pulled: Pulled | undefined): Promise<void> {
+        try {
+            await this.stop();
+        } catch (e) {
+            const why = e instanceof Error ? e.message : String(e);
+            if (pulled === undefined) {
+                console.error(`[luna:plugin] Failed to reload '${this.name}':`, e);
+            } else {
+                this.note(pulled.outcome === "updated"
+                    ? `Updated, runs from the next launch: ${why}`
+                    : `Not restarted: ${why}`);
+            }
+            return;
+        }
+        await this.enable();
+    }
+
+    // Takes in the row of a version Rust has just stored. Settings are left to the restarted
+    // load's ready ack, which reads what that load registered.
+    applyUpdate(info: any): void {
+        try {
+            const pkg = typeof info.manifest === "string" ? JSON.parse(info.manifest) : info.manifest;
+            if (pkg?.name) this.store.package = pkg;
+        } catch (e) { console.warn("[luna:plugin] Package info parse failed:", e); }
+        if (info.hash) this.store.package.hash = info.hash;
+        syncUpstream(this.url, this);
     }
 
     async uninstall(): Promise<void> {
@@ -359,34 +467,77 @@ export class LunaPlugin {
         return true;
     }
 
+    // Each version the source serves is pulled once: any verdict on a hash settles it, and only a
+    // change at the source asks again. A restart happens on `updated` alone; a source or machine
+    // that fails is asked again later, the wait doubling up to POLL_MAX_MS.
     private startReloadLoop(): void {
         if (this.reloadTimeout) return;
+        const loop = ++this.pollLoop;
+        let failures = 0;
+
+        // Neither a disable nor a Reload landed while the poll awaited: it may restart the plugin.
+        const stillOurs = () => loop === this.pollLoop && this.enabled && !this.loading._;
 
         const poll = async () => {
-            if (!this.liveReload || !this.enabled) return;
-            this.fetching._ = true;
-            try {
-                // Read-only hash check - re-fetches code, computes hash, does NOT touch DB
-                const result = await invokeIpc("plugin.check_hash", this.url);
-                const newHash = result?.hash;
-                if (newHash && newHash !== this.store.package.hash) {
-                    this.store.package.hash = newHash;
-                    await this.reload();
+            if (loop !== this.pollLoop || !this.liveReload) return;
+            let delay = POLL_MS;
+            let failed = false;
+            // A Reload in progress turns the plugin off for a moment: the next tick looks again.
+            if (stillOurs()) {
+                this.fetching._ = true;
+                try {
+                    const seen = (await invokeIpc("plugin.check_hash", this.url))?.hash;
+                    if (seen && seen !== this.store.package.hash && seen !== this.seenHash) {
+                        const pulled = await this.pullUpdate();
+                        switch (pulled.outcome) {
+                            case "updated":
+                                this.seenHash = seen;
+                                // Not ours any more: the stored version loads at the next enable.
+                                if (stillOurs()) await this.restart(pulled);
+                                break;
+                            case "upToDate":
+                                this.seenHash = seen;
+                                break;
+                            // Noted: the card is the one place these reasons reach the user.
+                            case "refused":
+                                this.seenHash = seen;
+                                this.note(pullNote(pulled));
+                                break;
+                            case "blocked":
+                                delay = POLL_MAX_MS;
+                                this.note(pullNote(pulled));
+                                break;
+                            case "unavailable":
+                                failed = true;
+                                this.note(pullNote(pulled));
+                                break;
+                            case "busy":
+                                break;
+                            case "gone":
+                                this.stopReloadLoop();
+                                return;
+                        }
+                    }
+                } catch (e) {
+                    console.error(`[luna:plugin] Live reload error for ${this.name}:`, e);
+                    failed = true;
+                } finally {
+                    this.fetching._ = false;
                 }
-            } catch (e) {
-                console.error(`[luna:plugin] Live reload error for ${this.name}:`, e);
-            } finally {
-                this.fetching._ = false;
-                if (this.liveReload && this.enabled) {
-                    this.reloadTimeout = setTimeout(poll, 1000);
-                }
+            }
+            // Consecutive failures only: one tick that went through starts the count again.
+            failures = failed ? failures + 1 : 0;
+            if (failed) delay = Math.min(POLL_MS * 2 ** failures, POLL_MAX_MS);
+            if (loop === this.pollLoop && this.liveReload) {
+                this.reloadTimeout = setTimeout(poll, delay);
             }
         };
 
-        this.reloadTimeout = setTimeout(poll, 1000);
+        this.reloadTimeout = setTimeout(poll, POLL_MS);
     }
 
     private stopReloadLoop(): void {
+        this.pollLoop++;
         if (this.reloadTimeout) {
             clearTimeout(this.reloadTimeout);
             this.reloadTimeout = null;

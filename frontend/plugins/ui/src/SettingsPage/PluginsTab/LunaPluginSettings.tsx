@@ -52,6 +52,7 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 	const [enabled, setEnabled] = React.useState(plugin.enabled);
 	const [loading, setLoading] = React.useState(plugin.loading._);
 	const [loadError, setLoadError] = React.useState(plugin.loadError._);
+	const [note, setNote] = React.useState<string | undefined>(undefined);
 	const [installed, setInstalled] = React.useState(plugin.installed);
 	const [hideSettings, setHideSettings] = React.useState(plugin.store.hideSettings);
 	// useState(() => fn) to store a function without React calling it as a lazy initializer
@@ -85,6 +86,21 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 		]);
 		return () => {
 			unloadSet(unloads);
+		};
+	}, [plugin]);
+
+	// A note answers a Reload, or says why the live reload did not take a version: shown for a few
+	// seconds, then gone. The runtime's own LunaPlugin has `onUpdateNote`; @luna/core's type does not.
+	React.useEffect(() => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const stop = (plugin as { onUpdateNote?: (cb: (note: string | undefined) => void) => () => void }).onUpdateNote?.((next) => {
+			clearTimeout(timer);
+			setNote(next);
+			if (next) timer = setTimeout(() => setNote(undefined), 6000);
+		});
+		return () => {
+			clearTimeout(timer);
+			stop?.();
 		};
 	}, [plugin]);
 
@@ -128,6 +144,7 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 				version={version}
 				link={link}
 				loadError={loadError}
+				note={note}
 				author={author}
 				desc={desc}
 				isLibrary={plugin.isLibrary}

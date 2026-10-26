@@ -126,6 +126,16 @@ export function exposeLoaderApi() {
         }
     });
 
+    // Any page script can call the emitter: the url only picks the plugin, the row is read again.
+    onIpcEvent("jsrt.plugin_updated", (url: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (!plugin) return;
+        invokeIpc("plugin.list").then((plugins: any[]) => {
+            const info = Array.isArray(plugins) ? plugins.find(p => p.url === url) : undefined;
+            if (info) plugin.applyUpdate(info);
+        }).catch((e) => console.warn("[luna:loader] plugin.list failed:", e));
+    });
+
     // Populate plugin registry from Rust PluginStore.
     // Plugins execute in Rust, but the UI reads LunaPlugin.plugins for display.
     invokeIpc("plugin.list").then((plugins: any[]) => {

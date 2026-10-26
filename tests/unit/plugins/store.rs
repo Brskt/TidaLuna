@@ -179,6 +179,36 @@ fn an_installed_plugin_writes_whether_or_not_it_is_enabled() {
     assert_eq!(storage_get(&mut conn, url, "k").as_deref(), Some("v3"));
 }
 
+/// A new manifest alone is an update (its dependencies would go stale unseen); a source that
+/// renames the plugin would take another name's data dir and trust rows, and changes nothing.
+#[test]
+fn an_update_takes_a_new_manifest_but_not_a_new_name() {
+    let url = "https://a/Foo";
+    let new_manifest = r#"{"name":"Foo","v":2}"#;
+    let cases = [
+        ("Foo", new_manifest, UpdateOutcome::Updated, new_manifest),
+        (
+            "Other",
+            new_manifest,
+            UpdateOutcome::Renamed {
+                stored: "Foo".into(),
+            },
+            "{}",
+        ),
+    ];
+    for (source_name, manifest, expected, kept) in cases {
+        let mut conn = mem();
+        stored_row(&mut conn, url, "Foo", "{}");
+        let outcome = update(&mut conn, url, source_name, manifest, "code", "h2").unwrap();
+        assert_eq!(outcome, expected, "{source_name}");
+        assert_eq!(
+            stored(&mut conn, url).unwrap().unwrap().manifest,
+            kept,
+            "{source_name}"
+        );
+    }
+}
+
 fn storage_rows(conn: &Connection, url: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM plugin_storage WHERE namespace = ?1",

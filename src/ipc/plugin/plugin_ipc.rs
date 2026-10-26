@@ -192,13 +192,13 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         tokio::task::spawn_blocking(move || {
             db.call_plugins(move |pc| {
                 // The stored name, the one the startup pass loads the plugin under.
-                let (name, manifest, code): (String, String, String) = pc
-                    .query_row(
-                        "SELECT name, manifest, code FROM plugins WHERE url = ?1 AND installed = 1",
-                        rusqlite::params![url],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .map_err(|e| format!("Plugin not found or no code: {e}"))?;
+                let crate::plugins::store::StoredPlugin {
+                    name,
+                    manifest,
+                    code,
+                } = crate::plugins::store::stored(pc, &url)
+                    .map_err(|e| format!("DB error: {e}"))?
+                    .ok_or_else(|| format!("Plugin not found: {url}"))?;
                 let name = crate::plugins::name::PluginName::parse(&name)
                     .map_err(|refused| format!("Cannot enable: {refused}"))?;
 
@@ -681,10 +681,32 @@ pub(super) async fn fetch_plugin_package(
     Ok(Some(manifest_str))
 }
 
-async fn fetch_plugin_data(
+/// A plugin's manifest as fetched, and whether the source served it.
+pub(super) enum Manifest {
+    Served(String),
+    /// Built for a source answering 404 for the `.json`: a classic `.mjs`-only plugin.
+    MadeUp(String),
+}
+
+impl Manifest {
+    pub(super) fn into_string(self) -> String {
+        match self {
+            Self::Served(text) | Self::MadeUp(text) => text,
+        }
+    }
+}
+
+pub(super) struct PluginData {
+    pub(super) name: String,
+    pub(super) manifest: Manifest,
+    pub(super) code: String,
+    pub(super) hash: String,
+}
+
+pub(super) async fn fetch_plugin_data(
     client: &reqwest::Client,
     url: &str,
-) -> anyhow::Result<(String, String, String, String)> {
+) -> anyhow::Result<PluginData> {
     let base = sanitize_plugin_url(url);
 
     // `?` propagates a hard manifest failure (cap/JSON/transport); only a
@@ -701,7 +723,12 @@ async fn fetch_plugin_data(
         let code = fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await?;
         let hash = fnv_hash_str(&code);
 
-        Ok((name, manifest_str, code, hash))
+        Ok(PluginData {
+            name,
+            manifest: Manifest::Served(manifest_str),
+            code,
+            hash,
+        })
     } else {
         let fetch_url = if url.ends_with("package.json") {
             url.to_string()
@@ -721,7 +748,12 @@ async fn fetch_plugin_data(
         let manifest = serde_json::json!({"name": &name, "main": &fetch_url}).to_string();
         let hash = fnv_hash_str(&code);
 
-        Ok((name, manifest, code, hash))
+        Ok(PluginData {
+            name,
+            manifest: Manifest::MadeUp(manifest),
+            code,
+            hash,
+        })
     }
 }
 
@@ -751,24 +783,17 @@ impl From<String> for InstallError {
 async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, InstallError> {
     let turn = INSTALL_CONSENTS.begin()?;
     let client = &*crate::state::HTTP_CLIENT;
-    let (name, manifest, code, hash) = fetch_plugin_data(client, &url)
+    let PluginData {
+        name,
+        manifest,
+        code,
+        hash,
+    } = fetch_plugin_data(client, &url)
         .await
         .map_err(|e| format!("{e:#}"))?;
+    let manifest = manifest.into_string();
     let name = crate::plugins::name::PluginName::parse(&name).map_err(|r| r.to_string())?;
-
-    // Validate luna.type if present
-    match crate::plugins::store::parse_luna_meta(&manifest) {
-        Err(msg) => return Err(msg.into()),
-        Ok(Some(ref meta)) => {
-            if let Some(ref t) = meta.plugin_type
-                && t != "plugin"
-                && t != "library"
-            {
-                return Err(format!("Invalid luna.type '{t}' in manifest").into());
-            }
-        }
-        Ok(None) => {} // no luna field - fine
-    }
+    check_luna_type(&manifest)?;
 
     // The user approves the bytes in hand; the write below stores these, never a second fetch.
     let answer = crate::ui::install_dialog::show_install_dialog(name.as_str(), &url, &manifest)
@@ -797,6 +822,19 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, In
     .map_err(|e| format!("spawn_blocking failed: {e}"))?;
 
     Ok(installed?)
+}
+
+/// Refuses a luna.type other than plugin or library; none at all is fine.
+pub(super) fn check_luna_type(manifest: &str) -> Result<(), String> {
+    match crate::plugins::store::parse_luna_meta(manifest)? {
+        Some(crate::plugins::store::LunaMeta {
+            plugin_type: Some(t),
+            ..
+        }) if t != "plugin" && t != "library" => {
+            Err(format!("Invalid luna.type '{t}' in manifest"))
+        }
+        _ => Ok(()), // no luna field, or no type
+    }
 }
 
 /// Stores the plugin row and resets its native trust, which only a reinstall does: a decision kept
