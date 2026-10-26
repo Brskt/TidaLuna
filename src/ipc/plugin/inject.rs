@@ -129,7 +129,9 @@ pub(super) fn inject_plugin(
     ) {
         Ok(js) => js,
         Err(failure) => {
-            with_state(|state| state.plugin_manager.retire_load(url, load_id));
+            // Undone in the page too: `mark_loading` took the record of any instance still running
+            // there, and only this id's unload, which reaches older ones, still names it.
+            undo_injection(url, load_id);
             return match failure {
                 crate::plugins::transpile_helper::Failure::Source(e) => {
                     crate::vprintln!("[PLUGIN] Failed to prepare '{name}': {e}");
@@ -158,15 +160,9 @@ pub(super) fn inject_plugin(
     }
 
     if !injection_still_current(epoch, with_state(|state| state.session_epoch)) {
-        // The session ended while this was transpiling, and the sweep that ran meanwhile could
-        // not touch this plugin: `mark_loading` had registered it before any code existed, and
-        // the cleanup it dispatched was a no-op while `forget_plugin` then dropped the only
-        // record of it. The injection just posted therefore lands in a session the user has
-        // left, with nothing left to unload it.
-        //
-        // Posting the cleanup HERE is what makes it work where the sweep's did not: both leave
-        // this thread through the same queue, in program order; this one runs after the
-        // injection has executed and has something to undo.
+        // The session ended while this was being prepared. A sweep after `mark_loading` named
+        // this load, and the page holds its unload against the code; one before never saw it,
+        // and nothing else would unload what was just posted.
         crate::vprintln!("[PLUGIN] Session changed under '{name}' - undoing its injection");
         undo_injection(url, load_id);
         return Err(InjectFailure::SessionChanged);
@@ -203,7 +199,9 @@ pub(super) async fn watch_ack(url: String, load_id: u64) {
     crate::vprintln!(
         "[PLUGIN] Timeout: '{url}' never sent ready ack (gen={load_id}), marking failed"
     );
-    eval_js(&crate::plugins::PluginManager::generate_unload_js(&url));
+    eval_js(&crate::plugins::PluginManager::generate_unload_js(
+        &url, load_id,
+    ));
     let url_disable = url.clone();
     let _ = tokio::task::spawn_blocking(move || {
         crate::state::db().call_plugins(move |pc| {
@@ -221,7 +219,7 @@ pub(super) async fn watch_ack(url: String, load_id: u64) {
 /// them), and passing it is what keeps this from reaching past its own attempt into whatever
 /// load became current in the meantime.
 pub(super) fn undo_injection(url: &str, load_id: u64) {
-    let cleanup = crate::plugins::PluginManager::generate_unload_js(url);
+    let cleanup = crate::plugins::PluginManager::generate_unload_js(url, load_id);
     eval_js(&cleanup);
     with_state(|state| state.plugin_manager.retire_load(url, load_id));
 }

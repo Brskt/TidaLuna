@@ -482,8 +482,10 @@ fn settle_ended_session(ended: &crate::app_state::EndedSession) {
             "[PLUGIN] Unloading {} user plugin(s) (session ended)",
             ended.loaded.len()
         );
-        for (url, _) in &ended.loaded {
-            eval_js(&crate::plugins::PluginManager::generate_unload_js(url));
+        for (url, load_id) in &ended.loaded {
+            eval_js(&crate::plugins::PluginManager::generate_unload_js(
+                url, *load_id,
+            ));
         }
     }
     // Letting the renderer's invokeIpc resolve rather than hang across the transition.

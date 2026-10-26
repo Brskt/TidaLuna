@@ -51,6 +51,7 @@ pub(crate) fn payload_from_frontend(f: &Frontend) -> EarlyRuntimePayload {
         &e.window_open,
         &e.session_stub,
         &e.exfil_guard,
+        &e.plugin_loads,
     ]
     .join("\n");
     EarlyRuntimePayload {

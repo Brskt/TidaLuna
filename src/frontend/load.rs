@@ -43,6 +43,7 @@ early_runtime! {
     window_open,
     session_stub,
     exfil_guard,
+    plugin_loads,
     fallback_titlebar,
     cache_heal,
     init_static,

@@ -5,7 +5,8 @@
 //!   - Shadows sensitive globals (cefQuery, nativeInterface, IPC helpers, token globals)
 //!   - Provides a controlled `fetch()` that routes through Rust (token injection, audit)
 //!   - Provides a controlled `storage` API (per-plugin SQLite via IPC)
-//!   - Tracks unload callbacks for cleanup
+//!   - Tracks unload callbacks for cleanup, and runs only if the page's load registry
+//!     (`early-runtime/plugin_loads.js`) grants its load id the url
 //!
 //! The real `window.cefQuery` is captured as a private `__cq` parameter -
 //! used internally by the controlled APIs but not exposed to plugin code.
@@ -84,12 +85,19 @@ pub fn wrap_plugin_code(
     js.push_str("var __ackReq = '");
     js.push_str(&escaped_ack);
     js.push_str("';\n");
+    // Claims the url for this load before any plugin line, after the captures so the replaced
+    // instance's cleanup cannot patch them. No registry, or a newer load owns the url: no run.
+    js.push_str("var __plBind = window.__pluginLoads && window.__pluginLoads.claim('");
+    js.push_str(&escaped_id);
+    js.push_str("', ");
+    js.push_str(&load_id.to_string());
+    js.push_str(");\nif (!__plBind) return;\n");
     // Inner IIFE is async to support top-level await (plugin .mjs files are ES modules).
     // __pThen, __ackCq, __ackReq are shadowed to undefined in the inner scope.
     js.push_str("__pThen.call(\n");
     // Sensitive globals are shadowed as parameters (receive undefined at call site).
     // This only blocks bare identifiers - window.X still works (shared V8 context limitation).
-    js.push_str("(async function(__pid, __cq, __gen, __cap, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq, __LUNAR_CAPTURED_TOKEN__, __TIDALUNAR_CREDENTIALS__, __LUNAR_SEND_IPC__, __LUNAR_INVOKE_IPC__, __LUNAR_IPC_LISTENERS__, __LUNAR_IPC_ON__, __LUNAR_IPC_EMIT__, __LUNAR_CONFIG__, __LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery) {\n");
+    js.push_str("(async function(__pid, __cq, __gen, __cap, __bind, localStorage, sessionStorage, XMLHttpRequest, indexedDB, caches, ServiceWorker, importScripts, __pThen, __ackCq, __ackReq, __LUNAR_CAPTURED_TOKEN__, __TIDALUNAR_CREDENTIALS__, __LUNAR_SEND_IPC__, __LUNAR_INVOKE_IPC__, __LUNAR_IPC_LISTENERS__, __LUNAR_IPC_ON__, __LUNAR_IPC_EMIT__, __LUNAR_CONFIG__, __LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery, __plBind) {\n");
     js.push_str("'use strict';\n");
 
     // Routes all network requests through Rust via cefQuery.
@@ -216,20 +224,28 @@ var __ipcRenderer = {
 "#,
     );
 
-    // Plugins register cleanup callbacks via onUnload().
-    // Rust calls window.__pluginUnloads[pluginId]() to trigger cleanup.
+    // Plugins register cleanup callbacks via onUnload(); the registry runs them on this load's
+    // unload. Once unloaded, a plugin resuming from an await gets its late callbacks run at once.
     js.push_str(
         r#"
 var __unloads = [];
-var onUnload = function(fn) { if (typeof fn === 'function') __unloads.push(fn); };
-if (!window.__pluginUnloads) window.__pluginUnloads = {};
-window.__pluginUnloads[__pid] = function() {
+var __dead = false;
+var __expHost = null;
+var __expMine = null;
+var onUnload = function(fn) {
+    if (typeof fn !== 'function') return;
+    if (__dead) { try { fn(); } catch(e) { console.error('[plugin:unload]', __pid, e); } return; }
+    __unloads.push(fn);
+};
+__bind(function() {
+    __dead = true;
     for (var i = __unloads.length - 1; i >= 0; i--) {
         try { __unloads[i](); } catch(e) { console.error('[plugin:unload]', __pid, e); }
     }
     __unloads = [];
-    delete window.__pluginUnloads[__pid];
-};
+    if (__expHost && __expHost[__pid] === __expMine) delete __expHost[__pid];
+});
+__bind = undefined;
 "#,
     );
 
@@ -246,32 +262,37 @@ window.__pluginUnloads[__pid] = function() {
     js.push_str(
         r#"
 if (typeof __exports !== 'undefined') {
-    if (!window.__pluginExports) window.__pluginExports = {};
     // Only expose Settings - the sole export consumed by the bundle (extractSettings).
     // Other exports (unloads, internal state, functions) stay private to the IIFE scope.
-    if (__exports.Settings) window.__pluginExports[__pid] = { Settings: __exports.Settings };
+    if (!__dead && __exports.Settings) {
+        if (!window.__pluginExports) window.__pluginExports = {};
+        __expHost = window.__pluginExports;
+        __expMine = { Settings: __exports.Settings };
+        __expHost[__pid] = __expMine;
+    }
     if (__exports.unloads instanceof Set) {
-        for (var __fn of __exports.unloads) __unloads.push(__fn);
+        for (var __fn of __exports.unloads) onUnload(__fn);
     }
 }
 "#,
     );
 
-    // Arguments: pluginId, cefQuery ref, load_id, capability, then undefined for all shadowed
-    // globals.
+    // Arguments: pluginId, cefQuery ref, load_id, capability, the registry's bind, then
+    // undefined for all shadowed globals.
     // 10 original shadows (localStorage..importScripts, __pThen, __ackCq, __ackReq)
-    // + 11 security shadows (__LUNAR_CAPTURED_TOKEN__..__LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery)
+    // + 12 security shadows (__LUNAR_CAPTURED_TOKEN__..__LUNAR_SESSION_DELEGATE__, nativeInterface, cefQuery, __plBind)
     js.push_str("})('");
     js.push_str(&escaped_id);
     js.push_str("', window.cefQuery, ");
     js.push_str(&load_id.to_string());
     js.push_str(", '");
     js.push_str(&escaped_cap);
-    js.push('\'');
+    js.push_str("', __plBind");
     js.push_str(
         ", undefined, undefined, undefined, undefined, undefined, undefined, undefined\
          , undefined, undefined, undefined\
-         , undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined)",
+         , undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined\
+         , undefined)",
     );
 
     // Sent via .then() in the OUTER scope after the async IIFE fully resolves.
@@ -294,3 +315,7 @@ if (typeof __exports !== 'undefined') {
 #[cfg(test)]
 #[path = "../../tests/unit/plugins/wrapper.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/plugins/load_orders.rs"]
+mod load_orders;

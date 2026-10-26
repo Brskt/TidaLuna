@@ -294,7 +294,7 @@ pub(crate) fn bundled_bun_version(_: &crate::updater::Recovered) -> Option<Strin
 }
 
 /// Find a binary next to the executable, or fall back to bare name (resolved via PATH by OS).
-fn find_binary(exe_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn find_binary(exe_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     // bin/ subdirectory (new layout)
     let bin = exe_dir.join("bin").join(name);
     if bin.exists() {

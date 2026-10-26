@@ -308,12 +308,11 @@ impl PluginManager {
         }
     }
 
-    /// Generate the JS cleanup code for a plugin (static, no state mutation).
-    pub fn generate_unload_js(plugin_id: &str) -> String {
+    /// The JS unloading `load_id` or an older instance of the plugin, never a newer one. Posted
+    /// before that load's code lands, it leaves the id in the page so the code is refused.
+    pub fn generate_unload_js(plugin_id: &str, load_id: u64) -> String {
         let escaped = wrapper::escape_js(plugin_id);
-        format!(
-            "if(window.__pluginUnloads&&window.__pluginUnloads['{escaped}']){{window.__pluginUnloads['{escaped}']()}}"
-        )
+        format!("window.__pluginLoads&&window.__pluginLoads.unload('{escaped}',{load_id})")
     }
 
     /// End the load `load_id`, whether it reached Ready or not. Returns true if this call is

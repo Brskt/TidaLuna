@@ -339,7 +339,7 @@ async fn do_plugin_disable(url: String) -> Result<(), String> {
     };
 
     // 3. Unload from renderer (best-effort)
-    let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&url);
+    let cleanup_js = crate::plugins::PluginManager::generate_unload_js(&url, load_id);
     eval_js(&cleanup_js);
 
     // 4. Bookkeeping AFTER dispatch, naming the load read above.
