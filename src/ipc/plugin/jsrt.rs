@@ -203,9 +203,8 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                         // three duties are not interchangeable: a session that ended under an
                         // injection is not a plugin that failed to load, and reconciling on it
                         // would disable something nothing was wrong with.
-                        let outcome = super::inject::inject_plugin(&p.url, &name, &p.code, epoch);
-                        match outcome.pass_duty() {
-                            super::inject::PassDuty::Record { load_id } => {
+                        match super::inject::inject_plugin(&p.url, &name, &p.code, epoch) {
+                            Ok(load_id) => {
                                 // Critical: persist ever_dispatched flag
                                 let url_flag = p.url.clone();
                                 let flag_ok = db.call_plugins(move |pc| {
@@ -225,15 +224,17 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                                     failed_urls.push(p.url);
                                 }
                             }
-                            super::inject::PassDuty::Reconcile => failed_urls.push(p.url),
-                            super::inject::PassDuty::Keep => helper_failed = true,
-                            super::inject::PassDuty::Abandon => {
-                                crate::vprintln!(
-                                    "[PLUGIN] Load pass abandoned: the session changed under '{}'",
-                                    p.name
-                                );
-                                return;
-                            }
+                            Err(failure) => match failure.pass_duty() {
+                                super::inject::PassDuty::Reconcile => failed_urls.push(p.url),
+                                super::inject::PassDuty::Keep => helper_failed = true,
+                                super::inject::PassDuty::Abandon => {
+                                    crate::vprintln!(
+                                        "[PLUGIN] Load pass abandoned: the session changed under '{}'",
+                                        p.name
+                                    );
+                                    return;
+                                }
+                            },
                         }
                     } else {
                         still_remaining.push(p);

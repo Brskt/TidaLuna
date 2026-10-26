@@ -245,23 +245,16 @@ async fn do_plugin_enable(url: String) -> Result<(), String> {
         .await
     };
     let load_id = match injected {
-        Ok(super::inject::Injected::Live { load_id }) => load_id,
-        // Every `Injected` failure below has already marked the plugin unloaded. What is left is what only
+        Ok(Ok(load_id)) => load_id,
+        // Every `InjectFailure` has already marked the plugin unloaded. What is left is what only
         // an enable owes: undoing the `enabled` flag this call set a few lines up.
-        outcome => {
+        Ok(Err(failure)) => {
             revert_enable(&url).await;
-            return Err(match outcome {
-                Ok(super::inject::Injected::RngUnavailable) => "RNG unavailable".to_string(),
-                Ok(super::inject::Injected::TranspileFailed(e)) => {
-                    format!("Failed to prepare: {e}")
-                }
-                Ok(super::inject::Injected::HelperUnavailable(e)) => {
-                    format!("Cannot prepare plugins: {e}")
-                }
-                Ok(super::inject::Injected::NoFrame) => "No renderer frame available".to_string(),
-                Err(e) => format!("spawn_blocking failed: {e}"),
-                _ => "Session ended during activation".to_string(),
-            });
+            return Err(failure.reason());
+        }
+        Err(e) => {
+            revert_enable(&url).await;
+            return Err(format!("spawn_blocking failed: {e}"));
         }
     };
 

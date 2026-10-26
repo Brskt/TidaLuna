@@ -9,16 +9,13 @@
 
 use crate::app_state::{eval_js, with_state};
 
-/// What became of an injection, and what the caller still owes.
+/// Why an injection left nothing live, and what the caller still owes.
 ///
-/// Every failing variant has already marked the plugin unloaded: that half is the same for
-/// both callers. What differs is what each owes on top (the boot pass records a failed url
-/// for its batch reconciliation, an enable reverts the `enabled` flag it just set), and that
-/// stays with them.
-pub(super) enum Injected {
-    /// The code is in the renderer and the session that asked for it is still current.
-    /// `load_id` identifies this load for the readiness ack and its timeout.
-    Live { load_id: u64 },
+/// Every variant has already marked the plugin unloaded: that half is the same for every
+/// caller. What differs is what each owes on top (the boot pass records a failed url for its
+/// batch reconciliation, an enable reverts the `enabled` flag it just set), and that stays with
+/// them. A live injection is not one of these: `inject_plugin` hands its `load_id` back as `Ok`.
+pub(super) enum InjectFailure {
     /// No randomness available: no nonce and no capability could be minted. Nothing was
     /// transpiled and nothing was dispatched.
     RngUnavailable,
@@ -33,17 +30,15 @@ pub(super) enum Injected {
     SessionChanged,
 }
 
-/// What the boot pass owes for an outcome, and whether it may go on at all.
+/// What the boot pass owes for a failed injection, and whether it may go on at all.
 ///
-/// The pass used to read this off `Injected` through a wildcard, which left `SessionChanged`
+/// The pass used to read this off the outcome through a wildcard, which left `SessionChanged`
 /// wearing the same clothes as a plugin that could not load. Reconciliation writes
 /// `enabled = 0`. A logout timed against the last plugin of a pass disabled it for every
 /// session afterwards, and the plugin was never at fault. Three duties named apart are what
-/// keeps a sixth outcome from reopening that: `pass_duty` matches exhaustively, and the
+/// keeps a sixth failure from reopening that: `pass_duty` matches exhaustively, and the
 /// compiler asks each new one to choose.
 pub(super) enum PassDuty {
-    /// The code is live under this pass's own session; record the load and count the progress.
-    Record { load_id: u64 },
     /// The attempt ended with nothing live while its session stayed current; the batch
     /// reconciliation owes it a disable.
     Reconcile,
@@ -55,21 +50,32 @@ pub(super) enum PassDuty {
     Keep,
 }
 
-impl Injected {
-    /// Sort an outcome into the duty it leaves the boot pass.
+impl InjectFailure {
+    /// Sort a failure into the duty it leaves the boot pass.
     ///
-    /// `SessionChanged` is the one outcome that says nothing about the plugin. Its injection
+    /// `SessionChanged` is the one failure that says nothing about the plugin. Its injection
     /// has already been undone, and the `enabled` flag it arrived with was set by a user in a
     /// session nothing here has disproved. The updater reached the same conclusion from the
     /// other side, where a check that could not conclude keeps the offer it never disproved.
     pub(super) fn pass_duty(&self) -> PassDuty {
         match self {
-            Injected::Live { load_id } => PassDuty::Record { load_id: *load_id },
-            Injected::RngUnavailable | Injected::TranspileFailed(_) | Injected::NoFrame => {
-                PassDuty::Reconcile
-            }
-            Injected::SessionChanged => PassDuty::Abandon,
-            Injected::HelperUnavailable(_) => PassDuty::Keep,
+            InjectFailure::RngUnavailable
+            | InjectFailure::TranspileFailed(_)
+            | InjectFailure::NoFrame => PassDuty::Reconcile,
+            InjectFailure::SessionChanged => PassDuty::Abandon,
+            InjectFailure::HelperUnavailable(_) => PassDuty::Keep,
+        }
+    }
+
+    /// What the page is told, written in this one place: an enable shows it as the plugin's
+    /// `loadError`, and the updater's restart quotes it after its own lead-in.
+    pub(super) fn reason(&self) -> String {
+        match self {
+            InjectFailure::RngUnavailable => "RNG unavailable".to_string(),
+            InjectFailure::TranspileFailed(e) => format!("Failed to prepare: {e}"),
+            InjectFailure::HelperUnavailable(e) => format!("Cannot prepare plugins: {e}"),
+            InjectFailure::NoFrame => "No renderer frame available".to_string(),
+            InjectFailure::SessionChanged => "Session ended during activation".to_string(),
         }
     }
 }
@@ -83,7 +89,8 @@ pub(super) fn injection_still_current(pass_epoch: u64, current_epoch: Option<u64
 }
 
 /// Mint this load's identity, transpile the plugin, dispatch it, and keep it only if the
-/// session that asked for it is still current.
+/// session that asked for it is still current. `Ok` is the live load's `load_id`, which keys
+/// its readiness ack and the ack's timeout.
 ///
 /// `epoch` is the session the caller decided to inject under, read before this call. The
 /// re-read happens here, after the dispatch, because that is the only point where the answer
@@ -94,7 +101,7 @@ pub(super) fn inject_plugin(
     name: &crate::plugins::name::PluginName,
     code: &str,
     epoch: u64,
-) -> Injected {
+) -> Result<u64, InjectFailure> {
     let (Some(nonce), Some(capability)) = (
         crate::plugins::manager::random_nonce(),
         crate::plugins::manager::random_capability(),
@@ -103,7 +110,7 @@ pub(super) fn inject_plugin(
         // the plugin here would reach past this attempt and drop whatever load was already
         // current, which has nothing to do with a failed draw of randomness.
         crate::vprintln!("[PLUGIN] RNG unavailable, skipping '{name}'");
-        return Injected::RngUnavailable;
+        return Err(InjectFailure::RngUnavailable);
     };
 
     let load_id = with_state(|state| {
@@ -126,12 +133,12 @@ pub(super) fn inject_plugin(
             return match failure {
                 crate::plugins::transpile_helper::Failure::Source(e) => {
                     crate::vprintln!("[PLUGIN] Failed to prepare '{name}': {e}");
-                    Injected::TranspileFailed(e)
+                    Err(InjectFailure::TranspileFailed(e))
                 }
                 crate::plugins::transpile_helper::Failure::Helper(e) => {
                     // Not gated: no plugin can load while this lasts, and nothing else says so.
                     crate::verr!("[PLUGIN] Cannot prepare '{name}': {e}");
-                    Injected::HelperUnavailable(e)
+                    Err(InjectFailure::HelperUnavailable(e))
                 }
             };
         }
@@ -147,7 +154,7 @@ pub(super) fn inject_plugin(
     if !eval_js(&js) {
         crate::vprintln!("[PLUGIN] No renderer frame for '{name}'");
         with_state(|state| state.plugin_manager.retire_load(url, load_id));
-        return Injected::NoFrame;
+        return Err(InjectFailure::NoFrame);
     }
 
     if !injection_still_current(epoch, with_state(|state| state.session_epoch)) {
@@ -162,10 +169,10 @@ pub(super) fn inject_plugin(
         // injection has executed and has something to undo.
         crate::vprintln!("[PLUGIN] Session changed under '{name}' - undoing its injection");
         undo_injection(url, load_id);
-        return Injected::SessionChanged;
+        return Err(InjectFailure::SessionChanged);
     }
 
-    Injected::Live { load_id }
+    Ok(load_id)
 }
 
 /// Wait on the ready ack of `load_id`, and give the load up once it has gone idle: unload it,
@@ -208,9 +215,9 @@ pub(super) async fn watch_ack(url: String, load_id: u64) {
 }
 
 /// Undo an injection that was dispatched and then found unwanted, for the callers whose own
-/// bookkeeping fails after this module has handed back `Live`.
+/// bookkeeping fails after this module has handed back a live load.
 ///
-/// `load_id` names the load being undone. The callers all hold it (it is what `Live` handed
+/// `load_id` names the load being undone. The callers all hold it (it is what `Ok` handed
 /// them), and passing it is what keeps this from reaching past its own attempt into whatever
 /// load became current in the meantime.
 pub(super) fn undo_injection(url: &str, load_id: u64) {

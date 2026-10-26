@@ -30,11 +30,10 @@ fn an_injection_is_recorded_only_while_its_session_is_provably_current() {
 
 /// The boot pass sorts an outcome into what it owes. A logout under an injection owes nothing:
 /// reconciled as the plugin's own failure it wrote `enabled = 0` behind a log level that is off by
-/// default. Outcomes that end under their own session still owe their url, or their load.
+/// default. Outcomes that end under their own session still owe their url.
 #[test]
 fn an_outcome_owes_the_boot_pass_a_verdict_only_under_its_own_session() {
-    let duty = |outcome: Injected| match outcome.pass_duty() {
-        PassDuty::Record { load_id } => format!("record {load_id}"),
+    let duty = |outcome: InjectFailure| match outcome.pass_duty() {
         PassDuty::Reconcile => "reconcile".to_string(),
         PassDuty::Abandon => "abandon".to_string(),
         PassDuty::Keep => "keep".to_string(),
@@ -42,34 +41,29 @@ fn an_outcome_owes_the_boot_pass_a_verdict_only_under_its_own_session() {
 
     for (outcome, expected, why) in [
         (
-            Injected::SessionChanged,
+            InjectFailure::SessionChanged,
             "abandon",
             "a logout under an injection would be reconciled as the plugin's own failure",
         ),
         (
-            Injected::RngUnavailable,
+            InjectFailure::RngUnavailable,
             "reconcile",
             "no nonce could be minted: nothing was dispatched and the url is still owed",
         ),
         (
-            Injected::TranspileFailed("unterminated string literal".to_string()),
+            InjectFailure::TranspileFailed("unterminated string literal".to_string()),
             "reconcile",
             "the plugin's own source is what failed to prepare here",
         ),
         (
-            Injected::HelperUnavailable("cannot start the transpile helper".to_string()),
+            InjectFailure::HelperUnavailable("cannot start the transpile helper".to_string()),
             "keep",
             "a helper that cannot run fails every plugin of the pass, and none of them is at fault",
         ),
         (
-            Injected::NoFrame,
+            InjectFailure::NoFrame,
             "reconcile",
             "no frame took the code, and the session is still the one that asked for it",
-        ),
-        (
-            Injected::Live { load_id: 7 },
-            "record 7",
-            "the readiness ack and its timeout are keyed to this load, which has to survive the sort",
         ),
     ] {
         assert_eq!(duty(outcome), expected, "{why}");
