@@ -289,3 +289,31 @@ async fn a_grant_read_before_a_reinstall_is_not_written_after_it() {
 
     assert!(!gate.is_open());
 }
+
+/// Bun honours grants module by module: a row an older build saved module by module can hold a
+/// refusal beside grants, and a plugin serving the granted code again would get the rest.
+#[test]
+fn a_refused_module_refuses_its_whole_row() {
+    let map = |stored: &[(&str, bool)]| -> HashMap<String, bool> {
+        stored.iter().map(|(m, g)| (m.to_string(), *g)).collect()
+    };
+    let net = |granted: bool| -> Vec<(&str, bool)> {
+        NETWORK_MODULES.iter().map(|m| (*m, granted)).collect()
+    };
+    let mut partial = net(true);
+    partial[0] = ("net", false);
+    let cases = [
+        (map(&partial), map(&net(false))),
+        (map(&[("net", false)]), map(&net(false))),
+        (
+            map(&[("fs", true), ("os", false)]),
+            map(&[("fs", true), ("os", false)]),
+        ),
+        (map(&net(true)), map(&net(true))),
+    ];
+    for (mut stored, expected) in cases {
+        let before = stored.clone();
+        refuse_whole_rows(&mut stored);
+        assert_eq!(stored, expected, "stored {before:?}");
+    }
+}

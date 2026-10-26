@@ -7,35 +7,69 @@ pub(crate) struct TrustDecision {
     pub granted: bool,
 }
 
-/// Load persisted trust decisions for a plugin's current code.
-///
-/// Scoped to `code_hash`: a decision granted for one version of the native
-/// code does not apply once the code changes under the same plugin name. A
-/// hash mismatch yields no decisions; the user is re-prompted, and that is
-/// what makes trust-on-first-use sound against code substitution.
+/// A plugin's trust decisions for its current code. A grant holds for its `code_hash` only, against
+/// code substitution; a module whose latest decision under any hash refused stays refused until a
+/// reinstall. A failed read is an error, never "none": a refusal missed lets the grants through.
 pub(crate) fn load_trust(
     conn: &mut Connection,
     plugin: &str,
     code_hash: &str,
-) -> Vec<TrustDecision> {
-    let mut stmt = match conn
-        .prepare("SELECT module, granted FROM native_trust WHERE plugin = ?1 AND code_hash = ?2")
-    {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map(params![plugin, code_hash], |row| {
+) -> rusqlite::Result<Vec<TrustDecision>> {
+    let mut decisions = query_decisions(
+        conn,
+        "SELECT module, granted FROM native_trust WHERE plugin = ?1 AND code_hash = ?2",
+        params![plugin, code_hash],
+    )?;
+    let refusals = query_decisions(
+        conn,
+        "SELECT module, granted FROM native_trust
+         WHERE granted = 0 AND rowid IN (
+             SELECT max(rowid) FROM native_trust WHERE plugin = ?1 GROUP BY module)",
+        params![plugin],
+    )?;
+    for refusal in refusals {
+        match decisions.iter_mut().find(|d| d.module == refusal.module) {
+            Some(decision) => decision.granted = false,
+            None => decisions.push(refusal),
+        }
+    }
+    Ok(decisions)
+}
+
+fn query_decisions(
+    conn: &mut Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Vec<TrustDecision>> {
+    let mut stmt = conn.prepare(sql)?;
+    stmt.query_map(params, |row| {
         Ok(TrustDecision {
             module: row.get(0)?,
             granted: row.get::<_, i32>(1)? != 0,
         })
-    })
-    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-    .unwrap_or_default()
+    })?
+    .collect()
+}
+
+/// One trust dialog's answer as one commit, on the disk before this returns. Bun honours grants
+/// module by module: a row stored in part, or a refusal a power cut takes back, would leave
+/// modules granted that the user refused, an older hash's grant included.
+pub(crate) fn save_trust_answers(
+    conn: &mut Connection,
+    code_hash: &str,
+    plugin: &str,
+    answers: &[(&str, bool)],
+) -> rusqlite::Result<()> {
+    let _stable = Stable::begin(conn);
+    let tx = conn.unchecked_transaction()?;
+    for &(module, granted) in answers {
+        save_trust(&tx, code_hash, plugin, module, granted)?;
+    }
+    tx.commit()
 }
 
 pub(crate) fn save_trust(
-    conn: &mut Connection,
+    conn: &Connection,
     code_hash: &str,
     plugin: &str,
     module: &str,
@@ -54,8 +88,7 @@ pub(crate) fn save_trust(
 /// bytes rather than `LIKE`, whose `_` is a wildcard and which ignores case.
 ///
 /// The delete is on the disk before this returns: a clear that only reached the OS cache would
-/// hand an older grant back after a power cut, over any refusal given since. Grants and refusals
-/// stay on the routine sync, since a row lost with the tail only asks again.
+/// hand an older grant back after a power cut, over any refusal given since.
 pub(crate) fn clear_trust_by_plugin(
     conn: &mut Connection,
     plugin: &PluginName,

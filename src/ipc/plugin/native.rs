@@ -55,6 +55,19 @@ fn row_modules(row: &str) -> &'static [&'static str] {
         .map_or(&[], |(_, modules)| *modules)
 }
 
+/// One refused module refuses its whole row, whatever its other modules stored: Bun honours grants
+/// module by module, and a row an older build saved module by module can hold a refusal beside
+/// grants. A row refused here is never asked again, so its answer cannot overwrite the refusal.
+fn refuse_whole_rows(grants: &mut HashMap<String, bool>) {
+    for (_, modules) in TRUST_ROWS {
+        if modules.iter().any(|m| grants.get(*m) == Some(&false)) {
+            for module in *modules {
+                grants.insert((*module).to_string(), false);
+            }
+        }
+    }
+}
+
 /// Pending trust prompts: one per "module::rows" and load of the plugin. Concurrent register calls
 /// of one load that ask the same rows share a single dialog.
 static PENDING_TRUST: LazyLock<Prompts> = LazyLock::new(Prompts::default);
@@ -508,13 +521,13 @@ pub(super) fn handle_register_native(
                 // Off the UI thread (judging it stats every ancestor). A data dir inside the app's
                 // own files would hand a plugin write access to them.
                 if crate::platform::install_guard::get().is_some_and(|g| g.covers(&dir)) {
-                    return Err(DataDirRefusal::InsideTheApp);
+                    return Err(StateRefusal::InsideTheApp);
                 }
                 crate::state::db().call(move |pc, sc| {
                     // A case twin installed before names were unique in any case shares this
                     // folder wherever the file system ignores case.
                     if crate::plugins::store::case_twin_installed(pc, &declared) {
-                        return Err(DataDirRefusal::SharedByCase);
+                        return Err(StateRefusal::SharedByCase);
                     }
                     let manifest_json: String = pc
                         .query_row(
@@ -523,7 +536,8 @@ pub(super) fn handle_register_native(
                             |row| row.get(0),
                         )
                         .unwrap_or_default();
-                    let decisions = crate::native_runtime::trust::load_trust(sc, &plugin, &hash);
+                    let decisions = crate::native_runtime::trust::load_trust(sc, &plugin, &hash)
+                        .map_err(StateRefusal::TrustUnreadable)?;
                     Ok((manifest_json, decisions))
                 })
             }
@@ -532,7 +546,7 @@ pub(super) fn handle_register_native(
 
         let (manifest_json, decisions) = match read {
             Ok(Ok(pair)) => pair,
-            Ok(Err(DataDirRefusal::InsideTheApp)) => {
+            Ok(Err(StateRefusal::InsideTheApp)) => {
                 crate::verr!(
                     "[NATIVE] Refused a plugin data dir inside TidaLunar's own files: {}",
                     data_dir_path.display()
@@ -540,7 +554,7 @@ pub(super) fn handle_register_native(
                 ipc_callback_err(&callback, 403, "registerNative: data dir is not usable");
                 return;
             }
-            Ok(Err(DataDirRefusal::SharedByCase)) => {
+            Ok(Err(StateRefusal::SharedByCase)) => {
                 crate::verr!(
                     "[NATIVE] Refused the data dir of {:?}: another installed plugin has the same name in another case",
                     declared_name.as_str()
@@ -552,9 +566,18 @@ pub(super) fn handle_register_native(
                 );
                 return;
             }
+            // These two refuse rather than register with no grants read: an empty map reads as
+            // "nothing was ever trusted", and would re-prompt modules answered or pass refused ones.
+            Ok(Err(StateRefusal::TrustUnreadable(e))) => {
+                crate::verr!("[NATIVE] Could not read the trust decisions of {name}: {e}");
+                ipc_callback_err(
+                    &callback,
+                    500,
+                    "registerNative: could not read plugin state",
+                );
+                return;
+            }
             Err(e) => {
-                // Refusing beats registering with no grants read: an empty map reads as "nothing
-                // was ever trusted" and would re-prompt for modules the user already answered.
                 crate::verr!("[NATIVE] registerNative state read did not run: {e}");
                 ipc_callback_err(
                     &callback,
@@ -564,10 +587,11 @@ pub(super) fn handle_register_native(
                 return;
             }
         };
-        let trust_grants: HashMap<String, bool> = decisions
+        let mut trust_grants: HashMap<String, bool> = decisions
             .into_iter()
             .map(|d| (d.module, d.granted))
             .collect();
+        refuse_whole_rows(&mut trust_grants);
 
         let scanned = scanned_rows(runtime, &code).await;
         if let Some(progress) = &progress {
@@ -686,9 +710,7 @@ async fn ask_trust(attempt: &mut RegisterAttempt, rows: &[&'static str]) -> Opti
         let gate = waiting.gate();
         // Awaited rather than posted: the dedup key below may only go once this write is
         // committed, or a caller after it would find neither the key nor the row and prompt
-        // again. Not synced to the disk: a commit a power cut takes back asks again, since
-        // `clear_trust_by_plugin` leaves no older grant to read back. Handed to the blocking
-        // pool: the round trip parks that pool's thread instead of this tokio worker.
+        // again. On the blocking pool: the round trip parks that pool's thread, not a worker.
         let written = tokio::task::spawn_blocking(move || {
             crate::state::db().call_settings(move |conn| {
                 // Checked on the actor, where an uninstall or a reinstall also runs: either
@@ -697,17 +719,12 @@ async fn ask_trust(attempt: &mut RegisterAttempt, rows: &[&'static str]) -> Opti
                 if !gate.is_open() {
                     return;
                 }
-                for (module, granted) in decided {
-                    if let Err(e) = crate::native_runtime::trust::save_trust(
-                        conn, &hash, &plugin, module, granted,
-                    ) {
-                        crate::vprintln!(
-                            "[NATIVE] Failed to save trust for {}::{}: {}",
-                            plugin,
-                            module,
-                            e
-                        );
-                    }
+                // A save that fails still lets the answer apply below, for this session only: the
+                // next load asks again. Logged ungated, as nothing else would tell.
+                if let Err(e) =
+                    crate::native_runtime::trust::save_trust_answers(conn, &hash, &plugin, &decided)
+                {
+                    crate::verr!("[NATIVE] Failed to save the trust answer of {plugin}: {e}");
                 }
             })
         })
@@ -733,11 +750,13 @@ async fn ask_trust(attempt: &mut RegisterAttempt, rows: &[&'static str]) -> Opti
     Some(answers)
 }
 
-/// Why a plugin's data dir cannot be handed out.
-enum DataDirRefusal {
+/// Why a registration is refused before any trust dialog: its data dir cannot be handed out, or
+/// what the user decided cannot be read.
+enum StateRefusal {
     InsideTheApp,
     /// Another installed plugin's name differs only by case: one folder where case is ignored.
     SharedByCase,
+    TrustUnreadable(rusqlite::Error),
 }
 
 /// One registration attempt. These values all travel together through the trust retry, and the

@@ -6,7 +6,9 @@ use super::durability_settings_tests::{
 };
 use super::fixture::file_conn;
 use super::*;
-use crate::native_runtime::trust::{clear_trust_by_plugin, load_trust, save_trust};
+use crate::native_runtime::trust::{
+    clear_trust_by_plugin, load_trust, save_trust, save_trust_answers,
+};
 use crate::plugins::name::PluginName;
 use std::path::Path;
 
@@ -18,6 +20,7 @@ fn net() -> PluginName {
 
 fn granted(conn: &mut Connection) -> Vec<bool> {
     load_trust(conn, PLUGIN, "h")
+        .unwrap()
         .into_iter()
         .map(|d| d.granted)
         .collect()
@@ -27,7 +30,7 @@ fn granted(conn: &mut Connection) -> Vec<bool> {
 fn clearing_a_plugins_trust_is_written_under_a_full_sync() {
     let dir = tempfile::tempdir().unwrap();
     let mut conn = file_conn(dir.path());
-    save_trust(&mut conn, "h", PLUGIN, "net", true).unwrap();
+    save_trust(&conn, "h", PLUGIN, "net", true).unwrap();
     let statements = statements_of(&mut conn, |c| clear_trust_by_plugin(c, &net()).unwrap());
     assert_in_order(
         &statements,
@@ -51,12 +54,12 @@ fn a_refusal_lost_with_the_tail_asks_again_once_the_grant_is_cleared() {
     let dir = tempfile::tempdir().unwrap();
     let mut conn = file_conn(dir.path());
     conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
-    save_trust(&mut conn, "h", PLUGIN, "net", true).unwrap();
+    save_trust(&conn, "h", PLUGIN, "net", true).unwrap();
     conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
     clear_trust_by_plugin(&mut conn, &net()).unwrap();
     let cleared = wal_len(dir.path());
-    save_trust(&mut conn, "h", PLUGIN, "net", false).unwrap();
+    save_trust(&conn, "h", PLUGIN, "net", false).unwrap();
     let refused = wal_len(dir.path());
     assert!(cleared > 0 && refused > cleared);
 
@@ -70,4 +73,43 @@ fn a_refusal_lost_with_the_tail_asks_again_once_the_grant_is_cleared() {
     assert!(granted(&mut lost_refusal).is_empty());
     let mut lost_nothing = after_a_power_cut(dir.path(), "settings.db", refused);
     assert_eq!(granted(&mut lost_nothing), [false]);
+}
+
+/// Bun honours grants module by module: an answer cut short would leave part of a refused row
+/// granted. Wherever the log is cut, the answer is stored whole or not at all.
+#[test]
+fn a_trust_answer_is_stored_whole_or_not_at_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = file_conn(dir.path());
+    conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let modules = [
+        "net",
+        "http",
+        "https",
+        "http2",
+        "tls",
+        "dns",
+        "dns/promises",
+    ];
+    let answer: Vec<(&str, bool)> = modules.iter().map(|m| (*m, false)).collect();
+    save_trust_answers(&mut conn, "h", PLUGIN, &answer).unwrap();
+    let written = wal_len(dir.path());
+    let page: i64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+
+    // A log is a 32-byte header, then frames of a 24-byte header and one page each.
+    let cuts = std::iter::once(0).chain((32..=written).step_by(24 + page as usize));
+    for kept in cuts {
+        let cut = after_a_power_cut(dir.path(), "settings.db", kept);
+        let stored: i64 = cut
+            .query_row("SELECT COUNT(*) FROM native_trust", [], |row| row.get(0))
+            .unwrap();
+        assert!(
+            stored == 0 || stored == modules.len() as i64,
+            "{stored} modules stored after a cut at byte {kept}"
+        );
+    }
 }

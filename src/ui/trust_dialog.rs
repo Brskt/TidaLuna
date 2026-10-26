@@ -185,10 +185,10 @@ button:disabled {{ background:#333; color:#777; cursor:default; }}
     </div>
     <div class="warn">
         Only allow what you trust this plugin with.
-        <div style="margin-top:6px">Your answers are remembered unless the plugin is:</div>
+        <div style="margin-top:6px">Your answers are remembered:</div>
         <ul>
-            <li>Reinstalled</li>
-            <li>Updated</li>
+            <li>Allowed: until an update changes this file, or the plugin is reinstalled</li>
+            <li>Denied: until the plugin is reinstalled</li>
         </ul>
         <div style="margin-top:6px">Closing this window answers nothing: you will be asked again.</div>
     </div>
