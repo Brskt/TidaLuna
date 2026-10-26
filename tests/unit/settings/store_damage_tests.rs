@@ -38,7 +38,7 @@ fn insert_refused_trust(conn: &Connection) {
     .unwrap();
 }
 
-/// A profile with a log level and a trust row, and the two default-on consents refused or left
+/// A profile with a log level and a trust row, and the three default-on consents refused or left
 /// without a row.
 fn profile(dir: &Path, refused_consents: bool) -> PathBuf {
     let path = dir.join("settings.db");
@@ -47,18 +47,19 @@ fn profile(dir: &Path, refused_consents: bool) -> PathBuf {
     if refused_consents {
         save_video_codec_enabled(&mut conn, false);
         save_receiver_always_on(&mut conn, false);
+        save_plugin_update_at_boot(&mut conn, false);
     }
     save_log_level(&mut conn, 2);
     insert_refused_trust(&conn);
     path
 }
 
-/// A profile that refused the two default-on consents and kept a log level, as the real one does.
+/// A profile that refused the three default-on consents and kept a log level, as the real one does.
 fn seeded(dir: &Path) -> PathBuf {
     profile(dir, true)
 }
 
-/// A profile that never touched the two default-on consents: no row for either.
+/// A profile that never touched the three default-on consents: no row for any.
 fn untouched(dir: &Path) -> PathBuf {
     profile(dir, false)
 }
@@ -71,6 +72,7 @@ fn table_page_reverted_index_kept(dir: &Path, after_refusal: impl FnOnce(&Connec
         let mut conn = Connection::open(&path).unwrap();
         init_schema(&mut conn).unwrap();
         save_receiver_always_on(&mut conn, false);
+        save_plugin_update_at_boot(&mut conn, false);
         save_log_level(&mut conn, 2);
     }
     let table = root_page(&path, "settings");
@@ -102,7 +104,11 @@ fn page_image(path: &Path, page: u64) -> Vec<u8> {
     file[((page - 1) * PAGE) as usize..(page * PAGE) as usize].to_vec()
 }
 
-const BOTH_CONSENTS: [&str; 2] = [CONNECT_RECEIVER_ALWAYS_ON.key, VIDEO_CODEC_ENABLED.key];
+const CONSENTS: [&str; 3] = [
+    PLUGINS_UPDATE_AT_BOOT.key,
+    CONNECT_RECEIVER_ALWAYS_ON.key,
+    VIDEO_CODEC_ENABLED.key,
+];
 
 fn trust_rows(conn: &Connection) -> i64 {
     conn.query_row("SELECT count(*) FROM native_trust", [], |row| row.get(0))
@@ -151,7 +157,7 @@ fn a_damaged_settings_page_is_set_aside_and_the_refusals_survive_the_rebuild() {
     assert_eq!(
         opened,
         Opened::Rebuilt {
-            turned_off: BOTH_CONSENTS.to_vec(),
+            turned_off: CONSENTS.to_vec(),
             trust: Trust::Dropped
         }
     );
@@ -180,7 +186,7 @@ fn a_store_that_is_not_a_database_is_rebuilt_instead_of_failing_the_launch() {
         assert_eq!(
             open(&path).unwrap().1,
             Opened::Rebuilt {
-                turned_off: BOTH_CONSENTS.to_vec(),
+                turned_off: CONSENTS.to_vec(),
                 trust: Trust::Unknown
             },
             "{what}"
@@ -204,7 +210,7 @@ fn an_index_that_lost_a_row_is_rebuilt_without_losing_it() {
     }
 
     let (mut conn, opened) = open(&path).unwrap();
-    // The table still held both refusals: nothing to write down.
+    // The table still held every refusal: nothing to write down.
     assert_eq!(
         opened,
         Opened::Reindexed {
@@ -452,7 +458,7 @@ fn a_repair_notice_outlives_the_process_that_made_it_until_it_is_acknowledged() 
     let dir = tempfile::tempdir().unwrap();
     let path = seeded(dir.path());
     ruin_page(&path, root_page(&path, "settings"));
-    let told = told_of(&BOTH_CONSENTS, Trust::Dropped, true);
+    let told = told_of(&CONSENTS, Trust::Dropped, true);
     {
         let (conn, _) = open(&path).unwrap();
         assert_eq!(pending_notice(&conn), told);
@@ -482,7 +488,7 @@ fn the_reply_to_the_ask_is_the_notice_as_the_page_reads_it_then_null() {
     let (conn, _) = open(&path).unwrap();
     assert_eq!(
         serde_json::to_string(&pending_notice(&conn)).unwrap(),
-        r#"{"turnedOff":["connect.receiver_always_on","video.codec_enabled"],"trust":"dropped","saved":true}"#
+        r#"{"turnedOff":["plugins.update_at_boot","connect.receiver_always_on","video.codec_enabled"],"trust":"dropped","saved":true}"#
     );
     acknowledge_repair_notice(&conn);
     assert_eq!(
@@ -516,7 +522,7 @@ fn a_volatile_run_tells_it_cannot_save_and_leaves_nothing_on_disk_to_tell_twice(
     let (conn, _) = open(&path).unwrap();
     assert_eq!(
         pending_notice(&conn),
-        told_of(&BOTH_CONSENTS, Trust::Dropped, false)
+        told_of(&CONSENTS, Trust::Dropped, false)
     );
     acknowledge_repair_notice(&conn);
     assert_eq!(pending_notice(&conn), None);
@@ -529,7 +535,7 @@ fn a_volatile_run_tells_it_cannot_save_and_leaves_nothing_on_disk_to_tell_twice(
     assert!(matches!(opened, Opened::Rebuilt { .. }));
     assert_eq!(
         pending_notice(&conn),
-        told_of(&BOTH_CONSENTS, Trust::Dropped, true)
+        told_of(&CONSENTS, Trust::Dropped, true)
     );
 }
 
@@ -545,7 +551,7 @@ fn a_second_repair_before_the_first_was_told_tells_both() {
 
     assert_eq!(
         pending_notice(&conn),
-        told_of(&BOTH_CONSENTS, Trust::Dropped, true)
+        told_of(&CONSENTS, Trust::Dropped, true)
     );
 }
 
@@ -609,7 +615,7 @@ fn a_volatile_run_leaves_the_damaged_store_exactly_where_it_was() {
     assert_eq!(
         opened,
         Opened::Volatile {
-            turned_off: BOTH_CONSENTS.to_vec(),
+            turned_off: CONSENTS.to_vec(),
             trust: Trust::Dropped
         }
     );
@@ -624,7 +630,7 @@ fn a_volatile_run_leaves_the_damaged_store_exactly_where_it_was() {
     assert_eq!(
         opened,
         Opened::Rebuilt {
-            turned_off: BOTH_CONSENTS.to_vec(),
+            turned_off: CONSENTS.to_vec(),
             trust: Trust::Dropped
         }
     );
@@ -701,7 +707,7 @@ fn a_rebuild_that_died_before_the_swap_is_redone_from_the_damaged_store() {
         assert_eq!(
             opened,
             Opened::Rebuilt {
-                turned_off: BOTH_CONSENTS.to_vec(),
+                turned_off: CONSENTS.to_vec(),
                 trust: Trust::Dropped
             }
         );
@@ -802,7 +808,7 @@ fn a_vanished_settings_table_is_not_papered_over_before_the_decision() {
     assert_eq!(
         opened,
         Opened::Rebuilt {
-            turned_off: BOTH_CONSENTS.to_vec(),
+            turned_off: CONSENTS.to_vec(),
             trust: Trust::Dropped
         }
     );
@@ -835,7 +841,7 @@ fn a_reindex_whose_markers_cannot_be_written_repairs_nothing() {
 }
 
 /// A profile whose first row is one the table keeps but cannot be read as text (`first`), then
-/// the two refusals, with the trust table ruined: the settings table passes its own check.
+/// the three refusals, with the trust table ruined: the settings table passes its own check.
 fn unreadable_row_first(dir: &Path, first: &str) -> PathBuf {
     let path = dir.join("settings.db");
     let mut conn = Connection::open(&path).unwrap();
@@ -843,6 +849,7 @@ fn unreadable_row_first(dir: &Path, first: &str) -> PathBuf {
     conn.execute(first, []).unwrap();
     save_video_codec_enabled(&mut conn, false);
     save_receiver_always_on(&mut conn, false);
+    save_plugin_update_at_boot(&mut conn, false);
     insert_refused_trust(&conn);
     drop(conn);
     ruin_page(&path, root_page(&path, "native_trust"));
@@ -959,13 +966,14 @@ fn a_scan_that_cannot_run_or_stops_early_is_not_intact() {
     assert!(!salvaged.rows.is_empty());
 }
 
-/// A profile that refused the two consents and holds no trust decision.
+/// A profile that refused the three consents and holds no trust decision.
 fn seeded_without_trust(dir: &Path) -> PathBuf {
     let path = dir.join("settings.db");
     let mut conn = Connection::open(&path).unwrap();
     init_schema(&mut conn).unwrap();
     save_video_codec_enabled(&mut conn, false);
     save_receiver_always_on(&mut conn, false);
+    save_plugin_update_at_boot(&mut conn, false);
     path
 }
 
@@ -980,7 +988,7 @@ fn a_rebuild_that_lost_no_trust_decision_does_not_announce_one() {
     assert_eq!(
         opened,
         Opened::Rebuilt {
-            turned_off: BOTH_CONSENTS.to_vec(),
+            turned_off: CONSENTS.to_vec(),
             trust: Trust::Empty
         }
     );
@@ -1036,7 +1044,7 @@ fn rebuilt_in_a_directory_named(name: &std::ffi::OsStr) {
     assert_eq!(
         opened,
         Opened::Rebuilt {
-            turned_off: BOTH_CONSENTS.to_vec(),
+            turned_off: CONSENTS.to_vec(),
             trust: Trust::Dropped
         }
     );
@@ -1091,7 +1099,7 @@ fn set_notice_row(path: &Path, json: &str) {
         .unwrap();
 }
 
-/// A profile whose first repair was never told of: both consents turned off, trust dropped.
+/// A profile whose first repair was never told of: the consents turned off, trust dropped.
 fn repaired_untold(dir: &Path) -> PathBuf {
     let path = seeded(dir);
     ruin_page(&path, root_page(&path, "settings"));
@@ -1102,7 +1110,7 @@ fn repaired_untold(dir: &Path) -> PathBuf {
 /// What a notice that cannot be read again is stood in for by: every setting reading as a repair
 /// leaves it, and permissions that may be asked again.
 fn the_wider_notice() -> Option<RepairNotice> {
-    told_of(&BOTH_CONSENTS, Trust::Unknown, true)
+    told_of(&CONSENTS, Trust::Unknown, true)
 }
 
 #[test]
@@ -1214,6 +1222,7 @@ fn a_trust_decision_the_table_lost_is_told_by_a_reindex() {
             "a reindex that also turned a setting off",
             |conn| {
                 save_video_codec_enabled(conn, false);
+                save_plugin_update_at_boot(conn, false);
                 save_log_level(conn, 2);
             },
             true,
@@ -1306,12 +1315,20 @@ fn a_damaged_store_from_before_the_notice_is_told_only_what_its_own_repair_did()
     let receiver_off = "INSERT INTO settings VALUES ('connect.receiver_always_on', 'false');";
     // (rows the user left, damage, what the repair itself turned off)
     let cases = [
-        (receiver_off, corrupt_index_byte as fn(&Path), vec![]),
-        ("", corrupt_index_byte, vec![CONNECT_RECEIVER_ALWAYS_ON.key]),
+        (
+            receiver_off,
+            corrupt_index_byte as fn(&Path),
+            vec![PLUGINS_UPDATE_AT_BOOT.key],
+        ),
+        (
+            "",
+            corrupt_index_byte,
+            vec![PLUGINS_UPDATE_AT_BOOT.key, CONNECT_RECEIVER_ALWAYS_ON.key],
+        ),
         (
             receiver_off,
             |path: &Path| ruin_page(path, root_page(path, "settings")),
-            BOTH_CONSENTS.to_vec(),
+            CONSENTS.to_vec(),
         ),
     ];
     for (rows, damage, turned_off) in cases {

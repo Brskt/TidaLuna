@@ -214,6 +214,13 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             });
             crate::vprintln!("[UPDATER] Auto-check set to {enabled}");
         }
+        "settings.set_plugin_update_at_boot" => {
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
+            crate::state::db().post(move |_, conn| {
+                crate::settings::save_plugin_update_at_boot(conn, enabled);
+            });
+            crate::vprintln!("[PLUGIN] Update check at launch set to {enabled}");
+        }
         "updater.set_channel" => {
             // save_update_channel normalizes anything but "dev" to "stable", and
             // `from_setting` maps the same string the same way. The value handed to the

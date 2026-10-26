@@ -96,8 +96,11 @@ pub(crate) fn after_a_power_cut(dir: &Path, file: &str, wal_kept: u64) -> Connec
 
 #[test]
 fn a_refused_consent_is_written_under_a_full_sync() {
-    let savers: [fn(&mut Connection, bool); 2] =
-        [save_video_codec_enabled, save_receiver_always_on];
+    let savers: [fn(&mut Connection, bool); 3] = [
+        save_video_codec_enabled,
+        save_receiver_always_on,
+        save_plugin_update_at_boot,
+    ];
     for save in savers {
         let dir = tempfile::tempdir().unwrap();
         let mut conn = file_conn(dir.path());

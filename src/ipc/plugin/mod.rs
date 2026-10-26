@@ -141,6 +141,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         "plugin.update" => {
             update::handle_plugin_update(&msg, callback);
         }
+        "plugin.update_all" => {
+            update::handle_plugin_update_all(callback);
+        }
         "plugin.enable" => {
             plugin_ipc::handle_plugin_enable(&msg, callback);
         }
@@ -161,6 +164,12 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         }
         "settings.video_codec_state" => {
             ipc_callback_ok(&callback, &crate::video::codec::state_json());
+        }
+        "settings.plugin_update_at_boot" => {
+            crate::state::db().post(move |_, settings| {
+                let on = crate::settings::load_plugin_update_at_boot(settings);
+                ipc_callback_ok(&callback, &on.to_string());
+            });
         }
         // The reply carries the repairs the user has not been told of (settings.db, plugins.db),
         // `null` when there are none; they stay in their stores until `settings.store_repair_ack`.

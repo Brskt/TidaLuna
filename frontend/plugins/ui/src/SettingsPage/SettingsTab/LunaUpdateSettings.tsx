@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
@@ -31,6 +31,19 @@ export const LunaUpdateSettings = React.memo(() => {
 	const [checking, setChecking] = useState(false);
 	const [checkNote, setCheckNote] = useState("");
 	const [autoCheck, setAutoCheck] = useState(() => (window as any).__TIDALUNAR_AUTO_CHECK__ !== false);
+	// Read from Rust on mount: a value seeded at launch would be stale after a page reload.
+	const [pluginCheck, setPluginCheck] = useState(true);
+	// A click before the read answers is newer than what the read saw, and its write queues after
+	// the read on the same DB actor: the click is what the DB ends on, so the answer is dropped.
+	const pluginCheckTouched = useRef(false);
+	useEffect(() => {
+		ipcRenderer
+			.invoke("settings.plugin_update_at_boot")
+			.then((on: unknown) => {
+				if (!pluginCheckTouched.current) setPluginCheck(on !== false);
+			})
+			.catch((err: unknown) => console.warn("[luna:ui] plugin update setting unreadable:", err));
+	}, []);
 	const [channel, setChannel] = useState(() =>
 		(window as any).__TIDALUNAR_UPDATE_CHANNEL__ === "dev" ? "dev" : "stable",
 	);
@@ -98,6 +111,12 @@ export const LunaUpdateSettings = React.memo(() => {
 		setAutoCheck(checked);
 		(window as any).__TIDALUNAR_AUTO_CHECK__ = checked;
 		ipcRenderer.send("updater.set_auto_check", checked);
+	}, []);
+
+	const handlePluginCheckToggle = useCallback((_: any, checked: boolean) => {
+		pluginCheckTouched.current = true;
+		setPluginCheck(checked);
+		ipcRenderer.send("settings.set_plugin_update_at_boot", checked);
 	}, []);
 
 	const handleChannel = useCallback((value: string) => {
@@ -204,6 +223,12 @@ export const LunaUpdateSettings = React.memo(() => {
 				desc="Check for updates automatically when the app starts"
 				checked={autoCheck}
 				onChange={handleAutoCheckToggle}
+			/>
+			<LunaSwitchSetting
+				title="Check plugin updates on startup"
+				desc="Update installed plugins from their source when the app starts"
+				checked={pluginCheck}
+				onChange={handlePluginCheckToggle}
 			/>
 			<LunaSelectSetting
 				title="Update channel"

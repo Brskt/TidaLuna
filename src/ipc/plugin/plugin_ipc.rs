@@ -350,12 +350,13 @@ async fn do_plugin_disable(url: String) -> Result<(), String> {
 
 /// jsrt.load_plugins as request-response: runs multi-pass + reconciliation, then responds.
 /// Refuses to load plugins when no session is active (login page scenario).
-pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
-    let has_session =
-        with_state(|state| !state.captured_token.is_empty() || state.token_state.is_some())
-            .unwrap_or(false);
+pub(super) fn has_session() -> bool {
+    with_state(|state| !state.captured_token.is_empty() || state.token_state.is_some())
+        .unwrap_or(false)
+}
 
-    if !has_session {
+pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
+    if !has_session() {
         crate::vprintln!("[PLUGIN] Skipping plugin load - no active session");
         ipc_callback_ok(&callback, "true");
         return;

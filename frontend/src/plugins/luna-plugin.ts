@@ -370,8 +370,8 @@ export class LunaPlugin {
             if (!LunaPlugin.corePlugins.has(this.name)) {
                 pulled = await this.pullUpdate();
                 this.note(pullNote(pulled));
-                // Busy: the live-reload poll or another Reload holds the plugin's turn, and a
-                // restart now would run alongside theirs.
+                // Busy: the launch check, the live-reload poll or another Reload holds the plugin's
+                // turn, and a restart now would run alongside theirs.
                 if (pulled.outcome === "busy" || pulled.outcome === "gone") return;
             }
             await this.restart(pulled);

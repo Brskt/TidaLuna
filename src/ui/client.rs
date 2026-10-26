@@ -164,6 +164,7 @@ impl BrowserSideHandler for IpcQueryHandler {
                     || msg.channel.starts_with("connect.")
                     || msg.channel == "player.parse_dash"
                     || msg.channel == "settings.video_codec_state"
+                    || msg.channel == "settings.plugin_update_at_boot"
                     || msg.channel == "settings.store_repair")
             {
                 if msg.channel.starts_with("connect.") {

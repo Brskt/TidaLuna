@@ -453,6 +453,18 @@ pub(crate) fn check_dependencies_satisfied(
     }
 }
 
+/// `Ok(false)` once the plugin is off or gone; a read that failed is an `Err`, not a disable.
+pub(crate) fn is_enabled(conn: &mut Connection, url: &str) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension as _;
+    conn.query_row(
+        "SELECT enabled FROM plugins WHERE url = ?1 AND installed = 1",
+        params![url],
+        |row| row.get::<_, i32>(0),
+    )
+    .optional()
+    .map(|flag| flag.is_some_and(|flag| flag != 0))
+}
+
 /// Get the plugin name for a given URL.
 pub(crate) fn get_name_by_url(conn: &mut Connection, url: &str) -> Option<String> {
     conn.query_row(
@@ -647,6 +659,26 @@ pub(crate) fn collect_enabled_code(conn: &mut Connection) -> Vec<EnabledPlugin> 
         Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
         Err(e) => {
             crate::vprintln!("[PLUGINS] Failed to query enabled plugins: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// The urls `collect_enabled_code` loads, in its order, without reading their code.
+pub(crate) fn enabled_urls(conn: &mut Connection) -> Vec<String> {
+    let mut stmt = match conn.prepare(
+        "SELECT url FROM plugins WHERE installed = 1 AND enabled = 1 AND code IS NOT NULL ORDER BY rowid",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::vprintln!("[PLUGINS] Failed to query enabled plugin urls: {e}");
+            return Vec::new();
+        }
+    };
+    match stmt.query_map([], |row| row.get(0)) {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(e) => {
+            crate::vprintln!("[PLUGINS] Failed to query enabled plugin urls: {e}");
             Vec::new()
         }
     }

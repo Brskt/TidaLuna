@@ -14,6 +14,7 @@ const TRUST_SENTENCES = {
 const SETTING_NAMES: Record<string, string> = {
     "connect.receiver_always_on": "Connect",
     "video.codec_enabled": "the video codec",
+    "plugins.update_at_boot": "the plugin update check",
 };
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);

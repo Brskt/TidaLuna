@@ -106,21 +106,35 @@ export function exposeLoaderApi() {
     }
 
     // Resync frontend on plugin lifecycle events from Rust
-    onIpcEvent("jsrt.plugin_failed", (url: string) => {
+    // The reason is shown as text, whoever emitted it; without one, the ready ack timed out.
+    onIpcEvent("jsrt.plugin_failed", (url: string, reason?: string) => {
         const plugin = LunaPlugin.getByUrl(url);
         if (plugin) {
             plugin.enabled = false;
             plugin.store.enabled = false;
-            plugin.loadError._ = "Plugin failed to initialize (timeout)";
+            // Its code is unloaded: the Settings it registered must not stay on the card.
+            plugin.exports = undefined;
+            plugin.loadError._ = typeof reason === "string" ? reason : "Plugin failed to initialize (timeout)";
             window.dispatchEvent(new Event("luna:plugins-updated"));
         }
+    });
+    // Rust unloaded the plugin and could not start it again this session; its flag is untouched.
+    onIpcEvent("jsrt.plugin_stopped", (url: string, reason?: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (!plugin) return;
+        plugin.exports = undefined;
+        plugin.loadError._ = typeof reason === "string" ? reason : "Plugin stopped";
+        window.dispatchEvent(new Event("luna:plugins-updated"));
     });
     onIpcEvent("jsrt.plugin_ready_confirmed", (url: string) => {
         const plugin = LunaPlugin.getByUrl(url);
         if (!plugin) return;
         // The plugin's top level has finished: its Settings, if any, are registered now.
         const found = plugin.extractSettings();
-        if (found || plugin.loadError._) {
+        // A restarted version without Settings must not keep showing its predecessor's.
+        const dropped = !found && plugin.exports !== undefined;
+        if (dropped) plugin.exports = undefined;
+        if (found || dropped || plugin.loadError._) {
             plugin.loadError._ = undefined;
             window.dispatchEvent(new Event("luna:plugins-updated"));
         }
@@ -151,5 +165,8 @@ export function exposeLoaderApi() {
         }
         console.log("[luna:loader] LunaPlugin.plugins:", Object.keys(LunaPlugin.plugins).length, "total");
         window.dispatchEvent(new Event("luna:plugins-updated"));
+        // After the listeners and the registry: an update landing earlier would reach neither.
+        // Rust runs it once per launch, if its setting allows.
+        invokeIpc("plugin.update_all").catch((e) => console.warn("[luna:loader] plugin.update_all failed:", e));
     }).catch((e) => console.warn("[luna:loader] plugin.list failed:", e));
 }

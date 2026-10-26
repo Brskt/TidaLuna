@@ -150,6 +150,13 @@ const UPDATER_AUTO_CHECK: Setting<bool> = Setting {
     absent: true,
     unreadable: true,
 };
+// On by default, off when unknown: a refusal the store lost must not read as consent to code
+// replaced from its source without a click.
+const PLUGINS_UPDATE_AT_BOOT: Setting<bool> = Setting {
+    key: "plugins.update_at_boot",
+    absent: true,
+    unreadable: false,
+};
 const UPDATER_CHANNEL: Setting<String> = Setting {
     key: "updater.channel",
     absent: String::new(),
@@ -504,6 +511,14 @@ pub(crate) fn load_update_auto_check(conn: &mut Connection) -> bool {
 
 pub(crate) fn save_update_auto_check(conn: &mut Connection, enabled: bool) {
     UPDATER_AUTO_CHECK.save(conn, &enabled.to_string());
+}
+
+pub(crate) fn load_plugin_update_at_boot(conn: &mut Connection) -> bool {
+    Reader::new(conn).get(&PLUGINS_UPDATE_AT_BOOT)
+}
+
+pub(crate) fn save_plugin_update_at_boot(conn: &mut Connection, enabled: bool) {
+    PLUGINS_UPDATE_AT_BOOT.save(conn, &enabled.to_string());
 }
 
 /// Update channel: "stable" (published releases only) or "dev" (the CI's

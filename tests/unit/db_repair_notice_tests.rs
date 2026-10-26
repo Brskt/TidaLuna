@@ -109,7 +109,8 @@ fn a_settings_repair_alone_keeps_the_shape_the_page_already_reads() {
         serde_json::to_string(&crate::settings::pending_notice(conn)).unwrap()
     });
     assert_eq!(told, settings_only);
-    assert!(!told.contains("plugins"));
+    let value: serde_json::Value = serde_json::from_str(&told).unwrap();
+    assert!(value.get("plugins").is_none());
 }
 
 #[test]

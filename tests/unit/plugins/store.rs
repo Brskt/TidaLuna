@@ -179,6 +179,21 @@ fn an_installed_plugin_writes_whether_or_not_it_is_enabled() {
     assert_eq!(storage_get(&mut conn, url, "k").as_deref(), Some("v3"));
 }
 
+/// A read that fails is not a disable: the restart that asks would unload a running plugin.
+#[test]
+fn a_failed_read_of_the_enabled_flag_is_an_error() {
+    let mut conn = mem();
+    assert!(
+        !is_enabled(&mut conn, "https://a/Foo").unwrap(),
+        "an absent row is off"
+    );
+    let mut bare = Connection::open_in_memory().unwrap();
+    assert!(
+        is_enabled(&mut bare, "https://a/Foo").is_err(),
+        "a failed read was folded"
+    );
+}
+
 /// A new manifest alone is an update (its dependencies would go stale unseen); a source that
 /// renames the plugin would take another name's data dir and trust rows, and changes nothing.
 #[test]
