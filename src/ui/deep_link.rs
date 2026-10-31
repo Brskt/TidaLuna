@@ -290,6 +290,17 @@ pub(crate) fn take_pending() -> Option<DeepLinkTarget> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
+/// Said where the process ends: a link still held then was accepted and never
+/// shown, and the click that sent it saw nothing wrong. Ungated for that reason.
+pub(crate) fn report_unshown() {
+    if let Some(target) = take_pending() {
+        crate::verr!(
+            "[deep_link] {} was accepted and never shown: the app was closing",
+            for_log(&target)
+        );
+    }
+}
+
 /// Called when the browser is registered, which is the fact a navigation waits
 /// for. The readiness flag names an earlier one, the UI thread, letting a link
 /// reach `deliver` after the startup navigation has drained the slot and before

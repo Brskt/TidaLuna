@@ -453,7 +453,7 @@ cef::wrap_task! {
             if let Some(window) = crate::ui::app_window::AppWindow::current() {
                 window.close();
             } else {
-                cef::quit_message_loop();
+                crate::app_state::quit_loop();
             }
         }
     }

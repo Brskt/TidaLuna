@@ -2,7 +2,8 @@
 //!
 //! The first instance takes an OS lock and listens; a later launch detects it,
 //! signals the running instance to raise its window, then exits before any shared
-//! state (DB, the SDK credential LevelDB, Connect sockets, CEF) is touched. Windows
+//! state (DB, the SDK credential LevelDB, Connect sockets, CEF) is touched. One
+//! that finds the instance closing waits for it to leave and takes over. Windows
 //! uses a named mutex + auto-reset event in a private namespace bounded by the
 //! user's SID; Linux an flock on a file in the data directory, with an AF_UNIX
 //! datagram socket in a private directory as the signal.
@@ -62,6 +63,11 @@ enum HandOff {
     /// for the server.
     #[cfg(windows)]
     UnattributedServer,
+    /// The running instance turned the channel away on purpose: it is on its way
+    /// out and still holds the lock until it is gone. Linux only: a pipe has no
+    /// way to say so, and its absence is all a client on Windows finds.
+    #[cfg(target_os = "linux")]
+    Closing,
     /// The attempt itself broke: a write that failed, or a channel we could not
     /// even open.
     Failed,
@@ -81,9 +87,58 @@ impl HandOff {
             Self::ForeignServer => "another account holds the channel",
             #[cfg(windows)]
             Self::UnattributedServer => "the channel's owner could not be read",
+            #[cfg(target_os = "linux")]
+            Self::Closing => "the running instance is closing",
             Self::Failed => "the channel failed",
         }
     }
+}
+
+/// How long a second launch keeps trying before it gives the launch up: to reach
+/// the channel, and to outwait a running instance that is leaving.
+///
+/// One deadline for both, started when the lock is found taken. The tightest
+/// ceiling on a protocol handler is `xdg-open`'s 5 s portal timeout; Firefox
+/// retries its profile lock for 5 s and Chromium on Windows its lockfile for 5 s,
+/// for the same instance still closing down.
+#[cfg(any(windows, target_os = "linux"))]
+const HANDOFF_BUDGET_MS: u64 = 5000;
+
+/// How long a launch looks for a channel that is not there, from a holder that is
+/// not leaving, before reporting it. A Linux holder binds right after taking the
+/// lock (45 ms at worst over 3000 trials with twice as many busy threads as cores);
+/// an absence past that is no race.
+#[cfg(any(windows, target_os = "linux"))]
+const NO_LISTENER_GRACE_MS: u64 = 250;
+
+/// How long closing waits for a listener to stop.
+#[cfg(any(windows, target_os = "linux"))]
+const CLOSE_WAIT_MS: u64 = 500;
+
+/// Waits for a listener thread, but no longer than `budget`: a listener held by a
+/// peer that never finishes writing must not hold the quit behind it.
+#[cfg(any(windows, target_os = "linux"))]
+fn join_within(listener: std::thread::JoinHandle<()>, budget: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    while !listener.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let _ = listener.join();
+    true
+}
+
+/// Turns the channel away for the rest of the process: a link or focus request sent after
+/// this fails visibly, and its sender waits for the lock. Called where the message loop is
+/// told to quit and where a launch ends after taking the lock (it outlives the service by
+/// the whole teardown). Idempotent; a no-op before the lock is taken and on macOS.
+pub(crate) fn close_channel() {
+    #[cfg(windows)]
+    windows_impl::close_channel();
+    #[cfg(target_os = "linux")]
+    linux_impl::close_channel();
 }
 
 /// Whose kernel object this is, the link pipe or the legacy lock, by the owner the
@@ -141,6 +196,8 @@ pub(crate) struct AppLock {
     _mutex: windows_impl::MutexGuard,
     #[cfg(windows)]
     link: LinkChannel,
+    #[cfg(windows)]
+    closer: Option<std::sync::Arc<windows_impl::Closer>>,
     #[cfg(target_os = "linux")]
     _guard: Option<linux_impl::Guard>,
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -187,10 +244,14 @@ mod windows_impl {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::ptr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SUCCESS,
-        FALSE, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        FALSE, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, TRUE,
         WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
     };
     use windows_sys::Win32::Security::Authorization::{
@@ -215,12 +276,13 @@ mod windows_impl {
         AddSIDToBoundaryDescriptor, ClosePrivateNamespace, CreateBoundaryDescriptorW, CreateEventW,
         CreateMutexW, CreatePrivateNamespaceW, DeleteBoundaryDescriptor, EVENT_MODIFY_STATE,
         GetCurrentProcess, INFINITE, OpenEventW, OpenPrivateNamespaceW, OpenProcessToken, SetEvent,
-        WaitForSingleObject,
+        WaitForMultipleObjects, WaitForSingleObject,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     use super::{
-        AppLock, HandOff, LinkChannel, ObjectOwner, OwnIdentity, classify_owner, post_focus,
+        AppLock, CLOSE_WAIT_MS, HANDOFF_BUDGET_MS, HandOff, LinkChannel, NO_LISTENER_GRACE_MS,
+        ObjectOwner, OwnIdentity, classify_owner, join_within, post_focus,
     };
 
     /// The namespace the lock and the focus event live in, named by its boundary:
@@ -242,24 +304,14 @@ mod windows_impl {
     /// pipe is in message mode, and a deep link this size is not a deep link.
     const MAX_LINK: usize = 4096;
 
-    /// How long a second launch keeps trying before it gives the link up.
-    ///
-    /// A single 200 ms wait used to stand here, on the reasoning that waiting
-    /// longer would delay an exit without winning a race. That was wrong twice
-    /// over: no OS bounds a protocol handler's lifetime -- the tightest ceiling
-    /// anywhere is `xdg-open`'s 5 s portal timeout -- and 200 ms is less than the
-    /// 250 ms Qt sleeps merely BETWEEN its two attempts at this same startup
-    /// race, while Chromium spends up to 20 s. This sits between them.
-    const LINK_HANDOFF_BUDGET_MS: u64 = 2000;
-
     /// One slice of the budget, letting an instance that frees up early be
     /// answered early instead of after the whole of it.
     const LINK_PIPE_WAIT_MS: u32 = 250;
 
     /// The pause before looking again for a pipe that is not there yet.
     /// `WaitNamedPipeW` needs an existing name, which leaves this the one case
-    /// with nothing to wait on.
-    const LINK_RETRY_PAUSE_MS: u64 = 50;
+    /// with nothing to wait on but the lock, when there is one.
+    const LINK_RETRY_PAUSE_MS: u32 = 50;
 
     /// Releases the lock on drop; a null handle (fail-open) is a no-op. Also holds
     /// the legacy mutex and the namespace, which drops after `drop` closes both.
@@ -394,12 +446,15 @@ mod windows_impl {
 
     struct SendHandle(HANDLE);
 
-    // SAFETY: a Win32 HANDLE is process-wide, not thread-bound, and both kinds of
-    // handle sent through here are used only by thread-safe APIs: the focus event
-    // by WaitForSingleObject/SetEvent, the link pipe by ConnectNamedPipe, ReadFile,
-    // DisconnectNamedPipe and CloseHandle. Using either from its listener thread is
-    // sound, and each handle is owned by exactly one thread at a time.
+    // SAFETY: a Win32 HANDLE is process-wide, not thread-bound, and each kind of
+    // handle sent through here is used only by thread-safe APIs: the focus event
+    // by WaitForMultipleObjects/SetEvent, the link pipe by ConnectNamedPipe,
+    // ReadFile, DisconnectNamedPipe and CloseHandle, the stop event by SetEvent and
+    // the same wait. A focus event and a pipe belong to exactly one thread at a time;
+    // the stop event is shared, and is only signalled, never closed.
     unsafe impl Send for SendHandle {}
+    // SAFETY: shared only through the stop event, whose two uses are thread-safe.
+    unsafe impl Sync for SendHandle {}
 
     impl SendHandle {
         // Accessor (not a field read): the closure captures the whole wrapper;
@@ -572,15 +627,53 @@ mod windows_impl {
                 _namespace: None,
             },
             link: LinkChannel::NotAttempted,
+            closer: None,
         })
     }
 
+    /// Every name the guard claims: a test can pass ones that meet no running app.
+    pub(super) struct Names {
+        pub(super) namespace: String,
+        pub(super) pipe: Vec<u16>,
+        pub(super) legacy_lock: Vec<u16>,
+        pub(super) legacy_focus: Vec<u16>,
+    }
+
+    impl Names {
+        fn of(own: &OwnIdentity) -> Self {
+            Self {
+                namespace: NAMESPACE.to_owned(),
+                pipe: wide(&format!("{LINK_PIPE_PREFIX}{}", own.user)),
+                legacy_lock: wide(&format!("{LEGACY_LOCK_PREFIX}{}", own.user)),
+                legacy_focus: wide(&format!("{LEGACY_FOCUS_PREFIX}{}", own.user)),
+            }
+        }
+    }
+
     pub(super) fn acquire_or_signal(url: Option<&str>) -> Option<AppLock> {
+        let lock = acquire_with(url, Names::of)?;
+        if let Some(closer) = &lock.closer {
+            let _ = CLOSER.set(Arc::clone(closer));
+        }
+        Some(lock)
+    }
+
+    /// `acquire_or_signal` on the given names, free of a running app's.
+    ///
+    /// A launch that finds the lock taken either hands over and leaves, or, once
+    /// the holder's pipe is gone because it is leaving, waits for the lock and
+    /// becomes the holder, its own link still to be shown. The pipe and the lock
+    /// share one deadline.
+    pub(super) fn acquire_with(
+        url: Option<&str>,
+        names: impl FnOnce(&OwnIdentity) -> Names,
+    ) -> Option<AppLock> {
         let Some((own, user)) = own_identity() else {
             crate::vprintln!("[LOCK]   SID lookup failed; single-instance guard disabled");
             return disabled();
         };
-        let namespace = match UserNamespace::open(NAMESPACE, user.sid()) {
+        let names = names(&own);
+        let namespace = match UserNamespace::open(&names.namespace, user.sid()) {
             Ok(namespace) => namespace,
             Err(error) => {
                 crate::vprintln!("[LOCK]   private namespace unavailable: {error}");
@@ -588,9 +681,8 @@ mod windows_impl {
             }
         };
         let attributes = namespace.attributes();
-        let lock_name = in_namespace(NAMESPACE, LOCK_LEAF);
-        let focus_name = in_namespace(NAMESPACE, FOCUS_LEAF);
-        let pipe_name = wide(&format!("{LINK_PIPE_PREFIX}{}", own.user));
+        let lock_name = in_namespace(&names.namespace, LOCK_LEAF);
+        let focus_name = in_namespace(&names.namespace, FOCUS_LEAF);
 
         // SAFETY: lock_name is NUL-terminated UTF-16; returns an owned handle or null.
         let mutex = unsafe { CreateMutexW(&attributes, FALSE, lock_name.as_ptr()) };
@@ -605,64 +697,192 @@ mod windows_impl {
         // SAFETY: mutex is a live handle; the wait is thread-safe.
         let wait = unsafe { WaitForSingleObject(mutex, 0) };
         if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
-            let legacy_name = wide(&format!("{LEGACY_LOCK_PREFIX}{}", own.user));
-            let legacy_focus = wide(&format!("{LEGACY_FOCUS_PREFIX}{}", own.user));
-            let legacy = match legacy_lock(&legacy_name, &own) {
-                Legacy::Held(handle) => handle,
-                Legacy::EarlierBuild => {
-                    hand_off(url, &pipe_name, &own, &legacy_focus);
-                    // SAFETY: our own lock, closed once, so the earlier build stays
-                    // the only instance.
-                    unsafe { CloseHandle(mutex) };
-                    return None;
-                }
-                Legacy::Unavailable => ptr::null_mut(),
-            };
-            // First instance: own the lock and listen for focus signals.
-            // SAFETY: focus_name is NUL-terminated UTF-16; auto-reset, owned handle.
-            let event = unsafe { CreateEventW(&attributes, FALSE, FALSE, focus_name.as_ptr()) };
-            if !event.is_null() {
-                spawn_focus_listener(event);
-            }
-            // The event an earlier build signals once it finds the legacy lock held.
-            if !legacy.is_null() {
-                // SAFETY: NUL-terminated name; auto-reset, owned handle.
-                let event =
-                    unsafe { CreateEventW(ptr::null(), FALSE, FALSE, legacy_focus.as_ptr()) };
-                if !event.is_null() {
-                    spawn_focus_listener(event);
-                }
-            }
-            // The address exists before this function returns, letting a link
-            // that arrives in the next instant find something to write to.
-            // Created here rather than inside the listener thread, which the
-            // caller outruns. A client arriving first got `ERROR_FILE_NOT_FOUND`,
-            // and the only retry was gated on the pipe being busy instead.
-            let link = match create_instance(&pipe_name) {
-                Some(pipe) => {
-                    spawn_link_listener(pipe_name, pipe);
-                    LinkChannel::Listening
-                }
-                // Deep links are done for this run, and the window still comes
-                // forward on a focus signal. The verdict travels rather than
-                // being announced here; `report_link_channel` speaks it once the
-                // log has been rotated.
-                None => LinkChannel::Unavailable,
-            };
-            return Some(AppLock {
-                _mutex: MutexGuard {
-                    handle: mutex,
-                    legacy,
-                    _namespace: Some(namespace),
-                },
-                link,
-            });
+            return first_instance(url, mutex, namespace, &names, &own);
         }
 
-        hand_off(url, &pipe_name, &own, &focus_name);
-        // SAFETY: release our handle, letting the kernel reap the object on owner exit.
-        unsafe { CloseHandle(mutex) };
-        None
+        match hand_off(
+            url,
+            &names.pipe,
+            &own,
+            &focus_name,
+            Some(mutex),
+            handoff_deadline(),
+        ) {
+            HandedOff::Owner => first_instance(url, mutex, namespace, &names, &own),
+            HandedOff::Left => {
+                // SAFETY: release our handle, letting the kernel reap the object on owner exit.
+                unsafe { CloseHandle(mutex) };
+                None
+            }
+        }
+    }
+
+    /// The first instance, `mutex` owned by this thread: it listens for focus
+    /// signals and links, and the closer is what turns them away later.
+    fn first_instance(
+        url: Option<&str>,
+        mutex: HANDLE,
+        namespace: UserNamespace,
+        names: &Names,
+        own: &OwnIdentity,
+    ) -> Option<AppLock> {
+        let attributes = namespace.attributes();
+        let focus_name = in_namespace(&names.namespace, FOCUS_LEAF);
+        let legacy = match legacy_lock(&names.legacy_lock, own) {
+            Legacy::Held(handle) => handle,
+            Legacy::EarlierBuild => {
+                hand_off(
+                    url,
+                    &names.pipe,
+                    own,
+                    &names.legacy_focus,
+                    None,
+                    handoff_deadline(),
+                );
+                // SAFETY: our own lock, closed once, so the earlier build stays
+                // the only instance.
+                unsafe { CloseHandle(mutex) };
+                return None;
+            }
+            Legacy::Unavailable => ptr::null_mut(),
+        };
+        let closing = Arc::new(AtomicBool::new(false));
+        // Manual-reset and unnamed: every focus listener waits on it beside its own
+        // event, and it stays signalled once closing has begun.
+        // SAFETY: no name, no attributes; an owned handle or null.
+        let stop = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
+        if stop.is_null() {
+            crate::verr!("[LOCK]   no stop event; the focus listeners cannot be closed");
+        }
+        let mut listeners = Listeners {
+            focus: Vec::new(),
+            link: None,
+        };
+        // SAFETY: focus_name is NUL-terminated UTF-16; auto-reset, owned handle.
+        let event = unsafe { CreateEventW(&attributes, FALSE, FALSE, focus_name.as_ptr()) };
+        if !event.is_null() {
+            listeners.focus.extend(spawn_focus_listener(event, stop));
+        }
+        // The event an earlier build signals once it finds the legacy lock held.
+        if !legacy.is_null() {
+            // SAFETY: NUL-terminated name; auto-reset, owned handle.
+            let event =
+                unsafe { CreateEventW(ptr::null(), FALSE, FALSE, names.legacy_focus.as_ptr()) };
+            if !event.is_null() {
+                listeners.focus.extend(spawn_focus_listener(event, stop));
+            }
+        }
+        // The address exists before this function returns, letting a link
+        // that arrives in the next instant find something to write to.
+        // Created here rather than inside the listener thread, which the
+        // caller outruns. A client arriving first got `ERROR_FILE_NOT_FOUND`,
+        // and the only retry was gated on the pipe being busy instead.
+        let link = match create_instance(&names.pipe) {
+            Some(pipe) => {
+                listeners.link =
+                    spawn_link_listener(names.pipe.clone(), pipe, Arc::clone(&closing));
+                LinkChannel::Listening
+            }
+            // Deep links are done for this run, and the window still comes
+            // forward on a focus signal. The verdict travels rather than
+            // being announced here; `report_link_channel` speaks it once the
+            // log has been rotated.
+            None => LinkChannel::Unavailable,
+        };
+        let closer = Closer {
+            closing,
+            stop: SendHandle(stop),
+            pipe: matches!(link, LinkChannel::Listening).then(|| names.pipe.clone()),
+            listeners: Mutex::new(listeners),
+        };
+        Some(AppLock {
+            _mutex: MutexGuard {
+                handle: mutex,
+                legacy,
+                _namespace: Some(namespace),
+            },
+            link,
+            closer: Some(Arc::new(closer)),
+        })
+    }
+
+    /// What turns the link pipe and the focus events away: the flag the pipe
+    /// listener reads, the event the focus listeners wait on beside their own, the
+    /// pipe's name to wake its listener with, and the listeners to wait for.
+    pub(super) struct Closer {
+        closing: Arc<AtomicBool>,
+        stop: SendHandle,
+        pipe: Option<Vec<u16>>,
+        listeners: Mutex<Listeners>,
+    }
+
+    /// The listeners closing waits for, the focus ones before the pipe one.
+    struct Listeners {
+        focus: Vec<JoinHandle<()>>,
+        link: Option<JoinHandle<()>>,
+    }
+
+    impl Closer {
+        /// Stops serving new clients and delivers what a connected one already
+        /// wrote. The pipe's name goes with its last instance. A link sent after
+        /// this finds no pipe, and its sender waits on the lock.
+        pub(super) fn close(&self) {
+            // Held throughout: a second caller waits for the first to be done.
+            let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+            // Before the signals, which the listeners act on by reading it.
+            self.closing.store(true, Ordering::Release);
+            if !self.stop.get().is_null() {
+                // SAFETY: the stop event is a live handle, never closed.
+                unsafe { SetEvent(self.stop.get()) };
+            }
+            // The focus events go first, so the pipe never leaves while its holder's
+            // focus event is still there: a launch tells a leaving holder from a live
+            // one without a pipe by that event. One deadline for the group.
+            let deadline = Instant::now() + Duration::from_millis(CLOSE_WAIT_MS);
+            for listener in listeners.focus.drain(..) {
+                if !join_within(listener, deadline.saturating_duration_since(Instant::now())) {
+                    crate::verr!("[LOCK]   a focus listener did not stop; its event stays open");
+                }
+            }
+            // The pipe listener sits in ConnectNamedPipe, which only a client ends.
+            // One that connects and writes nothing is read as an empty message.
+            if let Some(name) = &self.pipe
+                && let Some(client) = open_instance(name)
+            {
+                // SAFETY: our own client end, closed once and unwritten.
+                unsafe { CloseHandle(client) };
+            }
+            if let Some(listener) = listeners.link.take()
+                && !join_within(listener, Duration::from_millis(CLOSE_WAIT_MS))
+            {
+                crate::verr!("[LOCK]   the link listener did not stop; a link may be left unread");
+            }
+        }
+    }
+
+    /// The closer of the lock `acquire_or_signal` handed out, for the sites that
+    /// have no handle on it, the lock being a local of `main`.
+    static CLOSER: OnceLock<Arc<Closer>> = OnceLock::new();
+
+    pub(super) fn close_channel() {
+        if let Some(closer) = CLOSER.get() {
+            closer.close();
+        }
+    }
+
+    /// The deadline a launch that did not get the lock works to, for the pipe and
+    /// for the lock alike.
+    fn handoff_deadline() -> Instant {
+        Instant::now() + Duration::from_millis(HANDOFF_BUDGET_MS)
+    }
+
+    /// Whether a launch that did not get the lock ended up owning it.
+    enum HandedOff {
+        /// The running instance has what this launch carried, or nothing could be
+        /// done; the launch ends.
+        Left,
+        /// The lock came free while waiting: this launch is the first instance.
+        Owner,
     }
 
     /// Hands the running instance whatever this launch carried. A link that lands
@@ -674,13 +894,25 @@ mod windows_impl {
     /// refuses a raise from a signal to a process nobody granted (the window stays
     /// behind a flashing taskbar button); a launch started by the foreground
     /// process may grant it, as Chromium's process finder does.
-    fn hand_off(url: Option<&str>, pipe_name: &[u16], own: &OwnIdentity, focus_name: &[u16]) {
-        let pipe = match connect_link_pipe(pipe_name, own) {
-            Ok(pipe) => {
+    ///
+    /// With the `lock` to wait on, a pipe that is not there is waited out on that
+    /// lock until `deadline`, and a launch that gets it ends as the first instance.
+    fn hand_off(
+        url: Option<&str>,
+        pipe_name: &[u16],
+        own: &OwnIdentity,
+        focus_name: &[u16],
+        lock: Option<HANDLE>,
+        deadline: Instant,
+    ) -> HandedOff {
+        let wait = lock.map(|mutex| LockWait { mutex, focus_name });
+        let pipe = match connect_link_pipe(pipe_name, own, wait, deadline) {
+            Reach::Owner => return HandedOff::Owner,
+            Reach::Pipe(pipe) => {
                 grant_foreground(pipe);
                 Ok(pipe)
             }
-            Err(unanswered) => {
+            Reach::Lost(unanswered) => {
                 crate::verr!("[LOCK]   no foreground grant: {}", unanswered.reason());
                 Err(unanswered)
             }
@@ -699,7 +931,7 @@ mod windows_impl {
         match handoff {
             Some(HandOff::Landed) => {
                 crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
-                return;
+                return HandedOff::Left;
             }
             // Ungated, and this is the reason the channel has to be; this process
             // exits before the database opens and never learns the persisted
@@ -711,22 +943,41 @@ mod windows_impl {
             ),
             None => crate::vprintln!("[LOCK]   Another instance is running; focusing it"),
         }
-        // SAFETY: focus_name is NUL-terminated UTF-16; null if no event exists yet.
+        // SAFETY: focus_name is NUL-terminated UTF-16; null if no event exists.
         let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, FALSE, focus_name.as_ptr()) };
-        if !event.is_null() {
-            // SAFETY: event opened with EVENT_MODIFY_STATE; signalled then closed.
-            unsafe {
-                SetEvent(event);
-                CloseHandle(event);
-            }
+        if event.is_null() {
+            // Ungated for the reason above: a focus request that reaches nobody.
+            crate::verr!(
+                "[LOCK]   the running instance's focus event is gone; nothing was raised (gle={})",
+                // SAFETY: reads this thread's last error, set by the call above.
+                unsafe { GetLastError() }
+            );
+            return HandedOff::Left;
         }
+        // SAFETY: event opened with EVENT_MODIFY_STATE; signalled then closed.
+        unsafe {
+            if SetEvent(event) == 0 {
+                crate::verr!(
+                    "[LOCK]   the focus signal was not set (gle={})",
+                    GetLastError()
+                );
+            }
+            CloseHandle(event);
+        }
+        HandedOff::Left
     }
 
     /// One connection at a time, serially. A deep link arrives on a click, not in
     /// a stream, and a queue here would only let a stalled reader hide the next one.
-    fn spawn_link_listener(pipe_name: Vec<u16>, first: HANDLE) {
+    /// Past `closing` it serves the connection in hand and makes no next instance,
+    /// the name going with the last.
+    fn spawn_link_listener(
+        pipe_name: Vec<u16>,
+        first: HANDLE,
+        closing: Arc<AtomicBool>,
+    ) -> Option<JoinHandle<()>> {
         let first = SendHandle(first);
-        let _ = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("app-link-listener".to_owned())
             .spawn(move || {
                 let mut pipe = first.get();
@@ -737,14 +988,19 @@ mod windows_impl {
                     // The next instance before this conversation ends, not after,
                     // since the name is the address clients look for and closing
                     // the only instance would take the address down with it.
-                    let next = create_instance(&pipe_name);
+                    let next = if closing.load(Ordering::Acquire) {
+                        None
+                    } else {
+                        create_instance(&pipe_name)
+                    };
                     serve_instance(pipe);
                     match next {
                         Some(handle) => pipe = handle,
                         None => return,
                     }
                 }
-            });
+            })
+            .ok()
     }
 
     /// One server end of the link pipe, or `None` once the name is unusable.
@@ -821,12 +1077,58 @@ mod windows_impl {
         }
     }
 
+    /// How a launch that found the lock taken got to the instance holding it.
+    pub(super) enum Reach {
+        /// A client end of the link pipe, its server known to be ours.
+        Pipe(HANDLE),
+        /// The lock came free while the pipe was away: this launch owns it now.
+        Owner,
+        /// Neither, and why.
+        Lost(HandOff),
+    }
+
+    /// Whether `lock` was just taken by this thread: free, or left by an owner whose
+    /// thread ended, which is how a holder that exits releases it.
+    fn took(lock: HANDLE, wait_ms: u32) -> bool {
+        // SAFETY: a live mutex handle; the wait is thread-safe.
+        let wait = unsafe { WaitForSingleObject(lock, wait_ms) };
+        wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED
+    }
+
+    /// The lock a launch waits on, and the focus event of the holder it waits for.
+    #[derive(Clone, Copy)]
+    pub(super) struct LockWait<'a> {
+        pub(super) mutex: HANDLE,
+        pub(super) focus_name: &'a [u16],
+    }
+
+    /// Whether the holder still serves focus requests. Its listener closes the only
+    /// handle to the event when it stops, and an event is destroyed with its last
+    /// handle (CreateEventW, CloseHandle docs); the name is gone with it. This
+    /// launch's own handle lives for the length of the call.
+    fn focus_event_exists(focus_name: &[u16]) -> bool {
+        // SAFETY: focus_name is NUL-terminated UTF-16; null if no event exists.
+        let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, FALSE, focus_name.as_ptr()) };
+        if event.is_null() {
+            // SAFETY: reads this thread's last error, set by the call above.
+            return unsafe { GetLastError() } != ERROR_FILE_NOT_FOUND;
+        }
+        // SAFETY: the handle opened above, closed once.
+        unsafe { CloseHandle(event) };
+        true
+    }
+
     /// Retries only while the OS says the answer could still change.
     ///
     /// The retry is bounded by diagnosis rather than by patience: a busy pipe and
     /// an absent one are both transient and get the budget, anything else is
     /// answered once and reported. The previous single attempt lost the startup
     /// race outright.
+    ///
+    /// A pipe that is absent is not made yet, or no longer there, or never was. With
+    /// a `lock` to wait on, the pause between looks is spent on it, freeing this
+    /// launch the moment the holder is gone. A holder still serving focus gets only
+    /// the startup grace; one that stopped serving it is closing, and gets the budget.
     ///
     /// The one site a client handle is born, and the handle leaves it only once the
     /// kernel names its server as ours: nothing is granted to, or written into, a name
@@ -835,13 +1137,14 @@ mod windows_impl {
     pub(super) fn connect_link_pipe(
         pipe_name: &[u16],
         own: &OwnIdentity,
-    ) -> Result<HANDLE, HandOff> {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(LINK_HANDOFF_BUDGET_MS);
+        lock: Option<LockWait<'_>>,
+        deadline: Instant,
+    ) -> Reach {
+        let mut alive_since: Option<Instant> = None;
         loop {
             if let Some(pipe) = open_instance(pipe_name) {
                 let refused = match classify_owner(owner_sid(pipe).as_deref(), own) {
-                    ObjectOwner::Ours => return Ok(pipe),
+                    ObjectOwner::Ours => return Reach::Pipe(pipe),
                     ObjectOwner::Foreign(sid) => {
                         crate::vprintln!("[LOCK]   link pipe held by {sid}, refused");
                         HandOff::ForeignServer
@@ -850,7 +1153,7 @@ mod windows_impl {
                 };
                 // SAFETY: our own client end, closed once and unwritten.
                 unsafe { CloseHandle(pipe) };
-                return Err(refused);
+                return Reach::Lost(refused);
             }
             // Why this attempt found nothing, kept only for the iteration that
             // runs out of budget.
@@ -862,18 +1165,40 @@ mod windows_impl {
                 ERROR_PIPE_BUSY => {
                     // SAFETY: pipe_name is NUL-terminated UTF-16.
                     unsafe { WaitNamedPipeW(pipe_name.as_ptr(), LINK_PIPE_WAIT_MS) };
+                    if lock.is_some_and(|lock| took(lock.mutex, 0)) {
+                        return Reach::Owner;
+                    }
                     HandOff::Busy
                 }
-                // The name is not there. Nothing to wait on, so look again.
+                // The name is not there. `WaitNamedPipeW` needs one; the pause goes
+                // to the lock, or to a clock when there is none.
                 ERROR_FILE_NOT_FOUND => {
-                    std::thread::sleep(std::time::Duration::from_millis(LINK_RETRY_PAUSE_MS));
+                    match lock {
+                        Some(lock) if took(lock.mutex, LINK_RETRY_PAUSE_MS) => {
+                            return Reach::Owner;
+                        }
+                        // Alive (still serving focus) and without a pipe, or not
+                        // yet with one: it gets the grace the startup race needs,
+                        // not the budget. Looked at again each time, since a holder
+                        // that is closing drops its focus event before its pipe.
+                        Some(lock) if focus_event_exists(lock.focus_name) => {
+                            let since = *alive_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= Duration::from_millis(NO_LISTENER_GRACE_MS) {
+                                return Reach::Lost(HandOff::NoListener);
+                            }
+                        }
+                        Some(_) => {}
+                        None => std::thread::sleep(Duration::from_millis(u64::from(
+                            LINK_RETRY_PAUSE_MS,
+                        ))),
+                    }
                     HandOff::NoListener
                 }
                 // Not a race, since another attempt cannot answer differently.
-                _ => return Err(HandOff::Failed),
+                _ => return Reach::Lost(HandOff::Failed),
             };
-            if std::time::Instant::now() >= deadline {
-                return Err(unanswered);
+            if Instant::now() >= deadline {
+                return Reach::Lost(unanswered);
             }
         }
     }
@@ -931,20 +1256,32 @@ mod windows_impl {
         }
     }
 
-    fn spawn_focus_listener(event: HANDLE) {
+    /// Serves `event` until `stop` is signalled, then closes it: a wait on a handle
+    /// closed under it is undefined; the thread that waits is the one that closes,
+    /// and the name goes with it. A null `stop` is never signalled.
+    fn spawn_focus_listener(event: HANDLE, stop: HANDLE) -> Option<JoinHandle<()>> {
         let event = SendHandle(event);
-        let _ = std::thread::Builder::new()
+        let stop = SendHandle(stop);
+        std::thread::Builder::new()
             .name("app-focus-listener".to_owned())
             .spawn(move || {
+                let handles = [event.get(), stop.get()];
+                let count = if stop.get().is_null() { 1 } else { 2 };
                 loop {
-                    // SAFETY: live auto-reset event for the process lifetime; thread-safe wait.
-                    let r = unsafe { WaitForSingleObject(event.get(), INFINITE) };
+                    // SAFETY: two live handles, or one when `stop` is null; neither is
+                    // closed while this wait runs, and the wait is thread-safe.
+                    let r =
+                        unsafe { WaitForMultipleObjects(count, handles.as_ptr(), FALSE, INFINITE) };
+                    // The event is the first handle; the stop event, or a failure, ends it.
                     if r != WAIT_OBJECT_0 {
                         break;
                     }
                     post_focus();
                 }
-            });
+                // SAFETY: our event, waited on nowhere else and closed once.
+                unsafe { CloseHandle(event.get()) };
+            })
+            .ok()
     }
 }
 
@@ -953,14 +1290,21 @@ mod linux_impl {
     use std::fs::{File, OpenOptions, TryLockError};
     use std::hash::Hasher;
     use std::io::ErrorKind;
+    use std::net::Shutdown;
     use std::os::fd::AsRawFd;
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::{SocketAddr, UnixDatagram};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
 
-    use super::{AppLock, HandOff, post_focus};
+    use super::{
+        AppLock, CLOSE_WAIT_MS, HANDOFF_BUDGET_MS, HandOff, NO_LISTENER_GRACE_MS, join_within,
+        post_focus,
+    };
 
     /// Who sent a datagram, as the kernel reports it rather than as the payload
     /// claims.
@@ -1088,6 +1432,10 @@ mod linux_impl {
     /// than this is truncated by the kernel, and the truncated remainder fails the
     /// URL rule rather than navigating somewhere unintended.
     pub(super) const MAX_SIGNAL: usize = 4096;
+
+    /// How often a launch waiting for the lock tries it again: `std` has no lock
+    /// wait with a deadline, and a try is one syscall.
+    const LOCK_POLL_MS: u64 = 10;
 
     /// The lock is a file in the data directory it guards, so every launch that
     /// would share the database takes the same lock, whatever its environment.
@@ -1327,12 +1675,62 @@ mod linux_impl {
 
     /// Asks for the credentials of every datagram, then listens. A failed ask is
     /// logged, not fatal: every datagram then arrives unattributed and is refused.
-    fn listen(socket: &UnixDatagram) {
+    /// Gives back what closing needs: a handle on the socket and the listener.
+    fn listen(
+        socket: &UnixDatagram,
+        closing: &Arc<AtomicBool>,
+    ) -> Option<(UnixDatagram, JoinHandle<()>)> {
         if let Err(e) = enable_peer_credentials(socket) {
             crate::vprintln!("[LOCK]   no peer credentials ({e}); signals will be refused");
         }
-        if let Ok(listener) = socket.try_clone() {
-            spawn_focus_listener(listener);
+        let for_listener = socket.try_clone().ok()?;
+        let for_closing = socket.try_clone().ok()?;
+        let listener = spawn_focus_listener(for_listener, Arc::clone(closing))?;
+        Some((for_closing, listener))
+    }
+
+    /// What turns the channel away: the flag the listeners read, a handle on each
+    /// socket to shut, and the listeners to wait for.
+    pub(super) struct Closer {
+        closing: Arc<AtomicBool>,
+        sockets: Vec<UnixDatagram>,
+        listeners: Mutex<Vec<JoinHandle<()>>>,
+    }
+
+    impl Closer {
+        /// Stops reading new datagrams and delivers what already arrived. A sender
+        /// after this gets `EPIPE`, the file staying where it is (only `bind`
+        /// removes it), and the pending link is final once this returns.
+        pub(super) fn close(&self) {
+            // Held throughout: a second caller waits for the first to be done.
+            let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+            // Before the shutdown, which the listeners can only tell from an empty
+            // datagram by this flag.
+            self.closing.store(true, Ordering::Release);
+            for socket in &self.sockets {
+                if let Err(e) = socket.shutdown(Shutdown::Read) {
+                    crate::verr!(
+                        "[LOCK]   the channel could not be closed ({e}); links may still arrive"
+                    );
+                }
+            }
+            for listener in listeners.drain(..) {
+                if !join_within(listener, Duration::from_millis(CLOSE_WAIT_MS)) {
+                    crate::verr!(
+                        "[LOCK]   a channel listener did not stop; a link may be left unread"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The closer of the guard `acquire_or_signal` handed out, for the sites that
+    /// have no handle on the lock, which is a local of `main`.
+    static CLOSER: OnceLock<Arc<Closer>> = OnceLock::new();
+
+    pub(super) fn close_channel() {
+        if let Some(closer) = CLOSER.get() {
+            closer.close();
         }
     }
 
@@ -1366,55 +1764,111 @@ mod linux_impl {
         _lock: File,
         _channel: Option<Channel>,
         _legacy: Option<UnixDatagram>,
+        pub(super) closer: Arc<Closer>,
     }
 
     pub(super) fn acquire_or_signal(url: Option<&str>) -> Option<AppLock> {
-        let data_dir = crate::state::cache_data_dir();
-        let own = own_uid();
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-        match claim(&data_dir, runtime, own) {
-            Claim::Holder { lock, channel } => {
-                let legacy_socket = match legacy(&data_dir, own) {
-                    Legacy::Bound(socket) => Some(socket),
-                    Legacy::EarlierBuild(addr) => {
-                        report_hand_off(url, &hand_over(&addr, url));
-                        return None;
+        let lock = acquire_in(&crate::state::cache_data_dir(), runtime, url)?;
+        if let Some(guard) = &lock._guard {
+            let _ = CLOSER.set(Arc::clone(&guard.closer));
+        }
+        Some(lock)
+    }
+
+    /// `acquire_or_signal` on the given directories (a test needs no global). Same
+    /// hand-over and takeover as the Windows twin, under one shared deadline.
+    pub(super) fn acquire_in(
+        data_dir: &Path,
+        runtime: Option<PathBuf>,
+        url: Option<&str>,
+    ) -> Option<AppLock> {
+        let own = own_uid();
+        let deadline = Instant::now() + Duration::from_millis(HANDOFF_BUDGET_MS);
+        let mut unbound_since: Option<Instant> = None;
+        let mut waited = false;
+        loop {
+            match claim(data_dir, runtime.clone(), own) {
+                Claim::Holder { lock, channel } => {
+                    if waited {
+                        crate::vprintln!("[LOCK]   The previous instance has left; taking over");
                     }
-                    Legacy::Unavailable => None,
-                };
-                let channel = channel
-                    .inspect_err(|reason| {
-                        crate::vprintln!("[LOCK]   {reason}; focus and links cannot arrive");
-                    })
-                    .ok();
-                for socket in channel
-                    .iter()
-                    .map(|c| &c.socket)
-                    .chain(legacy_socket.iter())
-                {
-                    listen(socket);
+                    return hold(data_dir, own, lock, channel, url);
                 }
-                Some(AppLock {
-                    _guard: Some(Guard {
-                        _lock: lock,
-                        _channel: channel,
-                        _legacy: legacy_socket,
-                    }),
-                })
-            }
-            Claim::Held(addr) => {
-                let outcome = match addr {
-                    Some(addr) => hand_over(&addr, url),
-                    None => HandOff::NoListener,
-                };
-                report_hand_off(url, &outcome);
-                None
-            }
-            Claim::Unguarded(reason) => {
-                crate::vprintln!("[LOCK]   {reason}; guard disabled");
-                Some(AppLock { _guard: None })
+                Claim::Held(addr) => {
+                    let outcome = match &addr {
+                        Some(addr) => hand_over(addr, url),
+                        None => HandOff::NoListener,
+                    };
+                    // A leaving holder is waited for to the deadline. No socket is
+                    // not told apart from a holder that has not bound yet: it only
+                    // gets the grace that race needs.
+                    let patience = match (&outcome, &addr) {
+                        (HandOff::Closing, _) => Some(deadline),
+                        (HandOff::NoListener, Some(_)) => {
+                            let since = *unbound_since.get_or_insert_with(Instant::now);
+                            let grace = Duration::from_millis(NO_LISTENER_GRACE_MS);
+                            Some((since + grace).min(deadline))
+                        }
+                        _ => None,
+                    };
+                    if patience.is_some_and(|until| Instant::now() < until) {
+                        waited = true;
+                        std::thread::sleep(Duration::from_millis(LOCK_POLL_MS));
+                        continue;
+                    }
+                    report_hand_off(url, &outcome);
+                    return None;
+                }
+                Claim::Unguarded(reason) => {
+                    crate::vprintln!("[LOCK]   {reason}; guard disabled");
+                    return Some(AppLock { _guard: None });
+                }
             }
         }
+    }
+
+    /// The first instance: its channel and the legacy name listen, and `closer`
+    /// is what turns them away later.
+    fn hold(
+        data_dir: &Path,
+        own: u32,
+        lock: File,
+        channel: Result<Channel, String>,
+        url: Option<&str>,
+    ) -> Option<AppLock> {
+        let legacy_socket = match legacy(data_dir, own) {
+            Legacy::Bound(socket) => Some(socket),
+            Legacy::EarlierBuild(addr) => {
+                report_hand_off(url, &hand_over(&addr, url));
+                return None;
+            }
+            Legacy::Unavailable => None,
+        };
+        let channel = channel
+            .inspect_err(|reason| {
+                crate::vprintln!("[LOCK]   {reason}; focus and links cannot arrive");
+            })
+            .ok();
+        let closing = Arc::new(AtomicBool::new(false));
+        let (sockets, listeners) = channel
+            .iter()
+            .map(|c| &c.socket)
+            .chain(legacy_socket.iter())
+            .filter_map(|socket| listen(socket, &closing))
+            .unzip();
+        Some(AppLock {
+            _guard: Some(Guard {
+                _lock: lock,
+                _channel: channel,
+                _legacy: legacy_socket,
+                closer: Arc::new(Closer {
+                    closing,
+                    sockets,
+                    listeners: Mutex::new(listeners),
+                }),
+            }),
+        })
     }
 
     fn report_hand_off(url: Option<&str>, outcome: &HandOff) {
@@ -1422,6 +1876,14 @@ mod linux_impl {
             (Some(_), HandOff::Landed) => {
                 crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
             }
+            // Ungated like the rest: the wait ended with the old instance still
+            // there, and the link it was waiting to carry goes nowhere.
+            (Some(_), HandOff::Closing) => crate::verr!(
+                "[LOCK]   deep link lost: the running instance was still closing after the wait"
+            ),
+            (None, HandOff::Closing) => crate::verr!(
+                "[LOCK]   not started: the running instance was still closing after the wait"
+            ),
             // Ungated: this process exits before reading the persisted log level,
             // and a click whose link never opens leaves no other trace.
             (Some(_), lost) => crate::verr!(
@@ -1462,8 +1924,11 @@ mod linux_impl {
             let _ = client.send(FOCUS_SIGNAL.as_bytes());
             return HandOff::TooLong;
         }
-        if client.send(url.as_bytes()).is_ok() {
-            return HandOff::Landed;
+        match client.send(url.as_bytes()) {
+            Ok(_) => return HandOff::Landed,
+            // No focus word either: it would be turned away the same way.
+            Err(e) if closed_by_peer(&e) => return HandOff::Closing,
+            Err(_) => {}
         }
         // The link did not go; the window still should.
         let _ = client.send(FOCUS_SIGNAL.as_bytes());
@@ -1471,15 +1936,28 @@ mod linux_impl {
     }
 
     fn send_or_fail(client: &UnixDatagram, word: &str) -> HandOff {
-        if client.send(word.as_bytes()).is_ok() {
-            HandOff::Landed
-        } else {
-            HandOff::Failed
+        match client.send(word.as_bytes()) {
+            Ok(_) => HandOff::Landed,
+            Err(e) if closed_by_peer(&e) => HandOff::Closing,
+            Err(_) => HandOff::Failed,
         }
     }
 
-    fn spawn_focus_listener(socket: UnixDatagram) {
-        let _ = std::thread::Builder::new()
+    /// What a send gets once the receiver shut its reading end (`EPIPE`) or closed
+    /// its socket after we connected (`ECONNREFUSED`). Only a send says so: a
+    /// connect to a socket nobody serves is a holder not bound yet, or never bound.
+    fn closed_by_peer(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionRefused
+        )
+    }
+
+    fn spawn_focus_listener(
+        socket: UnixDatagram,
+        closing: Arc<AtomicBool>,
+    ) -> Option<JoinHandle<()>> {
+        std::thread::Builder::new()
             .name("app-focus-listener".to_owned())
             .spawn(move || {
                 let own = own_uid();
@@ -1487,6 +1965,11 @@ mod linux_impl {
                 // The length matters now that the payload varies (a receive that
                 // ignored it would read stale bytes from the previous datagram).
                 while let Ok((n, peer)) = recv_with_sender(&socket, &mut buf) {
+                    // A shut socket reads as empty once its queue is drained, as an
+                    // empty datagram does; only the flag tells them apart.
+                    if n == 0 && closing.load(Ordering::Acquire) {
+                        break;
+                    }
                     match classify(peer, own) {
                         Sender::Ours => match std::str::from_utf8(&buf[..n]) {
                             Ok(FOCUS_SIGNAL) => post_focus(),
@@ -1497,7 +1980,8 @@ mod linux_impl {
                         Sender::Unattributed => refuse(None),
                     }
                 }
-            });
+            })
+            .ok()
     }
 
     /// Said once per run. A local process can repeat a refused datagram as fast

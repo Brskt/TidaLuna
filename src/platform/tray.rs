@@ -183,7 +183,7 @@ fn force_quit() {
     if let Some(window) = crate::ui::app_window::AppWindow::current() {
         window.close();
     } else {
-        quit_message_loop();
+        crate::app_state::quit_loop();
     }
 }
 

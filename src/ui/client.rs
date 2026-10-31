@@ -489,7 +489,7 @@ wrap_life_span_handler! {
                 with_state(|state| {
                     state.browser = None;
                 });
-                quit_message_loop();
+                crate::app_state::quit_loop();
             }
         }
     }
@@ -974,8 +974,10 @@ wrap_request_handler! {
                     // Exiting here skips the drain that follows the message loop, and queued
                     // settings writes die with the process. This runs on a tokio task, never
                     // the actor's own thread; waiting on it is safe.
+                    crate::platform::app_lock::close_channel();
                     crate::state::db().flush();
                     crate::platform::secure_store::flush();
+                    crate::ui::deep_link::report_unshown();
                     std::process::exit(0);
                 }
                 if action == crate::ui::crash_dialog::CrashAction::OpenFolder

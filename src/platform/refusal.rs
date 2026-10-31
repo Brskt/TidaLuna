@@ -117,6 +117,10 @@ fn notify(text: &str) -> Result<(), String> {
 /// of failing it: the log line and the exit code carry the refusal.
 pub(crate) fn refuse_to_start(why: &str) -> ! {
     crate::verr!("[BOOT]   {why}");
+    // Before the alert, which stays up as long as its reader does, with the lock
+    // and the channel still ours when the refusal comes after they were taken.
+    crate::platform::app_lock::close_channel();
+    crate::ui::deep_link::report_unshown();
     if !cfg!(test) && !is_helper_process(std::env::args_os()) {
         #[cfg(target_os = "windows")]
         dialog(

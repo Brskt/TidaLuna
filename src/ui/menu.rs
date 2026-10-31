@@ -145,7 +145,7 @@ wrap_menu_model_delegate! {
                     if let Some(window) = AppWindow::current() {
                         window.close();
                     } else {
-                        quit_message_loop();
+                        crate::app_state::quit_loop();
                     }
                 }
             }

@@ -239,6 +239,13 @@ pub(crate) fn context_ready() -> bool {
     CONTEXT_READY.load(Ordering::Acquire)
 }
 
+/// Ends the message loop, turning the single-instance channel away first: a link
+/// accepted after the loop ends has no one left to show it.
+pub(crate) fn quit_loop() {
+    crate::platform::app_lock::close_channel();
+    quit_message_loop();
+}
+
 pub(crate) fn with_state<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut AppState) -> R,

@@ -10,7 +10,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             if let Some(window) = AppWindow::current() {
                 window.close();
             } else {
-                quit_message_loop();
+                crate::app_state::quit_loop();
             }
         }
         "window.minimize" => {

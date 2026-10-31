@@ -561,10 +561,14 @@ fn main() {
         match platform::refusal::classify_init_failure(code, &root_cache) {
             platform::refusal::InitFailure::HandedOver => {
                 crate::vprintln!("[CEF]    Another instance owns the session; exiting");
+                platform::app_lock::close_channel();
+                ui::deep_link::report_unshown();
                 return;
             }
             platform::refusal::InitFailure::Finished => {
                 crate::vprintln!("[CEF]    Chromium ended the launch early (exit code {code})");
+                platform::app_lock::close_channel();
+                ui::deep_link::report_unshown();
                 return;
             }
             platform::refusal::InitFailure::Refused(why) => refuse_to_start(&why),
@@ -578,6 +582,10 @@ fn main() {
     debug::perf_monitor::start();
 
     run_message_loop();
+
+    // Already done where the loop was told to quit; this covers a loop that ended
+    // some other way, and costs nothing twice.
+    platform::app_lock::close_channel();
 
     // Settings writes are queued, not awaited; the renderer's acknowledgement outruns the
     // disk. Drain before the teardown below rather than after it: a toggle flipped in the last
@@ -604,6 +612,9 @@ fn main() {
     crate::connect::bridge::set_active(None);
 
     shutdown();
+
+    // After everything that could still have shown it: what is left is lost.
+    ui::deep_link::report_unshown();
 }
 
 /// Boot-token reconcile parked on its own thread while CEF initializes; the

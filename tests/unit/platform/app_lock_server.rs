@@ -68,8 +68,8 @@ fn a_link_pipe_is_ours_only_when_our_own_token_created_it() {
 #[cfg(windows)]
 mod kernel {
     use super::super::windows_impl::{
-        LOCK_LEAF, Legacy, UserNamespace, connect_link_pipe, create_instance, in_namespace,
-        legacy_lock, open_instance, own_identity, owner_sid, wide,
+        LOCK_LEAF, Legacy, Names, Reach, UserNamespace, acquire_with, connect_link_pipe,
+        create_instance, in_namespace, legacy_lock, open_instance, own_identity, owner_sid, wide,
     };
     use super::*;
     use windows_sys::Win32::Foundation::{
@@ -351,11 +351,70 @@ mod kernel {
         };
         let name = test_pipe("refuse");
         let server = create_instance(&name).expect("a server end");
-        assert_eq!(
-            connect_link_pipe(&name, &stranger).err(),
-            Some(HandOff::ForeignServer)
-        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        assert!(matches!(
+            connect_link_pipe(&name, &stranger, None, deadline),
+            Reach::Lost(HandOff::ForeignServer)
+        ));
         // SAFETY: the server end opened above, closed once.
         unsafe { CloseHandle(server) };
+    }
+
+    /// The tag the second launch runs under, set in the child it launches.
+    const CLOSING_HOLDER: &str = "TIDALUNAR_TEST_CLOSING_HOLDER";
+
+    /// Names of one test's own, none of them a running app's.
+    fn names_for(tag: &str) -> Names {
+        Names {
+            namespace: format!("TidaLunarTest-{tag}"),
+            pipe: wide(&format!("\\\\.\\pipe\\TidaLunarAppLinkTest-{tag}")),
+            legacy_lock: wide(&format!("Global\\TidaLunarAppLockTest-{tag}")),
+            legacy_focus: wide(&format!("Global\\TidaLunarAppFocusTest-{tag}")),
+        }
+    }
+
+    /// A launch that came in while the holder closed used to write its link into a pipe nobody
+    /// read and leave; it now waits on the lock and holds it once the old holder is gone. This
+    /// process is the holder, on its own thread (the thread that ends releases the mutex).
+    #[test]
+    fn a_launch_that_finds_the_holder_closing_outwaits_it_and_takes_over() {
+        if let Some(tag) = std::env::var_os(CLOSING_HOLDER) {
+            let tag = tag.to_string_lossy().into_owned();
+            let launched = acquire_with(Some("tidal://album/1"), |_| names_for(&tag));
+            assert!(
+                launched.is_some(),
+                "the second launch left instead of taking over"
+            );
+            return;
+        }
+
+        let tag = format!("closing-{}", std::process::id());
+        let (held, holding) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let tag = tag.clone();
+            move || {
+                let lock = acquire_with(None, |_| names_for(&tag))
+                    .expect("the first launch holds the lock");
+                lock.closer.as_ref().expect("a closer").close();
+                held.send(()).expect("the test is waiting");
+                released.recv().expect("the test releases the holder");
+                drop(lock);
+            }
+        });
+        holding.recv().expect("the holder never closed");
+        // Long enough for the child to start and find the lock taken.
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            release.send(()).expect("the holder is waiting");
+        });
+
+        relaunch(
+            "a_launch_that_finds_the_holder_closing_outwaits_it_and_takes_over",
+            CLOSING_HOLDER,
+            &tag,
+        );
+        releasing.join().expect("the releasing thread");
+        holder.join().expect("the holder thread");
     }
 }
