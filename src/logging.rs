@@ -85,8 +85,8 @@ fn sink_dir() -> Option<&'static Path> {
     crate::state::data_dir()
 }
 
-/// No file under test: `data_dir()` is the user's real one, and a `verr!` a test provokes does not
-/// belong in their `console.log`. `take_lines` is where a test reads it instead.
+/// No file under test: a `verr!` a test provokes is read through `take_lines`, which a
+/// `console.log` shared by every test of the process would only duplicate.
 #[cfg(test)]
 fn sink_dir() -> Option<&'static Path> {
     None
