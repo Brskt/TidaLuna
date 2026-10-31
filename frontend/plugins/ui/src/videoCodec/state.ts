@@ -16,11 +16,16 @@ export type CodecSnapshot = { seq: number; enabled: boolean; phase: CodecPhase }
 export type VideoCodecState = {
 	/** `null` until the backend answered. */
 	snapshot: CodecSnapshot | null;
-	/** The last click the backend has not echoed yet: the switch shows it rather than spring back. */
+	/** The last click the backend has not answered yet: the switch shows it rather than spring back. */
 	pending: boolean | null;
+	/** The latest click. Only the answer to that one settles the pending. */
+	click: number;
 };
 
-export const initialVideoCodecState: VideoCodecState = { snapshot: null, pending: null };
+export const initialVideoCodecState: VideoCodecState = { snapshot: null, pending: null, click: 0 };
+
+/** How a click ended: the backend's reply, or its refusal, which brings no snapshot. */
+export type ClickOutcome = { reply: unknown } | "rejected";
 
 const PLAIN_KINDS = new Set(["starting", "off", "unsupported", "downloading", "ready"]);
 const RECOVERIES = new Set<string>(["timer", "on_demand", "never"]);
@@ -50,22 +55,32 @@ function parseSnapshot(raw: unknown): CodecSnapshot | null {
 }
 
 /**
- * Take a snapshot from either path, the push or the pull. They travel separately and can cross;
- * one whose `seq` is not newer is stale. A payload this build cannot read leaves the state as
- * it was: a `null` pull before the supervisor started, or a kind added later.
+ * Take a snapshot from any path: the push, the pull, a click's reply. They travel separately and
+ * can cross; one whose `seq` is not newer is stale. A payload this build cannot read leaves the
+ * state as it was: a `null` pull before the supervisor started, or a kind added later. A snapshot
+ * never settles a click: one published before the click was taken can carry the value it asked for.
  */
 export function acceptSnapshot(state: VideoCodecState, incoming: unknown): VideoCodecState {
 	const snapshot = parseSnapshot(incoming);
 	if (!snapshot || (state.snapshot && snapshot.seq <= state.snapshot.seq)) return state;
-	const pending = state.pending === snapshot.enabled ? null : state.pending;
-	return { snapshot, pending };
+	return { ...state, snapshot };
 }
 
 export function clickSwitch(state: VideoCodecState, on: boolean): VideoCodecState {
-	return { ...state, pending: on };
+	return { ...state, pending: on, click: state.click + 1 };
 }
 
-/** The click first, then the backend's echo, then the backend's own default: on. */
+/**
+ * The end of click number `click`. A reply's snapshot goes through the seq gate whichever click
+ * it answers; the pending goes only if this was the latest click, even when the gate refused the
+ * snapshot; the held one is no older than a reply taken after the step that took the click.
+ */
+export function settleClick(state: VideoCodecState, click: number, outcome: ClickOutcome): VideoCodecState {
+	const taken = outcome === "rejected" ? state : acceptSnapshot(state, outcome.reply);
+	return click === taken.click && taken.pending !== null ? { ...taken, pending: null } : taken;
+}
+
+/** The click first, then the backend's snapshot, then the backend's own default: on. */
 export function switchPosition(state: VideoCodecState): boolean {
 	return state.pending ?? state.snapshot?.enabled ?? true;
 }

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { ipcRenderer } from "@luna/lib";
 import { createStore } from "../store";
 import { wireSnapshot } from "../wireSnapshot";
-import { acceptSnapshot, clickSwitch, initialVideoCodecState, type VideoCodecState } from "./state";
+import { acceptSnapshot, clickSwitch, initialVideoCodecState, settleClick, type VideoCodecState } from "./state";
 
 /** The backend's event and the request the page pulls with: one name both ways. */
 const CHANNEL = "settings.video_codec_state";
@@ -17,10 +17,17 @@ const { publish } = store;
  */
 export const wireVideoCodec = wireSnapshot(store, CHANNEL, acceptSnapshot);
 
-/** The click is held here rather than in the tab: a remount before the echo keeps it. */
+/**
+ * The click is held here rather than in the tab: a remount before the answer keeps it. The answer
+ * waits for the step that takes the click, a download under way included.
+ */
 export function setVideoCodecEnabled(on: boolean) {
 	publish(clickSwitch(store.get(), on));
-	ipcRenderer.send("settings.set_video_codec", on);
+	const click = store.get().click;
+	ipcRenderer.invoke("settings.set_video_codec", on).then(
+		(reply: unknown) => publish(settleClick(store.get(), click, { reply })),
+		() => publish(settleClick(store.get(), click, "rejected")),
+	);
 }
 
 export function useVideoCodecState(): VideoCodecState {
