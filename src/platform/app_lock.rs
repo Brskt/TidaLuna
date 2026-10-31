@@ -1195,16 +1195,18 @@ mod linux_impl {
             .then_some(run)
     }
 
-    /// The bound end of the channel, unlinked when the holder exits cleanly.
+    /// The bound end of the channel. Its file is never unlinked on exit: only
+    /// `bind` removes one, under the lock. A successor's socket is out of reach
+    /// of the leaving holder.
     pub(super) struct Channel {
         pub(super) socket: UnixDatagram,
         pub(super) path: PathBuf,
     }
 
     impl Channel {
-        /// Only the lock holder binds, so a socket file already there is one a
-        /// holder that died left behind, and unlinking it cannot take a live one.
-        /// A channel exists only with `CHANNEL_MODE` set.
+        /// Only the lock holder binds, so a socket file already there belongs to a
+        /// holder that is gone, and unlinking it cannot take a live one. A channel
+        /// exists only with `CHANNEL_MODE` set.
         fn bind(path: PathBuf) -> std::io::Result<Self> {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
@@ -1215,15 +1217,15 @@ mod linux_impl {
                 socket: UnixDatagram::bind(&path)?,
                 path,
             };
-            // Built first, so a refused mode drops it and unlinks the socket.
-            std::fs::set_permissions(&channel.path, std::fs::Permissions::from_mode(CHANNEL_MODE))?;
+            // Still under the lock: a refused mode leaves no socket behind.
+            if let Err(e) = std::fs::set_permissions(
+                &channel.path,
+                std::fs::Permissions::from_mode(CHANNEL_MODE),
+            ) {
+                let _ = std::fs::remove_file(&channel.path);
+                return Err(e);
+            }
             Ok(channel)
-        }
-    }
-
-    impl Drop for Channel {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
         }
     }
 
