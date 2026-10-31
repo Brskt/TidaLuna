@@ -5,6 +5,7 @@ import { LunaSettings } from "../../components";
 
 import { LunaPlugin } from "@luna/core";
 import { LunaPluginSettings } from "../PluginsTab/LunaPluginSettings";
+import { LunaAudioCacheSettings } from "./LunaAudioCacheSettings";
 import { LunaConnectSettings } from "./LunaConnectSettings";
 import { LunaCrossfadeSettings } from "./LunaCrossfadeSettings";
 import { LunaFeatureFlags } from "./LunaFeatureFlags";
@@ -28,6 +29,7 @@ export const SettingsTab = React.memo(() => {
 			<LunaConnectSettings />
 			<LunaVolumeSyncSettings />
 			<LunaCrossfadeSettings />
+			<LunaAudioCacheSettings />
 			<LunaVideoCodecSettings />
 			<LunaSettingsTransfer />
 			<LunaFeatureFlags />
