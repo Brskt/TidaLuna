@@ -61,6 +61,14 @@ pub(crate) fn ipc_callback_err(cb: &IpcCallback, code: i32, msg: &str) {
         .failure(code, msg);
 }
 
+/// Answers with `value` as JSON; a value that will not serialize fails the call as a 500.
+pub(crate) fn ipc_callback_json(cb: &IpcCallback, value: &impl serde::Serialize) {
+    match serde_json::to_string(value) {
+        Ok(json) => ipc_callback_ok(cb, &json),
+        Err(e) => ipc_callback_err(cb, 500, &e.to_string()),
+    }
+}
+
 pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCallback) {
     // Resolved once, before dispatch: a handler resolving again could read a capability the gate
     // accepted and eviction has since dropped, turning an allowed call unattributed after the fact.
@@ -175,10 +183,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         // `null` when there are none; they stay in their stores until `settings.store_repair_ack`.
         "settings.store_repair" => {
             crate::state::db().post(move |plugins, settings| {
-                match serde_json::to_string(&crate::db::pending_repairs(plugins, settings)) {
-                    Ok(json) => ipc_callback_ok(&callback, &json),
-                    Err(e) => ipc_callback_err(&callback, 500, &e.to_string()),
-                }
+                ipc_callback_json(&callback, &crate::db::pending_repairs(plugins, settings));
             });
         }
         _ => {
