@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { ipcRenderer } from "@luna/lib";
 import type { LunaUnloads } from "@luna/core";
+import { createStore } from "../store";
 import type { UpdateInfo } from "../types/updater";
 import {
 	hydrateUpdater,
@@ -13,15 +14,9 @@ import {
 
 export type { UpdaterEvent, UpdaterState } from "./state";
 
-let current = initialUpdaterState;
-const listeners = new Set<(state: UpdaterState) => void>();
+const store = createStore(initialUpdaterState);
+const { publish } = store;
 let wired = false;
-
-function publish(next: UpdaterState) {
-	if (next === current) return;
-	current = next;
-	for (const listener of listeners) listener(current);
-}
 
 /**
  * Record a transition the renderer makes on its own.
@@ -31,7 +26,7 @@ function publish(next: UpdaterState) {
  * over by an optimistic click.
  */
 export function pushUpdaterEvent(event: UpdaterEvent) {
-	publish(reduceUpdater(current, event));
+	publish(reduceUpdater(store.get(), event));
 }
 
 /**
@@ -72,22 +67,20 @@ export function wireUpdater(unloads: LunaUnloads) {
 	});
 	ipcRenderer
 		.invoke("updater.status")
-		.then((status: unknown) => publish(hydrateUpdater(current, status)))
+		.then((status: unknown) => publish(hydrateUpdater(store.get(), status)))
 		.catch(() => {});
 }
 
 /** Subscribe to the one record both surfaces read. */
 export function onUpdaterState(listener: (state: UpdaterState) => void): () => void {
-	listeners.add(listener);
-	listener(current);
-	return () => {
-		listeners.delete(listener);
-	};
+	const unsubscribe = store.subscribe(listener);
+	listener(store.get());
+	return unsubscribe;
 }
 
 /** The backend-owned half of a surface's state. Whatever else it tracks stays its own. */
 export function useUpdaterState(): UpdaterState {
-	const [state, setState] = useState<UpdaterState>(current);
+	const [state, setState] = useState<UpdaterState>(store.get());
 	useEffect(() => onUpdaterState(setState), []);
 	return state;
 }
