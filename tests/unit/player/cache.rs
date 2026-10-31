@@ -584,3 +584,45 @@ fn an_index_from_before_generations_keeps_its_rows_and_hands_out_new_ones() {
     cache.record("new", "flac", 10).unwrap();
     assert!(generation_of(&cache, "new").0 > 0);
 }
+
+/// The log's length and how much of it is in the database, counted without copying anything.
+fn log_of(cache: &AudioCache) -> (i64, i64) {
+    cache
+        .conn
+        .as_ref()
+        .unwrap()
+        .query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| {
+            Ok((row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+}
+
+/// Nothing else checkpoints the log once the automatic one is off: a thread that never started,
+/// or a hook that never rings it, would let the log grow with every write, and no write would
+/// say so.
+#[test]
+fn a_log_past_the_threshold_is_checkpointed_by_the_cache_thread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cache = AudioCache::open_with_capacity(tmp.path(), 1 << 40).unwrap();
+
+    let mut stored = 0;
+    while log_of(&cache).0 < 1100 {
+        assert!(stored < 5000, "the log never grew past the threshold");
+        cache.record(&format!("track-{stored}"), "flac", 1).unwrap();
+        stored += 1;
+    }
+
+    let waiting_since = std::time::Instant::now();
+    loop {
+        let (log, copied) = log_of(&cache);
+        if copied == log {
+            break;
+        }
+        assert!(
+            waiting_since.elapsed() < std::time::Duration::from_secs(10),
+            "{copied} of {log} pages of the log copied after {:?}",
+            waiting_since.elapsed()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}

@@ -5,6 +5,9 @@ use std::sync::mpsc;
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod checkpoint;
+use checkpoint::Checkpointer;
+
 /// The cap the user picks in the settings, in whole gigabytes.
 pub(crate) const MIN_CAPACITY_GB: u8 = 1;
 pub(crate) const MAX_CAPACITY_GB: u8 = 6;
@@ -261,6 +264,18 @@ pub struct AudioCache {
     stranded: u64,
     /// The [`Generation`] the next row takes: above every one in the index at open, never reused.
     next_generation: i64,
+    /// The thread that checkpoints the index's log, off the lock; `None` where SQLite's own
+    /// automatic checkpoint is still on.
+    checkpointer: Option<Checkpointer>,
+}
+
+impl Drop for AudioCache {
+    /// The checkpoint thread ends before the connection it was started beside closes.
+    fn drop(&mut self) {
+        if let Some(mut checkpointer) = self.checkpointer.take() {
+            checkpointer.stop(self.conn.as_ref());
+        }
+    }
 }
 
 /// The eviction pass a store's row owes, to run once the lock is let go.
@@ -450,10 +465,15 @@ impl AudioCache {
             )
             .unwrap_or(0) as u64;
 
+        // Last: SQLite's own checkpoint serves the writes above, and goes off only once the
+        // thread that replaces it runs.
+        let checkpointer = Checkpointer::start(&conn, &db_path);
+
         // No eviction here: a cache over its cap (the cap lowered by a session that ended before
         // its own pass did) is trimmed by [`settle_after_open`] once the cache is shared. The init
         // the lock waits behind never unlinks.
         Ok(Self {
+            checkpointer,
             conn: Some(conn),
             audio_dir,
             max_bytes,
@@ -611,6 +631,7 @@ impl AudioCache {
             wiping: false,
             stranded: 0,
             next_generation: 1,
+            checkpointer: None,
         }
     }
 
