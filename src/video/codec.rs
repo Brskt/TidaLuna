@@ -606,7 +606,7 @@ enum PhaseView {
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
-struct SnapshotView {
+pub(crate) struct SnapshotView {
     seq: u64,
     enabled: bool,
     phase: PhaseView,
@@ -1002,10 +1002,13 @@ impl<I: Io> Core<I> {
 enum Wake {
     Ask(tokio::sync::oneshot::Sender<Result<PathBuf, NoDecoder>>),
     Recheck,
-    /// The switch moved. Carries nothing: the task reads `wanted` as a level; a burst of
-    /// toggles settles once, on the last position.
-    Switch,
+    /// The switch moved. The task reads `wanted` as a level; a burst of toggles settles once, on
+    /// the last position. The sender gets the snapshot after the step that took the wake; dropped
+    /// unanswered, it refuses the click.
+    Switch(SwitchReply),
 }
+
+type SwitchReply = tokio::sync::oneshot::Sender<SnapshotView>;
 
 /// The task's end of the wake channel. A switch is a level, and the ones queued back to back are
 /// one retry (each would otherwise plan its own `Verify` and fetch a failure once per click).
@@ -1024,12 +1027,16 @@ impl Wakes {
         }
     }
 
-    /// Drops the switches queued right behind the one just taken.
-    fn fold_switches(&mut self) {
+    /// Folds the switches queued right behind the one just taken, keeping their senders: each is
+    /// answered after the one step the run plans.
+    fn fold_switches(&mut self, replies: &mut Vec<SwitchReply>) {
         while let Ok(wake) = self.rx.try_recv() {
-            if !matches!(wake, Wake::Switch) {
-                self.held = Some(wake);
-                break;
+            match wake {
+                Wake::Switch(reply) => replies.push(reply),
+                other => {
+                    self.held = Some(other);
+                    break;
+                }
             }
         }
     }
@@ -1072,9 +1079,12 @@ impl Supervisor {
     }
 
     /// A download under way finishes first: the task is busy with it, and `Off` follows.
-    fn set_enabled(&self, on: bool) {
+    fn set_enabled(&self, on: bool) -> tokio::sync::oneshot::Receiver<SnapshotView> {
+        let (reply, answered) = tokio::sync::oneshot::channel();
         self.wanted.store(on, std::sync::atomic::Ordering::Release);
-        let _ = self.wakes.send(Wake::Switch);
+        // A task already gone hands the wake back with its sender, dropped here: the refusal.
+        let _ = self.wakes.send(Wake::Switch(reply));
+        answered
     }
 
     fn is_ready(&self) -> bool {
@@ -1138,9 +1148,13 @@ async fn supervise<I: Io>(
                     let _ = reply.send(answer(&tx.borrow().phase));
                 }
                 Some(Wake::Recheck) => core.step(&tx, wanted(), Why::Recheck).await,
-                Some(Wake::Switch) => {
-                    wakes.fold_switches();
+                Some(Wake::Switch(first)) => {
+                    let mut replies = vec![first];
+                    wakes.fold_switches(&mut replies);
                     core.step(&tx, wanted(), Why::Switch).await;
+                    for reply in replies {
+                        let _ = reply.send(view(&tx.borrow()));
+                    }
                 }
             },
             () = demand.notified() => core.step(&tx, wanted(), Why::Demand).await,
@@ -1199,9 +1213,11 @@ pub(crate) fn note_demand() {
 
 /// The user's switch, live. Off keeps the installed file (Firefox removes nothing either); on
 /// again only verifies it.
-pub(crate) fn set_enabled(on: bool) {
-    if let Some(supervisor) = SUPERVISOR.get() {
-        supervisor.set_enabled(on);
+pub(crate) fn set_enabled(on: bool) -> tokio::sync::oneshot::Receiver<SnapshotView> {
+    match SUPERVISOR.get() {
+        Some(supervisor) => supervisor.set_enabled(on),
+        // Never started: the sender dropped here is the refusal.
+        None => tokio::sync::oneshot::channel().1,
     }
 }
 

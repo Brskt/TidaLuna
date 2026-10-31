@@ -61,6 +61,24 @@ pub(crate) fn log_safe_channel(channel: &str) -> &str {
     channel
 }
 
+/// Channels answered by their handler. Any other invoke is answered "ok" before its handler runs,
+/// which a page waiting on the reply would take for the work being done.
+fn is_invoke_channel(channel: &str) -> bool {
+    channel.starts_with("plugin.")
+        || channel.starts_with("proxy.")
+        || channel.starts_with("jsrt.")
+        || channel.starts_with("tidal.")
+        || channel.starts_with("__Luna.")
+        || channel.starts_with("__LunaNative.")
+        || channel.starts_with("updater.")
+        || channel.starts_with("connect.")
+        || channel == "player.parse_dash"
+        || channel == "settings.video_codec_state"
+        || channel == "settings.set_video_codec"
+        || channel == "settings.plugin_update_at_boot"
+        || channel == "settings.store_repair"
+}
+
 /// Privileged-frame gate decision: an untrusted frame's privileged channel is refused
 /// (403 if a reply is awaited, else a silent ack). Applied uniformly: a channel
 /// cannot slip the gate by being absent from the dispatch list.
@@ -153,20 +171,7 @@ impl BrowserSideHandler for IpcQueryHandler {
             }
 
             // Req-resp plugin/connect dispatch (trusted by the gate above).
-            if msg.id.is_some()
-                && (msg.channel.starts_with("plugin.")
-                    || msg.channel.starts_with("proxy.")
-                    || msg.channel.starts_with("jsrt.")
-                    || msg.channel.starts_with("tidal.")
-                    || msg.channel.starts_with("__Luna.")
-                    || msg.channel.starts_with("__LunaNative.")
-                    || msg.channel.starts_with("updater.")
-                    || msg.channel.starts_with("connect.")
-                    || msg.channel == "player.parse_dash"
-                    || msg.channel == "settings.video_codec_state"
-                    || msg.channel == "settings.plugin_update_at_boot"
-                    || msg.channel == "settings.store_repair")
-            {
+            if msg.id.is_some() && is_invoke_channel(&msg.channel) {
                 if msg.channel.starts_with("connect.") {
                     crate::connect::ipc::handle_connect_invoke(msg, callback);
                 } else {

@@ -173,6 +173,25 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         "settings.video_codec_state" => {
             ipc_callback_ok(&callback, &crate::video::codec::state_json());
         }
+        // Live: the supervisor follows once free (a download under way finishes first) and answers
+        // with its snapshot after the step that took this click, holding the query that long. A
+        // decode already running is not interrupted mid-frame.
+        "settings.set_video_codec" => {
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
+            crate::state::db().post(move |_, conn| {
+                crate::settings::save_video_codec_enabled(conn, enabled);
+            });
+            let answered = crate::video::codec::set_enabled(enabled);
+            crate::vprintln!("[VIDEO]   Codec set to {enabled}");
+            crate::state::rt_handle().spawn(async move {
+                match answered.await {
+                    Ok(view) => ipc_callback_json(&callback, &view),
+                    Err(_) => {
+                        ipc_callback_err(&callback, 503, "the video codec service has stopped")
+                    }
+                }
+            });
+        }
         "settings.plugin_update_at_boot" => {
             crate::state::db().post(move |_, settings| {
                 let on = crate::settings::load_plugin_update_at_boot(settings);

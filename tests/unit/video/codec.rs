@@ -733,17 +733,20 @@ async fn an_ask_between_two_switches_is_answered_after_the_first_retry() {
     assert_eq!(io.count(|s| &s.fetches), 2);
 }
 
-/// The task is busy with the download: `Off` follows it, and the file it brought stays.
+/// The task is busy with the download: `Off` follows it and answers the click, not the `Ready` the
+/// download step published, and the file it brought stays.
 #[tokio::test(start_paused = true)]
-async fn a_switch_off_during_a_download_lands_after_it() {
+async fn a_switch_off_during_a_download_is_answered_after_it_and_keeps_its_file() {
     let io = FakeIo::new(secs(40), never_fails);
     let supervisor = supervising(&io);
     live(&supervisor, false, 5).await;
     assert_eq!(phase(&supervisor), Phase::Downloading);
 
-    supervisor.set_enabled(false);
+    let answer = supervisor.set_enabled(false).await.expect("answered");
     live(&supervisor, false, 60).await;
 
+    assert!(!answer.enabled);
+    assert_eq!(answer.phase, PhaseView::Off);
     assert_eq!(phase(&supervisor), Phase::Unavailable(Unavailable::Off));
     assert!(io.0.installed.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(io.count(|s| &s.fetches), 1);
