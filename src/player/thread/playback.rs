@@ -75,7 +75,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// incoming track finished during the overlap: such a track has its `Finished` consumed by
     /// the fade's own drain, and would otherwise never be cached.
     pub(super) fn store_finished_ciphertext(&self) {
-        if self.is_cached {
+        if self.cached.is_some() {
             return;
         }
         let Some(ref buf) = self.current_buffer else {
@@ -175,10 +175,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // A stall is the case this must not touch: those bytes decoded fine until they
         // stopped arriving, and evicting them would cost a re-download of a good file.
         if cause == PacketFailure::Source
-            && self.is_cached
+            && let Some(seen) = self.cached
             && let Some(tid) = self.current_track_id.clone()
         {
-            crate::player::cache::AudioCache::drop_entry_detached(tid);
+            crate::player::cache::AudioCache::drop_entry_detached(tid, seen);
         }
         match cause {
             // No `MediaError`: every code the SDK maps advances the queue, and a track whose
@@ -1025,7 +1025,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // below, letting a seek landing this tick still count as in flight: a range restart
         // always blocks the reader, and that stall is the seek's own doing.
         if self.is_playing
-            && !self.is_cached
+            && self.cached.is_none()
             && !self.seeking
             && let Some(ref buf) = self.current_buffer
         {
@@ -1058,7 +1058,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         outgoing_reached_end = true;
                         crate::vprintln!(
                             "[TRACK]  Decode finished ({})",
-                            if self.is_cached {
+                            if self.cached.is_some() {
                                 "from cache"
                             } else {
                                 "from stream"
@@ -1128,7 +1128,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             crate::vprintln!(
                                 "[SEEK]   complete: wall={} ({})",
                                 format_ms(wall_ms),
-                                if self.is_cached {
+                                if self.cached.is_some() {
                                     "cached"
                                 } else {
                                     "streaming"
@@ -1197,10 +1197,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                         // retire them and every later play would fail the same way. Handed
                         // over rather than done here, this being the control thread where a
                         // cache wipe holds the lock for its whole duration.
-                        if self.is_cached
+                        if let Some(seen) = self.cached
                             && let Some(tid) = self.current_track_id.clone()
                         {
-                            crate::player::cache::AudioCache::drop_entry_detached(tid);
+                            crate::player::cache::AudioCache::drop_entry_detached(tid, seen);
                         }
                         (self.callback)(PlayerEvent::MediaError {
                             error: e,

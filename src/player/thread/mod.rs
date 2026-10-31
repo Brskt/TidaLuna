@@ -150,7 +150,9 @@ pub(super) struct PlayerThread<F> {
     /// measurement taken here can name the track the frontend will announce it under.
     current_product_id: Option<String>,
     current_format: String,
-    is_cached: bool,
+    /// The generation of the cache entry this track was read from, `None` for a track that was
+    /// not a cache hit: the only row a decode failure may retire.
+    cached: Option<crate::player::cache::Generation>,
     is_playing: bool,
     has_track: bool,
     // The transport state to put back when a seek settles while not playing. `is_playing`
@@ -406,7 +408,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_track_id: None,
             current_product_id: None,
             current_format: String::new(),
-            is_cached: false,
+            cached: None,
             is_playing: false,
             idle_state: crate::player::PlaybackState::Ready,
             has_track: false,

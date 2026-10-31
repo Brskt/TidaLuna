@@ -221,9 +221,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// The READ is blocking and deliberately on the control thread: the decode threads and the
     /// audio callback are untouched, the ring already holds seconds of audio, and it happens
     /// once per transition. The LOOKUP does not. Arming polls four times a second for the whole
-    /// tail of every track, and waiting on the cache mutex at that cadence is what a wipe turns
-    /// into frozen transport: `MenuCommand::ClearCache` holds it for its entire `remove_dir_all`
-    /// to keep the wipe atomic against `store_finished_ciphertext`'s unlocked writes.
+    /// tail of every track, and waiting on the cache mutex at that cadence turns any stall of its
+    /// holders (a store's row, a step of an eviction or a Clear) into frozen transport.
     /// `ipc/window.rs` met the same mutex on the UI thread and answered it the same way.
     ///
     /// Busy therefore reads as a miss, which the caller already handles: not yet, ask again
@@ -596,10 +595,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // faded into then reads as a different track and forces a full rebuild, audibly
         // undoing the fade.
         self.set_committed_track(Some((track_id, state.next.track.format.clone())));
-        // A preloaded track is a fresh network fetch, never a disk-cache hit. False
+        // A preloaded track is a fresh network fetch, never a disk-cache hit. None
         // is the safe direction: it lets the completion path store it, which is
         // idempotent, rather than skip a track that was never cached.
-        self.is_cached = false;
+        self.cached = None;
         // This pair is ordered, and the order is the fix. `commit_peeked` flips the staged
         // buffer's owner to `Playback`, and from that instant a download restart resolves its
         // url through `CURRENT_TRACK`. Published second, a restart landing in between reads the
@@ -1153,7 +1152,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         {
             self.load_seq = event_seq;
         }
-        self.is_cached = cached;
+        self.cached = cached;
         self.current_format = format;
         // Invalidated until this load's probe emits a fresh one (the ASIO/exclusive
         // branches never do -> stays None, and a re-assert cannot send a stale format).
@@ -1169,7 +1168,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // absent id (which costs this track its length for good) is otherwise unobservable.
         crate::vprintln!(
             "[LOAD #{load_gen}] handle_load enter | cached={} | track={} | product={:?}",
-            cached,
+            cached.is_some(),
             short_id(&track_id, 60),
             self.current_product_id.as_deref()
         );
@@ -1494,7 +1493,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             format_ms(probe_ms),
             format_ms(cpal_ms),
             format_ms(handle_start.elapsed().as_secs_f64() * 1000.0),
-            if cached {
+            if cached.is_some() {
                 " (CACHE HIT)"
             } else {
                 " (streaming)"
@@ -2059,7 +2058,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!(
                 "[SEEK]   sent: {:.2}s ({})",
                 latest_time,
-                if self.is_cached {
+                if self.cached.is_some() {
                     "cached/RAM"
                 } else {
                     "streaming"

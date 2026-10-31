@@ -39,14 +39,12 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             let x = msg.args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let y = msg.args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
-            // Tried, not awaited: a clear in flight holds this mutex for the whole wipe, and
-            // that hold is deliberate, keeping the wipe atomic against the unlocked
-            // writes `store_finished_ciphertext` performs. Waiting here would put the freeze
-            // back on the UI thread by the back door. The size is a label. The existing
-            // fallback below is the right answer when the lock is busy.
+            // Tried, not awaited: this mutex's holders (a store's row, a step of an eviction or
+            // a Clear) can stall behind the disk, and waiting would put that on the UI thread.
+            // The size is only a label; the fallback below covers a busy lock.
             let cache_label = if let Ok(cache) = crate::state::AUDIO_CACHE.try_lock() {
-                let mb = cache.total_size() as f64 / (1024.0 * 1024.0);
-                format!("Clear Cache ({mb:.0} MB)")
+                let size = crate::player::cache::format_size(cache.total_size());
+                format!("Clear Cache ({size})")
             } else {
                 "Clear Cache".to_string()
             };
@@ -260,15 +258,8 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
             });
             crate::vprintln!("[LOGGING] Console window set to {enabled} (applies on restart)");
         }
-        // Live: the supervisor follows once free (a download under way finishes first) and echoes
-        // the position in its snapshot. A decode already running is not interrupted mid-frame.
-        "settings.set_video_codec" => {
-            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-            crate::state::db().post(move |_, conn| {
-                crate::settings::save_video_codec_enabled(conn, enabled);
-            });
-            crate::video::codec::set_enabled(enabled);
-            crate::vprintln!("[VIDEO]   Codec set to {enabled}");
+        "settings.clear_audio_cache" => {
+            crate::player::cache::queue_clear(None);
         }
         // Not Windows-gated: crossfade rides the shared cpal path, which every
         // platform uses. The exclusive and ASIO backends ignore it.

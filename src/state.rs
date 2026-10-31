@@ -565,8 +565,17 @@ pub(crate) fn boot_settings() -> &'static crate::settings::BootSettings {
 }
 
 pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = LazyLock::new(|| {
+    use crate::player::cache::{AudioCache, DEFAULT_CAPACITY_GB, capacity_bytes};
     let dir = cache_data_dir();
-    let cache = match crate::player::cache::AudioCache::open(&dir) {
+    // `get`, not `boot_settings()`: tests reach this global without boot settings, and a
+    // panicking init would poison it. They get the defaults.
+    let (enabled, gb) = BOOT_SETTINGS
+        .get()
+        .map_or((true, DEFAULT_CAPACITY_GB), |boot| {
+            (boot.audio_cache_enabled, boot.audio_cache_gb)
+        });
+    let max_bytes = capacity_bytes(gb);
+    let mut cache = match AudioCache::open_with_capacity(&dir, max_bytes) {
         Ok(cache) => {
             crate::vprintln!("[CACHE]  Opened ({})", dir.join("cache").display());
             cache
@@ -575,14 +584,17 @@ pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = Lazy
             crate::verr!("[CACHE]  Failed to open: {e}");
             // Fallback: a session cache in the OS temp dir.
             let tmp = std::env::temp_dir().join(APP_DIR);
-            crate::player::cache::AudioCache::open(&tmp).unwrap_or_else(|e| {
+            AudioCache::open_with_capacity(&tmp, max_bytes).unwrap_or_else(|e| {
                 // Never panic here: a panicking init poisons the LazyLock for
                 // the process lifetime; every later touch would panic too.
                 crate::verr!("[CACHE]  Fallback failed, cache disabled: {e}");
-                crate::player::cache::AudioCache::disabled(&dir)
+                AudioCache::disabled(&dir, max_bytes)
             })
         }
     };
+    cache.set_enabled(enabled);
+    // After the boot writes above: the seed has no page to reach, which pulls at mount.
+    crate::player::cache::install_publisher(&mut cache);
     Mutex::new(cache)
 });
 

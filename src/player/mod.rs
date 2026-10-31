@@ -651,7 +651,7 @@ struct LoadRequest {
     product_id: Option<String>,
     resume_policy: ResumePolicy,
     load_start: std::time::Instant,
-    cached: bool,
+    cached: Option<cache::Generation>,
     format: String,
 }
 
@@ -680,7 +680,7 @@ impl LoadContext {
         current_gen() != self.load_gen
     }
 
-    fn publish_load(&self, buffer: RamBuffer, cached: bool, track_id: String) {
+    fn publish_load(&self, buffer: RamBuffer, cached: Option<cache::Generation>, track_id: String) {
         let _ = self.cmd_tx.send(PlayerCommand::Load {
             request: LoadRequest {
                 buffer,
@@ -1113,10 +1113,10 @@ async fn try_cache_hit(ctx: &LoadContext, track_id: &str, key: &str) -> LoadStep
             crate::vprintln!("[CACHE]  Lock poisoned, skipping cache lookup");
             return LoadStep::Miss;
         };
-        cache.lookup_path(track_id)
+        cache.lookup_seen(track_id)
     };
 
-    let Some(path) = path else {
+    let Some(cache::Seen { path, generation }) = path else {
         let cache_ms = cache_t0.elapsed().as_secs_f64() * 1000.0;
         crate::vprintln!(
             "[CACHE]  Miss ({}) | lookup: {}",
@@ -1143,7 +1143,7 @@ async fn try_cache_hit(ctx: &LoadContext, track_id: &str, key: &str) -> LoadStep
         Ok(Ok(data)) => data,
         Ok(Err(CacheReadError::Orphaned)) => {
             if let Ok(mut cache) = AUDIO_CACHE.lock() {
-                cache.remove_index_entry(track_id);
+                cache.remove_orphan(track_id, generation);
             }
             return LoadStep::Miss;
         }
@@ -1156,7 +1156,7 @@ async fn try_cache_hit(ctx: &LoadContext, track_id: &str, key: &str) -> LoadStep
         }
         Ok(Err(CacheReadError::Corrupt(reason))) => {
             if let Ok(mut cache) = AUDIO_CACHE.lock() {
-                match cache.drop_entry(track_id) {
+                match cache.drop_seen(track_id, generation) {
                     cache::DropOutcome::Dropped | cache::DropOutcome::NoRow => crate::vprintln!(
                         "[CACHE]  Dropped unusable entry {}: {reason}",
                         short_id(track_id, 40)
@@ -1195,7 +1195,7 @@ async fn try_cache_hit(ctx: &LoadContext, track_id: &str, key: &str) -> LoadStep
         format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)
     );
     let buffer = RamBuffer::from_complete(data);
-    ctx.publish_load(buffer, true, track_id.to_string());
+    ctx.publish_load(buffer, Some(generation), track_id.to_string());
     LoadStep::Handled
 }
 
@@ -1235,7 +1235,7 @@ async fn try_preload_hit(ctx: &LoadContext, track: &TrackInfo, track_id: &str) -
             format_ms(ctx.load_start.elapsed().as_secs_f64() * 1000.0)
         );
         let buffer = preloaded.buffer;
-        ctx.publish_load(buffer, false, track_id.to_string());
+        ctx.publish_load(buffer, None, track_id.to_string());
         return LoadStep::Handled;
     }
 
@@ -1310,7 +1310,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
                 );
                 let buffer =
                     RamBuffer::from_complete_with_ciphertext(fetched.data, fetched.ciphertext);
-                ctx.publish_load(buffer, false, track_id.to_string());
+                ctx.publish_load(buffer, None, track_id.to_string());
             }
             Err(e) => {
                 crate::vprintln!("[ERROR]  Fetch failed: {}", e);
@@ -1384,7 +1384,7 @@ async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, track_id: &s
         buffer.written() / 1024,
         prebuf_start.elapsed().as_secs_f64() * 1000.0
     );
-    ctx.publish_load(buffer, false, track_id.to_string());
+    ctx.publish_load(buffer, None, track_id.to_string());
 }
 
 impl Player {
@@ -1888,7 +1888,7 @@ impl Player {
                     product_id,
                     resume_policy: ResumePolicy::Disabled,
                     load_start,
-                    cached: false,
+                    cached: None,
                     format,
                 },
                 auto_play: true,

@@ -411,7 +411,8 @@ fn main() {
     if let Err(e) = std::thread::Builder::new()
         .name("cache-warm".into())
         .spawn(|| {
-            let _ = &*crate::state::AUDIO_CACHE;
+            // The pass a cache left over its cap owes runs here, once the cache is shared.
+            crate::player::cache::AudioCache::settle_after_open(&crate::state::AUDIO_CACHE);
         })
     {
         crate::vprintln!("[CACHE]  Warm thread spawn failed ({e})");

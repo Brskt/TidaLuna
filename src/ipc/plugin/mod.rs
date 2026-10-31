@@ -69,6 +69,14 @@ pub(crate) fn ipc_callback_json(cb: &IpcCallback, value: &impl serde::Serialize)
     }
 }
 
+/// Answers a cache click with the state its change left, or fails it if the change never ran.
+fn audio_cache_completion(callback: IpcCallback) -> crate::player::cache::Completion {
+    crate::player::cache::Completion::new(move |outcome| match outcome {
+        Ok(state) => ipc_callback_json(&callback, &state),
+        Err(why) => ipc_callback_err(&callback, 500, why),
+    })
+}
+
 pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCallback) {
     // Resolved once, before dispatch: a handler resolving again could read a capability the gate
     // accepted and eviction has since dropped, turning an allowed call unattributed after the fact.
@@ -191,6 +199,62 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
                     }
                 }
             });
+        }
+        // Off the UI thread: a clear or a lowered cap holds the cache lock while it deletes.
+        "settings.audio_cache_state" => {
+            crate::state::rt_handle().spawn_blocking(move || {
+                let Ok(mut cache) = crate::state::AUDIO_CACHE.lock() else {
+                    ipc_callback_err(&callback, 500, "audio cache lock poisoned");
+                    return;
+                };
+                let state = cache.state();
+                drop(cache);
+                ipc_callback_json(&callback, &state);
+            });
+        }
+        // Invoked rather than sent: the page lets go of the click on this reply, the state taken
+        // once the change is applied, and on nothing else.
+        "settings.set_audio_cache_enabled" => {
+            let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
+            crate::state::db().post(move |_, conn| {
+                crate::settings::save_audio_cache_enabled(conn, enabled);
+            });
+            crate::player::cache::queue_change(
+                crate::player::cache::Request::Switch,
+                move |cache| {
+                    cache.set_enabled(enabled);
+                    Ok(())
+                },
+                Some(audio_cache_completion(callback)),
+            );
+            crate::vprintln!("[CACHE]  Cache set to {enabled}");
+        }
+        "settings.set_audio_cache_size" => {
+            use crate::player::cache::{MAX_CAPACITY_GB, MIN_CAPACITY_GB, capacity_bytes};
+            // Read as f64 like the crossfade: `as_u64` rejects 4.0 as readily as 4.5. A value
+            // the slider cannot send is refused rather than guessed at.
+            let Some(gb) = msg
+                .args
+                .first()
+                .and_then(|v| v.as_f64())
+                .filter(|gb| gb.is_finite())
+                .map(|gb| {
+                    gb.round()
+                        .clamp(MIN_CAPACITY_GB as f64, MAX_CAPACITY_GB as f64)
+                        as u8
+                })
+            else {
+                ipc_callback_err(&callback, 400, "audio cache size is not a number");
+                return;
+            };
+            crate::state::db().post(move |_, conn| {
+                crate::settings::save_audio_cache_gb(conn, gb);
+            });
+            crate::player::cache::queue_resize(
+                capacity_bytes(gb),
+                Some(audio_cache_completion(callback)),
+            );
+            crate::vprintln!("[CACHE]  Cap set to {gb} GB");
         }
         "settings.plugin_update_at_boot" => {
             crate::state::db().post(move |_, settings| {

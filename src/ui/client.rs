@@ -75,6 +75,9 @@ fn is_invoke_channel(channel: &str) -> bool {
         || channel == "player.parse_dash"
         || channel == "settings.video_codec_state"
         || channel == "settings.set_video_codec"
+        || channel == "settings.audio_cache_state"
+        || channel == "settings.set_audio_cache_enabled"
+        || channel == "settings.set_audio_cache_size"
         || channel == "settings.plugin_update_at_boot"
         || channel == "settings.store_repair"
 }

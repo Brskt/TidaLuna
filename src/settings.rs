@@ -193,6 +193,17 @@ const VIDEO_CODEC_ENABLED: Setting<bool> = Setting {
     absent: true,
     unreadable: false,
 };
+// On by default, and on a row it cannot read: a cache grants nothing, it only saves bandwidth.
+const AUDIO_CACHE_ENABLED: Setting<bool> = Setting {
+    key: "cache.audio_enabled",
+    absent: true,
+    unreadable: true,
+};
+const AUDIO_CACHE_GB: Setting<u8> = Setting {
+    key: "cache.audio_gb",
+    absent: crate::player::cache::DEFAULT_CAPACITY_GB,
+    unreadable: crate::player::cache::DEFAULT_CAPACITY_GB,
+};
 }
 
 #[derive(Debug, Clone)]
@@ -603,6 +614,27 @@ pub(crate) fn save_video_codec_enabled(conn: &mut Connection, enabled: bool) {
     VIDEO_CODEC_ENABLED.save(conn, &enabled.to_string());
 }
 
+pub(crate) fn save_audio_cache_enabled(conn: &mut Connection, enabled: bool) {
+    AUDIO_CACHE_ENABLED.save(conn, &enabled.to_string());
+}
+
+fn clamp_audio_cache_gb(gb: u8) -> u8 {
+    gb.clamp(
+        crate::player::cache::MIN_CAPACITY_GB,
+        crate::player::cache::MAX_CAPACITY_GB,
+    )
+}
+
+/// Clamped on read as well as on write, like the crossfade: a hand-edited zero would otherwise
+/// evict the whole cache at launch.
+fn audio_cache_gb(r: &mut Reader) -> u8 {
+    clamp_audio_cache_gb(r.get(&AUDIO_CACHE_GB))
+}
+
+pub(crate) fn save_audio_cache_gb(conn: &mut Connection, gb: u8) {
+    AUDIO_CACHE_GB.save(conn, &clamp_audio_cache_gb(gb).to_string());
+}
+
 /// Settings the window bootstrap needs, batched into one db read, loading
 /// off the CEF UI thread in main() instead of blocking on_context_initialized.
 #[derive(Debug, Clone, Copy)]
@@ -620,6 +652,8 @@ pub(crate) struct BootSettings {
     pub(crate) crossfade_enabled: bool,
     pub(crate) crossfade_secs: u8,
     pub(crate) video_codec_enabled: bool,
+    pub(crate) audio_cache_enabled: bool,
+    pub(crate) audio_cache_gb: u8,
 }
 
 /// One `Reader` for the whole boot read: a failing store reports one line, not one per key.
@@ -646,6 +680,8 @@ pub(crate) fn load_boot_settings(conn: &mut Connection) -> BootSettings {
         crossfade_enabled: r.get(&PLAYER_CROSSFADE_ENABLED),
         crossfade_secs: crossfade_secs(&mut r),
         video_codec_enabled: r.get(&VIDEO_CODEC_ENABLED),
+        audio_cache_enabled: r.get(&AUDIO_CACHE_ENABLED),
+        audio_cache_gb: audio_cache_gb(&mut r),
     }
 }
 

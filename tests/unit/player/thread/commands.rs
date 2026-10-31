@@ -178,7 +178,7 @@ async fn an_announced_length_names_the_track_its_load_carried() {
             product_id: Some("120002099".to_string()),
             resume_policy: ResumePolicy::Restart,
             load_start: std::time::Instant::now(),
-            cached: true,
+            cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
         },
         false,
@@ -247,7 +247,7 @@ async fn a_probe_failure_names_the_track_its_load_carried() {
             product_id: Some("120002099".to_string()),
             resume_policy: ResumePolicy::Restart,
             load_start: std::time::Instant::now(),
-            cached: true,
+            cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
         },
         false,
@@ -1723,7 +1723,7 @@ fn load_req_of(buffer: crate::player::buffer::RamBuffer, seq: u32, track: &str) 
         product_id: None,
         resume_policy: ResumePolicy::Restart,
         load_start: std::time::Instant::now(),
-        cached: true,
+        cached: Some(crate::player::cache::Generation::NONE),
         format: "flac".to_string(),
     }
 }
@@ -2211,7 +2211,7 @@ async fn a_stale_load_leaves_a_live_fade_armed() {
             product_id: Some("superseded-product".to_string()),
             resume_policy: ResumePolicy::Restart,
             load_start: std::time::Instant::now(),
-            cached: true,
+            cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
         },
         false,
@@ -2224,11 +2224,9 @@ async fn a_stale_load_leaves_a_live_fade_armed() {
     );
 }
 
-/// Arming polls four times a second for the whole tail of every track, and each tick asks the
-/// cache whether the next track is on disk. `MenuCommand::ClearCache` holds that same mutex for
-/// its entire `remove_dir_all`, deliberately, to keep the wipe atomic against
-/// `store_finished_ciphertext`'s unlocked writes: waiting for it here parks the player control
-/// thread for the whole wipe.
+/// Arming polls four times a second for the tail of every track, each tick asking the cache
+/// whether the next track is on disk. That mutex's holders (a store's row, a step of an eviction
+/// or a Clear) can stall behind the disk: waiting here parks the control thread as long.
 #[test]
 fn a_busy_cache_never_parks_the_arming_tick() {
     let dir = tempfile::tempdir().unwrap();
@@ -2544,7 +2542,7 @@ fn handle_load_of_c(h: &mut Harness, gen_c: u32, seq_c: u32) -> bool {
             product_id: Some("c-product".to_string()),
             resume_policy: ResumePolicy::Restart,
             load_start: std::time::Instant::now(),
-            cached: true,
+            cached: Some(crate::player::cache::Generation::NONE),
             format: "flac".to_string(),
         },
         false,
