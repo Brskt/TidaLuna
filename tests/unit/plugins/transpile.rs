@@ -104,6 +104,42 @@ fn an_import_is_lowered_to_a_modules_lookup() {
     }
 }
 
+/// UTF-16 units of the string literal in `x = <literal>;`, lone surrogates kept; parse errors refused.
+fn utf16_of(literal: &str) -> Vec<u16> {
+    let allocator = oxc::allocator::Allocator::default();
+    let code = format!("x = {literal};");
+    let parsed = oxc::parser::Parser::new(&allocator, &code, oxc::span::SourceType::mjs()).parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{code}: {:?}",
+        parsed.diagnostics
+    );
+    let [Statement::ExpressionStatement(s)] = parsed.program.body.as_slice() else {
+        panic!("{code}");
+    };
+    let Expression::AssignmentExpression(a) = &s.expression else {
+        panic!("{code}");
+    };
+    let Expression::StringLiteral(l) = &a.right else {
+        panic!("{code}");
+    };
+    l.value.encode_utf16().collect()
+}
+
+/// A plugin's import source is pasted into generated code: it must come back out as the same one
+/// string, including a lone surrogate JSON cannot encode, and never close the literal early.
+#[test]
+fn an_import_source_reaches_the_lookup_as_the_same_one_string() {
+    let source = r#""\uD800\"\\\n'</script>""#;
+    let lowered = lower_es_modules(&format!("import {{ x }} from {source};x();"), "plugin.ts")
+        .expect("lowered");
+    let (_, rest) = lowered
+        .split_once("luna?.core?.modules?.[")
+        .expect(&lowered);
+    let (literal, _) = rest.split_once(']').expect(&lowered);
+    assert_eq!(utf16_of(literal), utf16_of(source), "{lowered}");
+}
+
 /// `@luna/lib` is the exception, and the reason is identity. Its `ipcRenderer.invoke` closes over
 /// the app bundle's scope; a shadow injected into a plugin's wrapper cannot reach it, and the
 /// channels that act on the caller's identity used to arrive with none, which is how

@@ -70,7 +70,14 @@ fn run() {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get() as f32)
         .unwrap_or(1.0);
-    let mut sys = System::new();
+    // Fails only on a platform sysinfo does not support.
+    let mut sys = match System::new() {
+        Ok(sys) => sys,
+        Err(e) => {
+            crate::verr!("[PERF] No sampler: {e}");
+            return;
+        }
+    };
     loop {
         // with_cmd is required to read each process's `--type=` switch for
         // classify(); the default refresh skips it, which left every CEF

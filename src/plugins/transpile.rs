@@ -1,7 +1,9 @@
+use std::fmt::Write;
 use std::path::Path;
 
 use oxc::ast::ast::*;
 use oxc::span::GetSpan;
+use oxc::str::JSStr;
 
 /// Transpile TypeScript plugin source to IIFE-ready JavaScript.
 ///
@@ -161,15 +163,14 @@ fn lower_import(decl: &ImportDeclaration) -> String {
         return String::new(); // side-effect import
     };
 
-    let module =
-        serde_json::to_string(decl.source.value.as_str()).unwrap_or_else(|_| "\"\"".to_string());
+    let module = js_string_literal(decl.source.value);
     // `@luna/lib` resolves to a copy bound to THIS plugin, not the shared object. The lib's own
     // `invoke` closes over the app bundle's scope; a shadow injected into the plugin's wrapper
     // cannot reach it, which is why the channels that act on the caller's identity kept arriving
     // with none, and why `registerNative` read its identity off an argument instead. This lowering
     // is the one step that runs once per plugin with that plugin's capability in scope: the
     // binding is made here rather than anywhere the lib itself could reach.
-    let modules_ref = if decl.source.value.as_str() == "@luna/lib" {
+    let modules_ref = if decl.source.value == "@luna/lib" {
         "luna?.core?.modules?.[\"__lunaLibFor\"]?.(__cap)".to_string()
     } else {
         format!("luna?.core?.modules?.[{module}]")
@@ -208,6 +209,26 @@ fn lower_import(decl: &ImportDeclaration) -> String {
     statements.join(" ")
 }
 
+/// `value` as a double-quoted JS string literal. A plugin's import source may hold a lone
+/// surrogate, which JSON cannot encode; `\uXXXX` carries it through intact.
+fn js_string_literal(value: JSStr) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c.to_char() {
+            Some(ch @ ('"' | '\\')) => {
+                out.push('\\');
+                out.push(ch);
+            }
+            Some(ch) if ch >= ' ' => out.push(ch),
+            _ => {
+                let _ = write!(out, "\\u{:04x}", c.to_u32());
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// `export { a as X, type T, b }` -> `var __exports = { X: a, b: b };`
 ///
 /// Type-only specifiers (`export { type T }`) are dropped: the TS transform
@@ -225,12 +246,9 @@ fn build_exports_object(specifiers: &[ExportSpecifier]) -> String {
     format!("var __exports = {{ {} }};", entries.join(", "))
 }
 
+/// Panics on a lone surrogate, which the parser reports and every caller bails on first.
 pub(crate) fn module_export_name(name: &ModuleExportName) -> String {
-    match name {
-        ModuleExportName::IdentifierName(i) => i.name.to_string(),
-        ModuleExportName::IdentifierReference(i) => i.name.to_string(),
-        ModuleExportName::StringLiteral(s) => s.value.to_string(),
-    }
+    name.name().to_string()
 }
 
 #[cfg(test)]
