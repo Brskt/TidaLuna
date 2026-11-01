@@ -202,3 +202,43 @@ fn a_launch_that_beats_the_holders_bind_still_lands_its_link() {
         "a link that landed leaves nothing for the second launch to hold"
     );
 }
+
+/// A signal that cuts a receive short is no death. The reader retries, delivers the next link
+/// and logs nothing at the close.
+#[test]
+fn a_reader_interrupted_by_a_signal_still_delivers_the_next_link() {
+    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    const LINK: &[u8] = b"tidal://album/eintr-survivor";
+    fn interrupted_then_a_link_then_the_close(
+        _: &UnixDatagram,
+        buf: &mut [u8],
+    ) -> std::io::Result<(usize, Option<u32>)> {
+        match CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0..=2 => Err(std::io::ErrorKind::Interrupted.into()),
+            3 => {
+                buf[..LINK.len()].copy_from_slice(LINK);
+                Ok((LINK.len(), Some(own_uid())))
+            }
+            _ => Ok((0, None)),
+        }
+    }
+    let (socket, _) = UnixDatagram::pair().expect("a socket pair");
+    let closing = std::sync::atomic::AtomicBool::new(true);
+    let fate = Fate::new("channel");
+
+    read_until_closed(
+        &socket,
+        &closing,
+        &fate,
+        interrupted_then_a_link_then_the_close,
+    );
+
+    assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 5);
+    let delivered = crate::ui::deep_link::take_pending().expect("the link was delivered");
+    assert!(delivered.to_string().contains("eintr-survivor"));
+    fate.report();
+    assert!(
+        crate::logging::take_lines().is_empty(),
+        "the reader reported a death"
+    );
+}

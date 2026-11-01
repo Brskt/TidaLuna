@@ -353,6 +353,10 @@ impl AppLock {
         if matches!(self.link, LinkChannel::Unavailable) {
             crate::verr!("[LOCK]   no link pipe; deep links cannot reach this window");
         }
+        #[cfg(target_os = "linux")]
+        if let Some(guard) = &self._guard {
+            guard.report_deaths();
+        }
         #[cfg(any(windows, target_os = "linux"))]
         for unserved in &self.unserved {
             match unserved {
@@ -1886,14 +1890,80 @@ mod linux_impl {
     fn listen(
         socket: &UnixDatagram,
         closing: &Arc<AtomicBool>,
+        fate: &Arc<Fate>,
     ) -> std::io::Result<(UnixDatagram, JoinHandle<()>)> {
         if let Err(e) = enable_peer_credentials(socket) {
             crate::vprintln!("[LOCK]   no peer credentials ({e}); signals will be refused");
         }
         let for_listener = socket.try_clone()?;
         let for_closing = socket.try_clone()?;
-        let listener = spawn_focus_listener(for_listener, Arc::clone(closing))?;
+        let listener = spawn_focus_listener(for_listener, Arc::clone(closing), Arc::clone(fate))?;
         Ok((for_closing, listener))
+    }
+
+    /// Why a reader left without being closed.
+    enum Cause {
+        Failed(std::io::Error),
+        Panicked,
+    }
+
+    enum Standing {
+        /// The session log is not ours yet, and the reader still runs or has died unheard.
+        Waiting(Option<Cause>),
+        /// `report_channels` has run: a later death is said where it happens.
+        Reported,
+    }
+
+    /// What became of one socket's reader. The mutex makes recording and saying
+    /// atomic: a death is said once, by `report_channels` if it came first and by
+    /// the reader if it came after.
+    pub(super) struct Fate {
+        socket: &'static str,
+        standing: Mutex<Standing>,
+    }
+
+    impl Fate {
+        pub(super) fn new(socket: &'static str) -> Self {
+            Self {
+                socket,
+                standing: Mutex::new(Standing::Waiting(None)),
+            }
+        }
+
+        fn died(&self, cause: Cause) {
+            let mut standing = self.standing.lock().unwrap_or_else(|e| e.into_inner());
+            match &mut *standing {
+                Standing::Waiting(slot) => *slot = Some(cause),
+                Standing::Reported => {
+                    drop(standing);
+                    self.say(&cause);
+                }
+            }
+        }
+
+        pub(super) fn report(&self) {
+            let before = std::mem::replace(
+                &mut *self.standing.lock().unwrap_or_else(|e| e.into_inner()),
+                Standing::Reported,
+            );
+            if let Standing::Waiting(Some(cause)) = before {
+                self.say(&cause);
+            }
+        }
+
+        /// Ungated: a reader that stopped leaves a bound socket nobody reads.
+        fn say(&self, cause: &Cause) {
+            match cause {
+                Cause::Failed(e) => crate::verr!(
+                    "[LOCK]   the {} reader stopped ({e}); what reaches it is lost",
+                    self.socket
+                ),
+                Cause::Panicked => crate::verr!(
+                    "[LOCK]   the {} reader panicked; what reaches it is lost",
+                    self.socket
+                ),
+            }
+        }
     }
 
     /// What turns the channel away: the flag the listeners read, a handle on each
@@ -1972,6 +2042,17 @@ mod linux_impl {
         _channel: Option<Channel>,
         _legacy: Option<UnixDatagram>,
         pub(super) closer: Arc<Closer>,
+        fates: Vec<Arc<Fate>>,
+    }
+
+    impl Guard {
+        /// Says the deaths that came before the session log was ours, and the
+        /// readers say their own from here on.
+        pub(super) fn report_deaths(&self) {
+            for fate in &self.fates {
+                fate.report();
+            }
+        }
     }
 
     pub(super) fn acquire_or_signal(url: Option<&str>) -> Option<AppLock> {
@@ -2056,6 +2137,7 @@ mod linux_impl {
         };
         let closing = Arc::new(AtomicBool::new(false));
         let (mut sockets, mut listeners, mut unserved) = (Vec::new(), Vec::new(), Vec::new());
+        let mut fates = Vec::new();
         let channel = match channel {
             Ok(channel) => Some(channel),
             Err(unbound) => {
@@ -2063,25 +2145,28 @@ mod linux_impl {
                 None
             }
         };
-        let mut serve = |socket: &UnixDatagram, failed: fn(std::io::Error) -> Unserved| match listen(
-            socket, &closing,
-        ) {
-            Ok((end, listener)) => {
-                sockets.push(end);
-                listeners.push(listener);
-                true
-            }
-            Err(e) => {
-                unserved.push(failed(e));
-                false
-            }
-        };
+        let mut serve =
+            |socket: &UnixDatagram, name: &'static str, failed: fn(std::io::Error) -> Unserved| {
+                let fate = Arc::new(Fate::new(name));
+                match listen(socket, &closing, &fate) {
+                    Ok((end, listener)) => {
+                        sockets.push(end);
+                        listeners.push(listener);
+                        fates.push(fate);
+                        true
+                    }
+                    Err(e) => {
+                        unserved.push(failed(e));
+                        false
+                    }
+                }
+            };
         // The channel without a reader is dropped: the flock is the lock, and a launch
         // then finds nobody to hand to instead of a holder that never reads.
-        let channel = channel.filter(|c| serve(&c.socket, Unserved::Channel));
+        let channel = channel.filter(|c| serve(&c.socket, "channel", Unserved::Channel));
         // The legacy name stays bound (earlier builds take its bind as their lock).
         if let Some(socket) = &legacy_socket {
-            serve(socket, Unserved::Legacy);
+            serve(socket, "legacy", Unserved::Legacy);
         }
         Some(AppLock {
             _guard: Some(Guard {
@@ -2093,6 +2178,7 @@ mod linux_impl {
                     sockets,
                     listeners: Mutex::new(listeners),
                 }),
+                fates,
             }),
             unserved,
         })
@@ -2195,31 +2281,71 @@ mod linux_impl {
     fn spawn_focus_listener(
         socket: UnixDatagram,
         closing: Arc<AtomicBool>,
+        fate: Arc<Fate>,
     ) -> std::io::Result<JoinHandle<()>> {
         std::thread::Builder::new()
             .name("app-focus-listener".to_owned())
-            .spawn(move || {
-                let own = own_uid();
-                let mut buf = [0u8; MAX_SIGNAL];
-                // The length matters now that the payload varies (a receive that
-                // ignored it would read stale bytes from the previous datagram).
-                while let Ok((n, peer)) = recv_with_sender(&socket, &mut buf) {
-                    // A shut socket reads as empty once its queue is drained, as an
-                    // empty datagram does; only the flag tells them apart.
-                    if n == 0 && closing.load(Ordering::Acquire) {
-                        break;
-                    }
-                    match classify(peer, own) {
-                        Sender::Ours => match std::str::from_utf8(&buf[..n]) {
-                            Ok(FOCUS_SIGNAL) => post_focus(),
-                            Ok(url) => crate::ui::deep_link::deliver(url),
-                            Err(_) => post_focus(),
-                        },
-                        Sender::Foreign(uid) => refuse(Some(uid)),
-                        Sender::Unattributed => refuse(None),
-                    }
+            .spawn(move || read_until_closed(&socket, &closing, &fate, recv_with_sender))
+    }
+
+    /// One datagram and its sender's uid; a test passes one that a signal cuts short.
+    pub(super) type Recv = fn(&UnixDatagram, &mut [u8]) -> std::io::Result<(usize, Option<u32>)>;
+
+    /// Armed for the whole read loop, disarmed only by a close. Any other way out (a
+    /// failed receive, an unwind) is recorded; the socket stays bound and open.
+    struct Exit<'a> {
+        fate: &'a Fate,
+        cause: Option<Cause>,
+    }
+
+    impl Drop for Exit<'_> {
+        fn drop(&mut self) {
+            if let Some(cause) = self.cause.take() {
+                self.fate.died(cause);
+            }
+        }
+    }
+
+    pub(super) fn read_until_closed(
+        socket: &UnixDatagram,
+        closing: &AtomicBool,
+        fate: &Fate,
+        recv: Recv,
+    ) {
+        let own = own_uid();
+        let mut buf = [0u8; MAX_SIGNAL];
+        let mut exit = Exit {
+            fate,
+            cause: Some(Cause::Panicked),
+        };
+        loop {
+            // The length matters now that the payload varies (a receive that
+            // ignored it would read stale bytes from the previous datagram).
+            let (n, peer) = match recv(socket, &mut buf) {
+                Ok(received) => received,
+                // A signal handler installed without `SA_RESTART` ends the wait early.
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    exit.cause = Some(Cause::Failed(e));
+                    return;
                 }
-            })
+            };
+            // A shut socket reads as empty once its queue is drained, as an
+            // empty datagram does; only the flag tells them apart.
+            if n == 0 && closing.load(Ordering::Acquire) {
+                exit.cause = None;
+                return;
+            }
+            match classify(peer, own) {
+                Sender::Ours => match std::str::from_utf8(&buf[..n]) {
+                    Ok(FOCUS_SIGNAL) => post_focus(),
+                    Ok(url) => crate::ui::deep_link::deliver(url),
+                    Err(_) => post_focus(),
+                },
+                Sender::Foreign(uid) => refuse(Some(uid)),
+                Sender::Unattributed => refuse(None),
+            }
+        }
     }
 
     /// Said once per run. A local process can repeat a refused datagram as fast
