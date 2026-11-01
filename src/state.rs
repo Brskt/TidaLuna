@@ -405,7 +405,8 @@ pub(crate) fn data_dir() -> Option<&'static Path> {
     Some(&test_root::root().data)
 }
 
-#[cfg(all(test, not(target_os = "windows")))]
+/// Only the Linux desktop entry asks for the home under test.
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn user_home() -> Option<&'static Path> {
     Some(&test_root::root().home)
 }
@@ -431,7 +432,7 @@ pub(crate) mod test_root {
     const ALIVE: &str = ".alive";
 
     pub(crate) struct TestRoot {
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         pub(crate) home: PathBuf,
         pub(crate) data: PathBuf,
     }
@@ -447,7 +448,7 @@ pub(crate) mod test_root {
             LOCK.set(alive).expect("one test root per process");
             sweep(&temp, &dir);
             TestRoot {
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(target_os = "linux")]
                 home: dir.join("home"),
                 data: dir.join("data"),
             }
