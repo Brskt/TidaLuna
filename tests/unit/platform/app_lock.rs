@@ -30,7 +30,7 @@ fn holder(data: &Path, runtime: &Path) -> (std::fs::File, Channel) {
         Claim::Holder {
             channel: Err(reason),
             ..
-        } => panic!("the holder has no channel: {reason}"),
+        } => panic!("the holder has no channel: {reason:?}"),
         Claim::Held(_) => panic!("the first launch found the lock taken"),
         Claim::Unguarded(reason) => panic!("the guard stood down: {reason}"),
     }

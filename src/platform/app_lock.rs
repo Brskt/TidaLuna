@@ -94,6 +94,68 @@ impl HandOff {
     }
 }
 
+/// What a launch asked of the running window besides its link. `Asked` says the
+/// signal went, not that anything raised the window. The listener at the far end
+/// may not exist.
+#[cfg(any(windows, target_os = "linux"))]
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Focus {
+    Asked,
+    /// Nothing was sent, or the send failed.
+    #[cfg(target_os = "linux")]
+    NotAsked,
+    /// No focus event answers to the name, with the error that said so.
+    #[cfg(windows)]
+    Gone(u32),
+    /// The event opened and signalling it failed, with the error.
+    #[cfg(windows)]
+    Unset(u32),
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+impl std::fmt::Display for Focus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Asked => f.write_str("focus asked"),
+            #[cfg(target_os = "linux")]
+            Self::NotAsked => f.write_str("the window was not asked to come forward"),
+            #[cfg(windows)]
+            Self::Gone(gle) => write!(f, "the focus event is gone, nothing was asked (gle={gle})"),
+            #[cfg(windows)]
+            Self::Unset(gle) => write!(f, "the focus signal was not set (gle={gle})"),
+        }
+    }
+}
+
+/// How a launch's link fared, and the focus request tried when it did not land.
+#[cfg(any(windows, target_os = "linux"))]
+#[derive(Debug)]
+struct Attempt {
+    link: HandOff,
+    focus: Focus,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+impl Attempt {
+    #[cfg(target_os = "linux")]
+    fn unasked(link: HandOff) -> Self {
+        Self {
+            link,
+            focus: Focus::NotAsked,
+        }
+    }
+
+    /// Ungated: this process exits before reading the persisted log level, and a
+    /// click whose link never opens leaves no other trace.
+    fn report_lost(&self) {
+        crate::verr!(
+            "[LOCK]   deep link not delivered ({}); {}",
+            self.link.reason(),
+            self.focus
+        );
+    }
+}
+
 /// How long a second launch keeps trying before it gives the launch up: to reach
 /// the channel, and to outwait a running instance that is leaving.
 ///
@@ -176,8 +238,8 @@ fn classify_owner(owner: Option<&str>, own: &OwnIdentity) -> ObjectOwner {
 /// What became of the pipe a clicked link travels on, for the instance that owns
 /// the lock.
 ///
-/// Windows only. Linux reports its own channel's absence where it finds it, and
-/// macOS never launches a second process at all.
+/// Windows only. Linux has one socket for focus and links, whose absence is an
+/// `Unserved` cause, and macOS never launches a second process at all.
 #[cfg(windows)]
 enum LinkChannel {
     /// A listener holds the address; a link arriving now reaches the window.
@@ -185,15 +247,24 @@ enum LinkChannel {
     /// Creating it or its listener failed, and nothing else will ever say why
     /// clicking a link stopped working.
     Unavailable,
-    /// Never attempted, the guard having stood down for a reason it reported
-    /// itself.
+    /// Never attempted, the guard having stood down for the `Unserved::Unguarded`
+    /// cause the lock carries.
     NotAttempted,
 }
 
-/// A listener the first instance went without. A data channel is closed so that a
-/// launch finds nobody to hand to; a marker another process reads stays.
+/// What the first instance went without, held until `report_channels` can say it.
+/// A data channel no thread reads is closed; a marker another process reads stays.
 #[cfg(any(windows, target_os = "linux"))]
+#[derive(Debug)]
 enum Unserved {
+    /// With no lock taken there is no channel either, and no second launch is held off.
+    Unguarded(Unguarded),
+    /// The lock holds, but no private directory could name a channel.
+    #[cfg(target_os = "linux")]
+    NoChannelDir,
+    /// The lock holds, but the channel's socket could not be bound.
+    #[cfg(target_os = "linux")]
+    Bind(std::io::Error),
     #[cfg(windows)]
     Focus(std::io::Error),
     /// The event only earlier builds signal.
@@ -201,12 +272,58 @@ enum Unserved {
     LegacyFocus(std::io::Error),
     #[cfg(windows)]
     Link(std::io::Error),
+    /// The event that stops the focus listeners, which closing then cannot reach.
+    #[cfg(windows)]
+    Stop(std::io::Error),
     /// One socket carries both focus and links here.
     #[cfg(target_os = "linux")]
     Channel(std::io::Error),
     /// The name earlier builds lock on stays bound; they still exit on it.
     #[cfg(target_os = "linux")]
     Legacy(std::io::Error),
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[derive(Debug)]
+enum Unguarded {
+    #[cfg(target_os = "linux")]
+    DataDir(std::io::Error),
+    #[cfg(target_os = "linux")]
+    DataDirRefused(linux_impl::DirRefusal),
+    #[cfg(target_os = "linux")]
+    LockFile(std::io::Error),
+    #[cfg(target_os = "linux")]
+    Lock(std::io::Error),
+    #[cfg(windows)]
+    Identity,
+    #[cfg(windows)]
+    Namespace(u32),
+    #[cfg(windows)]
+    Mutex(u32),
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+impl std::fmt::Display for Unguarded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::DataDir(e) => write!(f, "the data directory cannot be created ({e})"),
+            #[cfg(target_os = "linux")]
+            Self::DataDirRefused(refusal) => {
+                write!(f, "the data directory is refused ({refusal:?})")
+            }
+            #[cfg(target_os = "linux")]
+            Self::LockFile(e) => write!(f, "the lock file cannot be opened ({e})"),
+            #[cfg(target_os = "linux")]
+            Self::Lock(e) => write!(f, "the lock file cannot be locked ({e})"),
+            #[cfg(windows)]
+            Self::Identity => f.write_str("SID lookup failed"),
+            #[cfg(windows)]
+            Self::Namespace(gle) => write!(f, "private namespace unavailable (gle={gle})"),
+            #[cfg(windows)]
+            Self::Mutex(gle) => write!(f, "CreateMutexW failed (gle={gle})"),
+        }
+    }
 }
 
 /// Held for the process lifetime; dropping it releases the lock.
@@ -226,7 +343,7 @@ pub(crate) struct AppLock {
 }
 
 impl AppLock {
-    /// Say why a click will go nowhere, once the session log is ours to write.
+    /// Say what the first instance went without, once the session log is ours to write.
     ///
     /// The verdict waits on the type instead of leaving as a `verr!` where it is
     /// found. `verr!` opens the log file itself, and finding that file already
@@ -251,6 +368,21 @@ impl AppLock {
                 Unserved::Link(e) => {
                     crate::verr!("[LOCK]   the link pipe had no thread to serve it ({e})")
                 }
+                Unserved::Unguarded(cause) => {
+                    crate::verr!("[LOCK]   {cause}; single-instance guard disabled")
+                }
+                #[cfg(windows)]
+                Unserved::Stop(e) => crate::verr!(
+                    "[LOCK]   no stop event ({e}); the focus listeners cannot be closed"
+                ),
+                #[cfg(target_os = "linux")]
+                Unserved::NoChannelDir => crate::verr!(
+                    "[LOCK]   no private directory for the channel; focus and links cannot arrive"
+                ),
+                #[cfg(target_os = "linux")]
+                Unserved::Bind(e) => crate::verr!(
+                    "[LOCK]   the channel cannot be bound ({e}); focus and links cannot arrive"
+                ),
                 #[cfg(target_os = "linux")]
                 Unserved::Channel(e) => crate::verr!(
                     "[LOCK]   no channel listener ({e}); focus and links cannot arrive"
@@ -327,8 +459,9 @@ mod windows_impl {
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     use super::{
-        AppLock, CLOSE_WAIT_MS, HANDOFF_BUDGET_MS, HandOff, LinkChannel, NO_LISTENER_GRACE_MS,
-        ObjectOwner, OwnIdentity, Unserved, classify_owner, join_within, post_focus,
+        AppLock, Attempt, CLOSE_WAIT_MS, Focus, HANDOFF_BUDGET_MS, HandOff, LinkChannel,
+        NO_LISTENER_GRACE_MS, ObjectOwner, OwnIdentity, Unguarded, Unserved, classify_owner,
+        join_within, post_focus,
     };
 
     /// The namespace the lock and the focus event live in, named by its boundary:
@@ -665,7 +798,7 @@ mod windows_impl {
         sid
     }
 
-    fn disabled() -> Option<AppLock> {
+    fn disabled(cause: Unguarded) -> Option<AppLock> {
         Some(AppLock {
             _mutex: MutexGuard {
                 handle: ptr::null_mut(),
@@ -674,7 +807,7 @@ mod windows_impl {
             },
             link: LinkChannel::NotAttempted,
             closer: None,
-            unserved: Vec::new(),
+            unserved: vec![Unserved::Unguarded(cause)],
         })
     }
 
@@ -716,16 +849,12 @@ mod windows_impl {
         names: impl FnOnce(&OwnIdentity) -> Names,
     ) -> Option<AppLock> {
         let Some((own, user)) = own_identity() else {
-            crate::vprintln!("[LOCK]   SID lookup failed; single-instance guard disabled");
-            return disabled();
+            return disabled(Unguarded::Identity);
         };
         let names = names(&own);
         let namespace = match UserNamespace::open(&names.namespace, user.sid()) {
             Ok(namespace) => namespace,
-            Err(error) => {
-                crate::vprintln!("[LOCK]   private namespace unavailable: {error}");
-                return disabled();
-            }
+            Err(error) => return disabled(Unguarded::Namespace(error)),
         };
         let attributes = namespace.attributes();
         let lock_name = in_namespace(&names.namespace, LOCK_LEAF);
@@ -735,10 +864,7 @@ mod windows_impl {
         let mutex = unsafe { CreateMutexW(&attributes, FALSE, lock_name.as_ptr()) };
         if mutex.is_null() {
             // SAFETY: reads this thread's last error, set by the call above.
-            crate::vprintln!("[LOCK]   CreateMutexW failed: {}", unsafe {
-                GetLastError()
-            });
-            return disabled();
+            return disabled(Unguarded::Mutex(unsafe { GetLastError() }));
         }
 
         // SAFETY: mutex is a live handle; the wait is thread-safe.
@@ -798,15 +924,15 @@ mod windows_impl {
         // event, and it stays signalled once closing has begun.
         // SAFETY: no name, no attributes; an owned handle or null.
         let stop = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
+        let mut unserved = Vec::new();
         if stop.is_null() {
-            crate::verr!("[LOCK]   no stop event; the focus listeners cannot be closed");
+            unserved.push(Unserved::Stop(std::io::Error::last_os_error()));
         }
         let mut listeners = Listeners {
             focus: Vec::new(),
             link: None,
             kept: Vec::new(),
         };
-        let mut unserved = Vec::new();
         // SAFETY: focus_name is NUL-terminated UTF-16; auto-reset, owned handle.
         let event = unsafe { CreateEventW(&attributes, FALSE, FALSE, focus_name.as_ptr()) };
         if event.is_null() {
@@ -1013,43 +1139,42 @@ mod windows_impl {
             }
             (url, Err(unanswered)) => url.map(|_| unanswered),
         };
-        match handoff {
-            Some(HandOff::Landed) => {
-                crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
-                return HandedOff::Left;
-            }
-            // Ungated, and this is the reason the channel has to be; this process
-            // exits before the database opens and never learns the persisted
-            // level, while a click answered by a window that did not navigate
-            // leaves no other trace anywhere.
-            Some(lost) => crate::verr!(
-                "[LOCK]   deep link not delivered ({}); focusing instead",
-                lost.reason()
-            ),
-            None => crate::vprintln!("[LOCK]   Another instance is running; focusing it"),
+        if let Some(HandOff::Landed) = handoff {
+            crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
+            return HandedOff::Left;
         }
+        // Asked before the verdict is logged, letting the line say what happened to the window.
+        let focus = ask_focus(focus_name);
+        match handoff {
+            Some(link) => Attempt { link, focus }.report_lost(),
+            None if focus == Focus::Asked => {
+                crate::vprintln!("[LOCK]   Another instance is running; {focus}");
+            }
+            // Ungated: a focus request that reaches nobody.
+            None => crate::verr!("[LOCK]   Another instance is running; {focus}"),
+        }
+        HandedOff::Left
+    }
+
+    /// Signals the running instance's focus event, and says how far that got.
+    fn ask_focus(focus_name: &[u16]) -> Focus {
         // SAFETY: focus_name is NUL-terminated UTF-16; null if no event exists.
         let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, FALSE, focus_name.as_ptr()) };
         if event.is_null() {
-            // Ungated for the reason above: a focus request that reaches nobody.
-            crate::verr!(
-                "[LOCK]   the running instance's focus event is gone; nothing was raised (gle={})",
-                // SAFETY: reads this thread's last error, set by the call above.
-                unsafe { GetLastError() }
-            );
-            return HandedOff::Left;
+            // SAFETY: reads this thread's last error, set by the call above.
+            return Focus::Gone(unsafe { GetLastError() });
         }
-        // SAFETY: event opened with EVENT_MODIFY_STATE; signalled then closed.
+        // SAFETY: event opened with EVENT_MODIFY_STATE; signalled then closed, with
+        // the error read before the close.
         unsafe {
-            if SetEvent(event) == 0 {
-                crate::verr!(
-                    "[LOCK]   the focus signal was not set (gle={})",
-                    GetLastError()
-                );
-            }
+            let focus = if SetEvent(event) == 0 {
+                Focus::Unset(GetLastError())
+            } else {
+                Focus::Asked
+            };
             CloseHandle(event);
+            focus
         }
-        HandedOff::Left
     }
 
     /// One connection at a time, serially. A deep link arrives on a click, not in
@@ -1386,8 +1511,8 @@ mod linux_impl {
     use std::time::{Duration, Instant};
 
     use super::{
-        AppLock, CLOSE_WAIT_MS, HANDOFF_BUDGET_MS, HandOff, NO_LISTENER_GRACE_MS, Unserved,
-        join_within, post_focus,
+        AppLock, Attempt, CLOSE_WAIT_MS, Focus, HANDOFF_BUDGET_MS, HandOff, NO_LISTENER_GRACE_MS,
+        Unguarded, Unserved, join_within, post_focus,
     };
 
     /// Who sent a datagram, as the kernel reports it rather than as the payload
@@ -1667,49 +1792,47 @@ mod linux_impl {
         /// be bound: the lock still holds, but neither focus nor links can arrive.
         Holder {
             lock: File,
-            channel: Result<Channel, String>,
+            channel: Result<Channel, Unserved>,
         },
         /// Another process of this account holds it, listening here; `None` when
         /// no private directory could name its channel.
         Held(Option<SocketAddr>),
         /// The guard cannot stand, and says why.
-        Unguarded(String),
+        Unguarded(Unguarded),
     }
 
     /// Takes the data directory's lock, or names the channel of whoever holds it.
     pub(super) fn claim(data_dir: &Path, runtime: Option<PathBuf>, own: u32) -> Claim {
-        if std::fs::create_dir_all(data_dir).is_err() {
-            return Claim::Unguarded("the data directory cannot be created".into());
+        if let Err(e) = std::fs::create_dir_all(data_dir) {
+            return Claim::Unguarded(Unguarded::DataDir(e));
         }
         if let Err(refusal) = check_data_dir(data_dir, own) {
-            return Claim::Unguarded(format!("the data directory is refused ({refusal:?})"));
+            return Claim::Unguarded(Unguarded::DataDirRefused(refusal));
         }
-        let Ok(lock) = OpenOptions::new()
+        let lock = match OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .mode(0o600)
             .open(data_dir.join(LOCK_FILE))
-        else {
-            return Claim::Unguarded("the lock file cannot be opened".into());
+        {
+            Ok(lock) => lock,
+            Err(e) => return Claim::Unguarded(Unguarded::LockFile(e)),
         };
         let path = channel_dir(data_dir, runtime, own).map(|dir| dir.join(channel_name(data_dir)));
         match lock.try_lock() {
             Ok(()) => Claim::Holder {
                 lock,
                 channel: match path {
-                    Some(path) => Channel::bind(path)
-                        .map_err(|e| format!("the channel cannot be bound ({e})")),
-                    None => Err("no private directory for the channel".into()),
+                    Some(path) => Channel::bind(path).map_err(Unserved::Bind),
+                    None => Err(Unserved::NoChannelDir),
                 },
             },
             Err(TryLockError::WouldBlock) => {
                 Claim::Held(path.and_then(|path| SocketAddr::from_pathname(path).ok()))
             }
-            Err(TryLockError::Error(_)) => {
-                Claim::Unguarded("the lock file cannot be locked".into())
-            }
+            Err(TryLockError::Error(e)) => Claim::Unguarded(Unguarded::Lock(e)),
         }
     }
 
@@ -1882,12 +2005,12 @@ mod linux_impl {
                 Claim::Held(addr) => {
                     let outcome = match &addr {
                         Some(addr) => hand_over(addr, url),
-                        None => HandOff::NoListener,
+                        None => Attempt::unasked(HandOff::NoListener),
                     };
                     // A leaving holder is waited for to the deadline. No socket is
                     // not told apart from a holder that has not bound yet: it only
                     // gets the grace that race needs.
-                    let patience = match (&outcome, &addr) {
+                    let patience = match (&outcome.link, &addr) {
                         (HandOff::Closing, _) => Some(deadline),
                         (HandOff::NoListener, Some(_)) => {
                             let since = *unbound_since.get_or_insert_with(Instant::now);
@@ -1904,11 +2027,10 @@ mod linux_impl {
                     report_hand_off(url, &outcome);
                     return None;
                 }
-                Claim::Unguarded(reason) => {
-                    crate::vprintln!("[LOCK]   {reason}; guard disabled");
+                Claim::Unguarded(cause) => {
                     return Some(AppLock {
                         _guard: None,
-                        unserved: Vec::new(),
+                        unserved: vec![Unserved::Unguarded(cause)],
                     });
                 }
             }
@@ -1921,7 +2043,7 @@ mod linux_impl {
         data_dir: &Path,
         own: u32,
         lock: File,
-        channel: Result<Channel, String>,
+        channel: Result<Channel, Unserved>,
         url: Option<&str>,
     ) -> Option<AppLock> {
         let legacy_socket = match legacy(data_dir, own) {
@@ -1932,13 +2054,15 @@ mod linux_impl {
             }
             Legacy::Unavailable => None,
         };
-        let channel = channel
-            .inspect_err(|reason| {
-                crate::vprintln!("[LOCK]   {reason}; focus and links cannot arrive");
-            })
-            .ok();
         let closing = Arc::new(AtomicBool::new(false));
         let (mut sockets, mut listeners, mut unserved) = (Vec::new(), Vec::new(), Vec::new());
+        let channel = match channel {
+            Ok(channel) => Some(channel),
+            Err(unbound) => {
+                unserved.push(unbound);
+                None
+            }
+        };
         let mut serve = |socket: &UnixDatagram, failed: fn(std::io::Error) -> Unserved| match listen(
             socket, &closing,
         ) {
@@ -1974,8 +2098,8 @@ mod linux_impl {
         })
     }
 
-    fn report_hand_off(url: Option<&str>, outcome: &HandOff) {
-        match (url, outcome) {
+    fn report_hand_off(url: Option<&str>, outcome: &Attempt) {
+        match (url, &outcome.link) {
             (Some(_), HandOff::Landed) => {
                 crate::vprintln!("[LOCK]   Handed a deep link to the running instance");
             }
@@ -1987,14 +2111,9 @@ mod linux_impl {
             (None, HandOff::Closing) => crate::verr!(
                 "[LOCK]   not started: the running instance was still closing after the wait"
             ),
-            // Ungated: this process exits before reading the persisted log level,
-            // and a click whose link never opens leaves no other trace.
-            (Some(_), lost) => crate::verr!(
-                "[LOCK]   deep link not delivered ({}); focusing instead",
-                lost.reason()
-            ),
+            (Some(_), _) => outcome.report_lost(),
             (None, HandOff::Landed) => {
-                crate::vprintln!("[LOCK]   Another instance is running; focusing it");
+                crate::vprintln!("[LOCK]   Another instance is running; {}", outcome.focus);
             }
             (None, lost) => crate::verr!(
                 "[LOCK]   could not reach the running instance ({})",
@@ -2010,32 +2129,49 @@ mod linux_impl {
     /// signal keeps an event of its own. Failing to open or connect it loses the
     /// focus too, and that is the one case nothing here can rescue. It is
     /// reported instead.
-    pub(super) fn hand_over(addr: &SocketAddr, url: Option<&str>) -> HandOff {
+    pub(super) fn hand_over(addr: &SocketAddr, url: Option<&str>) -> Attempt {
         let Ok(client) = UnixDatagram::unbound() else {
-            return HandOff::Failed;
+            return Attempt::unasked(HandOff::Failed);
         };
         if client.connect_addr(addr).is_err() {
-            return HandOff::NoListener;
+            return Attempt::unasked(HandOff::NoListener);
         }
         let Some(url) = url else {
-            return send_or_fail(&client, FOCUS_SIGNAL);
+            let link = send_or_fail(&client, FOCUS_SIGNAL);
+            let focus = if link == HandOff::Landed {
+                Focus::Asked
+            } else {
+                Focus::NotAsked
+            };
+            return Attempt { link, focus };
         };
         // Refused here rather than truncated by the kernel on arrival, since a
         // cut URL fails the route rule at the far end and reads as a refused
         // link instead of an oversized one.
         if url.len() > MAX_SIGNAL {
-            let _ = client.send(FOCUS_SIGNAL.as_bytes());
-            return HandOff::TooLong;
+            return Attempt {
+                link: HandOff::TooLong,
+                focus: ask_focus(&client),
+            };
         }
         match client.send(url.as_bytes()) {
-            Ok(_) => return HandOff::Landed,
+            Ok(_) => return Attempt::unasked(HandOff::Landed),
             // No focus word either: it would be turned away the same way.
-            Err(e) if closed_by_peer(&e) => return HandOff::Closing,
+            Err(e) if closed_by_peer(&e) => return Attempt::unasked(HandOff::Closing),
             Err(_) => {}
         }
         // The link did not go; the window still should.
-        let _ = client.send(FOCUS_SIGNAL.as_bytes());
-        HandOff::Failed
+        Attempt {
+            link: HandOff::Failed,
+            focus: ask_focus(&client),
+        }
+    }
+
+    fn ask_focus(client: &UnixDatagram) -> Focus {
+        match client.send(FOCUS_SIGNAL.as_bytes()) {
+            Ok(_) => Focus::Asked,
+            Err(_) => Focus::NotAsked,
+        }
     }
 
     fn send_or_fail(client: &UnixDatagram, word: &str) -> HandOff {
