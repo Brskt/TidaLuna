@@ -319,7 +319,7 @@ fn main() {
 
     // After that rotation, never before, because this one speaks through `verr!`,
     // which opens the very file the line above moves.
-    app_lock.report_link_channel();
+    app_lock.report_channels();
 
     // Ahead of everything that logs: the persisted level lives in the DB, and a
     // gated line emitted before it is known reaches neither stderr nor the file,

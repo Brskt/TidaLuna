@@ -118,7 +118,7 @@ pub(crate) fn take_lines() -> Vec<String> {
 /// Nothing may open the sink before this runs, an open sink being exactly what
 /// makes the rotation stand down. A filled slot is therefore a caller out of
 /// order and never a runtime condition, which is why startup keeps its verdicts
-/// until here, `AppLock::report_link_channel` among them.
+/// until here, `AppLock::report_channels` among them.
 pub(crate) fn adopt_session_log(_lock: &crate::platform::app_lock::AppLock) {
     let mut guard = FILE_SINK.lock().unwrap_or_else(|e| e.into_inner());
     debug_assert!(

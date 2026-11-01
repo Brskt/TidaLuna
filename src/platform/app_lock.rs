@@ -182,12 +182,31 @@ fn classify_owner(owner: Option<&str>, own: &OwnIdentity) -> ObjectOwner {
 enum LinkChannel {
     /// A listener holds the address; a link arriving now reaches the window.
     Listening,
-    /// Creating it failed, and nothing else will ever say why clicking a link
-    /// stopped working.
+    /// Creating it or its listener failed, and nothing else will ever say why
+    /// clicking a link stopped working.
     Unavailable,
     /// Never attempted, the guard having stood down for a reason it reported
     /// itself.
     NotAttempted,
+}
+
+/// A listener the first instance went without. A data channel is closed so that a
+/// launch finds nobody to hand to; a marker another process reads stays.
+#[cfg(any(windows, target_os = "linux"))]
+enum Unserved {
+    #[cfg(windows)]
+    Focus(std::io::Error),
+    /// The event only earlier builds signal.
+    #[cfg(windows)]
+    LegacyFocus(std::io::Error),
+    #[cfg(windows)]
+    Link(std::io::Error),
+    /// One socket carries both focus and links here.
+    #[cfg(target_os = "linux")]
+    Channel(std::io::Error),
+    /// The name earlier builds lock on stays bound; they still exit on it.
+    #[cfg(target_os = "linux")]
+    Legacy(std::io::Error),
 }
 
 /// Held for the process lifetime; dropping it releases the lock.
@@ -200,6 +219,8 @@ pub(crate) struct AppLock {
     closer: Option<std::sync::Arc<windows_impl::Closer>>,
     #[cfg(target_os = "linux")]
     _guard: Option<linux_impl::Guard>,
+    #[cfg(any(windows, target_os = "linux"))]
+    unserved: Vec<Unserved>,
     #[cfg(not(any(windows, target_os = "linux")))]
     _unsupported: (),
 }
@@ -210,10 +231,35 @@ impl AppLock {
     /// The verdict waits on the type instead of leaving as a `verr!` where it is
     /// found. `verr!` opens the log file itself, and finding that file already
     /// open is what makes `adopt_session_log` stand its rotation down.
-    pub(crate) fn report_link_channel(&self) {
+    pub(crate) fn report_channels(&self) {
         #[cfg(windows)]
         if matches!(self.link, LinkChannel::Unavailable) {
             crate::verr!("[LOCK]   no link pipe; deep links cannot reach this window");
+        }
+        #[cfg(any(windows, target_os = "linux"))]
+        for unserved in &self.unserved {
+            match unserved {
+                #[cfg(windows)]
+                Unserved::Focus(e) => crate::verr!(
+                    "[LOCK]   no focus listener ({e}); a second launch cannot raise this window"
+                ),
+                #[cfg(windows)]
+                Unserved::LegacyFocus(e) => crate::verr!(
+                    "[LOCK]   no legacy focus listener ({e}); earlier builds cannot raise this window"
+                ),
+                #[cfg(windows)]
+                Unserved::Link(e) => {
+                    crate::verr!("[LOCK]   the link pipe had no thread to serve it ({e})")
+                }
+                #[cfg(target_os = "linux")]
+                Unserved::Channel(e) => crate::verr!(
+                    "[LOCK]   no channel listener ({e}); focus and links cannot arrive"
+                ),
+                #[cfg(target_os = "linux")]
+                Unserved::Legacy(e) => crate::verr!(
+                    "[LOCK]   no legacy listener ({e}); earlier builds cannot reach this instance"
+                ),
+            }
         }
     }
 }
@@ -282,7 +328,7 @@ mod windows_impl {
 
     use super::{
         AppLock, CLOSE_WAIT_MS, HANDOFF_BUDGET_MS, HandOff, LinkChannel, NO_LISTENER_GRACE_MS,
-        ObjectOwner, OwnIdentity, classify_owner, join_within, post_focus,
+        ObjectOwner, OwnIdentity, Unserved, classify_owner, join_within, post_focus,
     };
 
     /// The namespace the lock and the focus event live in, named by its boundary:
@@ -448,7 +494,7 @@ mod windows_impl {
 
     // SAFETY: a Win32 HANDLE is process-wide, not thread-bound, and each kind of
     // handle sent through here is used only by thread-safe APIs: the focus event
-    // by WaitForMultipleObjects/SetEvent, the link pipe by ConnectNamedPipe,
+    // by WaitForMultipleObjects/SetEvent/CloseHandle, the link pipe by ConnectNamedPipe,
     // ReadFile, DisconnectNamedPipe and CloseHandle, the stop event by SetEvent and
     // the same wait. A focus event and a pipe belong to exactly one thread at a time;
     // the stop event is shared, and is only signalled, never closed.
@@ -628,6 +674,7 @@ mod windows_impl {
             },
             link: LinkChannel::NotAttempted,
             closer: None,
+            unserved: Vec::new(),
         })
     }
 
@@ -757,19 +804,41 @@ mod windows_impl {
         let mut listeners = Listeners {
             focus: Vec::new(),
             link: None,
+            kept: Vec::new(),
         };
+        let mut unserved = Vec::new();
         // SAFETY: focus_name is NUL-terminated UTF-16; auto-reset, owned handle.
         let event = unsafe { CreateEventW(&attributes, FALSE, FALSE, focus_name.as_ptr()) };
-        if !event.is_null() {
-            listeners.focus.extend(spawn_focus_listener(event, stop));
+        if event.is_null() {
+            unserved.push(Unserved::Focus(std::io::Error::last_os_error()));
+        } else {
+            match spawn_focus_listener(event, stop) {
+                Ok(listener) => listeners.focus.push(listener),
+                Err(e) => {
+                    // Kept until closing begins: its presence is what tells a launch
+                    // this holder is not leaving, whether or not a thread reads it.
+                    listeners.kept.push(SendHandle(event));
+                    unserved.push(Unserved::Focus(e));
+                }
+            }
         }
         // The event an earlier build signals once it finds the legacy lock held.
         if !legacy.is_null() {
             // SAFETY: NUL-terminated name; auto-reset, owned handle.
             let event =
                 unsafe { CreateEventW(ptr::null(), FALSE, FALSE, names.legacy_focus.as_ptr()) };
-            if !event.is_null() {
-                listeners.focus.extend(spawn_focus_listener(event, stop));
+            if event.is_null() {
+                unserved.push(Unserved::LegacyFocus(std::io::Error::last_os_error()));
+            } else {
+                match spawn_focus_listener(event, stop) {
+                    Ok(listener) => listeners.focus.push(listener),
+                    Err(e) => {
+                        // SAFETY: no thread took it; it is ours alone, closed once. An
+                        // earlier build reads nothing from it but the signal.
+                        unsafe { CloseHandle(event) };
+                        unserved.push(Unserved::LegacyFocus(e));
+                    }
+                }
             }
         }
         // The address exists before this function returns, letting a link
@@ -778,14 +847,23 @@ mod windows_impl {
         // caller outruns. A client arriving first got `ERROR_FILE_NOT_FOUND`,
         // and the only retry was gated on the pipe being busy instead.
         let link = match create_instance(&names.pipe) {
-            Some(pipe) => {
-                listeners.link =
-                    spawn_link_listener(names.pipe.clone(), pipe, Arc::clone(&closing));
-                LinkChannel::Listening
-            }
+            Some(pipe) => match spawn_link_listener(names.pipe.clone(), pipe, Arc::clone(&closing))
+            {
+                Ok(listener) => {
+                    listeners.link = Some(listener);
+                    LinkChannel::Listening
+                }
+                Err(e) => {
+                    // SAFETY: no thread took it; it is ours alone, closed once. A launch then
+                    // finds no pipe instead of one that takes its link and never reads.
+                    unsafe { CloseHandle(pipe) };
+                    unserved.push(Unserved::Link(e));
+                    LinkChannel::Unavailable
+                }
+            },
             // Deep links are done for this run, and the window still comes
             // forward on a focus signal. The verdict travels rather than
-            // being announced here; `report_link_channel` speaks it once the
+            // being announced here; `report_channels` speaks it once the
             // log has been rotated.
             None => LinkChannel::Unavailable,
         };
@@ -803,6 +881,7 @@ mod windows_impl {
             },
             link,
             closer: Some(Arc::new(closer)),
+            unserved,
         })
     }
 
@@ -820,6 +899,8 @@ mod windows_impl {
     struct Listeners {
         focus: Vec<JoinHandle<()>>,
         link: Option<JoinHandle<()>>,
+        /// Focus events no thread serves, closed with the others.
+        kept: Vec<SendHandle>,
     }
 
     impl Closer {
@@ -843,6 +924,10 @@ mod windows_impl {
                 if !join_within(listener, deadline.saturating_duration_since(Instant::now())) {
                     crate::verr!("[LOCK]   a focus listener did not stop; its event stays open");
                 }
+            }
+            for event in listeners.kept.drain(..) {
+                // SAFETY: no thread waits on it and nothing else closes it; closed here, once.
+                unsafe { CloseHandle(event.get()) };
             }
             // The pipe listener sits in ConnectNamedPipe, which only a client ends.
             // One that connects and writes nothing is read as an empty message.
@@ -970,17 +1055,17 @@ mod windows_impl {
     /// One connection at a time, serially. A deep link arrives on a click, not in
     /// a stream, and a queue here would only let a stalled reader hide the next one.
     /// Past `closing` it serves the connection in hand and makes no next instance,
-    /// the name going with the last.
+    /// the name going with the last. A failed start leaves the pipe with the caller.
     fn spawn_link_listener(
         pipe_name: Vec<u16>,
         first: HANDLE,
         closing: Arc<AtomicBool>,
-    ) -> Option<JoinHandle<()>> {
-        let first = SendHandle(first);
+    ) -> std::io::Result<JoinHandle<()>> {
+        let served = SendHandle(first);
         std::thread::Builder::new()
             .name("app-link-listener".to_owned())
             .spawn(move || {
-                let mut pipe = first.get();
+                let mut pipe = served.get();
                 loop {
                     // SAFETY: freshly created server end; blocks until a client connects.
                     unsafe { ConnectNamedPipe(pipe, ptr::null_mut()) };
@@ -1000,7 +1085,6 @@ mod windows_impl {
                     }
                 }
             })
-            .ok()
     }
 
     /// One server end of the link pipe, or `None` once the name is unusable.
@@ -1258,14 +1342,15 @@ mod windows_impl {
 
     /// Serves `event` until `stop` is signalled, then closes it: a wait on a handle
     /// closed under it is undefined; the thread that waits is the one that closes,
-    /// and the name goes with it. A null `stop` is never signalled.
-    fn spawn_focus_listener(event: HANDLE, stop: HANDLE) -> Option<JoinHandle<()>> {
-        let event = SendHandle(event);
+    /// and the name goes with it. A null `stop` is never signalled. A failed start
+    /// leaves the event with the caller.
+    fn spawn_focus_listener(event: HANDLE, stop: HANDLE) -> std::io::Result<JoinHandle<()>> {
+        let served = SendHandle(event);
         let stop = SendHandle(stop);
         std::thread::Builder::new()
             .name("app-focus-listener".to_owned())
             .spawn(move || {
-                let handles = [event.get(), stop.get()];
+                let handles = [served.get(), stop.get()];
                 let count = if stop.get().is_null() { 1 } else { 2 };
                 loop {
                     // SAFETY: two live handles, or one when `stop` is null; neither is
@@ -1279,9 +1364,8 @@ mod windows_impl {
                     post_focus();
                 }
                 // SAFETY: our event, waited on nowhere else and closed once.
-                unsafe { CloseHandle(event.get()) };
+                unsafe { CloseHandle(served.get()) };
             })
-            .ok()
     }
 }
 
@@ -1302,8 +1386,8 @@ mod linux_impl {
     use std::time::{Duration, Instant};
 
     use super::{
-        AppLock, CLOSE_WAIT_MS, HANDOFF_BUDGET_MS, HandOff, NO_LISTENER_GRACE_MS, join_within,
-        post_focus,
+        AppLock, CLOSE_WAIT_MS, HANDOFF_BUDGET_MS, HandOff, NO_LISTENER_GRACE_MS, Unserved,
+        join_within, post_focus,
     };
 
     /// Who sent a datagram, as the kernel reports it rather than as the payload
@@ -1679,14 +1763,14 @@ mod linux_impl {
     fn listen(
         socket: &UnixDatagram,
         closing: &Arc<AtomicBool>,
-    ) -> Option<(UnixDatagram, JoinHandle<()>)> {
+    ) -> std::io::Result<(UnixDatagram, JoinHandle<()>)> {
         if let Err(e) = enable_peer_credentials(socket) {
             crate::vprintln!("[LOCK]   no peer credentials ({e}); signals will be refused");
         }
-        let for_listener = socket.try_clone().ok()?;
-        let for_closing = socket.try_clone().ok()?;
+        let for_listener = socket.try_clone()?;
+        let for_closing = socket.try_clone()?;
         let listener = spawn_focus_listener(for_listener, Arc::clone(closing))?;
-        Some((for_closing, listener))
+        Ok((for_closing, listener))
     }
 
     /// What turns the channel away: the flag the listeners read, a handle on each
@@ -1822,7 +1906,10 @@ mod linux_impl {
                 }
                 Claim::Unguarded(reason) => {
                     crate::vprintln!("[LOCK]   {reason}; guard disabled");
-                    return Some(AppLock { _guard: None });
+                    return Some(AppLock {
+                        _guard: None,
+                        unserved: Vec::new(),
+                    });
                 }
             }
         }
@@ -1851,12 +1938,27 @@ mod linux_impl {
             })
             .ok();
         let closing = Arc::new(AtomicBool::new(false));
-        let (sockets, listeners) = channel
-            .iter()
-            .map(|c| &c.socket)
-            .chain(legacy_socket.iter())
-            .filter_map(|socket| listen(socket, &closing))
-            .unzip();
+        let (mut sockets, mut listeners, mut unserved) = (Vec::new(), Vec::new(), Vec::new());
+        let mut serve = |socket: &UnixDatagram, failed: fn(std::io::Error) -> Unserved| match listen(
+            socket, &closing,
+        ) {
+            Ok((end, listener)) => {
+                sockets.push(end);
+                listeners.push(listener);
+                true
+            }
+            Err(e) => {
+                unserved.push(failed(e));
+                false
+            }
+        };
+        // The channel without a reader is dropped: the flock is the lock, and a launch
+        // then finds nobody to hand to instead of a holder that never reads.
+        let channel = channel.filter(|c| serve(&c.socket, Unserved::Channel));
+        // The legacy name stays bound (earlier builds take its bind as their lock).
+        if let Some(socket) = &legacy_socket {
+            serve(socket, Unserved::Legacy);
+        }
         Some(AppLock {
             _guard: Some(Guard {
                 _lock: lock,
@@ -1868,6 +1970,7 @@ mod linux_impl {
                     listeners: Mutex::new(listeners),
                 }),
             }),
+            unserved,
         })
     }
 
@@ -1956,7 +2059,7 @@ mod linux_impl {
     fn spawn_focus_listener(
         socket: UnixDatagram,
         closing: Arc<AtomicBool>,
-    ) -> Option<JoinHandle<()>> {
+    ) -> std::io::Result<JoinHandle<()>> {
         std::thread::Builder::new()
             .name("app-focus-listener".to_owned())
             .spawn(move || {
@@ -1981,7 +2084,6 @@ mod linux_impl {
                     }
                 }
             })
-            .ok()
     }
 
     /// Said once per run. A local process can repeat a refused datagram as fast
