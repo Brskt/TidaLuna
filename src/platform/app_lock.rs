@@ -144,7 +144,7 @@ pub(crate) fn close_channel() {
 /// Whose kernel object this is, the link pipe or the legacy lock, by the owner the
 /// kernel stamped on it. A name is a first-come claim any account can make; the
 /// owner is the one fact its creator cannot forge.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 #[derive(Debug, PartialEq)]
 enum ObjectOwner {
     Ours,
@@ -156,7 +156,7 @@ enum ObjectOwner {
 
 /// The owners our own token stamps on what it creates: its user, and its default
 /// owner, which is BUILTIN\Administrators when the token is elevated.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 struct OwnIdentity {
     user: String,
     default_owner: String,
@@ -164,7 +164,7 @@ struct OwnIdentity {
 
 /// Exact equality on both sides' `ConvertSidToStringSidW` form: a SID that merely
 /// starts like ours is another account.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn classify_owner(owner: Option<&str>, own: &OwnIdentity) -> ObjectOwner {
     match owner {
         Some(sid) if sid == own.user || sid == own.default_owner => ObjectOwner::Ours,
