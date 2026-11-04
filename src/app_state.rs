@@ -388,11 +388,15 @@ pub(crate) fn open_in_os(target: impl AsRef<std::ffi::OsStr>) {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+        if let Err(e) = std::process::Command::new("xdg-open").arg(target).spawn() {
+            crate::verr!("[SHELL]  Could not run xdg-open: {e}");
+        }
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(target).spawn();
+        if let Err(e) = std::process::Command::new("open").arg(target).spawn() {
+            crate::verr!("[SHELL]  Could not run open: {e}");
+        }
     }
 }
 

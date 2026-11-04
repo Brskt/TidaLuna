@@ -46,9 +46,12 @@ pub fn start() {
     if !enabled() {
         return;
     }
-    let _ = thread::Builder::new()
+    if let Err(e) = thread::Builder::new()
         .name("perf-sampler".into())
-        .spawn(run);
+        .spawn(run)
+    {
+        crate::verr!("[PERF] No sampler: {e}");
+    }
 }
 
 fn run() {
@@ -62,6 +65,7 @@ fn run() {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_owned()))
     else {
+        crate::verr!("[PERF] No sampler: this executable's name is unknown");
         return;
     };
     // sysinfo's cpu_usage() is a percentage of a single core (can exceed 100 on
