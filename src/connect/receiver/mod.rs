@@ -247,6 +247,9 @@ async fn routing_loop(
                     SessionNotifyEvent::Unicast { socket_id, ref message } => {
                         let _ = client_comm.send_to(socket_id, message).await;
                     }
+                    SessionNotifyEvent::Close { socket_id } => {
+                        client_comm.close_after_drain(socket_id).await;
+                    }
                     SessionNotifyEvent::Internal(ref internal) => {
                         match internal {
                             SessionInternalEvent::SessionEnded(end) => {

@@ -1,6 +1,6 @@
 //! Tests for the receiver's routing task and its teardown in `src/connect/receiver/mod.rs`,
 //! attached by `#[path]`. They drive the real `routing_loop` and `ConnectReceiver::shutdown`
-//! over a server whose one client socket is a channel the test reads.
+//! over a server whose client sockets are channels the test reads.
 
 use super::*;
 use std::time::Instant;
@@ -467,39 +467,46 @@ async fn a_command_right_behind_a_start_session_is_the_new_members() {
 }
 
 /// A session suspended by its phone's own `endSession` admits nobody, its phone included, until
-/// a `resumeSession` names it.
+/// a `resumeSession` names it. The end closes the socket it came on; the phone resumes on a
+/// new one (socket 2), as a controller that dials again does.
 #[tokio::test]
 async fn a_suspended_session_takes_its_phones_commands_again_once_resumed() {
     let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
     let (server, _listener, mut wire, filler) = WsServer::with_client_for_test(1, 64).await;
     drop(filler);
+    let mut wire_2 = server.add_client_for_test(2, 64).await;
     let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
         ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
-    let send = |message: serde_json::Value| {
+    let send = |socket_id: u32, message: serde_json::Value| {
         let client_tx = client_tx.clone();
         async move {
             client_tx
-                .send(ClientEvent::Message {
-                    socket_id: 1,
-                    message,
-                })
+                .send(ClientEvent::Message { socket_id, message })
                 .await
                 .unwrap();
         }
     };
     client_tx.send(ClientEvent::Connected(1)).await.unwrap();
-    send(serde_json::json!({ "command": "startSession" })).await;
+    client_tx.send(ClientEvent::Connected(2)).await.unwrap();
+    send(1, serde_json::json!({ "command": "startSession" })).await;
     let started = heard_on(&mut wire, Duration::from_millis(500)).await;
     let id = started[0]["sessionId"].clone();
 
-    send(serde_json::json!({ "command": "endSession", "sessionId": id, "stopCasting": false }))
-        .await;
-    send(serde_json::json!({ "command": "next", "requestId": 8 })).await;
+    send(
+        1,
+        serde_json::json!({ "command": "endSession", "sessionId": id, "stopCasting": false }),
+    )
+    .await;
+    send(1, serde_json::json!({ "command": "next", "requestId": 8 })).await;
     let suspended = heard_on(&mut wire, Duration::from_millis(500)).await;
-    send(serde_json::json!({ "command": "resumeSession", "sessionId": id })).await;
-    send(serde_json::json!({ "command": "next", "requestId": 9 })).await;
-    let resumed = heard_on(&mut wire, Duration::from_millis(500)).await;
+    send(
+        2,
+        serde_json::json!({ "command": "resumeSession", "sessionId": id }),
+    )
+    .await;
+    send(2, serde_json::json!({ "command": "next", "requestId": 9 })).await;
+    let resumed = heard_on(&mut wire_2, Duration::from_millis(500)).await;
     receiver.shutdown(SHUTDOWN_DEADLINE).await;
 
     // Sorted: the session's answers and the step's are written by two arms of the loop.

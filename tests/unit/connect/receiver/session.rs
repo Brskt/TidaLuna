@@ -252,3 +252,27 @@ async fn the_members_are_the_sockets_of_the_live_session_only() {
         .await;
     assert!(session.members().is_empty(), "a suspended session has none");
 }
+
+/// The close that follows a suspending end reaches the routing loop as the disconnect of the
+/// socket: the suspension is already told, and is not told a second time.
+#[tokio::test]
+async fn the_disconnect_of_a_socket_closed_after_an_end_ends_nothing_again() {
+    for (stop_casting, end) in [(true, SessionEnd::Over), (false, SessionEnd::Suspended)] {
+        let (mut session, id, mut heard) = started_hearing(7).await;
+        session
+            .handle_command(
+                7,
+                "endSession",
+                &serde_json::json!({ "sessionId": id, "stopCasting": stop_casting }),
+            )
+            .await;
+
+        session.handle_disconnect(7).await;
+
+        assert_eq!(
+            ends_heard(&mut heard),
+            vec![end],
+            "stopCasting: {stop_casting}"
+        );
+    }
+}

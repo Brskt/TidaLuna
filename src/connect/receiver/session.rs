@@ -16,6 +16,11 @@ pub(crate) enum SessionNotifyEvent {
         socket_id: u32,
         message: serde_json::Value,
     },
+    /// The socket is closed once what was sent it before is written: sent after the notice that
+    /// tells it the session is over, as TIDAL's receiver closes it.
+    Close {
+        socket_id: u32,
+    },
     Internal(SessionInternalEvent),
 }
 
@@ -125,7 +130,9 @@ impl ReceiverSession {
         if let Some(ref mut session) = self.session {
             session.connected_sockets.remove(&socket_id);
 
-            if session.connected_sockets.is_empty() {
+            // Not once the session is suspended or over: the close that follows its end reports
+            // the socket gone, and the end is already told.
+            if session.connected_sockets.is_empty() && self.state == ReceiverSessionState::Active {
                 // Last client gone -> suspend session (keep for resume)
                 self.handle_session_ended(true).await;
             }
@@ -315,6 +322,8 @@ impl ReceiverSession {
         // suspended = !stopCasting (if stopCasting=true -> clean end, not suspended)
         self.handle_session_ended(!stop_casting).await;
 
+        // Closed behind the notice, as TIDAL's receiver does (`notifyEndedAndClose`): every socket
+        // that heard a session end for good, only the one that leaves when it is suspended.
         let notify = session_ended_notice(&session_id, !stop_casting);
         for hearer in hearers {
             let _ = self
@@ -324,6 +333,12 @@ impl ReceiverSession {
                     message: notify.clone(),
                 })
                 .await;
+            if stop_casting || hearer == socket_id {
+                let _ = self
+                    .notify_tx
+                    .send(SessionNotifyEvent::Close { socket_id: hearer })
+                    .await;
+            }
         }
     }
 

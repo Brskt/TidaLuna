@@ -60,6 +60,7 @@ async fn stalled_client(
             write_tx,
             cancel: cancel.drop_guard(),
             closing: CancellationToken::new(),
+            leaving: CancellationToken::new(),
             _read_task: tokio::spawn(std::future::pending()),
             _heartbeat_task: AbortOnDropHandle::new(_heartbeat_task),
             write_task: AbortOnDropHandle::new(write_task),
@@ -82,7 +83,17 @@ async fn server_with_stalled_client() -> (
     let listener = spawn_test_listener(&tasks, cancel.clone()).await;
     let (client, wire, filler) = stalled_client(cancel.child_token()).await;
     let clients = Arc::new(RwLock::new(HashMap::from([(1, client)])));
-    (WsServer { tasks, clients }, listener, wire, filler)
+    let closers = TaskTracker::new();
+    (
+        WsServer {
+            tasks,
+            clients,
+            closers,
+        },
+        listener,
+        wire,
+        filler,
+    )
 }
 
 #[tokio::test]
@@ -683,4 +694,97 @@ async fn reading_to_the_close_stops_at_the_peers_close() {
         Some(Ok(WsMessage::Text("after".into()))),
         "the frame after the Close is left unread"
     );
+}
+
+/// The next event of a server, failing the test if none comes.
+async fn next_event(events: &mut mpsc::Receiver<ClientEvent>) -> ClientEvent {
+    tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("no event")
+        .expect("the events channel closed")
+}
+
+/// A client closed on its own, as TIDAL's receiver closes a phone it told the session is over:
+/// what was queued reaches it before the Close, and the routing loop hears the socket gone, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_closed_after_its_drain_is_heard_gone_once() {
+    let (events_tx, mut events) = mpsc::channel(64);
+    let (mut server, port, _) = start_on_any_port(events_tx).await;
+    let peer = connect_peer(port, 1 << 16).await;
+    let Some(ClientEvent::Connected(id)) = events.recv().await else {
+        panic!("no Connected")
+    };
+    queue_a_session_end(&server, id).await;
+    let (_write, read) = peer.split();
+    let heard = tokio::spawn(hear_to_the_end(read));
+
+    server.close_after_drain(id).await;
+
+    let heard = tokio::time::timeout(Duration::from_secs(5), heard)
+        .await
+        .expect("the peer never saw its socket end")
+        .unwrap();
+    assert_heard_the_session_end(&heard);
+    assert!(
+        matches!(next_event(&mut events).await, ClientEvent::Disconnected(gone) if gone == id),
+        "the close was not reported"
+    );
+    let again = tokio::time::timeout(Duration::from_millis(500), events.recv()).await;
+    assert!(again.is_err(), "more than the close was reported");
+    assert!(
+        !server.clients.read().await.contains_key(&id),
+        "the closed client is listed"
+    );
+    server.shutdown().await;
+}
+
+/// A shutdown that finds a client mid-close waits for its drain: the notices and the Close reach
+/// the peer whole, not cut by the shutdown's own cancellation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shutdown_during_a_client_close_leaves_its_drain_whole() {
+    let (events_tx, mut events) = mpsc::channel(64);
+    let (mut server, id, peer) = server_with_a_peer(events_tx, &mut events).await;
+    drain(events);
+    queue_a_session_end(&server, id).await;
+    let (_write, read) = peer.split();
+    let heard = tokio::spawn(hear_to_the_end(read));
+
+    server.close_after_drain(id).await;
+    server.shutdown().await;
+
+    let heard = tokio::time::timeout(Duration::from_secs(5), heard)
+        .await
+        .expect("the peer never saw its socket end")
+        .unwrap();
+    assert_heard_the_session_end(&heard);
+}
+
+/// A phone that answers nothing is let go at the deadline: reported gone, its tasks ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_never_answers_the_close_is_released_at_the_deadline() {
+    let (events_tx, mut events) = mpsc::channel(64);
+    let (mut server, port, _) = start_on_any_port(events_tx).await;
+    let base = alive_tasks();
+    let _peer = connect_peer(port, 1 << 16).await;
+    let Some(ClientEvent::Connected(id)) = events.recv().await else {
+        panic!("no Connected")
+    };
+
+    server.close_after_drain(id).await;
+
+    let gone = tokio::time::timeout(Duration::from_secs(6), events.recv()).await;
+    assert!(
+        matches!(gone, Ok(Some(ClientEvent::Disconnected(gone))) if gone == id),
+        "the close was never reported: {:?}",
+        gone.is_ok()
+    );
+    let t0 = std::time::Instant::now();
+    while alive_tasks() > base && t0.elapsed() < Duration::from_secs(3) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        alive_tasks() <= base,
+        "a task of the released client is left"
+    );
+    server.shutdown().await;
 }

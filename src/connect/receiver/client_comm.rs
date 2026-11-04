@@ -79,6 +79,12 @@ impl ClientCommunicator {
         self.server.send_to(socket_id, msg).await
     }
 
+    /// Closes the socket once what was sent to it is written; its disconnect is reported as usual.
+    pub async fn close_after_drain(&self, socket_id: u32) {
+        crate::vprintln!("[connect::ws] -> close({}) after the queue", socket_id);
+        self.server.close_after_drain(socket_id).await;
+    }
+
     pub async fn shutdown(&mut self) {
         self.server.shutdown().await;
     }

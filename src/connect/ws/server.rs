@@ -10,9 +10,10 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::{CancellationToken, DropGuard};
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 use crate::connect::runtime::TaskGroup;
+use crate::connect::ws::close::{CLOSE_DEADLINE, read_to_close};
 use crate::connect::ws::writer;
 
 /// A client socket's life as the routing loop hears it, every socket on one channel. `Connected`
@@ -38,9 +39,13 @@ struct ClientHandle {
     cancel: DropGuard,
     /// Cancelled by `shutdown`: the read loop stops serving, then reads up to the peer's Close.
     closing: CancellationToken,
+    /// Cancelled with `closing` by `close_after_drain` alone: the read loop then reports the
+    /// disconnect once it has read to the Close, which a `shutdown` has no loop left to take.
+    leaving: CancellationToken,
     _read_task: tokio::task::JoinHandle<()>,
     _heartbeat_task: AbortOnDropHandle<()>,
-    /// Awaited by `shutdown`, up to its deadline, for what was queued to be written.
+    /// Awaited, up to a deadline, for what was queued to be written: by `shutdown` and by each
+    /// closer.
     write_task: AbortOnDropHandle<()>,
 }
 
@@ -48,9 +53,11 @@ struct ClientHandle {
 pub(crate) struct WsServer {
     tasks: Arc<TaskGroup>,
     clients: Arc<RwLock<HashMap<u32, ClientHandle>>>,
+    /// The drains of the clients `close_after_drain` is closing, which `shutdown` waits for.
+    closers: TaskTracker,
 }
 
-const SERVER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
+const SERVER_SHUTDOWN_DEADLINE: Duration = CLOSE_DEADLINE;
 
 /// Messages a client may leave untaken before it counts as no longer reading.
 const CLIENT_QUEUE: usize = 64;
@@ -99,7 +106,11 @@ impl WsServer {
             )?;
         }
 
-        Ok(Self { tasks, clients })
+        Ok(Self {
+            tasks,
+            clients,
+            closers: TaskTracker::new(),
+        })
     }
 
     /// Send a message to a specific client (unicast).
@@ -147,6 +158,43 @@ impl WsServer {
         }
     }
 
+    /// Closes the client `socket_id` once what is queued for it is written, as `shutdown` does for
+    /// all of them: a notice sent just before reaches the peer ahead of the Close. The client leaves
+    /// the map at once; its read loop reports the disconnect at the peer's Close, or at the deadline.
+    pub async fn close_after_drain(&self, socket_id: u32) {
+        let Some(client) = self.clients.write().await.remove(&socket_id) else {
+            return;
+        };
+        let ClientHandle {
+            write_tx,
+            cancel,
+            closing,
+            leaving,
+            _read_task: read_task,
+            _heartbeat_task: heartbeat_task,
+            write_task,
+        } = client;
+        // As in `shutdown`, the read loop stops serving: a command that follows the notice is
+        // read and dropped. The disconnect is reported once it has read to the Close.
+        leaving.cancel();
+        closing.cancel();
+        // The heartbeat, dropped here, holds the only other sender. With it and the handle's own
+        // gone, the writer runs to the end of its queue and closes.
+        drop(write_tx);
+        drop(heartbeat_task);
+        self.closers.spawn(async move {
+            let (mut write_task, mut read_task) = (write_task, read_task);
+            let _ = tokio::time::timeout(CLOSE_DEADLINE, async {
+                let _ = (&mut write_task).await;
+                let _ = (&mut read_task).await;
+            })
+            .await;
+            // Past the deadline the guard's token, which the read loop leaves on to report the
+            // disconnect, ends a peer that never answered; the writer's handle aborts a parked send.
+            drop(cancel);
+        });
+    }
+
     /// Disconnect clients that no longer take their queue: dropping the entry ends them, and their
     /// read loop, left on the cancelled token, reports the disconnect.
     async fn evict(&self, socket_ids: &[u32]) {
@@ -186,11 +234,16 @@ impl WsServer {
                 })
                 .collect()
         };
+        // The drains of clients being closed are waited for in the same budget, before anything
+        // is cancelled: the token below would cut them.
+        self.closers.close();
         let _ = tokio::time::timeout(SERVER_SHUTDOWN_DEADLINE, async {
-            for (_, writer, reader) in ending.iter_mut() {
-                let _ = writer.await;
-                let _ = reader.await;
-            }
+            tokio::join!(self.closers.wait(), async {
+                for (_, writer, reader) in ending.iter_mut() {
+                    let _ = writer.await;
+                    let _ = reader.await;
+                }
+            });
         })
         .await;
         // A peer that stopped reading leaves its writer parked in a send, and one that never
@@ -310,8 +363,9 @@ async fn accept_loop<L: Borrow<TcpListener>>(
         // client's disconnect to stop its read/write loops gracefully.
         let client_cancel = cancel.child_token();
         let closing = CancellationToken::new();
+        let leaving = CancellationToken::new();
 
-        // Write task: forward mpsc -> WS sink, exit on cancel.
+        // Write task: forward mpsc -> WS sink, exit on cancel or when the queue closes.
         let (write_tx, write_rx) = mpsc::channel::<WsMessage>(CLIENT_QUEUE);
         let write_task = AbortOnDropHandle::new(tokio::spawn(writer::run(
             write,
@@ -328,7 +382,7 @@ async fn accept_loop<L: Borrow<TcpListener>>(
         // no entry behind, its writer and socket held by nobody's read loop.
         let mut registry = clients.write().await;
 
-        // Read task: WS stream -> dispatch, exit on cancel.
+        // Read task: WS stream -> dispatch, exit on cancel or once `closing` has it read to the end.
         let _read_task = {
             let clients = clients.clone();
             let events_tx = events_tx.clone();
@@ -336,8 +390,11 @@ async fn accept_loop<L: Borrow<TcpListener>>(
             let client_alive = client_alive.clone();
             let cancel = client_cancel.clone();
             let closing = closing.clone();
+            let leaving = leaving.clone();
             tokio::spawn(async move {
                 let mut read = read;
+                let gone = (events_tx.clone(), clients.clone(), client_alive.clone());
+                let read_cancel = cancel.clone();
                 // `closing` preempts every await of the loop, its sends included: the routing
                 // loop, in its epilogue by then, takes no event.
                 let closed = tokio::select! {
@@ -354,7 +411,18 @@ async fn accept_loop<L: Borrow<TcpListener>>(
                     ) => false,
                 };
                 if closed {
-                    read_to_close(&mut read).await;
+                    // Bounded by the token: the closer cancels it at its deadline.
+                    tokio::select! {
+                        biased;
+                        _ = read_cancel.cancelled() => {}
+                        _ = read_to_close(&mut read) => {}
+                    }
+                    // A `shutdown` has its routing loop gone; a client closed on its own is
+                    // still reported, or the loop would hold the socket for good.
+                    if leaving.is_cancelled() {
+                        let (events_tx, clients, client_alive) = gone;
+                        report_disconnect(socket_id, &events_tx, &clients, &client_alive).await;
+                    }
                 }
             })
         };
@@ -385,6 +453,7 @@ async fn accept_loop<L: Borrow<TcpListener>>(
                 write_tx,
                 cancel: client_cancel.drop_guard(),
                 closing,
+                leaving,
                 _read_task,
                 _heartbeat_task,
                 write_task,
@@ -440,7 +509,16 @@ async fn client_read_loop(
         }
     }
 
-    // Client disconnected - cleanup
+    report_disconnect(socket_id, &events_tx, &clients, &client_alive).await;
+}
+
+/// Client disconnected: removes its entry and tells the routing loop.
+async fn report_disconnect(
+    socket_id: u32,
+    events_tx: &mpsc::Sender<ClientEvent>,
+    clients: &RwLock<HashMap<u32, ClientHandle>>,
+    client_alive: &AtomicBool,
+) {
     client_alive.store(false, Ordering::Relaxed);
     let mut clients_guard = clients.write().await;
     // Dropping the removed entry ends the heartbeat and the writer.
@@ -448,8 +526,8 @@ async fn client_read_loop(
     drop(clients_guard);
 
     crate::vprintln!("[connect::ws::server] Client {} disconnected", socket_id);
-    // Every end of the socket but `closing`'s passes here: the peer's, and the server's
-    // (heartbeat verdict, eviction, shutdown) through its token.
+    // Every end of the socket but `shutdown`'s passes here: the peer's, and the server's
+    // (heartbeat verdict, eviction, a close of its own) through its token.
     if events_tx
         .send(ClientEvent::Disconnected(socket_id))
         .await
@@ -459,20 +537,6 @@ async fn client_read_loop(
             "[connect::ws::server] Dropped Disconnected({}) event",
             socket_id
         );
-    }
-}
-
-/// Reads and drops what the peer still sends, up to its Close: the answer to ours, and the last
-/// frame it sends. Released before it, a socket holding a Pong or a command not yet read would
-/// be reset, and the reset discards what the peer has yet to receive, our Close included.
-async fn read_to_close<S, E>(read: &mut S)
-where
-    S: futures_util::Stream<Item = Result<WsMessage, E>> + Unpin,
-{
-    while let Some(Ok(message)) = read.next().await {
-        if let WsMessage::Close(_) = message {
-            break;
-        }
     }
 }
 
@@ -526,7 +590,17 @@ impl WsServer {
         let listener = spawn_test_listener(&tasks, cancel.clone()).await;
         let (client, wire_rx, filler) = test_client(&cancel, wire_capacity);
         let clients = Arc::new(RwLock::new(HashMap::from([(socket_id, client)])));
-        (Self { tasks, clients }, listener, wire_rx, filler)
+        let closers = TaskTracker::new();
+        (
+            Self {
+                tasks,
+                clients,
+                closers,
+            },
+            listener,
+            wire_rx,
+            filler,
+        )
     }
 
     /// Another client (`socket_id`) on the server, its socket the returned wire.
@@ -573,6 +647,7 @@ fn test_client(
         write_tx,
         cancel: client_cancel.drop_guard(),
         closing: closing.clone(),
+        leaving: CancellationToken::new(),
         _read_task: tokio::spawn(async move { closing.cancelled().await }),
         _heartbeat_task: AbortOnDropHandle::new(_heartbeat_task),
         write_task: AbortOnDropHandle::new(write_task),

@@ -35,6 +35,7 @@ src/connect/
 ├── ws/                 # WebSocket transport
 │   ├── client.rs       # TLS client (controller -> device)
 │   ├── server.rs       # TLS server (accepts mobile clients)
+│   ├── close.rs        # shared close deadline and read-to-Close
 │   ├── heartbeat.rs    # shared ping/pong driver
 │   ├── tls.rs          # rustls config with TIDAL CA
 │   └── pending.rs      # requestId -> oneshot tracker
@@ -126,7 +127,7 @@ need socket-id suffixes.
 | receiver routing loop | `ConnectReceiver.tasks` | 5 s |
 | mDNS browser event loop | `ConnectManager.controller_tasks` | 2 s |
 | WS server listener | `WsServer.tasks` | 2 s |
-| WS server per-client read/write/heartbeat | `ClientHandle` (raw) | abort on disconnect; `shutdown()` lets each writer flush its queue first, 2 s |
+| WS server per-client read/write/heartbeat | `ClientHandle` (raw) | abort on disconnect; `shutdown()` and `close_after_drain` (after an `endSession`) let the writer flush its queue first, 2 s |
 | WS client per-connection read/write/heartbeat | `WsClient` (raw) | abort on `shutdown()` |
 | IPC fire-and-forget handlers | raw `tokio::spawn` | ephemeral |
 | controller session send (fire-and-forget) | raw `tokio::spawn` | ephemeral |
