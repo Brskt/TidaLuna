@@ -6,12 +6,31 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
+use crate::connect::ConnectManager;
+use crate::connect::failure_latch::FailureLatch;
 use crate::connect::types::{MdnsDevice, ReceiverConfig};
 use crate::connect::ws::client::{WsClient, WsClientEvent};
 
 use super::helpers::{
     emit_controller_session_event, forward_controller_notification, get_controller_arc,
 };
+
+/// One latch per operation `discover` and `refresh` retry: the controller init (shared by both),
+/// the discovery start and the device refresh. Told apart by operation, not cause: their errors
+/// are untyped `anyhow::Error`s (mdns-sd, the missing runtime, a task spawn).
+static INIT_FAILURE: FailureLatch = FailureLatch::new();
+static DISCOVERY_FAILURE: FailureLatch = FailureLatch::new();
+static REFRESH_FAILURE: FailureLatch = FailureLatch::new();
+
+fn init_if_missing(cm: &mut ConnectManager) {
+    if cm.controller().is_some() {
+        return;
+    }
+    match cm.init_controller() {
+        Ok(()) => INIT_FAILURE.recovered(),
+        Err(e) => INIT_FAILURE.failed(format_args!("[connect::ipc] Controller init failed: {e}")),
+    }
+}
 
 pub(super) fn initialize(msg: &IpcMessage) {
     let queue_url = msg.arg(1).to_string();
@@ -34,12 +53,14 @@ pub(super) fn discover() {
     with_state(|state| {
         if let Some(ref mut cm) = state.connect {
             // Lazy init: discover may arrive before initialize.
-            if cm.controller().is_none() {
-                let _ = cm.init_controller();
-            }
+            init_if_missing(cm);
             if let Some(ctrl) = cm.controller() {
                 let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = guard.start_discovery();
+                match guard.start_discovery() {
+                    Ok(()) => DISCOVERY_FAILURE.recovered(),
+                    Err(e) => DISCOVERY_FAILURE
+                        .failed(format_args!("[connect::ipc] Discovery start failed: {e}")),
+                }
             }
         }
     });
@@ -54,12 +75,14 @@ pub(super) fn discover() {
 pub(super) fn refresh() {
     with_state(|state| {
         if let Some(ref mut cm) = state.connect {
-            if cm.controller().is_none() {
-                let _ = cm.init_controller();
-            }
+            init_if_missing(cm);
             if let Some(ctrl) = cm.controller() {
                 let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = guard.refresh_devices();
+                match guard.refresh_devices() {
+                    Ok(()) => REFRESH_FAILURE.recovered(),
+                    Err(e) => REFRESH_FAILURE
+                        .failed(format_args!("[connect::ipc] Device refresh failed: {e}")),
+                }
             }
         }
     });
