@@ -10,7 +10,8 @@ use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use crate::connect::ConnectManager;
 use crate::connect::controller::TidalConnectController;
 use crate::connect::controller::dial::{
-    ConnectFailure, RESOLVE_DEADLINE, RESUME_DEADLINE, confirm_resume, dial_requested,
+    ConnectFailure, RESOLVE_DEADLINE, RESUME_DEADLINE, Started, confirm_resume, confirm_start,
+    dial_requested,
 };
 use crate::connect::controller::flight::{ConnectFlights, Verdict};
 use crate::connect::controller::session::{ControllerSessionEvent, ResumePlan};
@@ -88,7 +89,7 @@ pub(super) fn refresh() {
 
 /// Only the account id is read: the token a device is given comes from `token_state` at send
 /// time, never from an argument a plugin can also send. A live session's device is handed the
-/// token held now, as TIDAL's `setAuthentication` does, unless it holds that one already.
+/// token held now, unless it holds it already; with none live, the next install hands it over.
 pub(super) fn set_auth(msg: &IpcMessage) {
     let credential = msg.arg(0).to_string();
     with_state(|state| {
@@ -119,6 +120,18 @@ fn controller_browsing() -> Option<Arc<Mutex<TidalConnectController>>> {
     .flatten()
 }
 
+/// The controller if one was built, without building it.
+fn existing_controller() -> Option<Arc<Mutex<TidalConnectController>>> {
+    with_state(|state| {
+        state
+            .connect
+            .as_ref()
+            .and_then(|cm| cm.controller())
+            .cloned()
+    })
+    .flatten()
+}
+
 /// One per process: every connect request, whoever sent it, goes through the same attempt.
 static CONNECT_FLIGHTS: ConnectFlights = ConnectFlights::new();
 
@@ -139,18 +152,6 @@ fn answer_failure(callback: &IpcCallback, failure: &ConnectFailure) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .failure(failure.status(), &failure.message());
-}
-
-/// Whether TIDAL is told `failure` ended a connect, no controller meaning no session to protect.
-fn announces_failure(
-    ctrl: Option<&Arc<Mutex<TidalConnectController>>>,
-    failure: &ConnectFailure,
-) -> bool {
-    ctrl.is_none_or(|ctrl| {
-        ctrl.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .announces_connect_failure(failure)
-    })
 }
 
 /// A failure answered without an attempt, or by a leader that died. Announced to TIDAL as
@@ -175,24 +176,29 @@ const TIDAL_LINK: Link = Link {
     resume_deadline: RESUME_DEADLINE,
 };
 
-/// A live session the device confirmed resuming on the new socket, with what the wait read.
+/// A session the device confirmed resuming on the new socket, with what the wait read.
 struct Resumed {
     plan: ResumePlan,
     frames: Vec<WsClientEvent>,
 }
 
-/// What the dial produced: the socket to install and the device it reached.
+/// What the device confirmed on the new socket: a session resumed, or one started.
+enum Established {
+    Resumed(Resumed),
+    Started(Started),
+}
+
+/// What the dial produced: the socket to install, the device it reached and what it confirmed.
 struct Dialled {
     ctrl: Arc<Mutex<TidalConnectController>>,
     ws: WsClient,
     device: MdnsDevice,
     events: mpsc::Receiver<WsClientEvent>,
-    /// Set when the request is the reconnect of a live session, resumed before anything moves.
-    resumed: Option<Resumed>,
+    established: Established,
 }
 
-/// Closes the socket it holds unless taken: a dial replaced or cancelled during the resume wait
-/// drops its future there, and nothing else holds the socket.
+/// Closes the socket it holds unless taken: a dial replaced or cancelled while it waits for the
+/// device drops its future there, and nothing else holds the socket.
 struct Unsettled(Option<WsClient>);
 
 impl Unsettled {
@@ -213,8 +219,8 @@ impl Drop for Unsettled {
     }
 }
 
-/// The part of the attempt that awaits: resolve the device, dial it and, for a live session of
-/// that device, have it confirm the resume on the new socket. Nothing is installed, and the live
+/// The part of the attempt that awaits: resolve the device, dial it and have it confirm on the new
+/// socket the resume of its session, or a start when it has none. Nothing is installed, and a
 /// session keeps its old socket until the settle step.
 async fn dial_device(
     ctrl: Option<Arc<Mutex<TidalConnectController>>>,
@@ -238,7 +244,7 @@ async fn dial_device(
     )
     .await?;
     let held = Unsettled(Some(ws));
-    let resumed = match plan {
+    let established = match plan {
         Some(plan) => {
             let frames = confirm_resume(
                 held.ws(),
@@ -247,16 +253,16 @@ async fn dial_device(
                 link.resume_deadline,
             )
             .await?;
-            Some(Resumed { plan, frames })
+            Established::Resumed(Resumed { plan, frames })
         }
-        None => None,
+        None => Established::Started(confirm_start(held.ws(), &mut events, &ctrl).await?),
     };
     Ok(Dialled {
         ctrl,
         ws: held.take(),
         device,
         events,
-        resumed,
+        established,
     })
 }
 
@@ -266,14 +272,8 @@ fn settle_attempt(
     ctrl: Option<&Arc<Mutex<TidalConnectController>>>,
     dialled: Result<Dialled, ConnectFailure>,
 ) -> Verdict {
-    match dialled {
-        Ok(dialled) => match install_session(dialled) {
-            Ok(joined) => Verdict::done(joined),
-            Err(failure) => Verdict {
-                announce: failure.is_announced(),
-                result: Err(failure),
-            },
-        },
+    match dialled.and_then(install_session) {
+        Ok(joined) => Verdict::done(joined),
         Err(failure) => Verdict {
             announce: settle_failure(ctrl, &failure, &Renderer),
             result: Err(failure),
@@ -281,9 +281,9 @@ fn settle_attempt(
     }
 }
 
-/// A resume the device did not confirm ends the session when its old socket is no longer live,
-/// through the same end a disconnect announces: a `connect_failed` alone would leave TIDAL on the
-/// remote player. Whether TIDAL is then told the connect failed.
+/// An announced failure first ends the session whose socket is no longer live, through the end a
+/// disconnect announces: `connect_failed` alone would leave TIDAL on the remote player. A session
+/// TIDAL was told ended owes nothing. Whether TIDAL is then told the connect failed.
 fn settle_failure(
     ctrl: Option<&Arc<Mutex<TidalConnectController>>>,
     failure: &ConnectFailure,
@@ -294,7 +294,7 @@ fn settle_failure(
         return true;
     };
     let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
-    if failure.is_resume()
+    if failure.is_announced()
         && let Some(se) = guard.end_unless_live()
     {
         page.session_event(&se, guard.connection_gen());
@@ -333,15 +333,15 @@ impl Drop for InstallGuard {
     }
 }
 
-/// Install the session and watch its socket. Returns whether the device already held our session,
-/// or why nothing was installed: the session the request was to resume is gone.
+/// Install the session the device confirmed and watch its socket. Returns the `joined` the device
+/// reported, or why nothing was installed: the session the request was to resume is gone.
 fn install_session(dialled: Dialled) -> Result<bool, ConnectFailure> {
     let Dialled {
         ctrl,
         ws,
         device,
         events: event_rx,
-        resumed,
+        established,
     } = dialled;
     let ws = Arc::new(ws);
     // Declared before the controller lock below: an unwind releases that lock first.
@@ -350,34 +350,33 @@ fn install_session(dialled: Dialled) -> Result<bool, ConnectFailure> {
         conn_gen: None,
         armed: true,
     };
-    let (conn_gen, joined, replay) = {
+    let (conn_gen, joined, replay, token_owed) = {
         let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
-        match resumed {
-            Some(Resumed { plan, frames }) => {
-                let conn_gen = guard
-                    .adopt_resumed(ws, &device, &plan)
-                    .ok_or(ConnectFailure::Cancelled)?;
-                undo.conn_gen = Some(conn_gen);
-                (conn_gen, true, frames)
+        let (adopted, joined, replay) = match established {
+            Established::Resumed(Resumed { plan, frames }) => {
+                (guard.adopt_resumed(ws, &device, &plan)?, true, frames)
             }
-            None => {
-                let cred = guard.session_credential().map(|s| s.to_string());
-                let installed = guard.set_ws_and_start_session(ws, &device, cred.as_deref());
-                undo.conn_gen = Some(installed.conn_gen);
-                // Posted in the hold that bumped the generation, where the old loop's own posts
-                // are made: its last event cannot land behind this one.
-                if let Some(se) = installed.superseded {
-                    emit_controller_session_event(&se, installed.conn_gen);
-                }
-                let request = guard.start_session(&device, cred.as_deref());
-                (
-                    installed.conn_gen,
-                    request.is_some_and(|r| r.joined()),
-                    Vec::new(),
-                )
-            }
+            Established::Started(Started {
+                session_id,
+                joined,
+                frames,
+            }) => (
+                guard.adopt_started(ws, &device, session_id, joined),
+                joined,
+                frames,
+            ),
+        };
+        undo.conn_gen = Some(adopted.conn_gen);
+        // Posted in the hold that bumped the generation, by this task and ahead of its answer: the
+        // loop below is another task, and the old loop's own posts cannot land behind these.
+        for se in [adopted.superseded, adopted.started].into_iter().flatten() {
+            emit_controller_session_event(&se, adopted.conn_gen);
         }
+        (adopted.conn_gen, joined, replay, adopted.token_owed)
     };
+    if token_owed && let Some(handout) = prepare_update(None) {
+        push_server_info(handout.due);
+    }
 
     tokio::spawn(async move {
         read_connection(&ctrl, conn_gen, replay, event_rx, &Renderer).await;
@@ -474,8 +473,9 @@ fn relay_event(
 pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
     let device_json = msg.args.first().cloned().unwrap_or_default();
     let Some(rt) = crate::state::RT_HANDLE.get() else {
-        // Flights run on that runtime: without it, none can be in progress to protect.
-        fail_connect(&callback, &ConnectFailure::NoRuntime, true);
+        let failure = ConnectFailure::NoRuntime;
+        let announce = settle_failure(existing_controller().as_ref(), &failure, &Renderer);
+        fail_connect(&callback, &failure, announce);
         return;
     };
     let ctrl_arc = controller_browsing();
@@ -484,7 +484,7 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
             Ok(requested) => requested,
             Err(e) => {
                 let failure = ConnectFailure::Malformed(e.to_string());
-                let announce = announces_failure(ctrl_arc.as_ref(), &failure);
+                let announce = settle_failure(ctrl_arc.as_ref(), &failure, &Renderer);
                 fail_connect(&callback, &failure, announce);
                 return;
             }
@@ -496,7 +496,7 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
             let (callback, ctrl) = (callback.clone(), ctrl_arc.clone());
             move |led: bool| {
                 let failure = ConnectFailure::Aborted;
-                let announce = led && announces_failure(ctrl.as_ref(), &failure);
+                let announce = led && settle_failure(ctrl.as_ref(), &failure, &Renderer);
                 fail_connect(&callback, &failure, announce);
             }
         };
@@ -558,15 +558,7 @@ fn end_session(
 
 pub(super) fn disconnect(msg: IpcMessage, callback: IpcCallback) {
     let stop = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-    let ctrl = with_state(|state| {
-        state
-            .connect
-            .as_ref()
-            .and_then(|cm| cm.controller())
-            .cloned()
-    })
-    .flatten();
-    if let Some(ctrl) = ctrl {
+    if let Some(ctrl) = existing_controller() {
         end_session(&CONNECT_FLIGHTS, &ctrl, stop, &Renderer);
     }
     callback

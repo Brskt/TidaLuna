@@ -31,7 +31,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async};
 
 use crate::connect::controller::TidalConnectController;
 use crate::connect::types::MdnsDevice;
-use crate::connect::ws::client::{WsClient, WsClientEvent};
+use crate::connect::ws::client::WsClient;
 
 /// A mock websocket server bound to a random loopback port.
 ///
@@ -107,15 +107,8 @@ pub async fn live_controller(
     let ws = Arc::new(dialing.await.unwrap().expect("dial"));
 
     let mut ctrl = TidalConnectController::new(None);
-    let installed = ctrl.set_ws_and_start_session(ws, device, None);
-    ctrl.start_session(device, None).expect("start sent");
-    let started = WsClientEvent::Message(serde_json::json!({
-        "command": "notifySessionStarted",
-        "sessionId": "s1",
-        "joined": false,
-    }));
-    assert!(ctrl.handle_ws_event(&started).is_some());
-    (Arc::new(Mutex::new(ctrl)), installed.conn_gen, conn)
+    let adopted = ctrl.adopt_started(ws, device, "s1".to_string(), false);
+    (Arc::new(Mutex::new(ctrl)), adopted.conn_gen, conn)
 }
 
 /// An accepted server-side websocket connection, open for as long as it is held.

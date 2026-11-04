@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::connect::consts;
 use crate::connect::controller::TidalConnectController;
 use crate::connect::types::{MdnsDevice, SessionCommand, SessionNotification};
 use crate::connect::ws::client::{WsClient, WsClientEvent};
@@ -21,12 +22,12 @@ pub(crate) const RESOLVE_DEADLINE: Duration = Duration::from_secs(5);
 /// How long a resume waits for the device to confirm it on the new socket: what a dial gets.
 pub(crate) const RESUME_DEADLINE: Duration = Duration::from_secs(5);
 
-/// The most frames of the new socket a resume sets aside while it waits: a device past that is not
-/// answering the resume.
-const RESUME_FRAME_CAP: usize = 64;
+/// The most frames of the new socket a start or a resume sets aside while it waits: a device past
+/// that is not answering.
+const ANSWER_FRAME_CAP: usize = 64;
 
-/// Longest part of renderer-supplied text (a `fullname`, the echo of a malformed device) that
-/// reaches a log line or an answer.
+/// Longest part of untrusted text (a `fullname`, the echo of a malformed device, a refusal's
+/// details) that reaches a log line or an answer.
 const FULLNAME_LOG_MAX: usize = 128;
 
 /// Why a connect request did not end in a connected device. Each variant names its own answer
@@ -45,8 +46,10 @@ pub(crate) enum ConnectFailure {
     Aborted,
     /// A disconnect, or the end of the session it was to resume, took the attempt's purpose away.
     Cancelled,
-    /// The device did not confirm the resume of the live session on the new socket.
+    /// The device did not confirm the resume of its session on the new socket.
     Resume(String),
+    /// The device did not start a session on the new socket.
+    Start(String),
 }
 
 impl ConnectFailure {
@@ -60,6 +63,7 @@ impl ConnectFailure {
             | Self::NoAddress
             | Self::Dial(_)
             | Self::Resume(_)
+            | Self::Start(_)
             | Self::Aborted => 500,
         }
     }
@@ -80,13 +84,8 @@ impl ConnectFailure {
             Self::Dial(e) => e.clone(),
             Self::Superseded => "Replaced by a newer connect request".to_string(),
             Self::Cancelled => "The connect was cancelled before it completed".to_string(),
-            Self::Resume(e) => e.clone(),
+            Self::Resume(e) | Self::Start(e) => e.clone(),
         }
-    }
-
-    /// Whether the dial reached the device and it was the resume that failed.
-    pub(crate) fn is_resume(&self) -> bool {
-        matches!(self, Self::Resume(_))
     }
 
     /// Whether TIDAL is told the connect failed. Not a superseded request (the newer one owns the
@@ -143,6 +142,48 @@ pub(crate) async fn dial_requested(
     Ok((ws, device))
 }
 
+/// What a refused `what` says: the device's own details, cut to what a log line can carry.
+fn refusal(what: &str, details: &serde_json::Value) -> String {
+    let said = details.to_string();
+    format!(
+        "The device refused to {what} the session: {}",
+        truncate_str(&said, FULLNAME_LOG_MAX)
+    )
+}
+
+/// Reads `events` until `judge` rules on a session notice: its answer, with the frames set aside
+/// before it and the notice last. A socket lost or a device sending too much first is an error.
+async fn read_answer<T>(
+    events: &mut mpsc::Receiver<WsClientEvent>,
+    what: &str,
+    mut judge: impl FnMut(&SessionNotification) -> Option<Result<T, String>>,
+) -> Result<(T, Vec<WsClientEvent>), String> {
+    let mut frames = Vec::new();
+    while let Some(event) = events.recv().await {
+        match &event {
+            WsClientEvent::Message(frame) => {
+                if let Ok(notice) = serde_json::from_value::<SessionNotification>(frame.clone())
+                    && let Some(ruling) = judge(&notice)
+                {
+                    frames.push(event);
+                    return ruling.map(|answer| (answer, frames));
+                }
+            }
+            WsClientEvent::ConnectionLost => break,
+            WsClientEvent::Error(_) => continue,
+        }
+        if frames.len() >= ANSWER_FRAME_CAP {
+            return Err(format!(
+                "The device sent too much before it answered the {what}"
+            ));
+        }
+        frames.push(event);
+    }
+    Err(format!(
+        "The connection was lost before the device answered the {what}"
+    ))
+}
+
 /// Asks the device to resume `session_id` on the new socket `ws` and waits up to `deadline` for it
 /// to say so on `events`. Returns the frames the wait read, in the order they came and the resume
 /// notice last: the session has not seen them yet. Nothing is installed or closed here.
@@ -160,49 +201,75 @@ pub(crate) async fn confirm_resume(
         .await
         .map_err(|e| ConnectFailure::Resume(e.to_string()))?;
 
-    let wait = async {
-        let mut frames = Vec::new();
-        while let Some(event) = events.recv().await {
-            match &event {
-                WsClientEvent::Message(frame) => {
-                    match serde_json::from_value::<SessionNotification>(frame.clone()) {
-                        Ok(SessionNotification::NotifySessionResumed { session_id: id })
-                            if id == session_id =>
-                        {
-                            frames.push(event);
-                            return Ok(frames);
-                        }
-                        Ok(SessionNotification::NotifySessionError {
-                            requested_command, ..
-                        }) if requested_command == "resumeSession" => {
-                            return Err(ConnectFailure::Resume(
-                                "The device refused to resume the session".to_string(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                WsClientEvent::ConnectionLost => break,
-                WsClientEvent::Error(_) => continue,
-            }
-            if frames.len() >= RESUME_FRAME_CAP {
-                return Err(ConnectFailure::Resume(
-                    "The device sent too much before it answered the resume".to_string(),
-                ));
-            }
-            frames.push(event);
+    let wait = read_answer(events, "resume", |notice| match notice {
+        SessionNotification::NotifySessionResumed { session_id: id } if id == session_id => {
+            Some(Ok(()))
         }
-        Err(ConnectFailure::Resume(
-            "The connection was lost before the device answered the resume".to_string(),
-        ))
-    };
-    tokio::time::timeout(deadline, wait)
+        SessionNotification::NotifySessionError {
+            requested_command,
+            details,
+        } if requested_command == "resumeSession" => Some(Err(refusal("resume", details))),
+        _ => None,
+    });
+    match tokio::time::timeout(deadline, wait).await {
+        Ok(answered) => answered
+            .map(|((), frames)| frames)
+            .map_err(ConnectFailure::Resume),
+        Err(_) => Err(ConnectFailure::Resume(
+            "The device did not answer the resume in time".to_string(),
+        )),
+    }
+}
+
+/// The session the device started on the new socket, with the frames the wait read before its notice.
+pub(crate) struct Started {
+    pub(crate) session_id: String,
+    pub(crate) joined: bool,
+    pub(crate) frames: Vec<WsClientEvent>,
+}
+
+/// Asks the device to start a session on the new socket `ws` and waits for it to say so on `events`:
+/// no deadline, a device may wait on its resources first. Nothing is installed or closed here.
+pub(crate) async fn confirm_start(
+    ws: &WsClient,
+    events: &mut mpsc::Receiver<WsClientEvent>,
+    ctrl: &Mutex<TidalConnectController>,
+) -> Result<Started, ConnectFailure> {
+    // Read as the command is built: a `set_auth` during the dial must reach it.
+    let credential = ctrl
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .session_credential()
+        .map(str::to_string);
+    let start = serde_json::to_value(SessionCommand::StartSession {
+        app_id: consts::SESSION_APP_ID.to_string(),
+        app_name: consts::SESSION_APP_NAME.to_string(),
+        session_credential: credential,
+    })
+    .map_err(|e| ConnectFailure::Start(e.to_string()))?;
+    ws.send_raw(start)
         .await
-        .unwrap_or_else(|_| {
-            Err(ConnectFailure::Resume(
-                "The device did not answer the resume in time".to_string(),
-            ))
-        })
+        .map_err(|e| ConnectFailure::Start(e.to_string()))?;
+
+    let ((session_id, joined), mut frames) = read_answer(events, "start", |notice| match notice {
+        SessionNotification::NotifySessionStarted { session_id, joined } => {
+            Some(Ok((session_id.clone(), *joined)))
+        }
+        SessionNotification::NotifySessionError {
+            requested_command,
+            details,
+        } if requested_command == "startSession" => Some(Err(refusal("start", details))),
+        _ => None,
+    })
+    .await
+    .map_err(ConnectFailure::Start)?;
+    // The notice itself is the install's to announce, once.
+    frames.pop();
+    Ok(Started {
+        session_id,
+        joined,
+        frames,
+    })
 }
 
 #[cfg(test)]

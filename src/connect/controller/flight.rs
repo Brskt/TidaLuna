@@ -1,10 +1,11 @@
 //! One connect attempt at a time. TIDAL asks for the persisted device at saga start and on every
-//! LOGIN_SUCCESS: overlapping requests for one device share one resolve, dial and startSession, and
-//! one for another device replaces the attempt in flight, as TIDAL's `takeLatest` on its pick does.
+//! LOGIN_SUCCESS: overlapping requests for one device share one resolve, dial and the device's answer
+//! to its start or resume, and one for another device replaces the attempt in flight, as TIDAL's
+//! `takeLatest` on its pick does.
 //!
-//! Lock order: the slot mutex, then the controller's. The settle step runs under the slot:
-//! "this attempt is still the current one" and its install are a single critical section.
-//! Nothing that holds the controller or the app state ever takes the slot.
+//! Lock order: the slot mutex, then the app state, then the controller's. The settle step runs
+//! under the slot: "still the current attempt" and its install are one critical section. Nothing
+//! that holds the controller or the app state ever takes the slot.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};

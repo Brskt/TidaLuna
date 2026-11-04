@@ -82,7 +82,7 @@ fn session_infos_for(
 
 /// The server info a device is to be handed now, with what became of sending it.
 pub(super) struct Handout {
-    /// The `updateServerInfo` that carries it, for a caller with no live session to send it to.
+    /// The `updateServerInfo` that carries it, for a caller to send itself when no live session took it.
     pub(super) command: serde_json::Value,
     pub(super) due: ServerInfoClaim,
 }
@@ -296,14 +296,6 @@ pub(super) fn emit_connect_failed() {
     post_emit("connect.connect_failed");
 }
 
-/// The same, for a failure of the socket generation `generation`.
-fn emit_connect_failed_at(generation: u64) {
-    post_emit_with_data(
-        "connect.connect_failed",
-        &serde_json::json!({ "connection": generation }),
-    );
-}
-
 /// `generation` is the controller's socket generation read in the lock hold that produced `event`:
 /// the page drops a lifecycle event older than one it applied, as a push queued before its
 /// snapshot read lands behind the snapshot's reply.
@@ -329,20 +321,13 @@ pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent, gene
                 &serde_json::json!({ "suspended": suspended, "connection": generation }),
             );
         }
-        ControllerSessionEvent::ConnectionLost { during_start } => {
+        ControllerSessionEvent::ConnectionLost => {
             post_emit_with_data(
                 "connect.connection_lost",
                 &serde_json::json!({ "connection": generation }),
             );
-            // TIDAL's queue restore waits for a session or a failure, not for a lost connection.
-            if *during_start {
-                emit_connect_failed_at(generation);
-            }
         }
         ControllerSessionEvent::SessionError { command, details } => {
-            if event.is_refused_connect() {
-                emit_connect_failed_at(generation);
-            }
             post_emit_with_data(
                 "connect.server_error",
                 &serde_json::json!({
