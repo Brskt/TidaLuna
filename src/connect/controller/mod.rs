@@ -1,4 +1,5 @@
 pub(crate) mod dial;
+pub(crate) mod flight;
 pub(crate) mod server_info;
 pub(crate) mod session;
 
@@ -302,6 +303,14 @@ impl TidalConnectController {
 
     pub fn is_connected(&self) -> bool {
         self.session.as_ref().is_some_and(|s| s.ws.is_connected())
+    }
+
+    /// Whether TIDAL is told that `failure` ended a connect. Not while a session stays live: its
+    /// CONNECT_TO_DEVICE_FAILED reads as "not connected" and drops the persisted device, which
+    /// would leave a live session the renderer believes gone. TIDAL disconnects before it
+    /// connects, so only a plugin's direct request reaches this with a session up.
+    pub fn announces_connect_failure(&self, failure: &dial::ConnectFailure) -> bool {
+        failure.is_announced() && !self.is_connected()
     }
 
     pub fn set_session_credential(&mut self, credential: Option<&str>) {

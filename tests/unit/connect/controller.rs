@@ -62,6 +62,73 @@ async fn disconnecting_a_live_session_returns_the_event_that_retires_it() {
     );
 }
 
+/// TIDAL's queue restore waits for a session or a failed connect, and a lost connection is neither:
+/// a socket that dies before the device answers startSession has to read as a failed start, and
+/// one that dies later as a plain disconnect.
+#[tokio::test]
+async fn a_socket_lost_reads_as_a_failed_start_before_the_session_and_a_disconnect_after() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let port: u16 = server.url().rsplit(':').next().unwrap().parse().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let dialing = tokio::spawn(async move {
+        WsClient::connect("127.0.0.1", port, true, event_tx)
+            .await
+            .unwrap()
+    });
+    let _conn = server.accept().await.expect("accept");
+    let ws = Arc::new(dialing.await.unwrap());
+
+    let mut ctrl = TidalConnectController::new(None);
+    ctrl.session = Some(ControllerSession::new(ws));
+    let lost = WsClientEvent::ConnectionLost;
+
+    ctrl.start_session(&dev("d"), None).expect("start sent");
+    assert!(matches!(
+        ctrl.handle_ws_event(&lost),
+        Some(ControllerSessionEvent::ConnectionLost { during_start: true })
+    ));
+
+    ctrl.start_session(&dev("d"), None).expect("start sent");
+    let started = WsClientEvent::Message(serde_json::json!({
+        "command": "notifySessionStarted",
+        "sessionId": "s1",
+        "joined": false,
+    }));
+    assert!(ctrl.handle_ws_event(&started).is_some());
+    assert!(matches!(
+        ctrl.handle_ws_event(&lost),
+        Some(ControllerSessionEvent::ConnectionLost {
+            during_start: false
+        })
+    ));
+}
+
+/// A plugin's connect can fail while a session is up. Telling TIDAL would clear its persisted
+/// device and mark it disconnected while the session goes on forwarding: the failure is only
+/// announced when no session remains.
+#[tokio::test]
+async fn a_failed_connect_is_not_announced_over_a_live_session() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let port: u16 = server.url().rsplit(':').next().unwrap().parse().unwrap();
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let dialing = tokio::spawn(async move {
+        WsClient::connect("127.0.0.1", port, true, event_tx)
+            .await
+            .unwrap()
+    });
+    let _conn = server.accept().await.expect("accept");
+    let ws = Arc::new(dialing.await.unwrap());
+
+    let failure = dial::ConnectFailure::Unresolved("d".into());
+    let mut ctrl = TidalConnectController::new(None);
+    assert!(ctrl.announces_connect_failure(&failure));
+
+    ctrl.session = Some(ControllerSession::new(ws));
+    assert!(!ctrl.announces_connect_failure(&failure));
+}
+
 #[test]
 fn insert_device_capped_dedups_and_bounds() {
     let mut devices = Vec::new();

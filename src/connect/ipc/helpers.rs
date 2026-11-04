@@ -140,8 +140,12 @@ pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent) {
                 &serde_json::json!({ "suspended": suspended }),
             );
         }
-        ControllerSessionEvent::ConnectionLost => {
+        ControllerSessionEvent::ConnectionLost { during_start } => {
             post_emit("connect.connection_lost");
+            // TIDAL's queue restore waits for a session or a failure, not for a lost connection.
+            if *during_start {
+                emit_connect_failed();
+            }
         }
         ControllerSessionEvent::SessionError { command, details } => {
             // A refused startSession is a connect that failed after the dial.

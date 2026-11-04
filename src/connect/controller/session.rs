@@ -23,7 +23,10 @@ pub(crate) enum ControllerSessionEvent {
         command: String,
         details: serde_json::Value,
     },
-    ConnectionLost,
+    /// `during_start`: the socket died before the device answered our startSession.
+    ConnectionLost {
+        during_start: bool,
+    },
 }
 
 /// What `queue_start_or_resume` sent to the device.
@@ -200,10 +203,11 @@ impl ControllerSession {
 
     /// Handle connection lost (ping timeout or WS close).
     pub fn handle_connection_lost(&mut self) -> Option<ControllerSessionEvent> {
+        let during_start = self.pending_start_nonce.is_some();
         self.pending_start_nonce = None;
         self.pending_device = None;
         // Don't clear the session - it may be resumable
-        Some(ControllerSessionEvent::ConnectionLost)
+        Some(ControllerSessionEvent::ConnectionLost { during_start })
     }
 
     pub fn connected_device(&self) -> Option<&MdnsDevice> {
