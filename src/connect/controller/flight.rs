@@ -32,10 +32,37 @@ impl Verdict {
     }
 }
 
+/// Stops a leader's dial, and says what its request ends in.
+struct Cancel {
+    token: CancellationToken,
+    reason: Mutex<ConnectFailure>,
+}
+
+impl Cancel {
+    fn new() -> Self {
+        Self {
+            token: CancellationToken::new(),
+            reason: Mutex::new(ConnectFailure::Superseded),
+        }
+    }
+
+    fn fire(&self, reason: ConnectFailure) {
+        *self.reason.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+        self.token.cancel();
+    }
+
+    fn reason(&self) -> ConnectFailure {
+        self.reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
 struct Flight {
     id: u64,
     fullname: String,
-    cancel: CancellationToken,
+    cancel: Arc<Cancel>,
     done: watch::Sender<Option<ConnectResult>>,
 }
 
@@ -50,7 +77,7 @@ struct Slot {
 
 /// The role a request takes in the attempt for its device.
 enum Join {
-    Lead { id: u64, cancel: CancellationToken },
+    Lead { id: u64, cancel: Arc<Cancel> },
     Follow(watch::Receiver<Option<ConnectResult>>),
     Closed,
 }
@@ -169,10 +196,10 @@ impl ConnectFlights {
                 // decided under the lock in `settle_attempt`, not here.
                 let dialled = tokio::select! {
                     biased;
-                    () = cancel.cancelled() => Err(ConnectFailure::Superseded),
+                    () = cancel.token.cancelled() => Err(cancel.reason()),
                     dialled = dial => dialled,
                 };
-                self.settle_attempt(id, dialled, settle, discard, armed)
+                self.settle_attempt(id, &cancel, dialled, settle, discard, armed)
             }
         }
     }
@@ -194,14 +221,14 @@ impl ConnectFlights {
                 return Join::Follow(done);
             }
             // The older request loses: its waiters are answered here, its leader wakes on `cancel`.
-            flight.cancel.cancel();
+            flight.cancel.fire(ConnectFailure::Superseded);
             flight
                 .done
                 .send_replace(Some(Err(ConnectFailure::Superseded)));
         }
         slot.next_id += 1;
         let id = slot.next_id;
-        let cancel = CancellationToken::new();
+        let cancel = Arc::new(Cancel::new());
         slot.flight = Some(Flight {
             id,
             fullname: fullname.to_string(),
@@ -220,7 +247,7 @@ impl ConnectFlights {
             let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
             slot.closed = true;
             if let Some(flight) = slot.flight.take() {
-                flight.cancel.cancel();
+                flight.cancel.fire(ConnectFailure::Aborted);
                 flight.done.send_replace(Some(Err(ConnectFailure::Aborted)));
             }
             std::mem::take(&mut slot.hooks)
@@ -232,12 +259,26 @@ impl ConnectFlights {
         }
     }
 
+    /// Ends the attempt in flight, as a disconnect does: nothing it dials is installed or
+    /// announced, and every request waiting on it is answered `Cancelled`. A leader already past
+    /// its settle step has installed what the disconnect then tears down.
+    pub(crate) fn cancel(&self) {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flight) = slot.flight.take() {
+            flight.cancel.fire(ConnectFailure::Cancelled);
+            flight
+                .done
+                .send_replace(Some(Err(ConnectFailure::Cancelled)));
+        }
+    }
+
     /// Install the outcome and hand the answer to the waiters, in one hold of the slot. The
     /// flight leaves the slot only after `settle` returned: a panic in it leaves the flight for
     /// `abandon` to answer.
     fn settle_attempt<D>(
         &self,
         id: u64,
+        cancel: &Cancel,
         dialled: Result<D, ConnectFailure>,
         settle: impl FnOnce(Result<D, ConnectFailure>) -> Verdict,
         discard: impl FnOnce(D),
@@ -249,7 +290,7 @@ impl ConnectFlights {
                 discard(dialled);
             }
             return Settled {
-                result: Err(ConnectFailure::Superseded),
+                result: Err(cancel.reason()),
                 led: true,
                 announce: false,
                 armed,

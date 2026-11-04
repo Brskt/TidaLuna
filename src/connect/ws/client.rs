@@ -19,6 +19,26 @@ pub(crate) enum WsClientEvent {
 /// caller for the OS connect timeout. Half of what a command then gets (`CMD_TIMEOUT`).
 const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The answer to a command already on the write queue.
+pub(crate) struct PendingReply {
+    request_id: u32,
+    rx: tokio::sync::oneshot::Receiver<serde_json::Value>,
+    pending: Arc<PendingRequests>,
+}
+
+impl PendingReply {
+    pub(crate) async fn wait(self, timeout_dur: Duration) -> anyhow::Result<serde_json::Value> {
+        match tokio::time::timeout(timeout_dur, self.rx).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => Err(anyhow::anyhow!("Request cancelled (connection closed)")),
+            Err(_) => {
+                self.pending.remove(self.request_id);
+                Err(anyhow::anyhow!("Request timed out"))
+            }
+        }
+    }
+}
+
 /// Connection-scoped WebSocket TLS client (controller -> device).
 /// Each instance owns its connection - reconnect = new WsClient.
 pub(crate) struct WsClient {
@@ -117,33 +137,49 @@ impl WsClient {
         })
     }
 
-    /// Send a command with a requestId and await the matching response (with timeout).
-    pub async fn send_command(
-        &self,
-        mut command: serde_json::Value,
-        timeout_dur: Duration,
-    ) -> anyhow::Result<serde_json::Value> {
+    /// Registers `command` as a request and serializes it with its requestId.
+    fn prepare(&self, mut command: serde_json::Value) -> anyhow::Result<(PendingReply, WsMessage)> {
         if !self.connected.load(Ordering::Relaxed) {
             anyhow::bail!("WebSocket not connected");
         }
-
         let (request_id, rx) = self.pending.register();
         command["requestId"] = serde_json::Value::from(request_id);
-
+        let reply = PendingReply {
+            request_id,
+            rx,
+            pending: self.pending.clone(),
+        };
+        // A failed serialization drops `reply`, which the registry reclaims on its next pass.
         let msg = WsMessage::Text(serde_json::to_string(&command)?.into());
+        Ok((reply, msg))
+    }
+
+    /// Send a command with a requestId and await the matching response (with timeout).
+    pub async fn send_command(
+        &self,
+        command: serde_json::Value,
+        timeout_dur: Duration,
+    ) -> anyhow::Result<serde_json::Value> {
+        let (reply, msg) = self.prepare(command)?;
         self.write_tx
             .send(msg)
             .await
             .map_err(|_| anyhow::anyhow!("WebSocket write channel closed"))?;
+        reply.wait(timeout_dur).await
+    }
 
-        match tokio::time::timeout(timeout_dur, rx).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(anyhow::anyhow!("Request cancelled (connection closed)")),
-            Err(_) => {
-                self.pending.remove(request_id);
-                Err(anyhow::anyhow!("Request timed out"))
+    /// Puts a command on the write queue without waiting: the caller fixes its place on the wire
+    /// in a critical section of its own and awaits the answer outside it. A full queue fails the
+    /// command rather than blocking.
+    pub fn queue_command(&self, command: serde_json::Value) -> anyhow::Result<PendingReply> {
+        let (reply, msg) = self.prepare(command)?;
+        self.write_tx.try_send(msg).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => anyhow::anyhow!("WebSocket write queue full"),
+            mpsc::error::TrySendError::Closed(_) => {
+                anyhow::anyhow!("WebSocket write channel closed")
             }
-        }
+        })?;
+        Ok(reply)
     }
 
     /// Send a message without requestId (fire-and-forget, e.g. startSession).

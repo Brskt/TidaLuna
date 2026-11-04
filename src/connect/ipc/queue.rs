@@ -3,8 +3,9 @@
 //! (quality update). Each builds the wire command and dispatches.
 
 use crate::app_state::{IpcCallback, IpcMessage};
+use crate::connect::controller::server_info::ServerInfoClaim;
 
-use super::helpers::{get_server_infos, send_device_cmd};
+use super::helpers::{answer_queued, prepare_load, prepare_update, send_device_cmd};
 
 pub(super) fn load_media(msg: &IpcMessage, callback: IpcCallback) {
     let media_info = msg.args.first().cloned().unwrap_or_default();
@@ -14,13 +15,15 @@ pub(super) fn load_media(msg: &IpcMessage, callback: IpcCallback) {
     );
 }
 
+/// A quality TIDAL names: text, not empty. Anything else names none, and none is remembered.
+fn named_quality(value: Option<&serde_json::Value>) -> Option<&str> {
+    value.and_then(|v| v.as_str()).filter(|q| !q.is_empty())
+}
+
 pub(super) fn load_queue(msg: &IpcMessage, callback: IpcCallback) {
     let data = msg.args.first().cloned().unwrap_or_default();
-    let quality = data
-        .get("audioquality")
-        .and_then(|v| v.as_str())
-        .unwrap_or("HIGH");
-    let Some((content_si, queue_si)) = get_server_infos(quality) else {
+    let named = named_quality(data.get("audioquality"));
+    let Some((content_si, queue_si)) = prepare_load(named, named.unwrap_or("HIGH")) else {
         callback
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -55,13 +58,7 @@ pub(super) fn select_queue_item(msg: &IpcMessage, callback: IpcCallback) {
 }
 
 pub(super) fn update_quality(msg: &IpcMessage, callback: IpcCallback) {
-    let quality = msg
-        .args
-        .first()
-        .and_then(|v| v.as_str())
-        .unwrap_or("HIGH")
-        .to_string();
-    let Some((content_si, queue_si)) = get_server_infos(&quality) else {
+    let Some(handout) = prepare_update(named_quality(msg.args.first())) else {
         callback
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -69,12 +66,17 @@ pub(super) fn update_quality(msg: &IpcMessage, callback: IpcCallback) {
         return;
     };
 
-    send_device_cmd(
-        serde_json::json!({
-            "command": "updateServerInfo",
-            "contentServerInfo": content_si,
-            "queueServerInfo": queue_si,
-        }),
-        callback,
-    );
+    match handout.due {
+        // The device holds this very content already: nothing is sent, and the answer is a bare ok.
+        ServerInfoClaim::Held => callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .success_str("\"ok\""),
+        ServerInfoClaim::NoSession => send_device_cmd(handout.command, callback),
+        ServerInfoClaim::Queued(queued) => answer_queued(queued, callback),
+        ServerInfoClaim::Failed(e) => callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure(500, &e),
+    }
 }

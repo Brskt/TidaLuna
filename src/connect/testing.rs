@@ -19,12 +19,19 @@
 #![cfg(test)]
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, accept_async};
+
+use crate::connect::controller::TidalConnectController;
+use crate::connect::types::MdnsDevice;
+use crate::connect::ws::client::{WsClient, WsClientEvent};
 
 /// A mock websocket server bound to a random loopback port.
 ///
@@ -56,7 +63,7 @@ impl MockWsServer {
                     Ok(ws) => ws,
                     Err(_) => continue,
                 };
-                if tx.send(MockWsConnection { _stream: ws }).await.is_err() {
+                if tx.send(MockWsConnection { stream: ws }).await.is_err() {
                     // Receiver dropped, server is shutting down.
                     break;
                 }
@@ -75,6 +82,10 @@ impl MockWsServer {
         format!("ws://{}", self.addr)
     }
 
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
     /// Wait for the next incoming connection. Returns `None` if the
     /// server was dropped or the accept loop died.
     pub async fn accept(&mut self) -> Option<MockWsConnection> {
@@ -82,7 +93,54 @@ impl MockWsServer {
     }
 }
 
+/// A controller with a session on `device` that TIDAL was told started, the generation its
+/// socket was installed at, and the connection that keeps that socket open.
+pub async fn live_controller(
+    server: &mut MockWsServer,
+    device: &MdnsDevice,
+) -> (Arc<Mutex<TidalConnectController>>, u64, MockWsConnection) {
+    let port: u16 = server.url().rsplit(':').next().unwrap().parse().unwrap();
+    let (event_tx, _events) = mpsc::channel(8);
+    let dialing =
+        tokio::spawn(async move { WsClient::connect("127.0.0.1", port, true, event_tx).await });
+    let conn = server.accept().await.expect("accept");
+    let ws = Arc::new(dialing.await.unwrap().expect("dial"));
+
+    let mut ctrl = TidalConnectController::new(None);
+    let installed = ctrl.set_ws_and_start_session(ws, device, None);
+    ctrl.start_session(device, None).expect("start sent");
+    let started = WsClientEvent::Message(serde_json::json!({
+        "command": "notifySessionStarted",
+        "sessionId": "s1",
+        "joined": false,
+    }));
+    assert!(ctrl.handle_ws_event(&started).is_some());
+    (Arc::new(Mutex::new(ctrl)), installed.conn_gen, conn)
+}
+
 /// An accepted server-side websocket connection, open for as long as it is held.
 pub struct MockWsConnection {
-    _stream: WebSocketStream<TcpStream>,
+    stream: WebSocketStream<TcpStream>,
+}
+
+impl MockWsConnection {
+    /// The next frame the code under test sent, `None` once the connection is closed or a frame
+    /// is not JSON.
+    pub async fn recv(&mut self) -> Option<serde_json::Value> {
+        loop {
+            match self.stream.next().await? {
+                Ok(Message::Text(text)) => return serde_json::from_str(&text).ok(),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    }
+
+    /// Sends the code under test a frame, as the device would.
+    pub async fn send(&mut self, frame: serde_json::Value) {
+        self.stream
+            .send(Message::Text(frame.to_string().into()))
+            .await
+            .expect("send to the code under test");
+    }
 }

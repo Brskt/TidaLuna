@@ -5,6 +5,7 @@
 
 pub(crate) mod auth;
 pub(crate) mod device;
+pub(crate) mod device_frame;
 pub(crate) mod media;
 pub(crate) mod playback;
 pub(crate) mod queue;
@@ -14,6 +15,7 @@ pub(crate) use auth::{
     AuthInfo, OAuthAuthInfo, OAuthFormParameters, OAuthParameters, OAuthServerInfo, ServerInfo,
 };
 pub(crate) use device::{DeviceType, MdnsDevice};
+pub(crate) use device_frame::{DeviceText, TextField, normalize_device_frame};
 pub(crate) use media::{MediaInfo, MediaMetadata, ResolvedStream, default_policy};
 pub(crate) use playback::{PbPlayState, PbState, PlaybackNotification, PlayerState, RequestResult};
 pub(crate) use queue::{QueueChangeReason, QueueInfo, QueueItem, QueueNotification, RepeatMode};

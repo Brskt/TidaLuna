@@ -259,58 +259,212 @@ async fn a_resumed_session_is_announced_as_started_once() {
     }
 }
 
-/// A refused resume is a connect that failed: the device keeps no such session, so keeping ours
-/// live would leave TIDAL (told nothing connected) and Rust disagreeing for good.
+/// A connect that replaces a live session with another device's closes its socket without the
+/// device saying anything: TIDAL has to be told it ended, or it keeps `isConnected` for a session
+/// nothing reads. Devices are told apart by `fullname`: a TXT `id` can be empty or shared.
 #[tokio::test]
-async fn a_refused_resume_retires_the_session_and_fails_the_connect() {
+async fn replacing_a_live_session_with_another_device_tells_tidal_it_ended() {
     let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
-    for ended_suspended in [false, true] {
-        let mut ctrl = resuming(ended_suspended, &mut server).await;
-        let refused = device_message(
-            "notifySessionError",
-            serde_json::json!({ "requestedCommand": "resumeSession", "details": {} }),
-        );
-        let event = ctrl
-            .handle_ws_event(&refused)
-            .expect("the refusal is reported");
-        assert!(event.is_refused_connect());
-        assert!(
-            ctrl.session.is_none(),
-            "the session is not resumable any more"
-        );
-        assert!(!ctrl.is_connected());
-    }
-}
+    for replacement_id in ["id", "other"] {
+        let (mut ctrl, _first) = live_on("id", &mut server).await;
 
-/// A connect that replaces a live session closes its socket without the device saying anything:
-/// TIDAL has to be told it ended, or it keeps `isConnected` for a session nothing reads.
-#[tokio::test]
-async fn replacing_a_live_session_tells_tidal_it_ended() {
-    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
-    for (replacement, suspended) in [("id", true), ("other", false)] {
-        let (ws, _first) = dial(&mut server).await;
-        let mut ctrl = TidalConnectController::new(None);
-        ctrl.session = Some(ControllerSession::new(ws));
-        ctrl.start_session(&dev("d"), None).expect("start sent");
-        let started = device_message(
-            "notifySessionStarted",
-            serde_json::json!({ "joined": false }),
-        );
-        assert!(ctrl.handle_ws_event(&started).is_some());
-
-        let mut target = dev("d");
-        target.id = replacement.into();
+        let mut target = dev("other");
+        target.id = replacement_id.into();
         let (ws, _second) = dial(&mut server).await;
         let installed = ctrl.set_ws_and_start_session(ws, &target, None);
         assert!(
             matches!(
                 installed.superseded,
-                Some(ControllerSessionEvent::SessionEnded { suspended: s }) if s == suspended
+                Some(ControllerSessionEvent::SessionEnded { suspended: false })
             ),
-            "replacement {replacement}"
+            "replacement with id {replacement_id}"
         );
         assert!(!ctrl.is_connected());
     }
+}
+
+/// TIDAL reconnects the device it casts to on every login, and its own controller does that
+/// unseen: the session moves to the socket the device resumed it on, nothing sent to the page. An
+/// end or a start announced here would stack a second cast listener in TIDAL ("next" skips two).
+#[tokio::test]
+async fn a_live_session_moves_to_its_resumed_socket_unseen() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let (mut ctrl, _first) = live_on("id", &mut server).await;
+    let old = ctrl.ws_client().unwrap();
+    let plan = ctrl.resume_plan("d").expect("a live session has a plan");
+    let before = ctrl.connection_gen;
+
+    let (ws, _second) = dial(&mut server).await;
+    let conn_gen = ctrl
+        .adopt_resumed(ws.clone(), &dev("d"), &plan)
+        .expect("still the planned session");
+    assert_ne!(ctrl.connection_gen, before);
+    assert!(
+        !old.is_connected(),
+        "the old socket closes once the new holds the session"
+    );
+    assert!(Arc::ptr_eq(&ctrl.ws_client().unwrap(), &ws));
+    assert!(ctrl.is_connected(), "the session stays live for the page");
+    let (_, _, _, connection) = ctrl.session_info().expect("still live");
+    assert_eq!(connection, conn_gen);
+}
+
+/// A connection lost while the device confirmed the resume told TIDAL the cast was gone: the
+/// resume notice replayed on the new socket is what tells it the cast is back.
+#[tokio::test]
+async fn a_session_lost_during_the_resume_is_announced_when_the_notice_is_replayed() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let (mut ctrl, _first) = live_on("id", &mut server).await;
+    let plan = ctrl.resume_plan("d").expect("a live session has a plan");
+    assert!(
+        ctrl.handle_ws_event(&WsClientEvent::ConnectionLost)
+            .is_some()
+    );
+
+    let (ws, _second) = dial(&mut server).await;
+    ctrl.adopt_resumed(ws, &dev("d"), &plan)
+        .expect("the device resumed that very session");
+    assert!(!ctrl.is_connected(), "nothing is announced by the install");
+
+    let resumed = device_message("notifySessionResumed", serde_json::json!({}));
+    assert!(matches!(
+        ctrl.handle_ws_event(&resumed),
+        Some(ControllerSessionEvent::SessionStarted { joined: true, .. })
+    ));
+}
+
+/// The device ends the session or another device takes the cast while the resume is confirmed:
+/// the socket the device resumed it on installs nothing. A new session there would be a start
+/// nothing asked for.
+#[tokio::test]
+async fn a_resume_whose_session_is_gone_installs_nothing() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    type Intervene = fn(&mut TidalConnectController, Arc<WsClient>);
+    let cases: [(&str, Intervene); 2] = [
+        ("the device ends it", |ctrl, _| {
+            let ended = device_message(
+                "notifySessionEnded",
+                serde_json::json!({ "suspended": false }),
+            );
+            assert!(ctrl.handle_ws_event(&ended).is_some());
+        }),
+        ("another device takes over", |ctrl, ws| {
+            let _ = ctrl.set_ws_and_start_session(ws, &dev("other"), None);
+        }),
+    ];
+    for (what, intervene) in cases {
+        let (mut ctrl, _first) = live_on("id", &mut server).await;
+        let plan = ctrl.resume_plan("d").expect("a live session has a plan");
+        let (taker, _taker_conn) = dial(&mut server).await;
+        intervene(&mut ctrl, taker.clone());
+        let installed = ctrl.ws_client();
+
+        let (ws, _second) = dial(&mut server).await;
+        assert!(
+            ctrl.adopt_resumed(ws.clone(), &dev("d"), &plan).is_none(),
+            "{what}"
+        );
+        assert!(
+            !ws.is_connected(),
+            "{what}: the socket nothing took is closed"
+        );
+        assert_eq!(
+            installed.map(|w| Arc::as_ptr(&w)),
+            ctrl.ws_client().map(|w| Arc::as_ptr(&w)),
+            "{what}: the controller keeps what it had"
+        );
+    }
+}
+
+/// A resume the device did not confirm leaves the live session on its old socket. When that socket
+/// shut with its loss still to come, nothing is left to resume: the session ends the way a
+/// disconnect ends it, with the end TIDAL is owed.
+#[tokio::test]
+async fn a_failed_resume_ends_the_session_only_when_its_old_socket_is_gone() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let (mut ctrl, _first) = live_on("id", &mut server).await;
+    assert!(ctrl.end_unless_live().is_none());
+    assert!(ctrl.is_connected(), "a live session is left as it was");
+
+    ctrl.ws_client().unwrap().shutdown();
+    let before = ctrl.connection_gen;
+    assert!(matches!(
+        ctrl.end_unless_live(),
+        Some(ControllerSessionEvent::SessionEnded { suspended: false })
+    ));
+    assert!(ctrl.session.is_none());
+    assert_ne!(ctrl.connection_gen, before, "its late loss is stale");
+    assert!(ctrl.end_unless_live().is_none(), "an end is announced once");
+}
+
+/// A controller with a session on device `id` that TIDAL was told started, its socket kept open
+/// by the connection returned with it.
+async fn live_on(
+    id: &str,
+    server: &mut crate::connect::testing::MockWsServer,
+) -> (
+    TidalConnectController,
+    crate::connect::testing::MockWsConnection,
+) {
+    let (ws, conn) = dial(server).await;
+    let mut ctrl = TidalConnectController::new(None);
+    ctrl.session = Some(ControllerSession::new(ws));
+    let mut device = dev("d");
+    device.id = id.into();
+    ctrl.start_session(&device, None).expect("start sent");
+    let started = device_message(
+        "notifySessionStarted",
+        serde_json::json!({ "joined": false }),
+    );
+    assert!(ctrl.handle_ws_event(&started).is_some());
+    (ctrl, conn)
+}
+
+fn update_for(token: &str) -> serde_json::Value {
+    serde_json::json!({ "command": "updateServerInfo", "token": token })
+}
+
+/// A device that reports its server info failing has to be handed the token again even when it
+/// is the one it holds: TIDAL's recovery pushes the same token, and the device retries on it.
+#[tokio::test]
+async fn a_device_error_owes_the_token_again() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let (mut ctrl, _conn) = live_on("id", &mut server).await;
+
+    assert!(matches!(
+        ctrl.deliver_server_info("a", None, update_for("a")),
+        ServerInfoClaim::Queued(_)
+    ));
+    assert!(matches!(
+        ctrl.deliver_server_info("a", None, update_for("a")),
+        ServerInfoClaim::Held
+    ));
+
+    for command in ["notifyContentServerError", "notifyQueueServerError"] {
+        let error = device_message(command, serde_json::json!({ "errorCode": 401 }));
+        assert!(ctrl.handle_ws_event(&error).is_none());
+        assert!(
+            matches!(
+                ctrl.deliver_server_info("a", None, update_for("a")),
+                ServerInfoClaim::Queued(_)
+            ),
+            "{command}"
+        );
+        assert!(matches!(
+            ctrl.deliver_server_info("a", None, update_for("a")),
+            ServerInfoClaim::Held
+        ));
+    }
+
+    // Nothing is owed to a device holding no session: a lost connection has nothing to read it.
+    assert!(
+        ctrl.handle_ws_event(&WsClientEvent::ConnectionLost)
+            .is_some()
+    );
+    assert!(matches!(
+        ctrl.deliver_server_info("a", None, update_for("a")),
+        ServerInfoClaim::NoSession
+    ));
 }
 
 /// An install that does not complete takes its own socket down and no later one's.

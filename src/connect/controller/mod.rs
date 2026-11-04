@@ -7,13 +7,15 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::connect::failure_latch::FailureLatch;
 use crate::connect::mdns::browser::{BrowserEvent, MdnsBrowser};
 use crate::connect::types::{
-    MdnsDevice, MediaInfo, PlaybackNotification, PlayerState, SessionNotification,
+    DeviceText, MdnsDevice, MediaInfo, PlaybackNotification, PlayerState, SessionNotification,
 };
 use crate::connect::ws::client::{WsClient, WsClientEvent};
 
-use session::{ControllerSession, ControllerSessionEvent, SessionRequest};
+use server_info::{Queued, ServerInfoClaim, ServerInfoLedger};
+use session::{ControllerSession, ControllerSessionEvent, ResumePlan, SessionRequest};
 
 /// Cap on tracked discovered devices; a malicious LAN advertiser could otherwise
 /// grow the list without bound by announcing many instances.
@@ -32,7 +34,24 @@ fn insert_device_capped(devices: &mut Vec<MdnsDevice>, device: MdnsDevice, max: 
     devices.push(device);
 }
 
-/// What installing a dialled socket produced: see `set_ws_and_start_session`.
+/// One report per outage of a device sending frames whose text field is not JSON, a latch for
+/// each field: a chatty device cannot spend the budget of the `verr!` lines everything else
+/// shares, and one field's outage cannot hide or re-arm the other's.
+#[derive(Default)]
+pub(crate) struct FrameFaults {
+    description: FailureLatch,
+    custom_data: FailureLatch,
+}
+
+impl FrameFaults {
+    pub(crate) fn latch(&self, field: DeviceText) -> &FailureLatch {
+        match field {
+            DeviceText::Description => &self.description,
+            DeviceText::CustomData => &self.custom_data,
+        }
+    }
+}
+
 #[must_use = "dropping the event leaves the renderer believing the superseded session is live"]
 pub(crate) struct InstalledSocket {
     pub(crate) conn_gen: u64,
@@ -65,6 +84,8 @@ pub(crate) struct TidalConnectController {
     /// TIDAL was told a connection started and no end has followed: a loss alone leaves it
     /// owed, its saga waiting on the end of a device it still holds. Moved by `announce` only.
     end_owed: bool,
+    server_info: ServerInfoLedger,
+    frame_faults: FrameFaults,
 }
 
 impl TidalConnectController {
@@ -82,6 +103,8 @@ impl TidalConnectController {
             session_credential: None,
             connection_gen: 0,
             end_owed: false,
+            server_info: ServerInfoLedger::default(),
+            frame_faults: FrameFaults::default(),
         }
     }
 
@@ -133,13 +156,9 @@ impl TidalConnectController {
         Ok(())
     }
 
-    /// Called after WsClient::connect succeeds (from IPC handler).
-    /// Stores the WS client and starts/resumes a session.
-    ///
-    /// Returns the installed connection's generation, which the caller must hand to the event
-    /// loop it spawns; that is what lets a superseded socket's events be discarded. A live
-    /// session this replaces comes back as the event that tells TIDAL it ended: the socket it
-    /// was told about is closed without a word of its own.
+    /// The new generation goes to the event loop the caller spawns, which drops a superseded
+    /// socket's events; a live session of another device comes back as the end TIDAL is told.
+    /// The same device's session (by `fullname`) keeps its state, to be resumed on `ws`.
     pub fn set_ws_and_start_session(
         &mut self,
         ws: Arc<WsClient>,
@@ -153,24 +172,22 @@ impl TidalConnectController {
         let mut superseded = None;
         // Close old WS if switching device
         if let Some(ref mut old_session) = self.session {
-            let was_live = old_session.end_live();
             let same_device = old_session
                 .connected_device()
-                .is_some_and(|d| d.id == device.id);
+                .is_some_and(|d| d.fullname == device.fullname);
             old_session.ws.shutdown();
             if same_device {
-                // Same device reconnect: replace the dead WS and keep session state,
-                // letting queue_start_or_resume send resumeSession on the new socket.
+                // The same device's session: replace the WS and keep its state, letting
+                // queue_start_or_resume send resumeSession on the new socket.
                 old_session.ws = ws;
                 old_session.connection = conn_gen;
-                let superseded =
-                    was_live.then_some(ControllerSessionEvent::SessionEnded { suspended: true });
                 return InstalledSocket {
                     conn_gen,
-                    superseded: self.announce(superseded),
+                    superseded: None,
                 };
             }
             // Different device - close old connection
+            let was_live = old_session.end_live();
             superseded =
                 was_live.then_some(ControllerSessionEvent::SessionEnded { suspended: false });
         }
@@ -181,6 +198,61 @@ impl TidalConnectController {
             conn_gen,
             superseded: self.announce(superseded),
         }
+    }
+
+    /// The plan for moving the live session of the device `fullname` to a new socket, `None` when
+    /// there is none to move.
+    pub fn resume_plan(&self, fullname: &str) -> Option<ResumePlan> {
+        self.session.as_ref()?.resume_plan(fullname)
+    }
+
+    /// Moves the planned session onto `ws`, the socket the device resumed it on; the old one closes
+    /// only now, having carried everything until the confirmation. Returns the new generation, or
+    /// `None` with `ws` closed when the session ended or moved meanwhile, or when `ws` died since
+    /// (a working socket is not traded for a dead one). No event is owed: a session live before
+    /// stays live, and one lost meanwhile is announced by the replayed resume notice.
+    pub fn adopt_resumed(
+        &mut self,
+        ws: Arc<WsClient>,
+        device: &MdnsDevice,
+        plan: &ResumePlan,
+    ) -> Option<u64> {
+        if !ws.is_connected()
+            || !self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.is_planned(plan, device))
+        {
+            ws.shutdown();
+            return None;
+        }
+        // Bumped ahead of the close, as in the other installs: its `ConnectionLost` is stale.
+        self.connection_gen = self.connection_gen.wrapping_add(1);
+        let conn_gen = self.connection_gen;
+        let session = self.session.as_mut()?;
+        session.ws.shutdown();
+        session.ws = ws;
+        session.connection = conn_gen;
+        Some(conn_gen)
+    }
+
+    /// A resume the device did not confirm leaves the session on its old socket when that is
+    /// still live. Otherwise nothing is left to resume: the session is retired and the end TIDAL
+    /// is owed comes back, as `disconnect` returns it.
+    pub fn end_unless_live(&mut self) -> Option<ControllerSessionEvent> {
+        if self.is_connected() {
+            return None;
+        }
+        self.retire_socket(false);
+        self.announce_owed_end()
+    }
+
+    /// The end of a session TIDAL was told started, when no end has been announced since.
+    fn announce_owed_end(&mut self) -> Option<ControllerSessionEvent> {
+        let owed = self
+            .end_owed
+            .then_some(ControllerSessionEvent::SessionEnded { suspended: false });
+        self.announce(owed)
     }
 
     /// Undo an install that did not complete: close the socket and drop its session, unless a newer
@@ -236,10 +308,7 @@ impl TidalConnectController {
         // Announced when an end is owed, session or not (TIDAL's connect saga waits on it after a
         // loss or a refused connect), and never twice after the device's own end.
         self.session = None;
-        let owed = self
-            .end_owed
-            .then_some(ControllerSessionEvent::SessionEnded { suspended: false });
-        self.announce(owed)
+        self.announce_owed_end()
     }
 
     /// Close the socket of a session TIDAL is told is over, as the device does on its side:
@@ -309,6 +378,9 @@ impl TidalConnectController {
                         {
                             self.last_media = Some(*media_info);
                         }
+                    }
+                    "notifyContentServerError" | "notifyQueueServerError" => {
+                        self.server_info.forget_sent();
                     }
                     _ => {}
                 }
@@ -401,6 +473,38 @@ impl TidalConnectController {
     /// not live, and a failed connect then announces.
     pub fn announces_connect_failure(&self, failure: &dial::ConnectFailure) -> bool {
         failure.is_announced() && !self.is_connected()
+    }
+
+    /// Hands the live session's device `command` (`updateServerInfo` with `token` and `quality`)
+    /// unless it holds that already; a socket with no live session has nothing to read it. Recorded
+    /// and queued in one hold: the wire keeps the recorded order, the answer is awaited outside it.
+    pub fn deliver_server_info(
+        &mut self,
+        token: &str,
+        quality: Option<&str>,
+        command: serde_json::Value,
+    ) -> ServerInfoClaim {
+        let Some(session) = self.session.as_ref().filter(|s| s.is_live()) else {
+            return ServerInfoClaim::NoSession;
+        };
+        let Some(delivery) = self.server_info.claim(self.connection_gen, token, quality) else {
+            return ServerInfoClaim::Held;
+        };
+        match session.ws.queue_command(command) {
+            Ok(reply) => ServerInfoClaim::Queued(Queued { delivery, reply }),
+            Err(e) => {
+                self.server_info.release(&delivery);
+                ServerInfoClaim::Failed(e.to_string())
+            }
+        }
+    }
+
+    pub fn release_server_info(&mut self, delivery: &server_info::Delivery) {
+        self.server_info.release(delivery);
+    }
+
+    pub fn frame_faults(&self) -> &FrameFaults {
+        &self.frame_faults
     }
 
     pub fn set_session_credential(&mut self, credential: Option<&str>) {

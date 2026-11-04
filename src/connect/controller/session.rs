@@ -44,6 +44,14 @@ impl ControllerSessionEvent {
     }
 }
 
+/// A live session to move onto a new socket, as it stood when the connect asked for it: the
+/// install only goes ahead if the session is still this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResumePlan {
+    pub(crate) session_id: String,
+    connection: u64,
+}
+
 /// What `queue_start_or_resume` sent to the device.
 pub(crate) enum SessionRequest {
     Start,
@@ -91,10 +99,8 @@ impl ControllerSession {
         device: &MdnsDevice,
         credential: Option<&str>,
     ) -> anyhow::Result<SessionRequest> {
-        // Same device + session exists -> resume
-        if let Some(ref session) = self.current
-            && session.device.id == device.id
-        {
+        // A session here is the device's own: another device gets a session of its own.
+        if let Some(ref session) = self.current {
             let cmd = SessionCommand::ResumeSession {
                 session_id: session.session_id.clone(),
             };
@@ -262,6 +268,24 @@ impl ControllerSession {
         self.current
             .as_mut()
             .is_some_and(|s| std::mem::replace(&mut s.live, false))
+    }
+
+    /// The plan for moving this session to a new socket of the device `fullname`: only a live
+    /// session of that device has one.
+    pub(super) fn resume_plan(&self, fullname: &str) -> Option<ResumePlan> {
+        let current = self.current.as_ref()?;
+        (self.is_live() && current.device.fullname == fullname).then(|| ResumePlan {
+            session_id: current.session_id.clone(),
+            connection: self.connection,
+        })
+    }
+
+    /// Whether this is still the session `plan` was made for, on `device`.
+    pub(super) fn is_planned(&self, plan: &ResumePlan, device: &MdnsDevice) -> bool {
+        self.connection == plan.connection
+            && self.current.as_ref().is_some_and(|s| {
+                s.session_id == plan.session_id && s.device.fullname == device.fullname
+            })
     }
 
     pub fn connected_device(&self) -> Option<&MdnsDevice> {

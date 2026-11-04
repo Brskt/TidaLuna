@@ -32,6 +32,9 @@ pub(crate) struct ConnectManager {
     controller: Option<Arc<Mutex<TidalConnectController>>>,
     /// What TIDAL sent before the controller existed (the first discovery builds it).
     session_credential: Option<String>,
+    /// The quality TIDAL last set, kept whether or not a controller or a session exists to hand
+    /// it to.
+    session_quality: Option<String>,
     receiver: Option<ConnectReceiver>,
     bridge_tx: Option<mpsc::Sender<BridgeEvent>>,
     controller_tasks: Arc<TaskGroup>,
@@ -42,6 +45,7 @@ impl ConnectManager {
         Self {
             controller: None,
             session_credential: None,
+            session_quality: None,
             receiver: None,
             bridge_tx: None,
             controller_tasks: Arc::new(TaskGroup::new()),
@@ -103,6 +107,19 @@ impl ConnectManager {
             let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
             guard.set_session_credential(self.session_credential.as_deref());
         }
+    }
+
+    /// Remember the quality TIDAL names. Only a quality that is named counts, as in TIDAL's
+    /// `serverInfo` (`if (newQuality)`): an absent or empty one leaves the last as it was.
+    pub(crate) fn remember_quality(&mut self, quality: Option<&str>) {
+        if let Some(quality) = quality.filter(|q| !q.is_empty()) {
+            self.session_quality = Some(quality.to_owned());
+        }
+    }
+
+    /// The quality TIDAL last set, `None` before it set one.
+    pub(crate) fn session_quality(&self) -> Option<&str> {
+        self.session_quality.as_deref()
     }
 
     /// Build a receiver (WS server + mDNS advertiser) without touching `self`.

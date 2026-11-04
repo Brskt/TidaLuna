@@ -103,6 +103,50 @@ async fn a_request_for_another_device_replaces_the_one_in_flight() {
     assert!(matches!(newer.result, Ok(false)));
 }
 
+/// A disconnect during a connect: whatever the leader dials after it must not be installed, which
+/// would start a session the user just ended, and the requests waiting on it hear it was cancelled.
+#[tokio::test]
+async fn a_disconnect_cancels_the_attempt_in_flight() {
+    let flights = ConnectFlights::new();
+    let (installed, discarded) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let (release, released) = oneshot::channel::<()>();
+
+    let leader = flights.run(
+        "tidal",
+        async {
+            released.await.unwrap();
+            // The dial completes as the disconnect lands.
+            flights.cancel();
+            Ok(true)
+        },
+        |dialled| {
+            installed.fetch_add(1, Ordering::SeqCst);
+            Verdict::done(dialled.is_ok())
+        },
+        |_| {
+            discarded.fetch_add(1, Ordering::SeqCst);
+        },
+        |_| {},
+    );
+    let follower = run(&flights, "tidal", std::future::pending());
+    let (leader, follower, ()) =
+        tokio::join!(leader, follower, async { release.send(()).unwrap() });
+
+    assert_eq!(installed.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        discarded.load(Ordering::SeqCst),
+        1,
+        "what it dialled is closed"
+    );
+    for cancelled in [&leader, &follower] {
+        assert!(matches!(cancelled.result, Err(ConnectFailure::Cancelled)));
+        assert!(
+            !cancelled.announces_failure(),
+            "the disconnect was announced already"
+        );
+    }
+}
+
 /// A leader that dies mid-attempt must not strand the device: the request waiting on it gets a
 /// failure, the next one runs its own attempt, and the leader's own query is answered once.
 #[tokio::test]
