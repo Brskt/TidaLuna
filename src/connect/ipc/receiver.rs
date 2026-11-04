@@ -7,6 +7,12 @@ use crate::connect::ConnectManager;
 use crate::connect::receiver::SHUTDOWN_DEADLINE;
 use crate::connect::types::ReceiverConfig;
 
+use crate::connect::failure_latch::FailureLatch;
+
+/// The receiver start, retried by every `discover` while it fails. All causes share one latch:
+/// `build_receiver` returns an untyped `anyhow::Error` whose text varies (port, OS).
+static START_FAILURE: FailureLatch = FailureLatch::new();
+
 /// Serializes receiver start/stop. Without it, two concurrent lifecycle calls
 /// (TIDAL issues `discover` + `receiver.start` close together on login) could
 /// both build a receiver - leaking one - or interleave a start with a stop.
@@ -74,6 +80,7 @@ pub(crate) async fn start_receiver_task(config: ReceiverConfig) {
 
     match ConnectManager::build_receiver(config).await {
         Ok((receiver, bridge_tx)) => {
+            START_FAILURE.recovered();
             // Install under the lock. If the manager is gone (process shutting
             // down between the active-check and here), hand the receiver back so
             // it can be torn down gracefully rather than dropped - a bare drop
@@ -91,7 +98,7 @@ pub(crate) async fn start_receiver_task(config: ReceiverConfig) {
                 receiver.shutdown(SHUTDOWN_DEADLINE).await;
             }
         }
-        Err(e) => crate::vprintln!("[connect::ipc] Receiver start failed: {e}"),
+        Err(e) => START_FAILURE.failed(format_args!("[connect::ipc] Receiver start failed: {e}")),
     }
 }
 

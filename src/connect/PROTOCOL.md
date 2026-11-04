@@ -41,6 +41,7 @@ src/connect/
 └── mdns/               # service discovery
     ├── advertiser.rs   # _tidalconnect._tcp advertisement
     ├── browser.rs      # peer discovery
+    ├── daemon.rs       # mdns-sd daemon that stops with its owner
     └── backend.rs      # MdnsBackend trait, bounded shutdown contract
 ```
 

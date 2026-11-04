@@ -126,7 +126,7 @@ async fn a_switch_off_during_a_stalled_queue_fetch_runs_the_epilogue_and_frees_t
     drop(filler);
     let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, stalled_http(&stall), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, stalled_http(&stall)).unwrap();
 
     client_tx
         .send(ClientEvent::Message {
@@ -188,7 +188,7 @@ async fn an_abort_inside_the_epilogue_frees_the_port() {
     filler.try_send(WsMessage::Ping(vec![].into())).unwrap();
     let (_client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new(), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let report = receiver
@@ -232,7 +232,7 @@ async fn a_switch_off_with_a_session_open_tells_the_phone_before_closing() {
     drop(filler);
     let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new(), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
     client_tx
         .send(ClientEvent::Message {
             socket_id: 1,
@@ -305,7 +305,7 @@ async fn a_command_taken_before_its_sockets_disconnect_leaves_nothing_of_the_soc
         client_tx.send(event).await.unwrap();
     }
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new(), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
 
     let (before, _) = drain_wire(&mut wire, Duration::from_millis(500)).await;
     assert_eq!(before, vec!["notifySessionStarted".to_string()]);
@@ -375,7 +375,7 @@ async fn a_socket_with_no_session_is_answered_nothing_and_fetches_no_queue() {
             .unwrap();
     }
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, stalled_http(&stall), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, stalled_http(&stall)).unwrap();
 
     let heard = heard_on(&mut wire, Duration::from_millis(500)).await;
     let fetched = recv_within(&stall.accepted, Duration::from_millis(200)).await;
@@ -412,7 +412,7 @@ async fn a_socket_outside_another_phones_session_is_answered_nothing() {
         client_tx.send(event).await.unwrap();
     }
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, stalled_http(&stall), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, stalled_http(&stall)).unwrap();
 
     let heard = heard_on(&mut wire, Duration::from_millis(500)).await;
     let fetched = recv_within(&stall.accepted, Duration::from_millis(200)).await;
@@ -446,7 +446,7 @@ async fn a_command_right_behind_a_start_session_is_the_new_members() {
         client_tx.send(event).await.unwrap();
     }
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, stalled_http(&stall), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, stalled_http(&stall)).unwrap();
 
     let heard = heard_on(&mut wire, Duration::from_millis(500)).await;
     let fetched = recv_within(&stall.accepted, Duration::from_secs(5)).await;
@@ -475,7 +475,7 @@ async fn a_suspended_session_takes_its_phones_commands_again_once_resumed() {
     drop(filler);
     let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new(), None).unwrap();
+        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
     let send = |message: serde_json::Value| {
         let client_tx = client_tx.clone();
         async move {
@@ -533,7 +533,7 @@ async fn two_sockets(http: reqwest::Client) -> Pair {
     let (events, client_rx) = mpsc::channel::<ClientEvent>(128);
     events.send(ClientEvent::Connected(1)).await.unwrap();
     events.send(ClientEvent::Connected(2)).await.unwrap();
-    let (receiver, _bridge_tx) = ConnectReceiver::launch(server, client_rx, http, None).unwrap();
+    let (receiver, _bridge_tx) = ConnectReceiver::launch(server, client_rx, http).unwrap();
     Pair {
         receiver,
         events,

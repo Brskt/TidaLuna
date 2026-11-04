@@ -2,6 +2,7 @@ use md5::{Digest, Md5};
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
 use std::sync::Arc;
 
+use super::daemon::OwnedDaemon;
 use crate::connect::consts;
 
 pub(crate) struct AdvertiseConfig {
@@ -26,17 +27,17 @@ impl Default for AdvertiseConfig {
 }
 
 pub(crate) struct MdnsAdvertiser {
-    daemon: Arc<ServiceDaemon>,
+    daemon: OwnedDaemon,
     registered_fullname: Option<String>,
 }
 
 impl MdnsAdvertiser {
     /// Create with its own daemon.
     pub fn new() -> anyhow::Result<Self> {
-        let daemon = ServiceDaemon::new()?;
+        let daemon = OwnedDaemon::new()?;
         log_daemon_events(&daemon);
         Ok(Self {
-            daemon: Arc::new(daemon),
+            daemon,
             registered_fullname: None,
         })
     }
@@ -94,11 +95,10 @@ impl MdnsAdvertiser {
         }
     }
 
-    /// Borrow the shared daemon for callers to drive a bounded shutdown
-    /// through `MdnsBackend`. The daemon thread is not owned exclusively
-    /// by the advertiser; shutdown is the caller's responsibility.
+    /// Share the daemon for a bounded shutdown through `MdnsBackend`; dropping the advertiser
+    /// stops it too.
     pub(crate) fn daemon(&self) -> Arc<ServiceDaemon> {
-        self.daemon.clone()
+        self.daemon.share()
     }
 }
 
@@ -123,7 +123,7 @@ fn log_daemon_events(daemon: &ServiceDaemon) {
                         crate::vprintln!("[connect::mdns] Announced {} on {}", name, addrs)
                     }
                     DaemonEvent::Error(e) => {
-                        crate::vprintln!("[connect::mdns] Daemon error: {}", e)
+                        crate::verr!("[connect::mdns] Daemon error: {}", e)
                     }
                     DaemonEvent::NameChange(change) => crate::vprintln!(
                         "[connect::mdns] Name conflict: {} renamed to {}",

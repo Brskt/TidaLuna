@@ -1,6 +1,7 @@
 pub(crate) mod bridge;
 pub(crate) mod consts;
 pub(crate) mod controller;
+pub(crate) mod failure_latch;
 pub(crate) mod ipc;
 pub(crate) mod mdns;
 pub(crate) mod receiver;
@@ -17,7 +18,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use controller::TidalConnectController;
-use mdns::advertiser::MdnsAdvertiser;
 use mdns::browser::{BrowserEvent, MdnsBrowser};
 use receiver::ConnectReceiver;
 use receiver::speaker_bridge::BridgeEvent;
@@ -94,8 +94,7 @@ impl ConnectManager {
     pub(crate) async fn build_receiver(
         config: ReceiverConfig,
     ) -> anyhow::Result<(ConnectReceiver, mpsc::Sender<BridgeEvent>)> {
-        let advertiser = MdnsAdvertiser::new().ok();
-        ConnectReceiver::start(config, advertiser).await
+        ConnectReceiver::start(config).await
     }
 
     /// Install a freshly built receiver and route bridge events to it.

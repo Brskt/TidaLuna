@@ -35,7 +35,6 @@ pub(crate) struct ConnectReceiver {
 impl ConnectReceiver {
     pub async fn start(
         config: ReceiverConfig,
-        advertiser: Option<MdnsAdvertiser>,
     ) -> anyhow::Result<(Self, mpsc::Sender<BridgeEvent>)> {
         // Channels
         let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
@@ -43,21 +42,10 @@ impl ConnectReceiver {
         // WS server
         let server = WsServer::start(config.ws_port, client_tx).await?;
 
-        // mDNS advertiser
-        let mut adv = advertiser;
-        if let Some(ref mut a) = adv {
-            let adv_config = AdvertiseConfig {
-                friendly_name: config.friendly_name.clone(),
-                model_name: config.model_name.clone(),
-                port: config.ws_port,
-                ..AdvertiseConfig::default()
-            };
-            if let Err(e) = a.start(&adv_config) {
-                crate::vprintln!("[connect::receiver] mDNS advertise failed: {}", e);
-            }
-        }
+        let (mut receiver, bridge_tx) = Self::launch(server, client_rx, reqwest::Client::new())?;
 
-        let (receiver, bridge_tx) = Self::launch(server, client_rx, reqwest::Client::new(), adv)?;
+        // Last, after every fallible step: a refused start leaves no daemon behind.
+        receiver.advertiser = Self::advertise(&config);
 
         crate::vprintln!(
             "[connect::receiver] Started on port {} as '{}'",
@@ -68,13 +56,35 @@ impl ConnectReceiver {
         Ok((receiver, bridge_tx))
     }
 
+    fn advertise(config: &ReceiverConfig) -> Option<MdnsAdvertiser> {
+        let mut advertiser = MdnsAdvertiser::new()
+            .inspect_err(|e| {
+                crate::verr!(
+                    "[connect::mdns] Advertiser unavailable, receiver not discoverable: {e}"
+                );
+            })
+            .ok()?;
+        let adv_config = AdvertiseConfig {
+            friendly_name: config.friendly_name.clone(),
+            model_name: config.model_name.clone(),
+            port: config.ws_port,
+            ..AdvertiseConfig::default()
+        };
+        if let Err(e) = advertiser.start(&adv_config) {
+            crate::verr!(
+                "[connect::receiver] mDNS advertise failed, receiver not discoverable: {}",
+                e
+            );
+        }
+        Some(advertiser)
+    }
+
     /// The services and the routing task over a started server. The queue's HTTP client is
     /// taken as given so a test can point it at a server of its own.
     fn launch(
         server: WsServer,
         client_rx: mpsc::Receiver<ClientEvent>,
         http: reqwest::Client,
-        advertiser: Option<MdnsAdvertiser>,
     ) -> anyhow::Result<(Self, mpsc::Sender<BridgeEvent>)> {
         let tasks = Arc::new(TaskGroup::new());
         let cancel = tasks.cancel_token();
@@ -108,7 +118,13 @@ impl ConnectReceiver {
             ),
         )?;
 
-        Ok((Self { tasks, advertiser }, bridge_tx))
+        Ok((
+            Self {
+                tasks,
+                advertiser: None,
+            },
+            bridge_tx,
+        ))
     }
 
     /// Tear down WS server, mDNS advertiser and routing task. mDNS gets a fifth of

@@ -1,7 +1,7 @@
-use mdns_sd::{ServiceDaemon, ServiceEvent};
-use std::sync::Arc;
+use mdns_sd::ServiceEvent;
 use tokio::sync::mpsc;
 
+use super::daemon::OwnedDaemon;
 use crate::connect::consts;
 use crate::connect::types::{DeviceType, MdnsDevice};
 
@@ -11,31 +11,21 @@ pub(crate) enum BrowserEvent {
 }
 
 pub(crate) struct MdnsBrowser {
-    daemon: Arc<ServiceDaemon>,
+    daemon: OwnedDaemon,
     event_tx: mpsc::Sender<BrowserEvent>,
     browse_task: Option<tokio::task::JoinHandle<()>>,
     filter_local: bool,
 }
 
 impl MdnsBrowser {
-    /// Create with an externally-owned daemon (shared with advertiser).
-    pub fn with_daemon(
-        daemon: Arc<ServiceDaemon>,
-        event_tx: mpsc::Sender<BrowserEvent>,
-        filter_local: bool,
-    ) -> Self {
-        Self {
-            daemon,
+    /// Create with its own daemon, stopped when the browser is dropped.
+    pub fn new(event_tx: mpsc::Sender<BrowserEvent>, filter_local: bool) -> anyhow::Result<Self> {
+        Ok(Self {
+            daemon: OwnedDaemon::new()?,
             event_tx,
             browse_task: None,
             filter_local,
-        }
-    }
-
-    /// Create with its own daemon.
-    pub fn new(event_tx: mpsc::Sender<BrowserEvent>, filter_local: bool) -> anyhow::Result<Self> {
-        let daemon = ServiceDaemon::new()?;
-        Ok(Self::with_daemon(Arc::new(daemon), event_tx, filter_local))
+        })
     }
 
     /// Start discovery. If already running, stops first then restarts.
