@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use time::{OffsetDateTime, UtcOffset};
 
 /// Maximum supported log level; values are clamped to `0..=MAX_LOG_LEVEL`.
@@ -68,16 +68,25 @@ fn ensure_file_sink() {
     let Some(dir) = sink_dir() else {
         return;
     };
+    if let Some(mut file) = open_console_log(dir) {
+        // Once anyone opens the file the rotation is off the table: held panics are written now.
+        if let Some(waiting) = take_pending_panics() {
+            flush_panics(&mut file, waiting);
+        }
+        keep_for_panics(&file);
+        *guard = Some(file);
+    }
+}
+
+fn open_console_log(dir: &Path) -> Option<File> {
     // Create the data dir first: on a fresh profile this runs before main's own
     // create_dir_all, and OpenOptions won't create missing parents.
     let _ = std::fs::create_dir_all(dir);
-    if let Ok(file) = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join("console.log"))
-    {
-        *guard = Some(file);
-    }
+        .ok()
 }
 
 #[cfg(not(test))]
@@ -86,10 +95,14 @@ fn sink_dir() -> Option<&'static Path> {
 }
 
 /// No file under test: a `verr!` a test provokes is read through `take_lines`, which a
-/// `console.log` shared by every test of the process would only duplicate.
+/// `console.log` shared by every test of the process would only duplicate. The panic hook's tests
+/// run in a child process of their own, whose parent names the directory to read back.
 #[cfg(test)]
 fn sink_dir() -> Option<&'static Path> {
-    None
+    static CHILD: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    CHILD
+        .get_or_init(|| std::env::var_os(tests::CHILD_DIR).map(Into::into))
+        .as_deref()
 }
 
 #[cfg(test)]
@@ -126,6 +139,7 @@ pub(crate) fn adopt_session_log(_lock: &crate::platform::app_lock::AppLock) {
         "a diagnostic opened the log before the session could rotate it"
     );
     adopt_leftover(&crate::state::cache_data_dir(), &mut guard);
+    release_pending_panics(sink_dir(), &mut guard);
 }
 
 /// The half that does not need the lock to be checked, an empty slot proving
@@ -224,6 +238,10 @@ fn err_budget(now_ms: u64, state: &AtomicU64, missed: &AtomicU32) -> ErrBudget {
     }
 }
 
+fn budget_now_ms() -> u64 {
+    u64::try_from(PROCESS_START.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// A hard failure with no other user-facing channel: never gated by `LOGS`, and it opens the sink
 /// itself, so the trace survives at level 0. Being ungated is also what lets an untrusted caller
 /// drive the disk at any level, and `console.log` rotates only at launch. The budget lives here
@@ -231,8 +249,7 @@ fn err_budget(now_ms: u64, state: &AtomicU64, missed: &AtomicU32) -> ErrBudget {
 pub fn vlog_err(args: std::fmt::Arguments<'_>) {
     #[cfg(test)]
     TEST_LINES.with(|lines| lines.borrow_mut().push(args.to_string()));
-    let now_ms = u64::try_from(PROCESS_START.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let missed = match err_budget(now_ms, &ERR_STATE, &ERR_MISSED) {
+    let missed = match err_budget(budget_now_ms(), &ERR_STATE, &ERR_MISSED) {
         ErrBudget::Drop => return,
         ErrBudget::Write => 0,
         ErrBudget::WroteAfterMissing(missed) => missed,
@@ -302,6 +319,187 @@ impl Write for CapturedStderr {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// Panics kept before the session log exists, and how many more were turned away.
+struct PendingPanics {
+    lines: Vec<String>,
+    dropped: u32,
+}
+
+impl PendingPanics {
+    fn keep(&mut self, line: String) {
+        if self.lines.len() < PANIC_PENDING_MAX {
+            self.lines.push(line);
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.dropped == 0
+    }
+}
+
+const PANIC_PENDING_MAX: usize = 16;
+const PANIC_TEXT_MAX: usize = 2048;
+
+/// The panics' own budget, same rule and burst as `verr!`'s; `err_budget` reads and writes only
+/// the pair it is given, keeping a flood of one kind from spending the other's.
+static PANIC_STATE: AtomicU64 = AtomicU64::new(ERR_BURST as u64);
+static PANIC_MISSED: AtomicU32 = AtomicU32::new(0);
+
+/// `Some` until the sink first opens, `adopt_session_log` included: writing earlier would open
+/// the file the rotation needs untouched. The hook takes this lock and nothing under it may
+/// panic; nothing does (a push into reserved room, a counter, a `take`).
+static PENDING_PANICS: Mutex<Option<PendingPanics>> = Mutex::new(Some(PendingPanics {
+    lines: Vec::new(),
+    dropped: 0,
+}));
+
+/// A second handle on `console.log`, written with no lock. The hook runs before the unwind frees
+/// anything; a thread panicking inside `FILE_SINK`'s guard would wait on itself.
+static PANIC_FILE: OnceLock<File> = OnceLock::new();
+
+/// Called once the file is open for good: the sink never reopens it, and `try_clone` shares
+/// its offset and append mode.
+fn keep_for_panics(file: &File) {
+    if let Ok(clone) = file.try_clone() {
+        let _ = PANIC_FILE.set(clone);
+    }
+}
+
+fn take_pending_panics() -> Option<PendingPanics> {
+    PENDING_PANICS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
+fn flush_panics(file: &mut File, waiting: PendingPanics) {
+    for line in &waiting.lines {
+        let _ = file.write_all(line.as_bytes());
+    }
+    if waiting.dropped > 0 {
+        let note = compose_line(
+            hook_time(),
+            format_args!(
+                "[LOG]    {} panic lines were not kept before the log opened",
+                waiting.dropped
+            ),
+        );
+        let _ = file.write_all(note.as_bytes());
+    }
+}
+
+/// Ends the wait once `adopt_session_log` has rotated; opens the sink only if a panic is owed.
+fn release_pending_panics(dir: Option<&Path>, sink: &mut Option<File>) {
+    let Some(waiting) = take_pending_panics().filter(|waiting| !waiting.is_empty()) else {
+        return;
+    };
+    if sink.is_none()
+        && let Some(dir) = dir
+    {
+        *sink = open_console_log(dir);
+    }
+    if let Some(file) = sink.as_mut() {
+        flush_panics(file, waiting);
+        keep_for_panics(file);
+    }
+}
+
+/// The clock as the hook can read it: no step panics, and the epoch stands in when the system
+/// clock is out of the `time` crate's range.
+fn hook_time() -> OffsetDateTime {
+    let utc = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i128::try_from(elapsed.as_nanos()).ok())
+        .and_then(|nanos| OffsetDateTime::from_unix_timestamp_nanos(nanos).ok())
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    UtcOffset::local_offset_at(utc)
+        .ok()
+        .and_then(|offset| utc.checked_to_offset(offset))
+        .unwrap_or(utc)
+}
+
+/// Where a panic's line goes, from whatever thread panicked, holding whatever it held.
+fn record_panic_line(line: String) {
+    if let Some(mut file) = PANIC_FILE.get() {
+        let _ = file.write_all(line.as_bytes());
+        return;
+    }
+    {
+        let mut pending = PENDING_PANICS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(waiting) = pending.as_mut() {
+            waiting.keep(line);
+            return;
+        }
+    }
+    // Rotated, and nothing has opened the sink since: level 0 with no failure yet.
+    if let Some(dir) = sink_dir()
+        && let Some(file) = open_console_log(dir)
+    {
+        let mut handle = &file;
+        let _ = handle.write_all(line.as_bytes());
+        let _ = PANIC_FILE.set(file);
+    }
+}
+
+/// The line `console.log` gets for a panic, under the panics' own budget. Nothing in here may
+/// panic: a panic inside the hook aborts the process, `catch_unwind` or not.
+fn log_panic(info: &std::panic::PanicHookInfo<'_>) {
+    let missed = match err_budget(budget_now_ms(), &PANIC_STATE, &PANIC_MISSED) {
+        ErrBudget::Drop => return,
+        ErrBudget::Write => 0,
+        ErrBudget::WroteAfterMissing(missed) => missed,
+    };
+    let now = hook_time();
+    if missed > 0 {
+        record_panic_line(compose_line(
+            now,
+            format_args!(
+                "[LOG]    {missed} panic lines went unwritten while their budget was spent"
+            ),
+        ));
+    }
+    // Cut first, bounding what the hook allocates. The scrub of a prefix keeps every cut it would
+    // make on the whole: no query outlives it.
+    let message = crate::util::truncate_str(
+        crate::platform::refusal::panic_message(info.payload()),
+        PANIC_TEXT_MAX,
+    );
+    let message = crate::util::redact_urls_in(message);
+    let (file, line) = info
+        .location()
+        .map_or(("an unknown location", 0), |at| (at.file(), at.line()));
+    // Panics only once the thread's data is destroyed, from a TLS destructor, which aborts anyway.
+    let thread = std::thread::current();
+    record_panic_line(compose_line(
+        now,
+        format_args!(
+            "[PANIC]  thread '{}' panicked at {file}:{line}: {message}",
+            thread.name().unwrap_or("<unnamed>")
+        ),
+    ));
+}
+
+/// Makes every panic of the process, on any thread, a line of `console.log` before the previous
+/// hook runs.
+pub(crate) fn install_panic_log() {
+    LazyLock::force(&PROCESS_START);
+    if let Some(waiting) = PENDING_PANICS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        waiting.lines.reserve_exact(PANIC_PENDING_MAX);
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_panic(info);
+        previous(info);
+    }));
 }
 
 #[macro_export]

@@ -206,7 +206,9 @@ fn main() {
 
     // From the first line that runs in the browser alone: a panic on this thread stops the
     // launch with a reason on screen until `on_context_initialized` has asked for the window.
+    // The log hook goes in first: the guard chains to it and the line lands before the refusal.
     if is_browser {
+        logging::install_panic_log();
         platform::refusal::guard_launch();
     }
 

@@ -27,6 +27,49 @@ pub(crate) fn redact_url_query(url: &str) -> Cow<'_, str> {
     }
 }
 
+/// `text` with the secrets of every URL cut, as a panic's `Debug` of a `reqwest::Error` or a
+/// `url::Url` prints them. A run ends at whitespace, at `"`, `<` and `>` (which `url` encodes) or
+/// at a backtick or backslash; `Url`'s fields carry no `://` and are cut by name. Takes no lock.
+pub(crate) fn redact_urls_in(text: &str) -> String {
+    let runs = redact_url_runs(text);
+    let passwords = redact_debug_field(&runs, "password: Some(\"");
+    let queries = redact_debug_field(&passwords, "query: Some(\"");
+    redact_debug_field(&queries, "fragment: Some(\"")
+}
+
+fn redact_url_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(sep) = rest.find("://") {
+        let after = sep + "://".len();
+        let tail = &rest[after..];
+        let len = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '<' | '>' | '`' | '\\'))
+            .unwrap_or(tail.len());
+        out.push_str(&rest[..after]);
+        out.push_str(&redact_url_query(&tail[..len]));
+        rest = &tail[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Replaces what a `Debug` string field holds, from the end of `marker` to the next `"`, which a
+/// url never carries unencoded.
+fn redact_debug_field(text: &str, marker: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(marker) {
+        let start = at + marker.len();
+        let tail = &rest[start..];
+        out.push_str(&rest[..start]);
+        out.push_str("<redacted>");
+        rest = &tail[tail.find('"').unwrap_or(tail.len())..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Long enough for any real CDN hostname; the cap exists because the caller picks the length.
 const REFUSED_HOST_MAX: usize = 64;
 

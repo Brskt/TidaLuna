@@ -280,3 +280,147 @@ fn a_slot_that_already_holds_a_handle_rotates_nothing() {
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), "live session\n");
 }
+
+// The panic hook is process-global: its scenarios run in a child process, the test binary
+// running itself on `child_scenario`, which does nothing unless the parent names one.
+
+const CHILD_SCENARIO: &str = "TIDALUNAR_LOGGING_TEST_SCENARIO";
+pub(super) const CHILD_DIR: &str = "TIDALUNAR_LOGGING_TEST_DIR";
+const CHILD_TEST: &str = "logging::tests::child_scenario";
+const CHILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn panic_on(name: &str, body: impl FnOnce() + Send + 'static) {
+    let _ = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(body)
+        .unwrap()
+        .join();
+}
+
+#[test]
+fn child_scenario() {
+    let (Ok(scenario), Ok(dir)) = (std::env::var(CHILD_SCENARIO), std::env::var(CHILD_DIR)) else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    match scenario.as_str() {
+        "panic_holding_the_sink" => {
+            let file = open_console_log(&dir).unwrap();
+            keep_for_panics(&file);
+            *FILE_SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+            install_panic_log();
+            panic_on("sink-holder", || {
+                let _held = FILE_SINK.lock().unwrap_or_else(|e| e.into_inner());
+                panic!("while holding the sink");
+            });
+        }
+        "panic_before_the_rotation" => {
+            install_panic_log();
+            panic_on("early", || panic!("before the rotation"));
+            assert!(
+                !dir.join("console.log").exists(),
+                "the hook opened the sink before the rotation"
+            );
+            let mut sink = None;
+            release_pending_panics(Some(&dir), &mut sink);
+            panic_on("late", || panic!("after the rotation"));
+        }
+        "panic_with_a_signed_url" => {
+            let file = open_console_log(&dir).unwrap();
+            keep_for_panics(&file);
+            *FILE_SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+            install_panic_log();
+            // A url as `reqwest::Error`'s `Debug` prints it, with `)` and `'` in its path, then a
+            // `url::Url` as its own `Debug` does, which has no `://`.
+            let message = "called `Result::unwrap()` on an `Err` value: reqwest::Error { kind: \
+                           Request, url: \"https://cdn.test/a(b)/it's?token=PATHSECRET\", source: \
+                           ConnectError(\"dns error\") } Url { scheme: \"https\", username: \
+                           \"u\", password: Some(\"PASSSECRET\"), host: \
+                           Some(Domain(\"cdn.test\")), path: \"/b\", query: \
+                           Some(\"token=QUERYSECRET\"), fragment: Some(\"frag=FRAGSECRET\") }";
+            panic_on("fetcher", move || panic!("{message}"));
+        }
+        other => panic!("unknown scenario {other}"),
+    }
+}
+
+/// `console.log` as the child left it, or a panic saying the child hung or failed.
+fn log_after_child(scenario: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
+        .env(CHILD_SCENARIO, scenario)
+        .env(CHILD_DIR, dir.path())
+        .stdout(fs::File::create(dir.path().join("child.out")).unwrap())
+        .stderr(fs::File::create(dir.path().join("child.err")).unwrap())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > CHILD_DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the child hung in {scenario}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let stderr = fs::read_to_string(dir.path().join("child.err")).unwrap_or_default();
+    assert!(status.success(), "{scenario} failed: {stderr}");
+    fs::read_to_string(dir.path().join("console.log")).unwrap_or_default()
+}
+
+/// The hook runs before the unwind; the sink's guard is still held when it writes.
+#[test]
+fn a_panic_while_the_sink_is_held_still_reaches_the_log() {
+    let log = log_after_child("panic_holding_the_sink");
+
+    assert!(
+        log.contains("[PANIC]  thread 'sink-holder' panicked at")
+            && log.contains("while holding the sink"),
+        "{log}"
+    );
+}
+
+/// A signed url's query is a credential and `Result::unwrap` prints the whole error, url included:
+/// the line keeps the diagnosis and loses the query, fragment and password, whether the url is a
+/// string with `)` and `'` in its path or the fields of a `Url`.
+#[test]
+fn a_panic_message_reaches_the_log_with_the_secrets_of_its_urls_redacted() {
+    let log = log_after_child("panic_with_a_signed_url");
+
+    assert!(
+        log.contains("https://cdn.test/a(b)/it's?<redacted>")
+            && log.contains("ConnectError(\"dns error\")")
+            && log.contains(
+                "path: \"/b\", query: Some(\"<redacted>\"), fragment: Some(\"<redacted>\")"
+            ),
+        "{log}"
+    );
+    assert!(
+        ![
+            "PATHSECRET",
+            "PASSSECRET",
+            "QUERYSECRET",
+            "FRAGSECRET",
+            "token=",
+            "frag="
+        ]
+        .iter()
+        .any(|secret| log.contains(secret)),
+        "{log}"
+    );
+}
+
+/// Opening the sink for a panic before `adopt_session_log` would defeat the rotation, and
+/// dropping it would leave the cause of a dead thread out of the session's log.
+#[test]
+fn a_panic_before_the_rotation_is_written_once_the_log_opens() {
+    let log = log_after_child("panic_before_the_rotation");
+
+    let early = log.find("thread 'early' panicked");
+    let late = log.find("thread 'late' panicked");
+    assert!(early.is_some() && late.is_some() && early < late, "{log}");
+}

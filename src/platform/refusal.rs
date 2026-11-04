@@ -163,16 +163,16 @@ static LAUNCHED: AtomicBool = AtomicBool::new(false);
 /// Makes a panic on the calling thread stop the launch through [`refuse_to_start`].
 ///
 /// A panic otherwise ends the launch with a line on a stderr that a desktop launch does not
-/// have: no log entry, no window, and an app that simply does not open. It is a hook rather than
+/// have: no window, and an app that simply does not open. It is a hook rather than
 /// a `catch_unwind` around `main` because the hook runs at the panic itself. Unwinding first
 /// would drop the tokio runtime, which waits for every blocking task before returning, and
 /// would never see a panic inside a CEF callback, which cannot unwind and aborts.
 ///
 /// Call it from the browser process's main thread, which is where the launch runs, and not from
-/// a CEF subprocess. Panics on other threads are left alone: a runtime task's panic is caught
-/// and reported by its `JoinHandle`, and the launch does not depend on a worker. No code on the
-/// main thread between here and [`launch_done`] may catch a panic, because the hook acts before
-/// any `catch_unwind` could.
+/// a CEF subprocess. Panics on other threads are left alone, the launch not depending on a
+/// worker; `logging::install_panic_log` has already put them in the log, a dropped task handle
+/// included. No code on the main thread between here and [`launch_done`] may catch a panic,
+/// because the hook acts before any `catch_unwind` could.
 pub(crate) fn guard_launch() {
     install_launch_guard(std::thread::current().id(), &LAUNCHED, refuse_to_start);
 }
