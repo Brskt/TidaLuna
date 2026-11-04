@@ -118,7 +118,7 @@ re-arms the notification.
 ### Task ownership
 
 Long-lived tasks go in a `TaskGroup` so shutdown has a deadline and
-panics surface. Per-connection tasks stay as raw `JoinHandle` + `abort()`
+panics surface. Per-connection tasks stay raw (`JoinHandle`, `AbortOnDropHandle`)
 because `TaskGroup` task names are `&'static str` and connection scopes
 need socket-id suffixes.
 
@@ -128,9 +128,8 @@ need socket-id suffixes.
 | mDNS browser event loop | `ConnectManager.controller_tasks` | 2 s |
 | WS server listener | `WsServer.tasks` | 2 s |
 | WS server per-client read/write/heartbeat | `ClientHandle` (raw) | abort on disconnect; `shutdown()` and `close_after_drain` (after an `endSession`) let the writer flush its queue first, 2 s |
-| WS client per-connection read/write/heartbeat | `WsClient` (raw) | abort on `shutdown()` |
+| WS client per-connection read/write/heartbeat | `WsClient` (raw) | dropped: queue written, then Close, 2 s; `shutdown()`: immediate |
 | IPC fire-and-forget handlers | raw `tokio::spawn` | ephemeral |
-| controller session send (fire-and-forget) | raw `tokio::spawn` | ephemeral |
 
 ### Shutdown
 

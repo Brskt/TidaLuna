@@ -31,6 +31,15 @@ pub(crate) enum ControllerSessionEvent {
     ConnectionLost,
 }
 
+/// What became of an end session command put on the write queue.
+pub(crate) enum EndQueue {
+    Queued,
+    /// The session was over already: nothing to end, nothing lost.
+    NoSession,
+    /// The frame could not be queued (full queue, socket down, or a command that did not serialize).
+    Lost(anyhow::Error),
+}
+
 /// A session to move onto a new socket, live or kept after a loss or a suspension, as it stood when
 /// the connect asked for it: the install only goes ahead if the session is still this one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,28 +85,24 @@ impl ControllerSession {
         (session, event)
     }
 
-    /// Queue an end session command (non-blocking).
-    pub fn queue_end(&mut self, stop_casting: bool) -> anyhow::Result<()> {
-        let session_id = match &self.current {
-            Some(s) => s.session_id.clone(),
-            None => anyhow::bail!("No active session"),
+    /// Puts the end session command on the socket's write queue, in the caller's own step: nothing
+    /// is spawned; the socket can be released right after, and the command is written before its
+    /// Close.
+    pub fn queue_end(&self, stop_casting: bool) -> EndQueue {
+        let Some(current) = &self.current else {
+            return EndQueue::NoSession;
         };
 
         let cmd = SessionCommand::EndSession {
-            session_id,
+            session_id: current.session_id.clone(),
             stop_casting,
         };
-        self.fire_and_forget(serde_json::to_value(&cmd)?);
-        Ok(())
-    }
-
-    /// Send a command via WS without waiting (spawn async send).
-    fn fire_and_forget(&self, value: serde_json::Value) {
-        let ws = self.ws.clone();
-        if let Some(rt) = crate::state::RT_HANDLE.get() {
-            rt.spawn(async move {
-                let _ = ws.send_raw(value).await;
-            });
+        match serde_json::to_value(&cmd)
+            .map_err(anyhow::Error::from)
+            .and_then(|command| self.ws.queue_raw(command))
+        {
+            Ok(()) => EndQueue::Queued,
+            Err(e) => EndQueue::Lost(e),
         }
     }
 

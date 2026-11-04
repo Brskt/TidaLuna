@@ -479,3 +479,46 @@ fn insert_device_capped_dedups_and_bounds() {
     assert_eq!(devices.len(), 2);
     assert!(devices.iter().all(|d| d.fullname != "c"));
 }
+
+/// The device hears the end of a disconnect, then the close, and the socket ends with it: a device
+/// that keeps the connection open (the official controller never closes its own) would otherwise
+/// hold it for every session the user ends.
+#[tokio::test]
+async fn disconnecting_writes_the_end_before_closing_the_socket() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let (ws, _conn) = dial(&mut server).await;
+    let mut ctrl = TidalConnectController::new(None);
+    let _ = ctrl.adopt_started(ws.clone(), &dev("d"), "s1".into(), false);
+    let session = ctrl.session.as_ref().unwrap();
+    assert!(matches!(session.queue_end(true), EndQueue::Queued));
+
+    ws.shutdown();
+
+    assert!(matches!(session.queue_end(true), EndQueue::Lost(_)));
+}
+
+/// Alive tasks of the running runtime: what a socket left open by its owner would add to.
+fn alive_tasks() -> usize {
+    tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks()
+}
+
+/// The device hears the end of a disconnect before the close, and nothing of the socket outlives
+/// it. A device that keeps the connection open (the official controller never closes its own)
+/// would otherwise hold the socket and its three tasks for every session the user ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnecting_writes_the_end_before_closing_the_socket_and_leaves_no_task() {
+    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
+    let base = alive_tasks();
+    let (ws, mut conn) = dial(&mut server).await;
+    let mut ctrl = TidalConnectController::new(None);
+    let _ = ctrl.adopt_started(ws, &dev("d"), "s1".into(), false);
+
+    let _ = ctrl.disconnect(true);
+
+    assert_eq!(
+        conn.wire_until_end(std::time::Duration::from_secs(5)).await,
+        vec!["endSession", "<close>", "<eof>"]
+    );
+}

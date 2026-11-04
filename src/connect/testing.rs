@@ -129,6 +129,40 @@ impl MockWsConnection {
         }
     }
 
+    /// What the code under test wrote within `within`, in order: each JSON frame's command, `<close>`
+    /// for a Close frame, then `<eof>` when the stream ended or `<open>` when it did not. Pings are
+    /// left out: the heartbeat's first one lands wherever the scheduler puts it.
+    pub async fn wire_until_end(&mut self, within: std::time::Duration) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout_at(deadline, self.stream.next()).await {
+                Err(_) => seen.push("<open>".to_string()),
+                Ok(None) | Ok(Some(Err(_))) => seen.push("<eof>".to_string()),
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                    seen.push(frame["command"].as_str().unwrap_or("?").to_string());
+                    continue;
+                }
+                Ok(Some(Ok(Message::Close(_)))) => {
+                    seen.push("<close>".to_string());
+                    continue;
+                }
+                Ok(Some(Ok(_))) => continue,
+            }
+            return seen;
+        }
+    }
+
+    /// Sends the code under test a Close, then reads as `wire_until_end` does.
+    pub async fn close_then_wire_until_end(&mut self, within: std::time::Duration) -> Vec<String> {
+        self.stream
+            .send(Message::Close(None))
+            .await
+            .expect("send the Close");
+        self.wire_until_end(within).await
+    }
+
     /// Sends the code under test a frame, as the device would.
     pub async fn send(&mut self, frame: serde_json::Value) {
         self.stream

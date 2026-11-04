@@ -16,7 +16,7 @@ use crate::connect::ws::client::{WsClient, WsClientEvent};
 
 use dial::ConnectFailure;
 use server_info::{Queued, ServerInfoClaim, ServerInfoLedger};
-use session::{ControllerSession, ControllerSessionEvent, ResumePlan};
+use session::{ControllerSession, ControllerSessionEvent, EndQueue, ResumePlan};
 
 /// Cap on tracked discovered devices; a malicious LAN advertiser could otherwise
 /// grow the list without bound by announcing many instances.
@@ -274,33 +274,40 @@ impl TidalConnectController {
     /// Disconnect from current device (sync - queues the endSession command).
     ///
     /// Returns the event the caller must emit when `stop_casting` leaves an end owed. The device's
-    /// own `notifySessionEnded` cannot carry that announcement; `queue_end` only hands the
-    /// command to a spawned send. The teardown below runs first and takes away both the
-    /// session the reply would be matched against and the currency of the loop delivering it.
+    /// own `notifySessionEnded` cannot carry that announcement: the teardown below runs first and
+    /// takes away both the session the reply would be matched against and the currency of the
+    /// loop delivering it.
     /// Returned rather than emitted, as [`handle_ws_event`](Self::handle_ws_event) does it:
     /// this layer speaks the protocol, the IPC layer above talks to the renderer.
     #[must_use = "dropping the event leaves the renderer believing it is still connected"]
     pub fn disconnect(&mut self, stop_casting: bool) -> Option<ControllerSessionEvent> {
-        if let Some(ref mut session) = self.session {
-            let _ = session.queue_end(stop_casting);
+        if let Some(ref session) = self.session
+            && let EndQueue::Lost(e) = session.queue_end(stop_casting)
+        {
+            crate::verr!(
+                "[connect::controller] endSession (stopCasting={stop_casting}) was not queued, \
+                 the device never hears it: {e}"
+            );
         }
         if !stop_casting {
             return None;
         }
-        // Retiring the session retires its socket's event loop with it. Nothing here
-        // closes the socket; absent the bump, that loop stays current and goes on
-        // forwarding frames from a device the user has just disconnected from.
+        // Retiring the session retires its socket's event loop with it: absent the bump, that
+        // loop stays current and goes on forwarding frames from a device the user has just
+        // disconnected from.
         self.connection_gen = self.connection_gen.wrapping_add(1);
         // `suspended: false` is the device's own answer to `stop_casting` (ended, not suspended).
         // Announced when an end is owed, session or not (TIDAL's connect saga waits on it after a
         // loss or a refused connect), and never twice after the device's own end.
+        // The socket closes with its last holder, once the endSession queued above is written.
         self.session = None;
         self.announce_owed_end()
     }
 
-    /// Close the socket of a session TIDAL is told is over, as the device does on its side:
-    /// every connect dials a new one. `keep_session` holds a suspended session for the resume.
-    /// The generation moves first, as in `disconnect`: the close's `ConnectionLost` is stale.
+    /// Cuts the socket of a session TIDAL is told is over, dropping what it still queues: the device
+    /// ended the session (and closes its side) or the connection is dead. Every connect dials a
+    /// new one. `keep_session` holds a suspended session for the resume. The generation moves
+    /// first, as in `disconnect`: the cut's `ConnectionLost` is stale.
     fn retire_socket(&mut self, keep_session: bool) {
         self.connection_gen = self.connection_gen.wrapping_add(1);
         if keep_session {
