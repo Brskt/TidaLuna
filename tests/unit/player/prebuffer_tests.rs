@@ -20,6 +20,7 @@ async fn a_download_that_dies_before_the_pre_buffer_target_still_publishes_at_on
     // that generation: a mint landing between the snapshot below and the call would end this
     // load before it started, and the test would be measuring the wrong exit.
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    crate::state::warm_process_globals();
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await

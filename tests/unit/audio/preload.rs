@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::audio::bandwidth::spawn_governor;
-use crate::state::{PreloadedTrack, TrackInfo};
+use crate::state::{HANG_GUARD, PreloadedTrack, TrackInfo, warm_process_globals};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// libtest runs the crate in one process, several threads wide, and `PRELOAD_STATE`
 /// is process-wide: a second test touching it would race this one in silence. Take
@@ -367,6 +367,7 @@ async fn a_head_that_never_arrives_stops_its_download() {
 #[tokio::test]
 async fn a_download_that_ends_before_its_head_gives_the_slot_back_at_once() {
     let _serialised = PRELOAD_TESTS.lock().await;
+    warm_process_globals();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -437,6 +438,7 @@ async fn a_download_that_ends_before_its_head_gives_the_slot_back_at_once() {
 #[tokio::test]
 async fn a_load_adopts_a_staging_download_before_its_head_lands() {
     let _serialised = PRELOAD_TESTS.lock().await;
+    warm_process_globals();
     // Announces a large body, then sends far less than a head and stops: it holds the window
     // the defect lived in open for the length of the test.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -472,12 +474,11 @@ async fn a_load_adopts_a_staging_download_before_its_head_lands() {
         }
     });
 
-    // The load arrives while the head is still missing. Polled rather than awaited because the
-    // claim under test is about WHEN the slot appears: as soon as the download starts, not
-    // after the head wait it used to sit behind.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+    // The load arrives while the head is still missing, polled for as long as the staging waits:
+    // the slot has to appear as soon as the download starts, not after the head wait it used to
+    // sit behind. The staging's own head deadline ends the wait; the test keeps no clock.
     let mut adopted = None;
-    while std::time::Instant::now() < deadline {
+    while !staging.is_finished() {
         adopted = take_preloaded_if_match(&track).await;
         if adopted.is_some() {
             break;
@@ -952,6 +953,7 @@ async fn a_superseded_attempt_cannot_install_its_handles() {
 #[tokio::test]
 async fn a_refused_range_restart_publishes_no_credential() {
     use std::io::{Read as _, Seek as _};
+    warm_process_globals();
 
     // Answers a head, then stops talking: the download parks on `stream.next()`, which is the
     // state a restart interrupts. The length it announces never arrives.
@@ -996,17 +998,16 @@ async fn a_refused_range_restart_publishes_no_credential() {
 
     // The head must land before the seek: a cursor inside the lookahead makes the reader wait
     // for bytes rather than move the download, and no restart would ever be armed.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !matches!(
-        buffer.head_status(1024),
-        crate::player::buffer::HeadStatus::Landed
-    ) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fixture never delivered its first chunk"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(HANG_GUARD, async {
+        while !matches!(
+            buffer.head_status(1024),
+            crate::player::buffer::HeadStatus::Landed
+        ) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture never delivered its first chunk");
 
     // Past the frontier plus the 32 KiB lookahead. The read parks, so it cannot share the
     // runtime that is driving the download.

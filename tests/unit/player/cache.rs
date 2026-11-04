@@ -619,7 +619,7 @@ fn a_log_past_the_threshold_is_checkpointed_by_the_cache_thread() {
             break;
         }
         assert!(
-            waiting_since.elapsed() < std::time::Duration::from_secs(10),
+            waiting_since.elapsed() < crate::state::HANG_GUARD,
             "{copied} of {log} pages of the log copied after {:?}",
             waiting_since.elapsed()
         );

@@ -131,15 +131,15 @@ fn assert_no_credential(error: &str) {
 /// fixture: taken here after `PRELOAD_TESTS`, as `state.rs` orders them, it keeps a parallel
 /// test's fade clear.
 ///
-/// The media client is built here too, before any deadline starts. Its first use reads the system
-/// root certificates inside the load task's first poll, on the runtime that drives the wait of
-/// `settled_error`, and with those files cold that outlasted the five second deadline.
+/// The process globals are opened here too, before any deadline starts: the media client's root
+/// certificates and the cache a load looks up first were read inside the load task's first poll,
+/// on the runtime that drives the wait, and with those files cold that outlasted the deadline.
 async fn serialised() -> (
     tokio::sync::MutexGuard<'static, ()>,
     crate::state::current_track_fixture::CurrentTrackSlot,
 ) {
     let preload = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let _ = &*crate::state::HTTP_CLIENT_PLAYBACK;
+    crate::state::warm_process_globals();
     (
         preload,
         crate::state::current_track_fixture::CurrentTrackSlot::clear(),
@@ -287,7 +287,7 @@ async fn a_rate_limited_stream_settles_the_load_it_refused() {
         LoadOrigin::Local,
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::state::HANG_GUARD;
     loop {
         let settled = events
             .lock()

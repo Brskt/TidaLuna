@@ -152,7 +152,7 @@ fn a_launch_that_finds_the_holder_closing_outwaits_it_and_takes_over() {
     );
     drop(first);
     reached
-        .recv_timeout(Duration::from_secs(3))
+        .recv_timeout(crate::state::HANG_GUARD)
         .expect("the second launch never took over");
     assert!(
         second.join().expect("the second launch panicked").is_some(),

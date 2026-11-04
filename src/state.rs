@@ -679,6 +679,20 @@ pub(crate) mod current_track_fixture {
     }
 }
 
+/// Opens the process globals a download or a load takes first, ahead of any clock: their one-time
+/// IO (the cache's SQLite, each client's root store) runs on the thread that takes them, and a
+/// test timing a window around it would time a slow disk as the code under test.
+#[cfg(test)]
+pub(crate) fn warm_process_globals() {
+    LazyLock::force(&AUDIO_CACHE);
+    LazyLock::force(&HTTP_CLIENT_PRELOAD);
+    LazyLock::force(&HTTP_CLIENT_PLAYBACK);
+}
+
+/// Bounds a test's wait that only a hang exceeds: no claim about speed rides on it.
+#[cfg(test)]
+pub(crate) const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[cfg(test)]
 #[path = "../tests/unit/state_tests.rs"]
 mod state_tests;
