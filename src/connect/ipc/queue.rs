@@ -24,7 +24,7 @@ pub(super) fn load_queue(msg: &IpcMessage, callback: IpcCallback) {
         callback
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .failure(500, "No controller");
+            .failure(500, "Not signed in");
         return;
     };
 
@@ -65,7 +65,7 @@ pub(super) fn update_quality(msg: &IpcMessage, callback: IpcCallback) {
         callback
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .failure(500, "No controller");
+            .failure(500, "Not signed in");
         return;
     };
 

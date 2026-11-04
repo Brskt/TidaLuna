@@ -1,8 +1,8 @@
 //! Shared helpers for the IPC layer.
 //!
-//! Covers three kinds of functionality:
-//! * State lookups into `ConnectManager` (`get_controller_arc`,
-//!   `get_session_ws`, `get_last_player_state`, `get_server_infos`).
+//! Covers four kinds of functionality:
+//! * State lookups into `ConnectManager` (`get_session_ws`,
+//!   `get_last_player_state`, `get_server_infos`).
 //! * Device command dispatch (`send_device_cmd`, `send_device_cmd_simple`).
 //! * CEF UI-thread posting for IPC event emission (`post_emit`,
 //!   `post_emit_with_data`), plus forwarding of controller WS notifications
@@ -14,22 +14,13 @@ use std::time::Duration;
 use cef::*;
 
 use crate::app_state::{IpcCallback, with_state};
+use crate::connect::controller::server_info::{build_content_server_info, build_server_info};
 use crate::connect::controller::session::ControllerSessionEvent;
 use crate::connect::types::{PlayerState, ServerInfo};
 use crate::connect::ws::client::WsClient;
+use crate::platform::secure_store::StoredTokenState;
 
 pub(super) const CMD_TIMEOUT: Duration = Duration::from_secs(10);
-
-pub(super) fn get_controller_arc()
--> Option<Arc<std::sync::Mutex<crate::connect::controller::TidalConnectController>>> {
-    with_state(|state| {
-        state
-            .connect
-            .as_ref()
-            .and_then(|cm| cm.controller().cloned())
-    })
-    .flatten()
-}
 
 pub(super) fn get_last_player_state() -> PlayerState {
     with_state(|state| {
@@ -54,20 +45,22 @@ pub(super) fn get_session_ws() -> Option<Arc<WsClient>> {
     .flatten()
 }
 
-/// Build (content, queue) ServerInfo pair from controller state for a
-/// given audio quality.
+/// Build (content, queue) ServerInfo pair for a given audio quality, `None` when signed out.
+/// The token is read here from the store the refreshes rotate, at the moment it is sent.
 pub(super) fn get_server_infos(quality: &str) -> Option<(ServerInfo, ServerInfo)> {
-    with_state(|state| {
-        state.connect.as_ref().and_then(|cm| {
-            let ctrl = cm.controller()?;
-            let guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
-            Some((
-                guard.build_content_server_info(quality),
-                guard.build_server_info("queue"),
-            ))
-        })
-    })
-    .flatten()
+    with_state(|state| server_infos_for(state.token_state.as_ref(), quality)).flatten()
+}
+
+/// The pair built from the live token alone: no argument carries a token a renderer sent.
+fn server_infos_for(
+    token_state: Option<&StoredTokenState>,
+    quality: &str,
+) -> Option<(ServerInfo, ServerInfo)> {
+    let access_token = &token_state?.current.access_token;
+    Some((
+        build_content_server_info(quality, access_token),
+        build_server_info("queue", access_token),
+    ))
 }
 
 pub(super) fn send_device_cmd_simple(command: &'static str, callback: IpcCallback) {
@@ -122,6 +115,11 @@ pub(super) fn forward_controller_notification(json: &serde_json::Value) {
     post_emit_with_data(channel, json);
 }
 
+/// TIDAL's `TCnotifyConnectFailed`: the frontend relays it as CONNECT_TO_DEVICE_FAILED.
+pub(super) fn emit_connect_failed() {
+    post_emit("connect.connect_failed");
+}
+
 pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent) {
     match event {
         ControllerSessionEvent::SessionStarted {
@@ -146,6 +144,10 @@ pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent) {
             post_emit("connect.connection_lost");
         }
         ControllerSessionEvent::SessionError { command, details } => {
+            // A refused startSession is a connect that failed after the dial.
+            if command == "startSession" {
+                emit_connect_failed();
+            }
             post_emit_with_data(
                 "connect.server_error",
                 &serde_json::json!({

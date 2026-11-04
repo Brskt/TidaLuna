@@ -23,7 +23,6 @@ pub(crate) fn handle_connect_ipc(msg: &IpcMessage) {
     crate::vprintln!("[connect::ipc] {}", sub);
 
     match sub {
-        "controller.initialize" => controller::initialize(msg),
         "controller.discover" => controller::discover(),
         "controller.refresh" => controller::refresh(),
         "controller.set_auth" => controller::set_auth(msg),

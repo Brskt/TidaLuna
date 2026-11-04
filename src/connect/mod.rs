@@ -30,6 +30,8 @@ pub(crate) const EXIT_SHUTDOWN_BUDGET: Duration = Duration::from_millis(250);
 
 pub(crate) struct ConnectManager {
     controller: Option<Arc<Mutex<TidalConnectController>>>,
+    /// What TIDAL sent before the controller existed (the first discovery builds it).
+    session_credential: Option<String>,
     receiver: Option<ConnectReceiver>,
     bridge_tx: Option<mpsc::Sender<BridgeEvent>>,
     controller_tasks: Arc<TaskGroup>,
@@ -39,6 +41,7 @@ impl ConnectManager {
     pub(crate) fn new() -> Self {
         Self {
             controller: None,
+            session_credential: None,
             receiver: None,
             bridge_tx: None,
             controller_tasks: Arc::new(TaskGroup::new()),
@@ -53,8 +56,7 @@ impl ConnectManager {
 
         let (event_tx, mut event_rx) = mpsc::channel::<BrowserEvent>(64);
         let browser = MdnsBrowser::new(event_tx, true)?;
-        let controller = Arc::new(Mutex::new(TidalConnectController::new(Some(browser))));
-        self.controller = Some(controller.clone());
+        let controller = self.install_controller(TidalConnectController::new(Some(browser)));
 
         // Spawn browser event polling task on the tokio runtime
         // (init_controller may be called from the CEF UI thread, not a tokio context).
@@ -80,6 +82,27 @@ impl ConnectManager {
 
         crate::vprintln!("[connect] Controller initialized");
         Ok(())
+    }
+
+    /// Adopt a new controller, handing it what TIDAL sent before it existed.
+    fn install_controller(
+        &mut self,
+        mut controller: TidalConnectController,
+    ) -> Arc<Mutex<TidalConnectController>> {
+        controller.set_session_credential(self.session_credential.as_deref());
+        let controller = Arc::new(Mutex::new(controller));
+        self.controller = Some(controller.clone());
+        controller
+    }
+
+    /// Store the account id TIDAL names, and update the live controller if there is one.
+    /// The token and the server URLs are not taken from the renderer: see `controller::server_info`.
+    pub(crate) fn set_session_credential(&mut self, credential: &str) {
+        self.session_credential = (!credential.is_empty()).then(|| credential.to_string());
+        if let Some(ctrl) = &self.controller {
+            let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
+            guard.set_session_credential(self.session_credential.as_deref());
+        }
     }
 
     /// Build a receiver (WS server + mDNS advertiser) without touching `self`.
@@ -180,3 +203,7 @@ impl ConnectManager {
         crate::vprintln!("[connect] Shutdown complete");
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/connect/manager.rs"]
+mod tests;

@@ -79,6 +79,13 @@ impl MdnsBrowser {
         Ok(())
     }
 
+    /// True while a browse is running; one that ended on its own (`SearchStopped`) is not.
+    pub fn is_discovering(&self) -> bool {
+        self.browse_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    }
+
     /// Stop discovery. Only stops browse, does not shut down the daemon.
     pub fn stop_discovery(&mut self) {
         if let Some(handle) = self.browse_task.take() {

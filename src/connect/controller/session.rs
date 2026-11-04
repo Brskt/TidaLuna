@@ -26,6 +26,19 @@ pub(crate) enum ControllerSessionEvent {
     ConnectionLost,
 }
 
+/// What `queue_start_or_resume` sent to the device.
+pub(crate) enum SessionRequest {
+    Start,
+    Resume,
+}
+
+impl SessionRequest {
+    /// The `joined` TIDAL reads off a `connectToDevice` answer: the device already held our session.
+    pub(crate) fn joined(&self) -> bool {
+        matches!(self, Self::Resume)
+    }
+}
+
 /// Controller-side session manager.
 /// Sends startSession/resumeSession/endSession to the remote device,
 /// tracks the active session, and correlates notifySessionStarted via nonce.
@@ -56,7 +69,7 @@ impl ControllerSession {
         &mut self,
         device: &MdnsDevice,
         credential: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<SessionRequest> {
         // Same device + session exists -> resume
         if let Some(ref session) = self.current
             && session.device.id == device.id
@@ -65,7 +78,7 @@ impl ControllerSession {
                 session_id: session.session_id.clone(),
             };
             self.fire_and_forget(serde_json::to_value(&cmd)?);
-            return Ok(());
+            return Ok(SessionRequest::Resume);
         }
 
         // New session
@@ -79,7 +92,7 @@ impl ControllerSession {
             session_credential: credential.map(|s| s.to_string()),
         };
         self.fire_and_forget(serde_json::to_value(&cmd)?);
-        Ok(())
+        Ok(SessionRequest::Start)
     }
 
     /// Queue an end session command (non-blocking).

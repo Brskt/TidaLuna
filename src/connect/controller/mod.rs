@@ -1,16 +1,18 @@
+pub(crate) mod dial;
+pub(crate) mod server_info;
 pub(crate) mod session;
 
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::connect::mdns::browser::{BrowserEvent, MdnsBrowser};
 use crate::connect::types::{
-    AuthInfo, MdnsDevice, MediaInfo, OAuthAuthInfo, OAuthFormParameters, OAuthParameters,
-    OAuthServerInfo, PlaybackNotification, PlayerState, ServerInfo, SessionNotification,
+    MdnsDevice, MediaInfo, PlaybackNotification, PlayerState, SessionNotification,
 };
 use crate::connect::ws::client::{WsClient, WsClientEvent};
 
-use session::{ControllerSession, ControllerSessionEvent};
+use session::{ControllerSession, ControllerSessionEvent, SessionRequest};
 
 /// Cap on tracked discovered devices; a malicious LAN advertiser could otherwise
 /// grow the list without bound by announcing many instances.
@@ -37,18 +39,15 @@ pub(crate) struct TidalConnectController {
     session: Option<ControllerSession>,
     /// Currently discovered devices (cached for get_state snapshot)
     discovered_devices: Vec<MdnsDevice>,
+    /// Bumped by every browser event applied to the list: what a connect request waits on
+    /// for a device the browse has not resolved yet.
+    device_changes: watch::Sender<()>,
     /// Last known player state from notifyPlayerStatusChanged
     last_player_state: PlayerState,
     /// Last known playback progress (ms)
     last_progress: u64,
     /// Last known media info from notifyMediaChanged
     last_media: Option<MediaInfo>,
-    /// Server URLs and auth for building protocol messages
-    content_server_url: String,
-    queue_server_url: String,
-    auth_server_url: String,
-    auth_token: String,
-    refresh_token: String,
     session_credential: Option<String>,
     /// Bumped on every WS install. `WsClient::shutdown()` emits `ConnectionLost`
     /// unconditionally on its way out: a socket we superseded on purpose looks exactly
@@ -65,14 +64,10 @@ impl TidalConnectController {
             browser,
             session: None,
             discovered_devices: Vec::new(),
+            device_changes: watch::channel(()).0,
             last_player_state: PlayerState::Idle,
             last_progress: 0,
             last_media: None,
-            content_server_url: String::new(),
-            queue_server_url: String::new(),
-            auth_server_url: String::new(),
-            auth_token: String::new(),
-            refresh_token: String::new(),
             session_credential: None,
             connection_gen: 0,
         }
@@ -88,6 +83,15 @@ impl TidalConnectController {
             browser.start_discovery()?;
         }
         Ok(())
+    }
+
+    /// Start mDNS discovery unless a browse is already running: restarting a live one would
+    /// only reset its query schedule.
+    pub fn ensure_discovery(&mut self) -> anyhow::Result<()> {
+        match self.browser {
+            Some(ref mut browser) if !browser.is_discovering() => browser.start_discovery(),
+            _ => Ok(()),
+        }
     }
 
     pub fn stop_discovery(&mut self) {
@@ -138,11 +142,18 @@ impl TidalConnectController {
     }
 
     /// Start or resume the session (sync part - the WS send is fire-and-forget).
-    pub fn start_session(&mut self, device: &MdnsDevice, credential: Option<&str>) {
-        if let Some(ref mut session) = self.session {
-            // Fire the start/resume command (async send, but send_raw is non-blocking via channel)
-            let _ = session.queue_start_or_resume(device, credential);
-        }
+    /// Returns which of the two was queued, `None` when there is no session or the command did
+    /// not serialize.
+    pub fn start_session(
+        &mut self,
+        device: &MdnsDevice,
+        credential: Option<&str>,
+    ) -> Option<SessionRequest> {
+        // Fire the start/resume command (async send, but send_raw is non-blocking via channel)
+        self.session
+            .as_mut()?
+            .queue_start_or_resume(device, credential)
+            .ok()
     }
 
     /// Disconnect from current device (sync - queues the endSession command).
@@ -246,10 +257,26 @@ impl TidalConnectController {
                 self.discovered_devices.retain(|d| d.fullname != fullname);
             }
         }
+        self.device_changes.send_replace(());
+    }
+
+    /// A receiver woken by every change of the discovered list. Taken in the same lock hold as
+    /// the lookup it guards. A device resolved after the lookup cannot be missed.
+    pub fn watch_devices(&self) -> watch::Receiver<()> {
+        self.device_changes.subscribe()
     }
 
     pub fn discovered_devices(&self) -> &[MdnsDevice] {
         &self.discovered_devices
+    }
+
+    /// The device mDNS found under `fullname`. A connect request names one by this key and gets
+    /// its address from here: the renderer, plugins included, never chooses where to dial.
+    pub fn discovered_device(&self, fullname: &str) -> Option<MdnsDevice> {
+        self.discovered_devices
+            .iter()
+            .find(|d| d.fullname == fullname)
+            .cloned()
     }
 
     /// Get the WS client from the active session (for sending commands).
@@ -277,71 +304,12 @@ impl TidalConnectController {
         self.session.as_ref().is_some_and(|s| s.ws.is_connected())
     }
 
-    pub fn set_server_urls(&mut self, queue_url: &str, content_url: &str, auth_url: &str) {
-        self.queue_server_url = queue_url.trim_end_matches('/').to_string();
-        self.content_server_url = content_url.trim_end_matches('/').to_string();
-        self.auth_server_url = auth_url.trim_end_matches('/').to_string();
-    }
-
-    pub fn set_auth(&mut self, credential: &str, token: &str, refresh: &str) {
-        self.session_credential = if credential.is_empty() {
-            None
-        } else {
-            Some(credential.to_string())
-        };
-        self.auth_token = token.to_string();
-        self.refresh_token = refresh.to_string();
+    pub fn set_session_credential(&mut self, credential: Option<&str>) {
+        self.session_credential = credential.map(str::to_string);
     }
 
     pub fn session_credential(&self) -> Option<&str> {
         self.session_credential.as_deref()
-    }
-
-    /// Build a ServerInfo for the given type ("content" or "queue"), matching the JS serverInfo.js format.
-    pub fn build_server_info(&self, server_type: &str) -> ServerInfo {
-        let server_url = match server_type {
-            "content" => &self.content_server_url,
-            "queue" => &self.queue_server_url,
-            _ => &self.content_server_url,
-        };
-        ServerInfo {
-            server_url: server_url.clone(),
-            auth_info: Some(AuthInfo {
-                header_auth: None,
-                oauth_server_info: Some(OAuthServerInfo {
-                    server_url: self.auth_server_url.clone(),
-                    auth_info: OAuthAuthInfo {
-                        header_auth: Some(format!("Bearer {}", self.auth_token)),
-                        oauth_parameters: Some(OAuthParameters {
-                            access_token: self.auth_token.clone(),
-                            refresh_token: self.refresh_token.clone(),
-                        }),
-                    },
-                    form_parameters: Some(OAuthFormParameters {
-                        grant_type: "switch_client".to_string(),
-                        scope: "r_usr".to_string(),
-                    }),
-                    http_header_fields: Vec::new(),
-                }),
-                oauth_parameters: None,
-            }),
-            http_header_fields: Vec::new(),
-            query_parameters: serde_json::Map::new(),
-        }
-    }
-
-    /// Build content server info with audioquality in queryParameters.
-    pub fn build_content_server_info(&self, quality: &str) -> ServerInfo {
-        let mut info = self.build_server_info("content");
-        info.query_parameters.insert(
-            "audioquality".to_string(),
-            serde_json::Value::String(quality.to_string()),
-        );
-        info.query_parameters.insert(
-            "audiomode".to_string(),
-            serde_json::Value::String("STEREO".to_string()),
-        );
-        info
     }
 
     pub fn shutdown(&mut self) {
