@@ -2,7 +2,7 @@
 
 use super::{Queued, ServerInfoClaim, TidalConnectController, await_delivery, build_emit_js};
 use crate::connect::testing::{MockWsServer, live_controller};
-use crate::connect::types::{DeviceType, MdnsDevice};
+use crate::connect::types::MdnsDevice;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
@@ -10,14 +10,7 @@ use std::time::Duration;
 const SHORT: Duration = Duration::from_millis(50);
 
 fn device() -> MdnsDevice {
-    MdnsDevice {
-        addresses: vec!["127.0.0.1".into()],
-        friendly_name: "n".into(),
-        fullname: "d".into(),
-        id: "id".into(),
-        port: 1,
-        device_type: DeviceType::TidalConnect,
-    }
+    crate::connect::testing::device("d")
 }
 
 fn deliver(ctrl: &Mutex<TidalConnectController>, token: &str) -> ServerInfoClaim {

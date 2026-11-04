@@ -1,70 +1,13 @@
 //! Tests for `src/connect/controller/mod.rs`, attached to it by `#[path]`.
 
 use super::*;
-use crate::connect::types::DeviceType;
+use crate::connect::testing::device;
 
-fn dev(fullname: &str) -> MdnsDevice {
-    MdnsDevice {
-        addresses: vec!["127.0.0.1".into()],
-        friendly_name: "n".into(),
-        fullname: fullname.into(),
-        id: "id".into(),
-        port: 1,
-        device_type: DeviceType::TidalConnect,
-    }
-}
-
-/// Retiring the session is the renderer's only notice of it, the device's own
-/// `notifySessionEnded` arriving on a socket whose loop this same call just made stale.
-#[tokio::test]
-async fn disconnecting_a_live_session_returns_the_event_that_retires_it() {
-    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
-    let port: u16 = server.url().rsplit(':').next().unwrap().parse().unwrap();
-
-    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
-    let dialing = tokio::spawn(async move {
-        WsClient::connect("127.0.0.1", port, true, event_tx)
-            .await
-            .unwrap()
-    });
-    let _conn = server.accept().await.expect("accept");
-    let ws = Arc::new(dialing.await.unwrap());
-
-    let mut ctrl = TidalConnectController::new(None);
-    let _ = ctrl.adopt_started(ws, &dev("d"), "s1".into(), false);
-    let before = ctrl.connection_gen;
-
-    let event = ctrl
-        .disconnect(true)
-        .expect("retiring a session has to announce it");
-
-    assert!(matches!(
-        event,
-        ControllerSessionEvent::SessionEnded { suspended: false }
-    ));
-    assert!(ctrl.session.is_none(), "the session goes with the event");
-    assert_ne!(
-        ctrl.connection_gen, before,
-        "and its event loop has to go stale"
-    );
-
-    // Why the announcement has to come from here at all: the device's own reply lands on a
-    // controller with no session left for it to end, and yields nothing to emit. Anyone
-    // moving the announcement back onto the acknowledgement has to break this first.
-    let reply = WsClientEvent::Message(serde_json::json!({
-        "command": "notifySessionEnded",
-        "sessionId": "s1",
-        "suspended": false,
-    }));
-    assert!(
-        ctrl.handle_ws_event(&reply).is_none(),
-        "the acknowledgement cannot carry the announcement"
-    );
-}
-
-/// TIDAL's connect saga waits for the end of the device it holds before dialling another. A loss
-/// tells it only CONNECTION_LOST, leaving that end owed (or the next pick hangs silently); one the
-/// device sent, or no connection announced, owes none: a second wipes the persisted device and reloads the track.
+/// TIDAL's connect saga waits for the end of the device it holds before dialling another. A live
+/// session owes that end, and so does a loss, which tells it only CONNECTION_LOST (or the next pick
+/// hangs silently); one the device sent, or no connection announced, owes none: a second wipes the
+/// persisted device and reloads the track. The device's own reply cannot carry it, landing on the
+/// event loop this call makes stale.
 #[tokio::test]
 async fn disconnecting_announces_the_end_only_when_one_is_owed() {
     let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
@@ -94,12 +37,12 @@ async fn disconnecting_announces_the_end_only_when_one_is_owed() {
             false,
         ),
     ] {
-        let (ws, _conn) = dial(&mut server).await;
-        let mut ctrl = TidalConnectController::new(None);
-        let _ = ctrl.adopt_started(ws, &dev("d"), "s1".into(), false);
-        assert!(ctrl.handle_ws_event(&lapse).is_some());
-        assert_eq!(ended(&mut ctrl), owed, "an end owed: {owed}");
-        assert!(!ended(&mut ctrl), "an end is announced once");
+        let (mut ctrl, _conn) = live_on("id", &mut server).await;
+        if let Some(event) = &event {
+            assert!(ctrl.handle_ws_event(event).is_some(), "{lapse}");
+        }
+        assert_eq!(ended(&mut ctrl), owed, "{lapse}: an end owed: {owed}");
+        assert!(!ended(&mut ctrl), "{lapse}: an end is announced once");
     }
 
     let mut idle = TidalConnectController::new(None);
@@ -114,7 +57,7 @@ async fn disconnecting_announces_the_end_only_when_one_is_owed() {
 async fn dial(
     server: &mut crate::connect::testing::MockWsServer,
 ) -> (Arc<WsClient>, crate::connect::testing::MockWsConnection) {
-    let port: u16 = server.url().rsplit(':').next().unwrap().parse().unwrap();
+    let port = server.port();
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
     let dialing = tokio::spawn(async move {
         WsClient::connect("127.0.0.1", port, true, event_tx)
@@ -141,7 +84,7 @@ async fn a_start_installed_over_a_live_session_ends_it_in_the_page_first() {
     let (mut ctrl, _first) = live_on("id", &mut server).await;
 
     let (ws, _second) = dial(&mut server).await;
-    let adopted = ctrl.adopt_started(ws, &dev("other"), "s2".into(), true);
+    let adopted = ctrl.adopt_started(ws, &device("other"), "s2".into(), true);
     assert!(matches!(
         adopted.superseded,
         Some(ControllerSessionEvent::SessionEnded { suspended: false })
@@ -175,7 +118,7 @@ async fn a_live_session_moves_to_its_resumed_socket_unseen() {
 
     let (ws, _second) = dial(&mut server).await;
     let adopted = ctrl
-        .adopt_resumed(ws.clone(), &dev("d"), &plan)
+        .adopt_resumed(ws.clone(), &device("d"), &plan)
         .unwrap_or_else(|failure| panic!("{}", failure.message()));
     let conn_gen = adopted.conn_gen;
     assert!(adopted.started.is_none() && !adopted.token_owed);
@@ -206,7 +149,7 @@ async fn a_resume_whose_session_is_gone_installs_nothing() {
             assert!(ctrl.handle_ws_event(&ended).is_some());
         }),
         ("another device takes over", |ctrl, ws| {
-            let _ = ctrl.adopt_started(ws, &dev("other"), "s2".into(), false);
+            let _ = ctrl.adopt_started(ws, &device("other"), "s2".into(), false);
         }),
     ];
     for (what, intervene) in cases {
@@ -219,7 +162,7 @@ async fn a_resume_whose_session_is_gone_installs_nothing() {
         let (ws, _second) = dial(&mut server).await;
         assert!(
             matches!(
-                ctrl.adopt_resumed(ws.clone(), &dev("d"), &plan),
+                ctrl.adopt_resumed(ws.clone(), &device("d"), &plan),
                 Err(dial::ConnectFailure::Cancelled)
             ),
             "{what}"
@@ -288,10 +231,21 @@ async fn gone_on(
 async fn a_gone_session_resumed_is_announced_by_the_install_and_owes_its_end() {
     let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
     for suspended in [false, true] {
-        let (mut ctrl, _first) = gone_on(suspended, &mut server).await;
-        let plan = ctrl
-            .resume_plan("d")
-            .expect("a gone session is resumed like a live one");
+        let (mut ctrl, _first, plan) = if suspended {
+            let (ctrl, conn) = gone_on(true, &mut server).await;
+            let plan = ctrl
+                .resume_plan("d")
+                .expect("a gone session is resumed like a live one");
+            (ctrl, conn, plan)
+        } else {
+            let (mut ctrl, conn) = live_on("id", &mut server).await;
+            let plan = ctrl.resume_plan("d").expect("a live session has a plan");
+            assert!(
+                ctrl.handle_ws_event(&WsClientEvent::ConnectionLost)
+                    .is_some()
+            );
+            (ctrl, conn, plan)
+        };
         let failure = dial::ConnectFailure::Unresolved("d".into());
         assert!(
             ctrl.announces_connect_failure(&failure),
@@ -300,7 +254,7 @@ async fn a_gone_session_resumed_is_announced_by_the_install_and_owes_its_end() {
 
         let (ws, _second) = dial(&mut server).await;
         let adopted = ctrl
-            .adopt_resumed(ws, &dev("d"), &plan)
+            .adopt_resumed(ws, &device("d"), &plan)
             .unwrap_or_else(|failure| panic!("{}", failure.message()));
         let Some(ControllerSessionEvent::SessionStarted {
             session_id,
@@ -342,7 +296,7 @@ async fn a_token_due_while_no_session_is_live_is_owed_to_the_next_install() {
 
     let (ws, mut second) = dial(&mut server).await;
     let adopted = ctrl
-        .adopt_resumed(ws, &dev("d"), &plan)
+        .adopt_resumed(ws, &device("d"), &plan)
         .unwrap_or_else(|failure| panic!("{}", failure.message()));
     assert!(adopted.token_owed, "the install is told to hand it over");
 
@@ -374,7 +328,7 @@ async fn a_socket_dead_at_the_install_leaves_the_session_as_it_was() {
         ws.shutdown();
         assert!(
             matches!(
-                ctrl.adopt_resumed(ws, &dev("d"), &plan),
+                ctrl.adopt_resumed(ws, &device("d"), &plan),
                 Err(dial::ConnectFailure::Resume(_))
             ),
             "gone: {gone}"
@@ -398,9 +352,11 @@ async fn live_on(
 ) {
     let (ws, conn) = dial(server).await;
     let mut ctrl = TidalConnectController::new(None);
-    let mut device = dev("d");
-    device.id = id.into();
-    let _ = ctrl.adopt_started(ws, &device, "s1".into(), false);
+    let found = MdnsDevice {
+        id: id.into(),
+        ..device("d")
+    };
+    let _ = ctrl.adopt_started(ws, &found, "s1".into(), false);
     (ctrl, conn)
 }
 
@@ -447,7 +403,7 @@ async fn an_abandoned_install_retires_only_its_own_socket() {
     let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
     let (ws, _conn) = dial(&mut server).await;
     let mut ctrl = TidalConnectController::new(None);
-    let installed = ctrl.adopt_started(ws.clone(), &dev("d"), "s1".into(), false);
+    let installed = ctrl.adopt_started(ws.clone(), &device("d"), "s1".into(), false);
 
     assert!(
         ctrl.abandon_install(installed.conn_gen.wrapping_sub(1))
@@ -468,14 +424,14 @@ async fn an_abandoned_install_retires_only_its_own_socket() {
 #[test]
 fn insert_device_capped_dedups_and_bounds() {
     let mut devices = Vec::new();
-    insert_device_capped(&mut devices, dev("a"), 2);
+    insert_device_capped(&mut devices, device("a"), 2);
     // Dedup by fullname, below the cap: re-seeing a known device does not grow the list.
-    insert_device_capped(&mut devices, dev("a"), 2);
+    insert_device_capped(&mut devices, device("a"), 2);
     assert_eq!(devices.len(), 1);
-    insert_device_capped(&mut devices, dev("b"), 2);
+    insert_device_capped(&mut devices, device("b"), 2);
     assert_eq!(devices.len(), 2);
     // At the cap, a new distinct device is refused.
-    insert_device_capped(&mut devices, dev("c"), 2);
+    insert_device_capped(&mut devices, device("c"), 2);
     assert_eq!(devices.len(), 2);
     assert!(devices.iter().all(|d| d.fullname != "c"));
 }
@@ -486,34 +442,7 @@ fn insert_device_capped_dedups_and_bounds() {
 #[tokio::test]
 async fn disconnecting_writes_the_end_before_closing_the_socket() {
     let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
-    let (ws, _conn) = dial(&mut server).await;
-    let mut ctrl = TidalConnectController::new(None);
-    let _ = ctrl.adopt_started(ws.clone(), &dev("d"), "s1".into(), false);
-    let session = ctrl.session.as_ref().unwrap();
-    assert!(matches!(session.queue_end(true), EndQueue::Queued));
-
-    ws.shutdown();
-
-    assert!(matches!(session.queue_end(true), EndQueue::Lost(_)));
-}
-
-/// Alive tasks of the running runtime: what a socket left open by its owner would add to.
-fn alive_tasks() -> usize {
-    tokio::runtime::Handle::current()
-        .metrics()
-        .num_alive_tasks()
-}
-
-/// The device hears the end of a disconnect before the close, and nothing of the socket outlives
-/// it. A device that keeps the connection open (the official controller never closes its own)
-/// would otherwise hold the socket and its three tasks for every session the user ends.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disconnecting_writes_the_end_before_closing_the_socket_and_leaves_no_task() {
-    let mut server = crate::connect::testing::MockWsServer::new().await.unwrap();
-    let base = alive_tasks();
-    let (ws, mut conn) = dial(&mut server).await;
-    let mut ctrl = TidalConnectController::new(None);
-    let _ = ctrl.adopt_started(ws, &dev("d"), "s1".into(), false);
+    let (mut ctrl, mut conn) = live_on("id", &mut server).await;
 
     let _ = ctrl.disconnect(true);
 

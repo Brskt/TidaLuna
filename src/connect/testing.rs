@@ -30,8 +30,20 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, accept_async};
 
 use crate::connect::controller::TidalConnectController;
-use crate::connect::types::MdnsDevice;
+use crate::connect::types::{DeviceType, MdnsDevice};
 use crate::connect::ws::client::WsClient;
+
+/// A loopback TIDAL Connect device named `fullname`.
+pub fn device(fullname: &str) -> MdnsDevice {
+    MdnsDevice {
+        addresses: vec!["127.0.0.1".into()],
+        friendly_name: "n".into(),
+        fullname: fullname.into(),
+        id: "id".into(),
+        port: 1,
+        device_type: DeviceType::TidalConnect,
+    }
+}
 
 /// A mock websocket server bound to a random loopback port.
 ///
@@ -99,7 +111,7 @@ pub async fn live_controller(
     server: &mut MockWsServer,
     device: &MdnsDevice,
 ) -> (Arc<Mutex<TidalConnectController>>, u64, MockWsConnection) {
-    let port: u16 = server.url().rsplit(':').next().unwrap().parse().unwrap();
+    let port = server.port();
     let (event_tx, _events) = mpsc::channel(8);
     let dialing =
         tokio::spawn(async move { WsClient::connect("127.0.0.1", port, true, event_tx).await });

@@ -5,19 +5,14 @@ use std::sync::Arc;
 use super::*;
 use crate::connect::mdns::browser::BrowserEvent;
 use crate::connect::testing::MockWsServer;
-use crate::connect::types::DeviceType;
 
 /// Device `fullname`, announced at `address` and `port`.
 fn device(fullname: &str, address: &str, port: u16) -> MdnsDevice {
     MdnsDevice {
         addresses: vec![address.into()],
         port,
-        device_type: DeviceType::TidalConnect,
+        ..crate::connect::testing::device(fullname)
     }
-}
-
-fn port_of(server: &MockWsServer) -> u16 {
-    server.url().rsplit(':').next().unwrap().parse().unwrap()
 }
 
 /// TIDAL resumes a cast before mDNS has answered, naming the device by key and carrying an
@@ -42,7 +37,7 @@ async fn a_request_waits_for_mdns_and_dials_what_it_resolved() {
         .handle_browser_event(BrowserEvent::DeviceFound(device(
             "tidal",
             "127.0.0.1",
-            port_of(&server),
+            server.port(),
         )));
 
     let dialled = dialling.await.unwrap().ok().expect("connected").1;
@@ -61,7 +56,7 @@ async fn a_device_mdns_never_found_is_not_dialled() {
     let ctrl = Mutex::new(TidalConnectController::new(None));
     let (events, _events_rx) = mpsc::channel(8);
 
-    let requested = device("ghost", "127.0.0.1", port_of(&server));
+    let requested = device("ghost", "127.0.0.1", server.port());
     let outcome = dial_requested(&ctrl, &requested, Duration::from_millis(100), true, events).await;
 
     assert!(matches!(outcome, Err(ConnectFailure::Unresolved(_))));
@@ -77,7 +72,7 @@ async fn dialled(
     mpsc::Receiver<WsClientEvent>,
     crate::connect::testing::MockWsConnection,
 ) {
-    let port = port_of(server);
+    let port = server.port();
     let (events, events_rx) = mpsc::channel(64);
     let dialling =
         tokio::spawn(async move { WsClient::connect("127.0.0.1", port, true, events).await });

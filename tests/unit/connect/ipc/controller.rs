@@ -8,18 +8,10 @@ use super::*;
 use crate::connect::controller::server_info::ServerInfoClaim;
 use crate::connect::mdns::browser::BrowserEvent;
 use crate::connect::testing::{MockWsServer, live_controller};
-use crate::connect::types::DeviceType;
 use crate::logging::take_lines;
 
 fn device() -> MdnsDevice {
-    MdnsDevice {
-        addresses: vec!["127.0.0.1".into()],
-        friendly_name: "n".into(),
-        fullname: "d".into(),
-        id: "id".into(),
-        port: 1,
-        device_type: DeviceType::TidalConnect,
-    }
+    crate::connect::testing::device("d")
 }
 
 #[derive(Default)]
