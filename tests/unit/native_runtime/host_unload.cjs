@@ -65,7 +65,7 @@ const ASSERTIONS = `
             "function tick(k) { return function() { globalThis[P + k] = (globalThis[P + k] || 0) + 1; }; }",
             "setInterval(tick('free'), 5);",
             "timers.setInterval(tick('mod'), 5);",
-            "setTimeout(tick('late'), 1500);",
+            "exports.armLate = function() { setTimeout(tick('late'), 50); };",
             "setImmediate(function again() { tick('imm')(); setImmediate(again); });",
             "exports.startFetch = function() {",
             "  fetch('http://127.0.0.1:9/x').then(tick('fetchok'), function(e) { globalThis[P + 'fetcherr'] = e.message; });",
@@ -94,6 +94,9 @@ const ASSERTIONS = `
         var bBefore = n("b_free");
 
         t("the module holds a grant store while loaded", grantStores.has("Unload/a.native.ts"), true);
+        // Armed in the same synchronous turn as the cleanup that follows: no turn of the loop
+        // lets it fire first, and the pauses below outlast it if the cleanup missed it.
+        send({ type: "call", name: "Unload/a.native.ts", fn: "armLate", args: [] });
         var c = await ask({ type: "cleanup", name: "Unload/a.native.ts" });
         t("cleanup is answered", c && c.ok === true, true);
         t("its grant store is gone", grantStores.has("Unload/a.native.ts"), false);
