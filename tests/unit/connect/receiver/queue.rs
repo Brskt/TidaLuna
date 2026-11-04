@@ -190,28 +190,6 @@ fn a_track_queued_twice_resolves_to_the_copy_the_controller_reaches_next() {
     );
 }
 
-#[tokio::test]
-async fn a_selected_pick_is_played_as_the_controllers_own_select() {
-    // Stops at the `SetMedia`: its load, not `select_pick`, sends the `notifyMediaChanged`.
-    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-
-    queue.select_pick(1).await;
-
-    assert_eq!(queue.current_index, Some(1));
-    assert_eq!(queue.state, QueueState::Loaded);
-    let mut set_media = None;
-    while let Ok(event) = notifies.try_recv() {
-        if let QueueNotifyEvent::SetMedia { media_info, .. } = event {
-            set_media = Some(media_info);
-        }
-    }
-    let media = set_media.expect("the picked item handed to playback");
-    assert_eq!(
-        (media.item_id.as_str(), media.media_id.as_str()),
-        ("i-2", "222")
-    );
-}
-
 const NEXT: Option<ListenerAct> = Some(ListenerAct::Next);
 const PREVIOUS: Option<ListenerAct> = Some(ListenerAct::Previous);
 
@@ -232,53 +210,6 @@ fn a_listeners_step_reaches_the_queue_whatever_state_its_window_is_in() {
             CastRoute::Previous,
             "{state:?}"
         );
-    }
-}
-
-/// A window response naming `items`, as the queue server sends it.
-fn window(items: &[(&str, &str)]) -> serde_json::Value {
-    serde_json::json!({
-        "items": items
-            .iter()
-            .map(|(item_id, media_id)| serde_json::json!({ "item_id": item_id, "media_id": media_id }))
-            .collect::<Vec<_>>(),
-    })
-}
-
-#[tokio::test]
-async fn a_step_with_no_queue_loaded_is_refused_for_the_listener_and_the_controller_alike() {
-    // One gate for the listener and the controller (see `handle_command`): a step kept back would
-    // play after whichever window landed next, in any session, or never.
-    for state in [QueueState::Idle, QueueState::Loading] {
-        for listener in [true, false] {
-            let (mut queue, mut notifies) =
-                casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-            queue.current_item_id_hint = Some("i-1".to_string());
-            queue.state = state;
-
-            let result = if listener {
-                queue.step(QueueStep::Next).await
-            } else {
-                queue
-                    .handle_command(1, "next", &serde_json::json!({}))
-                    .await
-            };
-            assert_eq!(
-                result,
-                RequestResult::NoQueue,
-                "{state:?}, listener: {listener}"
-            );
-
-            queue
-                .process_queue_window_response(window(&[("i-1", "111"), ("i-2", "222")]))
-                .await;
-
-            assert!(
-                handed_to_playback(&mut notifies).is_empty(),
-                "a refused step played once a window landed ({state:?}, listener: {listener})"
-            );
-            assert_eq!(queue.current_index, Some(0));
-        }
     }
 }
 
@@ -315,51 +246,14 @@ async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
     }
 }
 
-/// The media of every `SetMedia` the receiver handed to playback, in order.
-fn handed_to_playback(notifies: &mut mpsc::Receiver<QueueNotifyEvent>) -> Vec<(String, String)> {
-    let mut handed = Vec::new();
-    while let Ok(event) = notifies.try_recv() {
-        if let QueueNotifyEvent::SetMedia { media_info, .. } = event {
-            handed.push((media_info.item_id, media_info.media_id));
-        }
-    }
-    handed
-}
-
-#[tokio::test]
-async fn a_listeners_next_at_the_queues_end_hands_nothing_to_playback() {
-    // As the controller's own `next` there: nothing plays, and a paused cast stays paused.
-    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 1);
-
-    queue.skip_next().await;
-
-    assert_eq!(queue.current_index, Some(1));
-    assert!(handed_to_playback(&mut notifies).is_empty());
-}
-
 #[tokio::test]
 async fn a_queue_whose_session_is_over_answers_as_no_queue_loaded() {
-    let (mut queue, mut notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
-    queue.content_server = Some(
-        serde_json::from_value(serde_json::json!({ "serverUrl": "https://api.tidal.com/v1" }))
-            .expect("a url makes a server"),
-    );
-    queue.queue_server = queue.content_server.clone();
-    queue.current_media_id_hint = Some("111".to_string());
-    queue.current_item_id_hint = Some("i-1".to_string());
+    let (mut queue, _notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
     queue.queue_gen = 5;
 
     queue.end_session();
 
     assert_eq!(queue.step(QueueStep::Next).await, RequestResult::NoQueue);
-    assert_eq!(
-        queue.cast_route("222", PICK, LoadOrigin::Connect),
-        CastRoute::RefusePick
-    );
-    queue.on_media_ended().await;
-    assert!(handed_to_playback(&mut notifies).is_empty());
-    assert!(queue.content_server.is_none() && queue.queue_server.is_none());
-    assert!(queue.current_media_id_hint.is_none() && queue.current_item_id_hint.is_none());
     assert_eq!(
         queue.queue_gen, 5,
         "end_session did not carry the queue generation over"

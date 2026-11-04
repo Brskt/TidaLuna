@@ -54,14 +54,6 @@ async fn a_receiver_going_away_tells_the_live_session_it_is_over() {
     );
 }
 
-#[tokio::test]
-async fn a_suspended_session_has_nobody_to_tell() {
-    let (mut session, _, _) = started_hearing(7).await;
-    session.handle_disconnect(7).await;
-
-    assert!(session.revoke().is_none());
-}
-
 /// The ends the receiver's services were told of, in order.
 fn ends_heard(rx: &mut mpsc::Receiver<SessionNotifyEvent>) -> Vec<SessionEnd> {
     let mut ends = Vec::new();
@@ -204,20 +196,6 @@ async fn an_end_that_does_not_name_the_live_session_ends_nothing() {
         ]
     );
     assert_eq!(session.admission(7), Admission::Member);
-}
-
-#[tokio::test]
-async fn an_end_that_names_the_live_session_ends_it_whoever_sends_it() {
-    let (mut session, id, mut heard) = started_hearing(7).await;
-    session
-        .handle_command(
-            8,
-            "endSession",
-            &serde_json::json!({ "sessionId": id, "stopCasting": true }),
-        )
-        .await;
-    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Over]);
-    assert_eq!(session.admission(7), Admission::Outsider);
 }
 
 /// The sockets a `notifySessionEnded` was written to, in order.

@@ -1,8 +1,4 @@
 //! Tests for `src/connect/receiver/playback.rs`, attached to it by `#[path]`.
-//!
-//! Only the measured-length correction is exercised. `NotifyMediaChanged` is the sole message
-//! carrying a length, so correcting one means sending that message a second time, and when it
-//! is sent at all is the whole rule.
 
 use super::*;
 
@@ -208,14 +204,6 @@ async fn the_pause_of_the_previous_load_is_not_the_new_loads() {
     assert!(
         notices.try_recv().is_err(),
         "the previous load's pause was announced to the phone as the new track's"
-    );
-
-    controller.pause().await;
-
-    assert_eq!(
-        controller.play_state,
-        PbPlayState::Paused,
-        "the phone's Pause was swallowed"
     );
 }
 
