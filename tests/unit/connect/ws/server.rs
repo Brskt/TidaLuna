@@ -192,37 +192,41 @@ fn alive_tasks() -> usize {
         .num_alive_tasks()
 }
 
-/// ESTABLISHED server-side sockets of the connection `peer` holds to `port`. The table is
-/// host-wide and a freed port goes to any other socket; only the connection's own 4-tuple
-/// counts. Read from `/proc/net/tcp` (Linux only; elsewhere always 0, and the tests below
-/// check the tasks alone).
-fn established_sockets(port: u16, peer: std::net::SocketAddr) -> usize {
-    #[cfg(target_os = "linux")]
-    {
-        let std::net::SocketAddr::V4(peer) = peer else {
-            panic!("the peer is not on IPv4")
-        };
-        // The kernel's spelling: the octets as one little-endian word, the port in hex.
-        let spell = |ip: std::net::Ipv4Addr, port: u16| {
-            format!("{:08X}:{port:04X}", u32::from_le_bytes(ip.octets()))
-        };
-        let local = spell(std::net::Ipv4Addr::LOCALHOST, port);
-        let remote = spell(*peer.ip(), peer.port());
-        std::fs::read_to_string("/proc/net/tcp")
-            .unwrap()
-            .lines()
-            .skip(1)
-            .filter(|l| {
-                let f: Vec<&str> = l.split_whitespace().collect();
-                f[1] == local && f[2] == remote && f[3] == "01"
-            })
-            .count()
+/// The server's ESTABLISHED socket to `peer`, named as a descriptor link (`socket:[inode]`).
+/// The table is host-wide and a freed port goes to any other socket; only the connection's own
+/// 4-tuple counts. Read from `/proc/net/tcp` (Linux only; elsewhere the tests check the tasks).
+#[cfg(target_os = "linux")]
+fn server_socket(port: u16, peer: std::net::SocketAddr) -> String {
+    let std::net::SocketAddr::V4(peer) = peer else {
+        panic!("the peer is not on IPv4")
+    };
+    // The kernel's spelling: the octets as one little-endian word, the port in hex.
+    let spell = |ip: std::net::Ipv4Addr, port: u16| {
+        format!("{:08X}:{port:04X}", u32::from_le_bytes(ip.octets()))
+    };
+    let local = spell(std::net::Ipv4Addr::LOCALHOST, port);
+    let remote = spell(*peer.ip(), peer.port());
+    let table = std::fs::read_to_string("/proc/net/tcp").unwrap();
+    let mut rows = table
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|f| f[1] == local && f[2] == remote && f[3] == "01");
+    match (rows.next(), rows.next()) {
+        (Some(f), None) => format!("socket:[{}]", f[9]),
+        _ => panic!("the server's socket to the client is not seen ESTABLISHED, once"),
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (port, peer);
-        0
-    }
+}
+
+/// Whether this process still has a descriptor on `socket`. Its own table, not the socket's
+/// state: a child that a parallel test forks holds a copy of every descriptor until its exec,
+/// which keeps the socket ESTABLISHED for a moment after the server closed it.
+#[cfg(target_os = "linux")]
+fn holds(socket: &str) -> bool {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .flatten()
+        .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|link| link.as_os_str() == socket))
 }
 
 async fn connect_peer(port: u16, rcvbuf: u32) -> Peer {
@@ -268,7 +272,6 @@ async fn park_then_remove(removal: Removal) {
     let base = alive_tasks();
 
     let mut peer = connect_peer(port, 4096).await;
-    let peer_addr = peer.get_ref().get_ref().0.local_addr().unwrap();
     let Some(ClientEvent::Connected(id)) = events.recv().await else {
         panic!("no Connected")
     };
@@ -282,12 +285,13 @@ async fn park_then_remove(removal: Removal) {
         1,
         "evict fired: not the path under test"
     );
-    // The control: finding the live socket keeps the zeros below from being vacuous.
+    // The control: the live socket is among our descriptors, or the absences below prove nothing.
     #[cfg(target_os = "linux")]
-    assert_eq!(
-        established_sockets(port, peer_addr),
-        1,
-        "the server's socket to the client is not seen ESTABLISHED"
+    let socket = server_socket(port, peer.get_ref().get_ref().0.local_addr().unwrap());
+    #[cfg(target_os = "linux")]
+    assert!(
+        holds(&socket),
+        "the server's socket is not among this process's descriptors"
     );
 
     match removal {
@@ -318,9 +322,9 @@ async fn park_then_remove(removal: Removal) {
             base,
             "{removal:?}: a task of the removed client outlived its entry"
         );
-        assert_eq!(
-            established_sockets(port, peer_addr),
-            0,
+        #[cfg(target_os = "linux")]
+        assert!(
+            !holds(&socket),
             "{removal:?}: the removed client's socket is still open"
         );
     }
@@ -335,9 +339,9 @@ async fn park_then_remove(removal: Removal) {
         0,
         "{removal:?}: a task outlived the shutdown"
     );
-    assert_eq!(
-        established_sockets(port, peer_addr),
-        0,
+    #[cfg(target_os = "linux")]
+    assert!(
+        !holds(&socket),
         "{removal:?}: a socket outlived the shutdown"
     );
     drop(peer);
