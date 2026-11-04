@@ -1421,8 +1421,8 @@ mod windows_impl {
     ///
     /// The PID comes from the kernel, not the other end, and the grant reaches
     /// exactly the process a link written here would (`ASFW_ANY` would hand it to
-    /// the whole session). Ungated for the reason the lost-link report is (see
-    /// `hand_off`).
+    /// the whole session). A refusal is ungated for the reason the lost-link report
+    /// is (see `hand_off`); a success speaks only under `LOGS`, as the others there do.
     fn grant_foreground(pipe: HANDLE) {
         let mut pid: u32 = 0;
         // SAFETY: a live client end of a named pipe; pid receives the server's id.
@@ -1443,7 +1443,7 @@ mod windows_impl {
                 unsafe { GetLastError() }
             );
         } else {
-            crate::verr!("[LOCK]   foreground granted to pid {pid}");
+            crate::vprintln!("[LOCK]   foreground granted to pid {pid}");
         }
     }
 
