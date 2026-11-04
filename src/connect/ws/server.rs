@@ -13,7 +13,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 use crate::connect::runtime::TaskGroup;
-use crate::connect::ws::close::{CLOSE_DEADLINE, read_to_close};
+use crate::connect::ws::close::{CLOSE_DEADLINE, ReadEnd, answer_close, read_to_end};
 use crate::connect::ws::writer;
 
 /// A client socket's life as the routing loop hears it, every socket on one channel. `Connected`
@@ -37,10 +37,11 @@ pub(crate) enum ClientEvent {
 struct ClientHandle {
     write_tx: mpsc::Sender<WsMessage>,
     cancel: DropGuard,
-    /// Cancelled by `shutdown`: the read loop stops serving, then reads up to the peer's Close.
+    /// Cancelled by `shutdown` and `close_after_drain`: the read loop stops serving, then reads to
+    /// the end of the stream.
     closing: CancellationToken,
     /// Cancelled with `closing` by `close_after_drain` alone: the read loop then reports the
-    /// disconnect once it has read to the Close, which a `shutdown` has no loop left to take.
+    /// disconnect once it has read to the end, which a `shutdown` has no loop left to take.
     leaving: CancellationToken,
     _read_task: tokio::task::JoinHandle<()>,
     _heartbeat_task: AbortOnDropHandle<()>,
@@ -160,7 +161,8 @@ impl WsServer {
 
     /// Closes the client `socket_id` once what is queued for it is written, as `shutdown` does for
     /// all of them: a notice sent just before reaches the peer ahead of the Close. The client leaves
-    /// the map at once; its read loop reports the disconnect at the peer's Close, or at the deadline.
+    /// the map at once; its read loop reports the disconnect at the end of its stream, or at the
+    /// deadline.
     pub async fn close_after_drain(&self, socket_id: u32) {
         let Some(client) = self.clients.write().await.remove(&socket_id) else {
             return;
@@ -175,7 +177,7 @@ impl WsServer {
             write_task,
         } = client;
         // As in `shutdown`, the read loop stops serving: a command that follows the notice is
-        // read and dropped. The disconnect is reported once it has read to the Close.
+        // read and dropped. The disconnect is reported once it has read to the end.
         leaving.cancel();
         closing.cancel();
         // The heartbeat, dropped here, holds the only other sender. With it and the handle's own
@@ -213,8 +215,8 @@ impl WsServer {
     ///
     /// What was queued before the call is written before the close frame: the writers drain first.
     /// Cancelled, their biased select would drop every message not yet taken, the session's end
-    /// among them. A socket is released once the peer's Close is read: released on bytes still
-    /// unread, it would be reset, and the reset discards what the peer has yet to receive.
+    /// among them. A socket is released once its stream is read to the end: released on bytes
+    /// still unread, it would be reset, and the reset discards what the peer has yet to receive.
     pub async fn shutdown(&mut self) {
         // Each writer keeps its token uncancelled until it is done: cancelled, it would stop
         // taking its queue.
@@ -393,36 +395,43 @@ async fn accept_loop<L: Borrow<TcpListener>>(
             let leaving = leaving.clone();
             tokio::spawn(async move {
                 let mut read = read;
-                let gone = (events_tx.clone(), clients.clone(), client_alive.clone());
-                let read_cancel = cancel.clone();
-                // `closing` preempts every await of the loop, its sends included: the routing
-                // loop, in its epilogue by then, takes no event.
-                let closed = tokio::select! {
+                // `closing` preempts every await of the loop and of its report, sends included:
+                // the routing loop, in its epilogue by then, takes no event.
+                let reported = tokio::select! {
                     biased;
-                    _ = closing.cancelled() => true,
-                    _ = client_read_loop(
-                        socket_id,
-                        &mut read,
-                        events_tx,
-                        clients,
-                        pong_received,
-                        client_alive,
-                        cancel,
-                    ) => false,
-                };
-                if closed {
-                    // Bounded by the token: the closer cancels it at its deadline.
-                    tokio::select! {
-                        biased;
-                        _ = read_cancel.cancelled() => {}
-                        _ = read_to_close(&mut read) => {}
-                    }
-                    // A `shutdown` has its routing loop gone; a client closed on its own is
-                    // still reported, or the loop would hold the socket for good.
-                    if leaving.is_cancelled() {
-                        let (events_tx, clients, client_alive) = gone;
+                    _ = closing.cancelled() => false,
+                    () = async {
+                        let end = client_read_loop(
+                            socket_id,
+                            &mut read,
+                            &events_tx,
+                            &pong_received,
+                            &cancel,
+                        )
+                        .await;
+                        // Answered ahead of the report, whose drop of the entry aborts the
+                        // writer. A server's reply ends its stream at once.
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => {}
+                            _ = answer_close(end, &mut read) => {}
+                        }
                         report_disconnect(socket_id, &events_tx, &clients, &client_alive).await;
-                    }
+                    } => true,
+                };
+                if reported {
+                    return;
+                }
+                // Our close, bounded by the token: the closer cancels it at its deadline.
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {}
+                    _ = read_to_end(&mut read) => {}
+                }
+                // A `shutdown` has its routing loop gone; a client closed on its own is still
+                // reported, or the loop would hold the socket for good.
+                if leaving.is_cancelled() {
+                    report_disconnect(socket_id, &events_tx, &clients, &client_alive).await;
                 }
             })
         };
@@ -468,19 +477,17 @@ async fn client_read_loop(
     read: &mut futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
     >,
-    events_tx: mpsc::Sender<ClientEvent>,
-    clients: Arc<RwLock<HashMap<u32, ClientHandle>>>,
-    pong_received: Arc<AtomicBool>,
-    client_alive: Arc<AtomicBool>,
-    cancel: CancellationToken,
-) {
+    events_tx: &mpsc::Sender<ClientEvent>,
+    pong_received: &AtomicBool,
+    cancel: &CancellationToken,
+) -> ReadEnd {
     loop {
         let result = tokio::select! {
             biased;
-            _ = cancel.cancelled() => break,
+            _ = cancel.cancelled() => return ReadEnd::Stopped,
             r = read.next() => match r {
                 Some(r) => r,
-                None => break,
+                None => return ReadEnd::Stopped,
             },
         };
         match result {
@@ -503,13 +510,11 @@ async fn client_read_loop(
             Ok(WsMessage::Pong(_)) => {
                 pong_received.store(true, Ordering::Relaxed);
             }
-            Ok(WsMessage::Close(_)) => break,
-            Err(_) => break,
+            Ok(WsMessage::Close(_)) => return ReadEnd::PeerClosed,
+            Err(_) => return ReadEnd::Stopped,
             _ => {}
         }
     }
-
-    report_disconnect(socket_id, &events_tx, &clients, &client_alive).await;
 }
 
 /// Client disconnected: removes its entry and tells the routing loop.

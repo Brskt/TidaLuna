@@ -373,6 +373,24 @@ async fn a_shutdown_ends_the_parked_writer() {
     park_then_remove(Removal::Shutdown).await;
 }
 
+/// A phone's Close is answered before its socket goes: the reply is the reader's to write, the
+/// writer being aborted with the entry the disconnect removes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_close_is_answered() {
+    let (events_tx, events) = mpsc::channel(64);
+    let (mut server, port, _) = start_on_any_port(events_tx).await;
+    drain(events);
+    let (mut write, read) = connect_peer(port, 1 << 16).await.split();
+
+    write.send(WsMessage::Close(None)).await.unwrap();
+    let heard = tokio::time::timeout(Duration::from_secs(5), hear_to_the_end(read))
+        .await
+        .expect("the socket ends");
+    assert!(heard.closed, "the server answered the Close");
+
+    server.shutdown().await;
+}
+
 /// The server dropped without `shutdown` (its owner aborted or panicked).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_server_releases_its_port() {
@@ -678,22 +696,6 @@ async fn a_peer_that_never_answers_the_close_holds_the_shutdown_to_its_deadline(
         "the session's end never reached the peer"
     );
     assert!(bytes.ends_with(&[0x88, 0x00]), "the Close frame came last");
-}
-
-#[tokio::test]
-async fn reading_to_the_close_stops_at_the_peers_close() {
-    let mut frames = futures_util::stream::iter(vec![
-        Ok::<_, ()>(WsMessage::Pong(vec![].into())),
-        Ok(WsMessage::Text("play".into())),
-        Ok(WsMessage::Close(None)),
-        Ok(WsMessage::Text("after".into())),
-    ]);
-    read_to_close(&mut frames).await;
-    assert_eq!(
-        frames.next().await,
-        Some(Ok(WsMessage::Text("after".into()))),
-        "the frame after the Close is left unread"
-    );
 }
 
 /// The next event of a server, failing the test if none comes.
