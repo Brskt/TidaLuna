@@ -15,6 +15,10 @@ pub(crate) enum WsClientEvent {
     Error(String),
 }
 
+/// Bound on a dial (TCP, TLS, WS upgrade): without it an address nothing answers on holds the
+/// caller for the OS connect timeout. Half of what a command then gets (`CMD_TIMEOUT`).
+const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Connection-scoped WebSocket TLS client (controller -> device).
 /// Each instance owns its connection - reconnect = new WsClient.
 pub(crate) struct WsClient {
@@ -38,21 +42,26 @@ impl WsClient {
         let protocol = if disable_tls { "ws" } else { "wss" };
         let url = format!("{protocol}://{address}:{port}");
 
-        let ws_stream = if disable_tls {
-            let (stream, _) = tokio_tungstenite::connect_async(&url).await?;
-            stream
-        } else {
-            let tls_config = super::tls::tidal_client_tls_config()?;
-            let connector = tokio_tungstenite::Connector::Rustls(tls_config);
-            let (stream, _) = tokio_tungstenite::connect_async_tls_with_config(
-                &url,
-                None,
-                false,
-                Some(connector),
-            )
-            .await?;
-            stream
+        let handshake = async {
+            if disable_tls {
+                let (stream, _) = tokio_tungstenite::connect_async(&url).await?;
+                anyhow::Ok(stream)
+            } else {
+                let tls_config = super::tls::tidal_client_tls_config()?;
+                let connector = tokio_tungstenite::Connector::Rustls(tls_config);
+                let (stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+                    &url,
+                    None,
+                    false,
+                    Some(connector),
+                )
+                .await?;
+                Ok(stream)
+            }
         };
+        let ws_stream = tokio::time::timeout(DIAL_TIMEOUT, handshake)
+            .await
+            .map_err(|_| anyhow::anyhow!("Dial timed out after {}s", DIAL_TIMEOUT.as_secs()))??;
 
         let (write, read) = ws_stream.split();
         let connected = Arc::new(AtomicBool::new(true));
