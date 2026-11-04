@@ -22,13 +22,13 @@ fn item(item_id: &str, media_id: &str) -> QueueItem {
     .expect("two ids make a window item")
 }
 
-/// A receiver playing `items[idx]`, with the notify channel in the test's hand.
-fn playing(items: Vec<QueueItem>, idx: usize) -> (QueueManager, mpsc::Receiver<QueueNotifyEvent>) {
-    let (tx, rx) = mpsc::channel(8);
-    let mut queue = QueueManager::new(reqwest::Client::new(), tx);
+/// A receiver playing `items[idx]`, with the outbox of its effects in the test's hand.
+fn playing(items: Vec<QueueItem>, idx: usize) -> (QueueManager, Outbox) {
+    let outbox = Outbox::default();
+    let mut queue = QueueManager::new(reqwest::Client::new(), outbox.clone());
     queue.queue_items = items;
     queue.current_index = Some(idx);
-    (queue, rx)
+    (queue, outbox)
 }
 
 /// A lost CAS is not an error and does not replay our discarded token: the winner's current
@@ -86,7 +86,7 @@ fn a_refresh_is_reconciled_with_the_store_the_cas_left_behind() {
 }
 
 /// A receiver whose window is loaded, playing `items[idx]` for a controller.
-fn casting(items: Vec<QueueItem>, idx: usize) -> (QueueManager, mpsc::Receiver<QueueNotifyEvent>) {
+fn casting(items: Vec<QueueItem>, idx: usize) -> (QueueManager, Outbox) {
     let (mut queue, notifies) = playing(items, idx);
     queue.state = QueueState::Loaded;
     (queue, notifies)
@@ -228,8 +228,7 @@ async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
     ];
     for state in [QueueState::Idle, QueueState::Loading] {
         for (command, payload) in &commands {
-            let (mut queue, mut notifies) =
-                casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
+            let (mut queue, notifies) = casting(vec![item("i-1", "111"), item("i-2", "222")], 0);
             queue.state = state;
 
             assert_eq!(
@@ -238,7 +237,7 @@ async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
                 "{state:?}: {command}"
             );
             assert!(
-                notifies.try_recv().is_err(),
+                notifies.take().is_empty(),
                 "{state:?}: a refused {command} acted anyway"
             );
             assert_eq!(queue.state, state, "{command}");

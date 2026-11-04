@@ -2,7 +2,7 @@ use crate::connect::receiver::session::Admission;
 use crate::connect::ws::server::WsServer;
 
 /// Simplified client communicator: wraps WsServer for unicast and session multicast.
-/// All channel routing is done directly in the routing_loop (receiver/mod.rs).
+/// Event routing is done directly in the routing_loop (receiver/mod.rs).
 pub(crate) struct ClientCommunicator {
     server: WsServer,
 }

@@ -1,5 +1,4 @@
-use tokio::sync::mpsc;
-
+use super::outbox::Outbox;
 use crate::connect::receiver::speaker_bridge::{EventStamp, SpeakerBridge};
 use crate::connect::types::{
     MediaInfo, MediaMetadata, PbPlayState, PbState, PlaybackNotification, PlayerState,
@@ -39,7 +38,7 @@ pub(crate) struct PlaybackController {
     queue_gen: u64,
 
     bridge: SpeakerBridge,
-    notify_tx: mpsc::Sender<PlaybackNotifyEvent>,
+    outbox: Outbox,
 
     last_progress_ms: u64,
     current_duration_ms: u64,
@@ -49,7 +48,7 @@ pub(crate) struct PlaybackController {
 }
 
 impl PlaybackController {
-    pub fn new(bridge: SpeakerBridge, notify_tx: mpsc::Sender<PlaybackNotifyEvent>) -> Self {
+    pub fn new(bridge: SpeakerBridge, outbox: Outbox) -> Self {
         Self {
             state: PbState::NoEngine,
             play_state: PbPlayState::Paused,
@@ -60,7 +59,7 @@ impl PlaybackController {
             load_seq: 0,
             queue_gen: 0,
             bridge,
-            notify_tx,
+            outbox,
             last_progress_ms: 0,
             current_duration_ms: 0,
             last_progress_sent: std::time::Instant::now(),
@@ -68,7 +67,7 @@ impl PlaybackController {
     }
 
     /// Load a media item for playback.
-    pub async fn set_media(&mut self, media_info: MediaInfo, media_seq_no: u32) {
+    pub fn set_media(&mut self, media_info: MediaInfo, media_seq_no: u32) {
         if media_seq_no < self.media_seq_no {
             crate::vprintln!(
                 "[connect::playback] Stale media seq: now={}, recv={}",
@@ -107,12 +106,12 @@ impl PlaybackController {
         if let Some(seq) = handed_to_player {
             self.load_seq = seq;
         }
-        self.notify_media_changed().await;
+        self.notify_media_changed();
         if handed_to_player.is_none() {
             // Nothing reached the player: no `PlayerEvent` will ever arrive, and `Preparing`
             // would stand for the rest of the session. Answer for it here, where the state that
             // would be stranded lives.
-            self.fail("media could not be loaded").await;
+            self.fail("media could not be loaded");
         }
     }
 
@@ -122,7 +121,7 @@ impl PlaybackController {
     }
 
     /// Prepare next media for gapless playback.
-    pub async fn set_next_media(&mut self, media_info: MediaInfo, media_seq_no: u32) {
+    pub fn set_next_media(&mut self, media_info: MediaInfo, media_seq_no: u32) {
         self.next_media = Some(NextMediaSlot {
             media: media_info.clone(),
             media_seq_no,
@@ -131,7 +130,7 @@ impl PlaybackController {
         self.bridge.prepare_next(&media_info);
     }
 
-    pub async fn play(&mut self) {
+    pub fn play(&mut self) {
         match self.state {
             PbState::NoEngine | PbState::Stopped => {
                 crate::vprintln!(
@@ -143,7 +142,7 @@ impl PlaybackController {
                 if self.play_state != PbPlayState::Playing {
                     self.play_state = PbPlayState::Playing;
                     self.bridge.play();
-                    self.notify_player_status().await;
+                    self.notify_player_status();
                 }
             }
             PbState::Preparing => {
@@ -156,7 +155,7 @@ impl PlaybackController {
         }
     }
 
-    pub async fn pause(&mut self) {
+    pub fn pause(&mut self) {
         match self.state {
             PbState::NoEngine | PbState::Stopped => {
                 crate::vprintln!(
@@ -168,7 +167,7 @@ impl PlaybackController {
                 if self.play_state != PbPlayState::Paused {
                     self.play_state = PbPlayState::Paused;
                     self.bridge.pause();
-                    self.notify_player_status().await;
+                    self.notify_player_status();
                 }
             }
             PbState::Preparing | PbState::Completed => {
@@ -177,7 +176,7 @@ impl PlaybackController {
         }
     }
 
-    pub async fn stop(&mut self) {
+    pub fn stop(&mut self) {
         if matches!(self.state, PbState::NoEngine) {
             return;
         }
@@ -188,10 +187,10 @@ impl PlaybackController {
         self.bridge.stop();
         self.current_media = None;
         self.next_media = None;
-        self.notify_player_status().await;
+        self.notify_player_status();
     }
 
-    pub async fn seek(&mut self, position_ms: u64) {
+    pub fn seek(&mut self, position_ms: u64) {
         if matches!(self.state, PbState::NoEngine | PbState::Stopped) {
             crate::vprintln!(
                 "[connect::playback] Illegal state for seek: {:?}",
@@ -213,7 +212,7 @@ impl PlaybackController {
         self.bridge.set_mute(mute)
     }
 
-    pub async fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.engine_gen += 1;
         crate::connect::bridge::ENGINE_GEN
             .store(self.engine_gen, std::sync::atomic::Ordering::Relaxed);
@@ -231,7 +230,7 @@ impl PlaybackController {
     }
 
     /// Player finished preparing (Ready state).
-    pub async fn on_prepared(&mut self, from: EventStamp) {
+    pub fn on_prepared(&mut self, from: EventStamp) {
         if !self.hears(from) {
             crate::vprintln!(
                 "[connect::playback] Stale prepared: {:?}, current gen={} seq={}",
@@ -251,11 +250,11 @@ impl PlaybackController {
         if self.play_state == PbPlayState::Playing {
             self.bridge.play();
         }
-        self.notify_player_status().await;
+        self.notify_player_status();
     }
 
     /// Player state changed.
-    pub async fn on_status_updated(&mut self, player_state: PlayerState, from: EventStamp) {
+    pub fn on_status_updated(&mut self, player_state: PlayerState, from: EventStamp) {
         if !self.hears(from) {
             return;
         }
@@ -264,16 +263,11 @@ impl PlaybackController {
             PlayerState::Paused => self.play_state = PbPlayState::Paused,
             PlayerState::Buffering | PlayerState::Idle => {}
         }
-        self.notify_player_status().await;
+        self.notify_player_status();
     }
 
     /// Player progress update.
-    pub async fn on_progress_updated(
-        &mut self,
-        progress_ms: u64,
-        duration_ms: u64,
-        from: EventStamp,
-    ) {
+    pub fn on_progress_updated(&mut self, progress_ms: u64, duration_ms: u64, from: EventStamp) {
         if !self.hears(from) {
             return;
         }
@@ -284,7 +278,7 @@ impl PlaybackController {
         // Throttle progress sent to the session to at most one per second
         if self.last_progress_sent.elapsed() >= std::time::Duration::from_secs(1) {
             self.last_progress_sent = std::time::Instant::now();
-            self.notify_player_status().await;
+            self.notify_player_status();
         }
     }
 
@@ -292,7 +286,7 @@ impl PlaybackController {
     /// message carrying a length: correcting one means sending it a second time.
     /// It is sent only when the figure actually changes: a repeat the controller did not need
     /// is a repeat it might render.
-    pub async fn on_duration_measured(
+    pub fn on_duration_measured(
         &mut self,
         duration_ms: u64,
         track_id: Option<&str>,
@@ -328,47 +322,44 @@ impl PlaybackController {
             return;
         }
         self.current_duration_ms = duration_ms;
-        self.notify_media_changed().await;
+        self.notify_media_changed();
     }
 
     /// Track finished playing.
-    pub async fn on_playback_completed(&mut self, from: EventStamp) {
+    pub fn on_playback_completed(&mut self, from: EventStamp) {
         if !self.hears(from) {
             return;
         }
         self.state = PbState::Completed;
-        self.notify_player_status().await;
+        self.notify_player_status();
 
         // Check if gapless next media is valid
         if let Some(next) = self.next_media.take() {
             if next.queue_gen == self.queue_gen {
                 // Queue unchanged - use preloaded next
-                self.set_media(next.media, next.media_seq_no).await;
+                self.set_media(next.media, next.media_seq_no);
                 return;
             }
             crate::vprintln!("[connect::playback] Next media invalidated: queue changed");
         }
 
         // No valid next - ask QueueManager
-        let _ = self
-            .notify_tx
-            .send(PlaybackNotifyEvent::Internal(
-                PlaybackInternalEvent::MediaCompleted { has_next: false },
-            ))
-            .await;
+        self.outbox.push(PlaybackNotifyEvent::Internal(
+            PlaybackInternalEvent::MediaCompleted { has_next: false },
+        ));
     }
 
     /// Playback error.
-    pub async fn on_playback_error(&mut self, status_code: &str, from: EventStamp) {
+    pub fn on_playback_error(&mut self, status_code: &str, from: EventStamp) {
         if !self.hears(from) {
             return;
         }
-        self.fail(status_code).await;
+        self.fail(status_code);
     }
 
     /// The current track cannot play: the controller hears it, and the state settles to
     /// `Stopped`.
-    async fn fail(&mut self, status_code: &str) {
+    fn fail(&mut self, status_code: &str) {
         crate::vprintln!("[connect::playback] Error: {}", status_code);
 
         let notification = PlaybackNotification::NotifyPlaybackError {
@@ -376,14 +367,11 @@ impl PlaybackController {
             status_code: Some(status_code.to_string()),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self
-                .notify_tx
-                .send(PlaybackNotifyEvent::ToSession(msg))
-                .await;
+            self.outbox.push(PlaybackNotifyEvent::ToSession(msg));
         }
 
         self.state = PbState::Stopped;
-        self.notify_player_status().await;
+        self.notify_player_status();
     }
 
     /// The track the cast plays, whatever the queue's window says. `None` before anything was
@@ -392,7 +380,7 @@ impl PlaybackController {
         self.current_media.as_ref()
     }
 
-    async fn notify_player_status(&self) {
+    fn notify_player_status(&self) {
         let player_state = match (self.state, self.play_state) {
             (PbState::Started, PbPlayState::Playing) => PlayerState::Playing,
             (PbState::Started, PbPlayState::Paused) => PlayerState::Paused,
@@ -413,15 +401,10 @@ impl PlaybackController {
             "playerState": player_state,
             "progress": self.last_progress_ms,
         });
-        {
-            let _ = self
-                .notify_tx
-                .send(PlaybackNotifyEvent::ToSession(msg))
-                .await;
-        }
+        self.outbox.push(PlaybackNotifyEvent::ToSession(msg));
     }
 
-    async fn notify_media_changed(&self) {
+    fn notify_media_changed(&self) {
         if let Some(ref media) = self.current_media {
             // The native parser takes all 7 fields as fixed types: a null srcUrl or
             // customData fails it.
@@ -451,10 +434,7 @@ impl PlaybackController {
                 media_info: Box::new(announced_media),
             };
             if let Ok(msg) = serde_json::to_value(&notification) {
-                let _ = self
-                    .notify_tx
-                    .send(PlaybackNotifyEvent::ToSession(msg))
-                    .await;
+                self.outbox.push(PlaybackNotifyEvent::ToSession(msg));
             }
         }
     }

@@ -2,7 +2,7 @@
 //!
 //! These are the per-command bodies dispatched from
 //! [`super::QueueManager::dispatch`]. Splitting them into their own file
-//! keeps `mod.rs` focused on the state machine, channel wiring, and HTTP
+//! keeps `mod.rs` focused on the state machine, its effects, and HTTP
 //! orchestration while the command semantics live here.
 //!
 //! Methods stay on `QueueManager` via a separate `impl` block: Rust allows
@@ -20,7 +20,7 @@ use super::{
 impl QueueManager {
     pub(super) async fn proc_load_cloud_queue(&mut self, payload: &serde_json::Value) {
         self.state = QueueState::Loading;
-        self.bump_queue_gen().await;
+        self.bump_queue_gen();
 
         let has_content = payload.get("contentServerInfo").is_some();
         let has_queue = payload.get("queueServerInfo").is_some();
@@ -107,13 +107,10 @@ impl QueueManager {
                     self.current_item_id_hint = Some(media.item_id.clone());
                     resolve_media_url(&self.http, self.content_server.as_ref(), &mut media).await;
                     let seq = next_media_seq();
-                    let _ = self
-                        .notify_tx
-                        .send(QueueNotifyEvent::SetMedia {
-                            media_info: media,
-                            media_seq_no: seq,
-                        })
-                        .await;
+                    self.outbox.push(QueueNotifyEvent::SetMedia {
+                        media_info: media,
+                        media_seq_no: seq,
+                    });
                 }
                 Err(e) => {
                     crate::vprintln!("[connect::queue] currentMediaInfo parse FAILED: {}", e);
@@ -128,7 +125,7 @@ impl QueueManager {
             payload.get("mediaInfo").is_some()
         );
         self.state = QueueState::Loading;
-        self.bump_queue_gen().await;
+        self.bump_queue_gen();
 
         if let Some(mi) = payload.get("mediaInfo")
             && let Ok(mut media) = serde_json::from_value::<MediaInfo>(mi.clone())
@@ -136,19 +133,16 @@ impl QueueManager {
             resolve_media_url(&self.http, self.content_server.as_ref(), &mut media).await;
             let seq = next_media_seq();
             self.state = QueueState::Loaded;
-            let _ = self
-                .notify_tx
-                .send(QueueNotifyEvent::SetMedia {
-                    media_info: media,
-                    media_seq_no: seq,
-                })
-                .await;
+            self.outbox.push(QueueNotifyEvent::SetMedia {
+                media_info: media,
+                media_seq_no: seq,
+            });
         }
     }
 
     pub(super) async fn proc_select_queue_item(&mut self, payload: &serde_json::Value) {
         self.state = QueueState::Moving;
-        self.bump_queue_gen().await;
+        self.bump_queue_gen();
 
         if let Some(mi) = payload.get("mediaInfo")
             && let Ok(mut media) = serde_json::from_value::<MediaInfo>(mi.clone())
@@ -165,13 +159,10 @@ impl QueueManager {
             resolve_media_url(&self.http, self.content_server.as_ref(), &mut media).await;
             let seq = next_media_seq();
             self.state = QueueState::Loaded;
-            let _ = self
-                .notify_tx
-                .send(QueueNotifyEvent::SetMedia {
-                    media_info: media,
-                    media_seq_no: seq,
-                })
-                .await;
+            self.outbox.push(QueueNotifyEvent::SetMedia {
+                media_info: media,
+                media_seq_no: seq,
+            });
 
             self.reload_queue_window_around_current().await;
         }
@@ -184,7 +175,7 @@ impl QueueManager {
             self.current_item_id()
         );
         self.state = QueueState::Loading;
-        self.bump_queue_gen().await;
+        self.bump_queue_gen();
 
         if let Some(ref qi) = self.queue_info {
             self.load_queue_window(
@@ -206,12 +197,12 @@ impl QueueManager {
             reason: Some(QueueChangeReason::RefreshRequested),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
+            self.outbox.push(QueueNotifyEvent::ToSession(msg));
         }
     }
 
     pub(super) async fn proc_set_repeat_mode(&mut self, payload: &serde_json::Value) {
-        self.bump_queue_gen().await;
+        self.bump_queue_gen();
 
         let mode_str = payload
             .get("repeatMode")
@@ -249,12 +240,12 @@ impl QueueManager {
             reason: Some(QueueChangeReason::RepeatModeChanged),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
+            self.outbox.push(QueueNotifyEvent::ToSession(msg));
         }
     }
 
     pub(super) async fn proc_set_shuffle(&mut self, payload: &serde_json::Value) {
-        self.bump_queue_gen().await;
+        self.bump_queue_gen();
 
         let shuffle = payload
             .get("shuffle")
@@ -285,7 +276,7 @@ impl QueueManager {
             reason: Some(QueueChangeReason::ShuffleChanged),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
+            self.outbox.push(QueueNotifyEvent::ToSession(msg));
         }
     }
 

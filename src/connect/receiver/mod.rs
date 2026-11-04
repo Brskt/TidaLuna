@@ -1,9 +1,11 @@
 pub(crate) mod client_comm;
+pub(crate) mod outbox;
 pub(crate) mod playback;
 pub(crate) mod queue;
 pub(crate) mod session;
 pub(crate) mod speaker_bridge;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ use crate::connect::ws::server::{ClientEvent, WsServer};
 use cef::*;
 
 use client_comm::{ClientCommunicator, DispatchedCommand, classify_command};
+use outbox::{Effect, Outbox};
 use playback::{PlaybackController, PlaybackInternalEvent, PlaybackNotifyEvent};
 use queue::{CastRoute, QueueManager, QueueNotifyEvent, QueueStep};
 use session::{ReceiverSession, SessionEnd, SessionInternalEvent, SessionNotifyEvent};
@@ -89,16 +92,14 @@ impl ConnectReceiver {
         let tasks = Arc::new(TaskGroup::new());
         let cancel = tasks.cancel_token();
 
-        let (session_tx, session_rx) = mpsc::channel::<SessionNotifyEvent>(64);
-        let (playback_tx, playback_rx) = mpsc::channel::<PlaybackNotifyEvent>(64);
-        let (queue_tx, queue_rx) = mpsc::channel::<QueueNotifyEvent>(64);
         let (bridge_tx, bridge_rx) = mpsc::channel::<BridgeEvent>(128);
 
         // Services
-        let session_mgr = ReceiverSession::new(session_tx);
+        let outbox = Outbox::default();
+        let session_mgr = ReceiverSession::new(outbox.clone());
         let bridge = SpeakerBridge::new();
-        let playback_ctrl = PlaybackController::new(bridge, playback_tx);
-        let queue_mgr = QueueManager::new(http, queue_tx);
+        let playback_ctrl = PlaybackController::new(bridge, outbox.clone());
+        let queue_mgr = QueueManager::new(http, outbox.clone());
         let client_comm = ClientCommunicator::new(server);
 
         let routing_cancel = cancel.clone();
@@ -109,11 +110,9 @@ impl ConnectReceiver {
                 session_mgr,
                 playback_ctrl,
                 queue_mgr,
+                outbox,
                 bridge_rx,
                 client_rx,
-                session_rx,
-                playback_rx,
-                queue_rx,
                 routing_cancel,
             ),
         )?;
@@ -160,17 +159,14 @@ impl ConnectReceiver {
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 async fn routing_loop(
     mut client_comm: ClientCommunicator,
     mut session_mgr: ReceiverSession,
     mut playback_ctrl: PlaybackController,
     mut queue_mgr: QueueManager,
+    outbox: Outbox,
     mut bridge_rx: mpsc::Receiver<BridgeEvent>,
     mut client_rx: mpsc::Receiver<ClientEvent>,
-    mut session_rx: mpsc::Receiver<SessionNotifyEvent>,
-    mut playback_rx: mpsc::Receiver<PlaybackNotifyEvent>,
-    mut queue_rx: mpsc::Receiver<QueueNotifyEvent>,
     cancel: CancellationToken,
 ) {
     crate::vprintln!("[connect::receiver] Routing loop started");
@@ -187,9 +183,9 @@ async fn routing_loop(
     crate::connect::bridge::set_client_connected(false);
 
     // The token is raced against each turn as a whole, the arm's work included, not read only
-    // between turns: an arm awaits the network (queue HTTP, up to HTTP_TIMEOUT_SECS) and the
-    // notify channels this loop itself drains. A turn the token cannot interrupt outlives the
-    // receiver's deadline, and the abort that follows skips the teardown below.
+    // between turns: an arm awaits the network (queue HTTP, up to HTTP_TIMEOUT_SECS). A turn the
+    // token cannot interrupt outlives the receiver's deadline, and the abort that follows skips
+    // the teardown below.
     loop {
         let turn = cancel.run_until_cancelled(async {
         tokio::select! {
@@ -215,17 +211,19 @@ async fn routing_loop(
                                 None
                             }
                             DispatchedCommand::Session { socket_id, command, payload } => {
-                                session_mgr.handle_command(socket_id, &command, &payload).await;
+                                session_mgr.handle_command(socket_id, &command, &payload);
                                 None // Sessions have their own notification protocol
                             }
                             DispatchedCommand::Playback { command, payload } => {
-                                dispatch_playback(&mut playback_ctrl, &command, &payload).await;
+                                dispatch_playback(&mut playback_ctrl, &command, &payload);
                                 Some(RequestResult::Done)
                             }
                             DispatchedCommand::Queue { socket_id, command, payload } => {
                                 Some(queue_mgr.handle_command(socket_id, &command, &payload).await)
                             }
                         };
+                        // Sent ahead of the effects this command queued, which `settle` writes:
+                        // the order the phones take.
                         if let Some(result) = result
                             && let Some(rid) = request_id
                             && let Ok(reply) = serde_json::to_value(result.answer(rid))
@@ -236,97 +234,7 @@ async fn routing_loop(
                     ClientEvent::Disconnected(socket_id) => {
                         connected_sockets.remove(&socket_id);
                         crate::connect::bridge::set_client_connected(!connected_sockets.is_empty());
-                        session_mgr.handle_disconnect(socket_id).await;
-                    }
-                }
-            }
-
-            // Session notifications -> relay to WS + handle internals
-            Some(event) = session_rx.recv() => {
-                match event {
-                    SessionNotifyEvent::Unicast { socket_id, ref message } => {
-                        let _ = client_comm.send_to(socket_id, message).await;
-                    }
-                    SessionNotifyEvent::Close { socket_id } => {
-                        client_comm.close_after_drain(socket_id).await;
-                    }
-                    SessionNotifyEvent::Internal(ref internal) => {
-                        match internal {
-                            SessionInternalEvent::SessionEnded(end) => {
-                                playback_ctrl.reset().await;
-                                match end {
-                                    // Kept for a `resumeSession`: its phone steps on through
-                                    // the same queue.
-                                    SessionEnd::Suspended => {}
-                                    SessionEnd::Over => queue_mgr.end_session(),
-                                }
-                            }
-                            SessionInternalEvent::SessionStarted { session_id } => {
-                                crate::vprintln!("[connect::receiver] Session started: {}", session_id);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Playback notifications -> relay to WS + handle internals
-            Some(event) = playback_rx.recv() => {
-                match event {
-                    PlaybackNotifyEvent::ToSession(ref msg) => {
-                        client_comm.send_to_each(&session_mgr.members(), msg).await;
-                    }
-                    PlaybackNotifyEvent::Internal(ref internal) => {
-                        match internal {
-                            PlaybackInternalEvent::MediaCompleted { has_next } => {
-                                if *has_next {
-                                    queue_mgr.on_request_next_media().await;
-                                } else {
-                                    queue_mgr.on_media_ended().await;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Queue notifications -> relay to WS + dispatch to playback
-            Some(event) = queue_rx.recv() => {
-                match event {
-                    QueueNotifyEvent::ToSession(ref msg) => {
-                        client_comm.send_to_each(&session_mgr.members(), msg).await;
-                    }
-                    QueueNotifyEvent::SetMedia { ref media_info, media_seq_no } => {
-                        crate::vprintln!("[connect::receiver] SetMedia: {} (seq={})", media_info.item_id, media_seq_no);
-                        playback_ctrl.set_media(media_info.clone(), media_seq_no).await;
-                        // Update the local frontend UI with the new track metadata
-                        emit_receiver_metadata(media_info);
-                    }
-                    QueueNotifyEvent::SetNextMedia { media_info, media_seq_no } => {
-                        playback_ctrl.set_next_media(media_info, media_seq_no).await;
-                    }
-                    QueueNotifyEvent::SetVolume { level } => {
-                        // The mirror gets the report of what the player applied: its count is
-                        // what lets the page's later levels be told apart from stale ones.
-                        if let Some(level) = playback_ctrl.set_volume(level) {
-                            crate::connect::ipc::post_emit_with_data(
-                                "connect.receiver.volume_changed",
-                                &level.report(),
-                            );
-                        }
-                    }
-                    QueueNotifyEvent::SetMute { mute } => {
-                        // The mirror gets the levels the player settled on, not the command: an
-                        // unmute restores a level only the player knows, and TIDAL's store would
-                        // otherwise pick its own.
-                        if let Some(level) = playback_ctrl.set_mute(mute) {
-                            crate::connect::ipc::post_emit_with_data(
-                                "connect.receiver.mute_changed",
-                                &level.report(),
-                            );
-                        }
-                    }
-                    QueueNotifyEvent::QueueGenBumped { queue_gen } => {
-                        playback_ctrl.set_queue_gen(queue_gen);
+                        session_mgr.handle_disconnect(socket_id);
                     }
                 }
             }
@@ -336,35 +244,35 @@ async fn routing_loop(
                 match event {
                     BridgeEvent::Prepared { from } => {
                         crate::vprintln!("[connect::bridge] <- Prepared ({:?})", from);
-                        playback_ctrl.on_prepared(from).await;
+                        playback_ctrl.on_prepared(from);
                     }
                     BridgeEvent::StatusUpdated { ref state, from } => {
                         crate::vprintln!("[connect::bridge] <- StatusUpdated {:?} ({:?})", state, from);
-                        playback_ctrl.on_status_updated(*state, from).await;
+                        playback_ctrl.on_status_updated(*state, from);
                     }
                     BridgeEvent::ProgressUpdated { progress_ms, duration_ms, from } => {
                         // Don't log each progress (too noisy); one is logged via flush.rs.
                         // When idle, bridge::forward short-circuits at the source, so
                         // no bridge events reach this loop at all.
-                        playback_ctrl.on_progress_updated(progress_ms, duration_ms, from).await;
+                        playback_ctrl.on_progress_updated(progress_ms, duration_ms, from);
                     }
                     BridgeEvent::PlaybackCompleted { has_next_media, from } => {
                         crate::vprintln!("[connect::bridge] <- PlaybackCompleted has_next={} ({:?})", has_next_media, from);
                         let _ = has_next_media;
-                        playback_ctrl.on_playback_completed(from).await;
+                        playback_ctrl.on_playback_completed(from);
                     }
                     BridgeEvent::PlaybackError { ref status_code, from } => {
                         crate::vprintln!("[connect::bridge] <- PlaybackError {} ({:?})", status_code, from);
-                        playback_ctrl.on_playback_error(status_code, from).await;
+                        playback_ctrl.on_playback_error(status_code, from);
                     }
                     BridgeEvent::DurationMeasured { duration_ms, ref track_id, from } => {
                         crate::vprintln!("[connect::bridge] <- DurationMeasured {}ms ({:?})", duration_ms, from);
-                        playback_ctrl.on_duration_measured(duration_ms, track_id.as_deref(), from).await;
+                        playback_ctrl.on_duration_measured(duration_ms, track_id.as_deref(), from);
                     }
                     BridgeEvent::LocalLoad(load) => {
                         // Answered before anything is selected or stepped. The receiver's load of
-                        // the new track mints in a later turn of this loop, so the answer reaches
-                        // the renderer ahead of every event that load sends.
+                        // the new track mints once the turn settles; the answer reaches the
+                        // renderer ahead of every event that load sends.
                         let route = queue_mgr.cast_route(&load.product_id, load.act, crate::player::current_load().1);
                         crate::ui::flush::post_player_event(route.answer(load.load_id));
                         match route {
@@ -403,6 +311,7 @@ async fn routing_loop(
 
             else => return false,
         }
+        settle(&outbox, &client_comm, &session_mgr, &mut playback_ctrl, &mut queue_mgr).await;
         true
         })
         .await;
@@ -434,22 +343,133 @@ async fn routing_loop(
     // A receiver switched off mid-cast gets no `SessionEnded`: the loop is cancelled before any
     // disconnect is read, and the controller would own the player for the rest of the process.
     // `reset` stops only a cast (`StopScope::Cast`), leaving local music alone.
-    playback_ctrl.reset().await;
+    playback_ctrl.reset();
 
     client_comm.shutdown().await;
     crate::vprintln!("[connect::receiver] Routing loop ended");
 }
 
-/// Dispatch a playback command from a mobile client to the PlaybackController.
-async fn dispatch_playback(
-    ctrl: &mut PlaybackController,
-    command: &str,
-    payload: &serde_json::Value,
+/// The services' effects of a turn, applied before it ends: a phone hears its session start before
+/// the answer to what it sends next, and a word for the session's phones reaches that session. Each
+/// is applied whole, what it asks for in turn (a load announcing its media) before the next.
+async fn settle(
+    outbox: &Outbox,
+    client_comm: &ClientCommunicator,
+    session_mgr: &ReceiverSession,
+    playback_ctrl: &mut PlaybackController,
+    queue_mgr: &mut QueueManager,
 ) {
+    let mut waiting = VecDeque::new();
+    loop {
+        let mut asked = outbox.take();
+        asked.append(&mut waiting);
+        waiting = asked;
+        let Some(effect) = waiting.pop_front() else {
+            break;
+        };
+        match effect {
+            Effect::Session(SessionNotifyEvent::Unicast { socket_id, message }) => {
+                let _ = client_comm.send_to(socket_id, &message).await;
+            }
+            Effect::Session(SessionNotifyEvent::Close { socket_id }) => {
+                client_comm.close_after_drain(socket_id).await;
+            }
+            Effect::Session(SessionNotifyEvent::Internal(SessionInternalEvent::SessionEnded(
+                end,
+            ))) => {
+                playback_ctrl.reset();
+                match end {
+                    // Kept for a `resumeSession`: its phone steps on through the same queue.
+                    SessionEnd::Suspended => {}
+                    SessionEnd::Over => queue_mgr.end_session(),
+                }
+            }
+            Effect::Session(SessionNotifyEvent::Internal(
+                SessionInternalEvent::SessionStarted { session_id },
+            )) => {
+                crate::vprintln!("[connect::receiver] Session started: {}", session_id);
+            }
+            Effect::Playback(PlaybackNotifyEvent::ToSession(msg)) => {
+                client_comm.send_to_each(&session_mgr.members(), &msg).await;
+            }
+            Effect::Playback(PlaybackNotifyEvent::Internal(
+                PlaybackInternalEvent::MediaCompleted { has_next },
+            )) => {
+                if has_next {
+                    queue_mgr.on_request_next_media().await;
+                } else {
+                    queue_mgr.on_media_ended().await;
+                }
+            }
+            Effect::Queue(event) => {
+                apply_queue_effect(*event, client_comm, session_mgr, playback_ctrl).await
+            }
+        }
+    }
+}
+
+/// What the queue asks of the routing loop: a word for the session's phones, or work for playback.
+async fn apply_queue_effect(
+    event: QueueNotifyEvent,
+    client_comm: &ClientCommunicator,
+    session_mgr: &ReceiverSession,
+    playback_ctrl: &mut PlaybackController,
+) {
+    match event {
+        QueueNotifyEvent::ToSession(msg) => {
+            client_comm.send_to_each(&session_mgr.members(), &msg).await;
+        }
+        QueueNotifyEvent::SetMedia {
+            media_info,
+            media_seq_no,
+        } => {
+            crate::vprintln!(
+                "[connect::receiver] SetMedia: {} (seq={})",
+                media_info.item_id,
+                media_seq_no
+            );
+            playback_ctrl.set_media(media_info.clone(), media_seq_no);
+            emit_receiver_metadata(&media_info);
+        }
+        QueueNotifyEvent::SetNextMedia {
+            media_info,
+            media_seq_no,
+        } => {
+            playback_ctrl.set_next_media(media_info, media_seq_no);
+        }
+        QueueNotifyEvent::SetVolume { level } => {
+            // The mirror gets the report of what the player applied: its count is what lets
+            // the page's later levels be told apart from stale ones.
+            if let Some(level) = playback_ctrl.set_volume(level) {
+                crate::connect::ipc::post_emit_with_data(
+                    "connect.receiver.volume_changed",
+                    &level.report(),
+                );
+            }
+        }
+        QueueNotifyEvent::SetMute { mute } => {
+            // The mirror gets the levels the player settled on, not the command: an unmute
+            // restores a level only the player knows, and TIDAL's store would otherwise pick
+            // its own.
+            if let Some(level) = playback_ctrl.set_mute(mute) {
+                crate::connect::ipc::post_emit_with_data(
+                    "connect.receiver.mute_changed",
+                    &level.report(),
+                );
+            }
+        }
+        QueueNotifyEvent::QueueGenBumped { queue_gen } => {
+            playback_ctrl.set_queue_gen(queue_gen);
+        }
+    }
+}
+
+/// Dispatch a playback command from a mobile client to the PlaybackController.
+fn dispatch_playback(ctrl: &mut PlaybackController, command: &str, payload: &serde_json::Value) {
     match command {
-        "play" => ctrl.play().await,
-        "pause" => ctrl.pause().await,
-        "stop" => ctrl.stop().await,
+        "play" => ctrl.play(),
+        "pause" => ctrl.pause(),
+        "stop" => ctrl.stop(),
         "seek" => {
             crate::vprintln!("[connect::playback] seek payload: {}", payload);
             let pos = payload
@@ -457,7 +477,7 @@ async fn dispatch_playback(
                 .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
                 .unwrap_or(0);
             crate::vprintln!("[connect::playback] seek to {}ms", pos);
-            ctrl.seek(pos).await;
+            ctrl.seek(pos);
         }
         _ => {}
     }

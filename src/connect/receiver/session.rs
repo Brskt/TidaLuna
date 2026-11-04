@@ -1,6 +1,6 @@
 use std::collections::HashSet;
-use tokio::sync::mpsc;
 
+use super::outbox::Outbox;
 use crate::connect::consts;
 use crate::connect::types::SessionStatus;
 
@@ -69,15 +69,15 @@ struct SessionData {
 pub(crate) struct ReceiverSession {
     state: ReceiverSessionState,
     session: Option<SessionData>,
-    notify_tx: mpsc::Sender<SessionNotifyEvent>,
+    outbox: Outbox,
 }
 
 impl ReceiverSession {
-    pub fn new(notify_tx: mpsc::Sender<SessionNotifyEvent>) -> Self {
+    pub fn new(outbox: Outbox) -> Self {
         Self {
             state: ReceiverSessionState::None,
             session: None,
-            notify_tx,
+            outbox,
         }
     }
 
@@ -109,16 +109,11 @@ impl ReceiverSession {
     }
 
     /// Dispatch a session command from a mobile client.
-    pub async fn handle_command(
-        &mut self,
-        socket_id: u32,
-        command: &str,
-        payload: &serde_json::Value,
-    ) {
+    pub fn handle_command(&mut self, socket_id: u32, command: &str, payload: &serde_json::Value) {
         match command {
-            "startSession" => self.proc_start_session(socket_id, payload).await,
-            "resumeSession" => self.proc_resume_session(socket_id, payload).await,
-            "endSession" => self.proc_end_session(socket_id, payload).await,
+            "startSession" => self.proc_start_session(socket_id, payload),
+            "resumeSession" => self.proc_resume_session(socket_id, payload),
+            "endSession" => self.proc_end_session(socket_id, payload),
             _ => {
                 crate::vprintln!("[connect::receiver::session] Unknown command: {}", command);
             }
@@ -126,7 +121,7 @@ impl ReceiverSession {
     }
 
     /// A WS client disconnected.
-    pub async fn handle_disconnect(&mut self, socket_id: u32) {
+    pub fn handle_disconnect(&mut self, socket_id: u32) {
         if let Some(ref mut session) = self.session {
             session.connected_sockets.remove(&socket_id);
 
@@ -134,16 +129,30 @@ impl ReceiverSession {
             // the socket gone, and the end is already told.
             if session.connected_sockets.is_empty() && self.state == ReceiverSessionState::Active {
                 // Last client gone -> suspend session (keep for resume)
-                self.handle_session_ended(true).await;
+                self.handle_session_ended(true);
             }
         }
     }
 
-    async fn proc_start_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
+    fn proc_start_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
         // A new session replaces the one held, live or suspended, and its id with it: no phone
-        // can resume the old one after this.
-        if self.session.is_some() {
-            self.handle_session_ended(false).await;
+        // can resume the old one after this. Its other phones hear it is over and are closed, as
+        // TIDAL's receiver tells each one; the starting socket keeps the connection it starts on.
+        let replaced = self.session.as_ref().map(|old| {
+            let mut displaced: Vec<u32> = old
+                .connected_sockets
+                .iter()
+                .copied()
+                .filter(|&socket| socket != socket_id)
+                .collect();
+            displaced.sort_unstable();
+            (session_ended_notice(&old.session_id, false), displaced)
+        });
+        if let Some((notice, displaced)) = replaced {
+            self.handle_session_ended(false);
+            for socket in displaced {
+                self.tell_ended(socket, &notice, true);
+            }
         }
 
         let app_id = payload
@@ -164,8 +173,7 @@ impl ReceiverSession {
         let session_id = match generate_session_id() {
             Some(id) => id,
             None => {
-                self.send_session_error(socket_id, "startSession", "RNG unavailable")
-                    .await;
+                self.send_session_error(socket_id, "startSession", "RNG unavailable");
                 return;
             }
         };
@@ -197,24 +205,18 @@ impl ReceiverSession {
             "sessionId": session_id,
             "joined": false,
         });
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Unicast {
-                socket_id,
-                message: notify,
-            })
-            .await;
+        self.outbox.push(SessionNotifyEvent::Unicast {
+            socket_id,
+            message: notify,
+        });
 
         // Notify internal services
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Internal(
-                SessionInternalEvent::SessionStarted { session_id },
-            ))
-            .await;
+        self.outbox.push(SessionNotifyEvent::Internal(
+            SessionInternalEvent::SessionStarted { session_id },
+        ));
     }
 
-    async fn proc_resume_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
+    fn proc_resume_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
         let requested_sid = payload
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -229,16 +231,12 @@ impl ReceiverSession {
                             "command": "notifySessionResumed",
                             "sessionId": session.session_id,
                         });
-                        let _ = self
-                            .notify_tx
-                            .send(SessionNotifyEvent::Unicast {
-                                socket_id,
-                                message: notify,
-                            })
-                            .await;
+                        self.outbox.push(SessionNotifyEvent::Unicast {
+                            socket_id,
+                            message: notify,
+                        });
                     } else {
-                        self.send_session_error(socket_id, "resumeSession", "Invalid SessionId")
-                            .await;
+                        self.send_session_error(socket_id, "resumeSession", "Invalid SessionId");
                     }
                 }
             }
@@ -257,40 +255,31 @@ impl ReceiverSession {
                         "command": "notifySessionResumed",
                         "sessionId": sid,
                     });
-                    let _ = self
-                        .notify_tx
-                        .send(SessionNotifyEvent::Unicast {
-                            socket_id,
-                            message: notify,
-                        })
-                        .await;
-                    let _ = self
-                        .notify_tx
-                        .send(SessionNotifyEvent::Internal(
-                            SessionInternalEvent::SessionStarted { session_id: sid },
-                        ))
-                        .await;
+                    self.outbox.push(SessionNotifyEvent::Unicast {
+                        socket_id,
+                        message: notify,
+                    });
+                    self.outbox.push(SessionNotifyEvent::Internal(
+                        SessionInternalEvent::SessionStarted { session_id: sid },
+                    ));
                     return;
                 }
-                self.send_session_error(socket_id, "resumeSession", "Session ended")
-                    .await;
+                self.send_session_error(socket_id, "resumeSession", "Session ended");
             }
             ReceiverSessionState::None => {
-                self.send_session_error(socket_id, "resumeSession", "No Session")
-                    .await;
+                self.send_session_error(socket_id, "resumeSession", "No Session");
             }
         }
     }
 
-    async fn proc_end_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
+    fn proc_end_session(&mut self, socket_id: u32, payload: &serde_json::Value) {
         let stop_casting = payload
             .get("stopCasting")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
         if self.state != ReceiverSessionState::Active {
-            self.send_session_error(socket_id, "endSession", "No active session")
-                .await;
+            self.send_session_error(socket_id, "endSession", "No active session");
             return;
         }
 
@@ -306,8 +295,7 @@ impl ReceiverSession {
             .map(|s| s.session_id.clone())
             .filter(|id| id == requested_sid)
         else {
-            self.send_session_error(socket_id, "endSession", "Invalid SessionId")
-                .await;
+            self.send_session_error(socket_id, "endSession", "Invalid SessionId");
             return;
         };
 
@@ -320,25 +308,25 @@ impl ReceiverSession {
         }
 
         // suspended = !stopCasting (if stopCasting=true -> clean end, not suspended)
-        self.handle_session_ended(!stop_casting).await;
+        self.handle_session_ended(!stop_casting);
 
-        // Closed behind the notice, as TIDAL's receiver does (`notifyEndedAndClose`): every socket
-        // that heard a session end for good, only the one that leaves when it is suspended.
+        // Closed behind the notice: every socket that heard a session end for good, only the one
+        // that leaves when it is suspended.
         let notify = session_ended_notice(&session_id, !stop_casting);
         for hearer in hearers {
-            let _ = self
-                .notify_tx
-                .send(SessionNotifyEvent::Unicast {
-                    socket_id: hearer,
-                    message: notify.clone(),
-                })
-                .await;
-            if stop_casting || hearer == socket_id {
-                let _ = self
-                    .notify_tx
-                    .send(SessionNotifyEvent::Close { socket_id: hearer })
-                    .await;
-            }
+            self.tell_ended(hearer, &notify, stop_casting || hearer == socket_id);
+        }
+    }
+
+    /// `notice` to `socket_id`, then, with `close`, the socket closed behind it, as TIDAL's
+    /// receiver does (`notifyEndedAndClose`).
+    fn tell_ended(&self, socket_id: u32, notice: &serde_json::Value, close: bool) {
+        self.outbox.push(SessionNotifyEvent::Unicast {
+            socket_id,
+            message: notice.clone(),
+        });
+        if close {
+            self.outbox.push(SessionNotifyEvent::Close { socket_id });
         }
     }
 
@@ -362,7 +350,7 @@ impl ReceiverSession {
     /// Transition to Ended state.
     /// If suspended=true, keep the session for possible resume.
     /// Handle double-close correctly (idempotent).
-    async fn handle_session_ended(&mut self, suspended: bool) {
+    fn handle_session_ended(&mut self, suspended: bool) {
         if let Some(ref mut session) = self.session {
             if session.status == SessionStatus::Suspended && !suspended {
                 // Already suspended, now a real end -> clear
@@ -383,27 +371,21 @@ impl ReceiverSession {
             SessionEnd::Over
         };
 
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Internal(
-                SessionInternalEvent::SessionEnded(end),
-            ))
-            .await;
+        self.outbox.push(SessionNotifyEvent::Internal(
+            SessionInternalEvent::SessionEnded(end),
+        ));
     }
 
-    async fn send_session_error(&self, socket_id: u32, command: &str, error: &str) {
+    fn send_session_error(&self, socket_id: u32, command: &str, error: &str) {
         let msg = serde_json::json!({
             "command": "notifySessionError",
             "requestedCommand": command,
             "error": error,
         });
-        let _ = self
-            .notify_tx
-            .send(SessionNotifyEvent::Unicast {
-                socket_id,
-                message: msg,
-            })
-            .await;
+        self.outbox.push(SessionNotifyEvent::Unicast {
+            socket_id,
+            message: msg,
+        });
     }
 }
 

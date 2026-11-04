@@ -11,8 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
-
+use super::outbox::Outbox;
 use crate::connect::token_state::{
     AuthStore, CASError, GenerationStatus, RefreshGuard, TerminationReason, TokenState,
 };
@@ -131,7 +130,7 @@ pub(crate) struct QueueManager {
     /// Used for centering queue window requests around the current item.
     current_item_id_hint: Option<String>,
 
-    notify_tx: mpsc::Sender<QueueNotifyEvent>,
+    outbox: Outbox,
 
     /// Pending request for retry after token refresh (single retry only)
     pending_retry: Option<PendingRetry>,
@@ -146,7 +145,7 @@ struct PendingRetry {
 }
 
 impl QueueManager {
-    pub fn new(http: reqwest::Client, notify_tx: mpsc::Sender<QueueNotifyEvent>) -> Self {
+    pub fn new(http: reqwest::Client, outbox: Outbox) -> Self {
         Self {
             state: QueueState::Idle,
             queue_gen: 0,
@@ -159,7 +158,7 @@ impl QueueManager {
             current_index: None,
             current_media_id_hint: None,
             current_item_id_hint: None,
-            notify_tx,
+            outbox,
             pending_retry: None,
             terminal_notified: false,
         }
@@ -171,7 +170,7 @@ impl QueueManager {
     pub fn end_session(&mut self) {
         *self = Self {
             queue_gen: self.queue_gen,
-            ..Self::new(self.http.clone(), self.notify_tx.clone())
+            ..Self::new(self.http.clone(), self.outbox.clone())
         };
     }
 
@@ -258,18 +257,12 @@ impl QueueManager {
             // component, whatever state its queue is in.
             "setVolume" => {
                 if let Some(level) = payload.get("level").and_then(|v| v.as_f64()) {
-                    let _ = self
-                        .notify_tx
-                        .send(QueueNotifyEvent::SetVolume { level })
-                        .await;
+                    self.outbox.push(QueueNotifyEvent::SetVolume { level });
                 }
             }
             "setMute" => {
                 if let Some(mute) = payload.get("mute").and_then(|v| v.as_bool()) {
-                    let _ = self
-                        .notify_tx
-                        .send(QueueNotifyEvent::SetMute { mute })
-                        .await;
+                    self.outbox.push(QueueNotifyEvent::SetMute { mute });
                 }
             }
             _ => {
@@ -397,7 +390,7 @@ impl QueueManager {
     /// through the `notifyMediaChanged` the load sends.
     pub async fn select_pick(&mut self, index: usize) {
         self.state = QueueState::Moving;
-        self.bump_queue_gen().await;
+        self.bump_queue_gen();
         self.current_index = Some(index);
         self.send_set_media(index).await;
         self.state = QueueState::Loaded;
@@ -430,13 +423,10 @@ impl QueueManager {
             let mut media = queue_item_to_media_info(item);
             resolve_media_url(&self.http, self.content_server.as_ref(), &mut media).await;
             let seq = next_media_seq();
-            let _ = self
-                .notify_tx
-                .send(QueueNotifyEvent::SetMedia {
-                    media_info: media,
-                    media_seq_no: seq,
-                })
-                .await;
+            self.outbox.push(QueueNotifyEvent::SetMedia {
+                media_info: media,
+                media_seq_no: seq,
+            });
         }
     }
 
@@ -467,13 +457,10 @@ impl QueueManager {
             if next_idx < self.queue_items.len() {
                 let media = queue_item_to_media_info(&self.queue_items[next_idx]);
                 let seq = next_media_seq();
-                let _ = self
-                    .notify_tx
-                    .send(QueueNotifyEvent::SetNextMedia {
-                        media_info: media,
-                        media_seq_no: seq,
-                    })
-                    .await;
+                self.outbox.push(QueueNotifyEvent::SetNextMedia {
+                    media_info: media,
+                    media_seq_no: seq,
+                });
             }
         }
     }
@@ -546,7 +533,7 @@ impl QueueManager {
                                     self.state = QueueState::Idle;
                                     if !self.terminal_notified {
                                         self.terminal_notified = true;
-                                        self.notify_queue_server_error(401, "revoked").await;
+                                        self.notify_queue_server_error(401, "revoked");
                                     }
                                 }
                                 Err(e) => {
@@ -572,22 +559,21 @@ impl QueueManager {
                             self.notify_queue_server_error(
                                 401,
                                 &format!("invalid_grant: {provider_error}"),
-                            )
-                            .await;
+                            );
                         }
                     }
                     Err(e) => {
                         crate::vprintln!("[connect::queue] Token refresh failed: {e}");
                         self.pending_retry = None;
                         self.state = QueueState::Idle;
-                        self.notify_queue_server_error(401, &format!("{e}")).await;
+                        self.notify_queue_server_error(401, &format!("{e}"));
                     }
                 }
             }
             Err(e) => {
                 crate::vprintln!("[connect::queue] Queue window fetch failed: {e}");
                 self.state = QueueState::Idle;
-                self.notify_queue_server_error(0, &format!("{e}")).await;
+                self.notify_queue_server_error(0, &format!("{e}"));
             }
         }
     }
@@ -851,14 +837,14 @@ impl QueueManager {
                 queue_info: qi.clone(),
             };
             if let Ok(msg) = serde_json::to_value(&notification) {
-                let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
+                self.outbox.push(QueueNotifyEvent::ToSession(msg));
             }
         }
     }
 
-    async fn bump_queue_gen(&mut self) {
+    fn bump_queue_gen(&mut self) {
         self.queue_gen += 1;
-        let _ = self.notify_tx.try_send(QueueNotifyEvent::QueueGenBumped {
+        self.outbox.push(QueueNotifyEvent::QueueGenBumped {
             queue_gen: self.queue_gen,
         });
     }
@@ -891,13 +877,13 @@ impl QueueManager {
         }
     }
 
-    async fn notify_queue_server_error(&self, error_code: u32, message: &str) {
+    fn notify_queue_server_error(&self, error_code: u32, message: &str) {
         let notification = QueueNotification::NotifyQueueServerError {
             error_code,
             details: Some(serde_json::json!({ "description": message })),
         };
         if let Ok(msg) = serde_json::to_value(&notification) {
-            let _ = self.notify_tx.send(QueueNotifyEvent::ToSession(msg)).await;
+            self.outbox.push(QueueNotifyEvent::ToSession(msg));
         }
     }
 }

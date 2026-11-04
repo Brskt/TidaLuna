@@ -451,8 +451,8 @@ async fn a_command_right_behind_a_start_session_is_the_new_members() {
     let heard = heard_on(&mut wire, Duration::from_millis(500)).await;
     let fetched = recv_within(&stall.accepted, Duration::from_secs(5)).await;
     receiver.shutdown(SHUTDOWN_DEADLINE).await;
-    // The step is answered by the arm that took it. `notifySessionStarted` goes through another
-    // arm, which the queue fetch that never ends can hold back: only the step's answer is read.
+    // Only the step's answer is read: the session's start is told first, and the queue fetch
+    // that never ends answers nothing.
     let answers: Vec<String> = heard
         .iter()
         .filter(|m| m["command"] == "notifyRequestResult")
@@ -509,16 +509,12 @@ async fn a_suspended_session_takes_its_phones_commands_again_once_resumed() {
     let resumed = heard_on(&mut wire_2, Duration::from_millis(500)).await;
     receiver.shutdown(SHUTDOWN_DEADLINE).await;
 
-    // Sorted: the session's answers and the step's are written by two arms of the loop.
-    let commands = |heard: &[serde_json::Value]| -> Vec<String> {
-        let mut commands: Vec<String> = heard.iter().map(command_of).collect();
-        commands.sort();
-        commands
-    };
+    let commands =
+        |heard: &[serde_json::Value]| -> Vec<String> { heard.iter().map(command_of).collect() };
     assert_eq!(commands(&suspended), vec!["notifySessionEnded"]);
     assert_eq!(
         commands(&resumed),
-        vec!["notifyRequestResult#9", "notifySessionResumed"]
+        vec!["notifySessionResumed", "notifyRequestResult#9"]
     );
 }
 
@@ -651,21 +647,99 @@ async fn what_the_session_says_of_its_queue_is_heard_by_its_phones_only() {
         serde_json::json!({ "command": "refreshQueue", "requestId": 8 }),
     )
     .await;
-    let mut phone: Vec<String> = heard_on(&mut pair.phone, Duration::from_millis(500))
+    let phone: Vec<String> = heard_on(&mut pair.phone, Duration::from_millis(500))
         .await
         .iter()
         .map(command_of)
         .collect();
-    phone.sort();
     let outsider = heard_on(&mut pair.other, Duration::from_millis(500)).await;
     pair.receiver.shutdown(SHUTDOWN_DEADLINE).await;
 
     assert_eq!(
         phone,
-        vec!["notifyQueueItemsChanged", "notifyRequestResult#8"]
+        vec!["notifyRequestResult#8", "notifyQueueItemsChanged"]
     );
     assert!(
         outsider.is_empty(),
         "a socket outside the session heard its queue: {outsider:?}"
     );
+}
+
+/// The commands of the first `count` text messages written to the wire, fewer if it closes or
+/// the hang guard runs out first.
+async fn first_heard(wire: &mut mpsc::Receiver<WsMessage>, count: usize) -> Vec<String> {
+    let mut heard = Vec::new();
+    let _ = tokio::time::timeout(crate::state::HANG_GUARD, async {
+        while heard.len() < count {
+            match wire.recv().await {
+                Some(WsMessage::Text(text)) => {
+                    heard.push(command_of(&serde_json::from_str(&text).unwrap_or_default()));
+                }
+                Some(_) => {}
+                None => return,
+            }
+        }
+    })
+    .await;
+    heard
+}
+
+/// Whether the socket closes with nothing more written to it, within the hang guard.
+async fn closes_next(wire: &mut mpsc::Receiver<WsMessage>) -> bool {
+    tokio::time::timeout(crate::state::HANG_GUARD, wire.recv())
+        .await
+        .is_ok_and(|message| message.is_none())
+}
+
+/// Socket 2 replaces the session socket 1 started and asked a queue refresh of. What the old
+/// session says stays with its phone, which hears it is over and is closed. Socket 2 hears its
+/// own session only.
+#[tokio::test]
+async fn a_replaced_sessions_phone_is_told_and_closed_and_the_new_one_hears_nothing_of_it() {
+    let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
+    let (server, _listener, mut wire, filler) = WsServer::with_client_for_test(1, 64).await;
+    drop(filler);
+    let mut wire_2 = server.add_client_for_test(2, 64).await;
+    let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
+    for event in [
+        ClientEvent::Connected(1),
+        ClientEvent::Connected(2),
+        ClientEvent::Message {
+            socket_id: 1,
+            message: serde_json::json!({ "command": "startSession" }),
+        },
+        ClientEvent::Message {
+            socket_id: 1,
+            message: serde_json::json!({ "command": "refreshQueue", "requestId": 5 }),
+        },
+        ClientEvent::Message {
+            socket_id: 2,
+            message: serde_json::json!({ "command": "startSession" }),
+        },
+        ClientEvent::Message {
+            socket_id: 2,
+            message: serde_json::json!({ "command": "play", "requestId": 9 }),
+        },
+    ] {
+        client_tx.send(event).await.unwrap();
+    }
+    let (mut receiver, _bridge_tx) =
+        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
+
+    let phone = first_heard(&mut wire, 4).await;
+    let phone_closed = closes_next(&mut wire).await;
+    let other = first_heard(&mut wire_2, 2).await;
+    receiver.shutdown(SHUTDOWN_DEADLINE).await;
+
+    assert_eq!(
+        phone,
+        vec![
+            "notifySessionStarted",
+            "notifyRequestResult#5",
+            "notifyQueueItemsChanged",
+            "notifySessionEnded",
+        ]
+    );
+    assert!(phone_closed, "the replaced session's phone stayed open");
+    assert_eq!(other, vec!["notifySessionStarted", "notifyRequestResult#9"]);
 }

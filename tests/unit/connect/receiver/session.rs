@@ -7,29 +7,37 @@ fn session_id_is_none_on_entropy_failure() {
     assert_eq!(generate_session_id_with(|_| false), None);
 }
 
-/// A session started on `socket_id`, with the channel its services hear on.
-async fn started_hearing(
-    socket_id: u32,
-) -> (ReceiverSession, String, mpsc::Receiver<SessionNotifyEvent>) {
-    let (tx, mut rx) = mpsc::channel(16);
-    let mut session = ReceiverSession::new(tx);
-    session
-        .handle_command(socket_id, "startSession", &serde_json::json!({}))
-        .await;
+/// What the session asked of the routing loop since the last look, in order.
+fn session_effects(outbox: &Outbox) -> Vec<SessionNotifyEvent> {
+    outbox
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::connect::receiver::outbox::Effect::Session(event) => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A session started on `socket_id`, with the outbox its effects go to.
+fn started_hearing(socket_id: u32) -> (ReceiverSession, String, Outbox) {
+    let outbox = Outbox::default();
+    let mut session = ReceiverSession::new(outbox.clone());
+    session.handle_command(socket_id, "startSession", &serde_json::json!({}));
     let mut id = None;
-    while let Ok(event) = rx.try_recv() {
+    for event in session_effects(&outbox) {
         if let SessionNotifyEvent::Unicast { message, .. } = event
             && message["command"] == "notifySessionStarted"
         {
             id = message["sessionId"].as_str().map(str::to_string);
         }
     }
-    (session, id.expect("a startSession is answered"), rx)
+    (session, id.expect("a startSession is answered"), outbox)
 }
 
-#[tokio::test]
-async fn a_receiver_going_away_tells_the_live_session_it_is_over() {
-    let (mut session, id, _) = started_hearing(7).await;
+#[test]
+fn a_receiver_going_away_tells_the_live_session_it_is_over() {
+    let (mut session, id, _) = started_hearing(7);
 
     let revoked = session
         .revoke()
@@ -55,9 +63,9 @@ async fn a_receiver_going_away_tells_the_live_session_it_is_over() {
 }
 
 /// The ends the receiver's services were told of, in order.
-fn ends_heard(rx: &mut mpsc::Receiver<SessionNotifyEvent>) -> Vec<SessionEnd> {
+fn ends_heard(outbox: &Outbox) -> Vec<SessionEnd> {
     let mut ends = Vec::new();
-    while let Ok(event) = rx.try_recv() {
+    for event in session_effects(outbox) {
         if let SessionNotifyEvent::Internal(SessionInternalEvent::SessionEnded(end)) = event {
             ends.push(end);
         }
@@ -65,64 +73,92 @@ fn ends_heard(rx: &mut mpsc::Receiver<SessionNotifyEvent>) -> Vec<SessionEnd> {
     ends
 }
 
-#[tokio::test]
-async fn the_last_phone_gone_leaves_the_session_to_its_resume() {
-    let (mut session, id, mut heard) = started_hearing(7).await;
+#[test]
+fn the_last_phone_gone_leaves_the_session_to_its_resume() {
+    let (mut session, id, heard) = started_hearing(7);
 
-    session.handle_disconnect(7).await;
+    session.handle_disconnect(7);
 
-    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Suspended]);
-    session
-        .handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }))
-        .await;
+    assert_eq!(ends_heard(&heard), vec![SessionEnd::Suspended]);
+    session.handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }));
     assert_eq!(session.state, ReceiverSessionState::Active);
 }
 
-#[tokio::test]
-async fn an_end_that_stops_casting_is_over_and_one_that_does_not_is_a_suspension() {
-    let (mut stopped, id, mut heard) = started_hearing(7).await;
-    stopped
-        .handle_command(
-            7,
-            "endSession",
-            &serde_json::json!({ "sessionId": id, "stopCasting": true }),
-        )
-        .await;
-    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Over]);
+#[test]
+fn an_end_that_stops_casting_is_over_and_one_that_does_not_is_a_suspension() {
+    let (mut stopped, id, heard) = started_hearing(7);
+    stopped.handle_command(
+        7,
+        "endSession",
+        &serde_json::json!({ "sessionId": id, "stopCasting": true }),
+    );
+    assert_eq!(ends_heard(&heard), vec![SessionEnd::Over]);
 
-    let (mut paused, id, mut heard) = started_hearing(7).await;
-    paused
-        .handle_command(
-            7,
-            "endSession",
-            &serde_json::json!({ "sessionId": id, "stopCasting": false }),
-        )
-        .await;
-    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Suspended]);
+    let (mut paused, id, heard) = started_hearing(7);
+    paused.handle_command(
+        7,
+        "endSession",
+        &serde_json::json!({ "sessionId": id, "stopCasting": false }),
+    );
+    assert_eq!(ends_heard(&heard), vec![SessionEnd::Suspended]);
 }
 
 /// Over, not suspended: TIDAL's receiver drops its queue on the switch.
-#[tokio::test]
-async fn a_new_session_ends_the_one_held_for_good() {
-    let (mut live, _, mut heard) = started_hearing(7).await;
-    live.handle_command(8, "startSession", &serde_json::json!({}))
-        .await;
-    assert_eq!(ends_heard(&mut heard), vec![SessionEnd::Over]);
+#[test]
+fn a_new_session_ends_the_one_held_for_good() {
+    let (mut live, _, heard) = started_hearing(7);
+    live.handle_command(8, "startSession", &serde_json::json!({}));
+    assert_eq!(ends_heard(&heard), vec![SessionEnd::Over]);
 
-    let (mut suspended, _, mut heard) = started_hearing(7).await;
-    suspended.handle_disconnect(7).await;
-    suspended
-        .handle_command(8, "startSession", &serde_json::json!({}))
-        .await;
+    let (mut suspended, _, heard) = started_hearing(7);
+    suspended.handle_disconnect(7);
+    suspended.handle_command(8, "startSession", &serde_json::json!({}));
     assert_eq!(
-        ends_heard(&mut heard),
+        ends_heard(&heard),
         vec![SessionEnd::Suspended, SessionEnd::Over]
     );
 }
 
-#[tokio::test]
-async fn a_socket_is_a_member_only_of_the_live_session_it_started_or_resumed() {
-    let (mut session, id, _heard) = started_hearing(7).await;
+/// Each phone of the replaced session hears it is over and is closed, as TIDAL's receiver tells
+/// it; the socket that starts the new one keeps its connection, a member of the old one or not.
+#[test]
+fn a_new_session_tells_the_phones_of_the_one_it_replaces_and_closes_them() {
+    for starter in [9, 8] {
+        let (mut session, id, heard) = started_hearing(7);
+        session.handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }));
+        session_effects(&heard);
+
+        session.handle_command(starter, "startSession", &serde_json::json!({}));
+
+        let told: Vec<String> = session_effects(&heard)
+            .into_iter()
+            .filter_map(|event| match event {
+                SessionNotifyEvent::Unicast { socket_id, message } => Some(format!(
+                    "{socket_id}:{}:{}",
+                    message["command"].as_str().unwrap_or("?"),
+                    message["suspended"]
+                )),
+                SessionNotifyEvent::Close { socket_id } => Some(format!("{socket_id}:close")),
+                SessionNotifyEvent::Internal(_) => None,
+            })
+            .collect();
+        let displaced = [7, 8].into_iter().filter(|&socket| socket != starter);
+        let mut expected: Vec<String> = displaced
+            .flat_map(|socket| {
+                [
+                    format!("{socket}:notifySessionEnded:false"),
+                    format!("{socket}:close"),
+                ]
+            })
+            .collect();
+        expected.push(format!("{starter}:notifySessionStarted:null"));
+        assert_eq!(told, expected, "started on socket {starter}");
+    }
+}
+
+#[test]
+fn a_socket_is_a_member_only_of_the_live_session_it_started_or_resumed() {
+    let (mut session, id, _heard) = started_hearing(7);
     assert_eq!(session.admission(7), Admission::Member);
     assert_eq!(
         session.admission(8),
@@ -130,14 +166,10 @@ async fn a_socket_is_a_member_only_of_the_live_session_it_started_or_resumed() {
         "a socket that neither started nor resumed it"
     );
 
-    session
-        .handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }))
-        .await;
+    session.handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }));
     assert_eq!(session.admission(8), Admission::Member);
 
-    session
-        .handle_command(9, "startSession", &serde_json::json!({}))
-        .await;
+    session.handle_command(9, "startSession", &serde_json::json!({}));
     assert_eq!(session.admission(9), Admission::Member);
     for replaced in [7, 8] {
         assert_eq!(
@@ -149,9 +181,9 @@ async fn a_socket_is_a_member_only_of_the_live_session_it_started_or_resumed() {
 }
 
 /// Each refused end is answered with an error, as TIDAL's receiver does.
-#[tokio::test]
-async fn an_end_that_does_not_name_the_live_session_ends_nothing() {
-    let (mut session, _id, mut heard) = started_hearing(7).await;
+#[test]
+fn an_end_that_does_not_name_the_live_session_ends_nothing() {
+    let (mut session, _id, heard) = started_hearing(7);
     for (socket_id, payload) in [
         (8, serde_json::json!({ "stopCasting": true })),
         (
@@ -163,14 +195,12 @@ async fn an_end_that_does_not_name_the_live_session_ends_nothing() {
             serde_json::json!({ "sessionId": "another", "stopCasting": false }),
         ),
     ] {
-        session
-            .handle_command(socket_id, "endSession", &payload)
-            .await;
+        session.handle_command(socket_id, "endSession", &payload);
     }
 
     let mut errors = Vec::new();
     let mut ends = 0;
-    while let Ok(event) = heard.try_recv() {
+    for event in session_effects(&heard) {
         match event {
             SessionNotifyEvent::Unicast { socket_id, message }
                 if message["command"] == "notifySessionError" =>
@@ -198,81 +228,74 @@ async fn an_end_that_does_not_name_the_live_session_ends_nothing() {
     assert_eq!(session.admission(7), Admission::Member);
 }
 
-/// The sockets a `notifySessionEnded` was written to, in order.
-fn end_notices(rx: &mut mpsc::Receiver<SessionNotifyEvent>) -> Vec<u32> {
-    let mut sockets = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        if let SessionNotifyEvent::Unicast { socket_id, message } = event
-            && message["command"] == "notifySessionEnded"
-        {
-            sockets.push(socket_id);
-        }
-    }
-    sockets
+/// The `notifySessionEnded` notices and closes the session asked for, in order.
+fn end_told(outbox: &Outbox) -> Vec<String> {
+    session_effects(outbox)
+        .into_iter()
+        .filter_map(|event| match event {
+            SessionNotifyEvent::Unicast { socket_id, message }
+                if message["command"] == "notifySessionEnded" =>
+            {
+                Some(format!("{socket_id}:ended"))
+            }
+            SessionNotifyEvent::Close { socket_id } => Some(format!("{socket_id}:close")),
+            _ => None,
+        })
+        .collect()
 }
 
-#[tokio::test]
-async fn an_end_is_told_to_the_sockets_of_the_session_and_to_the_one_that_ended_it() {
-    for stop_casting in [false, true] {
-        let (mut session, id, mut heard) = started_hearing(7).await;
-        session
-            .handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }))
-            .await;
-        session
-            .handle_command(
-                9,
-                "endSession",
-                &serde_json::json!({ "sessionId": id, "stopCasting": stop_casting }),
-            )
-            .await;
-        assert_eq!(
-            end_notices(&mut heard),
-            vec![7, 8, 9],
-            "stopCasting: {stop_casting}"
+/// Socket 7 started the session, 8 resumed it and 9 ends it. As TIDAL's receiver does, each of the
+/// three hears the end and is closed behind it when casting stops; otherwise only the leaver is.
+#[test]
+fn an_end_tells_and_closes_the_session_and_its_sender_and_a_suspension_closes_the_sender_only() {
+    for (stop_casting, expected) in [
+        (
+            true,
+            vec![
+                "7:ended", "7:close", "8:ended", "8:close", "9:ended", "9:close",
+            ],
+        ),
+        (false, vec!["7:ended", "8:ended", "9:ended", "9:close"]),
+    ] {
+        let (mut session, id, heard) = started_hearing(7);
+        session.handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }));
+        session.handle_command(
+            9,
+            "endSession",
+            &serde_json::json!({ "sessionId": id, "stopCasting": stop_casting }),
         );
+        assert_eq!(end_told(&heard), expected, "stopCasting: {stop_casting}");
     }
 }
 
-#[tokio::test]
-async fn the_members_are_the_sockets_of_the_live_session_only() {
-    let (mut session, id, _heard) = started_hearing(7).await;
+#[test]
+fn the_members_are_the_sockets_of_the_live_session_only() {
+    let (mut session, id, _heard) = started_hearing(7);
     assert_eq!(session.members(), vec![7]);
 
-    session
-        .handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }))
-        .await;
+    session.handle_command(8, "resumeSession", &serde_json::json!({ "sessionId": id }));
     assert_eq!(session.members(), vec![7, 8]);
 
-    session
-        .handle_command(
-            7,
-            "endSession",
-            &serde_json::json!({ "sessionId": id, "stopCasting": false }),
-        )
-        .await;
+    session.handle_command(
+        7,
+        "endSession",
+        &serde_json::json!({ "sessionId": id, "stopCasting": false }),
+    );
     assert!(session.members().is_empty(), "a suspended session has none");
 }
 
 /// The close that follows a suspending end reaches the routing loop as the disconnect of the
 /// socket: the suspension is already told, and is not told a second time.
-#[tokio::test]
-async fn the_disconnect_of_a_socket_closed_after_an_end_ends_nothing_again() {
-    for (stop_casting, end) in [(true, SessionEnd::Over), (false, SessionEnd::Suspended)] {
-        let (mut session, id, mut heard) = started_hearing(7).await;
-        session
-            .handle_command(
-                7,
-                "endSession",
-                &serde_json::json!({ "sessionId": id, "stopCasting": stop_casting }),
-            )
-            .await;
+#[test]
+fn the_disconnect_of_a_socket_closed_after_an_end_ends_nothing_again() {
+    let (mut session, id, heard) = started_hearing(7);
+    session.handle_command(
+        7,
+        "endSession",
+        &serde_json::json!({ "sessionId": id, "stopCasting": false }),
+    );
 
-        session.handle_disconnect(7).await;
+    session.handle_disconnect(7);
 
-        assert_eq!(
-            ends_heard(&mut heard),
-            vec![end],
-            "stopCasting: {stop_casting}"
-        );
-    }
+    assert_eq!(ends_heard(&heard), vec![SessionEnd::Suspended]);
 }
