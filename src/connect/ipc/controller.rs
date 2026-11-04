@@ -126,12 +126,24 @@ fn answer_failure(callback: &IpcCallback, failure: &ConnectFailure) {
         .failure(failure.status(), &failure.message());
 }
 
-/// A failure that never reached an attempt. Announced to TIDAL as CONNECT_TO_DEVICE_FAILED, what
-/// releases its queue restore and drops the device it persisted, unless it names no device. Only
-/// `NoRuntime` gets here announced: a flight runs on that runtime, so none can be in progress.
-fn fail_connect(callback: &IpcCallback, failure: &ConnectFailure) {
+/// Whether TIDAL is told `failure` ended a connect, no controller meaning no session to protect.
+fn announces_failure(
+    ctrl: Option<&Arc<Mutex<TidalConnectController>>>,
+    failure: &ConnectFailure,
+) -> bool {
+    ctrl.is_none_or(|ctrl| {
+        ctrl.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .announces_connect_failure(failure)
+    })
+}
+
+/// A failure answered without an attempt, or by a leader that died. Announced to TIDAL as
+/// CONNECT_TO_DEVICE_FAILED when `announce`: that releases its queue restore and drops the
+/// device it persisted.
+fn fail_connect(callback: &IpcCallback, failure: &ConnectFailure, announce: bool) {
     log_failure(failure);
-    if failure.is_announced() {
+    if announce {
         emit_connect_failed();
     }
     answer_failure(callback, failure);
@@ -169,23 +181,42 @@ fn settle_attempt(
 ) -> Verdict {
     match dialled {
         Ok(dialled) => Verdict::done(install_session(dialled)),
-        Err(failure) => {
-            let announce = ctrl.is_none_or(|ctrl| {
-                ctrl.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .announces_connect_failure(&failure)
-            });
-            Verdict {
-                result: Err(failure),
-                announce,
-            }
-        }
+        Err(failure) => Verdict {
+            announce: announces_failure(ctrl, &failure),
+            result: Err(failure),
+        },
     }
 }
 
 /// A replaced attempt closes what it dialled: nothing else holds the socket.
 fn discard_dialled(dialled: Dialled) {
     dialled.ws.shutdown();
+}
+
+/// Retires the socket an install put in place unless the install and the event loop reading it
+/// finish: a panic, or a task dropped mid-way, would leave it open with nobody reading.
+struct InstallGuard {
+    ctrl: Arc<Mutex<TidalConnectController>>,
+    conn_gen: Option<u64>,
+    armed: bool,
+}
+
+impl InstallGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        let (true, Some(conn_gen)) = (self.armed, self.conn_gen) else {
+            return;
+        };
+        let mut guard = self.ctrl.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(se) = guard.abandon_install(conn_gen) {
+            emit_controller_session_event(&se, guard.connection_gen());
+        }
+    }
 }
 
 /// Install the session and watch its socket. Returns whether the device already held our session.
@@ -197,37 +228,53 @@ fn install_session(dialled: Dialled) -> bool {
         events: mut event_rx,
     } = dialled;
     let ws = Arc::new(ws);
+    // Declared before the controller lock below: an unwind releases that lock first.
+    let mut undo = InstallGuard {
+        ctrl: ctrl.clone(),
+        conn_gen: None,
+        armed: true,
+    };
     let (conn_gen, request) = {
         let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
         let cred = guard.session_credential().map(|s| s.to_string());
-        let conn_gen = guard.set_ws_and_start_session(ws, &device, cred.as_deref());
-        (conn_gen, guard.start_session(&device, cred.as_deref()))
+        let installed = guard.set_ws_and_start_session(ws, &device, cred.as_deref());
+        undo.conn_gen = Some(installed.conn_gen);
+        // Posted in the hold that bumped the generation, where the old loop's own posts are
+        // made: its last event cannot land behind this one.
+        if let Some(se) = installed.superseded {
+            emit_controller_session_event(&se, installed.conn_gen);
+        }
+        (
+            installed.conn_gen,
+            guard.start_session(&device, cred.as_deref()),
+        )
     };
 
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
-            // Checked before the forward below, which pushes raw JSON to the
-            // renderer without consulting the session; a guard further in would
-            // still leak a superseded connection's frames. Breaking rather than
-            // skipping, the generation only ever advancing. One take serves both
-            // the check and the handler, nothing between them awaiting.
-            let session_event = {
+            // The check, the handler and every post to the renderer share one hold of the lock
+            // that bumps the generation: a supersede lands wholly before or after them, so no
+            // event of a superseded socket is posted behind that supersede's own `session_ended`.
+            // Breaking rather than skipping, the generation only ever advancing; the posts only
+            // queue a task on the UI thread.
+            {
                 let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
                 if guard.connection_gen() != conn_gen {
                     break;
                 }
-                guard.handle_ws_event(&event)
-            };
-            if let WsClientEvent::Message(ref json) = event {
-                forward_controller_notification(json);
-            }
-            if let Some(se) = session_event {
-                emit_controller_session_event(&se);
+                let session_event = guard.handle_ws_event(&event);
+                if let WsClientEvent::Message(ref json) = event {
+                    forward_controller_notification(json);
+                }
+                if let Some(se) = session_event {
+                    emit_controller_session_event(&se, guard.connection_gen());
+                }
             }
             if matches!(event, WsClientEvent::ConnectionLost) {
                 break;
             }
         }
+        undo.disarm();
     });
     request.is_some_and(|r| r.joined())
 }
@@ -235,7 +282,8 @@ fn install_session(dialled: Dialled) -> bool {
 pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
     let device_json = msg.args.first().cloned().unwrap_or_default();
     let Some(rt) = crate::state::RT_HANDLE.get() else {
-        fail_connect(&callback, &ConnectFailure::NoRuntime);
+        // Flights run on that runtime: without it, none can be in progress to protect.
+        fail_connect(&callback, &ConnectFailure::NoRuntime, true);
         return;
     };
     let ctrl_arc = controller_browsing();
@@ -243,19 +291,36 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
         let requested = match serde_json::from_value::<MdnsDevice>(device_json) {
             Ok(requested) => requested,
             Err(e) => {
-                fail_connect(&callback, &ConnectFailure::Malformed(e.to_string()));
+                let failure = ConnectFailure::Malformed(e.to_string());
+                let announce = announces_failure(ctrl_arc.as_ref(), &failure);
+                fail_connect(&callback, &failure, announce);
                 return;
             }
         };
         let fullname = requested.fullname.clone();
-        let settled = CONNECT_FLIGHTS
+        // Also what the exit runs for every request still pending (`close_connect_flights`):
+        // TIDAL is told of the failure once, by the leader.
+        let abort = {
+            let (callback, ctrl) = (callback.clone(), ctrl_arc.clone());
+            move |led: bool| {
+                let failure = ConnectFailure::Aborted;
+                let announce = led && announces_failure(ctrl.as_ref(), &failure);
+                fail_connect(&callback, &failure, announce);
+            }
+        };
+        let mut settled = CONNECT_FLIGHTS
             .run(
                 &fullname,
                 dial_device(ctrl_arc.clone(), requested),
                 |dialled| settle_attempt(ctrl_arc.as_ref(), dialled),
                 discard_dialled,
+                abort,
             )
             .await;
+        // The exit may have answered this request already.
+        if !settled.claim() {
+            return;
+        }
         match &settled.result {
             // TIDAL reads `joined` off this answer (`'joined' in t`), which throws on a bare string.
             Ok(joined) => callback
@@ -275,24 +340,27 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
     });
 }
 
+/// Answers every connect request still pending, while the CEF side they answer through is alive:
+/// a later drop of their tasks has nothing left to run. Called from `ConnectManager::shutdown`.
+pub(crate) fn close_connect_flights() {
+    CONNECT_FLIGHTS.close();
+}
+
 pub(super) fn disconnect(msg: IpcMessage, callback: IpcCallback) {
     let stop = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(false);
-    let session_event = with_state(|state| {
+    with_state(|state| {
         if let Some(ref cm) = state.connect
             && let Some(ctrl) = cm.controller()
         {
             let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
-            return guard.disconnect(stop);
+            // From here rather than the controller, in the hold that bumped the generation, as
+            // the event loop does. Retiring the session is the only notice the renderer gets, the
+            // device's own reply having been overtaken by the teardown that provoked it.
+            if let Some(se) = guard.disconnect(stop) {
+                emit_controller_session_event(&se, guard.connection_gen());
+            }
         }
-        None
-    })
-    .flatten();
-    // Outside both locks, and from here rather than the controller, on the same footing as the
-    // event loop above. Retiring the session is the only notice the renderer gets, the device's
-    // own reply having been overtaken by the teardown that provoked it.
-    if let Some(se) = session_event {
-        emit_controller_session_event(&se);
-    }
+    });
     callback
         .lock()
         .unwrap_or_else(|e| e.into_inner())

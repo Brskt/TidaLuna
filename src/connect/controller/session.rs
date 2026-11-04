@@ -8,6 +8,9 @@ struct ActiveSession {
     session_id: String,
     device: MdnsDevice,
     joined: bool,
+    /// Whether TIDAL was last told this session is connected: set where `SessionStarted` is
+    /// returned, cleared where an end or a lost connection is. A session kept to resume is not live.
+    live: bool,
 }
 
 pub(crate) enum ControllerSessionEvent {
@@ -15,6 +18,9 @@ pub(crate) enum ControllerSessionEvent {
         session_id: String,
         device: MdnsDevice,
         joined: bool,
+        /// The socket generation this start rides on: a session resumed on a new socket carries
+        /// its old id; the id alone cannot tell a repeat announcement from a resume.
+        connection: u64,
     },
     SessionEnded {
         suspended: bool,
@@ -27,6 +33,15 @@ pub(crate) enum ControllerSessionEvent {
     ConnectionLost {
         during_start: bool,
     },
+}
+
+impl ControllerSessionEvent {
+    /// The device refused the startSession or resumeSession a connect sent: that connect failed
+    /// after the dial, and the device holds no session for it.
+    pub(crate) fn is_refused_connect(&self) -> bool {
+        matches!(self, Self::SessionError { command, .. }
+            if command == "startSession" || command == "resumeSession")
+    }
 }
 
 /// What `queue_start_or_resume` sent to the device.
@@ -48,6 +63,8 @@ impl SessionRequest {
 pub(crate) struct ControllerSession {
     current: Option<ActiveSession>,
     pub(crate) ws: Arc<WsClient>,
+    /// The controller's `connection_gen` when `ws` was installed.
+    pub(super) connection: u64,
     /// Internal nonce to correlate startSession -> notifySessionStarted
     /// (startSession has no requestId - nonce correlates the response)
     pending_start_nonce: Option<u64>,
@@ -61,6 +78,7 @@ impl ControllerSession {
         Self {
             current: None,
             ws,
+            connection: 0,
             pending_start_nonce: None,
             nonce_counter: 0,
             pending_device: None,
@@ -150,23 +168,30 @@ impl ControllerSession {
                     session_id: session_id.clone(),
                     device: device.clone(),
                     joined: *joined,
+                    live: true,
                 });
 
                 Some(ControllerSessionEvent::SessionStarted {
                     session_id: session_id.clone(),
                     device,
                     joined: *joined,
+                    connection: self.connection,
                 })
             }
             SessionNotification::NotifySessionEnded {
                 session_id,
                 suspended,
             } => {
-                if self
-                    .current
-                    .as_ref()
-                    .is_some_and(|s| s.session_id == *session_id)
-                    && !suspended
+                // TIDAL reads any end as a disconnect (its reducer checks no id): the
+                // session stops being live whichever id the device named.
+                if let Some(current) = self.current.as_mut() {
+                    current.live = false;
+                }
+                if !*suspended
+                    && self
+                        .current
+                        .as_ref()
+                        .is_some_and(|s| s.session_id == *session_id)
                 {
                     self.current = None;
                 }
@@ -175,13 +200,24 @@ impl ControllerSession {
                 })
             }
             SessionNotification::NotifySessionResumed { session_id } => {
-                // Update joined flag if needed
-                if let Some(ref mut session) = self.current
-                    && session.session_id == *session_id
-                {
-                    session.joined = true;
+                // TIDAL's `isConnected` only turns true on DEVICE_CONNECTED, which the web app
+                // dispatches for TIDAL Connect from `TCnotifySessionStarted` alone: a resume has to
+                // arrive as that, with `resumed: true`.
+                let session = self
+                    .current
+                    .as_mut()
+                    .filter(|s| s.session_id == *session_id)?;
+                session.joined = true;
+                if session.live {
+                    return None;
                 }
-                None
+                session.live = true;
+                Some(ControllerSessionEvent::SessionStarted {
+                    session_id: session.session_id.clone(),
+                    device: session.device.clone(),
+                    joined: true,
+                    connection: self.connection,
+                })
             }
             SessionNotification::NotifySessionError {
                 requested_command,
@@ -206,17 +242,37 @@ impl ControllerSession {
         let during_start = self.pending_start_nonce.is_some();
         self.pending_start_nonce = None;
         self.pending_device = None;
-        // Don't clear the session - it may be resumable
+        // Not cleared (the session may be resumable), though TIDAL reads the loss as a disconnect.
+        if let Some(current) = self.current.as_mut() {
+            current.live = false;
+        }
         Some(ControllerSessionEvent::ConnectionLost { during_start })
+    }
+
+    /// What TIDAL's `isConnected` says: a session it was told started or resumed and has not been
+    /// told ended or lost since. A socket that died with its `ConnectionLost` still on the way
+    /// already reads as gone.
+    pub fn is_live(&self) -> bool {
+        self.current.as_ref().is_some_and(|s| s.live) && self.ws.is_connected()
+    }
+
+    /// Takes the session out of the live state. Whether it was live: when it was, TIDAL has to be
+    /// told it ended, as nothing it sees would say so.
+    pub(super) fn end_live(&mut self) -> bool {
+        self.current
+            .as_mut()
+            .is_some_and(|s| std::mem::replace(&mut s.live, false))
     }
 
     pub fn connected_device(&self) -> Option<&MdnsDevice> {
         self.current.as_ref().map(|s| &s.device)
     }
 
-    pub fn session_info(&self) -> Option<(&str, &MdnsDevice, bool)> {
+    /// The live session only: a page reload replays it as DEVICE_CONNECTED.
+    pub fn session_info(&self) -> Option<(&str, &MdnsDevice, bool, u64)> {
         self.current
             .as_ref()
-            .map(|s| (s.session_id.as_str(), &s.device, s.joined))
+            .filter(|_| self.is_live())
+            .map(|s| (s.session_id.as_str(), &s.device, s.joined, self.connection))
     }
 }

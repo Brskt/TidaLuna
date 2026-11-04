@@ -18,6 +18,16 @@ fn run<'a>(
     fullname: &'a str,
     dial: impl Future<Output = ConnectResult> + 'a,
 ) -> impl Future<Output = Settled> + 'a {
+    run_counting(flights, fullname, dial, Arc::default())
+}
+
+/// As `run`, counting the times the request's abort hook fires.
+fn run_counting<'a>(
+    flights: &'a ConnectFlights,
+    fullname: &'a str,
+    dial: impl Future<Output = ConnectResult> + 'a,
+    aborts: Arc<AtomicUsize>,
+) -> impl Future<Output = Settled> + 'a {
     flights.run(
         fullname,
         dial,
@@ -29,6 +39,9 @@ fn run<'a>(
             },
         },
         drop,
+        move |_led| {
+            aborts.fetch_add(1, Ordering::SeqCst);
+        },
     )
 }
 
@@ -53,7 +66,11 @@ async fn overlapping_requests_for_one_device_share_one_attempt() {
         let (leader, follower, ()) =
             tokio::join!(leader, follower, async { release.send(()).unwrap() });
 
-        assert_eq!(attempts.load(Ordering::SeqCst), 1, "one resolve, dial and start");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "one resolve, dial and start"
+        );
         assert_eq!(leader.result.is_ok(), outcome.is_ok());
         assert_eq!(follower.result.is_ok(), outcome.is_ok());
         assert_eq!(
@@ -61,7 +78,10 @@ async fn overlapping_requests_for_one_device_share_one_attempt() {
             follower.result.as_ref().err().map(ConnectFailure::message),
         );
         assert_eq!(leader.announces_failure(), outcome.is_err());
-        assert!(!follower.announces_failure(), "the failure is announced once");
+        assert!(
+            !follower.announces_failure(),
+            "the failure is announced once"
+        );
     }
 }
 
@@ -84,29 +104,35 @@ async fn a_request_for_another_device_replaces_the_one_in_flight() {
 }
 
 /// A leader that dies mid-attempt must not strand the device: the request waiting on it gets a
-/// failure, and the next one runs its own attempt instead of waiting on a flight nobody finishes.
+/// failure, the next one runs its own attempt, and the leader's own query is answered once.
 #[tokio::test]
 async fn a_leader_that_dies_leaves_no_request_hanging() {
     const DEADLINE: Duration = Duration::from_secs(5);
 
     for abort in [false, true] {
         let flights = Arc::new(ConnectFlights::new());
+        let aborts = Arc::new(AtomicUsize::new(0));
         let (release, released) = oneshot::channel::<()>();
 
         let leader = tokio::spawn({
-            let flights = flights.clone();
+            let (flights, aborts) = (flights.clone(), aborts.clone());
             async move {
-                run(&flights, "tidal", async {
-                    released.await.unwrap();
-                    panic!("the leader dies mid-attempt");
-                })
+                run_counting(
+                    &flights,
+                    "tidal",
+                    async {
+                        released.await.unwrap();
+                        panic!("the leader dies mid-attempt");
+                    },
+                    aborts,
+                )
                 .await
             }
         });
         tokio::task::yield_now().await;
         let follower = tokio::spawn({
-            let flights = flights.clone();
-            async move { run(&flights, "tidal", std::future::pending()).await }
+            let (flights, aborts) = (flights.clone(), aborts.clone());
+            async move { run_counting(&flights, "tidal", std::future::pending(), aborts).await }
         });
         tokio::task::yield_now().await;
 
@@ -122,10 +148,83 @@ async fn a_leader_that_dies_leaves_no_request_hanging() {
             .expect("the follower of a dead leader is answered")
             .unwrap();
         assert!(matches!(follower.result, Err(ConnectFailure::Aborted)));
+        assert_eq!(
+            aborts.load(Ordering::SeqCst),
+            1,
+            "the dead leader's query is answered"
+        );
 
-        let next = tokio::time::timeout(DEADLINE, run(&flights, "tidal", async { Ok(true) }))
-            .await
-            .expect("a later request is not left waiting on the dead flight");
+        let mut next = tokio::time::timeout(
+            DEADLINE,
+            run_counting(&flights, "tidal", async { Ok(true) }, aborts.clone()),
+        )
+        .await
+        .expect("a later request is not left waiting on the dead flight");
         assert!(next.led() && matches!(next.result, Ok(true)));
+        assert!(next.claim());
+        drop(next);
+        assert_eq!(
+            aborts.load(Ordering::SeqCst),
+            1,
+            "an answered leader is not answered twice"
+        );
     }
+}
+
+/// At exit the runtime drops the pending requests after CEF is gone, and an abort hook that runs
+/// then posts to it. `close` has to answer each one first, once and with its role, and leave the
+/// later drop nothing to run.
+#[tokio::test]
+async fn closing_answers_every_pending_request_once_and_leaves_no_hook() {
+    let flights = Arc::new(ConnectFlights::new());
+    let answered: Arc<std::sync::Mutex<Vec<bool>>> = Arc::default();
+    let request = || {
+        let (flights, answered) = (flights.clone(), answered.clone());
+        tokio::spawn(async move {
+            flights
+                .run(
+                    "tidal",
+                    std::future::pending::<ConnectResult>(),
+                    |_| Verdict::done(true),
+                    drop,
+                    move |led| answered.lock().unwrap().push(led),
+                )
+                .await
+        })
+    };
+    let leader = request();
+    tokio::task::yield_now().await;
+    let follower = request();
+    tokio::task::yield_now().await;
+
+    flights.close();
+    let mut roles = answered.lock().unwrap().clone();
+    roles.sort();
+    assert_eq!(
+        roles,
+        [false, true],
+        "the leader and its follower, answered by the exit"
+    );
+
+    for task in [leader, follower] {
+        let mut settled = task.await.unwrap();
+        assert!(!settled.claim(), "the caller finds its request answered");
+    }
+    assert_eq!(
+        answered.lock().unwrap().len(),
+        2,
+        "dropping them runs nothing more"
+    );
+
+    let mut late = flights
+        .run(
+            "tidal",
+            std::future::pending::<ConnectResult>(),
+            |_| Verdict::done(true),
+            drop,
+            |_| {},
+        )
+        .await;
+    assert!(matches!(late.result, Err(ConnectFailure::Aborted)));
+    assert!(late.claim(), "a request after the exit answers itself");
 }

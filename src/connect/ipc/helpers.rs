@@ -120,37 +120,52 @@ pub(super) fn emit_connect_failed() {
     post_emit("connect.connect_failed");
 }
 
-pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent) {
+/// The same, for a failure of the socket generation `generation`.
+fn emit_connect_failed_at(generation: u64) {
+    post_emit_with_data(
+        "connect.connect_failed",
+        &serde_json::json!({ "connection": generation }),
+    );
+}
+
+/// `generation` is the controller's socket generation read in the lock hold that produced `event`:
+/// the page drops a lifecycle event older than one it applied, as a push queued before its
+/// snapshot read lands behind the snapshot's reply.
+pub(super) fn emit_controller_session_event(event: &ControllerSessionEvent, generation: u64) {
     match event {
         ControllerSessionEvent::SessionStarted {
             session_id,
             device,
             joined,
+            connection,
         } => {
             post_emit_with_data(
                 "connect.session_started",
                 &serde_json::json!({
                     "connectedDevice": device, "sessionId": session_id, "joined": joined,
+                    "connection": connection,
                 }),
             );
         }
         ControllerSessionEvent::SessionEnded { suspended } => {
             post_emit_with_data(
                 "connect.session_ended",
-                &serde_json::json!({ "suspended": suspended }),
+                &serde_json::json!({ "suspended": suspended, "connection": generation }),
             );
         }
         ControllerSessionEvent::ConnectionLost { during_start } => {
-            post_emit("connect.connection_lost");
+            post_emit_with_data(
+                "connect.connection_lost",
+                &serde_json::json!({ "connection": generation }),
+            );
             // TIDAL's queue restore waits for a session or a failure, not for a lost connection.
             if *during_start {
-                emit_connect_failed();
+                emit_connect_failed_at(generation);
             }
         }
         ControllerSessionEvent::SessionError { command, details } => {
-            // A refused startSession is a connect that failed after the dial.
-            if command == "startSession" {
-                emit_connect_failed();
+            if event.is_refused_connect() {
+                emit_connect_failed_at(generation);
             }
             post_emit_with_data(
                 "connect.server_error",

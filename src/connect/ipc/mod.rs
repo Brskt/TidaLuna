@@ -12,6 +12,7 @@ mod queue;
 mod receiver;
 mod state;
 
+pub(crate) use controller::close_connect_flights;
 pub(crate) use helpers::post_emit_with_data;
 pub(crate) use receiver::{set_receiver_enabled, start_receiver_task};
 

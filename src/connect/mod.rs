@@ -162,11 +162,12 @@ impl ConnectManager {
                 serde_json::to_value(guard.discovered_devices()).unwrap_or_default();
             snapshot["isConnected"] = serde_json::Value::Bool(guard.is_connected());
 
-            if let Some((session_id, device, joined)) = guard.session_info() {
+            if let Some((session_id, device, joined, connection)) = guard.session_info() {
                 snapshot["session"] = serde_json::json!({
                     "sessionId": session_id,
                     "device": device,
                     "joined": joined,
+                    "connection": connection,
                 });
             }
             if let Some(media) = guard.last_media() {
@@ -187,6 +188,9 @@ impl ConnectManager {
 
     /// Tear down receiver + controller within `deadline` total graceful budget.
     pub(crate) async fn shutdown(&mut self, deadline: Duration) {
+        // First, while the controller still tells a live session from none: each pending connect
+        // is answered now, as the runtime's later drop of its task would do after CEF is gone.
+        ipc::close_connect_flights();
         if let Some(mut receiver) = self.take_receiver() {
             receiver.shutdown(deadline).await;
         }

@@ -7,7 +7,7 @@
 //! Nothing that holds the controller or the app state ever takes the slot.
 
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -42,12 +42,41 @@ struct Flight {
 struct Slot {
     next_id: u64,
     flight: Option<Flight>,
+    /// Set by `close`: no request joins any more, each is answered as aborted.
+    closed: bool,
+    /// The abort hook of every request still running, with whether it leads: what `close` answers.
+    hooks: Vec<(Weak<Hook>, bool)>,
 }
 
 /// The role a request takes in the attempt for its device.
 enum Join {
     Lead { id: u64, cancel: CancellationToken },
     Follow(watch::Receiver<Option<ConnectResult>>),
+    Closed,
+}
+
+/// What answers a request that ends without having answered itself: it is told whether it led.
+type Hook = Mutex<Option<Box<dyn FnOnce(bool) + Send>>>;
+
+/// The request's abort hook, run on a panic or a cancelled task (the query would otherwise stay
+/// pending for good) and by `close` at exit. Whichever takes it first is the only one to run it.
+struct Armed {
+    hook: Arc<Hook>,
+    led: bool,
+}
+
+impl Armed {
+    fn take(hook: &Hook) -> Option<Box<dyn FnOnce(bool) + Send>> {
+        hook.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        if let Some(abort) = Self::take(&self.hook) {
+            abort(self.led);
+        }
+    }
 }
 
 /// How a request settled, and whether it was the one that did the work.
@@ -55,9 +84,17 @@ pub(crate) struct Settled {
     pub(crate) result: ConnectResult,
     led: bool,
     announce: bool,
+    armed: Armed,
 }
 
 impl Settled {
+    /// The caller takes the answer of its own request. False when `close` gave it already: the
+    /// caller then answers nothing, its callback is spent.
+    #[must_use = "a request that answers without claiming can answer twice"]
+    pub(crate) fn claim(&mut self) -> bool {
+        Armed::take(&self.armed.hook).is_some()
+    }
+
     /// Whether TIDAL is told about this failure: once per attempt, by the request that ran it.
     pub(crate) fn announces_failure(&self) -> bool {
         self.announce
@@ -91,28 +128,42 @@ impl ConnectFlights {
             slot: Mutex::new(Slot {
                 next_id: 0,
                 flight: None,
+                closed: false,
+                hooks: Vec::new(),
             }),
         }
     }
 
-    /// Run the attempt for the device `fullname`, or wait for the request already running it.
-    /// `dial` is the part that awaits. `settle` then takes its outcome under the slot lock, and
-    /// only while this attempt is still the current one: a replaced attempt hands what it dialled
-    /// to `discard` instead and installs nothing.
+    /// Run the attempt for `fullname`, or wait for the request already running it. `dial` awaits;
+    /// `settle` takes its outcome under the slot lock while the attempt is current (a replaced one
+    /// hands what it dialled to `discard`); `abort` runs if the request ends unclaimed, or on `close`.
     pub(crate) async fn run<D>(
         &self,
         fullname: &str,
         dial: impl Future<Output = Result<D, ConnectFailure>>,
         settle: impl FnOnce(Result<D, ConnectFailure>) -> Verdict,
         discard: impl FnOnce(D),
+        abort: impl FnOnce(bool) + Send + 'static,
     ) -> Settled {
-        match self.join(fullname) {
-            Join::Follow(done) => Settled {
-                result: wait_for(done).await,
+        let hook: Arc<Hook> = Arc::new(Mutex::new(Some(Box::new(abort))));
+        match self.join(fullname, &hook) {
+            Join::Closed => Settled {
+                result: Err(ConnectFailure::Aborted),
                 led: false,
                 announce: false,
+                armed: Armed { hook, led: false },
             },
+            Join::Follow(done) => {
+                let armed = Armed { hook, led: false };
+                Settled {
+                    result: wait_for(done).await,
+                    led: false,
+                    announce: false,
+                    armed,
+                }
+            }
             Join::Lead { id, cancel } => {
+                let armed = Armed { hook, led: true };
                 let _leader = Leader { flights: self, id };
                 // Stops dialling for a replaced attempt. Whether it may still install is
                 // decided under the lock in `settle_attempt`, not here.
@@ -121,20 +172,32 @@ impl ConnectFlights {
                     () = cancel.cancelled() => Err(ConnectFailure::Superseded),
                     dialled = dial => dialled,
                 };
-                self.settle_attempt(id, dialled, settle, discard)
+                self.settle_attempt(id, dialled, settle, discard, armed)
             }
         }
     }
 
-    fn join(&self, fullname: &str) -> Join {
-        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+    /// Registers `hook` with the role the request takes, in the same hold of the slot that
+    /// decides the role: `close` then sees either the request's hook or the closed flag.
+    fn join(&self, fullname: &str, hook: &Arc<Hook>) -> Join {
+        let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = &mut *guard;
+        if slot.closed {
+            return Join::Closed;
+        }
+        slot.hooks
+            .retain(|(registered, _)| registered.strong_count() > 0);
         if let Some(flight) = &slot.flight {
             if flight.fullname == fullname {
-                return Join::Follow(flight.done.subscribe());
+                let done = flight.done.subscribe();
+                slot.hooks.push((Arc::downgrade(hook), false));
+                return Join::Follow(done);
             }
             // The older request loses: its waiters are answered here, its leader wakes on `cancel`.
             flight.cancel.cancel();
-            flight.done.send_replace(Some(Err(ConnectFailure::Superseded)));
+            flight
+                .done
+                .send_replace(Some(Err(ConnectFailure::Superseded)));
         }
         slot.next_id += 1;
         let id = slot.next_id;
@@ -145,7 +208,28 @@ impl ConnectFlights {
             cancel: cancel.clone(),
             done: watch::channel(None).0,
         });
+        slot.hooks.push((Arc::downgrade(hook), true));
         Join::Lead { id, cancel }
+    }
+
+    /// Settles every request still running, for the exit: each one's abort hook runs now, while
+    /// what it answers through is alive, and the request then claims nothing. Later requests are
+    /// answered as aborted. The hooks run outside the slot, which they have no business in.
+    pub(crate) fn close(&self) {
+        let hooks = {
+            let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            slot.closed = true;
+            if let Some(flight) = slot.flight.take() {
+                flight.cancel.cancel();
+                flight.done.send_replace(Some(Err(ConnectFailure::Aborted)));
+            }
+            std::mem::take(&mut slot.hooks)
+        };
+        for (hook, led) in hooks {
+            if let Some(abort) = hook.upgrade().and_then(|hook| Armed::take(&hook)) {
+                abort(led);
+            }
+        }
     }
 
     /// Install the outcome and hand the answer to the waiters, in one hold of the slot. The
@@ -157,6 +241,7 @@ impl ConnectFlights {
         dialled: Result<D, ConnectFailure>,
         settle: impl FnOnce(Result<D, ConnectFailure>) -> Verdict,
         discard: impl FnOnce(D),
+        armed: Armed,
     ) -> Settled {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         if !slot.flight.as_ref().is_some_and(|flight| flight.id == id) {
@@ -167,6 +252,7 @@ impl ConnectFlights {
                 result: Err(ConnectFailure::Superseded),
                 led: true,
                 announce: false,
+                armed,
             };
         }
         let verdict = settle(dialled);
@@ -177,6 +263,7 @@ impl ConnectFlights {
             announce: verdict.announce && verdict.result.is_err(),
             result: verdict.result,
             led: true,
+            armed,
         }
     }
 

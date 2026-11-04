@@ -56,10 +56,9 @@ impl ConnectFailure {
         match self {
             Self::NoRuntime => "No runtime".to_string(),
             Self::NoController => "No controller".to_string(),
-            Self::Malformed(e) => format!(
-                "Malformed device: {:?}",
-                truncate_str(e, FULLNAME_LOG_MAX)
-            ),
+            Self::Malformed(e) => {
+                format!("Malformed device: {:?}", truncate_str(e, FULLNAME_LOG_MAX))
+            }
             Self::Aborted => "The connect attempt ended without an answer".to_string(),
             Self::Unresolved(fullname) => format!(
                 "Device {:?} not found on the network",
@@ -73,9 +72,10 @@ impl ConnectFailure {
 
     /// Whether TIDAL is told the connect failed. A superseded request is not a failure of the
     /// device: the newer request owns the outcome, and telling TIDAL would clear its pick. A
-    /// malformed one names no device, so there is no pick of TIDAL's to release or clear.
+    /// malformed one is announced: TIDAL's queue restore waits on a persisted device, and one
+    /// that no longer deserializes has to release it and be cleared.
     pub(crate) fn is_announced(&self) -> bool {
-        !matches!(self, Self::Superseded | Self::Malformed(_))
+        !matches!(self, Self::Superseded)
     }
 }
 

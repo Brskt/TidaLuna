@@ -47,7 +47,10 @@ async fn a_request_waits_for_mdns_and_dials_what_it_resolved() {
 
     let dialled = dialling.await.unwrap().ok().expect("connected").1;
     assert_eq!(dialled.addresses, vec!["127.0.0.1".to_string()]);
-    let _conn = server.accept().await.expect("the resolved address is dialled");
+    let _conn = server
+        .accept()
+        .await
+        .expect("the resolved address is dialled");
 }
 
 /// The request carries a reachable address for a device mDNS never found: it has to be refused,
