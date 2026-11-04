@@ -275,8 +275,7 @@ impl TidalConnectController {
     ///
     /// Returns the event the caller must emit when `stop_casting` leaves an end owed. The device's
     /// own `notifySessionEnded` cannot carry that announcement: the teardown below runs first and
-    /// takes away both the session the reply would be matched against and the currency of the
-    /// loop delivering it.
+    /// takes away both the session the reply would end and the currency of the loop delivering it.
     /// Returned rather than emitted, as [`handle_ws_event`](Self::handle_ws_event) does it:
     /// this layer speaks the protocol, the IPC layer above talks to the renderer.
     #[must_use = "dropping the event leaves the renderer believing it is still connected"]

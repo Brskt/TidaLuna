@@ -50,12 +50,9 @@ pub(crate) enum SessionNotification {
         #[serde(rename = "sessionId")]
         session_id: String,
     },
+    /// Its `sessionId` is not read: the device sends an end only to the sockets of its session.
     #[serde(rename = "notifySessionEnded")]
-    NotifySessionEnded {
-        #[serde(rename = "sessionId")]
-        session_id: String,
-        suspended: bool,
-    },
+    NotifySessionEnded { suspended: bool },
     #[serde(rename = "notifySessionError")]
     NotifySessionError {
         #[serde(rename = "requestedCommand")]

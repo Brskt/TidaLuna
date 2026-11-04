@@ -1,7 +1,7 @@
 //! Shared helpers for the IPC layer.
 //!
 //! Covers four kinds of functionality:
-//! * State lookups into `ConnectManager` (`get_session_ws`,
+//! * State lookups into `ConnectManager` (`existing_controller`, `get_session_ws`,
 //!   `get_last_player_state`).
 //! * Device command dispatch (`send_device_cmd`, `send_device_cmd_simple`).
 //! * CEF UI-thread posting for IPC event emission (`post_emit`,
@@ -27,6 +27,18 @@ use crate::platform::secure_store::StoredTokenState;
 use crate::connect::failure_latch::FailureLatch;
 
 pub(super) const CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The controller if one was built, without building it.
+pub(super) fn existing_controller() -> Option<Arc<Mutex<TidalConnectController>>> {
+    with_state(|state| {
+        state
+            .connect
+            .as_ref()
+            .and_then(|cm| cm.controller())
+            .cloned()
+    })
+    .flatten()
+}
 
 pub(super) fn get_last_player_state() -> PlayerState {
     with_state(|state| {
@@ -164,15 +176,7 @@ async fn await_delivery(
 
 /// `await_delivery` on the app's controller.
 async fn await_queued(queued: Queued) -> Result<serde_json::Value, String> {
-    let ctrl = with_state(|state| {
-        state
-            .connect
-            .as_ref()
-            .and_then(|cm| cm.controller())
-            .cloned()
-    })
-    .flatten()
-    .ok_or_else(|| "Not connected".to_string())?;
+    let ctrl = existing_controller().ok_or_else(|| "Not connected".to_string())?;
     await_delivery(&ctrl, queued, CMD_TIMEOUT).await
 }
 

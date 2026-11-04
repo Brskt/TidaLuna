@@ -13,7 +13,7 @@ use crate::connect::controller::dial::{
     ConnectFailure, RESOLVE_DEADLINE, RESUME_DEADLINE, Started, confirm_resume, confirm_start,
     dial_requested,
 };
-use crate::connect::controller::flight::{ConnectFlights, Verdict};
+use crate::connect::controller::flight::{ConnectFlights, Unanswered, Verdict};
 use crate::connect::controller::session::{ControllerSessionEvent, ResumePlan};
 use crate::connect::failure_latch::FailureLatch;
 use crate::connect::types::{
@@ -22,8 +22,8 @@ use crate::connect::types::{
 use crate::connect::ws::client::{WsClient, WsClientEvent};
 
 use super::helpers::{
-    emit_connect_failed, emit_controller_session_event, forward_controller_notification,
-    prepare_update, push_server_info,
+    emit_connect_failed, emit_controller_session_event, existing_controller,
+    forward_controller_notification, prepare_update, push_server_info,
 };
 
 /// One latch per operation the handlers retry: the controller init (shared by `discover`,
@@ -120,18 +120,6 @@ fn controller_browsing() -> Option<Arc<Mutex<TidalConnectController>>> {
     .flatten()
 }
 
-/// The controller if one was built, without building it.
-fn existing_controller() -> Option<Arc<Mutex<TidalConnectController>>> {
-    with_state(|state| {
-        state
-            .connect
-            .as_ref()
-            .and_then(|cm| cm.controller())
-            .cloned()
-    })
-    .flatten()
-}
-
 /// One per process: every connect request, whoever sent it, goes through the same attempt.
 static CONNECT_FLIGHTS: ConnectFlights = ConnectFlights::new();
 
@@ -154,9 +142,9 @@ fn answer_failure(callback: &IpcCallback, failure: &ConnectFailure) {
         .failure(failure.status(), &failure.message());
 }
 
-/// A failure answered without an attempt, or by a leader that died. Announced to TIDAL as
-/// CONNECT_TO_DEVICE_FAILED when `announce`: that releases its queue restore and drops the
-/// device it persisted.
+/// The failure of an attempt, reported by the request that ran it: one that failed before any
+/// attempt, or the leader. Announced to TIDAL as CONNECT_TO_DEVICE_FAILED when `announce`: that
+/// releases its queue restore and drops the device it persisted. A follower only answers.
 fn fail_connect(callback: &IpcCallback, failure: &ConnectFailure, announce: bool) {
     log_failure(failure);
     if announce {
@@ -291,7 +279,7 @@ fn settle_failure(
 ) -> bool {
     // No controller means no session to protect.
     let Some(ctrl) = ctrl else {
-        return true;
+        return failure.is_announced();
     };
     let mut guard = ctrl.lock().unwrap_or_else(|e| e.into_inner());
     if failure.is_announced()
@@ -494,10 +482,12 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
         // TIDAL is told of the failure once, by the leader.
         let abort = {
             let (callback, ctrl) = (callback.clone(), ctrl_arc.clone());
-            move |led: bool| {
-                let failure = ConnectFailure::Aborted;
-                let announce = led && settle_failure(ctrl.as_ref(), &failure, &Renderer);
-                fail_connect(&callback, &failure, announce);
+            move |unanswered: Unanswered| match unanswered {
+                Unanswered::Led(failure) => {
+                    let announce = settle_failure(ctrl.as_ref(), &failure, &Renderer);
+                    fail_connect(&callback, &failure, announce);
+                }
+                Unanswered::Followed => answer_failure(&callback, &ConnectFailure::Aborted),
             }
         };
         let mut settled = CONNECT_FLIGHTS
@@ -519,15 +509,10 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .success_str(&serde_json::json!({ "joined": joined }).to_string()),
-            Err(failure) => {
-                if settled.led() {
-                    log_failure(failure);
-                }
-                if settled.announces_failure() {
-                    emit_connect_failed();
-                }
-                answer_failure(&callback, failure);
+            Err(failure) if settled.led() => {
+                fail_connect(&callback, failure, settled.announces_failure());
             }
+            Err(failure) => answer_failure(&callback, failure),
         }
     });
 }

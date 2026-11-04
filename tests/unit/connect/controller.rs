@@ -49,7 +49,7 @@ async fn disconnecting_a_live_session_returns_the_event_that_retires_it() {
     );
 
     // Why the announcement has to come from here at all: the device's own reply lands on a
-    // controller with no session left to match it against, and yields nothing to emit. Anyone
+    // controller with no session left for it to end, and yields nothing to emit. Anyone
     // moving the announcement back onto the acknowledgement has to break this first.
     let reply = WsClientEvent::Message(serde_json::json!({
         "command": "notifySessionEnded",

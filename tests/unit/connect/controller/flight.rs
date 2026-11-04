@@ -21,7 +21,7 @@ fn run<'a>(
     run_counting(flights, fullname, dial, Arc::default())
 }
 
-/// As `run`, counting the times the request's abort hook fires.
+/// As `run`, counting the times the request's abort hook reports an aborted attempt it led.
 fn run_counting<'a>(
     flights: &'a ConnectFlights,
     fullname: &'a str,
@@ -39,8 +39,10 @@ fn run_counting<'a>(
             },
         },
         drop,
-        move |_led| {
-            aborts.fetch_add(1, Ordering::SeqCst);
+        move |unanswered| {
+            if matches!(unanswered, Unanswered::Led(ConnectFailure::Aborted)) {
+                aborts.fetch_add(1, Ordering::SeqCst);
+            }
         },
     )
 }
@@ -195,7 +197,7 @@ async fn a_leader_that_dies_leaves_no_request_hanging() {
         assert_eq!(
             aborts.load(Ordering::SeqCst),
             1,
-            "the dead leader's query is answered"
+            "the dead leader's query is answered, as an aborted attempt"
         );
 
         let mut next = tokio::time::timeout(
@@ -215,6 +217,26 @@ async fn a_leader_that_dies_leaves_no_request_hanging() {
     }
 }
 
+/// A request for `device` whose attempt never ends, `hook` told if it is left unanswered.
+fn pending_request(
+    flights: &Arc<ConnectFlights>,
+    device: &'static str,
+    hook: impl FnOnce(Unanswered) + Send + 'static,
+) -> tokio::task::JoinHandle<Settled> {
+    let flights = flights.clone();
+    tokio::spawn(async move {
+        flights
+            .run(
+                device,
+                std::future::pending::<ConnectResult>(),
+                |_| Verdict::done(true),
+                drop,
+                hook,
+            )
+            .await
+    })
+}
+
 /// At exit the runtime drops the pending requests after CEF is gone, and an abort hook that runs
 /// then posts to it. `close` has to answer each one first, once and with its role, and leave the
 /// later drop nothing to run.
@@ -223,17 +245,12 @@ async fn closing_answers_every_pending_request_once_and_leaves_no_hook() {
     let flights = Arc::new(ConnectFlights::new());
     let answered: Arc<std::sync::Mutex<Vec<bool>>> = Arc::default();
     let request = || {
-        let (flights, answered) = (flights.clone(), answered.clone());
-        tokio::spawn(async move {
-            flights
-                .run(
-                    "tidal",
-                    std::future::pending::<ConnectResult>(),
-                    |_| Verdict::done(true),
-                    drop,
-                    move |led| answered.lock().unwrap().push(led),
-                )
-                .await
+        let answered = answered.clone();
+        pending_request(&flights, "tidal", move |unanswered| {
+            answered
+                .lock()
+                .unwrap()
+                .push(matches!(unanswered, Unanswered::Led(_)));
         })
     };
     let leader = request();
@@ -271,4 +288,39 @@ async fn closing_answers_every_pending_request_once_and_leaves_no_hook() {
         .await;
     assert!(matches!(late.result, Err(ConnectFailure::Aborted)));
     assert!(late.claim(), "a request after the exit answers itself");
+}
+
+/// The exit lands before a replaced leader claimed its answer. Only the attempt in flight is
+/// aborted: the replaced leader still ends superseded, which TIDAL is not told of, instead of
+/// announcing a second failure as if it were aborted too.
+#[tokio::test]
+async fn closing_aborts_only_the_attempt_in_flight() {
+    let flights = Arc::new(ConnectFlights::new());
+    let answered: Arc<std::sync::Mutex<Vec<(&str, &str)>>> = Arc::default();
+    let request = |device: &'static str| {
+        let answered = answered.clone();
+        pending_request(&flights, device, move |unanswered| {
+            let end = match unanswered {
+                Unanswered::Led(ConnectFailure::Superseded) => "superseded",
+                Unanswered::Led(ConnectFailure::Aborted) => "aborted",
+                Unanswered::Led(_) => "other",
+                Unanswered::Followed => "followed",
+            };
+            answered.lock().unwrap().push((device, end));
+        })
+    };
+    let older = request("a");
+    tokio::task::yield_now().await;
+    let newer = request("b");
+    tokio::task::yield_now().await;
+
+    flights.close();
+    let mut ends = answered.lock().unwrap().clone();
+    ends.sort_unstable();
+    assert_eq!(ends, [("a", "superseded"), ("b", "aborted")]);
+
+    for task in [older, newer] {
+        let mut settled = task.await.unwrap();
+        assert!(!settled.claim(), "the exit answered it");
+    }
 }

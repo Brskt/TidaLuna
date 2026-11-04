@@ -36,27 +36,30 @@ impl Verdict {
 /// Stops a leader's dial, and says what its request ends in.
 struct Cancel {
     token: CancellationToken,
-    reason: Mutex<ConnectFailure>,
+    reason: Mutex<Option<ConnectFailure>>,
 }
 
 impl Cancel {
     fn new() -> Self {
         Self {
             token: CancellationToken::new(),
-            reason: Mutex::new(ConnectFailure::Superseded),
+            reason: Mutex::new(None),
         }
     }
 
     fn fire(&self, reason: ConnectFailure) {
-        *self.reason.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+        *self.reason.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
         self.token.cancel();
     }
 
+    /// Why the attempt was stopped: replaced, cancelled or closed. One nothing stopped ended
+    /// without an answer, its leader having died or the exit having overtaken its claim.
     fn reason(&self) -> ConnectFailure {
         self.reason
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+            .unwrap_or(ConnectFailure::Aborted)
     }
 }
 
@@ -72,8 +75,8 @@ struct Slot {
     flight: Option<Flight>,
     /// Set by `close`: no request joins any more, each is answered as aborted.
     closed: bool,
-    /// The abort hook of every request still running, with whether it leads: what `close` answers.
-    hooks: Vec<(Weak<Hook>, bool)>,
+    /// The abort hook of every request still running, with its part: what `close` answers.
+    hooks: Vec<(Weak<Hook>, Part)>,
 }
 
 /// The role a request takes in the attempt for its device.
@@ -83,18 +86,44 @@ enum Join {
     Closed,
 }
 
-/// What answers a request that ends without having answered itself: it is told whether it led.
-type Hook = Mutex<Option<Box<dyn FnOnce(bool) + Send>>>;
+/// The part a request has in the attempt for its device. A leader reads how its own attempt
+/// ended off its `Cancel`, which may no longer be the attempt in flight.
+#[derive(Clone)]
+enum Part {
+    Leader(Arc<Cancel>),
+    Follower,
+}
+
+impl Part {
+    fn unanswered(&self) -> Unanswered {
+        match self {
+            Self::Leader(cancel) => Unanswered::Led(cancel.reason()),
+            Self::Follower => Unanswered::Followed,
+        }
+    }
+}
+
+/// What a request that ends without having answered itself is told: that it ran an attempt, and
+/// why that attempt stopped, a failure that is its own to report; or that it only waited on one.
+pub(crate) enum Unanswered {
+    Led(ConnectFailure),
+    Followed,
+}
+
+type Abort = Box<dyn FnOnce(Unanswered) + Send>;
+
+/// What answers a request that ends without having answered itself.
+type Hook = Mutex<Option<Abort>>;
 
 /// The request's abort hook, run on a panic or a cancelled task (the query would otherwise stay
 /// pending for good) and by `close` at exit. Whichever takes it first is the only one to run it.
 struct Armed {
     hook: Arc<Hook>,
-    led: bool,
+    part: Part,
 }
 
 impl Armed {
-    fn take(hook: &Hook) -> Option<Box<dyn FnOnce(bool) + Send>> {
+    fn take(hook: &Hook) -> Option<Abort> {
         hook.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
@@ -102,7 +131,7 @@ impl Armed {
 impl Drop for Armed {
     fn drop(&mut self) {
         if let Some(abort) = Self::take(&self.hook) {
-            abort(self.led);
+            abort(self.part.unanswered());
         }
     }
 }
@@ -110,7 +139,6 @@ impl Drop for Armed {
 /// How a request settled, and whether it was the one that did the work.
 pub(crate) struct Settled {
     pub(crate) result: ConnectResult,
-    led: bool,
     announce: bool,
     armed: Armed,
 }
@@ -129,7 +157,7 @@ impl Settled {
     }
 
     pub(crate) fn led(&self) -> bool {
-        self.led
+        matches!(self.armed.part, Part::Leader(_))
     }
 }
 
@@ -171,27 +199,34 @@ impl ConnectFlights {
         dial: impl Future<Output = Result<D, ConnectFailure>>,
         settle: impl FnOnce(Result<D, ConnectFailure>) -> Verdict,
         discard: impl FnOnce(D),
-        abort: impl FnOnce(bool) + Send + 'static,
+        abort: impl FnOnce(Unanswered) + Send + 'static,
     ) -> Settled {
         let hook: Arc<Hook> = Arc::new(Mutex::new(Some(Box::new(abort))));
         match self.join(fullname, &hook) {
             Join::Closed => Settled {
                 result: Err(ConnectFailure::Aborted),
-                led: false,
                 announce: false,
-                armed: Armed { hook, led: false },
+                armed: Armed {
+                    hook,
+                    part: Part::Follower,
+                },
             },
             Join::Follow(done) => {
-                let armed = Armed { hook, led: false };
+                let armed = Armed {
+                    hook,
+                    part: Part::Follower,
+                };
                 Settled {
                     result: wait_for(done).await,
-                    led: false,
                     announce: false,
                     armed,
                 }
             }
             Join::Lead { id, cancel } => {
-                let armed = Armed { hook, led: true };
+                let armed = Armed {
+                    hook,
+                    part: Part::Leader(cancel.clone()),
+                };
                 let _leader = Leader { flights: self, id };
                 // Stops dialling for a replaced attempt. Whether it may still install is
                 // decided under the lock in `settle_attempt`, not here.
@@ -218,7 +253,7 @@ impl ConnectFlights {
         if let Some(flight) = &slot.flight {
             if flight.fullname == fullname {
                 let done = flight.done.subscribe();
-                slot.hooks.push((Arc::downgrade(hook), false));
+                slot.hooks.push((Arc::downgrade(hook), Part::Follower));
                 return Join::Follow(done);
             }
             // The older request loses: its waiters are answered here, its leader wakes on `cancel`.
@@ -236,13 +271,15 @@ impl ConnectFlights {
             cancel: cancel.clone(),
             done: watch::channel(None).0,
         });
-        slot.hooks.push((Arc::downgrade(hook), true));
+        slot.hooks
+            .push((Arc::downgrade(hook), Part::Leader(cancel.clone())));
         Join::Lead { id, cancel }
     }
 
     /// Settles every request still running, for the exit: each one's abort hook runs now, while
     /// what it answers through is alive, and the request then claims nothing. Later requests are
-    /// answered as aborted. The hooks run outside the slot, which they have no business in.
+    /// answered as aborted. The hooks run outside the slot, which they have no business in. A
+    /// leader replaced or cancelled earlier still ends as its attempt did, not as aborted.
     pub(crate) fn close(&self) {
         let hooks = {
             let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -253,9 +290,9 @@ impl ConnectFlights {
             }
             std::mem::take(&mut slot.hooks)
         };
-        for (hook, led) in hooks {
+        for (hook, part) in hooks {
             if let Some(abort) = hook.upgrade().and_then(|hook| Armed::take(&hook)) {
-                abort(led);
+                abort(part.unanswered());
             }
         }
     }
@@ -292,7 +329,6 @@ impl ConnectFlights {
             }
             return Settled {
                 result: Err(cancel.reason()),
-                led: true,
                 announce: false,
                 armed,
             };
@@ -304,7 +340,6 @@ impl ConnectFlights {
         Settled {
             announce: verdict.announce && verdict.result.is_err(),
             result: verdict.result,
-            led: true,
             armed,
         }
     }
