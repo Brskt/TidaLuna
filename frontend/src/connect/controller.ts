@@ -3,20 +3,12 @@ import type { MdnsDevice, MediaInfo, QueueLoadRequestData, RepeatMode } from "./
 
 export function createTidalConnectController() {
     return {
-        initialize(
-            serviceType: string,
-            queueServerUrl: string,
-            contentServerUrl: string,
-            authServerUrl: string,
-        ) {
-            sendIpc(
-                "connect.controller.initialize",
-                serviceType,
-                queueServerUrl,
-                contentServerUrl,
-                authServerUrl,
-            );
-        },
+        // TIDAL starts Connect only when this and `initialize` exist; events reach the store
+        // through `setupConnectEventListeners`, leaving the delegate unused.
+        registerDelegate() {},
+        // The server URLs it passes are not forwarded: plugins can call this channel too, and
+        // Rust knows TIDAL's hosts itself.
+        initialize() {},
         discoverDevices() {
             sendIpc("connect.controller.discover");
         },
@@ -29,8 +21,9 @@ export function createTidalConnectController() {
         disconnect(stopCasting: boolean): Promise<void> {
             return invokeIpc("connect.controller.disconnect", stopCasting);
         },
-        setAuthentication(credentials: string, authToken: string, refreshToken: string) {
-            sendIpc("connect.controller.set_auth", credentials, authToken, refreshToken);
+        // Only the account id is sent: Rust takes the token from its own store at cast time.
+        setAuthentication(credentials: string) {
+            sendIpc("connect.controller.set_auth", credentials);
         },
         loadMedia(rawMediaInfo: MediaInfo): Promise<unknown> {
             return invokeIpc("connect.controller.load_media", rawMediaInfo);

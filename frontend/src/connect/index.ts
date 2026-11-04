@@ -10,6 +10,7 @@ import { storePublished } from "../store-published";
 import { isOutputLevelReport, mirrorRustLevel } from "../volume";
 import { handleReceiverMediaChanged } from "./middleware";
 import type {
+    ConnectionLostPayload,
     ConnectStateSnapshot,
     DevicesReceivedPayload,
     MediaChangedPayload,
@@ -37,18 +38,62 @@ export async function setupConnectEventListeners(store: Store, published: () => 
         });
     });
 
+    // Rust stamps every lifecycle event with the socket generation it was posted at. A push queued
+    // before the snapshot read lands behind the snapshot's reply; one older than a generation this
+    // page applied is stale, and applying it would undo what the page already replaced.
+    let newest = 0;
+    const admit = (connection: number | undefined) => {
+        if (connection === undefined) return true;
+        if (connection < newest) return false;
+        newest = connection;
+        return true;
+    };
+
+    // TIDAL forks its cast-listening saga on every DEVICE_CONNECTED, and only DEVICE_DISCONNECTED
+    // cancels it: CONNECTION_LOST leaves it running. A connect finding one armed ends it first; a
+    // start repeated for the armed connection is dropped, as answering it would reset the player.
+    let armedFor: string | undefined;
+    let lostSinceArmed = false;
+    const dispatchConnected = (
+        connection: number | undefined,
+        payload: { device: unknown; session: { sessionId: string }; resumed?: boolean },
+    ) => {
+        const identity = `${connection}:${payload.session.sessionId}`;
+        if (identity === armedFor) return;
+        if (armedFor !== undefined) {
+            // After a loss the end returns TIDAL to its own player, which plays when the desired state
+            // is PLAYING: TIDAL's reducer-only reset comes first. Absent a loss it stays untouched:
+            // the remote's status only restores it when it reports a change.
+            if (lostSinceArmed) store.dispatch({ type: "playbackControls/SET_DESIRED_PAUSE_STATE" });
+            store.dispatch({
+                type: "remotePlayback/DEVICE_DISCONNECTED",
+                payload: { deviceType: "tidalConnect", suspended: true },
+            });
+        }
+        store.dispatch({ type: "remotePlayback/DEVICE_CONNECTED", payload });
+        armedFor = identity;
+        lostSinceArmed = false;
+    };
+
+    // A start a push already delivered is not replayed from the snapshot: the pushes behind it,
+    // which Rust posted before the snapshot was read, carry every later state in order.
+    const snapshotConnected = (session: NonNullable<ConnectStateSnapshot["session"]>) => {
+        if (armedFor !== undefined || !admit(session.connection)) return;
+        dispatchConnected(session.connection, { device: session.device, session });
+    };
+
     onIpcEvent("connect.session_started", (data: SessionStartedPayload) => {
-        store.dispatch({
-            type: "remotePlayback/DEVICE_CONNECTED",
-            payload: {
-                device: data.connectedDevice,
-                session: { sessionId: data.sessionId },
-                resumed: data.joined,
-            },
+        if (!admit(data.connection)) return;
+        dispatchConnected(data.connection, {
+            device: data.connectedDevice,
+            session: { sessionId: data.sessionId },
+            resumed: data.joined,
         });
     });
 
     onIpcEvent("connect.session_ended", (data: SessionEndedPayload) => {
+        if (!admit(data?.connection)) return;
+        armedFor = undefined;
         store.dispatch({
             type: "remotePlayback/DEVICE_DISCONNECTED",
             payload: {
@@ -58,7 +103,17 @@ export async function setupConnectEventListeners(store: Store, published: () => 
         });
     });
 
-    onIpcEvent("connect.connection_lost", () => {
+    // What TIDAL's native layer reports through `TCnotifyConnectFailed`: it releases the queue
+    // restore waiting on the device and drops the device TIDAL persisted.
+    onIpcEvent("connect.connect_failed", () => {
+        store.dispatch({ type: "remotePlayback/CONNECT_TO_DEVICE_FAILED" });
+    });
+
+    // The loss stays CONNECTION_LOST alone: TIDAL keeps the persisted session for a resume and its
+    // cast listener armed, which the next connect ends (above) once Rust starts a session again.
+    onIpcEvent("connect.connection_lost", (data?: ConnectionLostPayload) => {
+        if (!admit(data?.connection)) return;
+        lostSinceArmed = true;
         store.dispatch({ type: "remotePlayback/CONNECTION_LOST" });
     });
 
@@ -126,7 +181,7 @@ export async function setupConnectEventListeners(store: Store, published: () => 
             await published();
         }
         const state = await readStateSnapshot();
-        if (state) applyStateSnapshot(store, state);
+        if (state) applyStateSnapshot(store, state, snapshotConnected);
     } catch (e) {
         console.error("[connect] state snapshot not applied:", e);
     }
@@ -142,19 +197,18 @@ async function readStateSnapshot(): Promise<ConnectStateSnapshot | undefined> {
     }
 }
 
-function applyStateSnapshot(store: Store, state: ConnectStateSnapshot): void {
+function applyStateSnapshot(
+    store: Store,
+    state: ConnectStateSnapshot,
+    connected: (session: NonNullable<ConnectStateSnapshot["session"]>) => void,
+): void {
     if (state.devices?.length) {
         store.dispatch({
             type: "remotePlayback/DEVICES_RECEIVED",
             payload: { deviceType: "tidalConnect", devices: state.devices },
         });
     }
-    if (state.session) {
-        store.dispatch({
-            type: "remotePlayback/DEVICE_CONNECTED",
-            payload: { device: state.session.device, session: state.session },
-        });
-    }
+    if (state.session) connected(state.session);
     if (state.media) {
         store.dispatch({
             type: "remotePlayback/tidalConnect/MEDIA_CHANGED",

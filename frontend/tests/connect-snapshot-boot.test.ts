@@ -131,3 +131,51 @@ test("a store that fails for another reason is reported, not taken for an unpubl
 		error.mockRestore();
 	}
 });
+
+// A push Rust posted before the snapshot read can reach the renderer behind the snapshot's reply,
+// though the reply already shows the state that push led to. Rust stamps its lifecycle events with
+// the socket generation they were posted at, and the snapshot's session carries the one it is on.
+const emit = (channel: string, payload?: unknown) => (window as any).__LUNAR_IPC_EMIT__(channel, payload);
+const device = { id: "d1", type: "tidalConnect" };
+const liveAt = (connection: number) => ({ sessionId: "s1", device, joined: true, connection });
+const startedAt = (connection: number) => ({ connectedDevice: device, sessionId: "s1", joined: true, connection });
+const D3 = "remotePlayback/DEVICE_CONNECTED";
+const O3 = "remotePlayback/DEVICE_DISCONNECTED";
+
+// Earlier tests left their relays registered on the shared listener store.
+const isolate = () => {
+	const listeners = (window as any).__LUNAR_IPC_LISTENERS__;
+	for (const channel of Object.keys(listeners)) delete listeners[channel];
+};
+
+test("a loss and a resume queued behind a snapshot that shows the resume leave TIDAL connected", async () => {
+	isolate();
+	answers = [async () => ({ session: liveAt(2) })];
+	published = true;
+	await setupConnectEventListeners(store, async () => {});
+
+	emit("connect.connection_lost", { connection: 1 });
+	emit("connect.session_started", startedAt(2));
+
+	expect(types()).toEqual([D3]);
+});
+
+test("a snapshot after a push delivered the start leaves the pushes behind it to carry what followed", async () => {
+	isolate();
+	let reply!: (state: unknown) => void;
+	answers = [() => new Promise((r) => (reply = r))];
+	published = true;
+	const done = setupConnectEventListeners(store, async () => {});
+	await settled();
+	emit("connect.session_started", startedAt(1));
+
+	// An end and a start on a newer socket were posted before the read, and are still to come.
+	reply({ session: liveAt(3) });
+	await done;
+	emit("connect.session_ended", { suspended: true, connection: 2 });
+	emit("connect.session_started", startedAt(3));
+
+	expect(types()).toEqual([D3, O3, D3]);
+	// The push's start, which carries `resumed`; a start replayed from the snapshot does not.
+	expect((log[2] as any).payload.resumed).toBe(true);
+});

@@ -58,10 +58,18 @@ export interface SessionStartedPayload {
     connectedDevice: MdnsDevice;
     sessionId: string;
     joined: boolean;
+    /** The socket generation the start rides on; the snapshot's `session` carries the same. */
+    connection: number;
 }
 
 export interface SessionEndedPayload {
     suspended?: boolean;
+    /** The socket generation the event was posted at, as `SessionStartedPayload.connection`. */
+    connection: number;
+}
+
+export interface ConnectionLostPayload {
+    connection: number;
 }
 
 export interface MediaChangedPayload {
@@ -104,6 +112,7 @@ export interface ConnectStateSnapshot {
         sessionId: string;
         device: MdnsDevice;
         joined?: boolean;
+        connection: number;
     };
     media?: MediaInfo;
     playerStatus?: PlayerStatusChangedPayload;
