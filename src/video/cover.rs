@@ -101,6 +101,68 @@ fn is_cover_url(url: &str) -> bool {
         && parsed.path().starts_with("/videos/")
 }
 
+/// The square sizes TIDAL publishes for an animated cover, in pixels on a side.
+const SERVED_EDGES: [u32; 5] = [80, 160, 320, 640, 1280];
+
+/// The smallest published size that covers what the page asked for, or the largest one.
+fn served_edge(asked: u32) -> u32 {
+    SERVED_EDGES
+        .into_iter()
+        .find(|&edge| edge >= asked)
+        .unwrap_or(SERVED_EDGES[SERVED_EDGES.len() - 1])
+}
+
+/// One cover at one size: what is downloaded, decoded, transcoded and cached.
+///
+/// Built only by [`CoverKey::parse`] from the page's `src`: a cover URL ending in a square
+/// `<n>x<n>.mp4`, rewritten to the served edge, query and fragment dropped. A page cannot mint
+/// cache entries for one cover by varying them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CoverKey {
+    url: String,
+}
+
+impl CoverKey {
+    pub(crate) fn parse(src: &str, edge: &str) -> Result<Self, &'static str> {
+        if !is_cover_url(src) {
+            return Err("the cover url is not a TIDAL artwork video url");
+        }
+        let asked: u32 = edge
+            .parse()
+            .ok()
+            .filter(|&e| e > 0)
+            .ok_or("the cover edge is not a positive integer")?;
+        let edge = served_edge(asked);
+
+        let mut parsed = url::Url::parse(src).map_err(|_| "the cover url does not parse")?;
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        let last = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .ok_or("the cover url has no file name")?;
+        let (width, height) = last
+            .strip_suffix(".mp4")
+            .and_then(|size| size.split_once('x'))
+            .ok_or("the cover url names no <n>x<n>.mp4 variant")?;
+        if width.parse::<u32>().is_err() || width != height {
+            return Err("the cover url names no square variant");
+        }
+        parsed
+            .path_segments_mut()
+            .map_err(|_| "the cover url cannot carry a path")?
+            .pop()
+            .push(&format!("{edge}x{edge}.mp4"));
+        Ok(Self {
+            url: parsed.to_string(),
+        })
+    }
+
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+}
+
 /// The largest variant we ask for, in pixels on a side. At 1280 the 300 frames every variant
 /// carries are 738 MiB at the decoder's strides, well past `MAX_DECODED_BYTES`, and a real
 /// cover cannot finish; at 640 they are 193 MiB and fit. The canvas fills the same box either
