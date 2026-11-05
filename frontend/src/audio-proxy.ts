@@ -3,7 +3,7 @@
 
 import { sendIpc } from "./ipc";
 import { applyVolume } from "./volume";
-import { attachCoverCanvas, coverSelected, isCoverUrl } from "./video/cover-canvas";
+import { hijackSourceSrc, retargetCover } from "./video/cover-hijack";
 import { productOfStream } from "./sdk-playbackinfo";
 
 // The element Rust's mirror belongs to: the one Shaka plays. Shaka keeps TWO (the active one and
@@ -101,14 +101,6 @@ if (srcDesc) {
 	Object.defineProperty(HTMLMediaElement.prototype, "src", {
 		set(value: string) {
 			console.log("[audio-proxy] src SET:", typeof value === "string" ? value.slice(0, 80) : value, "isTidal:", shouldProxy(value));
-			// Covers bypass `shouldProxy`'s branch: it rebinds `_proxyElement`, `_proxyTime` and
-			// `_proxyPlaying` (the AUDIO player's mirror), and a cover there would replace the playing
-			// element and reset its time.
-			if (isCoverUrl(value)) {
-				srcDesc.set!.call(this, value);
-				attachCoverCanvas(this, value);
-				return;
-			}
 			if (shouldProxy(value)) {
 				(this as any)._lunarProxy = true;
 				(this as any)._lunarSrc = value;
@@ -185,8 +177,25 @@ Element.prototype.setAttribute = function (name: string, value: string) {
 		this.src = value;
 		return;
 	}
+	// TIDAL's animated cover, on its `<video>`'s `<source>`: React writes it as an attribute.
+	if (this instanceof HTMLSourceElement && name === "src") {
+		origSetAttribute.call(this, name, hijackSourceSrc(this, value));
+		return;
+	}
 	origSetAttribute.call(this, name, value);
 };
+
+// The same `src`, written as a property.
+const sourceSrcDesc = Object.getOwnPropertyDescriptor(HTMLSourceElement.prototype, "src");
+if (sourceSrcDesc?.set) {
+	Object.defineProperty(HTMLSourceElement.prototype, "src", {
+		get: sourceSrcDesc.get,
+		set(value: string) {
+			sourceSrcDesc.set!.call(this, hijackSourceSrc(this, value));
+		},
+		configurable: true,
+	});
+}
 
 const OrigAudio = window.Audio;
 (window as any).Audio = function (src?: string) {
@@ -256,34 +265,13 @@ HTMLMediaElement.prototype.load = function () {
 		return;
 	}
 
-	// TIDAL puts an animated cover on a <source> child, never on the element, and the `src` setter
-	// never sees it. `load()` does: a reused element can only change cover through it (the spec
-	// ignores a changed `src` on a <source> already inserted). TIDAL calls it from an effect,
-	// after the commit, with the child and parent both in the document. Read the child's `src`:
-	// `srcset` is ignored on a media child, and `currentSrc` is still stale here.
-	const media = this as HTMLMediaElement;
-	const candidate = media.querySelector("source")?.src;
-	if (candidate && isCoverUrl(candidate)) {
-		// The native load still runs: a `<video>` that never loads has no intrinsic size, the frame
-		// falls back to 300x150 and the painted cover collapses with it. `attachCoverCanvas` only
-		// reads the element once, for the artwork frame it sits in.
-		attachCoverCanvas(media, candidate);
-	}
+	// A reused element changes cover only through `load()` (the spec ignores a new `src` on an
+	// inserted <source>). TIDAL calls it after the commit, child in place: the edge is now the
+	// element's, the bust the latest. Written past the hook, which would take it for TIDAL's.
+	retargetCover(this, (source, url) => origSetAttribute.call(source, "src", url));
 
 	origLoad.call(this);
 };
-
-// The hook above stays for its timing (it attaches inside the commit, before TIDAL's unloaded
-// `<video>` can be painted), but `load()` is not every selection: a `<source>` inserted into a
-// fresh `<video>` starts one on its own. Its `loadstart` is the one signal every selection
-// fires. Captured on the document, since media events do not bubble.
-document.addEventListener(
-	"loadstart",
-	(e) => {
-		if (e.target instanceof HTMLMediaElement) coverSelected(e.target);
-	},
-	true,
-);
 
 // An element that does not hold the mirror (Shaka's preloaded one) reads as a loaded, idle one: not
 // playing, at zero. Its length stays the mirror's, since Shaka's `next()` waits 3 s for a

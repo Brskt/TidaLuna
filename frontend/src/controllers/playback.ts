@@ -3,7 +3,6 @@ import { isSelfLoad, setSelfLoad, onHandoff, onProxyBind, onSdkLoad, onSdkReload
 import { forgetRefusal, refusePlayback } from "../refuse-playback";
 import { onSdkStream, productOfStream } from "../sdk-playbackinfo";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
-import { setCurrentTrack } from "../video/cover-canvas";
 import { storePublished } from "../store-published";
 import type { ReceiverStream } from "../connect/types";
 
@@ -198,9 +197,6 @@ export const createPlaybackController = () => {
         ) => {
             if (item && typeof item === "object") {
                 if (item.type !== "video") lastItem = item;
-                // The one signal that fires for EVERY track, animated cover or not.
-                // `setCurrentTrack` takes the still artwork from it (see its doc).
-                setCurrentTrack(item);
 
                 // Send raw media item; metadata parsing/fallbacks are centralized in Rust.
                 sendIpc("player.metadata", item);
