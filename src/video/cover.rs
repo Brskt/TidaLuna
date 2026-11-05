@@ -87,13 +87,17 @@ const COVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///
 /// The host test is the exact equality `ipc::plugin::download` applies to artwork, never a
 /// substring. The path check is ours: the same host serves the static `images/` covers, which
-/// must never reach a decoder.
+/// must never reach a decoder. A port or a user part names another service or another identity
+/// than the CDN's, and the URL is a cache key besides: both are refused.
 fn is_cover_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
     parsed.scheme() == "https"
         && parsed.host_str() == Some("resources.tidal.com")
+        && parsed.port().is_none()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
         && parsed.path().starts_with("/videos/")
 }
 

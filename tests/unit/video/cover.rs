@@ -146,6 +146,18 @@ fn only_an_https_video_url_on_the_artwork_host_is_a_cover_url() {
             false,
         ),
         ("http://resources.tidal.com/videos/a.mp4", false),
+        (
+            "https://resources.tidal.com:8443/videos/a/640x640.mp4",
+            false,
+        ),
+        (
+            "https://user@resources.tidal.com/videos/a/640x640.mp4",
+            false,
+        ),
+        (
+            "https://:pass@resources.tidal.com/videos/a/640x640.mp4",
+            false,
+        ),
         ("not a url", false),
         (
             "https://resources.tidal.com/images/a/b/c/1280x1280.jpg",
