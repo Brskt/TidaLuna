@@ -259,7 +259,7 @@ fn installed_path(target: &CodecTarget) -> PathBuf {
     codec_dir().join(target.file_name)
 }
 
-fn sha256_bytes(data: &[u8]) -> String {
+pub(crate) fn sha256_bytes(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -371,6 +371,15 @@ fn write_atomically(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755))?;
     }
+    persist_outlasting_holds(tmp, dest)
+}
+
+/// Renames the synced `tmp` onto `dest`, waiting out another program that holds either for a
+/// moment (see `LOCK_BUDGET`).
+pub(crate) fn persist_outlasting_holds(
+    mut tmp: tempfile::NamedTempFile,
+    dest: &Path,
+) -> std::io::Result<()> {
     let start = std::time::Instant::now();
     let mut pause = LOCK_FIRST_PAUSE;
     loop {
