@@ -106,7 +106,6 @@ const CEF_SWITCHES: &[&str] = &[
     "disable-save-password-bubble",
     "disable-webrtc",
     "site-per-process",
-    "disable-accelerated-video-decode",
     "disable-accelerated-video-encode",
 ];
 
