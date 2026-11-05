@@ -116,10 +116,10 @@ pub(crate) fn validate_cover_webm(bytes: &[u8], expected: &ExpectedCover) -> Res
     let (Some(duration), Some(time_base)) = (media.duration, media.time_base) else {
         return Err("the upload states no duration".to_string());
     };
-    let micros = u128::from(duration.get()) * u128::from(time_base.numer.get()) * 1_000_000
-        / u128::from(time_base.denom.get());
-    let micros =
-        i64::try_from(micros).map_err(|_| "the upload's duration overflows".to_string())?;
+    let micros = time_base
+        .calc_duration(duration)
+        .and_then(|time| i64::try_from(time.as_micros()).ok())
+        .ok_or_else(|| "the upload's duration overflows".to_string())?;
     if (micros - expected.duration_micros).abs() > expected.tolerance_micros {
         return Err(format!(
             "the upload lasts {micros} us, the cover {} us",
