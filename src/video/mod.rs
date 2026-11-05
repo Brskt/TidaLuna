@@ -3,3 +3,4 @@
 
 pub(crate) mod codec;
 pub(crate) mod cover;
+pub(crate) mod webm;
