@@ -260,6 +260,7 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
         }
         "settings.clear_audio_cache" => {
             crate::player::cache::queue_clear(None);
+            crate::video::cover_cache::queue_clear();
         }
         // Not Windows-gated: crossfade rides the shared cpal path, which every
         // platform uses. The exclusive and ASIO backends ignore it.

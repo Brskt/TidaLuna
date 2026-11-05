@@ -113,6 +113,7 @@ wrap_menu_model_delegate! {
                     // the wipe walks a sharded tree as large as the cap allows. The menu closes
                     // without waiting on the disk; the settings page hears it.
                     crate::player::cache::queue_clear(None);
+                    crate::video::cover_cache::queue_clear();
                 }
                 MenuCommand::OpenData => {
                     open_in_os(crate::state::cache_data_dir());

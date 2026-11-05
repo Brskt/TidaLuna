@@ -36,3 +36,28 @@ fn eviction_keeps_the_newest_covers_under_budget_and_sweeps_stale_leftovers() {
         "the stale leftover, then the least recently used cover"
     );
 }
+
+/// The Clear runs beside the stores: deleting a staging file a store is still writing fails its
+/// rename, and the page reads that as the cover's fault.
+#[test]
+fn a_clear_leaves_the_file_a_store_is_still_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, age: u64| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"webm").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(age))
+            .unwrap();
+    };
+    write(&cover_name(1), 0);
+    write(".tmpLive", 5);
+    write(".tmpOld", 3_600);
+
+    CoverCache::new(dir.path().to_path_buf(), BUDGET_BYTES).clear();
+
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, [".tmpLive"]);
+}

@@ -36,7 +36,7 @@ export const LunaAudioCacheSettings = React.memo(() => {
 	}, []);
 
 	return (
-		<LunaSettings title="Audio cache" desc="Cache for streamed audio.">
+		<LunaSettings title="Cache" desc="Cache for streamed audio and animated covers.">
 			<LunaSwitchSetting
 				title="Cache tracks"
 				desc="Store streamed tracks in the cache."
@@ -44,7 +44,7 @@ export const LunaAudioCacheSettings = React.memo(() => {
 				disabled={!available}
 				onChange={handleToggle}
 			/>
-			<LunaSetting title="Cache size" desc="Space allocated for the cache.">
+			<LunaSetting title="Cache size" desc="Space allocated for cached tracks.">
 				<Slider
 					aria-label="Audio cache size in gigabytes"
 					min={MIN_GB}
@@ -64,7 +64,7 @@ export const LunaAudioCacheSettings = React.memo(() => {
 				title="Clear cache"
 				desc={
 					<>
-						Delete all cached tracks.
+						Delete all cached tracks and animated covers.
 						{usage && <Detail>{usage}</Detail>}
 						{note && <Detail>{note}</Detail>}
 					</>

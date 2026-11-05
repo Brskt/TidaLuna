@@ -124,6 +124,12 @@ impl CoverCache {
         Ok(())
     }
 
+    /// Delete every cover: an eviction to an empty budget. A store still being written lands its
+    /// cover after the Clear. A cover on screen keeps playing what its element loaded.
+    pub(crate) fn clear(&self) {
+        self.sweep(0);
+    }
+
     fn evict(&self) {
         self.sweep(self.budget);
     }
@@ -149,6 +155,11 @@ impl CoverCache {
             }
         }
     }
+}
+
+/// The user's "Clear cache", beside the audio cache's: off the UI thread it is called from.
+pub(crate) fn queue_clear() {
+    crate::state::rt_handle().spawn_blocking(|| COVER_CACHE.clear());
 }
 
 #[cfg(test)]
