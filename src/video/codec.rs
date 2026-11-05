@@ -144,12 +144,8 @@ impl FetchError {
     fn class(&self) -> Option<FailureClass> {
         Some(match self {
             Self::Unreachable(_) | Self::Body(_) => FailureClass::Network,
-            Self::Status(s) if s.is_server_error() || matches!(s.as_u16(), 408 | 429) => {
-                FailureClass::Network
-            }
-            Self::Status(_) | Self::OffHost | Self::NoTarget | Self::Redirected(_) => {
-                FailureClass::Refused
-            }
+            Self::Status(s) => FailureClass::of_status(*s),
+            Self::OffHost | Self::NoTarget | Self::Redirected(_) => FailureClass::Refused,
             Self::TooLarge | Self::Archive(_) | Self::Digest(_) => FailureClass::Corrupt,
             Self::Save(_) => FailureClass::Disk,
             Self::Shutdown => return None,
@@ -184,7 +180,7 @@ impl std::error::Error for FetchError {}
 
 /// `context: e: its source: ...`, the shape `{:#}` gives an `anyhow::Error`. reqwest's own
 /// `Display` stops at the top, which says "error sending request" and never why.
-fn write_chain(
+pub(crate) fn write_chain(
     f: &mut std::fmt::Formatter<'_>,
     context: &str,
     e: &dyn std::error::Error,
@@ -216,6 +212,15 @@ pub(crate) enum FailureClass {
 }
 
 impl FailureClass {
+    /// A host that answered without success: it could not serve right now, or it said no.
+    pub(crate) fn of_status(status: reqwest::StatusCode) -> Self {
+        if status.is_server_error() || matches!(status.as_u16(), 408 | 429) {
+            Self::Network
+        } else {
+            Self::Refused
+        }
+    }
+
     /// The only failure text a class sends out of the process, a constant: no path or OS
     /// message travels with it to the page.
     fn phrase(self) -> &'static str {

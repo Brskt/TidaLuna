@@ -1,7 +1,8 @@
 //! Decoding an animated album cover: a plain MP4 on `resources.tidal.com`, H.264, no audio.
 //!
 //! Distinct from the clip path in every way that matters: no manifest, no signed URL, no
-//! seek, and the file is small enough to hold whole in memory.
+//! seek, and the file is small enough to hold whole in memory. The decoded frames are never held
+//! whole: [`DecodeStream`] hands them out one at a time to the page, which transcodes them once.
 
 /// The bytes of one sample, or `None` when the file's tables do not describe a range this
 /// buffer actually contains.
@@ -22,6 +23,8 @@ fn sample_bytes(file: &[u8], offset: u64, size: usize) -> Option<&[u8]> {
 
 use shiguredo_mp4::bitstream::h264::{LengthSize, length_prefixed_to_annexb};
 use shiguredo_mp4::boxes::AvccBox;
+
+use crate::video::codec::FailureClass;
 
 /// A 4-byte start code. Three is also legal Annex-B, but four is what the crate emits and
 /// what every muxer writes at an access-unit boundary.
@@ -163,100 +166,6 @@ impl CoverKey {
     }
 }
 
-/// The largest variant we ask for, in pixels on a side. At 1280 the 300 frames every variant
-/// carries are 738 MiB at the decoder's strides, well past `MAX_DECODED_BYTES`, and a real
-/// cover cannot finish; at 640 they are 193 MiB and fit. The canvas fills the same box either
-/// way, and a quarter of the pixels is no visible loss on an animation.
-const MAX_COVER_EDGE: u32 = 640;
-
-/// The same cover at `MAX_COVER_EDGE`, or `None` unless the URL names a square `<n>x<n>.mp4`
-/// above it. Only the last segment changes, which keeps it inside what `is_cover_url` admits.
-fn capped_cover_url(url: &str) -> Option<String> {
-    let mut parsed = url::Url::parse(url).ok()?;
-    let last = parsed.path_segments()?.next_back()?.to_owned();
-    let (width, height) = last.strip_suffix(".mp4")?.split_once('x')?;
-    let width: u32 = width.parse().ok()?;
-    let height: u32 = height.parse().ok()?;
-    if width != height || width <= MAX_COVER_EDGE {
-        return None;
-    }
-    {
-        let mut segments = parsed.path_segments_mut().ok()?;
-        segments.pop();
-        segments.push(&format!("{MAX_COVER_EDGE}x{MAX_COVER_EDGE}.mp4"));
-    }
-    Some(parsed.to_string())
-}
-
-/// The URL a cover is actually fetched from, which is also the work's identity: capping before the
-/// work starts lets two frames naming different variants share it. TIDAL writes a variant literal
-/// at each call site (an album header asks for `1280x1280` whatever its box measures). Variants at
-/// or under the cap are different files and stay apart.
-pub(crate) fn canonical_cover_url(url: &str) -> String {
-    match capped_cover_url(url) {
-        Some(capped) => {
-            crate::vprintln!("[VIDEO]   Cover capped to {MAX_COVER_EDGE}px on a side");
-            capped
-        }
-        None => url.to_string(),
-    }
-}
-
-/// How many requesters still want one cover: one frame giving up must not cancel what the
-/// others wait for, and the question the work asks is a count reaching zero.
-///
-/// Joining is a compare-and-swap, not an increment: zero is a one-way door. Past it the work
-/// may stop at its next boundary, and a latecomer that incremented would be handed an abandoned
-/// answer; `try_join` refuses instead, and its caller starts a fresh job.
-pub(crate) struct CoverInterest {
-    waiters: std::sync::atomic::AtomicUsize,
-}
-
-impl CoverInterest {
-    /// One requester: the one that is creating the job.
-    pub(crate) fn new() -> Self {
-        Self {
-            waiters: std::sync::atomic::AtomicUsize::new(1),
-        }
-    }
-
-    /// Add a requester to a job already running, unless it has none left.
-    pub(crate) fn try_join(&self) -> bool {
-        use std::sync::atomic::Ordering;
-        let mut current = self.waiters.load(Ordering::Relaxed);
-        loop {
-            if current == 0 {
-                return false;
-            }
-            match self.waiters.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(seen) => current = seen,
-            }
-        }
-    }
-
-    /// One requester stops waiting. Saturating: a release that arrived twice cannot wrap the
-    /// count back into interest and revive work nobody wants.
-    pub(crate) fn release(&self) {
-        use std::sync::atomic::Ordering;
-        let _ = self
-            .waiters
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                Some(n.saturating_sub(1))
-            });
-    }
-
-    /// Nobody is waiting: everything from here on would be work for no reader.
-    pub(crate) fn abandoned(&self) -> bool {
-        self.waiters.load(std::sync::atomic::Ordering::Relaxed) == 0
-    }
-}
-
 /// The cover fetch's own client. Not `HTTP_CLIENT`: it follows redirects with no policy, so an
 /// open redirect on the artwork host would carry the fetch anywhere, and it shares a cookie jar.
 /// This one re-checks the host at every hop, as `ipc::plugin::download` does.
@@ -272,19 +181,66 @@ fn cover_redirect_allowed(url: &url::Url) -> bool {
     url.scheme() == "https" && url.host_str() == Some("resources.tidal.com")
 }
 
-/// Fetch a cover whole, or stop early and return `None` once nobody is waiting for it.
+/// Why a cover download failed, tagged by the stage that failed, as the codec's `FetchError` is.
+/// No `From`: a new step cannot fall by default into the class the page retries.
+#[derive(Debug)]
+pub(crate) enum CoverFetchError {
+    /// Not a cover on the artwork host; `CoverKey::parse` refused it first.
+    NotACover,
+    /// Anything before a status line: DNS, connect, TLS, the timeout.
+    Unreachable(reqwest::Error),
+    /// A redirect the host-checked client refused.
+    Redirected(reqwest::Error),
+    Status(reqwest::StatusCode),
+    /// The body broke off after the status line.
+    Body(reqwest::Error),
+    TooLarge,
+}
+
+impl CoverFetchError {
+    /// Read off the stage, never off the text.
+    pub(crate) fn class(&self) -> FailureClass {
+        match self {
+            Self::Unreachable(_) | Self::Body(_) => FailureClass::Network,
+            Self::Status(s) => FailureClass::of_status(*s),
+            Self::NotACover | Self::Redirected(_) => FailureClass::Refused,
+            Self::TooLarge => FailureClass::Corrupt,
+        }
+    }
+}
+
+/// The whole cause, for the log only: the page is told the class.
+impl std::fmt::Display for CoverFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::video::codec::write_chain;
+        match self {
+            Self::NotACover => f.write_str("cover url is not a TIDAL artwork video url"),
+            Self::Unreachable(e) => write_chain(f, "sending the cover request failed", e),
+            Self::Redirected(e) => write_chain(f, "the artwork host redirected elsewhere", e),
+            Self::Status(s) => write!(f, "artwork host answered {s}"),
+            Self::Body(e) => write_chain(f, "reading the cover failed", e),
+            Self::TooLarge => write!(f, "cover exceeds the ceiling of {MAX_COVER_BYTES} bytes"),
+        }
+    }
+}
+
+/// No `source()`: `Display` already carries the cause.
+impl std::error::Error for CoverFetchError {}
+
+/// Fetch a cover whole, or stop early and return `None` once its request is cancelled.
 ///
 /// Small enough to hold in memory, and the demuxer wants it that way: it does no IO of its own and
 /// is documented as accepting the entire file in one call.
-///
-/// `None` rather than an error, as in `decode_cover`.
-async fn fetch_cover(url: &str, interest: &CoverInterest) -> anyhow::Result<Option<Vec<u8>>> {
+pub(crate) async fn fetch_cover(
+    url: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Option<Vec<u8>>, CoverFetchError> {
     if !is_cover_url(url) {
         crate::vprintln!(
             "[VIDEO]   Refused a cover url outside the artwork host: {}",
             crate::util::refused_host(url)
         );
-        anyhow::bail!("cover url is not a TIDAL artwork video url");
+        return Err(CoverFetchError::NotACover);
     }
 
     let resp = COVER_CLIENT
@@ -292,9 +248,17 @@ async fn fetch_cover(url: &str, interest: &CoverInterest) -> anyhow::Result<Opti
         .timeout(COVER_TIMEOUT)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("{}", crate::util::network_error_text(e)))?;
+        .map_err(|e| {
+            // The policy's refusal surfaces as a send error too; only this flag tells it apart
+            // from a host that never answered.
+            if e.is_redirect() {
+                CoverFetchError::Redirected(e.without_url())
+            } else {
+                CoverFetchError::Unreachable(e.without_url())
+            }
+        })?;
     if !resp.status().is_success() {
-        anyhow::bail!("artwork host answered {}", resp.status());
+        return Err(CoverFetchError::Status(resp.status()));
     }
 
     let mut out = Vec::new();
@@ -304,13 +268,12 @@ async fn fetch_cover(url: &str, interest: &CoverInterest) -> anyhow::Result<Opti
         while let Some(chunk) = stream.next().await {
             // Asked once per chunk, a boundary where stopping is free; without it an abandoned
             // cover downloads to its last byte, or to `COVER_TIMEOUT`.
-            if interest.abandoned() {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(None);
             }
-            let chunk =
-                chunk.map_err(|e| anyhow::anyhow!("{}", crate::util::network_error_text(e)))?;
+            let chunk = chunk.map_err(|e| CoverFetchError::Body(e.without_url()))?;
             if out.len() + chunk.len() > MAX_COVER_BYTES {
-                anyhow::bail!("cover exceeds the ceiling of {MAX_COVER_BYTES} bytes");
+                return Err(CoverFetchError::TooLarge);
             }
             out.extend_from_slice(&chunk);
         }
@@ -325,12 +288,10 @@ use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 /// One decoded frame, owned. The decoder's own `DecodedYUV` borrows the decoder and cannot
 /// outlive the next `decode` call; the planes are copied out here.
 ///
-/// The strides travel with the planes because the decoder is free to pad each row past `width`,
-/// and a consumer addressing a padded plane by `width` alone reads the padding as picture. They
-/// are what the transport writes into its header and what the shader uses to sample.
+/// The strides travel with the planes because the decoder is free to pad each row past the width,
+/// and a consumer addressing a padded plane by that width alone reads the padding as picture. They
+/// are what each frame's record states and what the page's `VideoFrame` layout is built from.
 pub(crate) struct CoverFrame {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
     pub(crate) y: Vec<u8>,
     pub(crate) u: Vec<u8>,
     pub(crate) v: Vec<u8>,
@@ -491,238 +452,211 @@ fn demux_cover_samples(file: &[u8]) -> anyhow::Result<Vec<CoverSample>> {
     Ok(samples)
 }
 
-/// Decoded frames are held all at once, and a 1280x1280 frame is 2.58 MB at the decoder's
-/// strides. This bounds the total rather than the count, because the count says nothing about
-/// resolution.
-const MAX_DECODED_BYTES: usize = 256 * 1024 * 1024;
-
-/// Refuse a frame that is not the size of the ones before it.
-///
-/// The transport states one size per cover, in its header, and an `avc1` track may legally
-/// carry a second sample entry whose SPS names new dimensions (`demux_cover_samples` lets it
-/// through, the codec being unchanged). Refused rather than carried per frame: a frame that
-/// disagrees with the header throws inside the page's animation callback, where nothing catches
-/// it, and freezes the canvas over the hidden still artwork. Refused here, the still stays.
+/// The stream's header states one size per cover, yet an `avc1` track may carry a second sample
+/// entry whose SPS names new dimensions (`demux_cover_samples` passes it: same codec). Refused,
+/// not carried per frame: the page's encoder is configured once, for the header's size.
 fn refuse_resolution_change(
-    frames: &[CoverFrame],
+    first: Option<(usize, usize)>,
     width: usize,
     height: usize,
 ) -> anyhow::Result<()> {
-    let Some(first) = frames.first() else {
-        return Ok(());
-    };
-    if (first.width, first.height) != (width, height) {
-        anyhow::bail!(
-            "cover changes resolution mid-stream, from {}x{} to {width}x{height}",
-            first.width,
-            first.height,
-        );
+    match first {
+        Some((w, h)) if (w, h) != (width, height) => {
+            anyhow::bail!("cover changes resolution mid-stream, from {w}x{h} to {width}x{height}")
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
-/// Copy one decoded picture out and charge it against the ceiling.
-fn push_decoded_frame(
-    frames: &mut Vec<CoverFrame>,
-    decoded_bytes: &mut usize,
+/// Times for the decoded frames: the decoder returns none usable, and covers reorder; the samples'
+/// times, sorted, are one FIFO the frames draw from. Rebased to zero: the edit list that would say
+/// so is not read, and a loop starting late holds its last frame at every seam.
+struct PresentationTimes {
+    queue: std::collections::VecDeque<i64>,
+    span: i64,
+}
+
+impl PresentationTimes {
+    fn new(mut times: Vec<i64>) -> Self {
+        times.sort_unstable();
+        let first = times.first().copied().unwrap_or(0);
+        let queue: std::collections::VecDeque<i64> = times.into_iter().map(|t| t - first).collect();
+        let span = queue.back().copied().unwrap_or(0);
+        Self { queue, span }
+    }
+
+    /// The next frame's time. A frame with no time left is refused rather than given one: a
+    /// count that cannot be paired would mistime the whole animation instead of failing.
+    fn next(&mut self) -> anyhow::Result<i64> {
+        self.queue
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("cover decoded more frames than it has samples"))
+    }
+}
+
+fn take_frame(
     yuv: &openh264::decoder::DecodedYUV<'_>,
-) -> anyhow::Result<()> {
+    first: &mut Option<(usize, usize)>,
+    times: &mut PresentationTimes,
+) -> anyhow::Result<CoverFrame> {
     use openh264::formats::YUVSource;
 
     let (width, height) = yuv.dimensions();
     // Checked before the planes are copied: a frame that will be refused is not worth copying.
-    refuse_resolution_change(frames, width, height)?;
+    refuse_resolution_change(*first, width, height)?;
+    first.get_or_insert((width, height));
 
     let (y_stride, u_stride, v_stride) = yuv.strides();
-    let y = yuv.y().to_vec();
-    let u = yuv.u().to_vec();
-    let v = yuv.v().to_vec();
-    *decoded_bytes = decoded_bytes
-        .checked_add(y.len() + u.len() + v.len())
-        .ok_or_else(|| anyhow::anyhow!("cover decoded size overflows"))?;
-    if *decoded_bytes > MAX_DECODED_BYTES {
-        anyhow::bail!("cover decoded frames exceed the ceiling of {MAX_DECODED_BYTES} bytes");
-    }
-    frames.push(CoverFrame {
-        width,
-        height,
-        y,
-        u,
-        v,
+    Ok(CoverFrame {
+        y: yuv.y().to_vec(),
+        u: yuv.u().to_vec(),
+        v: yuv.v().to_vec(),
         y_stride,
         u_stride,
         v_stride,
-        // Filled once every picture is out, by `assign_presentation_times`. No frame ever leaves
-        // `decode_cover` still carrying this: a count that cannot be paired refuses outright.
-        pts_micros: 0,
-    });
-    Ok(())
-}
-
-/// Pair each decoded frame with its presentation time.
-///
-/// The decoder hands back no usable timestamp of its own (`DecodedYUV::timestamp` is built from
-/// an input stamp this path never sets), so the times come from the samples. They cannot be
-/// paired as they arrive: a stream that reorders emits pictures in display order while the
-/// samples arrive in decode order, and covers reorder. Sorting the samples' presentation times
-/// and walking them alongside the frames restores the correspondence. A count that does not
-/// match is refused rather than truncated: a silent short pairing would mistime the whole
-/// animation instead of failing.
-fn assign_presentation_times(
-    frames: &mut [CoverFrame],
-    samples: &[CoverSample],
-) -> anyhow::Result<()> {
-    if frames.len() != samples.len() {
-        anyhow::bail!(
-            "cover decoded {} frames for {} samples, so their presentation times cannot be paired",
-            frames.len(),
-            samples.len()
-        );
-    }
-    let mut times: Vec<i64> = samples.iter().map(|s| s.pts_micros).collect();
-    times.sort_unstable();
-    for (frame, pts) in frames.iter_mut().zip(times) {
-        frame.pts_micros = pts;
-    }
-    Ok(())
-}
-
-/// Every frame, or `None` once nobody waits for the answer: being abandoned is not the file's
-/// fault (see `CoverOutcome::Abandoned`).
-fn decode_cover(
-    file: &[u8],
-    api: openh264::OpenH264API,
-    interest: &CoverInterest,
-) -> anyhow::Result<Option<Vec<CoverFrame>>> {
-    use openh264::decoder::{Decoder, DecoderConfig, Flush};
-
-    let samples = demux_cover_samples(file)?;
-    if interest.abandoned() {
-        return Ok(None);
-    }
-
-    // `Flush::NoFlush`, never the crate's default. `DecoderConfig::new()` sets `Flush::Flush`, and
-    // `decode` passes `Flush::Auto`, which resolves to flushing after every single call. On a
-    // stream that reorders, that flush takes a picture out of the buffer later frames still
-    // reference, and OpenH264 answers `dsOutOfMemory` (upstream issue #50, error string and all).
-    // The crate's own B-frame test and its MP4 example both run `NoFlush` plus a final drain, and
-    // its `Flush` docs recommend the drain regardless.
-    let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
-    let mut decoder = Decoder::with_api_config(api, config)
-        .map_err(|e| anyhow::anyhow!("starting the cover decoder failed: {e}"))?;
-
-    let mut frames = Vec::new();
-    let mut decoded_bytes: usize = 0;
-    for sample in &samples {
-        // Read once per frame: this loop is the expensive part, and an atomic load costs nothing
-        // against it.
-        if interest.abandoned() {
-            return Ok(None);
-        }
-        let decoded = decoder
-            .decode(&sample.annex_b)
-            .map_err(|e| anyhow::anyhow!("decoding a cover frame failed: {e}"))?;
-        // `None` is ordinary: the decoder holds frames back until it has enough.
-        if let Some(yuv) = decoded {
-            push_decoded_frame(&mut frames, &mut decoded_bytes, &yuv)?;
-        }
-    }
-
-    // The loop's own check precedes each decode, never this drain.
-    if interest.abandoned() {
-        return Ok(None);
-    }
-    // The pictures held back for reordering only come out here. Without this drain the tail of
-    // every cover is missing, which is why the crate counts its own B-frame test after it.
-    let remaining = decoder
-        .flush_remaining()
-        .map_err(|e| anyhow::anyhow!("draining the cover decoder failed: {e}"))?;
-    for yuv in &remaining {
-        push_decoded_frame(&mut frames, &mut decoded_bytes, yuv)?;
-    }
-
-    if frames.is_empty() {
-        anyhow::bail!("cover decoded to no frames");
-    }
-    assign_presentation_times(&mut frames, &samples)?;
-    Ok(Some(frames))
-}
-
-/// What a cover load produced. Four outcomes rather than a `Result`, because "no codec" is an
-/// ordinary state with a name the user is owed, not a failure: the reason has to reach the UI
-/// rather than a log line, and each `NoDecoder` wants different words in front of the user.
-///
-/// `T` is what the caller's `finish` made of the frames, never the frames themselves: see
-/// [`load_cover`] for why that last step runs inside the load.
-pub(crate) enum CoverOutcome<T> {
-    Decoded(T),
-    NoCodec(crate::video::codec::NoDecoder),
-    Failed(String),
-    /// The request stopped wanting its answer before the work finished. Its own outcome rather
-    /// than a failure: nobody is owed a reason, and logging it as an error would report the
-    /// page behaving correctly.
-    Abandoned,
-}
-
-/// Fetch and decode one animated cover, provisioning the decoder on first need. The decode is
-/// CPU-bound and runs on the blocking pool.
-///
-/// `interest` is read at every boundary where stopping is free: a cover nobody waits for should
-/// not finish downloading, and above all not decoding (up to [`MAX_DECODED_BYTES`], one job per
-/// track while skipping through a queue).
-///
-/// `finish` runs on the same blocking thread right after the decode, behind one more read of
-/// `interest`: for the scheme it copies the whole cover, which on the async task would hold a
-/// runtime worker.
-///
-/// `source` is already canonical ([`canonical_cover_url`]): the caller keys the job on it
-/// before deciding whether to share it.
-pub(crate) async fn load_cover<T: Send + 'static>(
-    source: &str,
-    interest: std::sync::Arc<CoverInterest>,
-    finish: impl FnOnce(Vec<CoverFrame>) -> T + Send + 'static,
-) -> CoverOutcome<T> {
-    let path = match crate::video::codec::decoder().await {
-        Ok(path) => path,
-        Err(why) => return CoverOutcome::NoCodec(why),
-    };
-    if interest.abandoned() {
-        return CoverOutcome::Abandoned;
-    }
-
-    let file = match fetch_cover(source, &interest).await {
-        Ok(Some(file)) => file,
-        Ok(None) => return CoverOutcome::Abandoned,
-        Err(e) => return CoverOutcome::Failed(e.to_string()),
-    };
-    if interest.abandoned() {
-        return CoverOutcome::Abandoned;
-    }
-
-    let decoded = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<T>> {
-        let api = match crate::video::codec::load_api(&path) {
-            Ok(api) => api,
-            Err(e) => {
-                // The supervisor proved this file loads: it changed since.
-                crate::video::codec::recheck();
-                return Err(e);
-            }
-        };
-        let Some(frames) = decode_cover(&file, api, &interest)? else {
-            return Ok(None);
-        };
-        if interest.abandoned() {
-            return Ok(None);
-        }
-        Ok(Some(finish(frames)))
+        pts_micros: times.next()?,
     })
-    .await;
+}
 
-    match decoded {
-        Ok(Ok(Some(finished))) => CoverOutcome::Decoded(finished),
-        Ok(Ok(None)) => CoverOutcome::Abandoned,
-        Ok(Err(e)) => CoverOutcome::Failed(e.to_string()),
-        Err(e) => CoverOutcome::Failed(format!("the cover decode task failed: {e}")),
+/// One cover decoded a frame at a time, in display order, from a file already downloaded.
+///
+/// Holds only the frames the decoder releases at once: a whole clip at 1280 runs to hundreds of
+/// MiB decoded, and the page needs each frame only while it encodes it. No thread of its own: it
+/// moves to whichever pool thread CEF reads on, and `next_frame` is all of its work.
+pub(crate) struct DecodeStream {
+    samples: std::vec::IntoIter<CoverSample>,
+    decoder: openh264::decoder::Decoder,
+    times: PresentationTimes,
+    ready: std::collections::VecDeque<CoverFrame>,
+    drained: bool,
+    size: Option<(usize, usize)>,
+    frame_count: usize,
+}
+
+/// Why a decode could not open: ours, or the cover's.
+#[derive(Debug)]
+pub(crate) enum OpenError {
+    /// The decoder would not start; the cover says nothing.
+    Decoder(String),
+    /// The file would not demux, or decode to a first picture.
+    Cover(anyhow::Error),
+}
+
+impl OpenError {
+    pub(crate) fn class(&self) -> FailureClass {
+        match self {
+            Self::Decoder(_) => FailureClass::Unloadable,
+            Self::Cover(_) => FailureClass::Corrupt,
+        }
+    }
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decoder(e) => write!(f, "starting the cover decoder failed: {e}"),
+            Self::Cover(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl DecodeStream {
+    /// Demux `file`, start the decoder, and decode up to the first picture: its size is what the
+    /// stream's header states, and a file that never yields one is refused before any header.
+    pub(crate) fn open(file: &[u8], api: openh264::OpenH264API) -> Result<Self, OpenError> {
+        use openh264::decoder::{Decoder, DecoderConfig, Flush};
+
+        let samples = demux_cover_samples(file).map_err(OpenError::Cover)?;
+        let frame_count = samples.len();
+        let times = PresentationTimes::new(samples.iter().map(|s| s.pts_micros).collect());
+
+        // `Flush::NoFlush` and one final drain: `DecoderConfig::new()` with `decode`'s `Flush::Auto`
+        // flushes after every call, which on a reordering stream evicts a referenced picture and
+        // fails with `dsOutOfMemory` (openh264-rs#50). The crate's B-frame test and MP4 example agree.
+        let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
+        let decoder =
+            Decoder::with_api_config(api, config).map_err(|e| OpenError::Decoder(e.to_string()))?;
+
+        let mut stream = Self {
+            samples: samples.into_iter(),
+            decoder,
+            times,
+            ready: std::collections::VecDeque::new(),
+            drained: false,
+            size: None,
+            frame_count,
+        };
+        while stream.ready.is_empty() && stream.decode_more().map_err(OpenError::Cover)? {}
+        if stream.ready.is_empty() {
+            return Err(OpenError::Cover(anyhow::anyhow!(
+                "cover decoded to no frames"
+            )));
+        }
+        Ok(stream)
+    }
+
+    /// The size every frame has, in pixels.
+    pub(crate) fn size(&self) -> (usize, usize) {
+        self.size.unwrap_or((0, 0))
+    }
+
+    /// How many frames the stream yields: one per sample, or it fails.
+    pub(crate) fn frame_count(&self) -> usize {
+        self.frame_count
+    }
+
+    /// The last frame's presentation time, the first being zero.
+    pub(crate) fn span_micros(&self) -> i64 {
+        self.times.span
+    }
+
+    /// The next frame in display order, `None` once every sample's picture is out.
+    pub(crate) fn next_frame(&mut self) -> anyhow::Result<Option<CoverFrame>> {
+        while self.ready.is_empty() {
+            if !self.decode_more()? {
+                if !self.times.queue.is_empty() {
+                    anyhow::bail!(
+                        "cover decoded {} frames for {} samples",
+                        self.frame_count - self.times.queue.len(),
+                        self.frame_count
+                    );
+                }
+                return Ok(None);
+            }
+        }
+        Ok(self.ready.pop_front())
+    }
+
+    /// Feed the decoder one sample, or drain it once the samples are spent. False when there is
+    /// nothing left to feed or drain.
+    fn decode_more(&mut self) -> anyhow::Result<bool> {
+        if let Some(sample) = self.samples.next() {
+            let decoded = self
+                .decoder
+                .decode(&sample.annex_b)
+                .map_err(|e| anyhow::anyhow!("decoding a cover frame failed: {e}"))?;
+            // `None` is ordinary: the decoder holds frames back until it has enough.
+            if let Some(yuv) = decoded {
+                let frame = take_frame(&yuv, &mut self.size, &mut self.times)?;
+                self.ready.push_back(frame);
+            }
+            return Ok(true);
+        }
+        if self.drained {
+            return Ok(false);
+        }
+        self.drained = true;
+        // The pictures held back for reordering only come out here. Without this drain the tail of
+        // every cover is missing, which is why the crate counts its own B-frame test after it.
+        let remaining = self
+            .decoder
+            .flush_remaining()
+            .map_err(|e| anyhow::anyhow!("draining the cover decoder failed: {e}"))?;
+        for yuv in &remaining {
+            let frame = take_frame(yuv, &mut self.size, &mut self.times)?;
+            self.ready.push_back(frame);
+        }
+        Ok(true)
     }
 }
 

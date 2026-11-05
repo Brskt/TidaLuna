@@ -249,40 +249,6 @@ fn a_sample_size_that_would_overflow_the_running_total_is_refused() {
     assert!(budget.charge(usize::MAX).is_err());
 }
 
-fn decoded_frame(width: usize, height: usize) -> CoverFrame {
-    CoverFrame {
-        width,
-        height,
-        y: Vec::new(),
-        u: Vec::new(),
-        v: Vec::new(),
-        y_stride: width,
-        u_stride: width / 2,
-        v_stride: width / 2,
-        pts_micros: 0,
-    }
-}
-
-/// The first frame is what the header will state; it has nothing to disagree with.
-#[test]
-fn a_frame_that_changes_resolution_mid_stream_is_refused() {
-    for (frames, width, height, accepted) in [
-        (vec![decoded_frame(640, 640)], 640, 640, true),
-        (vec![decoded_frame(640, 640)], 640, 480, false),
-        (vec![decoded_frame(640, 640)], 320, 640, false),
-        (Vec::new(), 640, 640, true),
-    ] {
-        assert_eq!(
-            refuse_resolution_change(&frames, width, height).is_ok(),
-            accepted,
-            "{width}x{height} after {} frames",
-            frames.len()
-        );
-    }
-}
-
-/// The five sizes TIDAL publishes for an album cover are 80, 160, 320, 640 and 1280 on a side,
-/// and only the last one cannot be decoded whole. These pin the boundary in both directions.
 const COVER_BASE: &str = "https://resources.tidal.com/videos/fc890b4a/ec2c/4729/9431/bcd88b1eedac";
 
 /// The `src` is the page's word and the key names a file on disk: whatever the page varies (query,
@@ -308,137 +274,15 @@ fn a_cover_key_names_one_published_size_and_refuses_what_is_not_a_cover() {
     }
 }
 
+/// A stream that reorders emits pictures in display order while its samples arrive in decode
+/// order. Every frame must draw one time, in order, from a first at zero, and a frame beyond the
+/// sample count is refused.
 #[test]
-fn a_variant_at_or_under_the_cap_is_left_alone() {
-    for edge in [80, 160, 320, 640, 1280]
-        .into_iter()
-        .filter(|&edge| edge <= MAX_COVER_EDGE)
-    {
-        assert_eq!(
-            capped_cover_url(&format!("{COVER_BASE}/{edge}x{edge}.mp4")),
-            None,
-            "{edge}x{edge} is already at or under the cap and must not be rewritten"
-        );
-    }
-}
-
-#[test]
-fn a_segment_that_is_not_a_square_variant_is_passed_through() {
-    for last in [
-        "1280x720.mp4",
-        "cover.mp4",
-        "1280x1280",
-        "x.mp4",
-        "1280x.mp4",
-    ] {
-        assert_eq!(
-            capped_cover_url(&format!("{COVER_BASE}/{last}")),
-            None,
-            "{last} is not a square <n>x<n>.mp4 and must be left as it came"
-        );
-    }
-}
-
-#[test]
-fn a_url_that_does_not_parse_is_refused_rather_than_panicking() {
-    assert_eq!(capped_cover_url("not a url at all"), None);
-}
-
-#[test]
-fn two_oversized_variants_of_one_cover_key_the_same_job() {
-    let at_cap = format!("{COVER_BASE}/{MAX_COVER_EDGE}x{MAX_COVER_EDGE}.mp4");
-    let header = canonical_cover_url(&format!("{COVER_BASE}/1280x1280.mp4"));
-    let capped = canonical_cover_url(&at_cap);
-    assert_eq!(header, capped);
-    assert_eq!(header, at_cap);
-
-    // A smaller variant keeps its own key.
-    let small = format!("{COVER_BASE}/320x320.mp4");
-    assert_eq!(canonical_cover_url(&small), small);
-}
-
-#[test]
-fn a_cover_is_wanted_until_its_last_requester_leaves() {
-    let interest = CoverInterest::new();
-    assert!(
-        !interest.abandoned(),
-        "the requester that started it is waiting"
-    );
-
-    assert!(interest.try_join(), "a second frame may share the work");
-    interest.release();
-    assert!(
-        !interest.abandoned(),
-        "one of two requesters leaving must not stop work the other is waiting for"
-    );
-
-    interest.release();
-    assert!(interest.abandoned(), "the last one out ends the job");
-}
-
-/// Pins the one-way door at zero: a plain increment in place of the compare-and-swap would hand
-/// the latecomer an abandoned answer, a 499 for a frame still on screen.
-#[test]
-fn a_job_nobody_wants_cannot_be_joined_by_a_latecomer() {
-    let interest = CoverInterest::new();
-    interest.release();
-    assert!(interest.abandoned());
-
-    assert!(
-        !interest.try_join(),
-        "a job past its last requester must refuse a latecomer rather than revive"
-    );
-    assert!(
-        interest.abandoned(),
-        "and the refused join must not have moved the count"
-    );
-}
-
-#[test]
-fn a_share_given_back_twice_cannot_wrap_into_interest() {
-    let interest = CoverInterest::new();
-    interest.release();
-    interest.release();
-    interest.release();
-    assert!(interest.abandoned());
-    assert!(!interest.try_join());
-}
-
-fn frame() -> CoverFrame {
-    CoverFrame {
-        width: 2,
-        height: 2,
-        y: vec![0; 4],
-        u: vec![0; 1],
-        v: vec![0; 1],
-        y_stride: 2,
-        u_stride: 1,
-        v_stride: 1,
-        pts_micros: 0,
-    }
-}
-
-fn sample(pts_micros: i64) -> CoverSample {
-    CoverSample {
-        annex_b: Vec::new(),
-        pts_micros,
-    }
-}
-
-#[test]
-fn presentation_times_are_paired_in_display_order() {
-    let mut frames = vec![frame(), frame(), frame()];
-    // Decode order for an I-P-B pattern: the P frame arrives before the B frame it brackets.
-    let samples = [sample(0), sample(66_666), sample(33_333)];
-    assign_presentation_times(&mut frames, &samples).unwrap();
-
-    let times: Vec<i64> = frames.iter().map(|f| f.pts_micros).collect();
-    assert_eq!(times, [0, 33_333, 66_666]);
-}
-
-#[test]
-fn a_frame_count_that_cannot_be_paired_is_refused() {
-    let mut frames = vec![frame(), frame()];
-    let samples = [sample(0), sample(33_333), sample(66_666)];
-    assert!(assign_presentation_times(&mut frames, &samples).is_err());
+fn frame_times_are_sorted_rebased_and_one_per_sample() {
+    // Decode order for an I-P-B pattern starting late, as TIDAL's covers do.
+    let mut times = PresentationTimes::new(vec![33_333, 100_000, 66_666]);
+    assert_eq!(times.span, 66_667);
+    let drawn: Vec<i64> = (0..3).map(|_| times.next().unwrap()).collect();
+    assert_eq!(drawn, [0, 33_333, 66_667]);
+    assert!(times.next().is_err(), "a fourth frame has no sample");
 }

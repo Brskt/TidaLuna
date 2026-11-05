@@ -1,262 +1,141 @@
-//! Serves decoded animated-cover frames to the page over a scheme we own.
+//! Serves animated covers to the page over a scheme we own, in three routes named by the host:
 //!
-//! Frames cross as raw I420 rather than RGB: colour conversion belongs on the GPU, and I420 is
-//! half RGB's bytes. Neither `cefQuery` nor `execute_java_script` can carry them, both
-//! marshalling through UTF-16 text.
+//! * `video/?src=&edge=`: the cover transcoded to VP9 WebM, from the disk cache, with ranges. The
+//!   page points TIDAL's own `<video>` at it. 404 until it is transcoded.
+//! * `frames/?src=&edge=`: the cover's decoded I420 frames, one pass, for the page to transcode.
+//!   Neither `cefQuery` nor `execute_java_script` can carry them, both marshalling through text.
+//! * `store/?src=&edge=` (POST): the transcoded WebM, validated before it reaches the cache.
 //!
 //! A registered scheme rather than a synthetic `https://` path: `store_proxy` and `luna_modules`
 //! both bet that their path never collides with a real TIDAL request, and a scheme we own does
 //! not take that bet.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cef::*;
 
 use crate::ui::nav::PageKind;
 use crate::ui::token_filter::userfree_to_string;
-use crate::video::cover::{CoverFrame, CoverInterest, CoverOutcome, canonical_cover_url};
+use crate::video::codec::FailureClass;
+use crate::video::cover::{CoverFrame, CoverKey, DecodeStream};
 
 pub(crate) const COVER_SCHEME: &str = "luna-cover";
 
-/// Magic naming the wire format: a page handed a foreign body says so instead of painting
+/// Magic naming the frames wire format: a page handed a foreign body says so instead of encoding
 /// noise.
-const MAGIC: &[u8; 4] = b"LVC1";
+const MAGIC: &[u8; 4] = b"LVC2";
 
-/// Bytes before the first frame record: the magic, then width, height and frame count as u32.
+/// Bytes before the first frame: the magic, then width, height and frame count as u32.
 const HEADER_LEN: usize = 16;
 
-/// Bytes per frame record in the header.
+/// Bytes of the record in front of each frame's planes: pts (i64), three strides and three plane
+/// lengths (u32).
 const RECORD_LEN: usize = 32;
 
-/// Pull the original artwork URL back out of a scheme URL.
-///
-/// The source travels as a percent-encoded query parameter rather than as a path, so that the
-/// `https://` URL's own slashes and query survive the round trip untouched.
-fn source_url(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(k, _)| k == "src")
-        .map(|(_, v)| v.into_owned())
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoverRoute {
+    Video,
+    Frames,
+    Store,
 }
 
-/// Lay the frames out in the order `decodeCoverBuffer` (frontend `cover-canvas.ts`) reads them.
-///
-/// Takes the frames by value: each frame's planes are freed as soon as they are copied, where
-/// borrowing would hold the decoded cover and its body at once in the browser process. The
-/// `with_capacity` below takes RAM as it fills; peak is one cover plus the frame in hand.
-fn encode_frames(frames: Vec<CoverFrame>) -> Vec<u8> {
-    let (width, height) = frames
-        .first()
-        .map(|f| (f.width as u32, f.height as u32))
-        .unwrap_or((0, 0));
-
-    let planes: usize = frames
-        .iter()
-        .map(|f| f.y.len() + f.u.len() + f.v.len())
-        .sum();
-    let mut out = Vec::with_capacity(HEADER_LEN + frames.len() * RECORD_LEN + planes);
-
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&width.to_le_bytes());
-    out.extend_from_slice(&height.to_le_bytes());
-    out.extend_from_slice(&(frames.len() as u32).to_le_bytes());
-
-    for f in &frames {
-        out.extend_from_slice(&f.pts_micros.to_le_bytes());
-        out.extend_from_slice(&(f.y_stride as u32).to_le_bytes());
-        out.extend_from_slice(&(f.u_stride as u32).to_le_bytes());
-        out.extend_from_slice(&(f.v_stride as u32).to_le_bytes());
-        out.extend_from_slice(&(f.y.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(f.u.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(f.v.len() as u32).to_le_bytes());
+impl CoverRoute {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Video | Self::Frames => "GET",
+            Self::Store => "POST",
+        }
     }
-    for f in frames {
-        out.extend_from_slice(&f.y);
-        out.extend_from_slice(&f.u);
-        out.extend_from_slice(&f.v);
-    }
-    out
 }
 
+/// Refused before any work unless both route and cover are ours. The source is a percent-encoded
+/// query parameter, not a path: the `https://` URL's slashes and query survive the round trip.
+/// Other parameters (the page's cache-busting `r`) are ignored.
+fn parse_request(url: &str) -> Result<(CoverRoute, CoverKey), &'static str> {
+    let parsed = url::Url::parse(url).map_err(|_| "the cover request does not parse")?;
+    let route = match parsed.host_str() {
+        Some("video") => CoverRoute::Video,
+        Some("frames") => CoverRoute::Frames,
+        Some("store") => CoverRoute::Store,
+        _ => return Err("the cover request names no known route"),
+    };
+    let (mut src, mut edge) = (None, None);
+    for (name, value) in parsed.query_pairs() {
+        match &*name {
+            "src" => src = Some(value.into_owned()),
+            "edge" => edge = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    let src = src.ok_or("the cover request carries no src")?;
+    let edge = edge.ok_or("the cover request carries no edge")?;
+    Ok((route, CoverKey::parse(&src, &edge)?))
+}
+
+/// One request's answer, as `response_headers` and `read` serve it.
 #[derive(Default)]
-struct CoverState {
-    /// Shared, because one decoded cover can answer several requests at once: it is the body of a
-    /// job, not of a request, and copying it per requester would undo the sharing that produced it.
-    body: Arc<Vec<u8>>,
+struct Answer {
+    status: u16,
+    reason: String,
+    mime: &'static str,
+    body: Vec<u8>,
     offset: usize,
-    status: u16,
-    reason: String,
-    cancelled: bool,
-    /// This request's share of its job's interest, given back exactly once when CEF cancels.
-    ///
-    /// `cancelled` lives behind this mutex, which `read()` takes on the CEF IO thread; the fetch
-    /// and the decode run elsewhere and must not contend with it, least of all from inside a
-    /// per-frame loop. The count beside it is read for free wherever the work happens to be.
-    interest: Option<Arc<CoverInterest>>,
+    accept_ranges: bool,
+    content_range: Option<String>,
+    /// Where `body` starts in the cover when it is the part a range asked for.
+    first_byte: Option<usize>,
 }
 
-/// One finished answer, as every request that asked for the same cover receives it.
-struct CoverResponse {
-    status: u16,
-    reason: String,
-    body: Arc<Vec<u8>>,
+/// What `skip` tells CEF, which applies a `Range` by skipping to its first byte before it asks
+/// for the headers.
+#[derive(Debug, PartialEq, Eq)]
+enum SkipVerdict {
+    Skipped(i64),
+    Refused,
 }
 
-/// A cover being fetched and decoded right now, and the requesters it answers.
-struct CoverJob {
-    /// A receiver only, cloned to join. The sender lives in the job's task alone: whatever ends
-    /// that task drops it, which ends every waiter's wait and marks the entry dead to joiners.
-    result: CoverAnswer,
-    interest: Arc<CoverInterest>,
-}
-
-/// The covers in flight, keyed by [`canonical_cover_url`], never by what the page asked for
-/// (two requests for one cover routinely name different variants).
-///
-/// Single-flight: a cover is the costliest thing this module produces (up to
-/// `MAX_DECODED_BYTES` of decode plus the encoded body), and TIDAL renders one in several places
-/// at once (now-playing artwork, album header), each its own request. Same shape as
-/// `PENDING_TRUST` in `ipc::plugin::native`: a `watch` per key, a receiver per joiner, the
-/// value still readable from a receiver taken before the key was retired.
-static COVER_JOBS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, CoverJob>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-
-/// Run one cover to its answer, publish it to everyone waiting, and retire the key.
-///
-/// Retired and published under one lock: a receiver taken earlier still reads the value from its
-/// own handle once the sender is gone, so removal only stops LATER requests from joining work that
-/// is already over. Nothing here is a cache: the page keeps the decoded cover it painted, and a
-/// request arriving after this starts the work again.
-fn spawn_cover_job(
-    key: String,
-    interest: Arc<CoverInterest>,
-    result: tokio::sync::watch::Sender<Option<Arc<CoverResponse>>>,
-) {
-    let load = {
-        let key = key.clone();
-        let interest = interest.clone();
-        // The encode runs inside the load (`load_cover`'s `finish`), leaving only a send inside the
-        // lock of `run_cover_job`: `open()` takes the same lock on the CEF IO thread.
-        async move {
-            crate::video::cover::load_cover(&key, interest, |frames| {
-                crate::vprintln!("[VIDEO]   Cover decoded ({} frames)", frames.len());
-                encode_frames(frames)
-            })
-            .await
+impl Answer {
+    fn refusal(status: u16, reason: impl Into<String>) -> Self {
+        Self {
+            status,
+            reason: reason.into(),
+            ..Self::default()
         }
-    };
-    crate::state::rt_handle().spawn(run_cover_job(key, interest, result, load));
-}
-
-/// The job behind [`spawn_cover_job`], with its load handed in: the tests drive it with a load of
-/// their own, where the real one wants the network and a decoder.
-async fn run_cover_job(
-    key: String,
-    mine: Arc<CoverInterest>,
-    result: tokio::sync::watch::Sender<Option<Arc<CoverResponse>>>,
-    load: impl std::future::Future<Output = CoverOutcome<Vec<u8>>>,
-) {
-    let outcome = load.await;
-    let (status, reason, body) = match outcome {
-        CoverOutcome::Decoded(body) => (200, String::new(), body),
-        // Not an error: the page keeps the still image and is told why.
-        CoverOutcome::NoCodec(why) => {
-            crate::vprintln!("[VIDEO]   Cover without a codec: {}", why.phrase());
-            (503, why.phrase().to_string(), Vec::new())
-        }
-        // The cause stays in the log: a loader message names the codec's path on disk.
-        CoverOutcome::Failed(cause) => {
-            crate::verr!("[VIDEO]   Cover failed: {cause}");
-            (502, "the cover could not be loaded".to_string(), Vec::new())
-        }
-        CoverOutcome::Abandoned => {
-            crate::vprintln!("[VIDEO]   Cover abandoned before it was needed");
-            // nginx's "client closed request".
-            (499, "the request was abandoned".to_string(), Vec::new())
-        }
-    };
-    let answer = Arc::new(CoverResponse {
-        status,
-        reason,
-        body: Arc::new(body),
-    });
-
-    let mut jobs = COVER_JOBS.lock().unwrap_or_else(|e| e.into_inner());
-    // Only if the entry is still OURS. A job whose last requester left is replaced in the
-    // table by the next request rather than joined, and answering on that newcomer's channel
-    // would hand it a result computed for somebody else.
-    let still_ours = jobs
-        .get(&key)
-        .is_some_and(|job| Arc::ptr_eq(&job.interest, &mine));
-    if still_ours && jobs.remove(&key).is_some() {
-        let _ = result.send(Some(answer));
     }
-}
 
-/// What one requester waits on: its job's answer, once there is one.
-type CoverAnswer = tokio::sync::watch::Receiver<Option<Arc<CoverResponse>>>;
-
-/// Join the job already running for `key`, or register a new one and hand it to `start`.
-///
-/// Joined or started under one lock: the decision cannot straddle another request's. `start` is
-/// [`spawn_cover_job`] outside the tests.
-fn join_or_start(
-    key: String,
-    start: impl FnOnce(
-        String,
-        Arc<CoverInterest>,
-        tokio::sync::watch::Sender<Option<Arc<CoverResponse>>>,
-    ),
-) -> (CoverAnswer, Arc<CoverInterest>) {
-    let mut jobs = COVER_JOBS.lock().unwrap_or_else(|e| e.into_inner());
-    let joined = jobs.get(&key).and_then(|job| {
-        // A closed channel is a job whose task ended without publishing: it panicked, or its
-        // runtime dropped it. Joining it would wait on nothing, and the entry is replaced below.
-        let alive = job.result.has_changed().is_ok();
-        (alive && job.interest.try_join()).then(|| (job.result.clone(), job.interest.clone()))
-    });
-    match joined {
-        Some(pair) => pair,
-        None => {
-            let interest = Arc::new(CoverInterest::new());
-            let (tx, rx) = tokio::sync::watch::channel(None);
-            jobs.insert(
-                key.clone(),
-                CoverJob {
-                    result: rx.clone(),
-                    interest: interest.clone(),
-                },
-            );
-            start(key, interest.clone(), tx);
-            (rx, interest)
+    /// Acknowledged without moving, and only over a body that already starts at `n`: Chromium
+    /// places a range's body at its first byte without checking our status or `Content-Range`.
+    /// Zero is never acknowledged; CEF would then wait for a callback that never comes.
+    fn skip(&self, n: i64) -> SkipVerdict {
+        match self.first_byte {
+            Some(start) if n > 0 && usize::try_from(n) == Ok(start) => SkipVerdict::Skipped(n),
+            _ => SkipVerdict::Refused,
         }
     }
 }
 
-/// Wait for the job's answer, or name its absence should the job go without one.
-async fn await_answer(mut rx: CoverAnswer) -> Arc<CoverResponse> {
-    // The current value first: the job may have finished between the join and this task
-    // being polled, and a latecomer that only waited for a CHANGE would wait for a send that
-    // already happened.
-    let answer = loop {
-        let seen = rx.borrow().clone();
-        if let Some(found) = seen {
-            break Some(found);
-        }
-        if rx.changed().await.is_err() {
-            break rx.borrow().clone();
-        }
-    };
-    answer.unwrap_or_else(|| {
-        // The sender drops unsent when the job's task ends without publishing: it panicked,
-        // its runtime dropped it, or it finished after a newcomer had replaced it.
-        Arc::new(CoverResponse {
-            status: 502,
-            reason: "the cover job ended without an answer".to_string(),
-            body: Arc::new(Vec::new()),
-        })
-    })
+/// What a handler shares with the work it started.
+///
+/// `cancelled` is an atomic outside both locks: `cancel()` runs on the IO thread and must never
+/// wait on a frame being decoded under `frames`, nor the work on `answer`.
+#[derive(Default)]
+struct CoverShared {
+    answer: Mutex<Answer>,
+    /// The `frames/` body, decoded one frame per `read`. Its own lock, held only by `read`.
+    frames: Mutex<Option<FrameBody>>,
+    streaming: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+/// Hand one request its answer and resume CEF on its IO thread, where `cancel()` also runs: the
+/// `cancelled` check before `cont()` cannot then race a cancel.
+fn deliver(shared: Arc<CoverShared>, callback: Callback, answer: Answer) {
+    *shared.answer.lock().unwrap_or_else(|e| e.into_inner()) = answer;
+    let mut task = CoverContinueTask::new(callback, shared);
+    post_task(ThreadId::IO, Some(&mut task));
 }
 
 /// Why a requester is refused, or `None` to serve it.
@@ -275,22 +154,465 @@ fn requester_refusal(frame_url: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// Hand one request its answer and resume CEF on its IO thread, where `cancel()` also runs:
-/// the `cancelled` check before `cont()` cannot then race a cancel.
-fn deliver(state: Arc<Mutex<CoverState>>, callback: Callback, answer: &CoverResponse) {
-    {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-        st.status = answer.status;
-        st.reason.clone_from(&answer.reason);
-        st.body = answer.body.clone();
+/// A fixed number of slots, each held by the value that took it until that value drops.
+struct SlotPool {
+    used: AtomicUsize,
+    max: usize,
+}
+
+struct Slot(&'static SlotPool);
+
+impl SlotPool {
+    const fn new(max: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            max,
+        }
     }
-    let mut task = CoverContinueTask::new(callback, state);
-    post_task(ThreadId::IO, Some(&mut task));
+
+    fn try_acquire(&'static self) -> Option<Slot> {
+        self.used
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < self.max).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Slot(self))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Decoding streams at once. The page transcodes one cover at a time; the cap is for any other
+/// page script, which could otherwise open a decode per request. Each stream also holds a decoder
+/// and its cover's samples.
+static FRAME_STREAMS: SlotPool = SlotPool::new(2);
+
+/// What a finished `frames/` pass lets the page store: the size and timing its WebM must have.
+#[derive(Clone, Copy, Debug)]
+struct Grant {
+    width: usize,
+    height: usize,
+    frames: usize,
+    span_micros: i64,
+    at: Instant,
+}
+
+impl Grant {
+    /// What the WebM must carry. Its duration is the last frame's time plus one frame, as the
+    /// page's muxer writes it, and it may be off by one frame either side.
+    fn expected(&self) -> crate::video::webm::ExpectedCover {
+        let frame_micros = match self.frames {
+            0 | 1 => 0,
+            n => self.span_micros / (n as i64 - 1),
+        };
+        crate::video::webm::ExpectedCover {
+            width: self.width,
+            height: self.height,
+            duration_micros: self.span_micros + frame_micros,
+            tolerance_micros: frame_micros + 1_000,
+        }
+    }
+}
+
+/// How long a pass's grant waits for its store: the page encodes after the last frame, and how
+/// long that takes depends on the machine.
+const GRANT_LIFETIME: Duration = Duration::from_secs(120);
+
+/// Grants alive at once. Each is a few words; the bound only stops a page that reads passes and
+/// never stores from growing the map.
+const MAX_GRANTS: usize = 16;
+
+/// The covers the page may store, one store per finished `frames/` pass.
+///
+/// A store with no pass behind it is refused: the size and duration a WebM is checked against
+/// come from the decode, never from the page that posts it. A grant is opened at the pass's last
+/// frame, and nothing about its request later (a cancel, the handler dropping) closes it.
+#[derive(Default)]
+struct StoreGrants {
+    map: HashMap<CoverKey, Grant>,
+}
+
+impl StoreGrants {
+    fn insert(&mut self, key: CoverKey, grant: Grant) {
+        self.map
+            .retain(|_, g| grant.at.saturating_duration_since(g.at) <= GRANT_LIFETIME);
+        if self.map.len() >= MAX_GRANTS
+            && !self.map.contains_key(&key)
+            && let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, g)| g.at)
+                .map(|(k, _)| k.clone())
+        {
+            self.map.remove(&oldest);
+        }
+        self.map.insert(key, grant);
+    }
+
+    /// The key's grant, used up, unless it expired.
+    fn take(&mut self, key: &CoverKey, now: Instant) -> Option<Grant> {
+        self.map
+            .remove(key)
+            .filter(|g| now.saturating_duration_since(g.at) <= GRANT_LIFETIME)
+    }
+}
+
+static GRANTS: std::sync::LazyLock<Mutex<StoreGrants>> =
+    std::sync::LazyLock::new(|| Mutex::new(StoreGrants::default()));
+
+/// The `frames/` body: the header, then each frame's record and planes, decoded as `read` asks.
+struct FrameBody {
+    stream: DecodeStream,
+    key: CoverKey,
+    buf: Vec<u8>,
+    offset: usize,
+    done: bool,
+    _slot: Slot,
+}
+
+impl FrameBody {
+    fn new(stream: DecodeStream, key: CoverKey, slot: Slot) -> Self {
+        let (width, height) = stream.size();
+        let mut buf = Vec::with_capacity(HEADER_LEN);
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&(width as u32).to_le_bytes());
+        buf.extend_from_slice(&(height as u32).to_le_bytes());
+        buf.extend_from_slice(&(stream.frame_count() as u32).to_le_bytes());
+        Self {
+            stream,
+            key,
+            buf,
+            offset: 0,
+            done: false,
+            _slot: slot,
+        }
+    }
+
+    /// Copy the next bytes into `out`, decoding a frame when the one in hand is spent. Zero at
+    /// the end, when the pass's grant is opened.
+    fn fill(&mut self, out: &mut [u8]) -> anyhow::Result<usize> {
+        loop {
+            let left = &self.buf[self.offset..];
+            if !left.is_empty() {
+                let n = left.len().min(out.len());
+                out[..n].copy_from_slice(&left[..n]);
+                self.offset += n;
+                return Ok(n);
+            }
+            if self.done {
+                return Ok(0);
+            }
+            match self.stream.next_frame()? {
+                Some(frame) => {
+                    encode_frame(&frame, &mut self.buf);
+                    self.offset = 0;
+                }
+                None => {
+                    self.done = true;
+                    let (width, height) = self.stream.size();
+                    GRANTS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                        self.key.clone(),
+                        Grant {
+                            width,
+                            height,
+                            frames: self.stream.frame_count(),
+                            span_micros: self.stream.span_micros(),
+                            at: Instant::now(),
+                        },
+                    );
+                    crate::vprintln!(
+                        "[VIDEO]   Cover frames sent ({} at {width}x{height})",
+                        self.stream.frame_count()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One frame's record and planes, over `buf`'s previous contents.
+fn encode_frame(frame: &CoverFrame, buf: &mut Vec<u8>) {
+    buf.clear();
+    buf.reserve(RECORD_LEN + frame.y.len() + frame.u.len() + frame.v.len());
+    buf.extend_from_slice(&frame.pts_micros.to_le_bytes());
+    for value in [
+        frame.y_stride,
+        frame.u_stride,
+        frame.v_stride,
+        frame.y.len(),
+        frame.u.len(),
+        frame.v.len(),
+    ] {
+        buf.extend_from_slice(&(value as u32).to_le_bytes());
+    }
+    buf.extend_from_slice(&frame.y);
+    buf.extend_from_slice(&frame.u);
+    buf.extend_from_slice(&frame.v);
+}
+
+/// The part of a `video/` file one `Range` header asks for.
+enum RangeAnswer {
+    Whole,
+    /// Inclusive bounds, as `Content-Range` writes them.
+    Part {
+        start: usize,
+        end: usize,
+    },
+    Unsatisfiable,
+}
+
+/// One `bytes=` range of RFC 9110, section 14.1.2. Anything else (several ranges, another unit,
+/// a malformed value) is answered whole, which a server is allowed to do.
+fn resolve_range(header: Option<&str>, len: usize) -> RangeAnswer {
+    let Some(spec) = header.and_then(|h| h.trim().strip_prefix("bytes=")) else {
+        return RangeAnswer::Whole;
+    };
+    if spec.contains(',') {
+        return RangeAnswer::Whole;
+    }
+    let Some((first, last)) = spec.trim().split_once('-') else {
+        return RangeAnswer::Whole;
+    };
+    let (first, last) = (first.trim(), last.trim());
+    if first.is_empty() {
+        // A suffix: the last N bytes.
+        return match last.parse::<usize>() {
+            Ok(0) => RangeAnswer::Unsatisfiable,
+            Ok(_) if len == 0 => RangeAnswer::Unsatisfiable,
+            Ok(n) => RangeAnswer::Part {
+                start: len - n.min(len),
+                end: len - 1,
+            },
+            Err(_) => RangeAnswer::Whole,
+        };
+    }
+    let Ok(start) = first.parse::<usize>() else {
+        return RangeAnswer::Whole;
+    };
+    let end = if last.is_empty() {
+        usize::MAX
+    } else {
+        match last.parse::<usize>() {
+            Ok(end) if end >= start => end,
+            _ => return RangeAnswer::Whole,
+        }
+    };
+    if start >= len {
+        return RangeAnswer::Unsatisfiable;
+    }
+    RangeAnswer::Part {
+        start,
+        end: end.min(len - 1),
+    }
+}
+
+/// `video/`: the cached WebM, or why there is none.
+fn video_answer(key: &CoverKey, range: Option<&str>) -> Answer {
+    match crate::video::cover_cache::COVER_CACHE.get(key) {
+        Some(data) => ranged_answer(data, range),
+        None => Answer::refusal(404, "not transcoded"),
+    }
+}
+
+fn ranged_answer(mut data: Vec<u8>, range: Option<&str>) -> Answer {
+    let len = data.len();
+    let mut answer = Answer {
+        status: 200,
+        mime: "video/webm",
+        accept_ranges: true,
+        ..Answer::default()
+    };
+    match resolve_range(range, len) {
+        RangeAnswer::Whole => {}
+        RangeAnswer::Part { start, end } => {
+            data.truncate(end + 1);
+            data.drain(..start);
+            answer.status = 206;
+            answer.content_range = Some(format!("bytes {start}-{end}/{len}"));
+            answer.first_byte = Some(start);
+        }
+        RangeAnswer::Unsatisfiable => {
+            return Answer {
+                status: 416,
+                reason: "the range lies outside the cover".to_string(),
+                accept_ranges: true,
+                content_range: Some(format!("bytes */{len}")),
+                ..Answer::default()
+            };
+        }
+    }
+    answer.body = data;
+    answer
+}
+
+/// The total a POST body's elements add up to, refused past `max` before anything is copied: the
+/// sizes are the page's, and a sum computed first is what decides whether to allocate.
+fn body_size(
+    sizes: impl IntoIterator<Item = usize>,
+    max: usize,
+) -> Result<usize, (u16, &'static str)> {
+    let mut total: usize = 0;
+    for size in sizes {
+        total = total
+            .checked_add(size)
+            .filter(|&t| t <= max)
+            .ok_or((413, "the upload is larger than a cover may be"))?;
+    }
+    if total == 0 {
+        return Err((400, "the upload is empty"));
+    }
+    Ok(total)
+}
+
+/// Only bytes elements carry anything here: CEF hands a scheme handler a `Blob` or stream body as
+/// an empty element list, which is why the page posts a typed array. Kept apart from
+/// `token_filter`'s reader, which has no cap and must keep answering as it does.
+fn read_capped_body(request: &mut Request, max: usize) -> Result<Vec<u8>, (u16, &'static str)> {
+    let post_data = request.post_data().ok_or((400, "the upload is empty"))?;
+    let count = post_data.element_count();
+    let mut elements: Vec<Option<PostDataElement>> = vec![None; count];
+    post_data.elements(Some(&mut elements));
+    let total = body_size(elements.iter().flatten().map(|el| el.bytes_count()), max)?;
+    let mut body = Vec::with_capacity(total);
+    for el in elements.iter().flatten() {
+        let n = el.bytes_count();
+        if n == 0 {
+            continue;
+        }
+        let start = body.len();
+        body.resize(start + n, 0);
+        let copied = el.bytes(n, body[start..].as_mut_ptr());
+        body.truncate(start + copied.min(n));
+    }
+    Ok(body)
+}
+
+/// `store/`: the WebM checked against the grant its pass opened, then cached.
+fn store_answer(key: &CoverKey, body: &[u8]) -> Answer {
+    let grant = GRANTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take(key, Instant::now());
+    let Some(grant) = grant else {
+        return Answer::refusal(409, "no transcode of this cover is awaiting its upload");
+    };
+    if let Err(why) = crate::video::webm::validate_cover_webm(body, &grant.expected()) {
+        crate::verr!("[VIDEO]   Refused a transcoded cover: {why}");
+        return Answer::refusal(422, why);
+    }
+    match crate::video::cover_cache::COVER_CACHE.put(key, body) {
+        Ok(()) => {
+            crate::vprintln!(
+                "[VIDEO]   Cover transcoded and stored ({} bytes)",
+                body.len()
+            );
+            Answer {
+                status: 200,
+                ..Answer::default()
+            }
+        }
+        Err(e) => {
+            crate::verr!("[VIDEO]   Storing a transcoded cover failed: {e}");
+            let (status, reason) = put_refusal(&e);
+            Answer::refusal(status, reason)
+        }
+    }
+}
+
+/// A full disk heals, with time or with the user: the page asks again later. Any other write
+/// failure says nothing of the next one.
+fn put_refusal(e: &std::io::Error) -> (u16, &'static str) {
+    match e.kind() {
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => {
+            (507, "the disk has no room for the cover")
+        }
+        _ => (500, "the cover could not be stored"),
+    }
+}
+
+/// Why `frames/` could not open, by stage.
+enum FramesError {
+    Download(crate::video::cover::CoverFetchError),
+    Load(anyhow::Error),
+    Open(crate::video::cover::OpenError),
+    Panicked(tokio::task::JoinError),
+}
+
+impl FramesError {
+    fn class(&self) -> FailureClass {
+        match self {
+            Self::Download(e) => e.class(),
+            Self::Load(_) => FailureClass::Unloadable,
+            Self::Open(e) => e.class(),
+            Self::Panicked(_) => FailureClass::Crashed,
+        }
+    }
+}
+
+impl std::fmt::Display for FramesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Download(e) => write!(f, "downloading the cover failed: {e}"),
+            Self::Load(e) => write!(f, "loading the codec failed: {e:#}"),
+            Self::Open(e) => write!(f, "decoding the cover failed: {e}"),
+            Self::Panicked(e) => write!(f, "the cover decode task failed: {e}"),
+        }
+    }
+}
+
+/// The status tells the page what to do: 502 asks again soon (the network), 503 waits for the
+/// codec, 422 and 500 spend an attempt (the cover, or a fault of ours).
+fn frames_refusal(class: FailureClass) -> (u16, &'static str) {
+    match class {
+        FailureClass::Network => (502, "the cover could not be fetched right now"),
+        FailureClass::Refused => (422, "the artwork host does not serve this cover"),
+        FailureClass::Corrupt => (422, "the cover cannot be transcoded"),
+        FailureClass::Unloadable => (503, "the video codec could not be loaded"),
+        FailureClass::Disk | FailureClass::Crashed => {
+            (500, "the cover transcode failed inside the app")
+        }
+    }
+}
+
+/// `frames/`: the decoder, the file, and the first frame, before the headers go out.
+async fn open_frames(shared: &CoverShared, key: &CoverKey) -> Result<DecodeStream, Answer> {
+    let path = crate::video::codec::decoder().await.map_err(|why| {
+        crate::vprintln!("[VIDEO]   Cover without a codec: {}", why.phrase());
+        Answer::refusal(503, why.phrase())
+    })?;
+    let refusal = |e: FramesError| {
+        // The cause stays in the log: a loader message names the codec's path on disk.
+        crate::verr!("[VIDEO]   Cover frames failed: {e}");
+        let (status, reason) = frames_refusal(e.class());
+        Answer::refusal(status, reason)
+    };
+    let file = crate::video::cover::fetch_cover(key.url(), &shared.cancelled)
+        .await
+        .map_err(|e| refusal(FramesError::Download(e)))?
+        // nginx's "client closed request".
+        .ok_or_else(|| Answer::refusal(499, "the request was abandoned"))?;
+    let opened = tokio::task::spawn_blocking(move || {
+        let api = crate::video::codec::load_api(&path).map_err(FramesError::Load)?;
+        DecodeStream::open(&file, api).map_err(FramesError::Open)
+    })
+    .await
+    .unwrap_or_else(|e| Err(FramesError::Panicked(e)));
+    opened.map_err(|e| {
+        // The supervisor proved the codec loads and starts: one that no longer does changed since.
+        if e.class() == FailureClass::Unloadable {
+            crate::video::codec::recheck();
+        }
+        refusal(e)
+    })
 }
 
 wrap_resource_handler! {
     pub(super) struct CoverHandler {
-        state: Arc<Mutex<CoverState>>,
+        shared: Arc<CoverShared>,
         // Decided in `create()`, where CEF names the requesting frame.
         refusal: Option<&'static str>,
     }
@@ -302,12 +624,7 @@ wrap_resource_handler! {
             handle_request: Option<&mut ::std::os::raw::c_int>,
             callback: Option<&mut Callback>,
         ) -> ::std::os::raw::c_int {
-            let url = request
-                .as_ref()
-                .map(|r| userfree_to_string(&r.url()))
-                .unwrap_or_default();
-            // Async path: return now and finish via `callback` once the decode resolves. This
-            // CEF IO thread is shared by every resource load, and blocking it stalls all of them.
+            // Async path: return now and finish via `callback` once the work resolves.
             if let Some(hr) = handle_request {
                 *hr = 0;
             }
@@ -315,47 +632,92 @@ wrap_resource_handler! {
                 return 0;
             };
             let callback = callback.clone();
-            let state = self.state.clone();
-
-            // Before anything that costs: no job is joined or started for a refused requester.
-            if let Some(reason) = self.refusal {
-                deliver(
-                    state,
-                    callback,
-                    &CoverResponse {
-                        status: 403,
-                        reason: reason.to_string(),
-                        body: Arc::new(Vec::new()),
-                    },
-                );
-                return 1;
-            }
-
-            let Some(src) = source_url(&url) else {
-                deliver(
-                    state,
-                    callback,
-                    &CoverResponse {
-                        status: 502,
-                        reason: "cover request carries no src".to_string(),
-                        body: Arc::new(Vec::new()),
-                    },
-                );
+            let shared = self.shared.clone();
+            let Some(request) = request else {
+                deliver(shared, callback, Answer::refusal(400, "the cover request is missing"));
                 return 1;
             };
 
-            let (rx, interest) = join_or_start(canonical_cover_url(&src), spawn_cover_job);
-            // Recorded before the wait, so a `cancel()` arriving at any point after this finds a
-            // share to give back. Nothing else ever takes it.
-            {
-                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-                st.interest = Some(interest);
+            // Before anything that costs: no work starts for a refused requester.
+            if let Some(reason) = self.refusal {
+                deliver(shared, callback, Answer::refusal(403, reason));
+                return 1;
+            }
+            let (route, key) = match parse_request(&userfree_to_string(&request.url())) {
+                Ok(parsed) => parsed,
+                Err(why) => {
+                    deliver(shared, callback, Answer::refusal(400, why));
+                    return 1;
+                }
+            };
+            if userfree_to_string(&request.method()) != route.method() {
+                deliver(shared, callback, Answer::refusal(405, "the cover route takes another method"));
+                return 1;
             }
 
-            crate::state::rt_handle().spawn(async move {
-                let answer = await_answer(rx).await;
-                deliver(state, callback, &answer);
-            });
+            match route {
+                CoverRoute::Video => {
+                    let range = userfree_to_string(
+                        &request.header_by_name(Some(&CefString::from("Range"))),
+                    );
+                    crate::state::rt_handle().spawn(async move {
+                        // The codec gates the cache too: a cover must not play with the switch off.
+                        // Asked rather than read: at launch the installed codec is still being
+                        // verified, and a cached cover refused then would be transcoded again.
+                        if let Err(why) = crate::video::codec::decoder().await {
+                            deliver(shared, callback, Answer::refusal(503, why.phrase()));
+                            return;
+                        }
+                        let range = (!range.is_empty()).then_some(range);
+                        let answer = tokio::task::spawn_blocking(move || {
+                            video_answer(&key, range.as_deref())
+                        })
+                        .await
+                        .unwrap_or_else(|_| Answer::refusal(500, "the cover could not be read"));
+                        deliver(shared, callback, answer);
+                    });
+                }
+                CoverRoute::Frames => {
+                    let Some(slot) = FRAME_STREAMS.try_acquire() else {
+                        deliver(shared, callback, Answer::refusal(429, "too many covers are being transcoded"));
+                        return 1;
+                    };
+                    crate::state::rt_handle().spawn(async move {
+                        let answer = match open_frames(&shared, &key).await {
+                            Ok(stream) => {
+                                *shared.frames.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(FrameBody::new(stream, key, slot));
+                                shared.streaming.store(true, Ordering::Release);
+                                Answer {
+                                    status: 200,
+                                    mime: "application/octet-stream",
+                                    ..Answer::default()
+                                }
+                            }
+                            Err(answer) => answer,
+                        };
+                        deliver(shared, callback, answer);
+                    });
+                }
+                CoverRoute::Store => {
+                    let body = match read_capped_body(request, crate::video::webm::MAX_WEBM_BYTES) {
+                        Ok(body) => body,
+                        Err((status, why)) => {
+                            deliver(shared, callback, Answer::refusal(status, why));
+                            return 1;
+                        }
+                    };
+                    crate::state::rt_handle().spawn(async move {
+                        let answer =
+                            tokio::task::spawn_blocking(move || store_answer(&key, &body))
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Answer::refusal(500, "the cover could not be stored")
+                                });
+                        deliver(shared, callback, answer);
+                    });
+                }
+            }
             1
         }
 
@@ -365,36 +727,48 @@ wrap_resource_handler! {
             response_length: Option<&mut i64>,
             _redirect_url: Option<&mut CefString>,
         ) {
-            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let answer = self.shared.answer.lock().unwrap_or_else(|e| e.into_inner());
             let Some(resp) = response else {
                 return;
             };
-            resp.set_status(if st.status == 0 { 502 } else { st.status as i32 });
-            resp.set_mime_type(Some(&CefString::from("application/octet-stream")));
-            resp.set_header_by_name(
-                Some(&CefString::from("Access-Control-Allow-Origin")),
-                Some(&CefString::from("*")),
-                1,
-            );
+            let header = |resp: &mut Response, name: &str, value: &str| {
+                resp.set_header_by_name(
+                    Some(&CefString::from(name)),
+                    Some(&CefString::from(value)),
+                    1,
+                );
+            };
+            // An answer never set is a fault of ours, never the network the page would retry.
+            resp.set_status(if answer.status == 0 { 500 } else { answer.status as i32 });
+            let mime = if answer.mime.is_empty() { "text/plain" } else { answer.mime };
+            resp.set_mime_type(Some(&CefString::from(mime)));
+            header(resp, "Access-Control-Allow-Origin", "*");
             // Exposed as well as allowed: a standard scheme has its own origin, which makes the
             // page's fetch cross-origin, and CORS shows it only safelisted headers. Without this,
             // every refusal would reach the page as a bare status code.
-            resp.set_header_by_name(
-                Some(&CefString::from("Access-Control-Expose-Headers")),
-                Some(&CefString::from("X-Luna-Cover-Reason")),
-                1,
-            );
+            header(resp, "Access-Control-Expose-Headers", "X-Luna-Cover-Reason");
             // The named reason travels as a header so the page can say why a cover stayed still
             // without a second round trip.
-            if !st.reason.is_empty() {
-                resp.set_header_by_name(
-                    Some(&CefString::from("X-Luna-Cover-Reason")),
-                    Some(&CefString::from(st.reason.as_str())),
-                    1,
-                );
+            if !answer.reason.is_empty() {
+                header(resp, "X-Luna-Cover-Reason", &answer.reason);
+            }
+            if answer.accept_ranges {
+                header(resp, "Accept-Ranges", "bytes");
+            }
+            if let Some(range) = &answer.content_range {
+                header(resp, "Content-Range", range);
+            }
+            // A refusal is about this moment (the codec, the cache, the cap), never the cover.
+            if answer.status >= 400 {
+                header(resp, "Cache-Control", "no-store");
             }
             if let Some(len) = response_length {
-                *len = st.body.len() as i64;
+                *len = if self.shared.streaming.load(Ordering::Acquire) {
+                    // Decoded as it is read: the length is not known up front.
+                    -1
+                } else {
+                    answer.body.len() as i64
+                };
             }
         }
 
@@ -412,35 +786,93 @@ wrap_resource_handler! {
                 *br = 0;
                 return 0;
             }
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let remaining = st.body.len().saturating_sub(st.offset);
-            if remaining == 0 {
+            // SAFETY: CEF guarantees `data_out` is writable for at least `bytes_to_read` bytes for
+            // the duration of this call, and nothing else holds it meanwhile.
+            let out = unsafe { std::slice::from_raw_parts_mut(data_out, bytes_to_read as usize) };
+
+            if self.shared.streaming.load(Ordering::Acquire) {
+                // Decoded here, on the pool sequence CEF reads on: one frame is little work, and
+                // nothing is parked waiting for one, which would hold `cancel()` back.
+                let mut frames = self.shared.frames.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(body) = frames.as_mut() else {
+                    *br = 0;
+                    return 0;
+                };
+                if self.shared.cancelled.load(Ordering::Relaxed) {
+                    *frames = None;
+                    *br = 0;
+                    return 0;
+                }
+                return match body.fill(out) {
+                    Ok(0) => {
+                        // Frees the decoder, the file and the stream's slot now, not at the
+                        // handler's release.
+                        *frames = None;
+                        *br = 0;
+                        0
+                    }
+                    Ok(n) => {
+                        *br = n as ::std::os::raw::c_int;
+                        1
+                    }
+                    Err(e) => {
+                        crate::verr!("[VIDEO]   Cover frames stopped: {e}");
+                        *frames = None;
+                        // `ERR_FAILED`: the body ends in an error, never in a short success the
+                        // page would take for the whole cover.
+                        *br = -2;
+                        0
+                    }
+                };
+            }
+
+            let mut answer = self.shared.answer.lock().unwrap_or_else(|e| e.into_inner());
+            let offset = answer.offset;
+            let left = answer.body.len().saturating_sub(offset);
+            if left == 0 {
                 *br = 0;
                 return 0; // EOF
             }
-            let n = remaining.min(bytes_to_read as usize);
-            // SAFETY: CEF guarantees `data_out` is writable for at least `bytes_to_read` bytes
-            // for the duration of this call; we copy `n <= bytes_to_read` and return.
-            unsafe {
-                std::ptr::copy_nonoverlapping(st.body.as_ptr().add(st.offset), data_out, n);
-            }
-            st.offset += n;
+            let n = left.min(out.len());
+            out[..n].copy_from_slice(&answer.body[offset..offset + n]);
+            answer.offset += n;
             *br = n as ::std::os::raw::c_int;
             1
         }
 
-        fn cancel(&self) {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            st.cancelled = true;
-            // ONE requester leaving, not the work stopping. The job goes on for whoever else is
-            // still waiting on the same cover, and stops only when this was the last share. Taken
-            // rather than released in place, so a second `cancel()` on the same handler cannot
-            // give back a share twice.
-            if let Some(interest) = st.interest.take() {
-                interest.release();
+        fn skip(
+            &self,
+            bytes_to_skip: i64,
+            bytes_skipped: Option<&mut i64>,
+            _callback: Option<&mut ResourceSkipCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(skipped) = bytes_skipped else {
+                return 0;
+            };
+            let verdict = self
+                .shared
+                .answer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .skip(bytes_to_skip);
+            match verdict {
+                SkipVerdict::Skipped(n) => {
+                    *skipped = n;
+                    1
+                }
+                // `ERR_FAILED`, as CEF's own default: a refused range is an error, never a
+                // body placed at the wrong offset.
+                SkipVerdict::Refused => {
+                    *skipped = -2;
+                    0
+                }
             }
-            st.body = Arc::new(Vec::new());
-            st.offset = 0;
+        }
+
+        fn cancel(&self) {
+            // Only the flag: the download stops at its next chunk, a decode at its next `read`,
+            // and the stream and its slot go with the handler.
+            self.shared.cancelled.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -448,11 +880,11 @@ wrap_resource_handler! {
 wrap_task! {
     struct CoverContinueTask {
         callback: Callback,
-        state: Arc<Mutex<CoverState>>,
+        shared: Arc<CoverShared>,
     }
     impl Task {
         fn execute(&self) {
-            if self.state.lock().unwrap_or_else(|e| e.into_inner()).cancelled {
+            if self.shared.cancelled.load(Ordering::Relaxed) {
                 return;
             }
             self.callback.cont();
@@ -479,10 +911,7 @@ wrap_scheme_handler_factory! {
                     .map_or_else(|| "no frame".to_string(), crate::util::refused_host);
                 crate::vprintln!("[VIDEO]   Refused a cover request from {from}: {reason}");
             }
-            Some(CoverHandler::new(
-                Arc::new(Mutex::new(CoverState::default())),
-                refusal,
-            ))
+            Some(CoverHandler::new(Arc::new(CoverShared::default()), refusal))
         }
     }
 }

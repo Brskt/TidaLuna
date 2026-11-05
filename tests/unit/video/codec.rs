@@ -1006,3 +1006,19 @@ fn only_a_change_moves_the_sequence() {
     assert_eq!(rx.borrow().seq, 3);
     assert!(!rx.borrow().enabled);
 }
+
+/// The codec retries a `Network` host on a timer, and a cover page asks again without spending:
+/// a "no" read as "not now" retries forever, a "not now" read as "no" gives up on a host that
+/// would have served.
+#[test]
+fn a_host_status_is_not_now_only_when_it_says_so() {
+    for (status, class) in [
+        (500, FailureClass::Network),
+        (408, FailureClass::Network),
+        (429, FailureClass::Network),
+        (404, FailureClass::Refused),
+    ] {
+        let status = reqwest::StatusCode::from_u16(status).unwrap();
+        assert_eq!(FailureClass::of_status(status), class, "{status}");
+    }
+}
