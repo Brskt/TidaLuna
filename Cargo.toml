@@ -12,7 +12,7 @@ semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-zip = { version = "9.2.1", default-features = false, features = [
+zip = { version = "9.4.0", default-features = false, features = [
   "deflate-flate2-zlib-rs",
 ] }
 flate2 = "1.1.10"
@@ -71,7 +71,7 @@ strip = true
 
 
 [dependencies]
-aes = "0.9.3"
+aes = "0.9.4"
 aes-kw = "0.3.1"
 anyhow = { workspace = true }
 arboard = { version = "3.7.0", default-features = false }
@@ -97,7 +97,7 @@ fnv = "1.0.7"
 futures-util = "0.3.34"
 getrandom = { workspace = true }
 oauth2 = { version = "5.0.0", default-features = false }
-oxc = { version = "0.156.0", features = ["semantic", "transformer", "codegen"] }
+oxc = { version = "0.157.0", features = ["semantic", "transformer", "codegen"] }
 pbkdf2 = "0.13.0"
 # Already in the graph through `url`; named here to decode a path segment before
 # it is matched against the deep-link allowlist.
@@ -160,7 +160,7 @@ arc-swap = "1.9.3"
 async-trait = "0.1.92"
 gethostname = "1.1.0"
 md-5 = "0.11.0"
-mdns-sd = "0.21.6"
+mdns-sd = "0.21.7"
 rustls = "0.23.46"
 rustls-pemfile = "2.2.0"
 tokio-rustls = "0.26.6"
