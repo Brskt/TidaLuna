@@ -14,7 +14,13 @@ export const LunaStorePlugin = React.memo(({ url }: { url: string }) => {
 	const [isHovered, setIsHovered] = useState(false);
 
 	useEffect(() => {
-		LunaPlugin.fromStorage({ url }).then(setPlugin).catch(setLoadError);
+		let current = true;
+		LunaPlugin.fromStorage({ url })
+			.then((found: LunaPlugin) => current && setPlugin(found))
+			.catch((e: string) => current && setLoadError(e));
+		return () => {
+			current = false;
+		};
 	}, [url]);
 
 	if (!plugin) return null;
