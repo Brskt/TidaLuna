@@ -1,8 +1,8 @@
 //! `plugin.download`: the disk half of `MediaItem.download()`.
 //!
 //! The renderer computes the manifest, the destination and the tags but cannot write to
-//! disk; it hands them here: fetch the urls, decrypt with the player's decryptor, tag,
-//! write. Decryption follows the manifest's `encryptionType`; tagging does not follow its
+//! disk; it hands them here: fetch the urls, decrypt with the player's decryptor, remux a
+//! DASH track, tag, write. Decryption follows the manifest's `encryptionType`; tagging does not follow its
 //! `codecs` field, see `run`.
 //!
 //! The renderer names the destination. A write is only legitimate if `ui::file_dialog`'s ledger shows
@@ -12,6 +12,7 @@
 use super::{IpcCallback, ipc_callback_err, ipc_callback_ok};
 use crate::app_state::IpcMessage;
 use crate::audio::flac_tags::{self, Picture};
+use crate::audio::{fmp4_remux, mp4_tags};
 use crate::util::Refused;
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -20,8 +21,7 @@ use std::time::Duration;
 /// TIDAL's own container: one url, FLAC or AAC, encrypted per the manifest.
 const BTS_MIME: &str = "application/vnd.tidal.bts";
 /// Segmented AAC. The init segment and its media segments concatenate into a fragmented MP4, which
-/// plays as written; upstream additionally remuxes it to progressive MP4 and tags it, which this does
-/// not do. The result is untagged.
+/// is remuxed to a progressive MP4, tagged when tags are sent, as upstream does.
 const DASH_MIME: &str = "application/dash+xml";
 
 /// Longest url list a real manifest produces. The list is plugin-supplied; without a bound, Rust
@@ -265,8 +265,19 @@ async fn run(
 
     // `codecs` lies in both directions: it reports non-FLAC for real FLAC streams (why
     // upstream dropped the check) and BTS does carry AAC; the container decides. A
-    // non-FLAC stream is written through untagged rather than failing the download.
-    let finished = if req.tags.is_some() && decrypted.starts_with(b"fLaC") {
+    // non-FLAC BTS stream is written through untagged rather than failing the download.
+    let finished = if req.manifest_mime_type == DASH_MIME {
+        // A remux that fails fails the download, as upstream's does: the fragments are not
+        // the music file the plugin asked for.
+        let tags = match req.tags.as_ref() {
+            Some(meta) => {
+                let (comments, picture) = read_tags(Some(meta)).await;
+                Some(mp4_tags::udta_body(&comments, picture.as_ref())?)
+            }
+            None => None,
+        };
+        tokio::task::spawn_blocking(move || fmp4_remux::to_progressive(&decrypted, tags)).await??
+    } else if req.tags.is_some() && decrypted.starts_with(b"fLaC") {
         let (comments, picture) = read_tags(req.tags.as_ref()).await;
         tokio::task::spawn_blocking(move || flac_tags::retag(decrypted, &comments, picture))
             .await??

@@ -6,6 +6,9 @@ pub(crate) mod dash;
 mod declick;
 pub(crate) mod ipc;
 mod length;
+// The DASH fixture also builds the downloads' remux input.
+#[cfg(test)]
+pub(crate) use length::dash_fixture;
 // Compiled where it serves and where it is tested: only the two Windows engines consult it,
 // but the classification is pure and its tests earn their place on every host.
 #[cfg(any(target_os = "windows", test))]

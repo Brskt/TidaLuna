@@ -11,8 +11,8 @@ export const downloadProgress = async (_trackId: any) => undefined;
 // from the key; `codecs` is not, it mislabels real FLAC.
 //
 // Both manifests reduce to a url list Rust fetches in order and concatenates. BTS gives one; DASH
-// gives its init segment followed by its media segments, which concatenate into a fragmented MP4.
-// That plays as written but carries no tags, since tagging an MP4 needs a remux this does not do.
+// gives its init segment followed by its media segments, which concatenate into a fragmented MP4
+// that Rust remuxes to a progressive one before tagging it.
 export const download = async (playbackInfo: PlaybackInfo, path: string | string[], tags?: MetaTags): Promise<void> => {
 	const dest = Array.isArray(path) ? path.join("/") : path;
 	let payload: Record<string, unknown>;
@@ -26,7 +26,7 @@ export const download = async (playbackInfo: PlaybackInfo, path: string | string
 			};
 			break;
 		case "application/dash+xml":
-			payload = { urls: [playbackInfo.manifest.initUrl, ...playbackInfo.manifest.segmentUrls] };
+			payload = { urls: [playbackInfo.manifest.initUrl, ...playbackInfo.manifest.segmentUrls], tags };
 			break;
 		default:
 			throw new Error(`Downloads of ${(playbackInfo as PlaybackInfo).manifestMimeType} are not supported`);

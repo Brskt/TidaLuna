@@ -493,11 +493,7 @@ export class MediaItem extends ContentBase {
 		async (path: string | string[], audioQuality?: redux.AudioQuality) => {
 			const playbackInfo = await this.playbackInfo(audioQuality);
 			if (!playbackInfo) throw new Error(`Track ${this.id} is not available`);
-			// Only BTS carries tags: the DASH branch of download() has none to write, and flacTags()
-			// is a burst of MusicBrainz and Tidal lookups. Awaited after playbackInfo rather than
-			// beside it because the manifest type is what says whether the tags are wanted at all.
-			const tags = playbackInfo.manifestMimeType === "application/vnd.tidal.bts" ? await this.flacTags() : undefined;
-			return download(playbackInfo, path, tags);
+			return download(playbackInfo, path, await this.flacTags());
 		},
 	);
 	public async fileExtension(audioQuality?: redux.AudioQuality): Promise<string> {

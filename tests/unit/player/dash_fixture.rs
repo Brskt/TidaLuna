@@ -61,8 +61,9 @@ fn mp4a() -> Vec<u8> {
 
 /// The header of a fragmented MP4 that declares no length: the `mvhd`, `mdhd` and `tkhd`
 /// durations read 0 and no `mehd` or `sidx` stands in for them. The media timescale is the
-/// sample rate.
-pub(crate) fn init_segment() -> Vec<u8> {
+/// sample rate. An edit list skips `priming` media ticks when given: how an encoder declares the
+/// AAC priming samples it put before the audio.
+fn init_segment(priming: Option<u32>) -> Vec<u8> {
     let ftyp = bx(
         b"ftyp",
         &cat(&[b"iso5".to_vec(), u32s(&[0]), b"iso6mp41".to_vec()]),
@@ -123,7 +124,19 @@ pub(crate) fn init_segment() -> Vec<u8> {
     );
     let minf = bx(b"minf", &cat(&[smhd, dinf, stbl]));
     let mdia = bx(b"mdia", &cat(&[mdhd, hdlr, minf]));
-    let trak = bx(b"trak", &cat(&[tkhd, mdia]));
+    // A fragmented file's edit lasts 0: its length is unknown when the header is written.
+    let edts = priming.map(|ticks| {
+        bx(
+            b"edts",
+            &full(
+                b"elst",
+                0,
+                0,
+                &cat(&[u32s(&[1, 0, ticks]), vec![0, 1, 0, 0]]),
+            ),
+        )
+    });
+    let trak = bx(b"trak", &cat(&[tkhd, edts.unwrap_or_default(), mdia]));
     let mvex = bx(b"mvex", &full(b"trex", 0, 0, &u32s(&[1, 1, 0, 0, 0])));
     cat(&[ftyp, bx(b"moov", &cat(&[mvhd, trak, mvex]))])
 }
@@ -175,7 +188,12 @@ fn fragment(seq: u32, start: u64, frames: u32, how: Durations) -> Vec<u8> {
 
 /// A DASH track: the init segment, then one fragment per entry of `frames`.
 pub(crate) fn dash_track(frames: &[u32], how: Durations) -> Vec<u8> {
-    let mut out = init_segment();
+    dash_track_primed(frames, how, None)
+}
+
+/// [`dash_track`] whose init segment declares `priming` ticks of encoder delay.
+pub(crate) fn dash_track_primed(frames: &[u32], how: Durations, priming: Option<u32>) -> Vec<u8> {
+    let mut out = init_segment(priming);
     let mut start = 0u64;
     for (i, n) in frames.iter().enumerate() {
         out.extend(fragment(i as u32 + 1, start, *n, how));
