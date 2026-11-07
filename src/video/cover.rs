@@ -4,23 +4,7 @@
 //! seek, and the file is small enough to hold whole in memory. The decoded frames are never held
 //! whole: [`DecodeStream`] hands them out one at a time to the page, which transcodes them once.
 
-/// The bytes of one sample, or `None` when the file's tables do not describe a range this
-/// buffer actually contains.
-///
-/// `data_offset` and `data_size` are read out of `stco`/`co64`/`stsz`, which is untrusted
-/// input. `shiguredo_mp4` validates them against each other and against integer overflow,
-/// but never against the length of the buffer the caller holds: its own documentation
-/// example slices directly on them and panics on a truncated file. This is that missing
-/// check, and it is the reason every sample read goes through here.
-fn sample_bytes(file: &[u8], offset: u64, size: usize) -> Option<&[u8]> {
-    if size == 0 {
-        return None;
-    }
-    let start = usize::try_from(offset).ok()?;
-    let end = start.checked_add(size)?;
-    file.get(start..end)
-}
-
+use crate::util::mp4_samples::{SampleBudget, sample_bytes};
 use shiguredo_mp4::bitstream::h264::{LengthSize, length_prefixed_to_annexb};
 use shiguredo_mp4::boxes::AvccBox;
 
@@ -323,52 +307,6 @@ fn presentation_time(timestamp: u64, offset: Option<i64>) -> anyhow::Result<i64>
 /// of samples. Refuse rather than truncate, as `player::dash`'s own segment ceiling does.
 const MAX_COVER_SAMPLES: usize = 10_000;
 
-/// What one track's samples may claim, charged as each one arrives. Two ceilings, neither
-/// implying the other:
-///
-/// * the COUNT bounds what the tables may declare (see [`MAX_COVER_SAMPLES`]);
-/// * the BYTE TOTAL bounds what the samples may point at. The demuxer checks `stco`/`co64`
-///   offsets for overflow only, never for overlap: every chunk may name one region, each sample
-///   kept as its own copy, and neither the count nor the download cap stops that aliasing.
-///
-/// The byte ceiling is the file's length: a well-formed track's samples occupy disjoint regions
-/// of it, and aliasing is what exceeds it. Charging the declared size is enough: the Annex-B
-/// rewrite grows a sample at most fourfold, and the parameter sets prepended to sync samples
-/// are bounded by the count.
-struct SampleBudget {
-    file_len: usize,
-    claimed: usize,
-    count: usize,
-}
-
-impl SampleBudget {
-    fn new(file_len: usize) -> Self {
-        Self {
-            file_len,
-            claimed: 0,
-            count: 0,
-        }
-    }
-
-    /// Charged per sample, before anything is copied: a total computed up front would be the
-    /// hostile value itself.
-    fn charge(&mut self, data_size: usize) -> anyhow::Result<()> {
-        if self.count >= MAX_COVER_SAMPLES {
-            anyhow::bail!("cover exceeds the ceiling of {MAX_COVER_SAMPLES} samples");
-        }
-        let claimed = self.claimed.saturating_add(data_size);
-        if claimed > self.file_len {
-            anyhow::bail!(
-                "cover samples claim {claimed} bytes of a {} byte file; refusing it",
-                self.file_len
-            );
-        }
-        self.claimed = claimed;
-        self.count += 1;
-        Ok(())
-    }
-}
-
 /// Demux the file into Annex-B access units, in decode order.
 ///
 /// Everything the demuxer hands back borrows it: each sample is copied out before the
@@ -394,7 +332,9 @@ fn demux_cover_samples(file: &[u8]) -> anyhow::Result<Vec<CoverSample>> {
     let mut params: Option<ParameterSets> = None;
     let mut samples = Vec::new();
     let mut scratch = Vec::new();
-    let mut budget = SampleBudget::new(file.len());
+    // Charging the declared size is enough: the Annex-B rewrite grows a sample at most fourfold,
+    // and the parameter sets prepended to sync samples are bounded by the count.
+    let mut budget = SampleBudget::new("cover", MAX_COVER_SAMPLES, file.len());
 
     loop {
         let sample = match demuxer

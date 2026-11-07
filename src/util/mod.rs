@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 pub(crate) mod fmt;
 pub(crate) mod metadata;
+pub(crate) mod mp4_samples;
 
 /// Truncate `s` to at most `max_bytes`, snapping the end down to a UTF-8 char
 /// boundary; it never panics on multi-byte characters.
