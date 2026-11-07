@@ -31,12 +31,20 @@ fn a_plugin_cannot_hold_unlimited_modules() {
 // test owns its module names: issuing supersedes the previous entry for a name, which is right in
 // production and evicts a neighbour's token here.
 
+/// The token a registration of `module` gets: reserved, then minted under that reservation.
+fn minted(module: &str, hash: &str) -> String {
+    let plugin = owner(module.split_once('/').map_or(module, |(plugin, _)| plugin));
+    PendingRegistration::reserve(module, &plugin)
+        .expect("under the bound")
+        .mint(hash)
+        .expect("entropy available")
+}
+
 /// The channel must not be derivable from the module name: it used to be `__LunaNative.{name}`;
 /// any plugin could type another's name to call its native exports.
 #[test]
 fn the_channel_token_is_not_the_module_name() {
-    let token =
-        issue_native_channel("TokenShape/secret.native.ts", "hash").expect("entropy available");
+    let token = minted("TokenShape/secret.native.ts", "hash");
     assert!(!token.contains("TokenShape"));
     assert!(!token.contains("secret"));
     assert_eq!(
@@ -47,7 +55,7 @@ fn the_channel_token_is_not_the_module_name() {
 
 #[test]
 fn a_module_name_is_not_a_channel() {
-    issue_native_channel("NameGuess/secret.native.ts", "hash").expect("entropy available");
+    minted("NameGuess/secret.native.ts", "hash");
     assert!(
         module_for_native_channel("NameGuess/secret.native.ts").is_none(),
         "guessing the name must not reach the module"
@@ -92,8 +100,8 @@ fn a_pending_trust_key_names_its_module() {
 /// whose grants were just revoked.
 #[test]
 fn uninstalling_clears_every_token_the_plugin_held() {
-    let a = issue_native_channel("Gone/one.native.ts", "hash").expect("entropy available");
-    let b = issue_native_channel("Gone/two.native.ts", "hash").expect("entropy available");
+    let a = minted("Gone/one.native.ts", "hash");
+    let b = minted("Gone/two.native.ts", "hash");
 
     clear_native_channels(&CleanupScope::Plugin(owner("Gone")));
 
@@ -105,8 +113,8 @@ fn uninstalling_clears_every_token_the_plugin_held() {
 /// the new code.
 #[test]
 fn re_registering_different_code_revokes_the_previous_token() {
-    let old = issue_native_channel("Reload/x.native.ts", "hash-old").expect("entropy available");
-    let new = issue_native_channel("Reload/x.native.ts", "hash-new").expect("entropy available");
+    let old = minted("Reload/x.native.ts", "hash-old");
+    let new = minted("Reload/x.native.ts", "hash-new");
     assert!(module_for_native_channel(&old).is_none());
     assert_eq!(
         module_for_native_channel(&new).as_deref(),
@@ -118,13 +126,30 @@ fn re_registering_different_code_revokes_the_previous_token() {
 /// holding a live success whose channel answered 403.
 #[test]
 fn the_same_registration_hands_back_the_same_token() {
-    let first = issue_native_channel("Twice/x.native.ts", "hash-same").expect("entropy available");
-    let second = issue_native_channel("Twice/x.native.ts", "hash-same").expect("entropy available");
+    let first = minted("Twice/x.native.ts", "hash-same");
+    let second = minted("Twice/x.native.ts", "hash-same");
     assert_eq!(first, second);
     assert_eq!(
         module_for_native_channel(&first).as_deref(),
         Some("Twice/x.native.ts"),
         "the token handed to the first caller must stay live"
+    );
+}
+
+/// An uninstall between a registration's check of its load and its mint took the entry: the token
+/// it would put back reaches a module Bun unloaded, and a reinstall's same code would reuse it.
+#[test]
+fn a_registration_outlived_by_an_uninstall_mints_nothing() {
+    let module = "Outlived/x.native.ts";
+    let reservation = PendingRegistration::reserve(module, &owner("Outlived")).unwrap();
+
+    clear_native_channels(&CleanupScope::Plugin(owner("Outlived")));
+
+    assert!(reservation.mint("hash").is_err());
+    let reinstalled = minted(module, "hash");
+    assert_eq!(
+        module_for_native_channel(&reinstalled).as_deref(),
+        Some(module)
     );
 }
 
@@ -194,10 +219,58 @@ fn the_all_scope_names_every_module() {
     assert!(modules.is_empty());
 }
 
+/// An attempt whose load ended under it gets no channel, yet Bun may already run its code. Its entry
+/// is the only handle on that module: the last attempt to let go of it unloads it there.
+#[test]
+fn an_attempt_that_loaded_a_module_but_got_no_channel_unloads_it_as_it_goes() {
+    let module = "Orphan/x.native.ts";
+    let loaded = |in_flight: usize, with_channel: bool| {
+        let mut entry = entry_with(in_flight, with_channel);
+        entry.loaded = true;
+        entry
+    };
+    for (what, entry, unloads, kept) in [
+        ("sent to Bun, no channel", loaded(1, false), true, false),
+        ("never sent to Bun", entry_with(1, false), false, false),
+        ("a channel came of it", loaded(1, true), false, true),
+        (
+            "another attempt still holds it",
+            loaded(2, false),
+            false,
+            true,
+        ),
+    ] {
+        let epoch = entry.epoch;
+        let mut modules = HashMap::from([(module.to_string(), entry)]);
+        assert_eq!(release(&mut modules, module, epoch), unloads, "{what}");
+        assert_eq!(modules.contains_key(module), kept, "{what}");
+    }
+}
+
+/// A register queued for Bun marks its module as one Bun may run: unmarked, the attempt's release
+/// would leave that module running with nothing to unload it.
+#[test]
+fn a_module_counts_as_loaded_once_its_register_is_queued() {
+    let module = "Queued/x.native.ts";
+    let reservation = PendingRegistration::reserve(module, &owner("Queued")).expect("admitted");
+    let loaded = || {
+        NATIVE_MODULES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(module)
+            .is_some_and(|entry| entry.loaded)
+    };
+
+    assert!(!loaded(), "a reservation alone marked the module loaded");
+    assert_eq!(reservation.send_if_current(|| Ok(1)), Ok(1));
+    assert!(loaded(), "a queued register left the module unmarked");
+    drop(reservation);
+}
+
 /// An uninstall unloads each module it clears, through the body `clear_native_channels` runs.
 #[test]
 fn uninstalling_unloads_each_module_it_cleared() {
-    let _a = issue_native_channel("Unload/one.native.ts", "hash").expect("entropy available");
+    let _a = minted("Unload/one.native.ts", "hash");
     let reservation =
         PendingRegistration::reserve("Unload/two.native.ts", &owner("Unload")).expect("admitted");
 

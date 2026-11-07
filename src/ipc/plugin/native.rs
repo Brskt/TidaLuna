@@ -94,6 +94,9 @@ struct ModuleEntry {
     in_flight: usize,
     /// The channel once Bun has answered, `None` while the module is only being acquired.
     channel: Option<Channel>,
+    /// Bun was sent this module's code. Leaving the ledger with it set takes the module down in Bun
+    /// too: nothing else would reach or unload it there.
+    loaded: bool,
 }
 
 impl ModuleEntry {
@@ -102,6 +105,7 @@ impl ModuleEntry {
             epoch: NEXT_ENTRY_EPOCH.fetch_add(1, Ordering::Relaxed),
             in_flight: 0,
             channel: None,
+            loaded: false,
         }
     }
 }
@@ -119,11 +123,7 @@ struct Channel {
 /// Same name and hash reuses the token. Trust is keyed by `code_hash`, and minting a fresh one
 /// evicted a concurrent caller's. Different code replaces it, since Bun's `modules[name]` is one
 /// mutable slot with no caller identity of its own.
-fn issue_native_channel(name: &str, code_hash: &str) -> Option<String> {
-    let mut modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = modules
-        .entry(name.to_string())
-        .or_insert_with(ModuleEntry::fresh);
+fn channel_token(entry: &mut ModuleEntry, code_hash: &str) -> Option<String> {
     if let Some(channel) = entry.channel.as_ref().filter(|c| c.code_hash == code_hash) {
         return Some(channel.token.clone());
     }
@@ -181,35 +181,56 @@ impl PendingRegistration {
     /// An uninstall removes the entry and queues its unload under that lock: a send lands ahead of
     /// the unload or is refused, never after it to load a module just taken down.
     fn send_if_current<T>(&self, send: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        let modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
-        if modules
-            .get(&self.module)
-            .is_none_or(|entry| entry.epoch != self.epoch)
-        {
+        let mut modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = modules
+            .get_mut(&self.module)
+            .filter(|entry| entry.epoch == self.epoch)
+        else {
             return Err("registerNative: the plugin was uninstalled".to_string());
-        }
-        send()
+        };
+        let sent = send()?;
+        entry.loaded = true;
+        Ok(sent)
+    }
+
+    /// The channel token of this attempt's module, minted only while the entry is still the one it
+    /// reserved: an uninstall or a reinstall between the check of the load and here took it, and a
+    /// token put back would reach a module Bun already unloaded, or the reinstall's own.
+    fn mint(&self, code_hash: &str) -> Result<String, String> {
+        let mut modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = modules
+            .get_mut(&self.module)
+            .filter(|entry| entry.epoch == self.epoch)
+            .ok_or_else(|| "registerNative: the plugin was uninstalled".to_string())?;
+        channel_token(entry, code_hash).ok_or_else(|| "RNG unavailable".to_string())
     }
 }
 
 impl Drop for PendingRegistration {
     fn drop(&mut self) {
         let mut modules = NATIVE_MODULES.lock().unwrap_or_else(|e| e.into_inner());
-        // An entry that is gone, or is another incarnation's, is not this attempt's to settle: an
-        // uninstall cleared it while the attempt was in flight, and a reinstall may have made a new
-        // one whose own attempts would otherwise be miscounted here.
-        let Some(entry) = modules
-            .get_mut(&self.module)
-            .filter(|entry| entry.epoch == self.epoch)
-        else {
-            return;
-        };
-        entry.in_flight = entry.in_flight.saturating_sub(1);
-        // An attempt that never produced a channel leaves nothing behind; the slot goes back.
-        if entry.in_flight == 0 && entry.channel.is_none() {
-            modules.remove(&self.module);
+        // Under the lock, as a clear unloads: a later attempt's register lands behind this unload.
+        if release(&mut modules, &self.module, self.epoch) {
+            unload_in_child(&self.module);
         }
     }
+}
+
+/// Settle one attempt on `module`. An attempt that never produced a channel leaves nothing behind:
+/// the slot goes back with the last one. True when the entry left with Bun holding its code; the
+/// caller unloads it there. Pure over the map it is given.
+fn release(modules: &mut HashMap<String, ModuleEntry>, module: &str, epoch: u64) -> bool {
+    // An entry that is gone, or is another incarnation's, is not this attempt's to settle: an
+    // uninstall cleared it while the attempt was in flight, and a reinstall may have made a new
+    // one whose own attempts would otherwise be miscounted here.
+    let Some(entry) = modules.get_mut(module).filter(|entry| entry.epoch == epoch) else {
+        return false;
+    };
+    entry.in_flight = entry.in_flight.saturating_sub(1);
+    if entry.in_flight > 0 || entry.channel.is_some() {
+        return false;
+    }
+    modules.remove(module).is_some_and(|entry| entry.loaded)
 }
 
 /// Has this plugin room for one more distinct module? Counts the ledger's own entries, unique by
@@ -315,7 +336,7 @@ fn remove_scope(modules: &mut HashMap<String, ModuleEntry>, scope: &CleanupScope
 }
 
 /// Ask the child to unload one module and forget its cookies. Nothing awaits the answer: the
-/// uninstall has already happened. Without a child (no native plugin ever registered) there is
+/// entry has left the ledger already. Without a child (no native plugin ever registered) there is
 /// nothing to unload.
 fn unload_in_child(module: &str) {
     crate::native_runtime::forget_module_cookies(module);
@@ -833,10 +854,8 @@ fn do_register(
                     })
                     .unwrap_or_default();
                 // Admission can be arbitrarily stale (a trust dialog may sit open indefinitely).
-                // Re-check before minting: `issue_native_channel` inserts a missing entry; it would
-                // otherwise put back the one `clear_native_channels` just removed and hand a working
-                // token to an uninstalled plugin, which Bun never unloads. The load id also catches a
-                // disable-then-enable, where the plugin is back but this is not its registration.
+                // The load id catches a disable-then-enable, where the plugin is back but this is
+                // not its registration; the mint below refuses an entry an uninstall took since.
                 let same_load = crate::app_state::with_state(|state| {
                     state.plugin_manager.current_load_id(&attempt.plugin_url) == Some(attempt.load_id)
                 })
@@ -850,12 +869,13 @@ fn do_register(
                     ipc_callback_err(&callback, 500, "registerNative: plugin is no longer active");
                     return;
                 }
-                let Some(token) =
-                    issue_native_channel(attempt.reservation.module(), &attempt.code_hash)
-                else {
-                    clear_pending_trust_for_module(attempt.reservation.module());
-                    ipc_callback_err(&callback, 500, "RNG unavailable");
-                    return;
+                let token = match attempt.reservation.mint(&attempt.code_hash) {
+                    Ok(token) => token,
+                    Err(e) => {
+                        clear_pending_trust_for_module(attempt.reservation.module());
+                        ipc_callback_err(&callback, 500, &e);
+                        return;
+                    }
                 };
                 let channel = format!("__LunaNative.{token}");
                 crate::vprintln!(
