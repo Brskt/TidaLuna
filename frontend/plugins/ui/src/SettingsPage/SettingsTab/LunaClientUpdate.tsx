@@ -53,8 +53,7 @@ export const LunaClientUpdate = React.memo(() => {
 			title="Client Updates"
 			titleChildren={<SpinningButton title="Fetch releases" loading={loading} onClick={updateReleases} />}
 			direction="row"
-			alignItems="center"
-			pb={4}
+			sx={{ alignItems: "center", paddingBottom: 2 }}
 		>
 			<Dialog open={!!busy}>
 				<DialogTitle>Operation in progress</DialogTitle>

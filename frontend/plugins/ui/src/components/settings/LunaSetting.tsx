@@ -8,9 +8,9 @@ export type LunaSettingProps = Omit<StackProps, "title"> & LunaTitleValues;
 export const LunaSetting = React.memo((props: LunaSettingProps) => {
 	const { title, desc, variant, children, ...stackProps } = props;
 	return (
-		<Stack direction="row" alignItems="center" {...stackProps}>
+		<Stack direction="row" {...stackProps} sx={[{ alignItems: "center" }, ...(Array.isArray(stackProps.sx) ? stackProps.sx : [stackProps.sx])]}>
 			<LunaTitle sx={{ flexShrink: 0 }} variant={variant ?? "h8"} title={title} desc={desc} />
-			<Box display="flex" sx={{ flexGrow: 1 }} children={children} />
+			<Box sx={{ display: "flex", flexGrow: 1 }} children={children} />
 		</Stack>
 	);
 });

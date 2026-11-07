@@ -132,7 +132,7 @@ export const LunaUpdateSettings = React.memo(() => {
 
 	return (
 		<LunaSettings title="Updates">
-			<Stack direction="row" alignItems="center" spacing={2}>
+			<Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
 				<LunaButton
 					loading={phase === "checking"}
 					onClick={handleCheck}

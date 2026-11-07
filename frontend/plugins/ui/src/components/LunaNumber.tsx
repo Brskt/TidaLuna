@@ -54,11 +54,11 @@ export const LunaNumber = React.memo((props: LunaNumberProps) => {
 						</InputAdornment>
 					),
 				},
+				htmlInput: {
+					style: { textAlign: "center" },
+				},
 			}}
 			onChange={(e) => onNumber(e.target.value)}
-			inputProps={{
-				style: { textAlign: "center" },
-			}}
 			value={number}
 			{...props}
 			sx={{
