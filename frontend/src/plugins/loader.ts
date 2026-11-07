@@ -50,8 +50,179 @@ CoreLunaPlugin.prototype.reload = async function () {
 // Wire the upstream registry for lifecycle methods to sync both registries.
 setUpstreamPlugins(CoreLunaPlugin.plugins as any);
 
+// The urls the early fill put in the registry: the only ones its reconciliation may take out.
+const filledEarly = new Set<string>();
+let early: Promise<void> | undefined;
+
+function adopt(row: any): LunaPlugin {
+    const plugin = LunaPlugin.fromPluginInfo(row);
+    (CoreLunaPlugin.plugins as any)[row.url] = plugin;
+    return plugin;
+}
+
+/**
+ * The registry and its lifecycle events, before `@luna/ui` loads: a Store card made earlier would
+ * show an installed plugin as not installed, and its Install would reinstall it over the user's.
+ * Once per page; a failed list leaves the cards to the reconciliation in `exposeLoaderApi`.
+ */
+export function loadRegistry(): Promise<void> {
+    early ??= (async () => {
+        registerLifecycleEvents();
+        try {
+            const plugins = await invokeIpc("plugin.list");
+            if (!Array.isArray(plugins)) return;
+            for (const p of plugins) {
+                if (LunaPlugin.plugins[p.url]) continue;
+                adopt(p);
+                filledEarly.add(p.url);
+            }
+        } catch (e) {
+            console.warn("[luna:loader] plugin.list failed:", e);
+        }
+    })();
+    return early;
+}
+
+/** A move the rows have not confirmed yet; events for its new url wait in `queue`. */
+type PendingMove = { sources: Set<string>; pending: number; queue: Array<() => void> };
+const moving = new Map<string, PendingMove>();
+
+// A page script may have replaced console: a throw here would leave a move held for good.
+function warn(...args: unknown[]) {
+    try {
+        console.warn(...args);
+    } catch {}
+}
+
+// Rust emits a moved plugin's events right after `plugin_moved`, one eval each and in that order,
+// but the page takes the move only once the rows show it: held until then, they reach the moved
+// plugin. A `plugin_updated` from an update check is not ordered with the move.
+function onPluginEvent(channel: string, handler: (url: string, ...args: any[]) => void) {
+    onIpcEvent(channel, (url: string, ...args: any[]) => {
+        const move = moving.get(url);
+        if (move) move.queue.push(() => handler(url, ...args));
+        else handler(url, ...args);
+    });
+}
+
+// One check of a move is done: the last one lets the held events through, in the order they came.
+function release(to: string, from: string, move: PendingMove) {
+    move.sources.delete(from);
+    if (--move.pending > 0) return;
+    if (moving.get(to) === move) moving.delete(to);
+    for (const replay of move.queue) {
+        try {
+            replay();
+        } catch (e) {
+            warn("[luna:loader] plugin event failed:", e);
+        }
+    }
+}
+
+// Resync frontend on plugin lifecycle events from Rust
+function registerLifecycleEvents() {
+    // The reason is shown as text, whoever emitted it; without one, the ready ack timed out.
+    onPluginEvent("jsrt.plugin_failed", (url: string, reason?: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (plugin) {
+            plugin.enabled = false;
+            plugin.store.enabled = false;
+            // Its code is unloaded: the Settings it registered must not stay on the card.
+            plugin.exports = undefined;
+            plugin.loadError._ = typeof reason === "string" ? reason : "Plugin failed to initialize (timeout)";
+            window.dispatchEvent(new Event("luna:plugins-updated"));
+        }
+    });
+    // Rust unloaded the plugin and could not start it again this session; its flag is untouched.
+    onPluginEvent("jsrt.plugin_stopped", (url: string, reason?: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (!plugin) return;
+        plugin.exports = undefined;
+        plugin.loadError._ = typeof reason === "string" ? reason : "Plugin stopped";
+        window.dispatchEvent(new Event("luna:plugins-updated"));
+    });
+    onPluginEvent("jsrt.plugin_ready_confirmed", (url: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (!plugin) return;
+        // The plugin's top level has finished: its Settings, if any, are registered now.
+        const found = plugin.extractSettings();
+        // A restarted version without Settings must not keep showing its predecessor's.
+        const dropped = !found && plugin.exports !== undefined;
+        if (dropped) plugin.exports = undefined;
+        if (found || dropped || plugin.loadError._) {
+            plugin.loadError._ = undefined;
+            window.dispatchEvent(new Event("luna:plugins-updated"));
+        }
+    });
+
+    // Any page script can call the emitter: the url only picks the plugin, the row is read again.
+    onPluginEvent("jsrt.plugin_updated", (url: string) => {
+        const plugin = LunaPlugin.getByUrl(url);
+        if (!plugin) return;
+        invokeIpc("plugin.list").then((plugins: any[]) => {
+            const info = Array.isArray(plugins) ? plugins.find(p => p.url === url) : undefined;
+            if (info) plugin.applyUpdate(info);
+        }).catch((e) => console.warn("[luna:loader] plugin.list failed:", e));
+    });
+
+    // Any page script can call the emitter: the move is taken once the rows show it, only for an
+    // installed plugin (a Store placeholder is not one) and never onto one. Strings only: a registry
+    // lookup coerces its key, the rows do not. A pair already being checked is not checked again.
+    onIpcEvent("jsrt.plugin_moved", (from: unknown, to: unknown) => {
+        if (typeof from !== "string" || typeof to !== "string") return;
+        const plugin = LunaPlugin.getByUrl(from);
+        if (!plugin || plugin.url !== from) return;
+        let move = moving.get(to);
+        if (move?.sources.has(from)) return;
+        if (!move) {
+            move = { sources: new Set(), pending: 0, queue: [] };
+            moving.set(to, move);
+        }
+        move.sources.add(from);
+        move.pending++;
+        const checked = move;
+        invokeIpc("plugin.list").then((plugins: any[]) => {
+            if (!Array.isArray(plugins)) return;
+            const urls = new Set(plugins.map(p => p.url));
+            const confirmed = urls.has(to) && !urls.has(from) && plugin.installed && !LunaPlugin.plugins[to]?.installed;
+            if (confirmed && LunaPlugin.getByUrl(from) === plugin) plugin.moveTo(to);
+        }).catch((e) => warn("[luna:loader] plugin move not taken:", e))
+            .finally(() => release(to, from, checked));
+    });
+}
+
+/**
+ * Bring the registry to the rows the startup pass left: it turns plugins off and drops duplicate
+ * rows without an event. An instance the user acted on keeps what Rust answered that action, which
+ * a row read before it would undo.
+ */
+function reconcile(plugins: any[]) {
+    const rows = new Set<string>();
+    for (const p of plugins) {
+        rows.add(p.url);
+        const existing = LunaPlugin.plugins[p.url];
+        const plugin = existing ?? adopt(p);
+        if (existing && !existing.acted && !existing.loading._) {
+            existing.store.installed = !!p.installed;
+            existing.enabled = !!p.enabled;
+            if (p.loadError) existing.loadError._ = p.loadError;
+            existing.applyUpdate(p);
+        } else if (existing?.installed) {
+            (CoreLunaPlugin.plugins as any)[p.url] = existing;
+        }
+        // Already ready before this page listened: the ready handler missed it.
+        if (plugin.enabled && plugin.installed) plugin.extractSettings();
+    }
+    for (const url of filledEarly) {
+        const plugin = LunaPlugin.plugins[url];
+        if (rows.has(url) || !plugin || plugin.acted || plugin.loading._) continue;
+        delete LunaPlugin.plugins[url];
+        delete (CoreLunaPlugin.plugins as any)[url];
+    }
+}
+
 // Expose management API on window.luna.core for devtools console / plugin use
-export function exposeLoaderApi() {
+export function exposeLoaderApi(): Promise<void> | undefined {
     const luna = (window as any).luna;
     if (!luna) return;
 
@@ -110,64 +281,12 @@ export function exposeLoaderApi() {
         }).catch(() => {});
     }
 
-    // Resync frontend on plugin lifecycle events from Rust
-    // The reason is shown as text, whoever emitted it; without one, the ready ack timed out.
-    onIpcEvent("jsrt.plugin_failed", (url: string, reason?: string) => {
-        const plugin = LunaPlugin.getByUrl(url);
-        if (plugin) {
-            plugin.enabled = false;
-            plugin.store.enabled = false;
-            // Its code is unloaded: the Settings it registered must not stay on the card.
-            plugin.exports = undefined;
-            plugin.loadError._ = typeof reason === "string" ? reason : "Plugin failed to initialize (timeout)";
-            window.dispatchEvent(new Event("luna:plugins-updated"));
-        }
-    });
-    // Rust unloaded the plugin and could not start it again this session; its flag is untouched.
-    onIpcEvent("jsrt.plugin_stopped", (url: string, reason?: string) => {
-        const plugin = LunaPlugin.getByUrl(url);
-        if (!plugin) return;
-        plugin.exports = undefined;
-        plugin.loadError._ = typeof reason === "string" ? reason : "Plugin stopped";
-        window.dispatchEvent(new Event("luna:plugins-updated"));
-    });
-    onIpcEvent("jsrt.plugin_ready_confirmed", (url: string) => {
-        const plugin = LunaPlugin.getByUrl(url);
-        if (!plugin) return;
-        // The plugin's top level has finished: its Settings, if any, are registered now.
-        const found = plugin.extractSettings();
-        // A restarted version without Settings must not keep showing its predecessor's.
-        const dropped = !found && plugin.exports !== undefined;
-        if (dropped) plugin.exports = undefined;
-        if (found || dropped || plugin.loadError._) {
-            plugin.loadError._ = undefined;
-            window.dispatchEvent(new Event("luna:plugins-updated"));
-        }
-    });
-
-    // Any page script can call the emitter: the url only picks the plugin, the row is read again.
-    onIpcEvent("jsrt.plugin_updated", (url: string) => {
-        const plugin = LunaPlugin.getByUrl(url);
-        if (!plugin) return;
-        invokeIpc("plugin.list").then((plugins: any[]) => {
-            const info = Array.isArray(plugins) ? plugins.find(p => p.url === url) : undefined;
-            if (info) plugin.applyUpdate(info);
-        }).catch((e) => console.warn("[luna:loader] plugin.list failed:", e));
-    });
-
-    // Populate plugin registry from Rust PluginStore.
-    // Plugins execute in Rust, but the UI reads LunaPlugin.plugins for display.
-    invokeIpc("plugin.list").then((plugins: any[]) => {
+    // The registry after the startup pass. Plugins execute in Rust, but the UI reads
+    // LunaPlugin.plugins for display.
+    return invokeIpc("plugin.list").then((plugins: any[]) => {
         console.log("[luna:loader] plugin.list returned:", plugins?.length, "plugins");
         if (!Array.isArray(plugins)) return;
-        for (const p of plugins) {
-            if (!LunaPlugin.plugins[p.url]) {
-                const plugin = LunaPlugin.fromPluginInfo(p);
-                (CoreLunaPlugin.plugins as any)[p.url] = plugin;
-                // Already ready before this page listened: the ready handler above missed it.
-                if (plugin.enabled && plugin.installed) plugin.extractSettings();
-            }
-        }
+        reconcile(plugins);
         console.log("[luna:loader] LunaPlugin.plugins:", Object.keys(LunaPlugin.plugins).length, "total");
         window.dispatchEvent(new Event("luna:plugins-updated"));
         // After the listeners and the registry: an update landing earlier would reach neither.

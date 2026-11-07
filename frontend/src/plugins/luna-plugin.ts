@@ -112,6 +112,10 @@ export class LunaPlugin {
     exports: ModuleExports | undefined;
     dependants = new Set<LunaPlugin>();
 
+    // Set by the first lifecycle action: from then on the state is what that action left (Rust's
+    // answer, then the row it read back), and a row read before it must not overwrite that.
+    acted = false;
+
     // Reactive state (Signal-backed)
     loading = new Signal<boolean>(false);
     fetching = new Signal<boolean>(false);
@@ -248,6 +252,7 @@ export class LunaPlugin {
     }
 
     async install(): Promise<void> {
+        this.acted = true;
         this.loading._ = true;
         try {
             // 1. Store (installed=1, enabled=0)
@@ -311,6 +316,7 @@ export class LunaPlugin {
         }
         visited.add(this.url);
 
+        this.acted = true;
         this.rowEpoch++;
         this.loading._ = true;
         this.loadError._ = undefined; // Clear any previous error (e.g., timeout from last attempt)
@@ -375,6 +381,7 @@ export class LunaPlugin {
     // `disable()` without stopping the live-reload loop: a restart runs it right before
     // `enable()`, and the loop must outlive that.
     private async stop(): Promise<void> {
+        this.acted = true;
         this.rowEpoch++;
         this.loading._ = true;
         try {
@@ -398,6 +405,7 @@ export class LunaPlugin {
     // Stores the version the plugin's url serves now, then restarts the plugin from what is
     // stored, unless another run holds it or it is gone. Core plugins have no url to fetch from.
     async reload(): Promise<void> {
+        this.acted = true;
         this.loading._ = true;
         this.note(undefined);
         try {
@@ -461,6 +469,7 @@ export class LunaPlugin {
 
     async uninstall(): Promise<void> {
         await this.disable();
+        this.acted = true;
         this.loading._ = true;
         try {
             // Rust guard may reject - only mutate local state after success
@@ -474,6 +483,16 @@ export class LunaPlugin {
         } finally {
             this.loading._ = false;
         }
+    }
+
+    // Rust moved the plugin to its store's new address: both registries and the card follow.
+    moveTo(url: string): void {
+        delete LunaPlugin.plugins[this.url];
+        syncUpstream(this.url, null);
+        this.url = url;
+        this.store.url = url;
+        LunaPlugin.plugins[url] = this;
+        syncUpstream(url, this);
     }
 
     addDependant(plugin: LunaPlugin): void {
@@ -617,6 +636,7 @@ export class LunaPlugin {
 
         const info = await invokeIpc("plugin.install", cleanUrl);
         const plugin = LunaPlugin.fromPluginInfo(info);
+        plugin.acted = true;
 
         // Enable atomically (Rust: check deps + persist + inject)
         try {
@@ -694,6 +714,11 @@ export class LunaPlugin {
                 pkg = { name: lastSegment };
             }
         }
+
+        // A move or an install may have registered this url during the fetch: that object stays the
+        // one, or this placeholder would take the installed plugin's place in the registry.
+        const raced = LunaPlugin.plugins[url];
+        if (raced) return raced;
 
         const store: LunaPluginStore = {
             url,

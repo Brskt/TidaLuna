@@ -123,7 +123,7 @@ fn a_damaged_plugins_db_is_replaced_by_an_empty_store_and_the_launch_goes_on() {
                 DbActor::open(dir.path()).expect("a damaged plugins.db must not stop the launch");
 
             assert_eq!(
-                db.call_plugins(|c| crate::plugins::store::list(c).len()),
+                db.call_plugins(|c| crate::plugins::store::list(c).unwrap().len()),
                 0,
                 "{session:?}: the new store starts empty"
             );
@@ -148,7 +148,7 @@ fn a_damaged_plugins_db_is_replaced_by_an_empty_store_and_the_launch_goes_on() {
                 "{session:?}: replaced once, not every launch"
             );
             assert_eq!(
-                again.call_plugins(|c| crate::plugins::store::list(c).len()),
+                again.call_plugins(|c| crate::plugins::store::list(c).unwrap().len()),
                 1
             );
         }
@@ -188,7 +188,10 @@ fn a_healthy_plugins_db_is_not_touched() {
     let db = DbActor::open(dir.path()).unwrap();
 
     assert!(told_aside(&db).is_none());
-    assert_eq!(db.call_plugins(|c| crate::plugins::store::list(c).len()), 1);
+    assert_eq!(
+        db.call_plugins(|c| crate::plugins::store::list(c).unwrap().len()),
+        1
+    );
     assert_eq!(
         companions(&dir.path().join("plugins.db"))
             .iter()
@@ -223,7 +226,7 @@ fn a_plugins_db_another_connection_holds_is_never_replaced() {
     drop(holder);
     let mut kept = Connection::open(&path).unwrap();
     assert_eq!(
-        crate::plugins::store::list(&mut kept).len(),
+        crate::plugins::store::list(&mut kept).unwrap().len(),
         1,
         "a transient fault discards nothing"
     );
@@ -309,5 +312,8 @@ fn damage_the_wal_still_covers_is_not_a_reason_to_replace() {
     let db = DbActor::open(dir.path()).unwrap();
 
     assert!(told_aside(&db).is_none());
-    assert_eq!(db.call_plugins(|c| crate::plugins::store::list(c).len()), 1);
+    assert_eq!(
+        db.call_plugins(|c| crate::plugins::store::list(c).unwrap().len()),
+        1
+    );
 }

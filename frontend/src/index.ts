@@ -509,6 +509,8 @@ const init = async () => {
     // A volume set here while TIDAL's player holds no stream (nothing played yet, the queue ended).
     followCommittedVolume(store);
 
+    // Loader first: its overrides must be in place before anything can reach the core.
+    const { loadRegistry, exposeLoaderApi } = require("./plugins/loader");
     // Pinned: it is the second link of the chain a plugin's `@luna/lib` import is lowered to
     // (`luna.core.modules["__lunaLibFor"]`), and the accessor in front of it only forwards
     // here. Left writable, replacing THIS slot bypassed the pin on `__lunaLibFor` entirely.
@@ -549,6 +551,9 @@ const init = async () => {
         showSaveDialog: (options: any) => invokeIpc("__Luna.showSaveDialog", options),
     };
 
+    // Before `@luna/ui`, whose Store cards read the registry as they appear.
+    await loadRegistry();
+
     // Served from the Rust binary (luna_modules.rs) at /__luna__/*.mjs, not inlined. Absolute URL
     // because the injected bundle's base is about:blank; in a var for esbuild to leave it a runtime
     // import; loaded after the module registry above, which these resolve their deps through.
@@ -577,8 +582,7 @@ const init = async () => {
         console.error("[luna] Failed to load @luna/dev:", e);
     }
 
-    // Populate CEF plugin registry from Rust PluginStore (for @luna/ui display)
-    const { exposeLoaderApi } = require("./plugins/loader");
+    // Bring the registry to what the startup pass left, and expose the management API.
     exposeLoaderApi();
     console.log("[luna] Plugin execution delegated to Rust plugin manager");
 };

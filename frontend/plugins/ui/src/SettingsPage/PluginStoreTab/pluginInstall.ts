@@ -42,6 +42,10 @@ const toPluginUrlCandidates = (storeUrl: string, pluginId: string): string[] => 
 	return candidates.map((c) => normalizePluginUrl(`${normalizedStoreUrl}/${c.replace(/\s+/g, ".")}`));
 };
 
+// The object the registry holds for this url now: a move or a reinstall during a dialog replaces it,
+// and the one held from before would install over the plugin the user has.
+const current = (plugin: LunaPlugin) => LunaPlugin.plugins[plugin.url] ?? plugin;
+
 const resolvedPluginUrlCache = new Map<string, string>();
 
 const getStorePluginUrls = async (storeUrl: string): Promise<string[]> => {
@@ -104,7 +108,7 @@ const installDependency = async (dependency: LunaPackageDependency, dependantPlu
 	if (existingDependency !== undefined) {
 		if (!(await confirmInstallDependency(dependencyWithStore, dependantPlugin.name))) return;
 		const didInstall = await installPluginWithLibraries(existingDependency, visited);
-		if (didInstall && existingDependency.installed) return existingDependency;
+		if (didInstall && current(existingDependency).installed) return current(existingDependency);
 	}
 	if (!(await ensureStoreForDependency(dependencyWithStore, dependantPlugin.name))) return;
 	if (!(await confirmInstallDependency(dependencyWithStore, dependantPlugin.name))) return;
@@ -113,7 +117,7 @@ const installDependency = async (dependency: LunaPackageDependency, dependantPlu
 	const dependencyPlugin = await LunaPlugin.fromStorage({ url: dependencyUrl });
 	const didInstall = await installPluginWithLibraries(dependencyPlugin, visited);
 	if (!didInstall) return;
-	return dependencyPlugin;
+	return current(dependencyPlugin);
 };
 
 export const installPluginWithLibraries = async (plugin: LunaPlugin, visited = new Set<string>()) => {
@@ -127,6 +131,7 @@ export const installPluginWithLibraries = async (plugin: LunaPlugin, visited = n
 				return false;
 			}
 		}
+		plugin = current(plugin);
 		if (!plugin.installed) {
 			await plugin.install();
 			if (plugin.isLibrary) trace.msg.log(`Installed library plugin ${plugin.name}.`);

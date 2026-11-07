@@ -467,7 +467,8 @@ pub(super) fn handle_plugin_db(
         // renderer waits on.
         let result: Result<String, String> = (|| match channel.as_str() {
             "plugin.list" => {
-                let plugins = crate::plugins::store::list(pc);
+                let plugins =
+                    crate::plugins::store::list(pc).map_err(|e| format!("DB error: {e}"))?;
                 Ok(serde_json::to_string(&plugins).unwrap_or_else(|_| "[]".to_string()))
             }
             "plugin.storage.get" => {

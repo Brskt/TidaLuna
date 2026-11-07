@@ -158,17 +158,13 @@ pub(crate) fn mark_ever_dispatched(conn: &mut Connection, url: &str) -> rusqlite
     Ok(())
 }
 
-pub(crate) fn list(conn: &mut Connection) -> Vec<PluginInfo> {
-    let mut stmt = match conn.prepare(
+/// The installed plugins. A failed read is an error, never a shorter list: the page drops every
+/// plugin a list leaves out.
+pub(crate) fn list(conn: &mut Connection) -> rusqlite::Result<Vec<PluginInfo>> {
+    let mut stmt = conn.prepare(
         "SELECT url, name, manifest, hash, enabled, installed FROM plugins WHERE installed = 1",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::vprintln!("[PLUGINS] Failed to list: {e}");
-            return Vec::new();
-        }
-    };
-    match stmt.query_map([], |row| {
+    )?;
+    stmt.query_map([], |row| {
         let name: String = row.get(1)?;
         let manifest: String = row.get(2)?;
         Ok(PluginInfo {
@@ -180,13 +176,8 @@ pub(crate) fn list(conn: &mut Connection) -> Vec<PluginInfo> {
             enabled: row.get::<_, i32>(4)? != 0,
             installed: row.get::<_, i32>(5)? != 0,
         })
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            crate::vprintln!("[PLUGINS] Failed to list: {e}");
-            Vec::new()
-        }
-    }
+    })?
+    .collect()
 }
 
 /// Store a plugin in the DB as installed but NOT enabled.

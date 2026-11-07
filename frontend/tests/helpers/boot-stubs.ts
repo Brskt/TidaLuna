@@ -21,6 +21,6 @@ export function bootStubs(): void {
 	}));
 }
 
-// Settles once `init` (`src/index.ts`) has registered its interceptors: its last step asks Rust for
-// the plugins, which nothing here answers. The import returns before `init` starts (a zero-delay timer).
-export const initSettled = (): Promise<void> => (globalThis as any).__LUNAR_TEST_IPC_SENT__("jsrt.load_plugins");
+// Settles once `init` (`src/index.ts`) has registered its interceptors: past them it asks Rust for
+// the plugin rows, which nothing here answers. The import returns before `init` starts (a zero-delay timer).
+export const initSettled = (): Promise<void> => (globalThis as any).__LUNAR_TEST_IPC_SENT__("plugin.list");

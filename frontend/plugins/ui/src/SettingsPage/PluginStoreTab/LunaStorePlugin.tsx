@@ -23,6 +23,18 @@ export const LunaStorePlugin = React.memo(({ url }: { url: string }) => {
 		};
 	}, [url]);
 
+	// A move or a reinstall gives this url another object in the registry: the card follows it, or
+	// its Install would reinstall over the plugin the user has.
+	useEffect(() => {
+		const follow = () =>
+			setPlugin((held: LunaPlugin | undefined) => {
+				const live = held && LunaPlugin.plugins[held.url];
+				return live && live !== held ? live : held;
+			});
+		window.addEventListener("luna:plugins-updated", follow);
+		return () => window.removeEventListener("luna:plugins-updated", follow);
+	}, []);
+
 	if (!plugin) return null;
 
 	const version = url.startsWith("http://127.0.0.1") ? `${plugin.package?.version ?? ""} [DEV]` : plugin.package?.version;

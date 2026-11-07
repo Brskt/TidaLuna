@@ -95,7 +95,7 @@ fn a_listed_plugin_carries_why_it_cannot_load() {
     stored_row(&mut conn, "https://a/dot", ".", "{}");
     stored_row(&mut conn, "https://b/bad", "Bad", r#"{"luna": 1}"#);
     stored_row(&mut conn, "https://c/ok", "Ok", "{}");
-    let listed = list(&mut conn);
+    let listed = list(&mut conn).unwrap();
     let reason = |url: &str| {
         listed
             .iter()
@@ -111,7 +111,8 @@ fn a_listed_plugin_carries_why_it_cannot_load() {
 
 /// Whether `url` still has its row and the storage value `seeded` put there.
 fn kept(conn: &mut Connection, url: &str) -> bool {
-    list(conn).iter().any(|p| p.url == url) && storage_get(conn, url, "k").as_deref() == Some("v")
+    list(conn).unwrap().iter().any(|p| p.url == url)
+        && storage_get(conn, url, "k").as_deref() == Some("v")
 }
 
 fn seeded(conn: &mut Connection, url: &str, raw_name: &str, manifest: &str) {
@@ -154,7 +155,10 @@ fn a_name_two_manifests_declare_is_collapsed_to_the_enabled_one() {
         );
         assert!(kept(&mut conn, "https://a/p"), "{declared}");
         assert!(
-            !list(&mut conn).iter().any(|p| p.url == "https://b/p"),
+            !list(&mut conn)
+                .unwrap()
+                .iter()
+                .any(|p| p.url == "https://b/p"),
             "{declared}"
         );
         assert_eq!(
