@@ -567,7 +567,14 @@ wrap_load_handler! {
                 let in_app_browser = browser.as_ref().is_some_and(|b| b.is_popup() == 0);
                 if DocumentEnd::of(in_app_browser, frame.is_main() != 0) == DocumentEnd::Owner {
                     crate::vprintln!("[LOAD]   main document replaced, ending its music");
-                    with_state(|state| state.end_page_music());
+                    let page = with_state(|state| {
+                        state.end_page_music();
+                        state.end_page_plugins()
+                    });
+                    // First in the new document: plugin code sent for another page refuses it.
+                    if let Some(page) = page {
+                        exec_js_on_frame(frame, &crate::ipc::plugin::page_stamp(page));
+                    }
                 }
                 let url_userfree = frame.url();
                 let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
@@ -952,9 +959,13 @@ wrap_request_handler! {
                 return;
             }
 
-            // The page died with every control over its music, and the dialog below can stay up
-            // as long as the user likes: stop it here instead of at the reload's commit.
-            with_state(|state| state.end_page_music());
+            // The page died with every control over its music and its plugins, and the dialog
+            // below can stay up as long as the user likes: end both here, not at the reload's
+            // commit, or a load sent into the dead frame times out and turns a plugin off.
+            with_state(|state| {
+                state.end_page_music();
+                state.end_page_plugins();
+            });
 
             // Stack guard: if the reloaded page crashes again while a dialog is
             // already up, just reload rather than opening another dialog.

@@ -267,7 +267,7 @@ fn pending_trust_module(key: &str) -> &str {
 
 /// Abandon the pending prompts of an uninstall or a reinstall. The waiters learn it was the system,
 /// not the user.
-pub(super) fn clear_pending_trust(scope: &CleanupScope) {
+fn clear_pending_trust(scope: &CleanupScope) {
     match scope {
         CleanupScope::All => PENDING_TRUST.abandon_where(|_| true),
         CleanupScope::Plugin(owner) => {
@@ -276,15 +276,30 @@ pub(super) fn clear_pending_trust(scope: &CleanupScope) {
     }
 }
 
-/// A reinstall's reset, run on the actor: the open prompts first, which shuts the gate of an answer
-/// still on its way, then the rows. An answer written before it is cleared; one after it writes
-/// nothing.
+/// An install's, a reinstall's or an uninstall's reset, run on the actor: the open prompts first,
+/// which shuts the gate of an answer still on its way, then the rows. An answer written before it
+/// is cleared; one after it writes nothing.
 pub(super) fn reset_trust(
     sc: &mut rusqlite::Connection,
     plugin: &PluginName,
 ) -> rusqlite::Result<()> {
     clear_pending_trust(&CleanupScope::Plugin(plugin.clone()));
     crate::native_runtime::trust::clear_trust_by_plugin(sc, plugin)
+}
+
+/// An uninstall's reset, run on the actor once the loads are gone: the open prompts first, then the
+/// rows, as `reset_trust` does. A load still running could ask again after an earlier clear.
+pub(super) fn forget_trust(
+    sc: &mut rusqlite::Connection,
+    scope: &CleanupScope,
+) -> rusqlite::Result<()> {
+    match scope {
+        CleanupScope::All => {
+            clear_pending_trust(scope);
+            crate::native_runtime::trust::clear_all_trust(sc)
+        }
+        CleanupScope::Plugin(plugin) => reset_trust(sc, plugin),
+    }
 }
 
 /// Abandon the pending prompts of one module, once its registration has settled.

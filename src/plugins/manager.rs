@@ -174,6 +174,9 @@ pub struct PluginManager {
     capabilities: std::collections::HashMap<String, IssuedCapability>,
     /// The progress of each load still waiting on its ack.
     progress: std::collections::HashMap<String, Arc<LoadProgress>>,
+    /// The newest load ever marked for each url, kept past every retire: a load given up on knows
+    /// from it whether one replaced it since, which `current_load_id` cannot say once it is gone.
+    last_marked: std::collections::HashMap<String, u64>,
     next_load_id: u64,
 }
 
@@ -220,6 +223,7 @@ impl PluginManager {
         self.progress
             .insert(plugin_id.to_string(), LoadProgress::new(Instant::now()));
         self.url_to_name.insert(plugin_id.to_string(), name.clone());
+        self.last_marked.insert(plugin_id.to_string(), load_id);
         self.capabilities.insert(
             capability.to_string(),
             IssuedCapability {
@@ -318,12 +322,9 @@ impl PluginManager {
     /// End the load `load_id`, whether it reached Ready or not. Returns true if this call is
     /// what removed it.
     ///
-    /// Naming the load is the whole point. Removal used to be unconditional, and nothing
-    /// serialises `plugin.enable` against `plugin.disable`: a disable that lost the race erased
-    /// the `Loading` entry a newer enable had just written, while that enable injected its code
-    /// anyway. The plugin then ran in the renderer with no map knowing it, so no sweep unloads
-    /// it and the ten-second watchdog looks it up, finds nothing, and concludes there is
-    /// nothing to rescue.
+    /// Naming the load is the whole point: the UI thread's page and session sweeps are not
+    /// serialised with the plugin lifecycle, and an unconditional removal could erase a newer
+    /// load's entry while its code ran in the renderer, with no map left to unload it.
     ///
     /// The capability outlives this on purpose: `eval_js` only dispatches the cleanup, so the
     /// plugin's `onUnload` runs after this returns and its settings write still has to be
@@ -426,6 +427,12 @@ impl PluginManager {
             self.retire_load(url, *load_id);
         }
         loaded
+    }
+
+    /// The newest load ever marked for `plugin_id`, live or not. Load ids never repeat; a match
+    /// proves no load of this url was marked after it.
+    pub(crate) fn last_marked(&self, plugin_id: &str) -> Option<u64> {
+        self.last_marked.get(plugin_id).copied()
     }
 
     /// Get the current load_id for a plugin, if any.

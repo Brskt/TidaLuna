@@ -106,17 +106,19 @@ pub(crate) struct AppState {
     // session); a cold boot with a pending refresh closes it.
     pub(crate) proactive_refresh_done: bool,
     // Plugin-load requests parked behind the gate or behind a running pass, each tagged with the
-    // session epoch it was made under; answered when a pass of that same epoch settles.
-    pub(crate) plugin_load_waiters: Vec<(u64, IpcCallback)>,
-    // Set to the epoch of the load pass currently running off the UI thread. One at a time: two
+    // session and page it was made under; answered when a pass of that same ticket settles.
+    pub(crate) plugin_load_waiters: Vec<(Ticket, IpcCallback)>,
+    // Set to the ticket of the load pass currently running off the UI thread. One at a time: two
     // concurrent passes inject every enabled plugin twice into the same frame, and only one of
     // the two can ever have its ready ack accepted.
-    pub(crate) plugin_load_in_flight: Option<u64>,
+    pub(crate) plugin_load_in_flight: Option<Ticket>,
     // Bumped on every session change, and on nothing else. Work started under an older epoch
     // describes a session the user has left: a plugin-load pass must answer nobody who asked
     // after the change, and a token minted before it must not be committed at all (in memory
     // or to disk) because `captured_token` is the live authorization, not a draft.
     pub(crate) session_epoch: u64,
+    // The main document now running, and what this page's plugins have done in it.
+    pub(crate) page: PagePhase,
     pub(crate) last_client_id: String,
     pub(crate) connect: Option<crate::connect::ConnectManager>,
 }
@@ -135,6 +137,34 @@ fn settle_recorded_duration(
     Some(measured)
 }
 
+/// The session and the main document a piece of plugin work was started for. Neither outlives a
+/// change: a logout bumps the epoch, a reload or a navigation the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ticket {
+    pub(crate) epoch: u64,
+    pub(crate) page: u64,
+}
+
+/// What a main document holds of the plugin loading, gone with it. A reload keeps the session but
+/// not one plugin of the page: work started for the old document must neither run in the new one,
+/// before it pinned the host modules its plugins resolve through, nor be counted there.
+#[derive(Default)]
+pub(crate) struct PagePhase {
+    generation: u64,
+}
+
+impl PagePhase {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// A new main document: nothing of the old one carries over.
+    pub(crate) fn next(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+}
+
 /// What a session that has just ended was still holding, for the caller to settle outside
 /// the lock: an `eval_js` reaches the renderer and a parked callback answers an IPC
 /// request, and neither belongs under the state mutex.
@@ -144,7 +174,7 @@ pub(crate) struct EndedSession {
     pub(crate) loaded: Vec<(String, u64)>,
     /// The load requests it parked, to be answered rather than left hanging across the
     /// logout/login transition.
-    pub(crate) waiters: Vec<(u64, IpcCallback)>,
+    pub(crate) waiters: Vec<(Ticket, IpcCallback)>,
 }
 
 impl AppState {
@@ -177,6 +207,23 @@ impl AppState {
             loaded,
             waiters: std::mem::take(&mut self.plugin_load_waiters),
         }
+    }
+
+    /// The session and page plugin work started now belongs to.
+    pub(crate) fn ticket(&self) -> Ticket {
+        Ticket {
+            epoch: self.session_epoch,
+            page: self.page.generation(),
+        }
+    }
+
+    /// End the plugin loading of the page that is gone, returning the new page's generation. Its
+    /// plugins died with the document, no unload owed; its parked requests go, or a pass for them
+    /// would admit plugins before the new page's bundle asked. A running pass stops by itself.
+    pub(crate) fn end_page_plugins(&mut self) -> u64 {
+        self.plugin_manager.retire_all_loaded();
+        self.plugin_load_waiters.clear();
+        self.page.next()
     }
 
     /// End the music of the page that is gone, and the events it had queued for itself.
@@ -240,8 +287,13 @@ pub(crate) fn context_ready() -> bool {
 }
 
 /// Ends the message loop, turning the single-instance channel away first: a link
-/// accepted after the loop ends has no one left to show it.
+/// accepted after the loop ends has no one left to show it. The page ends before the loop closes
+/// the remaining windows: plugin work still running finds its ticket gone, and writes nothing.
 pub(crate) fn quit_loop() {
+    with_state(|s| {
+        s.end_page_music();
+        s.end_page_plugins();
+    });
     crate::platform::app_lock::close_channel();
     quit_message_loop();
 }

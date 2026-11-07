@@ -4,6 +4,7 @@
 
 use super::inject::PassDuty;
 use super::ipc_callback_ok;
+use super::jsrt::PassGuard;
 use super::plugin_ipc::{Manifest, PluginData};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use crate::plugins::store::UpdateOutcome;
@@ -84,7 +85,8 @@ enum Restarted {
     /// The old load is gone and nothing new runs, but the flag stays as the user set it: the
     /// failure was this machine's. The next launch loads the stored version.
     Stopped(String),
-    /// The session ended under the restart: nothing is owed and nothing may be written or said.
+    /// The session or page ended under the restart: nothing is owed and nothing may be written or
+    /// said.
     SessionEnded,
 }
 
@@ -139,24 +141,11 @@ async fn launch_check(url: String) {
             Restarted::Deferred(why) => {
                 crate::vprintln!("[PLUGIN] '{url}' runs its update from the next launch: {why}");
             }
-            Restarted::Disabled(why) => {
+            Restarted::Disabled(why) | Restarted::Stopped(why) => {
                 crate::vprintln!("[PLUGIN] '{url}' did not restart on its update: {why}");
-                let reason = format!("The plugin did not restart on its update: {why}");
-                crate::app_state::emit_ipc_event_with_args(
-                    "jsrt.plugin_failed",
-                    &[url.as_str(), reason.as_str()],
-                );
-            }
-            Restarted::Stopped(why) => {
-                crate::vprintln!("[PLUGIN] '{url}' did not restart on its update: {why}");
-                let reason = format!("The plugin did not restart on its update: {why}");
-                crate::app_state::emit_ipc_event_with_args(
-                    "jsrt.plugin_stopped",
-                    &[url.as_str(), reason.as_str()],
-                );
             }
             Restarted::SessionEnded => {
-                crate::vprintln!("[PLUGIN] '{url}' restart abandoned: the session ended");
+                crate::vprintln!("[PLUGIN] '{url}' restart abandoned: the session or page ended");
             }
         },
         Pulled::Refused { reason, .. }
@@ -315,91 +304,115 @@ async fn fetch(url: &str, stored_manifest: &str) -> Result<PluginData, String> {
     Ok(fetched)
 }
 
-/// Puts the stored version in place of the plugin's live load. `enabled` stays as the user set it
-/// unless the new code itself fails to load, which turns it off as any failed load does.
+/// Puts the stored version in place of the plugin's live load, and says what became of it to the
+/// page. `enabled` stays as the user set it unless the new code itself fails to load, which turns
+/// it off as any failed load does.
 async fn restart_live(url: &str) -> Restarted {
-    if with_state(|state| state.plugin_manager.current_load_id(url))
-        .flatten()
-        .is_none()
-    {
+    let url = url.to_string();
+    super::jsrt::in_section(move |pass| {
+        let restarted = restart_in_section(pass, &url);
+        // Inside the section: an enable taking the lock next must not be overtaken by this.
+        announce(&url, &restarted);
+        restarted
+    })
+    .await
+    .unwrap_or_else(Restarted::Stopped)
+}
+
+/// Under the pass lock, where every writer of the flag and of the load waits: what is read here
+/// holds to the end.
+fn restart_in_section(pass: &PassGuard, url: &str) -> Restarted {
+    // The load and the ticket in one look: the page this restarts in is the one that holds it.
+    let Some((old, ticket)) = with_state(|state| {
+        let ticket = state.ticket();
+        state
+            .plugin_manager
+            .current_load_id(url)
+            .map(|old| (old, ticket))
+    })
+    .flatten() else {
         return Restarted::NotLive;
-    }
+    };
     let read = {
         let url = url.to_string();
-        blocking(move || {
-            crate::state::db().call_plugins(move |pc| crate::plugins::store::stored(pc, &url))
-        })
-        .await
+        crate::state::db().call_plugins(move |pc| crate::plugins::store::stored(pc, &url))
     };
     let stored = match read {
-        Ok(Ok(Some(stored))) => stored,
-        Ok(Ok(None)) => return Restarted::NotLive,
-        Ok(Err(e)) => return Restarted::Deferred(format!("DB error: {e}")),
-        Err(why) => return Restarted::Deferred(why),
+        Ok(Some(stored)) => stored,
+        Ok(None) => return Restarted::NotLive,
+        Err(e) => return Restarted::Deferred(format!("DB error: {e}")),
     };
     let Ok(name) = crate::plugins::name::PluginName::parse(&stored.name) else {
         return Restarted::Deferred(format!("'{}' is not a plugin name", stored.name));
     };
-    // Enable and disable are not serialized against this: the flag is read before the old load
-    // goes, and again once the new one is in, where a disable that landed between them undoes it.
-    match restart_check(url, &name).await {
+    match restart_check(url, &name) {
         Ok(true) => {}
         Ok(false) => return Restarted::NotLive,
         Err(why) => return Restarted::Deferred(why),
     }
-    // Read late, as a disable does: the check above is a real await.
-    let Some(old) = with_state(|state| state.plugin_manager.current_load_id(url)).flatten() else {
-        return Restarted::NotLive;
+    // Before the old load goes: a refusal leaves it running.
+    let admission = match super::admission::admit(pass, ticket) {
+        Ok(admission) => admission,
+        Err(closed) => return Restarted::Deferred(closed.reason().to_string()),
     };
-    let epoch = with_state(|state| state.session_epoch).unwrap_or_default();
     super::inject::undo_injection(url, old);
-    let injected = {
-        let (url, name, code) = (url.to_string(), name.clone(), stored.code);
-        blocking(move || super::inject::inject_plugin(&url, &name, &code, epoch)).await
-    };
+    let marked_before = with_state(|state| state.plugin_manager.last_marked(url)).flatten();
+    let injected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::inject::inject_plugin(&admission, url, &name, &stored.code)
+    }));
     let load_id = match injected {
         Ok(Ok(load_id)) => load_id,
         Ok(Err(failure)) => match failure.pass_duty() {
             // The plugin's own failure turns it off as a failed load does.
             PassDuty::Reconcile => {
                 let disable = url.to_string();
-                let _ = blocking(move || {
-                    crate::state::db()
-                        .call_plugins(move |pc| crate::plugins::store::disable_failed(pc, &disable))
-                })
-                .await;
+                let _ = crate::state::db()
+                    .call_plugins(move |pc| crate::plugins::store::disable_failed(pc, &disable));
                 return Restarted::Disabled(failure.reason());
             }
             // A machine's failure leaves the flag as the user set it.
             PassDuty::Keep => return Restarted::Stopped(failure.reason()),
             PassDuty::Abandon => return Restarted::SessionEnded,
         },
-        Err(why) => return Restarted::Stopped(why),
+        // A panic past the mark leaves a load nothing watches: undone by the id this marked.
+        Err(_) => {
+            let marked = with_state(|state| state.plugin_manager.last_marked(url)).flatten();
+            if let Some(load_id) = marked.filter(|id| Some(*id) != marked_before) {
+                super::inject::undo_injection(url, load_id);
+            }
+            return Restarted::Stopped("The new version could not be started".to_string());
+        }
     };
-    if let Ok(false) = restart_check(url, &name).await {
-        super::inject::undo_injection(url, load_id);
-        return Restarted::NotLive;
-    }
-    crate::state::rt_handle().spawn(super::inject::watch_ack(url.to_string(), load_id));
+    crate::state::rt_handle().spawn(super::inject::watch_ack(url.to_string(), load_id, ticket));
     Restarted::Yes
+}
+
+/// Tells the page of a restart that left the plugin off or stopped.
+fn announce(url: &str, restarted: &Restarted) {
+    let (event, why) = match restarted {
+        Restarted::Disabled(why) => ("jsrt.plugin_failed", why),
+        Restarted::Stopped(why) => ("jsrt.plugin_stopped", why),
+        Restarted::Yes | Restarted::NotLive | Restarted::Deferred(_) | Restarted::SessionEnded => {
+            return;
+        }
+    };
+    let reason = format!("The plugin did not restart on its update: {why}");
+    crate::app_state::emit_ipc_event_with_args(event, &[url, reason.as_str()]);
 }
 
 /// Whether the plugin may restart now: `Ok(false)` once the user turned it off, `Err` while
 /// enabled plugins depend on it, which a disable refuses too, or while the flag cannot be read.
-async fn restart_check(url: &str, name: &crate::plugins::name::PluginName) -> Result<bool, String> {
+fn restart_check(url: &str, name: &crate::plugins::name::PluginName) -> Result<bool, String> {
     let (url, name) = (url.to_string(), name.to_string());
-    blocking(move || {
-        crate::state::db().call_plugins(move |pc| {
-            if !crate::plugins::store::is_enabled(pc, &url).map_err(|e| format!("DB error: {e}"))? {
-                return Ok(false);
-            }
-            match crate::plugins::store::find_enabled_dependants(pc, &name)? {
-                deps if deps.is_empty() => Ok(true),
-                deps => Err(format!("enabled plugins depend on it: {}", deps.join(", "))),
-            }
-        })
+    crate::state::db().call_plugins(move |pc| {
+        if !crate::plugins::store::is_enabled(pc, &url).map_err(|e| format!("DB error: {e}"))? {
+            return Ok(false);
+        }
+        match crate::plugins::store::find_enabled_dependants(pc, &name)? {
+            deps if deps.is_empty() => Ok(true),
+            deps => Err(format!("enabled plugins depend on it: {}", deps.join(", "))),
+        }
     })
-    .await?
 }
 
 async fn blocking<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> Result<R, String> {

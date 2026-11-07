@@ -30,7 +30,8 @@ fn an_injection_is_recorded_only_while_its_session_is_provably_current() {
 
 /// The boot pass sorts an outcome into what it owes. A logout under an injection owes nothing:
 /// reconciled as the plugin's own failure it wrote `enabled = 0` behind a log level that is off by
-/// default. Outcomes that end under their own session still owe their url.
+/// default. Nor does a reload; outcomes that end under their own session and page still owe their
+/// url.
 #[test]
 fn an_outcome_owes_the_boot_pass_a_verdict_only_under_its_own_session() {
     let duty = |outcome: InjectFailure| match outcome.pass_duty() {
@@ -65,7 +66,45 @@ fn an_outcome_owes_the_boot_pass_a_verdict_only_under_its_own_session() {
             "reconcile",
             "no frame took the code, and the session is still the one that asked for it",
         ),
+        (
+            InjectFailure::PageReplaced,
+            "abandon",
+            "a reload under an injection would disable a plugin the next page's pass loads",
+        ),
+        (
+            InjectFailure::Undelivered,
+            "keep",
+            "a UI thread that never took the code says nothing about the plugin",
+        ),
     ] {
         assert_eq!(duty(outcome), expected, "{why}");
+    }
+}
+
+/// A load given up on waits for the pass lock before it turns its plugin off. What happened
+/// meanwhile decides whether it still may: a disable written then would land on a plugin that works.
+#[test]
+fn a_timed_out_load_turns_its_plugin_off_only_if_nothing_replaced_it() {
+    for (same_page, last_marked, expected, why) in [
+        (
+            true,
+            Some(4),
+            true,
+            "nothing changed since the load timed out",
+        ),
+        (
+            true,
+            Some(5),
+            false,
+            "an enable loaded the plugin again since",
+        ),
+        (
+            false,
+            Some(4),
+            false,
+            "the page changed: the next page's pass loads it",
+        ),
+    ] {
+        assert_eq!(timeout_owed(same_page, last_marked, 4), expected, "{why}");
     }
 }

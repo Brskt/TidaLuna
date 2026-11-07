@@ -1,23 +1,11 @@
-use crate::app_state::{IpcMessage, eval_js, with_state};
+use super::admission::{Admission, Closed};
+use crate::app_state::{IpcMessage, Ticket, eval_js, with_state};
 use cef::*;
+use std::collections::HashSet;
 
+/// Purges the real tokens of the SDK's localStorage blob before plugin code runs. The SDK already
+/// holds them in memory (credentialsProvider), and the blob would be readable by any plugin.
 pub(crate) const JS_PURGE_SDK_BLOB: &str = "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}";
-
-/// Purge real tokens from SDK localStorage blob before plugin code runs.
-/// TIDAL SDK already holds tokens in memory (credentialsProvider) - the blob
-/// is no longer needed and would be readable by plugins that escape the IIFE.
-pub(super) fn purge_sdk_auth_blob_if_needed() {
-    let needs = with_state(|state| {
-        let n = state.needs_blob_purge;
-        state.needs_blob_purge = false;
-        n
-    })
-    .unwrap_or(false);
-    if needs {
-        eval_js(JS_PURGE_SDK_BLOB);
-        crate::vprintln!("[AUTH]   Purged SDK auth blob from localStorage (pre-plugin)");
-    }
-}
 
 // Soft clear: token only. TIDAL calls this during "not logged in" flow -
 // must not destroy cookies/localStorage/sessionStorage.
@@ -140,22 +128,68 @@ cef::wrap_completion_callback! {
 /// Multi-pass plugin loading with dependency ordering and startup reconciliation.
 /// Used by both the fire-and-forget path and the request-response handler.
 ///
-/// Runs off the CEF UI thread, one pass at a time, under the session epoch it was dispatched
-/// with. It re-reads that epoch before touching each plugin: a logout runs on the UI thread and
-/// cannot stop this pass. The pass has to notice and stop itself.
-pub(super) fn do_load_plugins_inline(epoch: u64) {
+/// Runs off the CEF UI thread, one pass at a time, under the ticket it was dispatched with. It
+/// re-reads that ticket before touching each plugin: a logout or a reload runs on the UI thread
+/// and cannot stop this pass. The pass has to notice and stop itself.
+pub(super) fn do_load_plugins_inline(ticket: Ticket) {
+    exclusive(|pass| {
+        // Before any row is read, plugins or not: the admission is also what purges the blob.
+        let admission = match super::admission::admit(pass, ticket) {
+            Ok(admission) => admission,
+            Err(Closed::Stale) => {
+                crate::vprintln!("[PLUGIN] Load pass dropped: the page or session changed");
+                return;
+            }
+            Err(closed) => {
+                crate::verr!("[PLUGIN] Load pass did not run: {}", closed.reason());
+                return;
+            }
+        };
+        let db = crate::state::db();
+
+        // 1. Dedup same-name plugins (legacy/corruption cleanup)
+        let deduped = db.call_plugins(crate::plugins::store::dedup_same_name);
+        for (url, name) in &deduped {
+            crate::vprintln!("[PLUGIN] Startup dedup: removed '{name}' ({url})");
+        }
+
+        // 2. Collect all enabled plugins with code + manifest
+        let enabled = db.call_plugins(crate::plugins::store::collect_enabled_code);
+        run_pass(&admission, enabled, HashSet::new());
+    });
+}
+
+/// Held by every writer of a plugin's row or live load: passes, enable, disable, install,
+/// uninstall, restarts, ack timeouts. Two of them interleaved act on what the other changed.
+static PASS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Proof the pass lock is held; only [`exclusive`] makes one.
+pub(super) struct PassGuard(());
+
+/// Runs `f` under the pass lock. From a blocking thread only: never the UI thread, the DB actor,
+/// nor a tokio worker. Not reentrant.
+pub(super) fn exclusive<R>(f: impl FnOnce(&PassGuard) -> R) -> R {
+    let _pass = PASS.lock().unwrap_or_else(|e| e.into_inner());
+    f(&PassGuard(()))
+}
+
+/// [`exclusive`] on the blocking pool, for async callers.
+pub(super) async fn in_section<R: Send + 'static>(
+    f: impl FnOnce(&PassGuard) -> R + Send + 'static,
+) -> Result<R, String> {
+    tokio::task::spawn_blocking(move || exclusive(f))
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))
+}
+
+/// Loads `remaining` in dependency order, `loaded_names` counting as loaded already.
+pub(super) fn run_pass(
+    admission: &Admission,
+    mut remaining: Vec<crate::plugins::store::EnabledPlugin>,
+    mut loaded_names: HashSet<String>,
+) {
+    let ticket = admission.ticket();
     let db = crate::state::db();
-
-    // 1. Dedup same-name plugins (legacy/corruption cleanup)
-    let deduped = db.call_plugins(crate::plugins::store::dedup_same_name);
-    for (url, name) in &deduped {
-        crate::vprintln!("[PLUGIN] Startup dedup: removed '{name}' ({url})");
-    }
-
-    // 2. Collect all enabled plugins with code + manifest
-    let mut remaining: Vec<crate::plugins::store::EnabledPlugin> =
-        db.call_plugins(crate::plugins::store::collect_enabled_code);
-    let mut loaded_names = std::collections::HashSet::new();
     let mut failed_urls = Vec::new();
     let mut helper_failed = false;
 
@@ -169,10 +203,10 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
         for p in remaining {
             // Checked per plugin, not once per pass: `retire_all_loaded` sweeps the manager
             // on the UI thread and has no way to interrupt this loop. Injecting after that sweep
-            // would resurrect a plugin into a session the user has already left, with nothing
-            // left behind to unload it again.
-            if with_state(|state| state.session_epoch) != Some(epoch) {
-                crate::vprintln!("[PLUGIN] Load pass abandoned: the session changed under it");
+            // would resurrect a plugin into a session or page that is gone, with nothing left
+            // behind to unload it again.
+            if with_state(|state| state.ticket()) != Some(ticket) {
+                crate::vprintln!("[PLUGIN] Load pass abandoned: the page or session changed");
                 return;
             }
             // Checked here rather than when the row is read: that read skips a row it cannot
@@ -198,12 +232,10 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                     let deps_satisfied = deps.iter().all(|d| loaded_names.contains(&d.name));
 
                     if deps_satisfied {
-                        // Every failing outcome has already announced itself and marked the
-                        // plugin unloaded. What is left is what only this pass owes, and the
-                        // three duties are not interchangeable: a session that ended under an
-                        // injection is not a plugin that failed to load, and reconciling on it
-                        // would disable something nothing was wrong with.
-                        match super::inject::inject_plugin(&p.url, &name, &p.code, epoch) {
+                        // No failing outcome leaves a load of this attempt registered. What is
+                        // left is this pass's own due: a session that ended under an injection
+                        // is no failed plugin, and reconciling it would disable a working one.
+                        match super::inject::inject_plugin(admission, &p.url, &name, &p.code) {
                             Ok(load_id) => {
                                 // Critical: persist ever_dispatched flag
                                 let url_flag = p.url.clone();
@@ -229,7 +261,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
                                 super::inject::PassDuty::Keep => helper_failed = true,
                                 super::inject::PassDuty::Abandon => {
                                     crate::vprintln!(
-                                        "[PLUGIN] Load pass abandoned: the session changed under '{}'",
+                                        "[PLUGIN] Load pass abandoned: the page or session changed under '{}'",
                                         p.name
                                     );
                                     return;
@@ -282,7 +314,7 @@ pub(super) fn do_load_plugins_inline(epoch: u64) {
 
     // 6. Startup timeout: each dispatched plugin's ready ack, watched on its own
     for (url, load_id) in dispatched_snapshot {
-        crate::state::rt_handle().spawn(super::inject::watch_ack(url, load_id));
+        crate::state::rt_handle().spawn(super::inject::watch_ack(url, load_id, ticket));
     }
 }
 
@@ -340,58 +372,57 @@ wrap_task! {
 ///
 /// The waiters list is the queue. A caller parks its callback, then calls this: whether it
 /// starts the pass or joins one already running, its answer arrives the same way, when a pass
-/// of its own epoch settles.
+/// of its own ticket settles.
 pub(super) fn request_plugin_load() {
     let start = with_state(|state| {
         if state.plugin_load_in_flight.is_some() {
             return None;
         }
-        let epoch = state.session_epoch;
-        state.plugin_load_in_flight = Some(epoch);
-        Some(epoch)
+        let ticket = state.ticket();
+        state.plugin_load_in_flight = Some(ticket);
+        Some(ticket)
     })
     .flatten();
-    if let Some(epoch) = start {
-        dispatch_plugin_load(epoch);
+    if let Some(ticket) = start {
+        dispatch_plugin_load(ticket);
     }
 }
 
 /// Run one pass off the UI thread, then settle it. Only ever called with the in-flight slot held.
-fn dispatch_plugin_load(epoch: u64) {
+fn dispatch_plugin_load(ticket: Ticket) {
     crate::state::rt_handle().spawn(async move {
-        purge_sdk_auth_blob_if_needed();
         // The pass is a long stretch of blocking database work; it belongs on the blocking
         // pool rather than a worker that other futures share.
-        if let Err(e) = tokio::task::spawn_blocking(move || do_load_plugins_inline(epoch)).await {
+        if let Err(e) = tokio::task::spawn_blocking(move || do_load_plugins_inline(ticket)).await {
             crate::verr!("[PLUGIN] Load pass did not run: {e}");
         }
-        settle_plugin_load(epoch);
+        settle_plugin_load(ticket);
     });
 }
 
 /// What a settling pass owes, in order: the waiters it may answer, the waiters it may not, and
-/// the epoch owed a pass of its own.
-type SettleSplit<T> = (Vec<(u64, T)>, Vec<(u64, T)>, Option<u64>);
+/// the tag owed a pass of its own.
+type SettleSplit<K, T> = (Vec<(K, T)>, Vec<(K, T)>, Option<K>);
 
-/// Split parked waiters into the ones a pass of `epoch` may answer and the ones it may not, and
-/// name the epoch owed a pass of its own.
+/// Split parked waiters into the ones a pass of `tag` may answer and the ones it may not, and
+/// name the tag owed a pass of its own.
 ///
-/// Whoever asked after the session changed carries a newer tag: this pass read a plugin set they
-/// never saw, and the reply is a bare boolean that gives them no way to detect the substitution.
-/// Generic over the payload, to keep the rule testable without a live IPC callback.
-fn settle_split<T>(parked: Vec<(u64, T)>, epoch: u64) -> SettleSplit<T> {
+/// Whoever asked after the session or page changed carries a newer tag: this pass read a plugin
+/// set they never saw, and the reply is a bare boolean that gives them no way to detect the
+/// substitution. Generic, to keep the rule testable without a live IPC callback.
+fn settle_split<K: Copy + PartialEq, T>(parked: Vec<(K, T)>, tag: K) -> SettleSplit<K, T> {
     let (answer, rest): (Vec<_>, Vec<_>) =
-        parked.into_iter().partition(|(parked, _)| *parked == epoch);
+        parked.into_iter().partition(|(parked, _)| *parked == tag);
     let next = rest.first().map(|(parked, _)| *parked);
     (answer, rest, next)
 }
 
-/// Answer the waiters this pass ran for, then start another if a newer epoch is still waiting.
-fn settle_plugin_load(epoch: u64) {
+/// Answer the waiters this pass ran for, then start another if a newer ticket is still waiting.
+fn settle_plugin_load(ticket: Ticket) {
     let (answer, next) = with_state(|state| {
         state.plugin_load_in_flight = None;
         let (answer, rest, next) =
-            settle_split(std::mem::take(&mut state.plugin_load_waiters), epoch);
+            settle_split(std::mem::take(&mut state.plugin_load_waiters), ticket);
         state.plugin_load_waiters = rest;
         if let Some(next) = next {
             state.plugin_load_in_flight = Some(next);

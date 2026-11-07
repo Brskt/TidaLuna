@@ -233,8 +233,8 @@ fn storage_rows(conn: &Connection, url: &str) -> i64 {
     .unwrap()
 }
 
-/// A write let through before the uninstall and run after it. The DB actor serves its queue in
-/// order; the delete comes first and the write finds no plugin to write for.
+/// A write let through before the uninstall and run after it. The write checks the row in its own
+/// statement and finds no plugin to write for.
 #[test]
 fn a_storage_write_after_uninstall_leaves_no_row() {
     let mut conn = mem();
