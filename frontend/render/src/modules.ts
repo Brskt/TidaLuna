@@ -48,7 +48,7 @@ export const storeReady: Promise<void> = new Promise((r) => { _resolveStoreReady
 // Prefer TIDAL's real module (captured into window.__lunaHostModules by the Rust
 // filter) so plugins share the host React. TIDAL's Vite output wraps React /
 // ReactDOM / jsx-runtime as CJS modules: the chunk's named exports are lazy-loader
-// functions (their source contains `{exports:{}` and `.exports`) and the real API
+// functions (their source mentions `exports`, as upstream matches it) and the real API
 // only appears after calling one. Validate the captured object directly first,
 // then invoke each lazy loader and validate its result (cf. upstream resolveCjsModule).
 // Undefined when the host offers nothing valid; the caller decides what that costs.
@@ -62,7 +62,7 @@ function resolveHost<T>(id: string, valid: (m: any) => boolean): T | undefined {
 	for (const v of Object.values(host)) {
 		if (typeof v !== "function") continue;
 		const src = Function.prototype.toString.call(v);
-		if (!src.includes("{exports:{}") || !src.includes(".exports")) continue;
+		if (!src.includes("exports")) continue;
 		try {
 			const r = (v as () => any)();
 			if (r && typeof r === "object" && valid(r)) {
