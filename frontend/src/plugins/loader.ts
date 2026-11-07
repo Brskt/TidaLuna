@@ -42,6 +42,11 @@ CoreLunaPlugin.prototype.reload = async function () {
     if (ours) await ours.reload();
 };
 
+// Upstream imports plugin code into the page, past every check Rust makes; no instance may do that.
+(CoreLunaPlugin.prototype as any).loadExports = async function () {
+    throw new Error("Plugins run through the host, never imported into the page");
+};
+
 // Wire the upstream registry for lifecycle methods to sync both registries.
 setUpstreamPlugins(CoreLunaPlugin.plugins as any);
 
