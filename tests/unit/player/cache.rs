@@ -605,9 +605,11 @@ fn a_log_past_the_threshold_is_checkpointed_by_the_cache_thread() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cache = AudioCache::open_with_capacity(tmp.path(), 1 << 40).unwrap();
 
+    // The commit that brings the log to the threshold rings the thread, and only the next write
+    // restarts the log: writing on past it races the checkpoint, which fast storage wins.
     let mut stored = 0;
-    while log_of(&cache).0 < 1100 {
-        assert!(stored < 5000, "the log never grew past the threshold");
+    while log_of(&cache).0 < i64::from(checkpoint::WAL_PAGES) {
+        assert!(stored < 5000, "the log never reached the threshold");
         cache.record(&format!("track-{stored}"), "flac", 1).unwrap();
         stored += 1;
     }
