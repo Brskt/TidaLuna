@@ -254,10 +254,12 @@ fn enable_admitted(admission: &super::admission::Admission, url: &str) -> Result
     // admission's ticket: `inject_plugin` re-reads it after the dispatch to decide whether the
     // code may stay.
     let load_id = match super::inject::inject_plugin(admission, url, &plugin_name, &code) {
-        Ok(load_id) => load_id,
+        Ok(super::inject::Injected::Started(load_id)) => load_id,
+        // Its own load already set the dispatch flag and watches its ack.
+        Ok(super::inject::Injected::AlreadyLive) => return Ok(()),
         // No `InjectFailure` leaves a load of this attempt registered. An enable still owes the
-        // `enabled` flag it set, undone only when the plugin itself failed: a reload, a logout or
-        // this machine's failure says nothing about it; the next pass loads it.
+        // `enabled` flag it set, undone only when the plugin itself failed: a reload, a logout, a
+        // closing window or this machine's failure says nothing about it; the next pass loads it.
         Err(failure) => {
             if let super::inject::PassDuty::Reconcile = failure.pass_duty() {
                 revert_enable(url);

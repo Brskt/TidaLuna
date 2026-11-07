@@ -30,10 +30,9 @@ fn an_injection_is_recorded_only_while_its_session_is_provably_current() {
 
 /// The boot pass sorts an outcome into what it owes. A logout under an injection owes nothing:
 /// reconciled as the plugin's own failure it wrote `enabled = 0` behind a log level that is off by
-/// default. Nor does a reload; outcomes that end under their own session and page still owe their
-/// url.
+/// default. Nor does a reload, a quit or a machine's failure; the rest still owe their url.
 #[test]
-fn an_outcome_owes_the_boot_pass_a_verdict_only_under_its_own_session() {
+fn only_a_failed_draw_or_transpile_owes_the_boot_pass_a_verdict() {
     let duty = |outcome: InjectFailure| match outcome.pass_duty() {
         PassDuty::Reconcile => "reconcile".to_string(),
         PassDuty::Abandon => "abandon".to_string(),
@@ -63,8 +62,8 @@ fn an_outcome_owes_the_boot_pass_a_verdict_only_under_its_own_session() {
         ),
         (
             InjectFailure::NoFrame,
-            "reconcile",
-            "no frame took the code, and the session is still the one that asked for it",
+            "abandon",
+            "only a closing browser has no frame: a quit under an injection would disable the plugin",
         ),
         (
             InjectFailure::PageReplaced,

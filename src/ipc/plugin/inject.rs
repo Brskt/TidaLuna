@@ -22,7 +22,8 @@ pub(super) enum InjectFailure {
     /// The transpile helper could not run, which says nothing about the plugin. Nothing was
     /// dispatched.
     HelperUnavailable(String),
-    /// There was no renderer frame to take the code.
+    /// There was no renderer frame to take the code. Only a browser closing has none; this says
+    /// nothing about the plugin.
     NoFrame,
     /// The session ended while this was in flight. Nothing of it stays live.
     SessionChanged,
@@ -45,8 +46,8 @@ pub(super) enum PassDuty {
     /// The attempt ended with nothing live while its session stayed current; the batch
     /// reconciliation owes it a disable.
     Reconcile,
-    /// The session or page this pass ran for is gone. Nothing is owed and nothing may be written:
-    /// whatever this pass concluded describes a plugin set no later page asked about.
+    /// The session or page this pass ran for is gone or closing. Nothing is owed and nothing may be
+    /// written: whatever this pass concluded describes a plugin set no later page asked about.
     Abandon,
     /// Nothing went live, and the failure was this machine's, not the plugin's: its flag stays as
     /// the user set it, and so do those of the plugins waiting on it.
@@ -56,14 +57,16 @@ pub(super) enum PassDuty {
 impl InjectFailure {
     /// Sort a failure into the duty it leaves the boot pass.
     ///
-    /// `RngUnavailable`, `TranspileFailed` and `NoFrame` are reconciled; every other failure says
-    /// nothing about the plugin, and the `enabled` flag a user set stays.
+    /// `RngUnavailable` and `TranspileFailed` are reconciled; every other failure says nothing
+    /// about the plugin, and the `enabled` flag a user set stays.
     pub(super) fn pass_duty(&self) -> PassDuty {
         match self {
-            InjectFailure::RngUnavailable
-            | InjectFailure::TranspileFailed(_)
-            | InjectFailure::NoFrame => PassDuty::Reconcile,
-            InjectFailure::SessionChanged | InjectFailure::PageReplaced => PassDuty::Abandon,
+            InjectFailure::RngUnavailable | InjectFailure::TranspileFailed(_) => {
+                PassDuty::Reconcile
+            }
+            InjectFailure::SessionChanged
+            | InjectFailure::PageReplaced
+            | InjectFailure::NoFrame => PassDuty::Abandon,
             InjectFailure::HelperUnavailable(_) | InjectFailure::Undelivered => PassDuty::Keep,
         }
     }
@@ -91,6 +94,16 @@ pub(super) fn injection_still_current<K: PartialEq>(asked: K, current: Option<K>
     current == Some(asked)
 }
 
+/// What an injection that did not fail left in the page.
+pub(super) enum Injected {
+    /// Dispatched under this `load_id`, which keys its readiness ack and the ack's timeout.
+    Started(u64),
+    /// The url already had a load in this page. Nothing was marked, prepared or sent: a second
+    /// mark would replace the record of the instance still running, and an eval that then never
+    /// ran would leave that instance with no record to unload it by.
+    AlreadyLive,
+}
+
 /// Which of the two moved under a ticket that is no longer current.
 fn stale(ticket: Ticket) -> InjectFailure {
     if with_state(|state| state.session_epoch) == Some(ticket.epoch) {
@@ -101,8 +114,8 @@ fn stale(ticket: Ticket) -> InjectFailure {
 }
 
 /// Mint this load's identity, transpile the plugin, dispatch it, and keep it only if the
-/// session and page it was admitted for are still current. `Ok` is the live load's `load_id`,
-/// which keys its readiness ack and the ack's timeout.
+/// session and page it was admitted for are still current. A url that already has a load is left
+/// as it is: enabling a live plugin is a no-op, as upstream's `enable` is for unchanged code.
 ///
 /// The last re-read happens after the dispatch: transpiling is real CPU work that holds no lock,
 /// and a logout or reload lands on a different thread.
@@ -111,8 +124,19 @@ pub(super) fn inject_plugin(
     url: &str,
     name: &crate::plugins::name::PluginName,
     code: &str,
-) -> Result<u64, InjectFailure> {
+) -> Result<Injected, InjectFailure> {
     let ticket = admission.ticket();
+    // Page and live in one look, ahead of the draw: a load of a replaced page is no reason to
+    // answer live, and a failed draw must not read as the plugin's fault on a live url.
+    let live = with_state(|state| {
+        (state.ticket() == ticket).then(|| state.plugin_manager.current_load_id(url).is_some())
+    })
+    .flatten();
+    match live {
+        None => return Err(stale(ticket)),
+        Some(true) => return Ok(Injected::AlreadyLive),
+        Some(false) => {}
+    }
     let (Some(nonce), Some(capability)) = (
         crate::plugins::manager::random_nonce(),
         crate::plugins::manager::random_capability(),
@@ -198,7 +222,7 @@ pub(super) fn inject_plugin(
         return Err(stale(ticket));
     }
 
-    Ok(load_id)
+    Ok(Injected::Started(load_id))
 }
 
 /// Wait on the ready ack of `load_id`, and give the load up once it has gone idle: unload it,
@@ -278,7 +302,7 @@ pub(super) fn unload_current(_pass: &super::jsrt::PassGuard, url: &str) {
 /// Undo an injection that was dispatched and then found unwanted, for the callers whose own
 /// bookkeeping fails after this module has handed back a live load.
 ///
-/// `load_id` names the load being undone. The callers all hold it (it is what `Ok` handed
+/// `load_id` names the load being undone. The callers all hold it (it is what `Started` handed
 /// them), and passing it is what keeps this from reaching past its own attempt into whatever
 /// load became current in the meantime.
 pub(super) fn undo_injection(url: &str, load_id: u64) {

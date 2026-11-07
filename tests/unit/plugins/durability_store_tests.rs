@@ -59,7 +59,7 @@ fn disabling_a_plugin_is_written_under_a_full_sync() {
             &syncs_routinely,
         ],
     );
-    assert!(collect_enabled_code(&mut conn).is_empty());
+    assert!(collect_enabled_code(&mut conn).unwrap().is_empty());
 }
 
 #[test]

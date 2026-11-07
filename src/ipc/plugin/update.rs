@@ -2,7 +2,7 @@
 //! the Reload button and the live-reload poll, which restart the plugin themselves;
 //! `plugin.update_all` stores and restarts once per launch, behind its setting.
 
-use super::inject::PassDuty;
+use super::inject::{Injected, PassDuty};
 use super::ipc_callback_ok;
 use super::jsrt::PassGuard;
 use super::plugin_ipc::{Manifest, PluginData};
@@ -85,8 +85,8 @@ enum Restarted {
     /// The old load is gone and nothing new runs, but the flag stays as the user set it: the
     /// failure was this machine's. The next launch loads the stored version.
     Stopped(String),
-    /// The session or page ended under the restart: nothing is owed and nothing may be written or
-    /// said.
+    /// The session or page ended or closed under the restart: nothing is owed and nothing may be
+    /// written or said.
     SessionEnded,
 }
 
@@ -361,7 +361,12 @@ fn restart_in_section(pass: &PassGuard, url: &str) -> Restarted {
         super::inject::inject_plugin(&admission, url, &name, &stored.code)
     }));
     let load_id = match injected {
-        Ok(Ok(load_id)) => load_id,
+        Ok(Ok(Injected::Started(load_id))) => load_id,
+        // Not reached under the pass lock, with the old load retired just above: a load that is
+        // running anyway keeps running, and the new version waits for the next launch.
+        Ok(Ok(Injected::AlreadyLive)) => {
+            return Restarted::Deferred("another load of it is running".to_string());
+        }
         Ok(Err(failure)) => match failure.pass_duty() {
             // The plugin's own failure turns it off as a failed load does.
             PassDuty::Reconcile => {

@@ -1,5 +1,5 @@
 use super::admission::{Admission, Closed};
-use crate::app_state::{IpcMessage, Ticket, eval_js, with_state};
+use crate::app_state::{IpcMessage, Ticket, emit_ipc_event_with_args, eval_js, with_state};
 use cef::*;
 use std::collections::HashSet;
 
@@ -142,6 +142,7 @@ pub(super) fn do_load_plugins_inline(ticket: Ticket) {
             }
             Err(closed) => {
                 crate::verr!("[PLUGIN] Load pass did not run: {}", closed.reason());
+                stop_all(ticket, &format!("Not loaded: {}", closed.reason()));
                 return;
             }
         };
@@ -154,9 +155,66 @@ pub(super) fn do_load_plugins_inline(ticket: Ticket) {
         }
 
         // 2. Collect all enabled plugins with code + manifest
-        let enabled = db.call_plugins(crate::plugins::store::collect_enabled_code);
+        let enabled = match db.call_plugins(crate::plugins::store::collect_enabled_code) {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                crate::verr!("[PLUGIN] Load pass could not read the enabled plugins: {e}");
+                stop_all(ticket, "Not loaded: the plugin list could not be read");
+                return;
+            }
+        };
         run_pass(&admission, enabled, HashSet::new());
     });
+}
+
+/// A pass that could not run leaves every enabled plugin off this page, flag kept: each card is
+/// told. Best effort: the rows are read again here, and a plugin whose own row refuses it already
+/// shows why.
+fn stop_all(ticket: Ticket, reason: &str) {
+    match crate::state::db().call_plugins(crate::plugins::store::collect_enabled_code) {
+        Ok(rows) => announce_stopped(
+            ticket,
+            rows.into_iter()
+                .filter(|p| crate::plugins::store::load_refusal(&p.name, &p.manifest).is_none())
+                .map(|p| (p.url, reason.to_string()))
+                .collect(),
+        ),
+        Err(e) => crate::verr!("[PLUGIN] Cannot tell the page which plugins stay off: {e}"),
+    }
+}
+
+/// Tells the page which plugins stay enabled but not running, flag untouched. Skips a replaced page
+/// and any url that has a load, whichever path named it.
+pub(super) fn announce_stopped(ticket: Ticket, plugins: Vec<(String, String)>) {
+    let stopped = with_state(|state| {
+        (state.ticket() == ticket).then(|| {
+            plugins
+                .into_iter()
+                .filter(|(url, _)| state.plugin_manager.current_load_id(url).is_none())
+                .collect::<Vec<_>>()
+        })
+    })
+    .flatten()
+    .unwrap_or_default();
+    for (url, reason) in stopped {
+        emit_ipc_event_with_args("jsrt.plugin_stopped", &[url.as_str(), reason.as_str()]);
+    }
+}
+
+/// The plugins a pass could not resolve, split by what they are owed.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Unresolved {
+    /// Stranded by a plugin's own failure: turned off.
+    pub(super) failed: Vec<String>,
+    /// Stranded once this machine failed to prepare a plugin: flag kept, the page told.
+    pub(super) stopped: Vec<String>,
+}
+
+/// Splits the plugins left with unresolved dependencies. A machine's failure says nothing about the
+/// plugins waiting on what it could not prepare.
+pub(super) fn settle_unresolved(unresolved: Vec<String>, helper_failed: bool) -> Unresolved {
+    let (stopped, failed) = unresolved.into_iter().partition(|_| helper_failed);
+    Unresolved { failed, stopped }
 }
 
 /// Held by every writer of a plugin's row or live load: passes, enable, disable, install,
@@ -192,6 +250,8 @@ pub(super) fn run_pass(
     let db = crate::state::db();
     let mut failed_urls = Vec::new();
     let mut helper_failed = false;
+    // Left on and not running, with the reason each card shows.
+    let mut stopped: Vec<(String, String)> = Vec::new();
 
     // 3. Multi-pass: load plugins whose deps are satisfied
     let mut dispatched_snapshot: Vec<(String, u64)> = Vec::new(); // (url, load_id) for timeout
@@ -236,7 +296,12 @@ pub(super) fn run_pass(
                         // left is this pass's own due: a session that ended under an injection
                         // is no failed plugin, and reconciling it would disable a working one.
                         match super::inject::inject_plugin(admission, &p.url, &name, &p.code) {
-                            Ok(load_id) => {
+                            // Its own load set the flag and is watched already.
+                            Ok(super::inject::Injected::AlreadyLive) => {
+                                loaded_names.insert(p.name);
+                                progress = true;
+                            }
+                            Ok(super::inject::Injected::Started(load_id)) => {
                                 // Critical: persist ever_dispatched flag
                                 let url_flag = p.url.clone();
                                 let flag_ok = db.call_plugins(move |pc| {
@@ -258,10 +323,14 @@ pub(super) fn run_pass(
                             }
                             Err(failure) => match failure.pass_duty() {
                                 super::inject::PassDuty::Reconcile => failed_urls.push(p.url),
-                                super::inject::PassDuty::Keep => helper_failed = true,
+                                super::inject::PassDuty::Keep => {
+                                    helper_failed = true;
+                                    stopped
+                                        .push((p.url, format!("Not loaded: {}", failure.reason())));
+                                }
                                 super::inject::PassDuty::Abandon => {
                                     crate::vprintln!(
-                                        "[PLUGIN] Load pass abandoned: the page or session changed under '{}'",
+                                        "[PLUGIN] Load pass abandoned: the page or session changed or closed under '{}'",
                                         p.name
                                     );
                                     return;
@@ -285,10 +354,18 @@ pub(super) fn run_pass(
     // it could not prepare says nothing about the plugin waiting on it.
     for p in &remaining {
         crate::vprintln!("[PLUGIN] Cannot load '{}': unresolved dependencies", p.name);
-        if !helper_failed {
-            failed_urls.push(p.url.clone());
-        }
     }
+    let unresolved = settle_unresolved(
+        remaining.into_iter().map(|p| p.url).collect(),
+        helper_failed,
+    );
+    failed_urls.extend(unresolved.failed);
+    stopped.extend(unresolved.stopped.into_iter().map(|url| {
+        (
+            url,
+            "Not loaded: the load pass could not prepare every plugin".to_string(),
+        )
+    }));
 
     // 5. Reconciliation: auto-disable plugins that couldn't load
     if !failed_urls.is_empty() {
@@ -311,6 +388,8 @@ pub(super) fn run_pass(
         loaded_names.len(),
         failed_urls.len()
     );
+
+    announce_stopped(ticket, stopped);
 
     // 6. Startup timeout: each dispatched plugin's ready ack, watched on its own
     for (url, load_id) in dispatched_snapshot {

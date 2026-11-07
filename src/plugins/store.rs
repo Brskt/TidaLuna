@@ -18,7 +18,7 @@ pub(crate) struct PluginInfo {
 
 /// Why a stored plugin cannot load, read off its own row: the same refusal an enable meets, and
 /// still there after the restart that disabled it.
-fn load_refusal(name: &str, manifest: &str) -> Option<String> {
+pub(crate) fn load_refusal(name: &str, manifest: &str) -> Option<String> {
     match PluginName::parse(name) {
         Err(refused) => Some(refused.to_string()),
         Ok(_) => parse_luna_meta(manifest).err(),
@@ -638,30 +638,22 @@ pub(crate) struct EnabledPlugin {
     pub manifest: String,
 }
 
-pub(crate) fn collect_enabled_code(conn: &mut Connection) -> Vec<EnabledPlugin> {
-    let mut stmt = match conn.prepare(
+/// The plugins a load pass injects. `Err` when the table cannot be read, never an empty list: a
+/// pass on nothing would vouch for every plugin it never tried. A row that does not decode is
+/// skipped alone, sparing every other plugin.
+pub(crate) fn collect_enabled_code(conn: &mut Connection) -> rusqlite::Result<Vec<EnabledPlugin>> {
+    let mut stmt = conn.prepare(
         "SELECT url, name, code, manifest FROM plugins WHERE installed = 1 AND enabled = 1 AND code IS NOT NULL ORDER BY rowid",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::vprintln!("[PLUGINS] Failed to query enabled plugins: {e}");
-            return Vec::new();
-        }
-    };
-    match stmt.query_map([], |row| {
+    )?;
+    let rows = stmt.query_map([], |row| {
         Ok(EnabledPlugin {
             url: row.get(0)?,
             name: row.get(1)?,
             code: row.get(2)?,
             manifest: row.get(3)?,
         })
-    }) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            crate::vprintln!("[PLUGINS] Failed to query enabled plugins: {e}");
-            Vec::new()
-        }
-    }
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
 /// The urls `collect_enabled_code` loads, in its order, without reading their code.

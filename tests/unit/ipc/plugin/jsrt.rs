@@ -41,3 +41,28 @@ fn a_pass_answers_only_the_waiters_of_its_own_epoch_in_arrival_order() {
         assert_eq!(got_next, next, "{what}");
     }
 }
+
+/// When this machine could not prepare a plugin, the plugins stranded behind it are told and keep
+/// their flag: a disable would outlive the glitch. A plugin whose dependency failed by itself is
+/// turned off.
+#[test]
+fn a_machine_failure_tells_the_plugins_it_stranded_instead_of_disabling_them() {
+    let unresolved = || vec!["https://x/D".to_string(), "https://x/W".to_string()];
+
+    assert_eq!(
+        settle_unresolved(unresolved(), true),
+        Unresolved {
+            failed: vec![],
+            stopped: unresolved(),
+        },
+        "a machine failure disabled a plugin"
+    );
+    assert_eq!(
+        settle_unresolved(unresolved(), false),
+        Unresolved {
+            failed: unresolved(),
+            stopped: vec![],
+        },
+        "a plugin whose dependency failed was left on"
+    );
+}
