@@ -562,6 +562,11 @@ const init = async () => {
         console.error("[luna] Failed to load @luna/ui:", e);
     }
 
+    // Load user plugins - Rust does dedup + multi-pass + reconciliation, then responds
+    await invokeIpc("jsrt.load_plugins");
+
+    // After the user plugins, as upstream orders it; before exposeLoaderApi, which reads each
+    // core module's Settings once.
     try {
         const devUrl = `${location.origin}/__luna__/dev.mjs`;
         const devMod = await import(/* @vite-ignore */ devUrl);
@@ -572,8 +577,6 @@ const init = async () => {
         console.error("[luna] Failed to load @luna/dev:", e);
     }
 
-    // Load user plugins - Rust does dedup + multi-pass + reconciliation, then responds
-    await invokeIpc("jsrt.load_plugins");
     // Populate CEF plugin registry from Rust PluginStore (for @luna/ui display)
     const { exposeLoaderApi } = require("./plugins/loader");
     exposeLoaderApi();
