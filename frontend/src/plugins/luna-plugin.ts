@@ -121,6 +121,9 @@ export class LunaPlugin {
     private reloadTimeout: ReturnType<typeof setTimeout> | null = null;
     // Bumped by each start and stop: a poll of a loop since stopped does not schedule another.
     private pollLoop = 0;
+    // Bumped by each enable, stop and write of `enabled`: a row read begun before any of them
+    // is stale.
+    private rowEpoch = 0;
     // The last source hash the poll had a verdict on; only a different one is pulled again.
     private seenHash: string | undefined;
     private enabledListeners = new Set<(enabled: boolean) => void>();
@@ -140,6 +143,7 @@ export class LunaPlugin {
     }
 
     set enabled(value: boolean) {
+        this.rowEpoch++;
         this.store.enabled = value;
         for (const fn of this.enabledListeners) {
             try {
@@ -152,6 +156,12 @@ export class LunaPlugin {
 
     get installed(): boolean {
         return this.store.installed;
+    }
+
+    // On and not stopped by a failure: a plugin left on after this machine failed to start it
+    // carries the reason, and a dependant must not load against it.
+    get running(): boolean {
+        return this.enabled && this.loadError._ === undefined;
     }
 
     get liveReload(): boolean {
@@ -276,9 +286,11 @@ export class LunaPlugin {
                     delete LunaPlugin.plugins[this.url];
                     syncUpstream(this.url, null);
                 } else {
-                    // Zombie remains visible as installed=true, enabled=false
+                    // Zombie remains visible as installed, off until its row says otherwise
                     this.store.enabled = false;
                     this.enabled = false;
+                    this.loadError._ = enableErr instanceof Error ? enableErr.message : String(enableErr);
+                    void this.followRow();
                     syncUpstream(this.url, this);
                 }
                 throw enableErr;
@@ -299,6 +311,7 @@ export class LunaPlugin {
         }
         visited.add(this.url);
 
+        this.rowEpoch++;
         this.loading._ = true;
         this.loadError._ = undefined; // Clear any previous error (e.g., timeout from last attempt)
         try {
@@ -307,13 +320,15 @@ export class LunaPlugin {
                 const depPlugin = LunaPlugin.getByName(dep.name);
                 if (!depPlugin || !depPlugin.store.installed) {
                     console.error(`[luna:plugin] Missing dependency '${dep.name}' for '${this.name}'`);
+                    this.loadError._ = `Dependency '${dep.name}' is not installed`;
                     return;
                 }
                 depPlugin.addDependant(this);
-                if (!depPlugin.enabled) {
+                if (!depPlugin.running) {
                     await depPlugin.enable(visited);
-                    if (!depPlugin.enabled) {
+                    if (!depPlugin.running) {
                         console.error(`[luna:plugin] Dependency '${dep.name}' failed to enable`);
+                        this.loadError._ = `Dependency '${dep.name}' is not running`;
                         return;
                     }
                 }
@@ -326,12 +341,29 @@ export class LunaPlugin {
             this.extractSettings();
             syncUpstream(this.url, this);
         } catch (e) {
+            // Off until the row says otherwise: Rust keeps the flag on when the failure was this
+            // machine's, and only a plugin that failed by itself is turned off.
             this.enabled = false;
             // On the card, not only in the console: the switch falling back to off says nothing.
             this.loadError._ = e instanceof Error ? e.message : String(e);
             console.error(`[luna:plugin] Failed to enable '${this.name}':`, e);
+            void this.followRow();
         } finally {
             this.loading._ = false;
+        }
+    }
+
+    // The card shows the row an enable left. Only ever turns it on, and only while no lifecycle
+    // step or write of `enabled` came since the read was asked; no answer leaves it off.
+    private async followRow(): Promise<void> {
+        const url = this.url;
+        const epoch = this.rowEpoch;
+        try {
+            const rows = await invokeIpc("plugin.list");
+            const row = Array.isArray(rows) ? rows.find((p: any) => p?.url === url) : undefined;
+            if (row?.enabled && epoch === this.rowEpoch) this.enabled = true;
+        } catch (e) {
+            console.warn("[luna:plugin] plugin.list failed:", e);
         }
     }
 
@@ -343,12 +375,15 @@ export class LunaPlugin {
     // `disable()` without stopping the live-reload loop: a restart runs it right before
     // `enable()`, and the loop must outlive that.
     private async stop(): Promise<void> {
+        this.rowEpoch++;
         this.loading._ = true;
         try {
             // Atomic: guard dependants + unload + persist (Rust handles everything)
             await invokeIpc("plugin.disable", this.url);
             // Only after Rust confirms:
             this.enabled = false;
+            // Stopped on purpose: a failure reason must not outlive the attempt it explains.
+            this.loadError._ = undefined;
             this.exports = undefined;
             if ((window as any).__pluginExports) {
                 delete (window as any).__pluginExports[this.url];
@@ -607,6 +642,8 @@ export class LunaPlugin {
             } else {
                 plugin.store.enabled = false;
                 plugin.enabled = false;
+                plugin.loadError._ = enableErr instanceof Error ? enableErr.message : String(enableErr);
+                void plugin.followRow();
                 syncUpstream(cleanUrl, plugin);
             }
             throw enableErr;
