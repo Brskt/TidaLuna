@@ -83,6 +83,16 @@ pub(super) fn admit(_pass: &PassGuard, ticket: Ticket) -> Result<Admission, Clos
         }
         crate::vprintln!("[AUTH]   Purged SDK auth blob from localStorage (pre-plugin)");
     }
+    // Set before any plugin line can run, and only for the page still current: a stale pass must
+    // not close the store-move window on a page whose own bundle has not asked yet.
+    with_state(|state| {
+        if state.ticket() != ticket {
+            return Err(Closed::Stale);
+        }
+        state.plugin_code_admitted = true;
+        Ok(())
+    })
+    .unwrap_or(Err(Closed::Stale))?;
     Ok(Admission { ticket })
 }
 

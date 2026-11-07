@@ -7,6 +7,7 @@ mod lib_native;
 mod native;
 mod plugin_ipc;
 mod proxy;
+mod store_move;
 mod trust_prompt;
 mod update;
 
@@ -152,6 +153,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         }
         "plugin.install" => {
             plugin_ipc::handle_plugin_install(&msg, callback);
+        }
+        "plugin.migrate_base_url" => {
+            store_move::handle_plugin_migrate_base_url(&msg, callback);
         }
         "plugin.check_hash" => {
             plugin_ipc::handle_plugin_check_hash(&msg, query_id, callback);

@@ -1,7 +1,8 @@
 //! Tests for `src/app_state.rs`, attached to it by `#[path]`.
 
 use super::{
-    MeasuredDuration, end_page_music, js_ipc_response, js_string_literal, settle_recorded_duration,
+    MeasuredDuration, PagePhase, PassStood, Ticket, end_page_music, js_ipc_response,
+    js_string_literal, settle_recorded_duration,
 };
 use crate::bridge::PlayerBridgeEvent;
 use crate::player::{LoadOrigin, Player, begin_load, current_load};
@@ -122,5 +123,53 @@ async fn the_end_of_a_page_leaves_a_cast_playing() {
     assert!(
         events.is_empty() && time.is_none(),
         "what the page queued is its own either way"
+    );
+}
+
+/// A reload keeps the session, not one plugin of the page: the plugins the old page left waiting
+/// on a store move would be injected a second time by the new page's own pass.
+#[test]
+fn a_new_page_drops_the_plugins_the_old_one_left_waiting() {
+    let mut page = PagePhase::default();
+    page.next();
+    page.wait([("https://x/A".to_string(), "A".to_string())].into());
+
+    page.next();
+
+    assert!(
+        page.take_waiting().is_empty(),
+        "the old page's waiting plugins carried over"
+    );
+}
+
+/// A store move's answer loads its plugins only once a pass tried every plugin, counting the rest
+/// as live. A later pass that could not prepare one takes that back: the answer after it would
+/// load a dependant against a library that never started.
+#[test]
+fn the_last_pass_of_a_page_says_whether_its_plugins_were_all_tried() {
+    let mut page = PagePhase::default();
+    let ticket = Ticket {
+        epoch: 1,
+        page: page.next(),
+    };
+    let other = Ticket {
+        epoch: 2,
+        page: ticket.page,
+    };
+    assert_eq!(page.pass_stood(ticket), PassStood::NotYet);
+
+    page.mark_loaded(ticket);
+    assert_eq!(page.pass_stood(ticket), PassStood::Completed);
+    assert_eq!(
+        page.pass_stood(other),
+        PassStood::NotYet,
+        "a pass of another session vouched for this one"
+    );
+
+    page.mark_incomplete(ticket);
+    assert_eq!(
+        page.pass_stood(ticket),
+        PassStood::Incomplete,
+        "an earlier complete pass outweighed the later one that could not load everything"
     );
 }

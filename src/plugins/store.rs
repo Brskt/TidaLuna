@@ -330,6 +330,73 @@ fn remove_rows(conn: &Connection, url: &str) -> rusqlite::Result<()> {
     tx.commit()
 }
 
+/// An installed plugin a store move carries: its url now, and the one under the new base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreMove {
+    pub(crate) name: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
+}
+
+/// The enabled plugins served under `from_base`, ASCII case aside (`tidaluna://` lowercases the
+/// url it carries). Leaves out a plugin whose new url is taken, and a disabled one: declining a
+/// move disables its plugins; the question is not asked again.
+pub(crate) fn pending_store_move(
+    conn: &Connection,
+    from_base: &str,
+    to_base: &str,
+) -> rusqlite::Result<Vec<StoreMove>> {
+    let (from_base, to_base) = (
+        from_base.trim_end_matches('/'),
+        to_base.trim_end_matches('/'),
+    );
+    let prefix = format!("{from_base}/");
+    let mut moves = Vec::new();
+    let mut stmt =
+        conn.prepare("SELECT url, name FROM plugins WHERE installed = 1 AND enabled = 1")?;
+    for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))? {
+        let (url, name) = row?;
+        let Some(rest) = url
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(&prefix))
+            .map(|_| &url[prefix.len()..])
+        else {
+            continue;
+        };
+        let to = format!("{to_base}/{rest}");
+        let taken: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM plugins WHERE url = ?1)",
+            params![to],
+            |row| row.get(0),
+        )?;
+        if !taken {
+            moves.push(StoreMove {
+                name,
+                from: url,
+                to,
+            });
+        }
+    }
+    Ok(moves)
+}
+
+/// Moves each plugin with its storage, all or none: a url taken since `pending_store_move` fails
+/// the whole move rather than overwrite that plugin.
+pub(crate) fn apply_store_move(conn: &Connection, moves: &[StoreMove]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for m in moves {
+        tx.execute(
+            "UPDATE plugins SET url = ?2 WHERE url = ?1",
+            params![m.from, m.to],
+        )?;
+        tx.execute(
+            "UPDATE plugin_storage SET namespace = ?2 WHERE namespace = ?1",
+            params![m.from, m.to],
+        )?;
+    }
+    tx.commit()
+}
+
 pub(crate) fn enable(conn: &mut Connection, url: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE plugins SET enabled = 1 WHERE url = ?1",

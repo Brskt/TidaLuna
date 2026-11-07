@@ -471,6 +471,7 @@ fn main() {
         plugin_load_in_flight: None,
         session_epoch: 0,
         page: Default::default(),
+        plugin_code_admitted: false,
         last_client_id: String::new(),
         connect: Some(crate::connect::ConnectManager::new()),
     })));

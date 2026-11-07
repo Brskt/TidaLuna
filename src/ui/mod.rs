@@ -19,6 +19,7 @@ pub(crate) mod message_dialog;
 pub(crate) mod module_capture;
 pub(crate) mod nav;
 pub(crate) mod proactive_refresh;
+pub(crate) mod store_move_dialog;
 pub(crate) mod store_proxy;
 pub(crate) mod token_filter;
 pub(crate) mod trust_dialog;

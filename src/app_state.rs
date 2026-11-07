@@ -119,6 +119,9 @@ pub(crate) struct AppState {
     pub(crate) session_epoch: u64,
     // The main document now running, and what this page's plugins have done in it.
     pub(crate) page: PagePhase,
+    // Set by the first plugin admitted in this process and never cleared: from then on any
+    // script of the page may be a plugin's, and `plugin.migrate_base_url` refuses them all.
+    pub(crate) plugin_code_admitted: bool,
     pub(crate) last_client_id: String,
     pub(crate) connect: Option<crate::connect::ConnectManager>,
 }
@@ -151,6 +154,30 @@ pub(crate) struct Ticket {
 #[derive(Default)]
 pub(crate) struct PagePhase {
     generation: u64,
+    /// How the last load pass of this page ended. The last one wins: a later pass that could not
+    /// load everything takes back what an earlier one vouched for.
+    pass_end: PassEnd,
+    /// The plugins a pass left waiting on a store move's answer, url to name.
+    waiting: HashMap<String, String>,
+}
+
+#[derive(Default)]
+enum PassEnd {
+    #[default]
+    Pending,
+    Completed(Ticket),
+    Incomplete(Ticket),
+}
+
+/// What a page's load passes stand for, asked under one ticket.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PassStood {
+    /// No pass of this ticket ended yet: the pass to come reads the rows itself.
+    NotYet,
+    /// Every enabled plugin was tried: the ones not failed are live or parked on a store move.
+    Completed,
+    /// A pass ended without trying every plugin, or was refused: nothing loads the rest here.
+    Incomplete,
 }
 
 impl PagePhase {
@@ -161,7 +188,33 @@ impl PagePhase {
     /// A new main document: nothing of the old one carries over.
     pub(crate) fn next(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
+        self.pass_end = PassEnd::Pending;
+        self.waiting.clear();
         self.generation
+    }
+
+    pub(crate) fn mark_loaded(&mut self, ticket: Ticket) {
+        self.pass_end = PassEnd::Completed(ticket);
+    }
+
+    pub(crate) fn mark_incomplete(&mut self, ticket: Ticket) {
+        self.pass_end = PassEnd::Incomplete(ticket);
+    }
+
+    pub(crate) fn pass_stood(&self, ticket: Ticket) -> PassStood {
+        match self.pass_end {
+            PassEnd::Completed(of) if of == ticket => PassStood::Completed,
+            PassEnd::Incomplete(of) if of == ticket => PassStood::Incomplete,
+            _ => PassStood::NotYet,
+        }
+    }
+
+    pub(crate) fn wait(&mut self, plugins: HashMap<String, String>) {
+        self.waiting.extend(plugins);
+    }
+
+    pub(crate) fn take_waiting(&mut self) -> HashMap<String, String> {
+        std::mem::take(&mut self.waiting)
     }
 }
 
@@ -201,6 +254,8 @@ impl AppState {
         // next plugin and keeps its result from ever answering a request made from here on,
         // which would report the departed session's plugin set as the new one's.
         self.session_epoch = self.session_epoch.wrapping_add(1);
+        // Left waiting by this session's pass: the next session's pass loads them itself.
+        self.page.take_waiting();
         self.captured_token.clear();
         self.token_state = None;
         EndedSession {

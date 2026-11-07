@@ -1,6 +1,6 @@
 //! Putting plugin code into the renderer, and deciding whether it may stay.
 //!
-//! Callers: the boot pass, `plugin.enable` and an update's restart. The
+//! Callers: the boot pass, `plugin.enable`, an update's restart, a store move's answer. The
 //! re-read after dispatch lives here once: written beside each caller, one skipped it, and an
 //! enable racing a logout left code running in the old session, its capability never revoked.
 

@@ -251,3 +251,51 @@ fn a_storage_write_after_uninstall_leaves_no_row() {
     );
     assert_eq!(storage_rows(&conn, url), 0, "orphan plugin_storage row");
 }
+
+/// A store move carries the enabled plugins under the old base, whatever the case of their url,
+/// with their storage. A disabled one, another store's plugin and its storage stay.
+#[test]
+fn a_store_move_carries_enabled_plugins_and_their_storage() {
+    let mut conn = mem();
+    let (foo, bar, baz) = (
+        "https://Old.example/store/Foo",
+        "https://old.example/store/Bar",
+        "https://other.example/store/Baz",
+    );
+    stored_row(&mut conn, foo, "Foo", "{}");
+    stored_row(&mut conn, bar, "Bar", "{}");
+    stored_row(&mut conn, baz, "Baz", "{}");
+    disable(&mut conn, bar).unwrap();
+    storage_set(&mut conn, foo, "k", "foo").unwrap();
+    storage_set(&mut conn, baz, "k", "baz").unwrap();
+
+    let moves =
+        pending_store_move(&conn, "https://old.example/store/", "https://new.example").unwrap();
+    let moved = "https://new.example/Foo";
+    assert_eq!(
+        moves,
+        [StoreMove {
+            name: "Foo".to_string(),
+            from: foo.to_string(),
+            to: moved.to_string(),
+        }]
+    );
+    apply_store_move(&conn, &moves).unwrap();
+
+    assert!(
+        is_enabled(&mut conn, moved).unwrap(),
+        "the moved plugin lost its flag"
+    );
+    assert_eq!(storage_get(&mut conn, moved, "k").as_deref(), Some("foo"));
+    assert_eq!(
+        storage_rows(&conn, foo),
+        0,
+        "storage left under the old url"
+    );
+    assert!(
+        !is_enabled(&mut conn, bar).unwrap(),
+        "the disabled plugin moved"
+    );
+    assert_eq!(storage_get(&mut conn, baz, "k").as_deref(), Some("baz"));
+    assert!(is_enabled(&mut conn, baz).unwrap());
+}
