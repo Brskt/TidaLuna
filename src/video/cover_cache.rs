@@ -2,7 +2,7 @@
 //!
 //! Not the audio cache: that one indexes tracks in SQLite and moves files through claims and
 //! settles, none of which a few megabytes of WebM per cover needs. One file per cover, named by
-//! the hash of its key, written whole and renamed into place, evicted oldest-used first.
+//! the hash of its key and format, written whole and renamed into place, evicted oldest-used first.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,12 @@ use std::time::{Duration, SystemTime};
 use crate::video::cover::CoverKey;
 
 /// Room for a few dozen covers at 1280, more at 640.
-const BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+const BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Bumped whenever what writes a cover changes its bytes: the page's encoder settings, its muxer,
+/// the frames Rust hands it. Hashed into each file's name. A cover an older format wrote is never
+/// served again and, used no more, is the first one evicted.
+const COVER_FORMAT: u32 = 2;
 
 /// A file that is not a cover and has not been touched for this long is a temporary one a crash
 /// left behind. Younger ones may be another store's, still being written.
@@ -85,7 +90,8 @@ impl CoverCache {
     }
 
     fn path_of(&self, key: &CoverKey) -> PathBuf {
-        let hash = crate::video::codec::sha256_bytes(key.url().as_bytes());
+        let named = format!("{COVER_FORMAT}\0{}", key.url());
+        let hash = crate::video::codec::sha256_bytes(named.as_bytes());
         self.dir.join(format!("{hash}.webm"))
     }
 

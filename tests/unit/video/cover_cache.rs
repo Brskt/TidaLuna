@@ -37,6 +37,23 @@ fn eviction_keeps_the_newest_covers_under_budget_and_sweeps_stale_leftovers() {
     );
 }
 
+/// A cover an older format wrote is still valid WebM; only its name keeps it from being served,
+/// and it stays a cover for eviction to take.
+#[test]
+fn a_cover_from_an_older_format_is_not_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = CoverKey::parse("https://resources.tidal.com/videos/a/640x640.mp4", "640").unwrap();
+    let old_name = crate::video::codec::sha256_bytes(key.url().as_bytes());
+    let old = dir.path().join(format!("{old_name}.webm"));
+    std::fs::write(&old, b"old").unwrap();
+    let cache = CoverCache::new(dir.path().to_path_buf(), BUDGET_BYTES);
+
+    assert_eq!(cache.get(&key), None, "the older file is not this format's");
+    assert!(is_cover_file(&old), "eviction still counts and takes it");
+    cache.put(&key, b"new").unwrap();
+    assert_eq!(cache.get(&key).as_deref(), Some(&b"new"[..]));
+}
+
 /// The Clear runs beside the stores: deleting a staging file a store is still writing fails its
 /// rename, and the page reads that as the cover's fault.
 #[test]

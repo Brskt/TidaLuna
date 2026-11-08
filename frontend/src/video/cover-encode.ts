@@ -36,15 +36,15 @@ const HEADER_LEN = 16;
 const RECORD_LEN = 32;
 
 /**
- * VP9 profile 0, level 4.0, 8-bit. Software: no hardware encoder was probed, and the encode runs
- * once per cover. Variable bitrate at a 4 Mbps target matched a two-pass libvpx encode of the
- * same cover in SSIM.
+ * VP9 profile 0, level 4.0, 8-bit, in software (no hardware encoder was probed; it runs once per
+ * cover), variable bitrate at 8 Mbps: 4 Mbps still showed artifacts next to TIDAL's own MP4.
+ * Any change here or in the muxer bumps `COVER_FORMAT` in `src/video/cover_cache.rs`.
  */
 export const encoderConfig = (width: number, height: number): VideoEncoderConfig => ({
 	codec: "vp09.00.40.08",
 	width,
 	height,
-	bitrate: 4_000_000,
+	bitrate: 8_000_000,
 	bitrateMode: "variable",
 	hardwareAcceleration: "prefer-software",
 	latencyMode: "quality",

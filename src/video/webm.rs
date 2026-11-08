@@ -10,9 +10,9 @@ use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::default::formats::MkvReader;
 
-/// Well above what the page's 4 Mbps target writes for a cover. The ceiling bounds what the
-/// handler reads into memory from a body whose size the page declares.
-pub(crate) const MAX_WEBM_BYTES: usize = 8 * 1024 * 1024;
+/// Above what the page's 8 Mbps target writes for a cover. The ceiling bounds what the handler
+/// reads into memory from a body whose size the page declares.
+pub(crate) const MAX_WEBM_BYTES: usize = 16 * 1024 * 1024;
 
 /// What the decode that preceded the upload says the WebM must be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
