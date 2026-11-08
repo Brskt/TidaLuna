@@ -714,26 +714,26 @@ fn negotiate_format(
 
     // Priority 1: 32-bit container with source valid bits (integer)
     candidates.push((
-        WaveFormat::new(32, bps.min(32), &SampleType::Int, sr, ch, channel_mask),
+        WaveFormat::new(32, bps.min(32), SampleType::Int, sr, ch, channel_mask),
         format!("32c/{}v Int", bps.min(32)),
     ));
     // Priority 2: 24-bit container with 24 valid bits
     if bps != 24 {
         candidates.push((
-            WaveFormat::new(24, 24, &SampleType::Int, sr, ch, channel_mask),
+            WaveFormat::new(24, 24, SampleType::Int, sr, ch, channel_mask),
             "24c/24v Int".to_string(),
         ));
     }
     // Priority 3: 16-bit container with 16 valid bits
     if bps != 16 {
         candidates.push((
-            WaveFormat::new(16, 16, &SampleType::Int, sr, ch, channel_mask),
+            WaveFormat::new(16, 16, SampleType::Int, sr, ch, channel_mask),
             "16c/16v Int".to_string(),
         ));
     }
     // Priority 4: 32-bit float
     candidates.push((
-        WaveFormat::new(32, 32, &SampleType::Float, sr, ch, channel_mask),
+        WaveFormat::new(32, 32, SampleType::Float, sr, ch, channel_mask),
         "32c/32v Float".to_string(),
     ));
 
@@ -759,7 +759,7 @@ fn init_exclusive_client(device_id: &str) -> Result<(DeviceEnumerator, wasapi::D
     // render endpoint instead of a literal device-name lookup.
     let device = if is_default_selector(device_id) || device_id.is_empty() {
         enumerator
-            .get_default_device(&Direction::Render)
+            .get_default_device(Direction::Render)
             .map_err(|e| format!("default device: {e}"))?
     } else {
         // `device_id` is cpal's device name: FriendlyName, or DeviceDesc when a driver
@@ -809,7 +809,7 @@ fn open_exclusive_stream(
 
         // Bound the borrow to this statement: the arms below use `audio_client` again.
         let initialized = timed_endpoint(format_args!("initialize ({label})"), || {
-            audio_client.initialize_client(wave_fmt, &Direction::Render, &stream_mode)
+            audio_client.initialize_client(wave_fmt, Direction::Render, stream_mode, None)
         });
         match initialized {
             Ok(()) => {
@@ -861,8 +861,9 @@ fn open_exclusive_stream(
                             timed_endpoint(format_args!("initialize (aligned, {label})"), || {
                                 audio_client2.initialize_client(
                                     wave_fmt,
-                                    &Direction::Render,
-                                    &stream_mode2,
+                                    Direction::Render,
+                                    stream_mode2,
+                                    None,
                                 )
                             });
                         if realigned.is_ok() {
@@ -1911,7 +1912,6 @@ fn render_thread_inner(
                     // delaying the track head rather than dropping it.
                     if ctx.post_start_silence_remaining > 0 {
                         let _ = rc.write_to_device(
-                            available,
                             &ctx.silence_buf[..available * dst_bytes_per_frame],
                             None,
                         );
@@ -2035,7 +2035,6 @@ fn render_thread_inner(
                             ctx.pending_start = true;
                         }
                         let _ = rc.write_to_device(
-                            available,
                             &ctx.silence_buf[..available * dst_bytes_per_frame],
                             None,
                         );
@@ -2139,7 +2138,7 @@ fn render_thread_inner(
                     // reaches the driver: charged to a whole pass it would be one more
                     // unattributed span.
                     stall.lap("pass up to write");
-                    if let Err(e) = rc.write_to_device(available, write_slice, None) {
+                    if let Err(e) = rc.write_to_device(write_slice, None) {
                         crate::vprintln!("[WASAPI] write error: {e}");
                     }
                     // Set even on failure: whether frames landed is unknown, and a missed
