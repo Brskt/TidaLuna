@@ -8,9 +8,11 @@
 
 use cef::*;
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
+
+use crate::util::reply::OnceReply;
 
 pub(crate) fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -213,9 +215,9 @@ fn dialog_subresource_allowed(url: &crate::ui::nav::RequestUrl) -> bool {
 /// Result-specific state shared by the dialog's request handler, window
 /// delegate, and UI-thread task. A single `Arc<DialogCore<R>>` reaches both the
 /// request handler (button click) and the window delegate (close-without-click).
-/// The oneshot sender behind the mutex is `take()`n exactly once.
+/// Whichever of them answers first settles `sender`.
 struct DialogCore<R> {
-    sender: Mutex<Option<oneshot::Sender<R>>>,
+    sender: OnceReply<R>,
     /// Maps a button-navigation URL to its result, or `None` for any other nav.
     parse: fn(&str) -> Option<R>,
     /// Result sent when the window is closed without a button click.
@@ -224,14 +226,6 @@ struct DialogCore<R> {
     height: i32,
     /// `height` until the page reports its own through `FIT_TO_CONTENT`.
     fitted_height: AtomicI32,
-}
-
-impl<R> DialogCore<R> {
-    fn send(&self, r: R) {
-        if let Some(tx) = self.sender.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = tx.send(r);
-        }
-    }
 }
 
 /// Show a dialog rendering `html` and return the user's choice via a oneshot.
@@ -244,7 +238,7 @@ pub(crate) fn show_dialog<R: Clone + Send + Sync + 'static>(
 ) -> oneshot::Receiver<R> {
     let (tx, rx) = oneshot::channel();
     let core = Arc::new(DialogCore {
-        sender: Mutex::new(Some(tx)),
+        sender: OnceReply::new(tx),
         parse,
         on_close,
         width: size.0,
@@ -401,7 +395,7 @@ wrap_request_handler! {
                 return 1;
             }
             if let Some(result) = (self.core.parse)(&url) {
-                self.core.send(result);
+                self.core.sender.send(result);
                 if let Some(b) = browser
                     && let Some(host) = b.host()
                 {
@@ -555,7 +549,7 @@ wrap_window_delegate! {
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
             *self.browser_view.borrow_mut() = None;
             // Closing via X without clicking a button -> the caller's default.
-            self.core.send(self.core.on_close.clone());
+            self.core.sender.send(self.core.on_close.clone());
         }
         fn on_window_activation_changed(
             &self,

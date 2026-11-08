@@ -5,6 +5,7 @@ mod install_consent;
 mod jsrt;
 mod lib_native;
 mod native;
+mod path_probe;
 mod plugin_ipc;
 mod proxy;
 mod store_move;

@@ -1,12 +1,15 @@
-//! Native file open/save dialog via CEF `BrowserHost::run_file_dialog`. Backs
-//! `showOpenDialog` and `showSaveDialog` from `@luna/lib.native`. The dialog
-//! must run on the CEF UI thread. The work is posted there as a Task; the
-//! selected paths are returned via a oneshot channel (empty = cancelled).
+//! Native file open/save dialog via CEF `BrowserHost::run_file_dialog`, and the system folder
+//! picker for folders (`super::folder_picker`). Backs `showOpenDialog` and `showSaveDialog` from
+//! `@luna/lib.native`. The work is posted to the CEF UI thread as a Task; the selected paths are
+//! returned via a oneshot channel (empty = cancelled).
 
 use cef::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
+
+use super::folder_picker::Answer;
+use crate::util::reply::OnceReply;
 
 /// Unspent dialog answers. A plugin names its own destination: this is what separates a path
 /// the user picked from one the renderer invented. Bounded: dialogs a plugin opens and never uses
@@ -367,10 +370,28 @@ pub(crate) fn show_file_dialog(
     filters: Vec<String>,
 ) -> oneshot::Receiver<Vec<String>> {
     let (tx, rx) = oneshot::channel();
-    let sender = Arc::new(Mutex::new(Some(tx)));
-    let mut task = FileDialogTask::new(mode, title, default_path, filters, sender);
+    let sender = Arc::new(OnceReply::new(tx));
+    let mut task = FileDialogTask::new(mode, title, default_path, filters, sender, false);
     post_task(ThreadId::UI, Some(&mut task));
     rx
+}
+
+/// CEF's own folder dialog, for when the system picker is not available.
+#[cfg(target_os = "linux")]
+pub(crate) fn show_cef_folder_dialog(
+    title: Option<String>,
+    default_path: Option<String>,
+    sender: Answer,
+) {
+    let mut task = FileDialogTask::new(
+        FileDialogMode::OPEN_FOLDER,
+        title,
+        default_path,
+        Vec::new(),
+        sender,
+        true,
+    );
+    post_task(ThreadId::UI, Some(&mut task));
 }
 
 /// `IntoIterator` consumes the list and cloning is no way around it: a clone of the borrowed
@@ -383,14 +404,12 @@ fn read_paths(list: &mut CefStringList) -> Vec<String> {
 
 wrap_run_file_dialog_callback! {
     struct FileDialogCallback {
-        sender: Arc<Mutex<Option<oneshot::Sender<Vec<String>>>>>,
+        sender: Answer,
     }
     impl RunFileDialogCallback {
         fn on_file_dialog_dismissed(&self, file_paths: Option<&mut CefStringList>) {
-            let paths: Vec<String> = file_paths.map(read_paths).unwrap_or_default();
-            if let Some(tx) = self.sender.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                let _ = tx.send(paths);
-            }
+            self.sender
+                .send(file_paths.map(read_paths).unwrap_or_default());
         }
     }
 }
@@ -401,7 +420,8 @@ wrap_task! {
         title: Option<String>,
         default_path: Option<String>,
         filters: Vec<String>,
-        sender: Arc<Mutex<Option<oneshot::Sender<Vec<String>>>>>,
+        sender: Answer,
+        cef_only: bool,
     }
     impl Task {
         fn execute(&self) {
@@ -410,11 +430,24 @@ wrap_task! {
                 .and_then(|b| b.host())
             else {
                 // No browser/host: resolve empty; the JS promise must still settle.
-                if let Some(tx) = self.sender.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    let _ = tx.send(Vec::new());
-                }
+                self.sender.send(Vec::new());
                 return;
             };
+
+            if self.mode == FileDialogMode::OPEN_FOLDER && !self.cef_only {
+                // The top-level window, readable only here on the UI thread.
+                #[cfg(target_os = "windows")]
+                let owner = host.window_handle().0 as usize;
+                #[cfg(not(target_os = "windows"))]
+                let owner = host.window_handle() as usize;
+                super::folder_picker::open(
+                    owner,
+                    self.title.clone(),
+                    self.default_path.clone(),
+                    self.sender.clone(),
+                );
+                return;
+            }
 
             let title = self.title.as_deref().map(CefString::from);
             let default_path = self.default_path.as_deref().map(CefString::from);

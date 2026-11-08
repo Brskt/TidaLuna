@@ -225,6 +225,9 @@ wrap_window_delegate! {
             }
         }
         fn on_window_destroyed(&self, _window: Option<&mut Window>) {
+            // A sheet cannot outlive its window: the plugin gets a cancel.
+            #[cfg(target_os = "macos")]
+            crate::ui::folder_picker::cancel_open();
             with_state(|state| state.force_quit = false);
             crate::platform::tray::destroy_tray();
             *self.browser_view.borrow_mut() = None;

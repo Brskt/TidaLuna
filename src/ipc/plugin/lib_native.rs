@@ -2,6 +2,7 @@
 //! prefixed `__Luna.`: routed to `handle_plugin_ipc` with Promise support and
 //! gated to trusted frames by `src/ui/client.rs`.
 
+use super::path_probe::DIALOG_PATHS;
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, is_safe_open_url, open_in_os};
 use crate::ui::destination_dialog::{Native, Refusal, Request, choose_destination, classify};
@@ -162,6 +163,24 @@ pub(super) fn handle_show_open_dialog(msg: &IpcMessage, callback: IpcCallback) {
     };
 
     crate::state::rt_handle().spawn(async move {
+        // Read only through the probe: on a dead mount the dialog opens without it.
+        let default_path = match default_path {
+            None => None,
+            Some(raw) if wants_directory => DIALOG_PATHS
+                .run(move || crate::ui::folder_picker::start_folder(Some(&raw)))
+                .await
+                .flatten()
+                .and_then(|start| start.into_os_string().into_string().ok()),
+            // Only statted here; CEF reads it again on the UI thread.
+            Some(raw) => {
+                DIALOG_PATHS
+                    .run(move || {
+                        let _ = std::fs::symlink_metadata(&raw);
+                        raw
+                    })
+                    .await
+            }
+        };
         // Only a folder grants writes; a dialog opened to read a file is answered as is.
         let paths = if wants_directory {
             let guard = crate::platform::install_guard::get();
@@ -248,21 +267,13 @@ pub(super) fn handle_show_save_dialog(msg: &IpcMessage, callback: IpcCallback) {
         .map(str::to_string);
     let filters = parse_filters(&opts);
 
-    // Runs off the CEF UI thread (`on_query_str`): a stat on a plugin-chosen path, a dead network
-    // mount say, would otherwise freeze repainting for that mount's timeout. `show_file_dialog` posts
-    // its own UI-thread task and is safe to call from anywhere.
+    // Off the CEF UI thread (`on_query_str`), and the plugin's path is read only through the probe:
+    // a dead network mount holds a stat until its server returns. `show_file_dialog` posts its own
+    // UI-thread task and is safe to call from anywhere.
     crate::state::rt_handle().spawn(async move {
         let default_path = match raw_default {
             None => None,
-            Some(raw) => {
-                match tokio::task::spawn_blocking(move || suggested_save_name(&raw)).await {
-                    Ok(name) => Some(name),
-                    Err(e) => {
-                        crate::verr!("[DIALOG] Could not prepare the suggested name: {e}");
-                        None
-                    }
-                }
-            }
+            Some(raw) => DIALOG_PATHS.run(move || suggested_save_name(&raw)).await,
         };
         let guard = crate::platform::install_guard::get();
         let request = Request {

@@ -197,17 +197,27 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Pipes",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Already in the graph through objc2-app-kit; named here for the folder panel's
+# completion handler.
+block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSAlert",
   "NSApplication",
   "NSEvent",
+  "NSOpenPanel",
+  "NSPanel",
   "NSResponder",
+  "NSSavePanel",
+  "NSView",
+  "NSWindow",
+  "block2",
   "std",
 ] }
 # Already in the graph through objc2-app-kit; named here for the Apple Event a
@@ -224,7 +234,7 @@ security-framework = "3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Already linked through the tray (`ksni`), at this exact version; named here for the
-# notification a launch that stops posts.
+# notification a launch that stops posts and for the folder portal.
 dbus = "0.9.12"
 flate2 = { workspace = true }
 # Already resolved through the graph; named here for the `SCM_CREDENTIALS` call
