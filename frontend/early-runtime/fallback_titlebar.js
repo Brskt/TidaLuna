@@ -1,6 +1,6 @@
-// Fallback window controls for frameless pages without TIDAL's `_bar_*` shell (the
-// login.tidal.com auth page gets no bundle). Injected from the early runtime to
-// reach those pages; hidden whenever TIDAL's own bar is present.
+// Fallback window controls for pages without TIDAL's `_bar_*` shell (the
+// login.tidal.com auth page gets no bundle): Back only under native buttons or a system frame.
+// Injected by the early runtime; hidden whenever TIDAL's own bar is present.
 (function () {
     if (window.top !== window.self) return;
     if (window.__TL_FALLBACK_BAR__) return;
@@ -21,9 +21,13 @@
     var cfg = self.__LUNAR_CONFIG__ || {};
     // macOS draws its own buttons at the window's top left: the strip only drags and goes back.
     var nativeButtons = cfg.nativeWindowButtons;
+    // The desktop's titlebar carries the window buttons; the strip stays for a page TIDAL's shell
+    // never reaches (`pageHasBundle`, set per page by Rust), as its way back.
     var systemFrame = cfg.systemFrame;
+    var pageHasBundle = self.__LUNAR_PAGE_HAS_BUNDLE__ !== false;
 
     function build() {
+        if (systemFrame && pageHasBundle) return;
         if (!document.body || document.getElementById("tlx-titlebar")) return;
 
         var bar = document.createElement("div");

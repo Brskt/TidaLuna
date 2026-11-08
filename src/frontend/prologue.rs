@@ -26,6 +26,7 @@ pub(crate) fn renderer_config_js() -> String {
         "loginCallbackPath": "/login/auth",
         "authHosts": [nav::HOST_LOGIN, nav::HOST_AUTH],
         "nativeWindowButtons": cfg!(target_os = "macos"),
+        "systemFrame": crate::ui::SYSTEM_FRAME,
     });
     format!("self.__LUNAR_CONFIG__={};", js_value(&config))
 }
@@ -46,19 +47,10 @@ pub(crate) struct InitGlobals {
     pub window_maximized: bool,
     pub credentials: serde_json::Value,
     pub rewrite_epoch: u64,
-    /// Linux only: the Windows-like UA TIDAL's titlebar gates on, shown to JS while the network
-    /// keeps the real one.
-    pub user_agent: Option<String>,
 }
 
 pub(crate) fn init_globals_js(g: &InitGlobals) -> String {
     let mut js = String::new();
-    if let Some(ua) = &g.user_agent {
-        js.push_str(&format!(
-            "(function(){{try{{var UA={ua};var AV=UA.replace('Mozilla/','');Object.defineProperty(Navigator.prototype,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(navigator,'userAgent',{{get:function(){{return UA;}},configurable:true}});Object.defineProperty(Navigator.prototype,'appVersion',{{get:function(){{return AV;}},configurable:true}});Object.defineProperty(navigator,'appVersion',{{get:function(){{return AV;}},configurable:true}});}}catch(e){{}}}})();\n",
-            ua = js_value(&json!(ua))
-        ));
-    }
     let globals: [(&str, Value); 13] = [
         ("PLATFORM", json!(g.platform)),
         ("CLOSE_TO_TRAY", json!(g.close_to_tray)),
@@ -88,7 +80,3 @@ pub(crate) fn init_globals_js(g: &InitGlobals) -> String {
     js.push_str(&format!("self.__lunaRewriteEpoch={};\n", js_value(&epoch)));
     js
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/frontend/prologue.rs"]
-mod tests;

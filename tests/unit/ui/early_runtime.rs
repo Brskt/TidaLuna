@@ -34,7 +34,7 @@ fn frontend() -> Frontend {
 
 #[test]
 fn the_preload_runs_the_scripts_in_this_order() {
-    let js = preload_script(&payload_from_frontend(&frontend()), false);
+    let js = preload_script(&payload_from_frontend(&frontend()), false, true);
     let order = [
         "self.__LUNAR_CONFIG__=",
         "/*host_modules*/",
@@ -48,6 +48,7 @@ fn the_preload_runs_the_scripts_in_this_order() {
         "/*exfil_guard*/",
         "/*plugin_loads*/",
         "/*cover_error*/",
+        "self.__LUNAR_PAGE_HAS_BUNDLE__=",
         "/*fallback_titlebar*/",
     ];
     let positions: Vec<usize> = order
@@ -62,7 +63,7 @@ fn the_preload_runs_the_scripts_in_this_order() {
 
 #[test]
 fn the_preload_keeps_its_guards() {
-    let js = preload_script(&payload_from_frontend(&frontend()), false);
+    let js = preload_script(&payload_from_frontend(&frontend()), false, true);
     assert!(
         js.contains("if(self.__LUNAR_EARLY_RUNTIME__)return;"),
         "{js}"
@@ -72,6 +73,25 @@ fn the_preload_keeps_its_guards() {
         "{js}"
     );
     assert!(js.contains("self.__LUNAR_EARLY_RUNTIME__=true;"), "{js}");
+}
+
+/// Under a system frame the strip shows only where TIDAL's shell never loads: the value must be the
+/// one the bundle injection itself follows, or the login page loses its way back.
+#[test]
+fn the_preload_says_whether_the_page_gets_the_bundle() {
+    let payload = payload_from_frontend(&frontend());
+    for kind in COVERED_KINDS {
+        let bundle = NavigationPolicy::for_page(kind).inject_bundle;
+        let js = preload_script(&payload, false, bundle);
+        assert!(
+            js.contains(&format!("self.__LUNAR_PAGE_HAS_BUNDLE__={bundle};")),
+            "{kind:?}"
+        );
+    }
+    assert!(
+        !NavigationPolicy::for_page(PageKind::AuthHost).inject_bundle,
+        "the login page is the one without it"
+    );
 }
 
 #[test]

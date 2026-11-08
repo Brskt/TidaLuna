@@ -219,6 +219,10 @@ wrap_drag_handler! {
             _frame: Option<&mut Frame>,
             regions: Option<&[DraggableRegion]>,
         ) {
+            // The desktop's titlebar moves the window: no page strip may drag it.
+            if crate::ui::SYSTEM_FRAME {
+                return;
+            }
             // CEF applies the regions in page order; a drag layer later in the page (TIDAL's
             // header `::before` on macOS) would cover an earlier `no-drag` button. Passed last,
             // `no-drag` regions always win.

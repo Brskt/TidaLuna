@@ -62,11 +62,11 @@ pub(crate) fn payload_from_frontend(f: &Frontend) -> EarlyRuntimePayload {
 }
 
 /// Popups get no fallback titlebar. Its buttons drive the main window, and the auth popup is
-/// OS-framed anyway.
-pub(crate) fn preload_script(p: &EarlyRuntimePayload, is_popup: bool) -> String {
+/// OS-framed anyway. `has_bundle` tells the titlebar whether TIDAL's own shell will load here.
+pub(crate) fn preload_script(p: &EarlyRuntimePayload, is_popup: bool, has_bundle: bool) -> String {
     let titlebar = if is_popup { "" } else { p.titlebar.as_str() };
     format!(
-        "(function(){{if(self.__LUNAR_EARLY_RUNTIME__)return;if(typeof window.cefQuery!=='function')return;\n{}\n{}\nself.__LUNAR_EARLY_RUNTIME__=true;}})();",
+        "(function(){{if(self.__LUNAR_EARLY_RUNTIME__)return;if(typeof window.cefQuery!=='function')return;\n{}\nself.__LUNAR_PAGE_HAS_BUNDLE__={has_bundle};\n{}\nself.__LUNAR_EARLY_RUNTIME__=true;}})();",
         p.body, titlebar
     )
 }

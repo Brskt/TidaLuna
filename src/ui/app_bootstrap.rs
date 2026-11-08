@@ -34,12 +34,13 @@ wrap_render_process_handler! {
                 let url = frame.url();
                 let url_str = crate::ui::token_filter::userfree_to_string(&url);
                 use crate::ui::nav::{NavigationPolicy, PageKind};
-                if NavigationPolicy::for_page(PageKind::classify(&url_str)).inject_early_runtime {
+                let policy = NavigationPolicy::for_page(PageKind::classify(&url_str));
+                if policy.inject_early_runtime {
                     use crate::ui::early_runtime;
                     match early_runtime::received() {
                         Some(payload) => crate::app_state::exec_js_on_frame(
                             frame,
-                            &early_runtime::preload_script(payload, is_popup),
+                            &early_runtime::preload_script(payload, is_popup, policy.inject_bundle),
                         ),
                         // The guards did not arrive: the page must not run without them.
                         None => {
@@ -353,15 +354,6 @@ wrap_browser_process_handler! {
 
             let asio = crate::state::boot_settings().asio;
 
-            // TIDAL's web frontend gates its native titlebar component on a
-            // Windows platform token in navigator.userAgent. On Linux we keep the
-            // real Linux UA for network traffic (CefSettings.user_agent) but
-            // expose a Windows-like UA to JavaScript for the titlebar to render.
-            #[cfg(target_os = "linux")]
-            let user_agent = Some(crate::state::JS_USER_AGENT.to_string());
-            #[cfg(not(target_os = "linux"))]
-            let user_agent = None;
-
             let perf = crate::debug::perf_monitor::enabled();
             let window_maximized = crate::state::boot_settings().window_maximized;
             let console = crate::state::boot_settings().console;
@@ -394,7 +386,6 @@ wrap_browser_process_handler! {
                 window_maximized,
                 credentials,
                 rewrite_epoch: crate::ui::module_capture::REWRITE_EPOCH,
-                user_agent,
             };
             let init_script = format!(
                 "{}{}\n{}",

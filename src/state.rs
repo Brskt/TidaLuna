@@ -35,13 +35,6 @@ pub(crate) static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
     build_user_agent(os)
 });
 
-// TIDAL's bar component renders only when navigator.userAgent contains a
-// Windows OS token. We override at the JS layer: HTTP traffic keeps the
-// honest Linux UA above.
-#[cfg(target_os = "linux")]
-pub(crate) static JS_USER_AGENT: LazyLock<String> =
-    LazyLock::new(|| build_user_agent("Windows NT 10.0; WOW64"));
-
 /// A retained source: what to fetch it with, and the id the frontend knows it by. The id lives
 /// here because the paths that replay a retained source (a re-arm, a recover) are handed no id
 /// of their own, and a measurement taken on a replay must still name its track.

@@ -9,6 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The drag strip TIDAL's macOS layout draws at the top: the native buttons sit at half its height.
 const MAC_TOP_BAR_HEIGHT: f32 = 48.0;
 
+/// Linux keeps the desktop's own titlebar: TIDAL draws one for Windows and a top strip for macOS,
+/// nothing for Linux.
+pub(crate) const SYSTEM_FRAME: bool = cfg!(target_os = "linux");
+
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn frameless_subclass_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
@@ -133,6 +137,7 @@ wrap_window_delegate! {
             }
         }
         fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
+            i32::from(!SYSTEM_FRAME)
         }
         // TIDAL's macOS layout draws no window buttons and leaves room for the native ones.
         fn with_standard_window_buttons(
@@ -153,7 +158,6 @@ wrap_window_delegate! {
                 }
                 _ => 0,
             }
-            1
         }
         fn can_resize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
             1
