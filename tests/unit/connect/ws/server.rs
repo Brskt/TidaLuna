@@ -541,12 +541,12 @@ async fn a_command_sent_during_the_shutdown_is_read_and_dropped() {
     }
     queue_a_session_end(&server, id).await;
     let (mut write, read) = peer.split();
-    let heard = tokio::spawn(hear_to_the_end(read));
     let play = serde_json::json!({ "command": "play" });
-    let (_, sent) = tokio::join!(
-        server.shutdown(),
-        write.send(WsMessage::Text(play.to_string().into()))
-    );
+    // The reader starts once the command is out: a Close read first would refuse the send.
+    let (_, (sent, heard)) = tokio::join!(server.shutdown(), async {
+        let sent = write.send(WsMessage::Text(play.to_string().into())).await;
+        (sent, tokio::spawn(hear_to_the_end(read)))
+    });
     assert!(sent.is_ok(), "the command left the peer: {sent:?}");
     let heard = tokio::time::timeout(Duration::from_secs(5), heard)
         .await
