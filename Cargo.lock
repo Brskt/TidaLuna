@@ -4633,7 +4633,7 @@ dependencies = [
 
 [[package]]
 name = "tidalunar"
-version = "0.0.19-alpha"
+version = "0.0.20-alpha"
 dependencies = [
  "aes",
  "aes-kw",
