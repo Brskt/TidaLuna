@@ -7,7 +7,9 @@ use std::sync::Mutex;
 use cef::FileDialogMode;
 use tokio::sync::oneshot;
 
-use super::{Dialogs, Request, Verdict, choose_destination, classify};
+use super::{
+    CANCEL, CHOOSE_ANOTHER, Dialogs, Refusal, Request, Verdict, choose_destination, classify,
+};
 use crate::ui::file_dialog::NotRecorded;
 
 /// Dialogs that answer from a script.
@@ -85,9 +87,6 @@ fn save() -> Request {
     }
 }
 
-const CHOOSE_ANOTHER: i32 = 0;
-const CANCEL: i32 = 1;
-
 /// A blob has no later gate: a path the vetting cannot resolve is refused like a protected one,
 /// and a refused path anywhere in the answer refuses it.
 #[test]
@@ -99,11 +98,17 @@ fn classify_refuses_the_first_path_it_cannot_admit() {
     ];
     assert_eq!(
         judge(answer),
-        Verdict::Refused(PathBuf::from(FORBIDDEN), NotRecorded::Protected)
+        Verdict::Refused(
+            PathBuf::from(FORBIDDEN),
+            Refusal::Location(NotRecorded::Protected)
+        )
     );
     assert_eq!(
         classify(vec!["../x".to_string()], |_| Err(NotRecorded::Unresolvable)),
-        Verdict::Refused(PathBuf::from("../x"), NotRecorded::Unresolvable)
+        Verdict::Refused(
+            PathBuf::from("../x"),
+            Refusal::Location(NotRecorded::Unresolvable)
+        )
     );
 }
 

@@ -379,5 +379,82 @@ fn an_ordinary_destination_is_kept_as_the_write_resolves_it() {
 #[test]
 fn the_install_folder_is_refused_as_a_folder() {
     let (_parent, root, guard) = guarded_install();
-    assert_eq!(vet_folder(Some(&guard), &root), Err(NotRecorded::Protected));
+    assert_eq!(
+        vet_folder(Some(&guard), crate::state::home_folder(), &root),
+        Err(NotGranted::Location(NotRecorded::Protected))
+    );
+}
+
+/// The plugin that opened the folder dialog chose where it starts. A grant of the home folder, or of
+/// one holding it, would let it write into every configuration folder of the account.
+#[test]
+fn a_folder_holding_the_home_folder_is_never_granted() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let music = home.join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+
+    for holding in [root.path(), home.as_path()] {
+        assert_eq!(
+            vet_folder(None, Some(&home), holding),
+            Err(NotGranted::HoldsHome),
+            "{holding:?}"
+        );
+    }
+    assert!(vet_folder(None, Some(&home), &music).is_ok());
+    assert_eq!(
+        vet_folder(None, None, &music),
+        Err(NotGranted::HoldsHome),
+        "a home nobody can name holds every folder"
+    );
+}
+
+/// A bind mount gives the home a second path but not a second identity, which is what a write
+/// below a grant is judged by.
+#[test]
+fn a_write_reaching_the_home_by_another_path_is_caught() {
+    use std::io::{Error, ErrorKind};
+    let id_of = |dir: &Path| match dir.to_str() {
+        Some("/home/u" | "/mnt/data/u") => Ok(1),
+        Some("/exfat/u") => Err(Error::from(ErrorKind::Unsupported)),
+        _ => Ok(0),
+    };
+    let crosses = |wanted: &str, grant: &str, home: &str, home_id: Option<&i32>| {
+        passes_through_home(
+            Path::new(wanted),
+            Path::new(grant),
+            Path::new(home),
+            home_id,
+            id_of,
+        )
+    };
+    assert!(crosses(
+        "/mnt/data/u/.ssh/x.flac",
+        "/mnt/data",
+        "/home/u",
+        Some(&1)
+    ));
+    assert!(!crosses(
+        "/mnt/data/other/x.flac",
+        "/mnt/data",
+        "/home/u",
+        Some(&1)
+    ));
+    assert!(
+        !crosses(
+            "/home/u/Music/a/x.flac",
+            "/home/u/Music",
+            "/home/u",
+            Some(&1)
+        ),
+        "only the directories below the grant count"
+    );
+    assert!(
+        crosses("/home/u/x.flac", "/home", "/home/u", None),
+        "a home without an id is judged by path"
+    );
+    assert!(
+        crosses("/exfat/u/x.flac", "/exfat", "/exfat/u", Some(&1)),
+        "a directory without an id is judged by path"
+    );
 }

@@ -110,6 +110,29 @@ pub(crate) enum NotRecorded {
     Protected,
 }
 
+/// Why a folder answer did not become a grant: what a file answer meets, or holding the home.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotGranted {
+    Location(NotRecorded),
+    /// A folder that is the user's home or holds it: every configuration folder under it would be
+    /// the plugin's to write into.
+    HoldsHome,
+}
+
+impl From<NotRecorded> for NotGranted {
+    fn from(why: NotRecorded) -> Self {
+        Self::Location(why)
+    }
+}
+
+/// Is `canonical` the home folder or one holding it? A home that cannot be named or resolved holds
+/// every folder: refusing all grants beats one reaching the whole account. Both sides canonical,
+/// since Windows hands back `\\?\C:\...` for one and `C:\...` for the other.
+fn holds_home(canonical: &Path, home: Option<&Path>) -> bool {
+    home.and_then(|home| home.canonicalize().ok())
+        .is_none_or(|home| home.starts_with(canonical))
+}
+
 /// A file answer as the write will resolve it, unless it lies inside the app's own files. Shared by
 /// the dialog that asks again on a refusal and by the record that mints the authorisation.
 pub(crate) fn vet_destination(
@@ -128,11 +151,15 @@ pub(crate) fn vet_destination(
 /// final component.
 pub(crate) fn vet_folder(
     guard: Option<&crate::platform::install_guard::Protected>,
+    home: Option<&Path>,
     dir: &Path,
-) -> Result<PathBuf, NotRecorded> {
+) -> Result<PathBuf, NotGranted> {
     let canonical = dir.canonicalize().map_err(|_| NotRecorded::Unresolvable)?;
     if !admissible(guard, &canonical) {
-        return Err(NotRecorded::Protected);
+        return Err(NotRecorded::Protected.into());
+    }
+    if holds_home(&canonical, home) {
+        return Err(NotGranted::HoldsHome);
     }
     Ok(canonical)
 }
@@ -226,22 +253,30 @@ pub(crate) fn consume(auth: Authorisation) {
 
 /// Record a directory a folder dialog answered. Called on the dialog's own result, like
 /// `record_user_choice`. Nothing the renderer says can put a path in here.
-pub(crate) fn record_folder_grant(dir: &Path) -> Result<(), NotRecorded> {
-    let canonical = match vet_folder(crate::platform::install_guard::get(), dir) {
+pub(crate) fn record_folder_grant(dir: &Path) -> Result<(), NotGranted> {
+    let guard = crate::platform::install_guard::get();
+    let canonical = match vet_folder(guard, crate::state::home_folder(), dir) {
         Ok(canonical) => canonical,
-        Err(NotRecorded::Unresolvable) => {
+        Err(why @ NotGranted::Location(NotRecorded::Unresolvable)) => {
             crate::verr!(
                 "[DIALOG] Cannot resolve the chosen folder, downloads to it will be refused: {}",
                 dir.display()
             );
-            return Err(NotRecorded::Unresolvable);
+            return Err(why);
         }
-        Err(NotRecorded::Protected) => {
+        Err(why @ NotGranted::Location(NotRecorded::Protected)) => {
             crate::verr!(
                 "[DIALOG] Refused a folder inside TidaLunar's own files: {}",
                 dir.display()
             );
-            return Err(NotRecorded::Protected);
+            return Err(why);
+        }
+        Err(why @ NotGranted::HoldsHome) => {
+            crate::verr!(
+                "[DIALOG] Refused a folder that is or holds the home folder: {}",
+                dir.display()
+            );
+            return Err(why);
         }
     };
     let mut granted = GRANTED_FOLDERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -278,6 +313,49 @@ fn folder_grant_covers(dest_resolved: &Path) -> bool {
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .any(|granted| dest_resolved.starts_with(granted))
+}
+
+/// Would this write under a folder grant land in the home? `vet_folder` compares paths, and a bind
+/// mount gives the home a second one. True when every covering grant passes through the home, and
+/// when the destination or the home cannot be resolved.
+pub(crate) fn folder_write_enters_home(dest: &Path) -> bool {
+    use crate::platform::install_guard::FileId;
+    let Some(wanted) = resolved(dest) else {
+        return true;
+    };
+    let Some(home) = crate::state::home_folder().and_then(|home| home.canonicalize().ok()) else {
+        return true;
+    };
+    let home_id = FileId::of(&home).ok();
+    let covering: Vec<PathBuf> = GRANTED_FOLDERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|granted| wanted.starts_with(granted))
+        .cloned()
+        .collect();
+    covering
+        .iter()
+        .all(|grant| passes_through_home(&wanted, grant, &home, home_id.as_ref(), FileId::of))
+}
+
+/// Is a directory of `wanted`, from its parent up to `grant`, the home? By identity, which no second
+/// path changes, else by path where either side has no id.
+fn passes_through_home<Id: PartialEq>(
+    wanted: &Path,
+    grant: &Path,
+    home: &Path,
+    home_id: Option<&Id>,
+    id_of: impl Fn(&Path) -> std::io::Result<Id>,
+) -> bool {
+    wanted
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(grant))
+        .any(|dir| match (home_id, id_of(dir)) {
+            (Some(home_id), Ok(id)) => *home_id == id,
+            _ => dir == home,
+        })
 }
 
 /// Show a native file dialog. Returns a receiver resolving to the selected

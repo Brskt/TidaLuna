@@ -339,23 +339,46 @@ pub(crate) fn user_home() -> Option<&'static Path> {
         .as_deref()
 }
 
-/// `LocalAppData` as the shell knows it, for a `LOCALAPPDATA` that is missing, empty or
-/// relative. `data_dir` reads the variable first because the data has always lived there.
+/// The account's home folder, what a folder grant may never be or hold. `None` when it cannot be
+/// named, and then no folder is granted at all.
+#[cfg(all(not(test), not(target_os = "windows")))]
+pub(crate) fn home_folder() -> Option<&'static Path> {
+    user_home()
+}
+
+/// The profile folder, from `USERPROFILE` first as the shell sets it, then as the shell knows it.
+#[cfg(all(not(test), target_os = "windows"))]
+pub(crate) fn home_folder() -> Option<&'static Path> {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    HOME.get_or_init(|| {
+        resolve_base(std::env::var_os("USERPROFILE"), || {
+            known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Profile)
+        })
+    })
+    .as_deref()
+}
+
+/// Under test the home is the process's own directory, never the developer's.
+#[cfg(test)]
+pub(crate) fn home_folder() -> Option<&'static Path> {
+    Some(&test_root::root().home)
+}
+
+/// A known folder as the shell names it, for an environment variable that is missing, empty or
+/// relative. Callers read the variable first: the data has always lived where it points.
 #[cfg(target_os = "windows")]
-fn known_local_app_data() -> Option<PathBuf> {
+fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{
-        FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
-    };
+    use windows_sys::Win32::UI::Shell::{KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath};
 
     let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
-    // SAFETY: the folder id is a static, a null token names the current user,
-    // and `raw` receives a string this function frees on either outcome, as the
-    // API requires.
+    // SAFETY: the folder id outlives the call, a null token names the current
+    // user, and `raw` receives a string this function frees on either outcome,
+    // as the API requires.
     let hr = unsafe {
         SHGetKnownFolderPath(
-            &FOLDERID_LocalAppData,
+            id,
             KF_FLAG_DONT_VERIFY as u32,
             std::ptr::null_mut(),
             &mut raw,
@@ -386,8 +409,10 @@ pub(crate) fn data_dir() -> Option<&'static Path> {
     DIR.get_or_init(|| {
         #[cfg(target_os = "windows")]
         {
-            resolve_base(std::env::var_os("LOCALAPPDATA"), known_local_app_data)
-                .map(|base| base.join(APP_DIR))
+            resolve_base(std::env::var_os("LOCALAPPDATA"), || {
+                known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
+            })
+            .map(|base| base.join(APP_DIR))
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -432,7 +457,7 @@ pub(crate) mod test_root {
     const ALIVE: &str = ".alive";
 
     pub(crate) struct TestRoot {
-        #[cfg(target_os = "linux")]
+        /// Created: a folder grant resolves the home to tell whether a folder holds it.
         pub(crate) home: PathBuf,
         pub(crate) data: PathBuf,
     }
@@ -447,9 +472,10 @@ pub(crate) mod test_root {
             let (alive, dir) = claim(&temp);
             LOCK.set(alive).expect("one test root per process");
             sweep(&temp, &dir);
+            let home = dir.join("home");
+            fs::create_dir(&home).expect("a test home folder");
             TestRoot {
-                #[cfg(target_os = "linux")]
-                home: dir.join("home"),
+                home,
                 data: dir.join("data"),
             }
         })

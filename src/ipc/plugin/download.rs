@@ -180,6 +180,9 @@ fn status_for(e: &anyhow::Error) -> i32 {
 /// What a plugin hears when a download targets the app's own files.
 const IN_THE_INSTALL: &str = "destination is inside TidaLunar's own files";
 
+/// What a plugin hears when a folder grant reaches the home folder under another path.
+const INTO_THE_HOME: &str = "destination is inside the home folder, reached by another path";
+
 /// What a plugin hears when it names a download for something other than audio.
 const NOT_AUDIO_NAME: &str = "destination must end in .flac or .m4a";
 
@@ -205,11 +208,18 @@ async fn run(
     // thread on a stalled network mount.
     // The snapshot is taken after the download permit: an already-finished sibling's write must be
     // visible here, and anchoring at dialog time would flag our own queued write as tampering.
-    let (auth, before, protected) = {
+    let (auth, enters_home, before, protected) = {
         let dest = dest.clone();
         tokio::task::spawn_blocking(move || {
+            use crate::ui::file_dialog::{
+                Authorisation, authorisation_for, folder_write_enters_home,
+            };
+            let auth = authorisation_for(&dest);
+            let enters_home =
+                matches!(auth, Some(Authorisation::Folder)) && folder_write_enters_home(&dest);
             (
-                crate::ui::file_dialog::authorisation_for(&dest),
+                auth,
+                enters_home,
                 FileIdentity::of(&dest),
                 guard.is_some_and(|g| g.covers(&dest)),
             )
@@ -221,6 +231,9 @@ async fn run(
     // present or absent. `write_file` judges again at the rename.
     if protected {
         return Err(Refused(IN_THE_INSTALL).into());
+    }
+    if enters_home {
+        return Err(Refused(INTO_THE_HOME).into());
     }
     // The plugin names the file, with no dialog at all under a folder grant, and its tags join the
     // bytes after the content check below: only the name can keep another program from opening it.

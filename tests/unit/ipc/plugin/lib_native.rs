@@ -75,7 +75,7 @@ fn a_save_answer_is_judged_under_its_sanitised_name() {
 #[test]
 fn a_protected_folder_answer_is_still_refused() {
     use crate::platform::install_guard::Protected;
-    use crate::ui::file_dialog::NotRecorded;
+    use crate::ui::file_dialog::{NotGranted, NotRecorded};
 
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("install");
@@ -84,7 +84,7 @@ fn a_protected_folder_answer_is_still_refused() {
 
     assert_eq!(
         vet_folder_answer(Some(&guard), &root),
-        Err(NotRecorded::Protected)
+        Err(NotGranted::Location(NotRecorded::Protected))
     );
     let music = parent.path().join("Music");
     std::fs::create_dir(&music).unwrap();

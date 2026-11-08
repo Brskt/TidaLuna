@@ -184,18 +184,22 @@ pub(super) fn handle_show_open_dialog(msg: &IpcMessage, callback: IpcCallback) {
         // dialog ever sees. Taken from the dialog's own answer; the renderer cannot name the folder
         // itself, and off the async worker since canonicalising could block on a stalled mount.
         if wants_directory {
+            use crate::ui::file_dialog::{NotGranted, NotRecorded, record_folder_grant};
             let granted = paths.clone();
-            let protected = tokio::task::spawn_blocking(move || {
-                granted.iter().any(|path| {
-                    crate::ui::file_dialog::record_folder_grant(std::path::Path::new(path))
-                        == Err(crate::ui::file_dialog::NotRecorded::Protected)
+            let refused = tokio::task::spawn_blocking(move || {
+                granted.iter().find_map(|path| {
+                    match record_folder_grant(std::path::Path::new(path)) {
+                        Err(NotGranted::Location(NotRecorded::Protected)) => Some(PROTECTED_ANSWER),
+                        Err(NotGranted::HoldsHome) => Some(HOME_ANSWER),
+                        Ok(()) | Err(NotGranted::Location(NotRecorded::Unresolvable)) => None,
+                    }
                 })
             })
             .await
-            .unwrap_or(false);
+            .unwrap_or(None);
             // Refused here only if the location changed since the dialog judged it.
-            if protected {
-                ipc_callback_err(&callback, 403, PROTECTED_ANSWER);
+            if let Some(why) = refused {
+                ipc_callback_err(&callback, 403, why);
                 return;
             }
         }
@@ -295,6 +299,9 @@ pub(super) fn handle_show_save_dialog(msg: &IpcMessage, callback: IpcCallback) {
 /// What a plugin hears when the user picked a path inside the app's own files.
 const PROTECTED_ANSWER: &str = "the chosen location is inside TidaLunar's own files";
 
+/// What a plugin hears when the user picked their home folder, or one holding it, for downloads.
+const HOME_ANSWER: &str = "the chosen folder is the home folder or holds it";
+
 /// Authorise the download that follows a save dialog's answer, under the sanitised name it will
 /// write to.
 fn record_save_answer(answered: &str) -> Result<(), crate::ui::file_dialog::NotRecorded> {
@@ -325,17 +332,19 @@ fn vet_save_answer(
     crate::ui::file_dialog::vet_destination(guard, &dest).map(drop)
 }
 
-/// The folder dialog's own judgement. Only a protected folder is refused. One that cannot be
-/// resolved gets no grant (`record_folder_grant`) and the download into it is what fails; refusing
-/// it here would loop the dialog until the user gave up.
+/// The folder dialog's own judgement. A protected folder and one holding the home are refused. One
+/// that cannot be resolved gets no grant (`record_folder_grant`) and the download into it is what
+/// fails; refusing it here would loop the dialog until the user gave up.
 fn vet_folder_answer(
     guard: Option<&crate::platform::install_guard::Protected>,
     dir: &std::path::Path,
-) -> Result<(), crate::ui::file_dialog::NotRecorded> {
-    use crate::ui::file_dialog::NotRecorded;
-    match vet_folder(guard, dir) {
-        Err(NotRecorded::Protected) => Err(NotRecorded::Protected),
-        Ok(_) | Err(NotRecorded::Unresolvable) => Ok(()),
+) -> Result<(), crate::ui::file_dialog::NotGranted> {
+    use crate::ui::file_dialog::{NotGranted, NotRecorded};
+    match vet_folder(guard, crate::state::home_folder(), dir) {
+        Err(why @ (NotGranted::Location(NotRecorded::Protected) | NotGranted::HoldsHome)) => {
+            Err(why)
+        }
+        Ok(_) | Err(NotGranted::Location(NotRecorded::Unresolvable)) => Ok(()),
     }
 }
 

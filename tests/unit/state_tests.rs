@@ -100,7 +100,8 @@ fn the_base_is_the_variable_else_the_fallback_when_absolute_and_text() {
 fn the_shell_names_local_app_data_as_an_absolute_directory() {
     // The fallback's only live caller is a launch with LOCALAPPDATA missing; this is
     // where the call itself is exercised.
-    let dir = super::known_local_app_data().expect("the shell names LocalAppData");
+    let dir = super::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
+        .expect("the shell names LocalAppData");
     assert!(dir.is_absolute(), "{dir:?} is not absolute");
     assert!(dir.is_dir(), "{dir:?} is not a directory");
 }

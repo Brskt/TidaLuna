@@ -1,4 +1,4 @@
-//! A save or folder dialog whose answer the install guard may refuse. The user is told and picks
+//! A save or folder dialog whose answer may be refused. The user is told and picks
 //! again or gives up, as Chromium does for a folder its File System Access API blocks: CEF has no
 //! hook to refuse inside the native dialog, which has closed by the time the answer is judged.
 
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use cef::FileDialogMode;
 use tokio::sync::oneshot;
 
-use super::file_dialog::NotRecorded;
+use super::file_dialog::{NotGranted, NotRecorded};
 
 /// The two dialogs a turn opens, behind a seam that lets tests run the loop without CEF.
 pub(crate) trait Dialogs: Sync {
@@ -58,28 +58,49 @@ impl Dialogs for Native {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    Location(NotRecorded),
+    HoldsHome,
+}
+
+impl From<NotRecorded> for Refusal {
+    fn from(why: NotRecorded) -> Self {
+        Self::Location(why)
+    }
+}
+
+impl From<NotGranted> for Refusal {
+    fn from(why: NotGranted) -> Self {
+        match why {
+            NotGranted::Location(why) => Self::Location(why),
+            NotGranted::HoldsHome => Self::HoldsHome,
+        }
+    }
+}
+
 /// What one dialog answer amounts to.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Cancelled,
     /// The first path turned down, and why.
-    Refused(PathBuf, NotRecorded),
+    Refused(PathBuf, Refusal),
     /// The answer as the dialog gave it: the caller hands it on unchanged.
     Chosen(Vec<String>),
 }
 
 /// `vet` is the site's own judgement of one path. Whatever it does not admit is refused, an
 /// unresolvable path included: a blob download has no later gate that would refuse it.
-pub(crate) fn classify(
+pub(crate) fn classify<E: Into<Refusal>>(
     answer: Vec<String>,
-    vet: impl Fn(&Path) -> Result<(), NotRecorded>,
+    vet: impl Fn(&Path) -> Result<(), E>,
 ) -> Verdict {
     if answer.is_empty() {
         return Verdict::Cancelled;
     }
     for raw in &answer {
         if let Err(why) = vet(Path::new(raw)) {
-            return Verdict::Refused(PathBuf::from(raw), why);
+            return Verdict::Refused(PathBuf::from(raw), why.into());
         }
     }
     Verdict::Chosen(answer)
@@ -129,10 +150,17 @@ where
             path.display()
         );
         let message = match why {
-            NotRecorded::Protected => {
-                "This folder holds TidaLunar's own files. Choose a location outside it."
+            Refusal::Location(NotRecorded::Protected) => {
+                "This folder holds TidaLunar's own files.\n\nChoose a location outside it."
             }
-            NotRecorded::Unresolvable => "TidaLunar cannot use this location. Choose another one.",
+            Refusal::Location(NotRecorded::Unresolvable) => {
+                "TidaLunar cannot use this location.\n\nChoose another one."
+            }
+            Refusal::HoldsHome => {
+                "A folder picked here lets the plugin save audio files anywhere inside it without asking again.\n\n\
+                 Your home folder, and any folder holding it, contains files other programs run.\n\n\
+                 Choose a folder inside it, such as Music. Saving a single file in your home still works."
+            }
         };
         let buttons = ["Choose another location".to_string(), "Cancel".to_string()];
         let reply = dialogs
