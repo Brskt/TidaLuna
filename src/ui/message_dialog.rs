@@ -8,8 +8,9 @@ use tokio::sync::oneshot;
 use crate::ui::dialog::{FIT_TO_CONTENT, escape_html, show_dialog};
 
 const MSGBOX_SCHEME: &str = "msgbox://";
-const DIALOG_W: i32 = 460;
-const DIALOG_H: i32 = 240;
+const DIALOG_W: i32 = 580;
+/// A ceiling: the window shrinks to its content.
+const DIALOG_H: i32 = 400;
 
 /// Show a message dialog and return the clicked button index via a oneshot.
 /// `cancel_id` is returned if the window is closed without a button click.
@@ -31,6 +32,18 @@ fn parse_msgbox(url: &str) -> Option<i32> {
         .and_then(|s| s.parse::<i32>().ok())
 }
 
+/// The message's line breaks, kept as Electron keeps them: a blank line starts a paragraph, a
+/// single break stays a break.
+fn paragraphs(message: &str) -> String {
+    message
+        .replace("\r\n", "\n")
+        .split("\n\n")
+        .map(|p| p.trim_matches('\n'))
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("<p>{}</p>", escape_html(p).replace('\n', "<br>")))
+        .collect()
+}
+
 fn build_html(
     title: &str,
     message: &str,
@@ -47,7 +60,7 @@ fn build_html(
     let message_html = if message.is_empty() {
         String::new()
     } else {
-        format!(r#"<div class="message">{}</div>"#, escape_html(message))
+        format!(r#"<div class="message">{}</div>"#, paragraphs(message))
     };
 
     let detail_html = if detail.is_empty() {
@@ -85,13 +98,17 @@ fn build_html(
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 body {{
     background:#1a1a1a; color:#fff; font-family:system-ui,sans-serif;
-    display:flex; align-items:center; justify-content:center;
-    height:100vh; -webkit-app-region:drag;
+    display:flex; justify-content:center;
+    padding:24px 0; -webkit-app-region:drag;
 }}
-.dialog {{ max-width:420px; width:90%; -webkit-app-region:no-drag; }}
+.dialog {{ max-width:540px; width:90%; -webkit-app-region:no-drag; }}
 h2 {{ font-size:16px; margin-bottom:12px; }}
-.message {{ font-size:14px; color:#eee; line-height:1.5; margin-bottom:8px; }}
-.detail {{ font-size:12px; color:#999; line-height:1.5; margin-bottom:16px; }}
+.message {{ font-size:14px; color:#eee; line-height:1.5; margin-bottom:12px; }}
+.message p + p {{ margin-top:10px; }}
+.detail {{
+    background:#222; padding:8px 12px; border-radius:4px;
+    font-size:12px; color:#ccc; line-height:1.5; word-break:break-all;
+}}
 .actions {{ display:flex; gap:8px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap; }}
 button {{
     padding:8px 16px; border:none; border-radius:4px;

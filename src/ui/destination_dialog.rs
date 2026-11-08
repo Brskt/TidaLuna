@@ -116,8 +116,8 @@ pub(crate) struct Request {
     pub filters: Vec<String>,
 }
 
-const CHOOSE_ANOTHER: i32 = 0;
-const CANCEL: i32 = 1;
+const CANCEL: i32 = 0;
+const CHOOSE_ANOTHER: i32 = 1;
 
 /// Open the dialog, judge the answer, and on a refusal say why and reopen until the user picks an
 /// admitted location or cancels (empty result). Turns are uncapped: a count would turn repicking
@@ -151,6 +151,12 @@ where
             "[DIALOG] Refused {} ({why:?}), asking again",
             path.display()
         );
+        let (title, choose) = match why {
+            Refusal::Location(_) | Refusal::HoldsHome => {
+                ("Location Not Allowed", "Choose Another Location")
+            }
+            Refusal::NotAudioName => ("File Name Not Allowed", "Choose Another Name"),
+        };
         let message = match why {
             Refusal::Location(NotRecorded::Protected) => {
                 "This folder holds TidaLunar's own files.\n\nChoose a location outside it."
@@ -167,10 +173,10 @@ where
                 "This file name must end in .flac or .m4a.\n\nChoose a name that does."
             }
         };
-        let buttons = ["Choose another location".to_string(), "Cancel".to_string()];
+        let buttons = ["Cancel".to_string(), choose.to_string()];
         let reply = dialogs
             .message(
-                "",
+                title,
                 message,
                 &path.display().to_string(),
                 &buttons,
