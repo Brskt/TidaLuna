@@ -6,6 +6,9 @@ use cef::*;
 use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// The drag strip TIDAL's macOS layout draws at the top: the native buttons sit at half its height.
+const MAC_TOP_BAR_HEIGHT: f32 = 48.0;
+
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn frameless_subclass_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
@@ -130,6 +133,26 @@ wrap_window_delegate! {
             }
         }
         fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
+        }
+        // TIDAL's macOS layout draws no window buttons and leaves room for the native ones.
+        fn with_standard_window_buttons(
+            &self,
+            _window: Option<&mut Window>,
+        ) -> ::std::os::raw::c_int {
+            i32::from(cfg!(target_os = "macos"))
+        }
+        fn titlebar_height(
+            &self,
+            _window: Option<&mut Window>,
+            titlebar_height: Option<&mut f32>,
+        ) -> ::std::os::raw::c_int {
+            match titlebar_height {
+                Some(height) if cfg!(target_os = "macos") => {
+                    *height = MAC_TOP_BAR_HEIGHT;
+                    1
+                }
+                _ => 0,
+            }
             1
         }
         fn can_resize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {

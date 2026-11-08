@@ -219,8 +219,18 @@ wrap_drag_handler! {
             _frame: Option<&mut Frame>,
             regions: Option<&[DraggableRegion]>,
         ) {
+            // CEF applies the regions in page order; a drag layer later in the page (TIDAL's
+            // header `::before` on macOS) would cover an earlier `no-drag` button. Passed last,
+            // `no-drag` regions always win.
+            let regions = regions.unwrap_or_default();
+            let ordered: Vec<DraggableRegion> = regions
+                .iter()
+                .filter(|r| r.draggable != 0)
+                .chain(regions.iter().filter(|r| r.draggable == 0))
+                .cloned()
+                .collect();
             if let Some(window) = crate::ui::app_window::AppWindow::from_browser(browser) {
-                window.set_draggable_regions(regions);
+                window.set_draggable_regions(Some(&ordered));
             }
         }
     }

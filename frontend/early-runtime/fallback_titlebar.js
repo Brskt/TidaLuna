@@ -18,13 +18,18 @@
         if (e.key === "F12") { e.preventDefault(); ipc("window.devtools"); }
     }, true);
 
+    var cfg = self.__LUNAR_CONFIG__ || {};
+    // macOS draws its own buttons at the window's top left: the strip only drags and goes back.
+    var nativeButtons = cfg.nativeWindowButtons;
+    var systemFrame = cfg.systemFrame;
+
     function build() {
         if (!document.body || document.getElementById("tlx-titlebar")) return;
 
         var bar = document.createElement("div");
         bar.id = "tlx-titlebar";
         bar.style.cssText =
-            "position:fixed;top:0;left:0;right:0;height:32px;display:none;" +
+            "position:fixed;top:0;left:0;right:0;height:" + (nativeButtons ? "48px" : "32px") + ";display:none;" +
             "align-items:center;justify-content:space-between;z-index:2147483647;" +
             "background:rgba(0,0,0,0.85);user-select:none;-webkit-app-region:drag";
 
@@ -45,9 +50,16 @@
 
         var hover = "rgba(255,255,255,0.12)";
         var left = document.createElement("div");
-        left.style.cssText = "display:flex;-webkit-app-region:no-drag";
+        left.style.cssText =
+            "display:flex;-webkit-app-region:no-drag" + (nativeButtons ? ";margin-left:80px" : "");
         left.appendChild(mkBtn("‹", "Back", function () { history.back(); }, hover));
+        bar.appendChild(left);
+        if (!nativeButtons && !systemFrame) bar.appendChild(windowButtons(mkBtn, hover));
+        document.body.appendChild(bar);
+        watch(bar);
+    }
 
+    function windowButtons(mkBtn, hover) {
         var right = document.createElement("div");
         right.style.cssText = "display:flex;-webkit-app-region:no-drag";
 
@@ -83,19 +95,20 @@
         right.appendChild(mkBtn("−", "Minimize", function () { ipc("window.minimize"); }, hover));
         right.appendChild(maxBtn);
         right.appendChild(mkBtn("✕", "Close", function () { ipc("window.close"); }, "#e81123"));
+        return right;
+    }
 
-        bar.appendChild(left);
-        bar.appendChild(right);
-        document.body.appendChild(bar);
-
+    function watch(bar) {
         // Show only while TIDAL's bar is absent; disconnect once it mounts, leaving
         // the app's busy DOM unwatched. `settled` defers the first show off the
         // login pages: the app never flashes the strip before `_bar_` renders.
-        var cfg = self.__LUNAR_CONFIG__ || {};
         var authHosts = cfg.authHosts || [];
         var settled = authHosts.indexOf(location.hostname) !== -1 || location.pathname.indexOf("/login") === 0;
 
-        function hasTidalBar() { return !!document.querySelector('[class*="_bar_"]'); }
+        // `_bar_` is TIDAL's Windows titlebar, `_macDesktopNavbar_` its macOS top strip.
+        function hasTidalBar() {
+            return !!document.querySelector('[class*="_bar_"], [class*="_macDesktopNavbar_"]');
+        }
         function sync() {
             if (hasTidalBar()) { bar.style.display = "none"; obs.disconnect(); return; }
             bar.style.display = settled ? "flex" : "none";

@@ -25,6 +25,7 @@ pub(crate) fn renderer_config_js() -> String {
         "redirectUri": nav::REDIRECT_URI,
         "loginCallbackPath": "/login/auth",
         "authHosts": [nav::HOST_LOGIN, nav::HOST_AUTH],
+        "nativeWindowButtons": cfg!(target_os = "macos"),
     });
     format!("self.__LUNAR_CONFIG__={};", js_value(&config))
 }
