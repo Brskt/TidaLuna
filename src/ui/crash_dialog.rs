@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use cef::*;
 use tokio::sync::oneshot;
 
-use crate::ui::dialog::{OnBlur, escape_html, show_dialog};
+use crate::ui::dialog::{escape_html, show_dialog};
 
 const CRASH_RELOAD: &str = "crash://reload";
 const CRASH_OPEN: &str = "crash://open";
@@ -37,13 +37,7 @@ pub(crate) fn show_crash_dialog(
     log_path: Option<&std::path::Path>,
 ) -> oneshot::Receiver<CrashAction> {
     let html = build_html(reason, error_code, log_path);
-    show_dialog(
-        html,
-        (DIALOG_W, DIALOG_H),
-        parse_crash,
-        CrashAction::Reload,
-        OnBlur::Stay,
-    )
+    show_dialog(html, (DIALOG_W, DIALOG_H), parse_crash, CrashAction::Reload)
 }
 
 /// Closing without a button is a reload (`show_dialog`'s on_close).

@@ -4,15 +4,14 @@
 use tokio::sync::oneshot;
 
 use crate::plugins::store::StoreMove;
-use crate::ui::dialog::{FIT_TO_CONTENT, OnBlur, escape_html, show_dialog};
+use crate::ui::dialog::{FIT_TO_CONTENT, escape_html, show_dialog};
 
 const MOVE_ALLOW: &str = "store-move://allow";
 const MOVE_DENY: &str = "store-move://deny";
 const DIALOG_W: i32 = 620;
 const DIALOG_H: i32 = 520;
 
-/// `moves` are the rows Rust read, never what the caller said. Stays open when it loses focus: it
-/// comes up at launch, while the main window takes the focus. Only a button answers: a close, by
+/// `moves` are the rows Rust read, never what the caller said. Only a button answers: a close, by
 /// the user, another process or the app quitting, decides nothing. Callable from any thread.
 pub(crate) fn show_store_move_dialog(
     from_base: &str,
@@ -20,7 +19,7 @@ pub(crate) fn show_store_move_dialog(
     moves: &[StoreMove],
 ) -> oneshot::Receiver<Option<bool>> {
     let html = build_html(from_base, to_base, moves);
-    show_dialog(html, (DIALOG_W, DIALOG_H), parse_move, None, OnBlur::Stay)
+    show_dialog(html, (DIALOG_W, DIALOG_H), parse_move, None)
 }
 
 fn parse_move(url: &str) -> Option<Option<bool>> {

@@ -5,7 +5,7 @@
 
 use tokio::sync::oneshot;
 
-use crate::ui::dialog::{OnBlur, escape_html, show_dialog};
+use crate::ui::dialog::{FIT_TO_CONTENT, escape_html, show_dialog};
 
 const MSGBOX_SCHEME: &str = "msgbox://";
 const DIALOG_W: i32 = 460;
@@ -23,13 +23,7 @@ pub(crate) fn show_message_dialog(
     cancel_id: i32,
 ) -> oneshot::Receiver<i32> {
     let html = build_html(title, message, detail, buttons, default_id);
-    show_dialog(
-        html,
-        (DIALOG_W, DIALOG_H),
-        parse_msgbox,
-        cancel_id,
-        OnBlur::Stay,
-    )
+    show_dialog(html, (DIALOG_W, DIALOG_H), parse_msgbox, cancel_id)
 }
 
 fn parse_msgbox(url: &str) -> Option<i32> {
@@ -115,12 +109,14 @@ button.primary:hover {{ background:#d11a2d; }}
     {detail_html}
     <div class="actions">{buttons_html}</div>
 </div>
+{fit}
 </body>
 </html>"#,
         title_html = title_html,
         message_html = message_html,
         detail_html = detail_html,
         buttons_html = buttons_html,
+        fit = FIT_TO_CONTENT,
     )
 }
 

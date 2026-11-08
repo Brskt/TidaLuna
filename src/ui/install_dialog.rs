@@ -4,7 +4,7 @@
 
 use tokio::sync::oneshot;
 
-use crate::ui::dialog::{FIT_TO_CONTENT, OnBlur, author_block, escape_html, show_dialog};
+use crate::ui::dialog::{FIT_TO_CONTENT, author_block, escape_html, show_dialog};
 
 const INSTALL_ALLOW: &str = "install://allow";
 const INSTALL_DENY: &str = "install://deny";
@@ -19,16 +19,10 @@ pub(crate) fn show_install_dialog(
     manifest_json: &str,
 ) -> oneshot::Receiver<bool> {
     let html = build_html(name, url, manifest_json);
-    show_dialog(
-        html,
-        (DIALOG_W, DIALOG_H),
-        parse_install,
-        false,
-        OnBlur::Close,
-    )
+    show_dialog(html, (DIALOG_W, DIALOG_H), parse_install, false)
 }
 
-/// Closing without a button, or clicking outside the window, declines (`on_close` = false).
+/// Closing without a button declines (`on_close` = false).
 fn parse_install(url: &str) -> Option<bool> {
     if url.starts_with(INSTALL_ALLOW) {
         Some(true)

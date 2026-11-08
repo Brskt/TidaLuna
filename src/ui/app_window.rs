@@ -48,6 +48,11 @@ impl AppWindow {
         }
     }
 
+    /// The CEF window itself, for a dialog that names it as its parent.
+    pub(crate) fn into_cef(self) -> Window {
+        self.cef
+    }
+
     pub(crate) fn close(&self) {
         self.cef.close();
     }

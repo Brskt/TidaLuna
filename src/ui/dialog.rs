@@ -2,13 +2,12 @@
 //! separate top-level window isolated from the main renderer: its buttons navigate to a
 //! custom-scheme URL (`trust://`, `install://`, `crash://`, `msgbox://`) which
 //! the dialog's own RequestHandler intercepts and maps to a result. This module
-//! owns the shared skeleton (client, delegates, the UI-thread task, centering,
-//! the ALLOY runtime style, and the fire-the-oneshot-exactly-once logic); each
-//! caller supplies only its HTML, size, a `url -> Option<R>` parser, the
-//! result to send if the window is closed without a button, and what losing focus does.
+//! owns the shared skeleton (client, delegates, the UI-thread task, centering and the ALLOY
+//! runtime style); each caller supplies only its HTML, size, a `url -> Option<R>` parser and
+//! the result to send if the window is closed without a button.
 
 use cef::*;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -105,21 +104,6 @@ pub(crate) fn emphasis_html(s: &str) -> String {
             (Piece::Close(e), false) => format!("&lt;/{}&gt;", e.tag()),
         })
         .collect()
-}
-
-/// What a dialog does when its window loses activation.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum OnBlur {
-    Stay,
-    /// Answers `on_close`, as a close without a button would.
-    Close,
-}
-
-impl OnBlur {
-    /// Only a window that was active and lost it: one never activated has seen no user.
-    fn closes(self, was_active: bool, active: bool) -> bool {
-        self == OnBlur::Close && was_active && !active
-    }
 }
 
 const FIT_SCHEME: &str = "dialog-size://";
@@ -236,7 +220,6 @@ struct DialogCore<R> {
     parse: fn(&str) -> Option<R>,
     /// Result sent when the window is closed without a button click.
     on_close: R,
-    on_blur: OnBlur,
     width: i32,
     height: i32,
     /// `height` until the page reports its own through `FIT_TO_CONTENT`.
@@ -258,14 +241,12 @@ pub(crate) fn show_dialog<R: Clone + Send + Sync + 'static>(
     size: (i32, i32),
     parse: fn(&str) -> Option<R>,
     on_close: R,
-    on_blur: OnBlur,
 ) -> oneshot::Receiver<R> {
     let (tx, rx) = oneshot::channel();
     let core = Arc::new(DialogCore {
         sender: Mutex::new(Some(tx)),
         parse,
         on_close,
-        on_blur,
         width: size.0,
         height: size.1,
         fitted_height: AtomicI32::new(size.1),
@@ -379,6 +360,14 @@ fn center_on_parent(window: &mut Window, dialog_w: i32, dialog_h: i32) -> bool {
 #[cfg(not(target_os = "windows"))]
 fn center_on_parent(_window: &mut Window, _dialog_w: i32, _dialog_h: i32) -> bool {
     false
+}
+
+/// The main window, while it is on screen: a dialog it owns can no longer sink behind it. Never
+/// modal, since a plugin reopening its box would lock out the settings that disable it. Hidden or
+/// minimized, the main window would take the dialog out of sight.
+fn dialog_parent() -> Option<Window> {
+    let window = crate::ui::app_window::AppWindow::current()?.into_cef();
+    (window.is_visible() == 1 && window.is_minimized() == 0).then_some(window)
 }
 
 wrap_request_handler! {
@@ -501,7 +490,6 @@ wrap_window_delegate! {
     struct DialogWindowDelegate<R: Clone + Send + Sync + 'static> {
         browser_view: RefCell<Option<BrowserView>>,
         core: Arc<DialogCore<R>>,
-        was_active: Cell<bool>,
     }
     impl ViewDelegate {
         fn preferred_size(&self, _view: Option<&mut View>) -> Size {
@@ -527,6 +515,14 @@ wrap_window_delegate! {
         }
         fn can_minimize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
             0
+        }
+        fn parent_window(
+            &self,
+            _window: Option<&mut Window>,
+            _is_menu: Option<&mut ::std::os::raw::c_int>,
+            _can_activate_menu: Option<&mut ::std::os::raw::c_int>,
+        ) -> Option<Window> {
+            dialog_parent()
         }
         fn on_window_created(&self, window: Option<&mut Window>) {
             let bv = self.browser_view.borrow();
@@ -563,18 +559,10 @@ wrap_window_delegate! {
         }
         fn on_window_activation_changed(
             &self,
-            window: Option<&mut Window>,
+            _window: Option<&mut Window>,
             active: ::std::os::raw::c_int,
         ) {
-            let active = active != 0;
-            crate::vprintln!("[DIALOG] activation changed: active={active}");
-            let was_active = self.was_active.replace(active);
-            if self.core.on_blur.closes(was_active, active)
-                && let Some(window) = window
-            {
-                self.core.send(self.core.on_close.clone());
-                window.close();
-            }
+            crate::vprintln!("[DIALOG] activation changed: active={}", active != 0);
         }
         fn can_close(&self, _window: Option<&mut Window>) -> i32 {
             1
@@ -626,7 +614,7 @@ wrap_task! {
             );
 
             let mut window_delegate =
-                DialogWindowDelegate::new(RefCell::new(browser_view), self.core.clone(), Cell::new(false));
+                DialogWindowDelegate::new(RefCell::new(browser_view), self.core.clone());
             window_create_top_level(Some(&mut window_delegate));
         }
     }
