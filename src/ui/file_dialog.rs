@@ -105,8 +105,8 @@ fn admissible(guard: Option<&crate::platform::install_guard::Protected>, path: &
     guard.is_none_or(|guard| !guard.covers(path))
 }
 
-/// Why a dialog answer did not become an authorisation. The caller answers the two differently: an
-/// unresolvable path fails later at the download, a protected one is refused to the plugin now.
+/// Why a dialog answer did not become an authorisation. An unresolvable path fails later at the
+/// download; a protected one is refused to the plugin now.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum NotRecorded {
     Unresolvable,

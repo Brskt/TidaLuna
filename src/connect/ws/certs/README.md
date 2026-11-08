@@ -1,3 +1,3 @@
 # TIDAL Connect certificates
 
-The build requires `tidal_server_key.pem` to be present at this location. It comes from the TIDAL Connect application binary.
+To enable the TIDAL Connect receiver, `tidal_server_key.pem` goes in here.

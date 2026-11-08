@@ -55,11 +55,11 @@ fn comments(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// What upstream's `node-taglib-sharp` writes for the same tags, field for field: a reader that
-/// shows the track right after a FLAC download must show this one the same. A wrong atom or format
-/// is silent until someone opens the file in another player.
+/// Every field lands in its iTunes atom and format: a reader that shows the track right after a
+/// FLAC download must show this one the same. A wrong atom or format is silent until someone opens
+/// the file in another player.
 #[test]
-fn tags_land_in_the_atoms_and_formats_upstream_writes() {
+fn tags_land_in_their_itunes_atoms_and_formats() {
     let tags = comments(&[
         ("TITLE", "Song"),
         ("ARTIST", "A"),
@@ -81,7 +81,7 @@ fn tags_land_in_the_atoms_and_formats_upstream_writes() {
         ("MUSICBRAINZ_ALBUMID", "mb-album"),
         ("REPLAYGAIN_TRACK_GAIN", "-6.5432"),
         ("REPLAYGAIN_TRACK_PEAK", "0.98"),
-        // Upstream writes neither.
+        // Neither gets an atom.
         ("UPC", "0123"),
         ("ORGANIZATION", "Label"),
     ]);

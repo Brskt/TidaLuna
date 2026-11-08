@@ -1,9 +1,9 @@
 //! `plugin.download`: the disk half of `MediaItem.download()`.
 //!
 //! The renderer computes the manifest, the destination and the tags but cannot write to
-//! disk; it hands them here: fetch the urls, decrypt with the player's decryptor, remux a
-//! DASH track, tag, write. Decryption follows the manifest's `encryptionType`; tagging does not follow its
-//! `codecs` field, see `run`.
+//! disk; it hands them here: fetch the urls, decrypt with the player's decryptor, remux a DASH
+//! track, tag, write. Decryption follows the manifest's `encryptionType`; tagging does not follow
+//! its `codecs` field, see `run`.
 //!
 //! The renderer names the destination. A write is only legitimate if `ui::file_dialog`'s ledger shows
 //! the user answered a save or folder dialog for it; otherwise this channel is a general file-write
@@ -21,7 +21,7 @@ use std::time::Duration;
 /// TIDAL's own container: one url, FLAC or AAC, encrypted per the manifest.
 const BTS_MIME: &str = "application/vnd.tidal.bts";
 /// Segmented AAC. The init segment and its media segments concatenate into a fragmented MP4, which
-/// is remuxed to a progressive MP4, tagged when tags are sent, as upstream does.
+/// is remuxed to a progressive MP4, tagged when tags are sent.
 const DASH_MIME: &str = "application/dash+xml";
 
 /// Longest url list a real manifest produces. The list is plugin-supplied; without a bound, Rust
@@ -298,7 +298,7 @@ async fn run(
     // upstream dropped the check) and BTS does carry AAC; the container decides. A
     // non-FLAC BTS stream is written through untagged rather than failing the download.
     let finished = if req.manifest_mime_type == DASH_MIME {
-        // A remux that fails fails the download, as upstream's does: the fragments are not
+        // A remux that fails fails the download: the fragments are not
         // the music file the plugin asked for.
         let tags = match req.tags.as_ref() {
             Some(meta) => {

@@ -23,8 +23,8 @@ const plugin = (installed: boolean) => {
 	return { name: "Mover", url: URL_, installed, dependencyRequirements: [], installs, install: async () => void installs.push(URL_) };
 };
 
-// An Install started on a Store placeholder, whose dialogs straddled a store move, reinstalled the
-// moved plugin over the user's: turned off, its native trust reset.
+// An Install started on a Store placeholder, whose dialogs straddle a store move, must not
+// reinstall the moved plugin over the user's (turned off, its native trust reset).
 test("an Install held from before a move does not reinstall the moved plugin", async () => {
 	const placeholder = plugin(false);
 	const moved = plugin(true);

@@ -263,8 +263,9 @@ impl PassOutcome {
     }
 }
 
-/// Held by every writer of a plugin's row or live load: passes, store moves, enable, disable,
-/// install, uninstall, restarts, ack timeouts. Two of them interleaved act on what the other changed.
+/// Held by every writer of a plugin's row or live load except the UI thread's sweeps (logout, page
+/// end): passes, store moves, enable, disable, install, uninstall, restarts, ack timeouts. Two of
+/// them interleaved act on what the other changed.
 static PASS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Proof the pass lock is held; only [`exclusive`] makes one.

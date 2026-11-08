@@ -1,8 +1,5 @@
 //! iTunes-style metadata (`udta/meta/ilst`) for a progressive MP4, from the same Vorbis-style
 //! comments a FLAC download is tagged with.
-//!
-//! The fields, atoms and value formats are upstream's (`node-taglib-sharp` tags its DASH
-//! downloads); the box layout follows iTunes rather than that library's incidental bytes.
 
 use crate::audio::flac_tags::Picture;
 
@@ -15,11 +12,11 @@ const SIGNED_INT: u32 = 21;
 /// Untyped: `trkn` and `disk` are binary layouts, and a cover of an unknown format is stored as is.
 const IMPLICIT: u32 = 0;
 
-/// Freeform atoms are namespaced by a reverse-DNS `mean`; upstream writes only `com.apple.iTunes`.
+/// Freeform atoms are namespaced by a reverse-DNS `mean`; each one written here uses iTunes'.
 const ITUNES_MEAN: &str = "com.apple.iTunes";
 
 /// The body of a `udta` box carrying the tags, for the remuxer to place in `moov`. Atoms come in
-/// the order upstream's setters run, and a field without a usable value is left out.
+/// a fixed order, and a field without a usable value is left out.
 pub(crate) fn udta_body(
     comments: &[(String, String)],
     picture: Option<&Picture>,
@@ -30,8 +27,6 @@ pub(crate) fn udta_body(
             .find(|(key, _)| key == field)
             .map(|(_, value)| value.as_str())
     };
-    // Repeated comments become one atom: `node-taglib-sharp` joins a list with "; " and readers
-    // split it back on ";".
     let joined = |field: &str| {
         let values: Vec<&str> = comments
             .iter()
@@ -67,7 +62,6 @@ pub(crate) fn udta_body(
             .and_then(leading_int)
             .and_then(|n| u16::try_from(n).ok())
     };
-    // Both halves zero is no value at all; the library removes the atom then.
     let pair = |n: u16, total: u16| {
         let mut payload = vec![0, 0];
         payload.extend_from_slice(&n.to_be_bytes());
@@ -76,13 +70,14 @@ pub(crate) fn udta_body(
         payload
     };
     let (track, total) = (number("TRACKNUMBER"), number("TOTALTRACKS"));
+    // Both halves zero is no value at all: no atom is written.
     if track.unwrap_or(0) != 0 || total.unwrap_or(0) != 0 {
         items.push(boxed(
             b"trkn",
             &data(IMPLICIT, &pair(track.unwrap_or(0), total.unwrap_or(0)))?,
         )?);
     }
-    // Upstream never sets a disc total.
+    // The tags carry no disc total.
     if let Some(disc) = number("DISCNUMBER").filter(|disc| *disc != 0) {
         items.push(boxed(b"disk", &data(IMPLICIT, &pair(disc, 0))?)?);
     }
@@ -124,7 +119,7 @@ pub(crate) fn udta_body(
     Ok(meta)
 }
 
-/// `YEAR` when it is a plausible year, else the year that opens `DATE`, as upstream picks it.
+/// `YEAR` when it is a plausible year, else the year that opens `DATE`.
 fn year(year: Option<&str>, date: Option<&str>) -> Option<i64> {
     let plausible = |y: i64| (1..=9999).contains(&y);
     year.and_then(leading_int)
@@ -137,7 +132,7 @@ fn year(year: Option<&str>, date: Option<&str>) -> Option<i64> {
 }
 
 /// What JavaScript's `parseInt(value, 10)` reads: optional leading whitespace and sign, then the
-/// longest run of digits. Upstream parses with it; "3/12" is track 3 here as there.
+/// longest run of digits. "3/12" is track 3.
 fn leading_int(value: &str) -> Option<i64> {
     let value = value.trim_start();
     let (sign, digits) = match value.as_bytes().first() {
@@ -154,7 +149,7 @@ fn finite_float(value: &str) -> Option<f64> {
     value.trim().parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
-/// The `data` type of a cover: upstream's three types, ASCII case aside, and `image/bmp` as BMP.
+/// The `data` type of a cover: JPEG, PNG or BMP by MIME type, ASCII case aside, else untyped.
 fn cover_type(mime: &str) -> u32 {
     if mime.eq_ignore_ascii_case("image/jpeg") {
         JPEG

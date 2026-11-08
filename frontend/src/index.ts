@@ -570,7 +570,7 @@ const init = async () => {
     // Load user plugins - Rust does dedup + multi-pass + reconciliation, then responds
     await invokeIpc("jsrt.load_plugins");
 
-    // After the user plugins, as upstream orders it; before exposeLoaderApi, which reads each
+    // After the user plugins; before exposeLoaderApi, which reads each
     // core module's Settings once.
     try {
         const devUrl = `${location.origin}/__luna__/dev.mjs`;

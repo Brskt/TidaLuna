@@ -1,8 +1,8 @@
 //! Putting plugin code into the renderer, and deciding whether it may stay.
 //!
 //! Callers: the boot pass, `plugin.enable`, an update's restart, a store move's answer. The
-//! re-read after dispatch lives here once: written beside each caller, one skipped it, and an
-//! enable racing a logout left code running in the old session, its capability never revoked.
+//! re-read after dispatch lives here once, where no caller can skip it: an enable that raced a
+//! logout would leave code running in the old session, its capability never revoked.
 
 use super::admission::{Admission, Delivery};
 use crate::app_state::{Ticket, eval_js, with_state};
@@ -40,7 +40,7 @@ pub(super) enum InjectFailure {
 /// wearing the same clothes as a plugin that could not load. Reconciliation writes
 /// `enabled = 0`. A logout timed against the last plugin of a pass disabled it for every
 /// session afterwards, and the plugin was never at fault. Three duties named apart are what
-/// keeps a sixth failure from reopening that: `pass_duty` matches exhaustively, and the
+/// keeps a new failure from reopening that: `pass_duty` matches exhaustively, and the
 /// compiler asks each new one to choose.
 pub(super) enum PassDuty {
     /// The attempt ended with nothing live while its session stayed current; the batch
@@ -115,7 +115,7 @@ fn stale(ticket: Ticket) -> InjectFailure {
 
 /// Mint this load's identity, transpile the plugin, dispatch it, and keep it only if the
 /// session and page it was admitted for are still current. A url that already has a load is left
-/// as it is: enabling a live plugin is a no-op, as upstream's `enable` is for unchanged code.
+/// as it is: enabling a live plugin is a no-op.
 ///
 /// The last re-read happens after the dispatch: transpiling is real CPU work that holds no lock,
 /// and a logout or reload lands on a different thread.
@@ -227,7 +227,7 @@ pub(super) fn inject_plugin(
 
 /// Wait on the ready ack of `load_id`, and give the load up once it has gone idle: unload it,
 /// persist the disable, tell the page. One task per load: a load paused on its user's dialogs
-/// holds back no other plugin's. `ticket` is the admission's the load was injected under.
+/// holds back no other plugin's. `ticket` is the one the load was injected under.
 pub(super) async fn watch_ack(url: String, load_id: u64, ticket: Ticket) {
     use crate::plugins::manager::LoadWatch;
     // The clock started at `mark_loading`, before the transpile and, at boot, before every later

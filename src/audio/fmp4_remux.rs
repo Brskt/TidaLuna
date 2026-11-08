@@ -130,7 +130,7 @@ pub(crate) fn to_progressive(fmp4: &[u8], udta_body: Option<Vec<u8>>) -> anyhow:
 
 /// The encoder delay the source declares: the first edit's `media_time`, in media timescale, when
 /// it skips samples. The muxer writes no edit list; without it a player would play the AAC
-/// priming samples as sound. Read as upstream reads it.
+/// priming samples as sound.
 fn source_priming(fmp4: &[u8]) -> anyhow::Result<Option<i64>> {
     let moov = top_level_box(fmp4, b"moov")
         .ok_or_else(|| anyhow::anyhow!("DASH track has no moov box"))?;
@@ -147,8 +147,7 @@ fn source_priming(fmp4: &[u8]) -> anyhow::Result<Option<i64>> {
 }
 
 /// One edit starting `media_time` into the media and lasting the rest of it, with the movie and
-/// track durations shortened to match, as upstream's `patchMoov` writes it. Left out when that
-/// span is empty or does not fit the 32-bit fields upstream writes.
+/// track durations shortened to match. Left out when that span is empty or does not fit 32 bits.
 fn restore_priming(moov: &mut MoovBox, media_time: i64) {
     let movie_timescale = u128::from(moov.mvhd_box.timescale.get());
     let Some(trak) = moov.trak_boxes.first_mut() else {

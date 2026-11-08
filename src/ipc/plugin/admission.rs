@@ -152,9 +152,9 @@ impl Claim {
     }
 }
 
-/// Hand `js` to the page `ticket` names, checked on the UI thread right before it goes out. Checked
-/// here instead, a reload committing between the check and the frame lookup would land the code in
-/// the new document; on the UI thread the commit, the page bump and this task are ordered.
+/// Hand `js` to the page `ticket` names, checked on the UI thread right before it goes out.
+/// Checked on a worker, a reload committing between the check and the frame lookup would land
+/// the code in the new document; the UI thread orders the commit, the page bump and this task.
 fn eval_for(ticket: Ticket, js: String) -> Delivery {
     let claim = Arc::new(Claim::default());
     let (tx, rx) = mpsc::channel();

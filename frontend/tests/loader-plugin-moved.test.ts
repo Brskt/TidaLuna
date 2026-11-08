@@ -52,8 +52,8 @@ const { LunaPlugin } = await import("../src/plugins/luna-plugin");
 const emit = (channel: string, ...args: unknown[]) => (window as any).__LUNAR_IPC_EMIT__(channel, ...args);
 const answered = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-// A plugin first loaded at its new address can fail at once: that event came before the page took
-// the move and was dropped, leaving the card on with no error while Rust had turned it off.
+// A plugin first loaded at its new address can fail at once; that event comes before the page takes
+// the move and must still reach the moved plugin, or its card stays on with no error while Rust turned it off.
 test("an event for the new url waits for the move and reaches the moved plugin", async () => {
 	rows = [row(FROM), row(OTHER), row(VICTIM)];
 	await loader.loadRegistry();
@@ -123,8 +123,8 @@ test("a move the rows could not confirm lets its events through", async () => {
 	expect(victim.loadError._).toBe("after");
 });
 
-// A Store card whose package was still loading when the move landed put its placeholder over the
-// moved plugin, and every later event for that url reached the placeholder.
+// A Store card whose package is still loading when the move lands must not put its placeholder over
+// the moved plugin; every later event for that url would reach the placeholder.
 test("a Store card made during a move gets the moved plugin", async () => {
 	const mover = LunaPlugin.plugins[TO]!;
 	fetched = new Promise((resolve) => (fetchOpen = resolve));

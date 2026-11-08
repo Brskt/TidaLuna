@@ -31,7 +31,7 @@ const DUPLICATE = "https://x/Duplicate";
 const LIB = "https://x/Lib";
 
 // A Store card appears as soon as `@luna/ui` renders. Built from an empty registry, an installed
-// plugin showed Install, and the click reinstalled it over the user's: trust and flag reset.
+// plugin would show Install, and a click would reinstall it over the user's (trust and flag reset).
 test("a Store card of an installed plugin is the installed plugin", async () => {
 	rows = [row(OK), row(FAILED), row(DUPLICATE), row(LIB)];
 	await loader.loadRegistry();

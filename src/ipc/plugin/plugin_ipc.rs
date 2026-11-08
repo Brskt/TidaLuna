@@ -335,7 +335,7 @@ async fn do_plugin_disable(url: String) -> Result<(), String> {
             })
         }?;
         // 2. Unload from the renderer the load current now: under the pass lock no enable marks
-        // another between the row and here. Nothing loaded is fine, the row was all this owed.
+        // another between the row and here. Nothing loaded is fine; the row was all this owed.
         super::inject::unload_current(pass, &url);
         Ok(())
     })
