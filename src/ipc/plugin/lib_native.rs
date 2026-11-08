@@ -4,7 +4,7 @@
 
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, eval_js, is_safe_open_url, open_in_os};
-use crate::ui::destination_dialog::{Native, Request, choose_destination, classify};
+use crate::ui::destination_dialog::{Native, Refusal, Request, choose_destination, classify};
 use crate::ui::file_dialog::{show_file_dialog, vet_folder};
 use crate::ui::message_dialog::show_message_dialog;
 use cef::FileDialogMode;
@@ -321,15 +321,21 @@ fn record_save_answer(answered: &str) -> Result<(), crate::ui::file_dialog::NotR
     }
 }
 
-/// The save dialog's own judgement, on the sanitised destination: what `record_save_answer` records
-/// and the download writes, never the raw name.
+/// The save dialog's own judgement, on the sanitised name `record_save_answer` records and the
+/// download writes. Held to an audio name as `run` is: the download is a save answer's only reader,
+/// no native plugin being sent a `grant` to write one itself.
 fn vet_save_answer(
     guard: Option<&crate::platform::install_guard::Protected>,
     answered: &std::path::Path,
-) -> Result<(), crate::ui::file_dialog::NotRecorded> {
+) -> Result<(), Refusal> {
+    use crate::ui::file_dialog::NotRecorded;
     let dest = super::download::sanitized_destination(&answered.to_string_lossy())
-        .map_err(|_| crate::ui::file_dialog::NotRecorded::Unresolvable)?;
-    crate::ui::file_dialog::vet_destination(guard, &dest).map(drop)
+        .map_err(|_| NotRecorded::Unresolvable)?;
+    crate::ui::file_dialog::vet_destination(guard, &dest)?;
+    if !super::download::audio_named(&dest) {
+        return Err(Refusal::NotAudioName);
+    }
+    Ok(())
 }
 
 /// The folder dialog's own judgement. A protected folder and one holding the home are refused. One

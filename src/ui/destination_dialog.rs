@@ -58,10 +58,12 @@ impl Dialogs for Native {
     }
 }
 
+/// Why an answer is turned down: where it points, or, for a save a download will write, its name.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Location(NotRecorded),
     HoldsHome,
+    NotAudioName,
 }
 
 impl From<NotRecorded> for Refusal {
@@ -160,6 +162,9 @@ where
                 "A folder picked here lets the plugin save audio files anywhere inside it without asking again.\n\n\
                  Your home folder, and any folder holding it, contains files other programs run.\n\n\
                  Choose a folder inside it, such as Music. Saving a single file in your home still works."
+            }
+            Refusal::NotAudioName => {
+                "This file name must end in .flac or .m4a.\n\nChoose a name that does."
             }
         };
         let buttons = ["Choose another location".to_string(), "Cancel".to_string()];

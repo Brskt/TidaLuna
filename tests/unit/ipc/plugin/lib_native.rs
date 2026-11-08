@@ -1,7 +1,7 @@
 //! Tests for `src/ipc/plugin/lib_native.rs`, attached to it by `#[path]`.
 
 use super::{
-    asked_for_a_directory, build_send_to_render_js, record_save_answer, vet_folder_answer,
+    Refusal, asked_for_a_directory, build_send_to_render_js, record_save_answer, vet_folder_answer,
     vet_save_answer,
 };
 use serde_json::json;
@@ -63,7 +63,7 @@ fn a_save_answer_is_judged_under_its_sanitised_name() {
 
     assert_eq!(
         vet_save_answer(Some(&guard), &parent.path().join("install.")),
-        Err(NotRecorded::Protected)
+        Err(Refusal::Location(NotRecorded::Protected))
     );
     assert_eq!(
         vet_save_answer(Some(&guard), &parent.path().join("Title: B?.flac")),
