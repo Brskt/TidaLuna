@@ -431,6 +431,30 @@ async fn an_existing_install_file_is_refused_like_an_absent_one() {
     );
 }
 
+/// Under a folder grant nobody sees the name a plugin composes. A FLAC passes the content check
+/// whatever it is called, and its comments are plugin text: as `x.bat` a shell would run them.
+#[tokio::test]
+async fn a_download_named_for_another_program_is_refused_before_anything_is_fetched() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::ui::file_dialog::record_folder_grant(dir.path()).expect("the folder is granted");
+
+    let err = run(request_into(&dir.path().join("x.bat")), None)
+        .await
+        .expect_err("a non-audio name is refused");
+
+    assert!(format!("{err:#}").contains(NOT_AUDIO_NAME), "{err:#}");
+    assert_eq!(status_for(&err), 403);
+    assert!(!dir.path().join("x.bat").exists());
+}
+
+#[test]
+fn only_the_final_extension_names_a_download_audio() {
+    assert!(audio_named(std::path::Path::new("/m/Song.M4A")));
+    assert!(audio_named(std::path::Path::new("/m/a.zip.flac")));
+    assert!(!audio_named(std::path::Path::new("/m/a.flac.zip")));
+    assert!(!audio_named(std::path::Path::new("/m/.m4a")));
+}
+
 /// A substring test accepts all three of these, and each is a host someone else can control.
 #[test]
 fn lookalike_hosts_are_refused() {

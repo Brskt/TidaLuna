@@ -180,6 +180,19 @@ fn status_for(e: &anyhow::Error) -> i32 {
 /// What a plugin hears when a download targets the app's own files.
 const IN_THE_INSTALL: &str = "destination is inside TidaLunar's own files";
 
+/// What a plugin hears when it names a download for something other than audio.
+const NOT_AUDIO_NAME: &str = "destination must end in .flac or .m4a";
+
+/// The extensions `MediaItem.fileExtension` gives a download. Shells, file managers and browsers
+/// pick a file's handler by its extension: this decides which program opens what lands here.
+const AUDIO_EXTENSIONS: [&str; 2] = ["flac", "m4a"];
+
+pub(super) fn audio_named(dest: &std::path::Path) -> bool {
+    dest.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| AUDIO_EXTENSIONS.iter().any(|a| ext.eq_ignore_ascii_case(a)))
+}
+
 async fn run(
     req: Request,
     guard: Option<&'static crate::platform::install_guard::Protected>,
@@ -208,6 +221,11 @@ async fn run(
     // present or absent. `write_file` judges again at the rename.
     if protected {
         return Err(Refused(IN_THE_INSTALL).into());
+    }
+    // The plugin names the file, with no dialog at all under a folder grant, and its tags join the
+    // bytes after the content check below: only the name can keep another program from opening it.
+    if !audio_named(&dest) {
+        return Err(Refused(NOT_AUDIO_NAME).into());
     }
 
     // Settled before anything is fetched, from the same policy the write applies: the two cannot
@@ -257,8 +275,8 @@ async fn run(
     })
     .await??;
 
-    // A plugin picks the dialog's `defaultPath`; a user accepting without reading it can be steered
-    // at a file another program acts on. Refusing non-audio keeps this channel from writing one.
+    // The name is audio already; the bytes must be too, from offset 0, where a reader that sniffs
+    // content looks first.
     if !is_audio_container(&decrypted) {
         return Err(Refused("the stream is not an audio container").into());
     }
@@ -314,9 +332,9 @@ async fn run(
 /// magic prefix, which `#abcftyp\n[Desktop Entry]` fools. Judged on bytes, never the file name:
 /// `fileExtension()` answers `flac` for every BTS manifest including AAC, which arrives as ISO-BMFF.
 ///
-/// This only proves the file cannot ALSO be parsed as something else from offset 0, the real risk of
-/// a plugin-picked `defaultPath`. It does not seal the opaque payload region (`mdat`, FLAC frames)
-/// against carried content; that needs a demuxer, not this.
+/// This only proves the file cannot ALSO be parsed as something else from offset 0. It seals neither
+/// the opaque payload (`mdat`, FLAC frames) nor the plugin's tags added after it: an archive reader
+/// finds a ZIP in those. What keeps such a reader away is the audio name `run` holds the file to.
 fn is_audio_container(data: &[u8]) -> bool {
     is_flac_stream(data) || is_iso_bmff(data)
 }
