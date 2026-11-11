@@ -310,5 +310,5 @@ pub(crate) fn find_binary(exe_dir: &std::path::Path, name: &str) -> Option<PathB
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/native_runtime/host_script.rs"]
+#[path = "../../tests/unit/native_runtime.rs"]
 mod tests;

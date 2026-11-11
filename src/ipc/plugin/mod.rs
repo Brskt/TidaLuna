@@ -318,5 +318,5 @@ fn parse_dash_failure_code(err: &anyhow::Error) -> i32 {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/ipc/plugin/mod.rs"]
+#[path = "../../../tests/unit/ipc/plugin.rs"]
 mod tests;

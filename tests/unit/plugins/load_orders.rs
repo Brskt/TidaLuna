@@ -11,7 +11,7 @@ use super::wrap_plugin_code;
 
 const URL: &str = "https://example.test/plugin's/a.mjs";
 
-/// Bun from `dist/` when built, as `host_script.rs` resolves it, else from PATH.
+/// Bun from `dist/` when built, as `tests/unit/native_runtime.rs` resolves it, else from PATH.
 fn bun_path(root: &Path) -> PathBuf {
     let name = if cfg!(windows) { "bun.exe" } else { "bun" };
     crate::native_runtime::find_binary(&root.join("dist"), name)

@@ -573,5 +573,5 @@ wrap_task! {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/connect/receiver/routing.rs"]
+#[path = "../../../tests/unit/connect/receiver.rs"]
 mod tests;

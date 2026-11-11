@@ -476,5 +476,5 @@ pub(super) fn cleanup_staging() {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/updater/download/cap_tests.rs"]
-mod cap_tests;
+#[path = "../../tests/unit/updater/download.rs"]
+mod tests;

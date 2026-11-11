@@ -162,5 +162,5 @@ fn pick(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/ui/folder_picker_windows.rs"]
+#[path = "../../../tests/unit/ui/folder_picker/windows.rs"]
 mod tests;

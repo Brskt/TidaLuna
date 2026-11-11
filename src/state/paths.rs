@@ -164,5 +164,5 @@ pub fn cache_data_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/state_tests.rs"]
-mod state_tests;
+#[path = "../../tests/unit/state/paths.rs"]
+mod tests;

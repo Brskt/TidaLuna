@@ -38,7 +38,7 @@ fn last_duration_track(events: &Spy) -> Option<Option<String>> {
 /// nothing opens an audio endpoint.
 #[tokio::test]
 async fn an_announced_length_names_the_track_its_load_carried() {
-    // Held for the reason `load_state_tests` states: this samples the process-wide generation
+    // Held for the reason given in the `load_state` tests: this samples the process-wide generation
     // and `handle_load` reads it again; a mint from another test landing between the two
     // makes the load read as stale and ignored.
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;

@@ -245,5 +245,5 @@ fn pick(owner: usize, title: &str, default_path: Option<&str>) -> Outcome {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/ui/folder_picker_linux.rs"]
+#[path = "../../../tests/unit/ui/folder_picker/linux.rs"]
 mod tests;

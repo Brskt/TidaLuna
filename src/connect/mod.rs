@@ -226,5 +226,5 @@ impl ConnectManager {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/connect/manager.rs"]
+#[path = "../../tests/unit/connect.rs"]
 mod tests;

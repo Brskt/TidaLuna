@@ -1,4 +1,4 @@
-// Policy probe for frontend/scripts/native-host.cjs, driven by host_script.rs.
+// Policy probe for frontend/scripts/native-host.cjs, driven by tests/unit/native_runtime.rs.
 //
 // The script under test hardens its own realm and has no exports; it is loaded
 // exactly the way it loads a plugin - through new Function - and the assertions are
