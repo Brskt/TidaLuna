@@ -1,4 +1,4 @@
-//! Tests for `src/player/asio/host.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/asio/host/control.rs`, attached to it by `#[path]`.
 //!
 //! The transport states the control thread reports, and the load each one names. Nothing here
 //! opens a driver: `ControlCtx::new` holds none, and the transport arms below only ever reach the
