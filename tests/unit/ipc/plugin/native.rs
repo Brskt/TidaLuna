@@ -1,6 +1,7 @@
-//! Tests for `src/ipc/plugin/native.rs`, attached to it by `#[path]`.
+//! Tests for `src/ipc/plugin/native/mod.rs`, attached to it by `#[path]`.
 
 use super::*;
+use crate::ipc::plugin::trust_prompt::recordable;
 
 fn owner(raw: &str) -> PluginName {
     PluginName::parse(raw).unwrap()
