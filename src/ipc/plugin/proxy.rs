@@ -420,7 +420,7 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
             }
             let is_token_endpoint = crate::ui::nav::is_token_endpoint(&url);
             let is_4xx = (400..500).contains(&(status as u32));
-            let body = match super::plugin_ipc::read_bytes_capped(
+            let body = match super::source::read_bytes_capped(
                 resp,
                 MAX_UPSTREAM_BYTES,
                 "the upstream body",

@@ -145,7 +145,7 @@ fn settle(pass: &PassGuard, to: &str, moves: Vec<StoreMove>, answer: Option<bool
 /// which holds once this page's pass tried every plugin; before it, that pass loads them itself.
 /// After a pass that could not, they are told so and the next page load takes them.
 fn load(pass: &PassGuard, urls: Vec<String>) {
-    if !super::plugin_ipc::has_session() {
+    if !super::jsrt::has_session() {
         return;
     }
     let ready = with_state(|state| {

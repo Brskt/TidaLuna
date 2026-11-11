@@ -1,5 +1,8 @@
 use super::admission::{Admission, Closed};
-use crate::app_state::{IpcMessage, Ticket, emit_ipc_event_with_args, eval_js, with_state};
+use super::ipc_callback_ok;
+use crate::app_state::{
+    IpcCallback, IpcMessage, Ticket, emit_ipc_event_with_args, eval_js, with_state,
+};
 use cef::*;
 use std::collections::{HashMap, HashSet};
 
@@ -458,6 +461,42 @@ pub(super) fn run_pass(
     } else {
         PassOutcome::Completed(failed_urls)
     }
+}
+
+/// jsrt.load_plugins as request-response: runs multi-pass + reconciliation, then responds.
+/// Refuses to load plugins when no session is active (login page scenario).
+pub(super) fn has_session() -> bool {
+    with_state(|state| !state.captured_token.is_empty() || state.token_state.is_some())
+        .unwrap_or(false)
+}
+
+pub(super) fn handle_jsrt_load_plugins(callback: IpcCallback) {
+    if !has_session() {
+        crate::vprintln!("[PLUGIN] Skipping plugin load - no active session");
+        ipc_callback_ok(&callback, "true");
+        return;
+    }
+
+    // Gate: on a cold boot the real OAuth token still lives in TIDAL's SDK until
+    // the proactive refresh rotates it to opaque nonces. Park the reply until the
+    // gate opens (refresh done or 5s safety timeout); plugins can't read it.
+    // Parked first, then requested. Parking is what makes a second caller join the pass already
+    // running instead of starting its own over the same plugins, and it is the only way its
+    // answer can arrive: the pass, not this handler, replies.
+    let gate_closed = with_state(|state| {
+        let ticket = state.ticket();
+        state.plugin_load_waiters.push((ticket, callback.clone()));
+        !state.proactive_refresh_done
+    })
+    .unwrap_or(false);
+
+    if gate_closed {
+        crate::vprintln!("[PLUGIN] Deferring plugin load until proactive refresh completes");
+        super::jsrt::arm_gate_timeout();
+        return;
+    }
+
+    super::jsrt::request_plugin_load();
 }
 
 /// Open the gate and drain parked load requests. Posts to the CEF UI thread

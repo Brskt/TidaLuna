@@ -1,5 +1,5 @@
-use super::plugin_ipc::CleanupScope;
 use super::trust_prompt::{Prompts, recordable};
+use super::uninstall::CleanupScope;
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage};
 use crate::native_runtime::NativeRuntime;

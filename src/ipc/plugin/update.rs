@@ -5,7 +5,7 @@
 use super::inject::{Injected, PassDuty};
 use super::ipc_callback_ok;
 use super::jsrt::PassGuard;
-use super::plugin_ipc::{Manifest, PluginData};
+use super::source::{Manifest, PluginData};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use crate::plugins::store::UpdateOutcome;
 use std::collections::HashSet;
@@ -107,7 +107,7 @@ pub(super) fn handle_plugin_update(msg: &IpcMessage, callback: IpcCallback) {
 /// its check for the page that follows the login.
 pub(super) fn handle_plugin_update_all(callback: IpcCallback) {
     ipc_callback_ok(&callback, "true");
-    if !super::plugin_ipc::has_session() || LAUNCH_CHECK_RAN.swap(true, Ordering::SeqCst) {
+    if !super::jsrt::has_session() || LAUNCH_CHECK_RAN.swap(true, Ordering::SeqCst) {
         return;
     }
     crate::state::rt_handle().spawn(async {
@@ -225,7 +225,7 @@ async fn pull(url: &str) -> Pulled {
     if let Err(refused) = crate::plugins::name::PluginName::parse(&name) {
         return refused_as(hash, refused.to_string());
     }
-    if let Err(why) = super::plugin_ipc::check_luna_type(&manifest) {
+    if let Err(why) = super::install::check_luna_type(&manifest) {
         return refused_as(hash, why);
     }
     let filename = format!("{url}.mts");
@@ -286,18 +286,16 @@ fn refused_as(hash: String, reason: String) -> Pulled {
 /// without one: `fetch_plugin_data` would make up a manifest and drop the real one.
 async fn fetch(url: &str, stored_manifest: &str) -> Result<PluginData, String> {
     let client = &*crate::state::HTTP_CLIENT;
-    let fetched = tokio::time::timeout(
-        FETCH_TIMEOUT,
-        super::plugin_ipc::fetch_plugin_data(client, url),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "The source did not answer within {} s",
-            FETCH_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|e| format!("{e:#}"))?;
+    let fetched =
+        tokio::time::timeout(FETCH_TIMEOUT, super::source::fetch_plugin_data(client, url))
+            .await
+            .map_err(|_| {
+                format!(
+                    "The source did not answer within {} s",
+                    FETCH_TIMEOUT.as_secs()
+                )
+            })?
+            .map_err(|e| format!("{e:#}"))?;
     if !fetched.manifest.replaces(stored_manifest) {
         return Err("The source no longer serves the plugin's manifest".to_string());
     }

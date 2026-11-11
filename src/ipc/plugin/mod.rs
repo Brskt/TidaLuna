@@ -1,15 +1,20 @@
+mod activation;
 mod admission;
+mod auth_fetch;
 mod download;
 mod inject;
+mod install;
 mod install_consent;
 mod jsrt;
 mod lib_native;
 mod native;
 mod path_probe;
-mod plugin_ipc;
+mod plugin_db;
 mod proxy;
+mod source;
 mod store_move;
 mod trust_prompt;
+mod uninstall;
 mod update;
 
 pub(crate) use admission::page_stamp;
@@ -96,10 +101,10 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
     }
     match msg.channel.as_str() {
         "plugin.fetch" => {
-            plugin_ipc::handle_plugin_fetch(&msg, &caller, query_id, callback);
+            auth_fetch::handle_plugin_fetch(&msg, &caller, query_id, callback);
         }
         "tidal.fetch" => {
-            plugin_ipc::handle_tidal_fetch(&msg, query_id, callback);
+            auth_fetch::handle_tidal_fetch(&msg, query_id, callback);
         }
         "player.parse_dash" => {
             let xml = msg.arg(0);
@@ -150,16 +155,16 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
             native::handle_native_call(&msg, callback);
         }
         "plugin.fetch_package" => {
-            plugin_ipc::handle_plugin_fetch_package(&msg, callback);
+            source::handle_plugin_fetch_package(&msg, callback);
         }
         "plugin.install" => {
-            plugin_ipc::handle_plugin_install(&msg, callback);
+            install::handle_plugin_install(&msg, callback);
         }
         "plugin.migrate_base_url" => {
             store_move::handle_plugin_migrate_base_url(&msg, callback);
         }
         "plugin.check_hash" => {
-            plugin_ipc::handle_plugin_check_hash(&msg, query_id, callback);
+            source::handle_plugin_check_hash(&msg, query_id, callback);
         }
         "plugin.update" => {
             update::handle_plugin_update(&msg, callback);
@@ -168,13 +173,13 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
             update::handle_plugin_update_all(callback);
         }
         "plugin.enable" => {
-            plugin_ipc::handle_plugin_enable(&msg, callback);
+            activation::handle_plugin_enable(&msg, callback);
         }
         "plugin.disable" => {
-            plugin_ipc::handle_plugin_disable(&msg, callback);
+            activation::handle_plugin_disable(&msg, callback);
         }
         "jsrt.load_plugins" => {
-            plugin_ipc::handle_jsrt_load_plugins(callback);
+            jsrt::handle_jsrt_load_plugins(callback);
         }
         "updater.check" => {
             crate::updater::handle_updater_check(callback);
@@ -277,7 +282,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
             });
         }
         _ => {
-            plugin_ipc::handle_plugin_db(msg, &caller, callback);
+            plugin_db::handle_plugin_db(msg, &caller, callback);
         }
     }
 }
