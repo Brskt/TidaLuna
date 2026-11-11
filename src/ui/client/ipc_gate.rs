@@ -1,6 +1,6 @@
 use crate::app_state::IpcMessage;
 use crate::ipc::player::handle_ipc_message;
-use crate::ipc::plugin::handle_plugin_ipc;
+use crate::ipc::plugin::{handle_plugin_ipc, ipc_callback_err, ipc_callback_ok};
 use crate::ui::nav::PageKind;
 use cef::wrapper::message_router::BrowserSideHandler;
 use cef::*;
@@ -127,10 +127,7 @@ impl BrowserSideHandler for IpcQueryHandler {
                 msg.id.is_some(),
             ) {
                 PrivilegedGate::Refuse403 => {
-                    callback
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .failure(403, "IPC restricted to TIDAL frames");
+                    ipc_callback_err(&callback, 403, "IPC restricted to TIDAL frames");
                     return true;
                 }
                 PrivilegedGate::DropAck => {
@@ -138,10 +135,7 @@ impl BrowserSideHandler for IpcQueryHandler {
                         "[IPC]    Dropped privileged fire-and-forget from untrusted frame: {}",
                         log_safe_channel(&msg.channel)
                     );
-                    callback
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .success_str("ok");
+                    ipc_callback_ok(&callback, "ok");
                     return true;
                 }
                 PrivilegedGate::Allow => {}
@@ -153,19 +147,13 @@ impl BrowserSideHandler for IpcQueryHandler {
                 && frame.as_ref().map(|f| f.is_main() == 0).unwrap_or(true)
             {
                 if msg.id.is_some() {
-                    callback
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .failure(403, "Connect IPC restricted to main frame");
+                    ipc_callback_err(&callback, 403, "Connect IPC restricted to main frame");
                 } else {
                     crate::vprintln!(
                         "[IPC]    Dropped connect.* fire-and-forget from non-main frame: {}",
                         msg.channel
                     );
-                    callback
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .success_str("ok");
+                    ipc_callback_ok(&callback, "ok");
                 }
                 return true;
             }
@@ -182,10 +170,7 @@ impl BrowserSideHandler for IpcQueryHandler {
         }
 
         handle_ipc_message(request);
-        callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .success_str("ok");
+        ipc_callback_ok(&callback, "ok");
         true
     }
 

@@ -22,6 +22,7 @@ use crate::connect::controller::server_info::{
 use crate::connect::controller::session::ControllerSessionEvent;
 use crate::connect::types::{PlayerState, ServerInfo};
 use crate::connect::ws::client::WsClient;
+use crate::ipc::plugin::{ipc_callback_err, ipc_callback_ok};
 use crate::platform::secure_store::StoredTokenState;
 
 use crate::connect::failure_latch::FailureLatch;
@@ -210,27 +211,18 @@ pub(super) fn push_server_info(due: ServerInfoClaim) {
 pub(super) fn answer_queued(queued: Queued, callback: IpcCallback) {
     let Some(rt) = crate::state::RT_HANDLE.get() else {
         release_delivery(&queued.delivery);
-        callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .failure(500, "No runtime");
+        ipc_callback_err(&callback, 500, "No runtime");
         return;
     };
     rt.spawn(async move {
         let answer = match await_queued(queued).await {
             Ok(response) => serde_json::to_string(&response).unwrap_or_default(),
             Err(e) => {
-                callback
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .failure(500, &e);
+                ipc_callback_err(&callback, 500, &e);
                 return;
             }
         };
-        callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .success_str(&answer);
+        ipc_callback_ok(&callback, &answer);
     });
 }
 
@@ -257,27 +249,18 @@ async fn run_device_cmd(cmd: serde_json::Value) -> Result<serde_json::Value, Str
 }
 
 pub(super) fn send_device_cmd(cmd: serde_json::Value, callback: IpcCallback) {
-    let fail = |callback: &IpcCallback, message: &str| {
-        callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .failure(500, message);
-    };
     if let Some(rt) = crate::state::RT_HANDLE.get() {
         rt.spawn(async move {
             match run_device_cmd(cmd).await {
                 Ok(response) => {
                     let json = serde_json::to_string(&response).unwrap_or_default();
-                    callback
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .success_str(&json);
+                    ipc_callback_ok(&callback, &json);
                 }
-                Err(e) => fail(&callback, &e),
+                Err(e) => ipc_callback_err(&callback, 500, &e),
             }
         });
     } else {
-        fail(&callback, "No runtime");
+        ipc_callback_err(&callback, 500, "No runtime");
     }
 }
 

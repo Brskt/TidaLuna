@@ -20,6 +20,7 @@ use crate::connect::types::{
     DeviceText, MdnsDevice, ReceiverConfig, TextField, normalize_device_frame,
 };
 use crate::connect::ws::client::{WsClient, WsClientEvent};
+use crate::ipc::plugin::{ipc_callback_err, ipc_callback_ok};
 
 use super::helpers::{
     emit_connect_failed, emit_controller_session_event, existing_controller,
@@ -136,10 +137,7 @@ fn log_failure(failure: &ConnectFailure) {
 }
 
 fn answer_failure(callback: &IpcCallback, failure: &ConnectFailure) {
-    callback
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .failure(failure.status(), &failure.message());
+    ipc_callback_err(callback, failure.status(), &failure.message());
 }
 
 /// The failure of an attempt, reported by the request that ran it: one that failed before any
@@ -505,10 +503,10 @@ pub(super) fn connect(msg: IpcMessage, callback: IpcCallback) {
         }
         match &settled.result {
             // TIDAL reads `joined` off this answer (`'joined' in t`), which throws on a bare string.
-            Ok(joined) => callback
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .success_str(&serde_json::json!({ "joined": joined }).to_string()),
+            Ok(joined) => ipc_callback_ok(
+                &callback,
+                &serde_json::json!({ "joined": joined }).to_string(),
+            ),
             Err(failure) if settled.led() => {
                 fail_connect(&callback, failure, settled.announces_failure());
             }
@@ -546,10 +544,7 @@ pub(super) fn disconnect(msg: IpcMessage, callback: IpcCallback) {
     if let Some(ctrl) = existing_controller() {
         end_session(&CONNECT_FLIGHTS, &ctrl, stop, &Renderer);
     }
-    callback
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .success_str("\"ok\"");
+    ipc_callback_ok(&callback, "\"ok\"");
 }
 
 #[cfg(test)]

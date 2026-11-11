@@ -4,6 +4,7 @@
 
 use crate::app_state::{IpcCallback, IpcMessage};
 use crate::connect::controller::server_info::ServerInfoClaim;
+use crate::ipc::plugin::{ipc_callback_err, ipc_callback_ok};
 
 use super::helpers::{answer_queued, prepare_load, prepare_update, send_device_cmd};
 
@@ -24,10 +25,7 @@ pub(super) fn load_queue(msg: &IpcMessage, callback: IpcCallback) {
     let data = msg.args.first().cloned().unwrap_or_default();
     let named = named_quality(data.get("audioquality"));
     let Some((content_si, queue_si)) = prepare_load(named, named.unwrap_or("HIGH")) else {
-        callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .failure(500, "Not signed in");
+        ipc_callback_err(&callback, 500, "Not signed in");
         return;
     };
 
@@ -59,24 +57,15 @@ pub(super) fn select_queue_item(msg: &IpcMessage, callback: IpcCallback) {
 
 pub(super) fn update_quality(msg: &IpcMessage, callback: IpcCallback) {
     let Some(handout) = prepare_update(named_quality(msg.args.first())) else {
-        callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .failure(500, "Not signed in");
+        ipc_callback_err(&callback, 500, "Not signed in");
         return;
     };
 
     match handout.due {
         // The device holds this very content already: nothing is sent, and the answer is a bare ok.
-        ServerInfoClaim::Held => callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .success_str("\"ok\""),
+        ServerInfoClaim::Held => ipc_callback_ok(&callback, "\"ok\""),
         ServerInfoClaim::NoSession => send_device_cmd(handout.command, callback),
         ServerInfoClaim::Queued(queued) => answer_queued(queued, callback),
-        ServerInfoClaim::Failed(e) => callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .failure(500, &e),
+        ServerInfoClaim::Failed(e) => ipc_callback_err(&callback, 500, &e),
     }
 }
