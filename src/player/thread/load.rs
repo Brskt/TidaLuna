@@ -525,6 +525,89 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.loading_gen = loading_gen;
         self.pending_play = pending_play;
     }
+
+    pub(super) fn handle_reassert_resume(
+        &mut self,
+        want_play: bool,
+        product_id: Option<String>,
+        track_id: String,
+    ) {
+        // Applied only while `track_id` still names the committed track (see the field
+        // docs on `ReassertResume`). Erasing instead of refreshing would cost a
+        // quality-swapped track its name, and a generation cannot stand in for the id
+        // match: the newer load mints its generation before this command is minted.
+        let names_committed = self.current_track_id.as_deref() == Some(track_id.as_str());
+        if !names_committed {
+            crate::vprintln!(
+                "[LOAD]   re-assert names {}, committed is {:?}; keeping the live id",
+                crate::util::fmt::short_id(&track_id, 60),
+                self.current_track_id
+                    .as_deref()
+                    .map(|id| crate::util::fmt::short_id(id, 60))
+            );
+        }
+        if names_committed && product_id.is_some() {
+            self.current_product_id = product_id;
+        }
+        // A page names the retained track again, by a load of its own.
+        if names_committed {
+            self.orphaned = false;
+        }
+        // Same-track re-assert (boombox does stop()+load(same)): its load() awaits
+        // `mediaduration` before the instance is seekable, but the idempotent skip
+        // never re-runs handle_load: that event is never re-emitted and boombox's
+        // load() stalls, dropping later progress-bar seeks. Re-emit Duration (at the
+        // committed track's seq), letting the re-load resolve and stay seekable.
+        if self.current_duration > 0.0 {
+            (self.callback)(PlayerEvent::Duration(
+                self.current_duration,
+                self.current_seq,
+                self.current_product_id.clone(),
+            ));
+        }
+        // Same re-drive for the format snapshot the renderer nulls on every
+        // forwarded load (None on ASIO/exclusive-probed tracks -> no stale send).
+        if let Some(fmt) = self.last_media_format {
+            (self.callback)(fmt.to_event());
+        }
+        // Resume if the track was playing pre-stop (resume_on_reassert) or the
+        // load carried the user's play-intent (want_play); the resume then drives
+        // StateChange(Active), resolving boombox's post-duration active await so
+        // it applies the assetPosition and completes.
+        if self.resume_on_reassert || want_play {
+            self.handle_play();
+        }
+    }
+
+    pub(super) fn handle_load_failed(
+        &mut self,
+        error: String,
+        code: MediaErrorCode,
+        seq: u32,
+        load_gen: u32,
+        product_id: Option<String>,
+    ) {
+        // Superseded load (stop() keeps its task alive; abort is
+        // cooperative): checked at processing time, like handle_load's
+        // stale-Load gate; it also covers send/process races.
+        if load_gen != current_gen() {
+            crate::vprintln!("[LOAD #{load_gen}] stale LoadFailed, ignoring");
+            return;
+        }
+        // Error first (cause), then Duration(0) (effect): the SDK's load()
+        // awaits `mediaduration` with no timeout, and 0 is its own
+        // unknown-duration sentinel.
+        // The failed load's own id, carried on the command: this runs before
+        // `handle_load`; the thread is still committed to the previous track, and
+        // `self.current_product_id` would name it instead.
+        (self.callback)(PlayerEvent::MediaError {
+            error,
+            code,
+            seq,
+            product_id: product_id.clone(),
+        });
+        (self.callback)(PlayerEvent::Duration(0.0, seq, product_id));
+    }
 }
 
 #[cfg(test)]

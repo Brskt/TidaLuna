@@ -31,6 +31,17 @@ impl IncomingFailure {
 }
 
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
+    pub(super) fn handle_set_crossfade_secs(&mut self, secs: u8) {
+        // Takes effect at the next arming check. A fade already running
+        // keeps the length it was armed with rather than changing mid-ramp.
+        self.crossfade_secs = secs;
+        // The governor sizes what a preload may draw through a shut gate from
+        // this: a fade needs its own seconds of the incoming track, and the
+        // gate is shut for most of a track whose download is paced at real time.
+        self.governor.buffer_progress().set_crossfade_secs(secs);
+        crate::vprintln!("[XFADE] overlap set to {secs}s");
+    }
+
     /// Load a track's bytes straight from the disk cache, for a fade whose next
     /// track was never staged because the cache already held it.
     ///
