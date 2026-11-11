@@ -452,9 +452,6 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.stop_decode();
             self.pending_complete = false;
             self.last_played_snapshot = 0;
-            self.seeking = false;
-            self.seek_target = None;
-            self.seek_wall_start = None;
             self.has_track = false;
             self.is_playing = false;
             self.current_track_id = None;

@@ -55,6 +55,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_event_rx = None;
         // Nothing survives to answer a seek sent to the thread just retired, and a pin left
         // here follows the next track: pinned progress bar, suppressed resume writes.
+        self.clear_seek_pin();
+    }
+
+    /// Drops the seek pin: no seek in flight, no target, no start time for the
+    /// "[SEEK] complete" log.
+    pub(super) fn clear_seek_pin(&mut self) {
         self.seeking = false;
         self.seek_target = None;
         self.seek_wall_start = None;

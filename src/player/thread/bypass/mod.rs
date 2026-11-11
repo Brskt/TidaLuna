@@ -90,9 +90,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             return;
         }
         let position = self.effective_position();
-        self.seeking = false;
-        self.seek_target = None;
-        self.seek_wall_start = None;
+        self.clear_seek_pin();
         (self.callback)(PlayerEvent::StateChange(
             self.settled_state(),
             self.current_seq,
@@ -163,9 +161,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.set_committed_track(None);
         self.has_track = false;
         self.is_playing = false;
-        self.seeking = false;
-        self.seek_target = None;
-        self.seek_wall_start = None;
+        self.clear_seek_pin();
         self.exclusive_seek_tx = None;
         self.asio_seek_tx = None;
         self.current_track_id = None;

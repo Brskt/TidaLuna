@@ -123,9 +123,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 stream_id,
                                 gen_id,
                             ) {
-                                self.seeking = false;
-                                self.seek_target = None;
-                                self.seek_wall_start = None;
+                                self.clear_seek_pin();
                                 if let Some(track_id) = self.current_track_id.clone() {
                                     // Clear first, accepted or refused: `set` drops anything at
                                     // or under RESUME_MIN_SECONDS, which leaves an older and
@@ -220,9 +218,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 // A seek in flight when the track ended can no longer be
                                 // answered: its sender dies below, and the pin would hold the
                                 // command loop at its 1ms seeking cadence until the next load.
-                                self.seeking = false;
-                                self.seek_target = None;
-                                self.seek_wall_start = None;
+                                self.clear_seek_pin();
                                 self.current_track_id = None;
                                 self.set_committed_track(None);
                                 self.last_exclusive_pos = None;
