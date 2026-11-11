@@ -1,5 +1,5 @@
-//! Tests for what a plugin's switch-off or removal waits for, in `src/plugins/store.rs`, attached by
-//! `#[path]`.
+//! Tests for what a plugin's switch-off or removal waits for, in `src/plugins/store/mod.rs`,
+//! attached by `#[path]`.
 
 use super::*;
 use crate::settings::durability_settings_tests::{

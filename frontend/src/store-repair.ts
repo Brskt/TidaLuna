@@ -35,7 +35,7 @@ export const storeRepairMessage = ({ turnedOff, trust, saved }: StoreRepair): st
     return parts.join(" ");
 };
 
-/** What Rust did to plugins.db at launch (`PluginsReset` in src/plugins/store.rs): the copies of the damaged file. */
+/** What Rust did to plugins.db at launch (`PluginsReset` in src/plugins/store/mod.rs): the copies of the damaged file. */
 export type PluginsReset = { asides: string[] };
 
 /** What the page owes the user of the repairs at launch: the settings fields are there only when settings.db was repaired. */

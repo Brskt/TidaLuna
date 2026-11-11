@@ -2,6 +2,15 @@ use super::name::PluginName;
 use crate::db::{ROUTINE_SYNC, Stable};
 use rusqlite::{Connection, params};
 
+mod dependencies;
+mod storage;
+
+pub(crate) use dependencies::{
+    LunaMeta, check_dependencies_satisfied, find_dependants, find_enabled_dependants,
+    parse_luna_meta,
+};
+pub(crate) use storage::{storage_del, storage_get, storage_keys, storage_set};
+
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct PluginInfo {
     pub url: String,
@@ -22,38 +31,6 @@ pub(crate) fn load_refusal(name: &str, manifest: &str) -> Option<String> {
     match PluginName::parse(name) {
         Err(refused) => Some(refused.to_string()),
         Ok(_) => parse_luna_meta(manifest).err(),
-    }
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub(crate) struct LunaMeta {
-    #[serde(rename = "type")]
-    pub plugin_type: Option<String>,
-    #[serde(default)]
-    pub dependencies: Vec<LunaDependency>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub(crate) struct LunaDependency {
-    pub name: String,
-    #[serde(rename = "storeUrl")]
-    pub store_url: String,
-    #[serde(rename = "devStoreUrl")]
-    pub dev_store_url: Option<String>,
-}
-
-/// Parse the `luna` field from a plugin manifest JSON string.
-/// - `Ok(None)`: no `luna` field - classic plugin without metadata
-/// - `Ok(Some(meta))`: valid `luna` field
-/// - `Err(msg)`: `luna` field present but malformed - caller must block the operation
-pub(crate) fn parse_luna_meta(manifest: &str) -> Result<Option<LunaMeta>, String> {
-    let json: serde_json::Value =
-        serde_json::from_str(manifest).map_err(|e| format!("Invalid manifest JSON: {e}"))?;
-    match json.get("luna") {
-        None => Ok(None),
-        Some(luna_value) => serde_json::from_value(luna_value.clone())
-            .map(Some)
-            .map_err(|e| format!("Invalid luna field in manifest: {e}")),
     }
 }
 
@@ -417,100 +394,6 @@ fn clear_enabled(conn: &Connection, url: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Return names of installed plugins that depend on `plugin_name`.
-/// Fail-closed: if any installed manifest has an invalid `luna` field, returns Err
-/// (we cannot guarantee the plugin isn't a dependant -> block the operation).
-pub(crate) fn find_dependants(
-    conn: &mut Connection,
-    plugin_name: &str,
-) -> Result<Vec<String>, String> {
-    find_dependants_inner(conn, plugin_name, false)
-}
-
-/// Return names of installed AND enabled plugins that depend on `plugin_name`.
-/// Fail-closed on invalid manifests.
-pub(crate) fn find_enabled_dependants(
-    conn: &mut Connection,
-    plugin_name: &str,
-) -> Result<Vec<String>, String> {
-    find_dependants_inner(conn, plugin_name, true)
-}
-
-fn find_dependants_inner(
-    conn: &mut Connection,
-    plugin_name: &str,
-    enabled_only: bool,
-) -> Result<Vec<String>, String> {
-    let sql = if enabled_only {
-        "SELECT name, manifest FROM plugins WHERE installed = 1 AND enabled = 1"
-    } else {
-        "SELECT name, manifest FROM plugins WHERE installed = 1"
-    };
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| format!("Failed to query plugins: {e}"))?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|e| format!("Failed to query plugins: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    let mut dependants = Vec::new();
-    for (name, manifest) in &rows {
-        match parse_luna_meta(manifest) {
-            Ok(None) => {} // no luna field - not a dependant
-            Ok(Some(meta)) => {
-                if meta.dependencies.iter().any(|d| d.name == plugin_name) {
-                    dependants.push(name.clone());
-                }
-            }
-            Err(msg) => {
-                return Err(format!(
-                    "Cannot verify dependants: plugin '{name}' has {msg}"
-                ));
-            }
-        }
-    }
-    Ok(dependants)
-}
-
-/// Check that all dependencies of a plugin are installed AND enabled.
-/// - `Ok(())`: all deps satisfied (or no deps)
-/// - `Err(names)`: missing/disabled dep names, or error message if manifest is invalid
-pub(crate) fn check_dependencies_satisfied(
-    conn: &mut Connection,
-    manifest: &str,
-) -> Result<(), Vec<String>> {
-    let meta = match parse_luna_meta(manifest) {
-        Ok(None) => return Ok(()),
-        Ok(Some(m)) => m,
-        Err(msg) => return Err(vec![msg]),
-    };
-    if meta.dependencies.is_empty() {
-        return Ok(());
-    }
-
-    let mut missing = Vec::new();
-    for dep in &meta.dependencies {
-        let satisfied: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM plugins WHERE name = ?1 AND installed = 1 AND enabled = 1",
-                params![dep.name],
-                |row| row.get::<_, i32>(0),
-            )
-            .unwrap_or(0)
-            > 0;
-        if !satisfied {
-            missing.push(dep.name.clone());
-        }
-    }
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(missing)
-    }
-}
-
 /// `Ok(false)` once the plugin is off or gone; a read that failed is an `Err`, not a disable.
 pub(crate) fn is_enabled(conn: &mut Connection, url: &str) -> rusqlite::Result<bool> {
     use rusqlite::OptionalExtension as _;
@@ -557,136 +440,6 @@ pub(crate) fn case_twin_installed(conn: &mut Connection, name: &PluginName) -> b
     )
     .unwrap_or(0)
         > 0
-}
-
-pub(crate) fn storage_get(conn: &mut Connection, namespace: &str, key: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT value FROM plugin_storage WHERE namespace = ?1 AND key = ?2",
-        params![namespace, key],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
-/// Per-namespace storage quota limits. Passed as a parameter for the quota
-/// logic to be unit-tested against tiny limits without large allocations.
-struct StorageLimits {
-    max_value_bytes: usize,
-    max_key_bytes: usize,
-    max_namespace_keys: i64,
-    max_namespace_bytes: i64,
-}
-
-/// Production quota for `plugin.storage`. Generous for plugin settings; bounds a
-/// single plugin's unbounded growth of its own namespace.
-const STORAGE_LIMITS: StorageLimits = StorageLimits {
-    max_value_bytes: 1024 * 1024,
-    max_key_bytes: 1024,
-    max_namespace_keys: 1000,
-    max_namespace_bytes: 5 * 1024 * 1024,
-};
-
-/// Quota check before an INSERT OR REPLACE. Replace adds no key and shifts the
-/// byte total by the delta; counts use `CAST(value AS BLOB)` for bytes not chars.
-fn enforce_storage_quota(
-    conn: &mut Connection,
-    namespace: &str,
-    key: &str,
-    value: &str,
-    limits: &StorageLimits,
-) -> Result<(), String> {
-    if value.len() > limits.max_value_bytes {
-        return Err(format!(
-            "value exceeds the {}-byte per-value limit",
-            limits.max_value_bytes
-        ));
-    }
-    if key.len() > limits.max_key_bytes {
-        return Err(format!(
-            "key exceeds the {}-byte per-key limit",
-            limits.max_key_bytes
-        ));
-    }
-
-    let (key_count, total_bytes): (i64, i64) = conn
-        .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(value AS BLOB))), 0)
-             FROM plugin_storage WHERE namespace = ?1",
-            params![namespace],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|e| format!("DB error: {e}"))?;
-
-    // Existing byte length of this key (None if the key is new).
-    let old_value_bytes: Option<i64> = conn
-        .query_row(
-            "SELECT LENGTH(CAST(value AS BLOB)) FROM plugin_storage WHERE namespace = ?1 AND key = ?2",
-            params![namespace, key],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if old_value_bytes.is_none() && key_count + 1 > limits.max_namespace_keys {
-        return Err(format!(
-            "namespace exceeds the {}-key limit",
-            limits.max_namespace_keys
-        ));
-    }
-
-    let new_total = total_bytes - old_value_bytes.unwrap_or(0) + value.len() as i64;
-    if new_total > limits.max_namespace_bytes {
-        return Err(format!(
-            "namespace exceeds the {}-byte limit",
-            limits.max_namespace_bytes
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn storage_set(
-    conn: &mut Connection,
-    namespace: &str,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
-    enforce_storage_quota(conn, namespace, key, value, &STORAGE_LIMITS)?;
-    // The statement that writes checks the owner: a write let through before an uninstall and run
-    // after it must not recreate rows under a url that no longer has a plugin.
-    let written = conn
-        .execute(
-            "INSERT OR REPLACE INTO plugin_storage (namespace, key, value)
-             SELECT ?1, ?2, ?3
-             WHERE EXISTS (SELECT 1 FROM plugins WHERE url = ?1 AND installed = 1)",
-            params![namespace, key, value],
-        )
-        .map_err(|e| format!("DB error: {e}"))?;
-    if written == 0 {
-        return Err("plugin is not installed".to_string());
-    }
-    Ok(())
-}
-
-pub(crate) fn storage_del(
-    conn: &mut Connection,
-    namespace: &str,
-    key: &str,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM plugin_storage WHERE namespace = ?1 AND key = ?2",
-        params![namespace, key],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn storage_keys(conn: &mut Connection, namespace: &str) -> Vec<String> {
-    let mut stmt = match conn.prepare("SELECT key FROM plugin_storage WHERE namespace = ?1") {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    match stmt.query_map(params![namespace], |row| row.get(0)) {
-        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
-        Err(_) => Vec::new(),
-    }
 }
 
 pub(crate) struct EnabledPlugin {
@@ -808,9 +561,9 @@ pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/plugins/store.rs"]
+#[path = "../../../tests/unit/plugins/store.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "../../tests/unit/plugins/durability_store_tests.rs"]
+#[path = "../../../tests/unit/plugins/durability_store_tests.rs"]
 mod durability_store_tests;
