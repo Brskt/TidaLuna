@@ -10,8 +10,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
 use super::{
     AsioCommand, AsioEvent, CHANNELS, STREAM_CTX, STREAM_RESET_REQUESTED, STREAM_SWITCHES,
-    STREAM_UNDERRUNS, StreamCtx, stream_buffer_switch, tone_asio_message,
-    tone_buffer_switch_time_info, tone_sample_rate_did_change,
+    STREAM_UNDERRUNS, StreamCtx, asio_message, sample_rate_did_change, stream_buffer_switch,
+    stream_buffer_switch_time_info,
 };
 use crate::player::PlaybackState;
 use crate::player::asio::convert::AsioSampleType;
@@ -149,9 +149,9 @@ impl ControlCtx {
             paused: Arc::new(AtomicBool::new(false)),
             callbacks: Box::new(AsioCallbacks {
                 buffer_switch: stream_buffer_switch,
-                sample_rate_did_change: tone_sample_rate_did_change,
-                asio_message: tone_asio_message,
-                buffer_switch_time_info: tone_buffer_switch_time_info,
+                sample_rate_did_change,
+                asio_message,
+                buffer_switch_time_info: stream_buffer_switch_time_info,
             }),
             stream_id: None,
             opened_under: 0,

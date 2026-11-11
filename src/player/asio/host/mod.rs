@@ -23,14 +23,13 @@ mod smoke;
 
 pub(crate) use control::AsioHandle;
 pub(crate) use feeder::stream_reader_to_asio;
-use smoke::tone_buffer_switch;
 pub(crate) use smoke::{run_flac_test, run_ring_tone_test, run_tone_test};
 
 /// Stereo: TIDAL streams only stereo PCM, and ASIO4ALL exposes 2 output channels.
 const CHANNELS: usize = 2;
 
 /// `sampleRateDidChange`: the driver's clock changed; logged only.
-unsafe extern "system" fn tone_sample_rate_did_change(s_rate: AsioSampleRate) {
+unsafe extern "system" fn sample_rate_did_change(s_rate: AsioSampleRate) {
     crate::vprintln!("[ASIO] sampleRateDidChange: {s_rate} Hz");
 }
 
@@ -39,7 +38,7 @@ unsafe extern "system" fn tone_sample_rate_did_change(s_rate: AsioSampleRate) {
 /// clock never started on an endpoint renegotiation, e.g. ASIO4ALL's KS pin for a high
 /// rate); deferred to the control thread via `STREAM_RESET_REQUESTED` since re-entering
 /// ASIO from the driver thread is forbidden. `kAsioSupportsTimeInfo` stays unadvertised.
-unsafe extern "system" fn tone_asio_message(
+unsafe extern "system" fn asio_message(
     selector: i32,
     value: i32,
     _message: *mut c_void,
@@ -73,13 +72,13 @@ unsafe extern "system" fn tone_asio_message(
 
 /// `bufferSwitchTimeInfo`: only invoked if we advertised time-info support, which
 /// we do not. Provided for ABI completeness; delegates defensively.
-unsafe extern "system" fn tone_buffer_switch_time_info(
+unsafe extern "system" fn stream_buffer_switch_time_info(
     params: *mut AsioTime,
     double_buffer_index: i32,
     direct_process: AsioBool,
 ) -> *mut AsioTime {
-    // SAFETY: same RT-thread contract as `tone_buffer_switch`, which it forwards to.
-    unsafe { tone_buffer_switch(double_buffer_index, direct_process) };
+    // SAFETY: same RT-thread contract as `stream_buffer_switch`, which it forwards to.
+    unsafe { stream_buffer_switch(double_buffer_index, direct_process) };
     params
 }
 

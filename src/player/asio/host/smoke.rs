@@ -16,13 +16,14 @@ use symphonia::core::meta::MetadataOptions;
 use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
 use super::{
-    CHANNELS, STREAM_CTX, StreamCtx, stream_buffer_switch, tone_asio_message,
-    tone_buffer_switch_time_info, tone_sample_rate_did_change,
+    CHANNELS, STREAM_CTX, StreamCtx, asio_message, sample_rate_did_change, stream_buffer_switch,
+    stream_buffer_switch_time_info,
 };
 use crate::player::asio::convert::{AsioSampleType, write_dst_sample};
 use crate::player::asio::driver::AsioDriverInfo;
 use crate::player::asio::iasio::{
-    AsioBool, AsioBufferInfo, AsioCallbacks, AsioChannelInfo, AsioDriver, asio_ok, output_ready_raw,
+    AsioBool, AsioBufferInfo, AsioCallbacks, AsioChannelInfo, AsioDriver, AsioTime, asio_ok,
+    output_ready_raw,
 };
 
 /// The state the real-time callback needs, set once before `ASIOStart`. Held
@@ -80,10 +81,7 @@ fn fill_tone(scratch: &mut [i32], channels: usize, start_frame: u64, sample_rate
 
 /// `bufferSwitch`: the driver asks us to fill output half `double_buffer_index`
 /// (the other half is playing). Runs on the driver's real-time thread.
-pub(super) unsafe extern "system" fn tone_buffer_switch(
-    double_buffer_index: i32,
-    _direct_process: AsioBool,
-) {
+unsafe extern "system" fn tone_buffer_switch(double_buffer_index: i32, _direct_process: AsioBool) {
     let first = TONE_SWITCHES.fetch_add(1, Ordering::Relaxed) == 0;
     let ctx = TONE_CTX.load(Ordering::Acquire);
     if ctx.is_null() {
@@ -136,6 +134,18 @@ pub(super) unsafe extern "system" fn tone_buffer_switch(
     // SAFETY: `ctx.com` is the live `IASIO` pointer stored before `ASIOStart`;
     // `outputReady` is the one driver call the ASIO spec permits from `bufferSwitch`.
     unsafe { output_ready_raw(ctx.com) };
+}
+
+/// `bufferSwitchTimeInfo` for the tone: unadvertised like the streaming one, and forwarding
+/// to the tone's own switch.
+unsafe extern "system" fn tone_buffer_switch_time_info(
+    params: *mut AsioTime,
+    double_buffer_index: i32,
+    direct_process: AsioBool,
+) -> *mut AsioTime {
+    // SAFETY: same RT-thread contract as `tone_buffer_switch`, which it forwards to.
+    unsafe { tone_buffer_switch(double_buffer_index, direct_process) };
+    params
 }
 
 /// Smoke test (`ASIO_TONE`): play a tone through the first driver, blocking the
@@ -228,8 +238,8 @@ pub(crate) fn run_tone_test(info: &AsioDriverInfo) {
         ];
         let callbacks = AsioCallbacks {
             buffer_switch: tone_buffer_switch,
-            sample_rate_did_change: tone_sample_rate_did_change,
-            asio_message: tone_asio_message,
+            sample_rate_did_change,
+            asio_message,
             buffer_switch_time_info: tone_buffer_switch_time_info,
         };
         if !asio_ok(driver.create_buffers(
@@ -532,9 +542,9 @@ fn run_ring_to_asio(
             .collect();
         let callbacks = AsioCallbacks {
             buffer_switch: stream_buffer_switch,
-            sample_rate_did_change: tone_sample_rate_did_change,
-            asio_message: tone_asio_message,
-            buffer_switch_time_info: tone_buffer_switch_time_info,
+            sample_rate_did_change,
+            asio_message,
+            buffer_switch_time_info: stream_buffer_switch_time_info,
         };
         if !asio_ok(driver.create_buffers(
             infos.as_mut_ptr(),
