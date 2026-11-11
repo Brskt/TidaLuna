@@ -109,3 +109,7 @@ pub(crate) fn clear_all_trust(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM native_trust", [])?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/native_runtime/trust.rs"]
+mod tests;
