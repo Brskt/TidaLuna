@@ -153,5 +153,5 @@ pub(crate) fn delta(flags: &[String]) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/main/delta_diff_tests.rs"]
+#[path = "../tests/unit/delta/delta_diff_tests.rs"]
 mod delta_diff_tests;

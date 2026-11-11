@@ -226,5 +226,5 @@ pub(crate) fn finish_boot_tokens() {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/main/boot_token_tests.rs"]
+#[path = "../tests/unit/boot_token_tests.rs"]
 mod boot_token_tests;

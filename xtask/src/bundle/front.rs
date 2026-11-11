@@ -85,5 +85,5 @@ pub(super) fn copy_front(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/main/tests.rs"]
+#[path = "../../tests/unit/bundle/front/tests.rs"]
 mod tests;

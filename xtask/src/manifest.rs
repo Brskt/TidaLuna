@@ -212,5 +212,5 @@ pub(crate) fn sign_manifest() -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/main/manifest_emission_tests.rs"]
+#[path = "../tests/unit/manifest/manifest_emission_tests.rs"]
 mod manifest_emission_tests;
