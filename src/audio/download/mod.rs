@@ -111,7 +111,7 @@ fn current_fetch_url(task_canonical_id: &str) -> Option<String> {
 /// The two owners differ in one fact, and everything here follows from it: whether the track
 /// being fetched is the one `CURRENT_TRACK` names.
 impl DownloadOwner {
-    pub(in crate::audio) fn traffic_class(self) -> TrafficClass {
+    fn traffic_class(self) -> TrafficClass {
         match self {
             Self::Playback => TrafficClass::Playback,
             Self::Preload => TrafficClass::Preload,
@@ -134,11 +134,7 @@ impl DownloadOwner {
     /// `cancel_preload` so a fresh url arrives with a fresh task. Once adopted, the track IS
     /// current and a same-track re-assert can re-sign this task's url underneath it, which is
     /// when the global becomes the right place to read.
-    pub(in crate::audio) fn fetch_url(
-        self,
-        task_canonical_id: &str,
-        captured: &str,
-    ) -> Option<String> {
+    fn fetch_url(self, task_canonical_id: &str, captured: &str) -> Option<String> {
         match self {
             Self::Playback => current_fetch_url(task_canonical_id),
             Self::Preload => Some(captured.to_string()),

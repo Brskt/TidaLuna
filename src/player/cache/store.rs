@@ -249,7 +249,7 @@ impl AudioCache {
     }
 
     /// The detached thread's body, split out to run against a cache of its own in tests.
-    pub(super) fn drop_after_decode_failure(
+    fn drop_after_decode_failure(
         cache: &Mutex<AudioCache>,
         track_id: &str,
         seen: Generation,

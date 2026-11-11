@@ -9,7 +9,7 @@ pub(super) fn beside(path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Copies of damaged stores kept beside the live one; older ones are dropped first.
-pub(super) const KEPT_ASIDES: usize = 3;
+const KEPT_ASIDES: usize = 3;
 
 /// A name no file holds, with its two companions free too: a later incident never lands on an
 /// earlier one's file, nor on a `-wal` SQLite would replay into it.

@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 /// Pages of log a checkpoint is owed at: SQLite's own default for its automatic one.
-pub(super) const WAL_PAGES: c_int = 1000;
+const WAL_PAGES: c_int = 1000;
 
 /// What a reset log file is cut to: a little above the log a checkpoint leaves behind.
 const WAL_FILE_LIMIT: i64 = 8 * 1024 * 1024;

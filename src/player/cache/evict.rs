@@ -34,7 +34,7 @@ pub(super) fn locked(cache: &Mutex<AudioCache>) -> std::sync::MutexGuard<'_, Aud
 /// Where a pass stands in the LRU order, `(last_access, track_id)`: a total order, so that rows
 /// tied on a stamp (a `put_back` restoring one a later insert has reused) are neither skipped
 /// nor met twice across two batches.
-pub(super) struct Cursor {
+struct Cursor {
     last_access: i64,
     id: String,
 }
@@ -49,7 +49,7 @@ impl Default for Cursor {
 }
 
 /// What a step of a pass is after.
-pub(super) enum Goal<'a> {
+enum Goal<'a> {
     /// The LRU rows that bring the size under the target. A pass starts only over the cap
     /// (`first`), then drains to the target. `keep` is never a candidate; `unreclaimable` bytes
     /// are counted in the size and no row can free them.
@@ -304,11 +304,7 @@ impl AudioCache {
     /// transaction, ids `doomed` and bytes uncounted until [`settle_unlinks`](Self::settle_unlinks).
     /// Choosing and removing share one section: a chosen row was there, and from now on its id has
     /// no row, reservation or other batch, leaving its path untouched until the unlink.
-    pub(super) fn claim(
-        &mut self,
-        goal: Goal,
-        cursor: &mut Cursor,
-    ) -> Result<Vec<Doomed>, CacheError> {
+    fn claim(&mut self, goal: Goal, cursor: &mut Cursor) -> Result<Vec<Doomed>, CacheError> {
         let target = self.eviction_target();
         let (keep, mut left) = match goal {
             Goal::Trim {
@@ -394,11 +390,7 @@ impl AudioCache {
     /// already gone) is done; one that would not delete gets its row back as it was, its bytes
     /// counted again, for a later pass, a Clear or a store of the id to retry. Nothing can have
     /// removed that file in between: a doomed id is off limits to every store, drop and sweep.
-    pub(super) fn settle_unlinks(
-        &mut self,
-        batch: Vec<Doomed>,
-        results: Vec<std::io::Result<()>>,
-    ) -> Settled {
+    fn settle_unlinks(&mut self, batch: Vec<Doomed>, results: Vec<std::io::Result<()>>) -> Settled {
         let mut settled = Settled::default();
         let mut put_back = Vec::new();
         for (row, result) in batch.into_iter().zip(results) {

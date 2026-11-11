@@ -26,7 +26,7 @@ pub fn start_download(
     })
 }
 
-pub(in crate::audio) async fn download_stream(
+async fn download_stream(
     resp: reqwest::Response,
     url: String,
     key: String,

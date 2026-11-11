@@ -2,7 +2,7 @@ use rubato::Resampler;
 
 /// Source frames the resampler takes per call. Shared with the tests, which size their
 /// fixtures against it: a private literal would let the two drift apart in silence.
-pub(super) const CHUNK_SIZE: usize = 1024;
+const CHUNK_SIZE: usize = 1024;
 
 pub(in crate::player::thread) struct AudioPipeline {
     /// Absent when source and output share a rate: a sinc filter at ratio 1.0 returns

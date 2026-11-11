@@ -88,7 +88,7 @@ pub(in crate::player::thread) fn pack_xfade_done(cur_gen: u16, origin: u64) -> u
 /// on every call), so the mixer fixes its own size and slices the callback buffer to match,
 /// keeping the real-time path free of a resize. A cost knob rather than a correctness one:
 /// passes are chained, and any value mixes the same samples.
-pub(super) const MIX_QUANTUM: usize = 8192;
+const MIX_QUANTUM: usize = 8192;
 
 /// Copy up to `dst.len()` samples out of `c`, returning how many were available.
 /// The tail is zeroed: a starved ring contributes exact silence to a mix.

@@ -194,11 +194,7 @@ pub(crate) const ENGINE_RATE_IS_PINNED: bool =
 /// still opens when a device refuses its own advertised default. `pinned` is read off
 /// `ENGINE_RATE_IS_PINNED` by the caller rather than here, keeping both orderings
 /// testable on any host.
-pub(super) fn attempt_order(
-    source: (u32, u16),
-    device_default: (u32, u16),
-    pinned: bool,
-) -> [(u32, u16); 2] {
+fn attempt_order(source: (u32, u16), device_default: (u32, u16), pinned: bool) -> [(u32, u16); 2] {
     if pinned {
         [device_default, source]
     } else {
