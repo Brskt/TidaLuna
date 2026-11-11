@@ -1,4 +1,4 @@
-//! Tests for `src/ui/cover_scheme.rs`, attached by `#[path]`.
+//! Tests for `src/ui/cover_scheme/mod.rs`, attached by `#[path]`.
 
 use super::*;
 
@@ -21,58 +21,6 @@ fn only_a_tidal_page_may_request_a_cover() {
         (None, true),
     ] {
         assert_eq!(requester_refusal(frame).is_some(), refused, "{frame:?}");
-    }
-}
-
-/// The sizes are the page's; their sum sets the allocation, capped before anything is copied.
-#[test]
-fn an_upload_over_the_cap_is_refused_before_it_is_allocated() {
-    for (sizes, max, expected) in [(vec![3, 4], 8, Ok(7)), (vec![5, 4], 8, Err(413))] {
-        assert_eq!(
-            body_size(sizes.clone(), max).map_err(|(status, _)| status),
-            expected,
-            "{sizes:?} under {max}"
-        );
-    }
-}
-
-/// Chromium places a `bytes=N-` body at N on our scheme without checking a status or a
-/// `Content-Range`: CEF's skip to N is acknowledged only over a body that starts there.
-#[test]
-fn a_range_skip_is_acknowledged_only_over_the_part_that_starts_there() {
-    let cover: Vec<u8> = (0..=255).collect();
-    let part = ranged_answer(cover.clone(), Some("bytes=100-"));
-    assert_eq!(part.body, cover[100..]);
-    assert_eq!(part.skip(100), SkipVerdict::Skipped(100));
-    assert_eq!(part.skip(99), SkipVerdict::Refused, "another offset");
-
-    for (answer, case) in [
-        (ranged_answer(cover.clone(), None), "the whole cover"),
-        (ranged_answer(cover, Some("bytes=300-")), "past the end"),
-    ] {
-        assert_eq!(answer.skip(100), SkipVerdict::Refused, "{case}");
-    }
-}
-
-/// The page decides by the status alone: 502 asks again soon, 503 waits for the codec, 507
-/// asks at the next miss, and anything else spends one of two attempts. A transient answered as
-/// spent freezes a playable cover; a fault answered as transient retries it without end.
-#[test]
-fn each_failure_reaches_the_page_as_the_status_that_says_what_to_do() {
-    for (class, status) in [
-        (FailureClass::Network, 502),
-        (FailureClass::Refused, 422),
-        (FailureClass::Corrupt, 422),
-        (FailureClass::Unloadable, 503),
-        (FailureClass::Disk, 500),
-    ] {
-        assert_eq!(frames_refusal(class).0, status, "{class:?}");
-    }
-    for (kind, status) in [
-        (std::io::ErrorKind::StorageFull, 507),
-        (std::io::ErrorKind::PermissionDenied, 500),
-    ] {
-        assert_eq!(put_refusal(&kind.into()).0, status, "{kind:?}");
     }
 }
 
