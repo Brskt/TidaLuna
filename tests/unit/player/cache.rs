@@ -1,6 +1,9 @@
-//! Tests for `src/player/cache.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/cache/mod.rs`, attached to it by `#[path]`.
 
+use super::evict::{Cursor, Goal, Owed};
+use super::store::{Reservation, hold_moves_off};
 use super::*;
+use std::sync::Mutex;
 
 /// The calls the production passes make over a shared cache, for a test's own cache: lent to a
 /// `Mutex` for the length of the call, as `store_into` and the applier hold the global one.
