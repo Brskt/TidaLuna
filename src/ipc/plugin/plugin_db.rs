@@ -9,7 +9,6 @@ pub(super) fn handle_plugin_db(
 ) {
     let db = crate::state::db();
     let channel = msg.channel.clone();
-    let args = msg.args.clone();
     // The storage namespace is the caller's url, never argument 0: that named a namespace with no
     // check the caller owned it. Taken from the gate's resolution rather than resolved a second
     // time, which could answer differently and silently move the write.
@@ -46,7 +45,7 @@ pub(super) fn handle_plugin_db(
             }
             "plugin.storage.get" => {
                 let ns = caller_ns.as_str();
-                let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let key = msg.arg(1);
                 match crate::plugins::store::storage_get(pc, ns, key) {
                     Some(val) => {
                         Ok(serde_json::to_string(&val).unwrap_or_else(|_| "null".to_string()))
@@ -56,15 +55,15 @@ pub(super) fn handle_plugin_db(
             }
             "plugin.storage.set" => {
                 let ns = caller_ns.as_str();
-                let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                let value = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
+                let key = msg.arg(1);
+                let value = msg.arg(2);
                 crate::plugins::store::storage_set(pc, ns, key, value)
                     .map(|()| "true".to_string())
                     .map_err(|e| e.to_string())
             }
             "plugin.storage.del" => {
                 let ns = caller_ns.as_str();
-                let key = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let key = msg.arg(1);
                 crate::plugins::store::storage_del(pc, ns, key)
                     .map(|()| "true".to_string())
                     .map_err(|e| e.to_string())
@@ -75,7 +74,7 @@ pub(super) fn handle_plugin_db(
                 Ok(serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()))
             }
             "plugin.cleanup_failed_install" => {
-                let url = args.first().and_then(|v| v.as_str()).unwrap_or("");
+                let url = msg.arg(0);
                 // Triple guard: enabled=0 AND ever_dispatched=0
                 let (enabled, ever_dispatched): (bool, bool) = pc
                     .query_row(
