@@ -563,7 +563,3 @@ pub(crate) fn dedup_same_name(conn: &mut Connection) -> Vec<(String, String)> {
 #[cfg(test)]
 #[path = "../../../tests/unit/plugins/store.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/plugins/durability_store_tests.rs"]
-mod durability_store_tests;

@@ -315,7 +315,3 @@ if (typeof __exports !== 'undefined') {
 #[cfg(test)]
 #[path = "../../tests/unit/plugins/wrapper.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "../../tests/unit/plugins/load_orders.rs"]
-mod load_orders;

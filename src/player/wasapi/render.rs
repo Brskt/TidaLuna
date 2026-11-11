@@ -1181,17 +1181,5 @@ fn render_thread_inner(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/player/wasapi/pcm_compaction_tests.rs"]
-mod pcm_compaction_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/player/wasapi/endpoint_flush_tests.rs"]
-mod endpoint_flush_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/player/wasapi/stall_probe_tests.rs"]
-mod stall_probe_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/player/wasapi/transport_tests.rs"]
-mod transport_tests;
+#[path = "../../../tests/unit/player/wasapi/render.rs"]
+mod tests;

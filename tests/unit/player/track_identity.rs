@@ -1,7 +1,35 @@
-//! Tests for `refreshed_fetch_url` in `src/player/track_identity.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/track_identity.rs`, attached to it by `#[path]`.
 
-use super::{refresh_retained_credential, refreshed_fetch_url};
+use super::{
+    announcement_is_stale, is_same_active_track, refresh_retained_credential, refreshed_fetch_url,
+};
 use crate::state::TrackInfo;
+
+fn committed(canonical_id: &str, format: &str) -> (String, String) {
+    (canonical_id.to_string(), format.to_string())
+}
+
+#[test]
+fn only_the_same_track_in_the_same_format_is_kept_and_anything_else_rebuilds() {
+    // The caller strips the query before calling; both ids are canonical.
+    // (Production passes canonical_track_id("…?sig=2") == "…/abc".)
+    let cur = committed("https://cdn/tracks/abc", "flac");
+    let table = [
+        (Some(&cur), "https://cdn/tracks/abc", "flac", true),
+        (Some(&cur), "https://cdn/tracks/abc", "aac", false),
+        (Some(&cur), "https://cdn/tracks/xyz", "flac", false),
+        (None, "https://cdn/tracks/abc", "flac", false),
+    ];
+    for (current, id, format, same) in table {
+        assert_eq!(
+            is_same_active_track(current, id, format),
+            same,
+            "{current:?} against {id} as {format}"
+        );
+    }
+}
+
+// `refreshed_fetch_url`.
 
 fn track(url: &str) -> TrackInfo {
     TrackInfo {
@@ -145,4 +173,33 @@ fn two_records_of_one_source_match_whether_or_not_they_name_the_track() {
         preloaded, claimed,
         "a preload hit stopped matching once the load carried an id"
     );
+}
+
+// The load banner's staleness decision.
+
+#[test]
+fn an_announcement_is_stale_only_when_it_names_another_load() {
+    let table = [
+        // The gapless advance: Rust commits the next track before the renderer announces it.
+        // The slot still names the track that just ended, and its title must be withheld.
+        (Some("261445590"), Some("261445589"), true),
+        // The case that makes `same_track` the wrong gate here. A recover derives its id from the
+        // retained source and gets `None` when that was never claimed, while the announced
+        // metadata describes the track correctly. Reading absence as disagreement would withhold
+        // a title that was right, which is worse than the defect this decision exists for.
+        (None, Some("261445589"), false),
+        // First load after startup: the slot is empty until the renderer's first frame. There is
+        // no disagreement to report, and the banner falls back to its own Unknown placeholders.
+        (Some("261445590"), None, false),
+        (None, None, false),
+        // Every user-initiated play: the metadata frame precedes the load, and the ids agree.
+        (Some("261445589"), Some("261445589"), false),
+    ];
+    for (load, announced, stale) in table {
+        assert_eq!(
+            announcement_is_stale(load, announced),
+            stale,
+            "load {load:?}, announced {announced:?}"
+        );
+    }
 }

@@ -119,13 +119,5 @@ pub(super) fn print_track_banner(format: &str, product_id: Option<&str>) {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/player/reconcile_tests.rs"]
-mod reconcile_tests;
-
-#[cfg(test)]
-#[path = "../../tests/unit/player/fetch_url_tests.rs"]
-mod fetch_url_tests;
-
-#[cfg(test)]
-#[path = "../../tests/unit/player/banner_tests.rs"]
-mod banner_tests;
+#[path = "../../tests/unit/player/track_identity.rs"]
+mod tests;

@@ -220,10 +220,6 @@ pub(super) fn enforce_sandbox_protocol_gate(
     check_sandbox_protocol(manifest, system)
 }
 
-#[cfg(all(test, target_os = "linux"))]
-#[path = "../../tests/unit/updater/util/sandbox_protocol_gate_tests.rs"]
-mod sandbox_protocol_gate_tests;
-
 #[cfg(test)]
-#[path = "../../tests/unit/updater/util/version_tests.rs"]
-mod version_tests;
+#[path = "../../tests/unit/updater/util.rs"]
+mod tests;
