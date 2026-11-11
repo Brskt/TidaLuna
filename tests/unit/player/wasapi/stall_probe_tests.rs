@@ -1,4 +1,4 @@
-//! Tests for `src/player/wasapi.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/wasapi/render.rs`, attached to it by `#[path]`.
 //!
 //! The stall probe is what turned "a seek takes 1.2-2.5s" into "`IAudioClient::Reset()`
 //! takes 1.2-2.5s". Its bar is a formula rather than a chosen number, and its parked

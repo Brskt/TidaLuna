@@ -1168,7 +1168,7 @@ pub(crate) enum AsioEvent {
 }
 
 /// Absolute frame index for a position in seconds, the `played_frames` baseline so
-/// reporting stays correct after a seek/resume. Mirrors `wasapi::position_frames`.
+/// reporting stays correct after a seek/resume. Mirrors `wasapi::render::position_frames`.
 fn position_frames(secs: f64, sample_rate: u32) -> u64 {
     if sample_rate > 0 && secs.is_finite() && secs > 0.0 {
         (secs * sample_rate as f64) as u64

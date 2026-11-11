@@ -1,4 +1,4 @@
-//! Tests for `src/player/wasapi.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/wasapi/render.rs`, attached to it by `#[path]`.
 
 use super::*;
 

@@ -1,4 +1,4 @@
-//! Tests for `src/player/wasapi.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/wasapi/render.rs`, attached to it by `#[path]`.
 //!
 //! What a `Play` means to the render loop, stated once for each state it can reach. The drain
 //! serving `Playing` handles a whole burst of commands before it re-reads its own state, so

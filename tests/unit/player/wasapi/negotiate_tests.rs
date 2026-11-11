@@ -1,4 +1,4 @@
-//! Tests for `src/player/wasapi.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/wasapi/endpoint.rs`, attached to it by `#[path]`.
 //!
 //! Two pure surfaces sit under the exclusive negotiation: the candidate list, whose ORDER
 //! decides which format the hardware is asked for first, and the two error classifiers,

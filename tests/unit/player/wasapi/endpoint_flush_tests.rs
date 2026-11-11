@@ -1,4 +1,4 @@
-//! Tests for `src/player/wasapi.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/wasapi/render.rs`, attached to it by `#[path]`.
 //!
 //! `Reset()` reaches the driver and has been measured between 1.1s and 3.4s on a
 //! Focusrite endpoint; the render thread must only pay it when the endpoint really holds
