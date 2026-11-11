@@ -138,8 +138,7 @@ pub(super) fn insert_refused_trust(conn: &Connection) {
 /// without a row.
 pub(super) fn profile(dir: &Path, refused_consents: bool) -> PathBuf {
     let path = dir.join("settings.db");
-    let mut conn = Connection::open(&path).unwrap();
-    init_schema(&mut conn).unwrap();
+    let mut conn = file_conn(dir);
     if refused_consents {
         save_video_codec_enabled(&mut conn, false);
         save_receiver_always_on(&mut conn, false);

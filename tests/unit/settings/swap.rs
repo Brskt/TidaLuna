@@ -7,7 +7,7 @@ use crate::settings::catalog::{
     load_video_codec_enabled, read, save_log_level,
 };
 use crate::settings::fixture::{
-    CONSENTS, PAGE, asides, block, page_image, root_page, ruin_page, seeded,
+    CONSENTS, PAGE, asides, block, file_conn, page_image, root_page, ruin_page, seeded,
 };
 use crate::settings::store::{Opened, Trust, init_schema, is_clean, open, populate};
 
@@ -61,8 +61,7 @@ fn a_store_still_held_by_another_connection_is_not_replaced_under_its_wal() {
     let path = seeded(dir.path());
     // A session that is still there: its writes sit in the -wal, which the closing connection of
     // `open` cannot fold into the file.
-    let mut holder = Connection::open(&path).unwrap();
-    init_schema(&mut holder).unwrap();
+    let mut holder = file_conn(dir.path());
     save_log_level(&mut holder, 3);
     ruin_page(&path, root_page(&path, "native_trust"));
     assert!(std::fs::metadata(beside(&path, "-wal")).unwrap().len() > 0);

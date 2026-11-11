@@ -9,8 +9,8 @@ use crate::settings::catalog::{
     set,
 };
 use crate::settings::fixture::{
-    CONSENTS, PAGE, asides, block, insert_refused_trust, overwrite, page_image, profile, root_page,
-    ruin_page, seeded,
+    CONSENTS, PAGE, asides, block, file_conn, insert_refused_trust, overwrite, page_image, profile,
+    root_page, ruin_page, seeded,
 };
 use crate::settings::swap::beside;
 use std::path::PathBuf;
@@ -28,8 +28,7 @@ fn untouched(dir: &Path) -> PathBuf {
 fn table_page_reverted_index_kept(dir: &Path, after_refusal: impl FnOnce(&Connection)) -> PathBuf {
     let path = dir.join("settings.db");
     {
-        let mut conn = Connection::open(&path).unwrap();
-        init_schema(&mut conn).unwrap();
+        let mut conn = file_conn(dir);
         save_receiver_always_on(&mut conn, false);
         save_plugin_update_at_boot(&mut conn, false);
         save_log_level(&mut conn, 2);
@@ -536,8 +535,7 @@ fn a_reindex_whose_markers_cannot_be_written_repairs_nothing() {
 /// the three refusals, with the trust table ruined: the settings table passes its own check.
 fn unreadable_row_first(dir: &Path, first: &str) -> PathBuf {
     let path = dir.join("settings.db");
-    let mut conn = Connection::open(&path).unwrap();
-    init_schema(&mut conn).unwrap();
+    let mut conn = file_conn(dir);
     conn.execute(first, []).unwrap();
     save_video_codec_enabled(&mut conn, false);
     save_receiver_always_on(&mut conn, false);
@@ -609,8 +607,7 @@ fn a_consent_the_user_gave_survives_an_unreadable_row_before_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.db");
     {
-        let mut conn = Connection::open(&path).unwrap();
-        init_schema(&mut conn).unwrap();
+        let mut conn = file_conn(dir.path());
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('window.width', x'31323030')",
             [],
@@ -638,8 +635,7 @@ fn a_scan_that_cannot_run_or_stops_early_is_not_intact() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.db");
     {
-        let mut conn = Connection::open(&path).unwrap();
-        init_schema(&mut conn).unwrap();
+        let conn = file_conn(dir.path());
         for n in 0..300 {
             set(&conn, &format!("filler.{n:03}"), &"x".repeat(60));
         }
@@ -661,8 +657,7 @@ fn a_scan_that_cannot_run_or_stops_early_is_not_intact() {
 /// A profile that refused the three consents and holds no trust decision.
 fn seeded_without_trust(dir: &Path) -> PathBuf {
     let path = dir.join("settings.db");
-    let mut conn = Connection::open(&path).unwrap();
-    init_schema(&mut conn).unwrap();
+    let mut conn = file_conn(dir);
     save_video_codec_enabled(&mut conn, false);
     save_receiver_always_on(&mut conn, false);
     save_plugin_update_at_boot(&mut conn, false);
@@ -834,8 +829,7 @@ fn a_reindex_replaces_an_unreadable_earlier_notice_instead_of_leaving_it() {
 fn trust_page_reverted_index_kept(dir: &Path, seed: impl FnOnce(&mut Connection)) -> PathBuf {
     let path = dir.join("settings.db");
     {
-        let mut conn = Connection::open(&path).unwrap();
-        init_schema(&mut conn).unwrap();
+        let mut conn = file_conn(dir);
         seed(&mut conn);
     }
     let table = root_page(&path, "native_trust");
@@ -1046,9 +1040,7 @@ fn a_table_is_missed_from_a_store_that_had_it_and_not_from_one_that_predates_it(
     for table in TABLES {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.db");
-        let mut conn = Connection::open(&path).unwrap();
-        init_schema(&mut conn).unwrap();
-        drop(conn);
+        drop(file_conn(dir.path()));
         delete_schema_rows(&path, table.name);
 
         let conn = Connection::open(&path).unwrap();

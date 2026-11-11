@@ -5,7 +5,6 @@ use crate::settings::fixture::{
     self, assert_in_order, file_conn, mem_conn, root_page, ruin_page, seeded, statements_of,
     syncs_fully, syncs_routinely,
 };
-use crate::settings::init_schema;
 
 #[test]
 fn secs_clamp_to_the_maximum_on_write_and_on_read() {
@@ -95,8 +94,7 @@ fn a_refusal_inside_a_transaction_is_written_and_reported_unsynced() {
 fn damage_after_the_open_reads_as_refused_and_is_reported_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = seeded(dir.path());
-    let mut conn = Connection::open(&path).unwrap();
-    init_schema(&mut conn).unwrap();
+    let conn = file_conn(dir.path());
     ruin_page(&path, root_page(&path, "settings"));
     crate::logging::take_lines();
 
