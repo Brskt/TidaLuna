@@ -1,4 +1,4 @@
-//! Tests for `src/state.rs`, attached by `#[path]`.
+//! Tests for `src/state/paths.rs`, attached by `#[path]`.
 
 use std::ffi::OsString;
 use std::path::PathBuf;

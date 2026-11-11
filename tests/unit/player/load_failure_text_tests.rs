@@ -127,8 +127,8 @@ fn assert_no_credential(error: &str) {
 /// was never there.
 ///
 /// `Player::load_dash` also publishes into `CURRENT_TRACK`, whose every other writer takes its
-/// fixture: taken here after `PRELOAD_TESTS`, as `state.rs` orders them, it keeps a parallel
-/// test's fade clear.
+/// fixture: taken here after `PRELOAD_TESTS`, as `CurrentTrackSlot` orders them, it keeps a
+/// parallel test's fade clear.
 ///
 /// The process globals are opened here too, before any deadline starts: the media client's root
 /// certificates and the cache a load looks up first were read inside the load task's first poll,
