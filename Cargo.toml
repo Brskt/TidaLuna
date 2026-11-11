@@ -22,7 +22,7 @@ openh264 = { version = "0.9.9", default-features = false, features = [
   "libloading",
 ] }
 # Exact: CalVer, and a minor release may carry a [CHANGE] (breaking) entry; 2026.5.0 adds the
-# bitstream::h264 API cover.rs uses.
+# bitstream::h264 API cover/decode.rs uses.
 shiguredo_mp4 = "2026.5.0"
 
 # https://github.com/crate-ci/typos/blob/master/docs/reference.md
