@@ -427,3 +427,7 @@ pub(in crate::audio) async fn download_stream(
         range_restarts
     );
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/audio/download/stream.rs"]
+mod tests;

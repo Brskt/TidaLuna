@@ -1,10 +1,9 @@
 //! Tests for `src/audio/preload.rs`, attached to it by `#[path]`.
 
 use super::*;
-use crate::audio::bandwidth::{TrafficClass, spawn_governor};
-use crate::audio::download::download_stream;
+use crate::audio::bandwidth::spawn_governor;
 use crate::player::buffer::DownloadFailure;
-use crate::state::{HANG_GUARD, PreloadedTrack, TrackInfo, warm_process_globals};
+use crate::state::{PreloadedTrack, TrackInfo, warm_process_globals};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// libtest runs the crate in one process, several threads wide, and `PRELOAD_STATE`
 /// is process-wide: a second test touching it would race this one in silence. Take
@@ -12,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// mutex, because unlike that one this guard is held across an `.await`.
 pub(crate) static PRELOAD_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn staged(url: &str) -> TrackInfo {
+pub(crate) fn staged(url: &str) -> TrackInfo {
     TrackInfo {
         url: url.to_string(),
         key: "key".to_string(),
@@ -244,56 +243,6 @@ async fn a_staged_copy_its_decoder_refused_is_dropped_and_the_next_track_stands(
     );
 
     preload_state().reset();
-}
-
-/// The downloader was written for the track being listened to and read that assumption
-/// out of `CURRENT_TRACK`: every reconnect asked the global for a fresh credential and
-/// stopped dead when the answer named someone else. Staging breaks that by definition
-/// (`CURRENT_TRACK` names the OUTGOING track for a staged download's whole life); one
-/// transient error retired the staged buffer for good instead of reconnecting it.
-///
-/// The traffic class carried the same assumption, with the opposite effect: staged bytes
-/// charged to the playback queue skip the preload gate and its head allowance entirely,
-/// and compete with the track being heard.
-///
-/// A preload arm that never looks at `CURRENT_TRACK` is also the premise that makes
-/// `promote_crossfade` safe. It publishes the track BEFORE flipping the buffer's owner, and in
-/// that window the buffer still reads `Preload` while its track is already current. Should this
-/// arm ever start looking, the promotion order has to be revisited with it.
-///
-/// Neither assertion depends on what else holds `CURRENT_TRACK`: the playback arm answers
-/// `None` whether the slot names another track or nothing at all, and the preload arm never
-/// consults it. It still takes the slot fixture, because writing that global unguarded is
-/// what raced a Windows test that DOES depend on it into failing.
-#[test]
-fn a_staged_download_keeps_its_own_url_while_another_track_plays() {
-    let staged_url = "https://cdn.invalid/media/track-b.flac?token=STAGED";
-    let staged_id = crate::player::canonical_track_id(staged_url);
-    let _slot = crate::state::current_track_fixture::CurrentTrackSlot::holding(
-        crate::state::RetainedTrack {
-            track: staged("https://cdn.invalid/media/track-a.flac?token=PLAYING"),
-            // Nothing here reads the generation: both arms answer on the canonical url alone.
-            load_gen: 0,
-        },
-    );
-
-    assert_eq!(
-        DownloadOwner::Preload.fetch_url(&staged_id, staged_url),
-        Some(staged_url.to_string()),
-        "a staged download gave up reconnecting because the listener was on another track"
-    );
-    assert_eq!(
-        DownloadOwner::Playback.fetch_url(&staged_id, staged_url),
-        None,
-        "a playback download must still stop once the track it fetches is not current"
-    );
-    assert!(
-        matches!(
-            DownloadOwner::Preload.traffic_class(),
-            TrafficClass::Preload
-        ),
-        "staged bytes charged to the playback queue bypass the gate that paces them"
-    );
 }
 
 /// The head-wait exit is the one return that never publishes the slot. Nothing can
@@ -946,97 +895,4 @@ async fn a_superseded_attempt_cannot_install_its_handles() {
         "the attempt that owns the slot must still be able to write to it"
     );
     preload_state().reset();
-}
-
-/// A seek past the frontier restarts the download, and a request that cannot leave (refused port,
-/// dead route) makes `reqwest` stamp its own error with the url it tried. The bypass packet loops
-/// carry that into `MediaError`, which crosses into the renderer's JS realm and out over the
-/// Connect socket, and the query is a time-bounded credential.
-#[tokio::test]
-async fn a_refused_range_restart_publishes_no_credential() {
-    use std::io::{Read as _, Seek as _};
-    warm_process_globals();
-
-    // Answers a head, then stops talking: the download parks on `stream.next()`, which is the
-    // state a restart interrupts. The length it announces never arrives.
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut request = [0u8; 1024];
-        let _ = sock.read(&mut request).await;
-        let _ = sock
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n")
-            .await;
-        let _ = sock.write_all(&[0u8; 1024]).await;
-        let _ = sock.flush().await;
-        std::future::pending::<()>().await;
-    });
-
-    let resp = crate::state::HTTP_CLIENT_PRELOAD
-        .get(format!("http://127.0.0.1:{port}/track.flac"))
-        .send()
-        .await
-        .expect("the fixture accepts the first request");
-
-    let (buffer, writer) = crate::player::buffer::RamBuffer::new(
-        1_048_576,
-        DownloadOwner::Preload,
-        CancellationToken::new(),
-        GovernorHandle::ungoverned(),
-    );
-
-    // `download_stream` never issues the first request - it is handed one already open. The
-    // restart resolves its target from this argument instead, so a refused port here fails the
-    // restart alone while the transfer already in flight stays healthy.
-    let download = tokio::spawn(download_stream(
-        resp,
-        "http://127.0.0.1:1/track.flac?token=SECRET&exp=1".to_string(),
-        String::new(),
-        writer,
-    ));
-
-    // The head must land before the seek: a cursor inside the lookahead makes the reader wait
-    // for bytes rather than move the download, and no restart would ever be armed.
-    tokio::time::timeout(HANG_GUARD, async {
-        while !matches!(
-            buffer.head_status(1024),
-            crate::player::buffer::HeadStatus::Landed
-        ) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the fixture never delivered its first chunk");
-
-    // Past the frontier plus the 32 KiB lookahead. The read parks, so it cannot share the
-    // runtime that is driving the download.
-    let mut reader = buffer.clone();
-    std::thread::spawn(move || {
-        reader
-            .seek(std::io::SeekFrom::Start(1024 + 64 * 1024))
-            .expect("seeking a RamBuffer moves its cursor and nothing else");
-        let mut sink = [0u8; 64];
-        let _ = reader.read(&mut sink);
-    });
-
-    download.await.expect("the download task must not panic");
-
-    let mut settled = buffer.clone();
-    let mut sink = [0u8; 64];
-    let text = settled
-        .read(&mut sink)
-        .expect_err("a refused restart ends the download, and every later read carries that")
-        .to_string();
-
-    assert!(
-        !text.contains("SECRET"),
-        "the credential survived into the failure text: {text}"
-    );
-    assert!(
-        !text.contains("127.0.0.1"),
-        "the url survived into the failure text: {text}"
-    );
 }

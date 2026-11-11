@@ -5,8 +5,6 @@ use crate::state::HTTP_CLIENT_PRELOAD;
 mod stream;
 mod whole;
 
-#[cfg(test)]
-pub(in crate::audio) use stream::download_stream;
 pub(crate) use stream::start_download;
 pub(crate) use whole::fetch_and_decrypt;
 pub(in crate::audio) use whole::fetch_and_decrypt_inner;
@@ -147,3 +145,7 @@ impl DownloadOwner {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/audio/download.rs"]
+mod tests;
