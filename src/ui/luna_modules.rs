@@ -24,8 +24,8 @@ fn resolve(url: &str) -> Option<&'static [u8]> {
 }
 
 /// The module-serving request handler for a matched `/__luna__/*.mjs` fetch, else None. Wired into
-/// BOTH dispatches (browser-level `client.rs` and context-level `csp_filter.rs`), like `store_proxy`:
-/// the service-worker-routed fetch reaches only the context handler.
+/// BOTH dispatches (browser-level `client/request.rs` and context-level `csp_filter.rs`), like
+/// `store_proxy`: the service-worker-routed fetch reaches only the context handler.
 pub(super) fn intercept(
     url: &str,
     is_navigation: ::std::os::raw::c_int,

@@ -1,6 +1,6 @@
 //! IPC handlers backing the `@luna/lib.native` module exports. Channels are
 //! prefixed `__Luna.`: routed to `handle_plugin_ipc` with Promise support and
-//! gated to trusted frames by `src/ui/client.rs`.
+//! gated to trusted frames by `src/ui/client/ipc_gate.rs`.
 
 use super::path_probe::DIALOG_PATHS;
 use super::{ipc_callback_err, ipc_callback_ok};

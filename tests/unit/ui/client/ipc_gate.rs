@@ -1,8 +1,6 @@
-//! Tests for `src/ui/client.rs`, attached to it by `#[path]`.
+//! Tests for `src/ui/client/ipc_gate.rs`, attached to it by `#[path]`.
 
-use super::{
-    DocumentEnd, PrivilegedGate, is_privileged_channel, privileged_gate, trusted_via_memo,
-};
+use super::{PrivilegedGate, is_privileged_channel, privileged_gate, trusted_via_memo};
 use crate::ui::nav::PageKind;
 
 /// The memo follows the direct classification for every url, through a hit and a thrash.
@@ -67,22 +65,5 @@ fn only_the_channels_that_reach_the_token_the_os_or_the_dash_parser_are_privileg
         ("player.devices.set", true),
     ] {
         assert_eq!(is_privileged_channel(channel), privileged, "{channel}");
-    }
-}
-
-#[test]
-fn only_the_app_browsers_main_frame_ends_the_page_that_plays() {
-    let table = [
-        (true, true, DocumentEnd::Owner),
-        (true, false, DocumentEnd::Other),
-        (false, true, DocumentEnd::Other),
-        (false, false, DocumentEnd::Other),
-    ];
-    for (in_app_browser, is_main_frame, expected) in table {
-        assert_eq!(
-            DocumentEnd::of(in_app_browser, is_main_frame),
-            expected,
-            "app browser: {in_app_browser}, main frame: {is_main_frame}"
-        );
     }
 }

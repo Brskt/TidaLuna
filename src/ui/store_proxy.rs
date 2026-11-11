@@ -27,8 +27,8 @@ fn should_proxy(url: &str) -> bool {
 }
 
 /// The store-proxy request handler for a matching GitHub store sub-resource fetch, else None.
-/// Wired into BOTH dispatches: the browser-level one (`client.rs`) and the context-level one
-/// (`csp_filter.rs`). TIDAL's service worker routes some fetches browser-less, and those
+/// Wired into BOTH dispatches: the browser-level one (`client/request.rs`) and the context-level
+/// one (`csp_filter.rs`). TIDAL's service worker routes some fetches browser-less, and those
 /// reach only the context handler.
 pub(super) fn intercept(
     url: &str,
