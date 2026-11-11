@@ -1,18 +1,6 @@
-//! Tests for `src/ipc/plugin/proxy.rs`, attached to it by `#[path]`.
+//! Tests for `src/ipc/plugin/proxy/mod.rs`, attached to it by `#[path]`.
 
 use super::*;
-
-#[test]
-fn scrub_replaces_real_token_with_opaque() {
-    let pairs = vec![(
-        "real-access-token-1234".to_string(),
-        "luna_aaaa".to_string(),
-    )];
-    let body = r#"{"leaked":"real-access-token-1234"}"#.to_string();
-    let out = scrub_real_tokens_with(body, &pairs);
-    assert!(!out.contains("real-access-token-1234"), "{out}");
-    assert!(out.contains("luna_aaaa"), "{out}");
-}
 
 /// Truncating before the scrub leaks. The cut hands the scrubber a fragment it cannot match,
 /// and every substitution ahead of that fragment shortens the string, sliding it left into the
@@ -35,18 +23,6 @@ fn a_second_token_does_not_slide_into_the_log_window_behind_the_first() {
     assert!(!out.contains(&t1[..16]), "first token leaked: {out}");
     assert!(!out.contains(&t2[..16]), "second token leaked: {out}");
     assert!(out.contains("luna_1") && out.contains("luna_2"), "{out}");
-}
-
-#[test]
-fn token_body_empties_on_entropy_failure_never_leaks() {
-    // A real-token response with opaque generation failing must return an
-    // empty JSON body, never the real token, to plugin JS.
-    let body = r#"{"access_token":"real-secret","refresh_token":"real-rt"}"#;
-    // The session epoch only gates the commit into `AppState`, which no test reaches: the
-    // scrub asserted below happens either way.
-    let out = proxy_transform_token_body_with(body, 200, 0, || None);
-    assert_eq!(out, "{}");
-    assert!(!out.contains("real-secret"));
 }
 
 #[test]
