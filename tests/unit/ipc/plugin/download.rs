@@ -1,69 +1,6 @@
-//! Tests for `src/ipc/plugin/download.rs`, attached to it by `#[path]`.
+//! Tests for `src/ipc/plugin/download/mod.rs`, attached to it by `#[path]`.
 
 use super::*;
-
-#[test]
-fn a_destination_name_is_made_safe_for_every_filesystem_or_refused() {
-    for (path, expected) in [
-        (
-            "/music/A: B? C* D\" E<F>G|H.flac",
-            Some("A_ B_ C_ D_ E_F_G_H.flac"),
-        ),
-        ("/m/Song. ", Some("Song")),
-        ("/m/aux.flac", Some("_aux.flac")),
-        ("/m/...", None),
-        ("/", None),
-    ] {
-        match expected {
-            Some(name) => assert_eq!(sanitized_name(path), name, "{path:?}"),
-            None => assert!(sanitized_destination(path).is_err(), "{path:?}"),
-        }
-    }
-}
-
-fn sanitized_name(path: &str) -> String {
-    sanitized_destination(path)
-        .unwrap()
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string()
-}
-
-/// A byte budget, not a character count: 300 CJK characters are 900 bytes; a cut that
-/// counted characters would still hand the filesystem a name it refuses.
-#[test]
-fn a_multibyte_name_is_bounded_in_bytes_on_a_char_boundary() {
-    let out = sanitized_name(&format!("/m/{}.flac", "曲".repeat(300)));
-    assert!(out.len() <= MAX_NAME_BYTES, "{} bytes", out.len());
-    assert!(out.ends_with(".flac"));
-    // 250 bytes of stem budget is 83 whole characters, not 83 and a third.
-    assert_eq!(out.chars().filter(|c| *c == '曲').count(), 83);
-}
-
-#[test]
-fn an_extension_filling_the_budget_leaves_no_stem_to_keep() {
-    let out = sanitized_name(&format!("/m/s.{}", "e".repeat(400)));
-    assert!(out.len() <= MAX_NAME_BYTES, "{} bytes", out.len());
-}
-
-#[test]
-fn a_trailing_space_exposed_by_the_cut_is_removed() {
-    let out = sanitized_name(&format!("/m/{} {}", "a".repeat(254), "b".repeat(50)));
-    assert_eq!(out.len(), 254);
-    assert!(!out.ends_with(' '));
-}
-
-#[test]
-fn field_names_outside_printable_ascii_are_refused() {
-    assert!(valid_field_name("TITLE"));
-    assert!(!valid_field_name(""));
-    assert!(!valid_field_name("TITLE=X"));
-    assert!(!valid_field_name("TIT\nLE"));
-    // to_uppercase is Unicode aware: a non-ASCII key can reach here expanded.
-    assert!(!valid_field_name("TITLÉ"));
-}
 
 /// The consent names a file, not a path, and the fetch between the two can run for an hour. What is
 /// at the destination now is not what the run was authorised against: replacing it would destroy
@@ -144,17 +81,6 @@ async fn an_unconfirmed_destination_is_neither_replaced_nor_called_written() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"appeared meanwhile");
 }
 
-/// An `ftyp` box followed by one box that accounts for the rest.
-fn mp4(payload: usize) -> Vec<u8> {
-    let mut out = 24u32.to_be_bytes().to_vec();
-    out.extend_from_slice(b"ftypM4A ");
-    out.extend_from_slice(&[0u8; 12]);
-    out.extend_from_slice(&((payload + 8) as u32).to_be_bytes());
-    out.extend_from_slice(b"mdat");
-    out.extend(std::iter::repeat_n(0xAAu8, payload));
-    out
-}
-
 /// The url list comes from the plugin. An unbounded one would have Rust issue as many requests as
 /// it likes. The byte ceiling alone does not stop that: a list of tiny 404s costs nothing per url.
 #[test]
@@ -166,101 +92,6 @@ fn a_url_list_longer_than_a_real_manifest_is_refused() {
         !url_count_within_bounds(0),
         "an empty list has nothing to fetch"
     );
-}
-
-/// One ISO-BMFF box: a big-endian total size, the type, then payload.
-fn box_of(kind: &[u8; 4], total: usize) -> Vec<u8> {
-    let mut out = (total as u32).to_be_bytes().to_vec();
-    out.extend_from_slice(kind);
-    out.extend(std::iter::repeat_n(0u8, total - 8));
-    out
-}
-
-/// Bodies that only dress up as an audio container, each a file another program would act on or
-/// a download cut short. Not a seal: a box sized to hold a whole archive still passes.
-#[test]
-fn a_body_that_only_dresses_up_as_an_audio_container_is_refused() {
-    // A zero-size box means "to end of file" and would swallow any payload.
-    let mut zero_size_box = box_of(b"ftyp", 16);
-    zero_size_box.extend_from_slice(&0u32.to_be_bytes());
-    zero_size_box.extend_from_slice(b"mdat");
-    zero_size_box.extend_from_slice(b"PK\x03\x04 an archive read from its tail");
-
-    let mut desktop = b"#abcftyp\n".to_vec();
-    desktop.extend_from_slice(b"[Desktop Entry]\nType=Application\nExec=rm -rf /\n");
-
-    let mut xml = b"<!--ftyp-->".to_vec();
-    xml.extend_from_slice(b"<?xml version=\"1.0\"?><plist><dict/></plist>");
-
-    let mut truncated = box_of(b"ftyp", 16);
-    truncated.extend(box_of(b"moov", 40));
-    let mut cut = box_of(b"mdat", 512);
-    cut.truncate(cut.len() - 100);
-    truncated.extend(cut);
-
-    let mut with_zip = mp4(64);
-    with_zip.extend_from_slice(b"PK\x03\x04 appended archive");
-
-    let mut overrunning = 9999u32.to_be_bytes().to_vec();
-    overrunning.extend_from_slice(b"ftypM4A ");
-    overrunning.extend_from_slice(&[0u8; 16]);
-
-    let mut flac_header_only = b"fLaC".to_vec();
-    flac_header_only.push(0x80);
-    flac_header_only.extend_from_slice(&[0x00, 0x00, 0x22]);
-    flac_header_only.extend_from_slice(&[0u8; 34]);
-
-    let mut flac_lying_block = b"fLaC".to_vec();
-    flac_lying_block.push(0x80);
-    flac_lying_block.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
-    flac_lying_block.extend_from_slice(&[0u8; 34]);
-
-    let mut flac_not_streaminfo = b"fLaC".to_vec();
-    flac_not_streaminfo.push(0x84); // last block, type 4 = VORBIS_COMMENT
-    flac_not_streaminfo.extend_from_slice(&[0x00, 0x00, 0x22]);
-    flac_not_streaminfo.extend_from_slice(&[0u8; 40]);
-
-    // `ftyp` sits at offset 4, after the box size: carried anywhere else it is not ISO-BMFF.
-    let mut ftyp_first = b"ftyp".to_vec();
-    ftyp_first.extend_from_slice(&[0u8; 34]);
-
-    let mut ftyp_buried = vec![0u8; 40];
-    ftyp_buried[20..24].copy_from_slice(b"ftyp");
-
-    // Covers the body exactly but does not open on `ftyp`: only the magic's own check refuses it.
-    let mut unopened = box_of(b"moov", 16);
-    unopened.extend(box_of(b"mdat", 32));
-
-    for (body, what) in [
-        (zero_size_box, "a zero-size box swallowing a payload"),
-        (desktop, "desktop entry"),
-        (xml, "xml/plist"),
-        (truncated, "truncated DASH body"),
-        (with_zip, "data appended after the chain"),
-        (overrunning, "a box running past the end"),
-        (flac_header_only, "no frames"),
-        (flac_lying_block, "block runs past the end"),
-        (flac_not_streaminfo, "a chain opening on VORBIS_COMMENT"),
-        (
-            b"[Desktop Entry]\nExec=rm -rf /\n".to_vec(),
-            "a desktop entry",
-        ),
-        (b"#!/bin/sh\nrm -rf /\n".to_vec(), "a shell script"),
-        (
-            b"MZ\x90\x00\x03\x00\x00\x00\x04\x00".to_vec(),
-            "a PE header",
-        ),
-        (b"<?xml version=\"1.0\"?><plist/>".to_vec(), "a bare plist"),
-        (b"\x7fELF\x02\x01\x01\x00\x00\x00".to_vec(), "an ELF header"),
-        (ftyp_first, "ftyp at offset 0"),
-        (ftyp_buried, "ftyp deeper in the body"),
-        (unopened, "a chain with no ftyp first"),
-        (Vec::new(), "an empty body"),
-        (b"fLa".to_vec(), "a truncated FLAC magic"),
-        (b"fLaC".to_vec(), "a FLAC magic and nothing else"),
-    ] {
-        assert!(!is_audio_container(&body), "{what}");
-    }
 }
 
 /// A policy refusal is permanent. It must answer 403, not the 500 documented as worth a retry.
@@ -445,61 +276,4 @@ async fn a_download_named_for_another_program_is_refused_before_anything_is_fetc
     assert!(format!("{err:#}").contains(NOT_AUDIO_NAME), "{err:#}");
     assert_eq!(status_for(&err), 403);
     assert!(!dir.path().join("x.bat").exists());
-}
-
-#[test]
-fn only_the_final_extension_names_a_download_audio() {
-    assert!(audio_named(std::path::Path::new("/m/Song.M4A")));
-    assert!(audio_named(std::path::Path::new("/m/a.zip.flac")));
-    assert!(!audio_named(std::path::Path::new("/m/a.flac.zip")));
-    assert!(!audio_named(std::path::Path::new("/m/.m4a")));
-}
-
-/// A substring test accepts all three of these, and each is a host someone else can control.
-#[test]
-fn lookalike_hosts_are_refused() {
-    assert!(!is_tidal_media_host("evil-audio.tidal.com"));
-    assert!(!is_tidal_media_host("audio.tidal.com.evil.com"));
-    assert!(!is_tidal_media_host("evil.com"));
-    assert!(!is_tidal_media_host(""));
-}
-
-#[test]
-fn artwork_comes_from_its_own_host_only() {
-    assert!(is_tidal_artwork_host("resources.tidal.com"));
-    assert!(!is_tidal_artwork_host("lgf.audio.tidal.com"));
-    assert!(!is_tidal_artwork_host("resources.tidal.com.evil.com"));
-}
-
-/// Userinfo is the classic way past a check that reads the string rather than the parsed host (the
-/// first url's host is `evil.com`), and plaintext would hand the stream to anyone on the path.
-#[test]
-fn only_an_https_url_whose_parsed_host_is_allowed_passes() {
-    for (url, expected) in [
-        ("https://lgf.audio.tidal.com@evil.com/track.flac", false),
-        ("http://lgf.audio.tidal.com/track.flac", false),
-        ("https://lgf.audio.tidal.com/track.flac", true),
-        ("not a url", false),
-        ("", false),
-    ] {
-        assert_eq!(allowed_url(url, is_tidal_media_host), expected, "{url:?}");
-    }
-}
-
-/// Checking the submitted url is not enough on its own: the client follows redirects; an open
-/// redirect on an allowed host would otherwise carry the fetch anywhere.
-#[test]
-fn a_redirect_leaving_the_allowed_hosts_is_refused() {
-    let media = url::Url::parse("https://sp-ad-fa.audio.tidal.com/seg1.mp4").unwrap();
-    let artwork = url::Url::parse("https://resources.tidal.com/cover.jpg").unwrap();
-    let away = url::Url::parse("https://evil.com/seg1.mp4").unwrap();
-    let plaintext = url::Url::parse("http://lgf.audio.tidal.com/track.flac").unwrap();
-
-    assert!(redirect_allowed(&media));
-    assert!(
-        redirect_allowed(&artwork),
-        "media and artwork share one client"
-    );
-    assert!(!redirect_allowed(&away));
-    assert!(!redirect_allowed(&plaintext));
 }

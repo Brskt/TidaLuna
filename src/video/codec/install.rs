@@ -72,7 +72,7 @@ pub(crate) fn current_target() -> Option<&'static CodecTarget> {
 
 /// The one host this feature may reach, by exact equality: a suffix or substring test admits a
 /// registrable lookalike. Its own predicate rather than an addition to `nav::is_tidal_api_host`
-/// or `download::allowed_url`, which would widen those for every caller that trusts them.
+/// or `download::net::allowed_url`, which would widen those for every caller that trusts them.
 fn is_codec_host(host: &str) -> bool {
     host == CODEC_HOST
 }
