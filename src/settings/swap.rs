@@ -115,3 +115,7 @@ pub(crate) fn replace_naming(path: &Path, fresh: &Connection, aside: &Path) -> R
     prune_asides(path);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/settings/swap.rs"]
+mod tests;

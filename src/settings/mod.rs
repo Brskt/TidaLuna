@@ -20,7 +20,3 @@ pub(crate) use swap::{aside_name, replace_naming};
 #[cfg(test)]
 #[path = "../../tests/unit/settings/fixture.rs"]
 pub(crate) mod fixture;
-
-#[cfg(test)]
-#[path = "../../tests/unit/settings/durability_settings_tests.rs"]
-pub(crate) mod durability_settings_tests;

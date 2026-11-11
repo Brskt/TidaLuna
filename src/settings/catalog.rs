@@ -611,13 +611,5 @@ pub(crate) fn save_update_skip_version(conn: &mut Connection, version: &str) {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/settings/crossfade_settings_tests.rs"]
-mod crossfade_settings_tests;
-
-#[cfg(test)]
-#[path = "../../tests/unit/settings/video_codec_settings_tests.rs"]
-mod video_codec_settings_tests;
-
-#[cfg(test)]
-#[path = "../../tests/unit/settings/output_level_settings_tests.rs"]
-mod output_level_settings_tests;
+#[path = "../../tests/unit/settings/catalog.rs"]
+mod tests;

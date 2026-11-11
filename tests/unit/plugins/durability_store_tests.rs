@@ -2,7 +2,7 @@
 //! attached by `#[path]`.
 
 use super::*;
-use crate::settings::durability_settings_tests::{
+use crate::settings::fixture::{
     after_a_power_cut, assert_in_order, statements_of, syncs_fully, syncs_routinely,
 };
 use std::path::Path;

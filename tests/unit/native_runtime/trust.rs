@@ -3,10 +3,10 @@
 
 use super::{clear_all_trust, clear_trust_by_plugin, load_trust, save_trust, save_trust_answers};
 use crate::plugins::name::PluginName;
-use crate::settings::durability_settings_tests::{
-    after_a_power_cut, assert_in_order, statements_of, syncs_fully, syncs_routinely,
+use crate::settings::fixture::{
+    after_a_power_cut, assert_in_order, file_conn, mem_conn, statements_of, syncs_fully,
+    syncs_routinely,
 };
-use crate::settings::fixture::{file_conn, mem_conn};
 use rusqlite::Connection;
 use std::path::Path;
 

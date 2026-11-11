@@ -387,7 +387,7 @@ pub(crate) fn corruption(e: &rusqlite::Error) -> bool {
 
 /// Whether `PRAGMA integrity_check` found nothing. A check that cannot get through a damaged
 /// page answers with the corruption code instead of rows, which is "not clean" as well.
-fn is_clean(conn: &Connection) -> rusqlite::Result<bool> {
+pub(super) fn is_clean(conn: &Connection) -> rusqlite::Result<bool> {
     let rows = conn.prepare("PRAGMA integrity_check").and_then(|mut stmt| {
         stmt.query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -508,7 +508,7 @@ fn has_row(conn: &Connection, key: &str) -> bool {
 
 /// The new store, whole, in one transaction: the carried rows and the markers of what is lost
 /// land together or not at all.
-fn populate(
+pub(super) fn populate(
     conn: &mut Connection,
     carried: &[(String, String)],
     settings_lost: bool,
@@ -664,5 +664,5 @@ pub(crate) fn open(path: &Path) -> rusqlite::Result<(Connection, Opened)> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/settings/store_damage_tests.rs"]
-mod store_damage_tests;
+#[path = "../../tests/unit/settings/store.rs"]
+mod tests;
