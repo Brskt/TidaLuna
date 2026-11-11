@@ -1,4 +1,4 @@
-//! Tests for `src/main.rs`, attached to it by `#[path]`.
+//! Tests for `src/boot_tokens.rs`, attached to it by `#[path]`.
 
 use super::*;
 use platform::sdk_storage::{self, RawSdkBlob};

@@ -137,6 +137,31 @@ pub(crate) fn refuse_to_start(why: &str) -> ! {
     std::process::exit(1);
 }
 
+/// Stops a launch with no absolute UTF-8 data directory, saying why, before any
+/// file is written.
+pub(crate) fn refuse_without_data_dir() -> ! {
+    #[cfg(target_os = "windows")]
+    const WHY: &str = "TidaLunar cannot use your local application data folder \
+        (LOCALAPPDATA is missing, not an absolute path, or not valid Unicode text) \
+        and has nowhere to keep your session and settings.";
+    #[cfg(not(target_os = "windows"))]
+    const WHY: &str = "TidaLunar cannot use your home directory (HOME is unset, \
+        not an absolute path, or not valid UTF-8 text) and has nowhere to keep \
+        your session and settings.";
+    refuse_to_start(WHY)
+}
+
+/// Stops a launch from an executable whose path is not UTF-8 text. CEF takes its
+/// resource directories as text: a lossy copy would name a folder that does
+/// not exist.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn refuse_install_dir_not_text() -> ! {
+    refuse_to_start(
+        "TidaLunar cannot run from this folder: its path is not valid Unicode text. \
+        Move TidaLunar to a folder whose name is plain text.",
+    )
+}
+
 /// The text a caught panic carried, if it carried one.
 ///
 /// `panic!`, `assert!` and `unwrap` box a `&str` or a `String` depending on whether the message

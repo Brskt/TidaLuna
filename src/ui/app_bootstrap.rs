@@ -365,7 +365,7 @@ wrap_browser_process_handler! {
             // AppState before the page can consume it. An unusable blob arms a
             // one-shot renderer purge (NEEDS_BOOT_BLOB_PURGE), not an init-script
             // prefix that would replay on every reload.
-            crate::finish_boot_tokens();
+            crate::boot_tokens::finish_boot_tokens();
 
             // `main` refuses to start without the front, before CEF exists.
             let Some(front) = crate::frontend::load::get() else {
