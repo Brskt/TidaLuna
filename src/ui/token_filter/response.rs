@@ -1,4 +1,5 @@
-use super::{generate_opaque, now_unix_secs};
+use super::generate_opaque;
+use crate::util::now_unix_secs;
 
 pub(super) enum ProcessResult {
     Modified(Vec<u8>),

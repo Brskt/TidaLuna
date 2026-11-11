@@ -22,10 +22,7 @@ pub(super) fn proxy_rewrite_refresh_body(body: &str) -> String {
         return body.to_string();
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = crate::util::now_unix_secs();
     let real_rt = with_state(|state| {
         state
             .token_state
@@ -151,10 +148,7 @@ fn proxy_transform_token_body_with(
             crate::vprintln!("[AUTH]   Exchange answered for a session already left, dropped");
             return None;
         }
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_secs = crate::util::now_unix_secs();
 
         let (real_rt, ort) = if let Some(ref rt) = refresh_token {
             (rt.clone(), opaque_rt_new.clone().unwrap_or_default())

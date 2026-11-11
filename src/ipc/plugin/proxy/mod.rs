@@ -323,10 +323,7 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
         && let Some(opaque) = auth_val.strip_prefix("Bearer ")
         && crate::ui::token_filter::is_opaque(opaque)
     {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = crate::util::now_unix_secs();
         let real = with_state(|state| {
             state
                 .token_state

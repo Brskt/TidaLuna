@@ -180,10 +180,7 @@ async fn do_refresh(
             crate::vprintln!("[AUTH]   Refresh answered for a session already left, dropped");
             return false;
         }
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now_secs = crate::util::now_unix_secs();
 
         let (real_rt, ort) = if let Some(ref rt) = new_rt {
             (rt.clone(), opaque_rt_new.clone().unwrap_or_default())

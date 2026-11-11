@@ -10,7 +10,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const MARK_FILE: &str = ".update-mark.json";
 
@@ -44,10 +43,7 @@ pub(super) fn record(data_dir: &Path, current: &str) {
     if !super::util::is_newer(current, &existing) {
         return; // current <= stored; keep the higher mark
     }
-    let recorded_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let recorded_at = crate::util::now_unix_secs();
     let mark = Mark {
         max_version: current.to_string(),
         recorded_at,

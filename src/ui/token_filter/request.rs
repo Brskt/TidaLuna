@@ -1,8 +1,9 @@
 use cef::*;
 use std::sync::Mutex;
 
-use super::{is_opaque, now_unix_secs, userfree_to_string};
+use super::{is_opaque, userfree_to_string};
 use crate::ui::nav::RequestUrl;
+use crate::util::now_unix_secs;
 
 fn read_post_body(req: &mut Request) -> Option<Vec<u8>> {
     let method_cef = req.method();

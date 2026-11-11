@@ -219,13 +219,6 @@ wrap_resource_request_handler! {
     }
 }
 
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 #[path = "../../../tests/unit/ui/token_filter.rs"]
 mod tests;

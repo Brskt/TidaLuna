@@ -122,6 +122,13 @@ fn managed_install_from(value: Option<&str>) -> bool {
     matches!(value, Some(v) if !v.is_empty() && v != "0")
 }
 
+pub(crate) fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/util.rs"]
 mod tests;
