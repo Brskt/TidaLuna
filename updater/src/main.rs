@@ -222,10 +222,8 @@ fn run() -> Result<()> {
         // The currently-installed app version comes from its bundled manifest,
         // NOT env!("CARGO_PKG_VERSION") (which is the updater binary's own
         // version, unrelated to the app). delta_from is an app version.
-        let installed_version = fs::read_to_string(args.app_dir.join("manifest.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Manifest>(&s).ok())
-            .map(|m| m.version);
+        let installed_version =
+            cleanup::read_manifest(&args.app_dir.join("manifest.json")).map(|m| m.version);
         let mut use_delta = matches!(
             (&manifest.delta_from, &installed_version),
             (Some(d), Some(i)) if d == i
