@@ -29,27 +29,10 @@ pub(crate) fn delta(flags: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < flags.len() {
         match flags[i].as_str() {
-            "--target" => {
-                i += 1;
-                target = Some(flags.get(i).ok_or("--target requires a value")?.clone());
-            }
-            "--arch" => {
-                i += 1;
-                arch = Some(flags.get(i).ok_or("--arch requires a value")?.clone());
-            }
-            "--old-manifest" => {
-                i += 1;
-                old_manifest = Some(
-                    flags
-                        .get(i)
-                        .ok_or("--old-manifest requires a value")?
-                        .clone(),
-                );
-            }
-            "--dist" => {
-                i += 1;
-                dist = Some(flags.get(i).ok_or("--dist requires a value")?.clone());
-            }
+            "--target" => target = Some(crate::flag_value(flags, &mut i)?),
+            "--arch" => arch = Some(crate::flag_value(flags, &mut i)?),
+            "--old-manifest" => old_manifest = Some(crate::flag_value(flags, &mut i)?),
+            "--dist" => dist = Some(crate::flag_value(flags, &mut i)?),
             other => return Err(format!("unknown delta flag: {other}")),
         }
         i += 1;

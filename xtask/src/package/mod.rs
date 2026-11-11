@@ -23,14 +23,8 @@ pub(crate) fn package(flags: &[String]) -> Result<(), String> {
     while i < flags.len() {
         match flags[i].as_str() {
             "--release" => {} // payload was built by `bundle`
-            "--target" => {
-                i += 1;
-                target = flags.get(i).ok_or("--target requires a value")?.clone();
-            }
-            "--arch" => {
-                i += 1;
-                arch = Some(flags.get(i).ok_or("--arch requires a value")?.clone());
-            }
+            "--target" => target = crate::flag_value(flags, &mut i)?,
+            "--arch" => arch = Some(crate::flag_value(flags, &mut i)?),
             other => return Err(format!("unknown argument: {other}")),
         }
         i += 1;

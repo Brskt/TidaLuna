@@ -162,6 +162,16 @@ fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// The value after the flag at `*i`, moving `*i` onto it.
+fn flag_value(flags: &[String], i: &mut usize) -> Result<String, String> {
+    let flag = &flags[*i];
+    *i += 1;
+    flags
+        .get(*i)
+        .cloned()
+        .ok_or_else(|| format!("{flag} requires a value"))
+}
+
 /// Map a semver string like `0.0.4-alpha` to a fixed-arity dotted-numeric form
 /// for installer/bundle metadata that rejects prerelease suffixes:
 ///   * NSIS `VIProductVersion` requires exactly 4 numeric parts
