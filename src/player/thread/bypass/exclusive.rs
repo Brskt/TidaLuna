@@ -400,17 +400,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.current_exclusive_stream_id = None;
 
         // Prefer the live exclusive position (floor-free); fall back to resume_store.
-        let retained = crate::state::CURRENT_TRACK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retained()
-            .cloned();
-        let position = self.last_exclusive_pos.or_else(|| {
-            retained.as_ref().and_then(|r| {
-                self.resume_store
-                    .get(&crate::player::canonical_track_id(&r.track.url))
-            })
-        });
+        let retained = super::super::retained_track();
+        let position = self.resume_position(self.last_exclusive_pos, retained.as_ref());
         self.last_exclusive_pos = None;
         if let Some(retained) = retained {
             (self.callback)(PlayerEvent::ReplayRequest {

@@ -85,12 +85,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     #[cfg(target_os = "windows")]
     fn switch_rearm(&self) -> SwitchRearm {
-        let retained = crate::state::CURRENT_TRACK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retained()
-            .cloned();
-        SwitchRearm::choose(self.current_buffer.as_ref(), retained)
+        SwitchRearm::choose(self.current_buffer.as_ref(), super::retained_track())
     }
 
     pub(super) fn handle_set_audio_device(&mut self, id: String, mode: OutputMode) {
@@ -416,17 +411,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // resume_store only if no TimeUpdate arrived (it floors sub-1s and
                 // can return a stale prior-session offset). Track from CURRENT_TRACK
                 // since a polled Stopped may have nulled current_track_id.
-                let retained = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .cloned();
-                let position = self.last_exclusive_pos.or_else(|| {
-                    retained.as_ref().and_then(|r| {
-                        self.resume_store
-                            .get(&crate::player::canonical_track_id(&r.track.url))
-                    })
-                });
+                let retained = super::retained_track();
+                let position = self.resume_position(self.last_exclusive_pos, retained.as_ref());
 
                 // Reuse the retained buffer when the track is fully in memory: rebuild the
                 // shared pipeline on it in place (the device-switch path), no network
@@ -471,17 +457,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.current_device_id = Some(id);
 
                 // Prefer the live ASIO position (floor-free); fall back to resume_store.
-                let retained = crate::state::CURRENT_TRACK
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .retained()
-                    .cloned();
-                let position = self.last_asio_pos.or_else(|| {
-                    retained.as_ref().and_then(|r| {
-                        self.resume_store
-                            .get(&crate::player::canonical_track_id(&r.track.url))
-                    })
-                });
+                let retained = super::retained_track();
+                let position = self.resume_position(self.last_asio_pos, retained.as_ref());
 
                 // Reuse the retained buffer when the track is fully in memory: rebuild the
                 // shared pipeline on it in place (the device-switch path), no network

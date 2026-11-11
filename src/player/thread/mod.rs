@@ -703,6 +703,15 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 }
 
+/// A copy of the track `CURRENT_TRACK` retains, its lock released on return.
+fn retained_track() -> Option<crate::state::RetainedTrack> {
+    crate::state::CURRENT_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retained()
+        .cloned()
+}
+
 #[cfg(test)]
 #[path = "../../../tests/unit/player/thread/wav_fixture.rs"]
 pub(super) mod wav_fixture;

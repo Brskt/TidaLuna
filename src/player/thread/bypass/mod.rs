@@ -191,6 +191,22 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let shared = self.effective_position();
         (shared > 0.0).then_some(shared)
     }
+
+    /// Where a track leaving a bypass backend resumes: `live`, the backend's own floor-free
+    /// position, else what `resume_store` holds for `retained`.
+    #[cfg(target_os = "windows")]
+    pub(super) fn resume_position(
+        &self,
+        live: Option<f64>,
+        retained: Option<&crate::state::RetainedTrack>,
+    ) -> Option<f64> {
+        live.or_else(|| {
+            retained.and_then(|r| {
+                self.resume_store
+                    .get(&crate::player::canonical_track_id(&r.track.url))
+            })
+        })
+    }
 }
 
 #[cfg(test)]

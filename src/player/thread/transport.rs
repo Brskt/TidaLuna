@@ -88,11 +88,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Capture the retained source only when no track and no load in flight;
         // the short-circuit skips the CURRENT_TRACK lock on the resume path.
         let retained = if !self.has_track && self.loading_gen.is_none() {
-            crate::state::CURRENT_TRACK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .retained()
-                .cloned()
+            super::retained_track()
         } else {
             None
         };
