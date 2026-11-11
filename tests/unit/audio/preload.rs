@@ -193,7 +193,7 @@ async fn committing_spares_a_staged_record_that_names_another_track() {
 ///
 /// The second is the contract that must survive the fix. `next_track` names what the cut
 /// advances to; clearing it here would leave the completion path with nothing, which is
-/// the failure the sibling test in `player/thread/commands.rs` pins from the other side.
+/// the failure the sibling test in `player/thread/crossfade.rs` pins from the other side.
 #[tokio::test]
 async fn a_staged_copy_its_decoder_refused_is_dropped_and_the_next_track_stands() {
     let _serialised = PRELOAD_TESTS.lock().await;

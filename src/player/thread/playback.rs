@@ -1,4 +1,4 @@
-use super::commands::IncomingFailure;
+use super::crossfade::IncomingFailure;
 use super::output::{STREAM_ERR_DEVICE_LOST, STREAM_ERR_NONE, STREAM_ERR_UNKNOWN};
 use super::{DecodeEvent, PlayerThread};
 use crate::player::{DeviceErrorKind, MediaErrorCode, PlaybackState, PlayerEvent, format_ms};

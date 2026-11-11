@@ -294,7 +294,7 @@ pub(super) fn build_cpal_callback(
             // swap fell: the control thread reads `done` up to a poll later, when the counter
             // holds the outgoing total plus whatever the promoted ring has since delivered,
             // two quantities no reader can tell apart. The `Release` below publishes this
-            // store, and `commands.rs` reads `done` with `Acquire`, so a reader that sees this
+            // store, and `crossfade.rs` reads `done` with `Acquire`, so a reader that sees this
             // generation sees this clock.
             played_samples.store(xfade_in_played, Relaxed);
             fade_pos = 0;

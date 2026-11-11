@@ -1,5 +1,6 @@
 //! Tests for `src/player/thread/device.rs`, attached to it by `#[path]`. The switches themselves
-//! are driven through the harness in `commands.rs`'s tests; this file holds the rule they share.
+//! are driven through the `harness` fixture in `commands.rs`'s tests; this file holds the rule
+//! they share.
 
 use super::SwitchRearm;
 use crate::player::buffer::RamBuffer;
