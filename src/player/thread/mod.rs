@@ -703,6 +703,17 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 }
 
+/// Signals the reader behind `cancel` to stop and wakes it: parked on the buffer, it would
+/// see the signal only at its read timeout.
+fn retire_reader(cancel: &mut Option<Arc<AtomicBool>>, buffer: Option<&RamBuffer>) {
+    if let Some(cancel) = cancel.take() {
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(buf) = buffer {
+            buf.wake_readers();
+        }
+    }
+}
+
 /// A copy of the track `CURRENT_TRACK` retains, its lock released on return.
 fn retained_track() -> Option<crate::state::RetainedTrack> {
     crate::state::CURRENT_TRACK

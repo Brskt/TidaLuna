@@ -351,12 +351,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if let Some(tx) = self.decode_cmd_tx.take() {
             let _ = tx.send(DecodeCommand::Stop);
         }
-        if let Some(cancel) = self.decode_reader_cancel.take() {
-            cancel.store(true, Relaxed);
-            if let Some(ref buf) = self.current_buffer {
-                buf.wake_readers();
-            }
-        }
+        super::retire_reader(&mut self.decode_reader_cancel, self.current_buffer.as_ref());
         if let Some(handle) = self.decode_handle.take() {
             let _ = handle.join();
         }

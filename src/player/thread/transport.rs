@@ -47,12 +47,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // channel, and the join below runs on this thread: retire its reader and the read
         // returns now. Per-reader, keeping alive a buffer the caller is about to hand to
         // the next decoder, which cancelling the buffer would not.
-        if let Some(cancel) = self.decode_reader_cancel.take() {
-            cancel.store(true, Relaxed);
-            if let Some(ref buf) = self.current_buffer {
-                buf.wake_readers();
-            }
-        }
+        super::retire_reader(&mut self.decode_reader_cancel, self.current_buffer.as_ref());
         self.cpal_stream = None;
         if let Some(handle) = self.decode_handle.take() {
             let _ = handle.join();

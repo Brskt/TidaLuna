@@ -22,14 +22,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let Some(cmd_tx) = self.asio_handle.as_ref().map(|h| h.command_sender()) else {
             return;
         };
-        if let Some(prev) = self.asio_stream_cancel.take() {
-            prev.store(true, Relaxed);
-            // Wake the retired reader to quiesce instead of parking on the read
-            // timeout while the new stream contends for the same buffer.
-            if let Some(ref buf) = self.current_buffer {
-                buf.wake_readers();
-            }
-        }
+        // Wake the retired reader to quiesce instead of parking on the read
+        // timeout while the new stream contends for the same buffer.
+        super::super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
         let cancel = Arc::new(AtomicBool::new(false));
         self.asio_stream_cancel = Some(cancel.clone());
 
@@ -394,12 +389,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::verr!("[ASIO] control thread died; re-arming shared");
             // The decoder outlives it and would park forever against `consumed`, which
             // only the thread that just died advances.
-            if let Some(cancel) = self.asio_stream_cancel.take() {
-                cancel.store(true, Relaxed);
-                if let Some(ref buf) = self.current_buffer {
-                    buf.wake_readers();
-                }
-            }
+            super::super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
             self.is_asio_mode = false;
             (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioBackendDied));
             self.rearm_shared_after_asio_failure();
@@ -453,12 +443,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.asio_release_at = None;
             // Cancel the detached decoder first: its wait sites never observe the
             // control thread dying: it would leak (thread + full-track buffer).
-            if let Some(cancel) = self.asio_stream_cancel.take() {
-                cancel.store(true, Relaxed);
-                if let Some(ref buf) = self.current_buffer {
-                    buf.wake_readers();
-                }
-            }
+            super::super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
             self.asio_seek_tx = None;
             if let Some(handle) = self.asio_handle.take() {
                 self.asio_teardown = handle.shutdown();

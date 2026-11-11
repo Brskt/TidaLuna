@@ -23,15 +23,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let Some(cmd_tx) = self.exclusive_handle.as_ref().map(|h| h.command_sender()) else {
             return;
         };
-        if let Some(prev) = self.exclusive_stream_cancel.take() {
-            prev.store(true, Relaxed);
-            // Wake the retired reader to see the cancel and quiesce instead
-            // of parking up to the read timeout while the new stream contends for
-            // the same buffer (matches handle_set_audio_device).
-            if let Some(ref buf) = self.current_buffer {
-                buf.wake_readers();
-            }
-        }
+        // Wake the retired reader to see the cancel and quiesce instead
+        // of parking up to the read timeout while the new stream contends for
+        // the same buffer (matches handle_set_audio_device).
+        super::super::retire_reader(
+            &mut self.exclusive_stream_cancel,
+            self.current_buffer.as_ref(),
+        );
         let cancel = Arc::new(AtomicBool::new(false));
         self.exclusive_stream_cancel = Some(cancel.clone());
 
@@ -335,12 +333,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // `consumed`, which only the thread that just died advances. Cancelling
                 // first is what the idle release already owes and documents; skipping it
                 // leaks the thread AND its whole-track buffer.
-                if let Some(cancel) = self.exclusive_stream_cancel.take() {
-                    cancel.store(true, Relaxed);
-                    if let Some(ref buf) = self.current_buffer {
-                        buf.wake_readers();
-                    }
-                }
+                super::super::retire_reader(
+                    &mut self.exclusive_stream_cancel,
+                    self.current_buffer.as_ref(),
+                );
                 self.is_exclusive_mode = false;
                 (self.callback)(PlayerEvent::DeviceError(
                     DeviceErrorKind::ExclusiveBackendDied,

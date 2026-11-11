@@ -188,18 +188,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             }
             // Retire any live exclusive/asio reader before the new stream contends
             // for the same buffer.
-            if let Some(cancel) = self.exclusive_stream_cancel.take() {
-                cancel.store(true, Relaxed);
-                if let Some(ref buf) = self.current_buffer {
-                    buf.wake_readers();
-                }
-            }
-            if let Some(cancel) = self.asio_stream_cancel.take() {
-                cancel.store(true, Relaxed);
-                if let Some(ref buf) = self.current_buffer {
-                    buf.wake_readers();
-                }
-            }
+            super::retire_reader(
+                &mut self.exclusive_stream_cancel,
+                self.current_buffer.as_ref(),
+            );
+            super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
 
             // Switch TO ASIO (radio: mutually exclusive with shared / WASAPI-exclusive).
             if mode == OutputMode::Asio {
