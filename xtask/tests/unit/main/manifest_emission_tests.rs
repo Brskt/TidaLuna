@@ -1,4 +1,4 @@
-//! Tests for `xtask/src/main.rs`, attached to it by `#[path]`.
+//! Tests for `xtask/src/manifest.rs`, attached to it by `#[path]`.
 
 use super::*;
 

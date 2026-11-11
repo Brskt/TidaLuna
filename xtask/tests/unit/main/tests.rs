@@ -1,7 +1,7 @@
-//! Tests for `xtask/src/main.rs`, attached to it by `#[path]`.
+//! Tests for `xtask/src/bundle/front.rs`, attached to it by `#[path]`.
 
 use super::copy_front;
-use super::front_files::TOP_FILES;
+use crate::front_files::TOP_FILES;
 
 /// A fresh directory under the system temp dir; xtask carries no `tempfile`.
 fn scratch(tag: &str) -> std::path::PathBuf {

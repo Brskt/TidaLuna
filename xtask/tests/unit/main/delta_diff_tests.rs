@@ -1,6 +1,7 @@
-//! Tests for `xtask/src/main.rs`, attached to it by `#[path]`.
+//! Tests for `xtask/src/delta.rs`, attached to it by `#[path]`.
 
 use super::*;
+use crate::manifest::FileEntry;
 use std::collections::BTreeMap;
 
 fn entry(sha: &str) -> FileEntry {
