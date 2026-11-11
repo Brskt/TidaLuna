@@ -1,6 +1,6 @@
 import { showErrorBanner } from "./banner";
 
-/** What Rust repaired in settings.db at launch (`RepairNotice` in src/settings.rs). */
+/** What Rust repaired in settings.db at launch (`RepairNotice` in src/settings/store.rs). */
 export type StoreRepair = { turnedOff: string[]; trust: "empty" | "dropped" | "unknown"; saved: boolean };
 
 // `empty` says nothing: no permission was lost.

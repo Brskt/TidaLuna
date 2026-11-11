@@ -1,7 +1,7 @@
-//! Tests for the video codec setting in `src/settings.rs`, attached by `#[path]`.
+//! Tests for the video codec setting in `src/settings/catalog.rs`, attached by `#[path]`.
 
-use super::fixture::mem_conn;
 use super::*;
+use crate::settings::fixture::mem_conn;
 
 #[test]
 fn boot_settings_carry_the_video_codec_switch() {

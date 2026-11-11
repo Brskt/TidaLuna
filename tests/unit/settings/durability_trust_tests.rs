@@ -1,15 +1,15 @@
 //! Tests for what a trust revocation waits for, in `src/native_runtime/trust.rs`, attached to
-//! `src/settings.rs` by `#[path]`.
+//! `src/settings/mod.rs` by `#[path]`.
 
 use super::durability_settings_tests::{
     after_a_power_cut, assert_in_order, statements_of, syncs_fully, syncs_routinely,
 };
 use super::fixture::file_conn;
-use super::*;
 use crate::native_runtime::trust::{
     clear_trust_by_plugin, load_trust, save_trust, save_trust_answers,
 };
 use crate::plugins::name::PluginName;
+use rusqlite::Connection;
 use std::path::Path;
 
 const PLUGIN: &str = "net/a.native.ts";

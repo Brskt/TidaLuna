@@ -1,7 +1,7 @@
-//! Tests for the crossfade settings in `src/settings.rs`, attached by `#[path]`.
+//! Tests for the crossfade settings in `src/settings/catalog.rs`, attached by `#[path]`.
 
-use super::fixture::mem_conn;
 use super::*;
+use crate::settings::fixture::mem_conn;
 
 #[test]
 fn secs_clamp_to_the_maximum_on_write_and_on_read() {

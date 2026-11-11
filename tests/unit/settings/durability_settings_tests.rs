@@ -1,9 +1,12 @@
-//! Tests for what a settings write waits for, in `src/settings.rs`, attached by `#[path]`.
+//! Tests for what a settings write waits for, in `src/settings/catalog.rs`, attached by `#[path]`.
 
+use super::catalog::{VIDEO_CODEC_ENABLED, load_video_codec_enabled};
 use super::fixture::file_conn;
-use super::*;
+use super::{save_plugin_update_at_boot, save_receiver_always_on, save_video_codec_enabled};
+use rusqlite::Connection;
 use std::cell::RefCell;
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
+use std::path::Path;
 
 thread_local! {
     static STATEMENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };

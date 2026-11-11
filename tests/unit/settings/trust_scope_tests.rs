@@ -1,12 +1,12 @@
 //! Tests for which rows a trust revocation in `src/native_runtime/trust.rs` reaches, attached to
-//! `src/settings.rs` by `#[path]`.
+//! `src/settings/mod.rs` by `#[path]`.
 
 use super::fixture::mem_conn;
-use super::*;
 use crate::native_runtime::trust::{
     clear_all_trust, clear_trust_by_plugin, load_trust, save_trust,
 };
 use crate::plugins::name::PluginName;
+use rusqlite::Connection;
 
 fn modules(conn: &mut Connection) -> Vec<String> {
     let mut stmt = conn

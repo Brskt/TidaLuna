@@ -1,6 +1,8 @@
-//! What the settings tests share, attached to `src/settings.rs` by `#[path]`.
+//! What the settings tests share, attached to `src/settings/mod.rs` by `#[path]`.
 
-use super::{Connection, Path, init_schema};
+use super::init_schema;
+use rusqlite::Connection;
+use std::path::Path;
 
 /// A database of its own for each test, the schema in place.
 pub(super) fn mem_conn() -> Connection {

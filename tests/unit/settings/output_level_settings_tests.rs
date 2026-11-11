@@ -1,7 +1,7 @@
-//! Tests for the saved output level in `src/settings.rs`, attached by `#[path]`.
+//! Tests for the saved output level in `src/settings/catalog.rs`, attached by `#[path]`.
 
-use super::fixture::mem_conn;
 use super::*;
+use crate::settings::fixture::mem_conn;
 
 #[test]
 fn a_level_without_the_one_to_restore_reads_as_nothing_saved() {

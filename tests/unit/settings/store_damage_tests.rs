@@ -1,7 +1,16 @@
-//! Tests for a settings store that is damaged, attached to `src/settings.rs` by `#[path]`.
+//! Tests for a settings store that is damaged, attached to `src/settings/store.rs` by `#[path]`.
 
 use super::*;
+use crate::settings::catalog::{
+    CONNECT_RECEIVER_ALWAYS_ON, PLUGINS_UPDATE_AT_BOOT, Read, Reader, UPDATER_AUTO_CHECK,
+    Unreadable, VIDEO_CODEC_ENABLED, load_log_level, load_receiver_always_on,
+    load_update_auto_check, load_video_codec_enabled, read, save_log_level,
+    save_plugin_update_at_boot, save_receiver_always_on, save_video_codec_enabled, set,
+};
+use crate::settings::fixture;
+use crate::settings::swap::{KEPT_ASIDES, beside};
 use std::io::{Seek, SeekFrom, Write};
+use std::path::PathBuf;
 
 const PAGE: u64 = 4096;
 
