@@ -4,6 +4,10 @@ pub(crate) mod cache;
 pub(crate) mod crossfade;
 pub(crate) mod dash;
 mod declick;
+// The decode loop the two Windows engines share: compiled under test on every host, its
+// fake-sink tests needing no device.
+#[cfg(any(target_os = "windows", test))]
+mod decode_feed;
 pub(crate) mod ipc;
 mod length;
 // The DASH fixture also builds the downloads' remux input.
@@ -18,7 +22,8 @@ mod packet_failure;
 mod protocol;
 mod resume;
 mod thread;
-#[cfg(target_os = "windows")]
+// Compiled under test too: the shared decode loop's tests run it on every host.
+#[cfg(any(target_os = "windows", test))]
 mod throttle;
 mod track_identity;
 mod volume;

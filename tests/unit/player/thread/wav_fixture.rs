@@ -2,7 +2,7 @@
 //! by `#[path]`.
 
 /// RIFF/WAVE, PCM S16LE, mono: the cheapest container symphonia demuxes.
-pub(super) fn wav_s16_mono(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
+pub(in crate::player) fn wav_s16_mono(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
     let data_len = samples.len() as u32 * 2;
     let mut wav = Vec::with_capacity(44 + data_len as usize);
     wav.extend_from_slice(b"RIFF");

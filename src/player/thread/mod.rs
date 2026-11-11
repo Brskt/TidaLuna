@@ -781,7 +781,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
 #[cfg(test)]
 #[path = "../../../tests/unit/player/thread/wav_fixture.rs"]
-mod wav_fixture;
+pub(super) mod wav_fixture;
 
 #[cfg(test)]
 #[path = "../../../tests/unit/player/thread/harness.rs"]
