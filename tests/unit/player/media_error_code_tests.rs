@@ -1,4 +1,4 @@
-//! Tests for `src/player/mod.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/protocol.rs`, attached to it by `#[path]`.
 
 use super::MediaErrorCode;
 

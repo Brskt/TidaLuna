@@ -1,4 +1,4 @@
-//! Tests for `src/player/mod.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/load/cache_entry.rs`, attached to it by `#[path]`.
 
 use super::{CacheReadError, looks_like_media, looks_like_mpeg_frame, read_cache_entry};
 

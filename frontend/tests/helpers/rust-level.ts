@@ -1,4 +1,4 @@
-// Rust's level reports as the tests fake them (`LevelReport`, src/player/mod.rs). One count for
+// Rust's level reports as the tests fake them (`LevelReport`, src/player/volume.rs). One count for
 // every test of a file: the page's count of what it has taken in (`VolumeForwarder`) is module
 // state shared the same way. Each report has to be newer than any an earlier test handed it.
 

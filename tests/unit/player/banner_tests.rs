@@ -1,4 +1,4 @@
-//! Tests for the load banner's staleness decision in `src/player/mod.rs`, attached by `#[path]`.
+//! Tests for the load banner's staleness decision in `src/player/track_identity.rs`, attached by `#[path]`.
 
 use super::announcement_is_stale;
 

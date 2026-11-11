@@ -1,4 +1,4 @@
-//! Tests for `refreshed_fetch_url` in `src/player/mod.rs`, attached to it by `#[path]`.
+//! Tests for `refreshed_fetch_url` in `src/player/track_identity.rs`, attached to it by `#[path]`.
 
 use super::{refresh_retained_credential, refreshed_fetch_url};
 use crate::state::TrackInfo;

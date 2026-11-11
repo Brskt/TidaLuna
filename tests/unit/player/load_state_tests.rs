@@ -4,8 +4,9 @@
 //! two atomics, the pair could be published half-and-half, and the only reader that weighs both
 //! -`next_is_current`- then admitted a renderer-staged track into someone else's session.
 
-use super::fixture::silent_player;
 use super::{Continuation, LoadOrigin, StopScope, begin_load, current_load};
+use crate::player::Player;
+use crate::player::fixture::silent_player;
 
 /// Every writer of the load generation in the suite holds this: a mint from another test
 /// cannot land between one of ours and the read that checks it.
@@ -76,7 +77,7 @@ async fn a_rearm_keeps_the_owner_of_the_load_it_rearms() {
 }
 
 /// A re-arm of the load `expected_gen`, the way the `ReplayRequest` consumer issues it.
-fn rearm_of(player: &super::Player, expected_gen: u32) -> Continuation {
+fn rearm_of(player: &Player, expected_gen: u32) -> Continuation {
     player.rearm(
         // Nothing listens there: the re-armed load fails on its own, off this test's path.
         "http://127.0.0.1:9/mediatracks/cast.flac".to_string(),

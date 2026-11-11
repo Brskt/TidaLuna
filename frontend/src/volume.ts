@@ -1,7 +1,7 @@
 import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { invokeIpc, sendIpc } from "./ipc";
 
-// What Rust reports of the level it plays (`LevelReport`, src/player/mod.rs): after a Connect
+// What Rust reports of the level it plays (`LevelReport`, src/player/volume.rs): after a Connect
 // controller or the OS mixer moved it, and to a page that loads.
 export interface OutputLevelReport {
 	volume: number;

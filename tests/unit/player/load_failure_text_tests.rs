@@ -6,13 +6,12 @@
 //! controller on the network.
 //!
 //! `tests/unit/util.rs` already pins `network_error_text` itself. That test cannot fail for a
-//! call site that never calls it, which is how five arms in `src/player/mod.rs` went raw while
+//! call site that never calls it, which is how five arms in `src/player/load/` went raw while
 //! the helper sat one module away. These drive the real functions instead.
 
-use super::{
-    LoadContext, LoadOrigin, Player, PlayerCommand, PlayerEvent, ResumePolicy, SegmentUrls,
-    start_stream_load,
-};
+use super::sources::start_stream_load;
+use super::{LoadContext, PlayerCommand, ResumePolicy, SegmentUrls};
+use crate::player::{LoadOrigin, Player, PlayerEvent};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;

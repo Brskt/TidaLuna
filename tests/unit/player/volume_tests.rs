@@ -1,7 +1,7 @@
-//! Tests for `Volume` in `src/player/mod.rs`, attached to it by `#[path]`.
+//! Tests for `Volume` in `src/player/volume.rs`, attached to it by `#[path]`.
 
-use super::fixture::silent_player;
 use super::*;
+use crate::player::fixture::silent_player;
 
 /// A level is clamped to 0..=100, and a non-finite one sanitizes to silence, never full scale:
 /// `.clamp()` alone would let NaN through. 1e41 is an ordinary JSON number whose `/ 100.0`

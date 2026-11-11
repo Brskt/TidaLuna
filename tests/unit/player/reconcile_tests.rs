@@ -1,4 +1,4 @@
-//! Tests for `src/player/mod.rs`, attached to it by `#[path]`.
+//! Tests for `src/player/track_identity.rs`, attached to it by `#[path]`.
 
 use super::is_same_active_track;
 
