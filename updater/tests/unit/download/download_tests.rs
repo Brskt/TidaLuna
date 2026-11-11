@@ -1,4 +1,4 @@
-//! Tests for `updater/src/main.rs`, attached to it by `#[path]`.
+//! Tests for `updater/src/download.rs`, attached to it by `#[path]`.
 
 use std::io::Cursor;
 

@@ -153,7 +153,7 @@ FunctionEnd
 !macroend
 
 ; WaitForHandleRelease waits until no file of probe_exclusive_access's set
-; (updater/src/main.rs) nor updater.exe is locked, aborting once the retry
+; (updater/src/process.rs) nor updater.exe is locked, aborting once the retry
 ; budget below runs out.
 !macro DefineWaitForHandleRelease un
 Function ${un}WaitForHandleRelease
