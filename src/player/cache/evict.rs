@@ -466,3 +466,7 @@ pub(super) struct Settled {
     evicted: Vec<(String, i64)>,
     kept: Vec<(String, std::io::Error)>,
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/cache/evict.rs"]
+mod tests;

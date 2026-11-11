@@ -144,3 +144,7 @@ fn run(side: &Connection, shared: &Shared) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/cache/checkpoint.rs"]
+mod tests;

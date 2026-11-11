@@ -571,3 +571,7 @@ pub(crate) fn install_publisher(cache: &mut AudioCache) {
 #[cfg(test)]
 #[path = "../../../tests/unit/player/cache.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/cache/fixture.rs"]
+mod fixture;

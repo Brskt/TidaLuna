@@ -352,3 +352,7 @@ impl AudioCache {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/cache/store.rs"]
+mod tests;
