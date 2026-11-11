@@ -1,4 +1,4 @@
-//! Tests for the Windows half of `src/platform/app_lock.rs`, attached by `#[path]`.
+//! Tests for `src/platform/app_lock/windows_impl.rs`, attached to `app_lock/mod.rs` by `#[path]`.
 
 /// Real kernel objects, one account. Every name carries a `Test` infix and the pid, never
 /// meeting a running app.

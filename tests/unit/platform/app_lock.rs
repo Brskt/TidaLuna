@@ -1,4 +1,4 @@
-//! Tests for the Linux half of `src/platform/app_lock.rs`, attached by `#[path]`.
+//! Tests for `src/platform/app_lock/linux_impl.rs`, attached to `app_lock/mod.rs` by `#[path]`.
 
 use std::ffi::CString;
 use std::fs::File;
