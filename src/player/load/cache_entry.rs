@@ -121,5 +121,5 @@ pub(in crate::player) fn read_cache_entry(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/player/cache_entry_validation_tests.rs"]
-mod cache_entry_validation_tests;
+#[path = "../../../tests/unit/player/load/cache_entry.rs"]
+mod tests;

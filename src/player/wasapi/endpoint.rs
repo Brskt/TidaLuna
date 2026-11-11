@@ -391,5 +391,5 @@ pub(super) fn try_open_stream(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/player/wasapi/negotiate_tests.rs"]
-mod negotiate_tests;
+#[path = "../../../tests/unit/player/wasapi/endpoint.rs"]
+mod tests;

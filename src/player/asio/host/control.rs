@@ -1551,5 +1551,5 @@ impl Drop for AsioHandle {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/unit/player/asio/transport_tests.rs"]
-mod transport_tests;
+#[path = "../../../../tests/unit/player/asio/host/control.rs"]
+mod tests;

@@ -379,7 +379,3 @@ pub(crate) fn parse_player_ipc(
 #[cfg(test)]
 #[path = "../../tests/unit/player/ipc.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "../../tests/unit/player/cast_gate_tests.rs"]
-mod cast_gate_tests;

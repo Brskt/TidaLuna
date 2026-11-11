@@ -284,5 +284,5 @@ impl Player {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/player/volume_tests.rs"]
-mod volume_tests;
+#[path = "../../tests/unit/player/volume.rs"]
+mod tests;

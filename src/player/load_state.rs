@@ -158,5 +158,5 @@ pub(crate) fn next_event_seq() -> u32 {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/player/load_state_tests.rs"]
-mod load_state_tests;
+#[path = "../../tests/unit/player/load_state.rs"]
+mod tests;

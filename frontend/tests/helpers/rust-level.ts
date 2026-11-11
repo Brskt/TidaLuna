@@ -16,7 +16,7 @@ export function rustReport(
 }
 
 // Rust's level as a page meets it, restating `OutputLevel`'s rules (proved on the Rust side in
-// tests/unit/player/volume_tests.rs) to follow a page load end to end: a page's level applies
+// tests/unit/player/volume.rs) to follow a page load end to end: a page's level applies
 // once the page took in the newest catch-up or remote change, and one the output already plays
 // changes nothing.
 export class FakeRust {

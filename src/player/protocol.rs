@@ -278,5 +278,5 @@ pub(super) enum PlayerCommand {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/player/media_error_code_tests.rs"]
-mod media_error_code_tests;
+#[path = "../../tests/unit/player/protocol.rs"]
+mod tests;
