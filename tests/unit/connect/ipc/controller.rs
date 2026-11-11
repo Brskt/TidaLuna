@@ -433,10 +433,7 @@ fn other_device(port: u16) -> MdnsDevice {
 #[tokio::test]
 async fn a_start_waits_for_the_device_without_a_deadline() {
     let mut server = MockWsServer::new().await.unwrap();
-    let ctrl = Arc::new(Mutex::new(TidalConnectController::new(None)));
-    ctrl.lock()
-        .unwrap()
-        .handle_browser_event(discovered(server.port()));
+    let ctrl = fresh_controller(&server);
     let mut dialling = tokio::spawn({
         let ctrl = ctrl.clone();
         async move {
@@ -522,10 +519,7 @@ async fn a_start_the_device_refuses_or_drops_fails_the_connect() {
 #[tokio::test]
 async fn a_second_connect_during_a_start_follows_the_first() {
     let mut server = MockWsServer::new().await.unwrap();
-    let ctrl = Arc::new(Mutex::new(TidalConnectController::new(None)));
-    ctrl.lock()
-        .unwrap()
-        .handle_browser_event(discovered(server.port()));
+    let ctrl = fresh_controller(&server);
     let flights = ConnectFlights::new();
     let attempt = || {
         flights.run(
