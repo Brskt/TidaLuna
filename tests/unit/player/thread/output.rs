@@ -1,16 +1,18 @@
-//! Tests for the resampling and callback halves of `src/player/thread/output.rs`,
-//! attached to it by `#[path]`.
-//! `AudioPipeline` is `pub(super)` and `build_cpal_callback` is module-private; a child module
-//! of `player::thread` reaches both without widening anything. Nothing here opens a device:
-//! the pipeline is a pure function of its input, and the callback is a closure over rings.
+//! Tests for `src/player/thread/output/` (the callback in `mixer.rs`, the resampler in
+//! `resample.rs`, `attempt_order` in `stream.rs`), attached to its `mod.rs` by `#[path]`. Each
+//! item is at least `pub(super)` in its file, which a child module of `output` reaches. Nothing
+//! here opens a device: the pipeline is a pure function of its input, and the callback is a
+//! closure over rings.
 //!
 //! Every case that checks a shape also checks energy. A structural assertion cannot tell a
 //! correct result from an empty one, and silence is what a broken resampler produces.
 
-use super::{
-    AudioPipeline, CHUNK_SIZE, CrossfadeLink, CrossfadeSlot, MIX_QUANTUM, attempt_order,
-    build_cpal_callback, pack_xfade_done, unpack_xfade_done,
+use super::mixer::{
+    CrossfadeLink, CrossfadeSlot, MIX_QUANTUM, build_cpal_callback, pack_xfade_done,
+    unpack_xfade_done,
 };
+use super::resample::{AudioPipeline, CHUNK_SIZE};
+use super::stream::attempt_order;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 

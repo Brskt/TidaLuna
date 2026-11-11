@@ -394,7 +394,7 @@ struct StreamCtx {
     scratch: UnsafeCell<Box<[i32]>>,
     /// Bumped by the control thread on seek/track-change; the RT callback drains
     /// the ring once when it changes, keeping stale pre-seek audio from being played
-    /// (mirrors the cpal `seek_gen` drain in `thread/output.rs`).
+    /// (mirrors the cpal `seek_gen` drain in `thread/output/mixer.rs`).
     flush_gen: Arc<AtomicU32>,
     /// The RT thread's last-seen flush generation (touched only on the RT thread).
     local_flush_gen: AtomicU32,
@@ -466,7 +466,7 @@ unsafe extern "system" fn stream_buffer_switch(
 
     // Flush-gen changed (seek / track-change): drain the ring once; stale
     // pre-seek audio is not played, then adopt the new generation. Mirrors the
-    // cpal `seek_gen` drain in `thread/output.rs`.
+    // cpal `seek_gen` drain in `thread/output/mixer.rs`.
     let cur_gen = ctx.flush_gen.load(Ordering::Relaxed);
     if cur_gen != ctx.local_flush_gen.load(Ordering::Relaxed) {
         let avail = consumer.slots();

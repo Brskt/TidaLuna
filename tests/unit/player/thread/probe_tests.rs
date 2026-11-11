@@ -1,4 +1,5 @@
-//! Tests for `probe_audio_format` in `src/player/thread/output.rs`, attached to it by `#[path]`.
+//! Tests for `probe_audio_format` in `src/player/thread/output/mod.rs`, attached to it by
+//! `#[path]`.
 //!
 //! What the probe reports as a track's length is what the page is told, and the SDK's load of a
 //! track waits on that report.

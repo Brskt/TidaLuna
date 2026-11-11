@@ -550,7 +550,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // The clock is deliberately NOT rebased here. Only the tick that swapped the rings
         // knows where the swap fell: by the time this thread reads `done` the counter holds
         // the outgoing total plus whatever the promoted ring has since delivered, so any
-        // store made here discards audio already heard. `output.rs` fixes the base instead.
+        // store made here discards audio already heard. `output/mixer.rs` fixes the base instead.
         self.current_duration = state.duration;
 
         // Clear the completion state, exactly as a load does. It is GUARANTEED to be set
