@@ -427,13 +427,5 @@ impl DbActor {
 }
 
 #[cfg(test)]
-#[path = "../tests/unit/db_tests.rs"]
-mod db_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/db_open_tests.rs"]
-mod db_open_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/db_repair_notice_tests.rs"]
-mod db_repair_notice_tests;
+#[path = "../tests/unit/db.rs"]
+mod tests;
