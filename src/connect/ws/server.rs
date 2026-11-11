@@ -14,6 +14,7 @@ use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 use crate::connect::runtime::TaskGroup;
 use crate::connect::ws::close::{CLOSE_DEADLINE, ReadEnd, answer_close, read_to_end};
+use crate::connect::ws::tls::build_tls_acceptor;
 use crate::connect::ws::writer;
 
 /// A client socket's life as the routing loop hears it, every socket on one channel. `Connected`
@@ -543,36 +544,6 @@ async fn report_disconnect(
             socket_id
         );
     }
-}
-
-/// Build a TLS acceptor using the embedded TIDAL Connect server cert+key.
-#[cfg(has_connect_server_key)]
-fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
-    use rustls::ServerConfig;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-
-    static CERT_PEM: &[u8] = include_bytes!("certs/tidal_server_cert.pem");
-    static KEY_PEM: &[u8] = include_bytes!("certs/tidal_server_key.pem");
-
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut &CERT_PEM[..]).collect::<Result<Vec<_>, _>>()?;
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &KEY_PEM[..])
-        .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in PEM"))?;
-
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-
-    Ok(TlsAcceptor::from(Arc::new(config)))
-}
-
-/// Stand-in for a build the server key never reached, `include_bytes!` having no way to
-/// take a file that is absent. `ConnectReceiver::start` gives up on this error before it
-/// reaches the mDNS advertiser, leaving such a build to announce no receiver at all.
-#[cfg(not(has_connect_server_key))]
-fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
-    anyhow::bail!("no TIDAL Connect server key was bundled at build time")
 }
 
 /// The server as `start` builds it, the TLS accept aside, with one client (`socket_id`) whose

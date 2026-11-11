@@ -3,6 +3,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error, SignatureScheme};
 use std::sync::Arc;
+use tokio_rustls::TlsAcceptor;
 
 const TIDAL_TS_CA_PEM: &str = include_str!("certs/tidal_ts_ca.pem");
 const TIDAL_ROOT_CA_PEM: &str = include_str!("certs/tidal_root_ca.pem");
@@ -107,4 +108,34 @@ impl ServerCertVerifier for TidalCertVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+}
+
+/// Build a TLS acceptor using the embedded TIDAL Connect server cert+key.
+#[cfg(has_connect_server_key)]
+pub(super) fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
+    use rustls::ServerConfig;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    static CERT_PEM: &[u8] = include_bytes!("certs/tidal_server_cert.pem");
+    static KEY_PEM: &[u8] = include_bytes!("certs/tidal_server_key.pem");
+
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &CERT_PEM[..]).collect::<Result<Vec<_>, _>>()?;
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &KEY_PEM[..])
+        .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?
+        .ok_or_else(|| anyhow::anyhow!("No private key found in PEM"))?;
+
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+/// Stand-in for a build the server key never reached, `include_bytes!` having no way to
+/// take a file that is absent. `ConnectReceiver::start` gives up on this error before it
+/// reaches the mDNS advertiser, leaving such a build to announce no receiver at all.
+#[cfg(not(has_connect_server_key))]
+pub(super) fn build_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
+    anyhow::bail!("no TIDAL Connect server key was bundled at build time")
 }
