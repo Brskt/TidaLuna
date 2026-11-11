@@ -1,5 +1,5 @@
 #[cfg(target_os = "windows")]
-use super::commands::queued_seek_survives;
+use super::bypass::queued_seek_survives;
 use super::decode::{DecodeThreadConfig, spawn_decode_thread};
 use super::output::{
     format_duration_mmss, format_sample_rate, open_output_stream, probe_audio_format,

@@ -1,4 +1,5 @@
-mod commands;
+#[cfg(target_os = "windows")]
+mod bypass;
 mod crossfade;
 pub(super) mod decode;
 mod device;

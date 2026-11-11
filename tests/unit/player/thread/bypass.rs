@@ -1,9 +1,14 @@
-//! Tests for `src/player/thread/commands.rs`, attached to it by `#[path]`. The player of the
-//! shared `harness` fixture also drives `poll_playback`, which lives in the sibling `playback`
-//! module: both are `pub(in player::thread)`: either file reaches the whole surface.
+//! Tests for `src/player/thread/bypass/` (the queued seek and the settles in `mod.rs`, the two
+//! backends in `exclusive.rs` and `asio.rs`), attached to its `mod.rs` by `#[path]`. The player
+//! of the shared `harness` fixture also drives `poll_playback`, which lives in the sibling
+//! `playback` module.
 
 #[cfg(target_os = "windows")]
 use super::queued_seek_survives;
+#[cfg(target_os = "windows")]
+use super::seek_ack_is_current;
+#[cfg(target_os = "windows")]
+use super::verdict_names_current_stream;
 #[cfg(target_os = "windows")]
 use crate::player::asio::host::{AsioEvent, AsioHandle};
 #[cfg(target_os = "windows")]
@@ -44,6 +49,47 @@ fn a_queued_seek_survives_only_the_re_arm_of_its_own_track() {
             queued_seek_survives(queued_track, track_id, resume_policy),
             expected,
             "queued for {queued_track:?}, loading {track_id:?}, {resume_policy:?}"
+        );
+    }
+}
+
+/// A track change mints a new decoder, and its predecessor's answer must not land on it (stream
+/// half). On one live decoder only the generation separates the awaited seek from an earlier
+/// one still answering, which would clear the newer seek's pin (generation half).
+#[cfg(target_os = "windows")]
+#[test]
+fn only_the_awaited_seeks_own_ack_settles_it() {
+    for (current_stream, current_gen, ack_stream, ack_gen, expected) in [
+        (Some(8), 3, 7, 3, false),
+        (Some(7), 4, 7, 3, false),
+        (Some(7), 3, 7, 3, true),
+        (None, 3, 7, 3, false),
+    ] {
+        assert_eq!(
+            seek_ack_is_current(current_stream, current_gen, ack_stream, ack_gen),
+            expected,
+            "current ({current_stream:?}, {current_gen}), ack ({ack_stream}, {ack_gen})"
+        );
+    }
+}
+
+/// A rate-locked device takes seconds to refuse a candidate: a superseded stream's verdict
+/// must not mark the track that arrived meanwhile. Two unidentified sides are not the same
+/// stream (`None == None` read as a match would mark whatever happened to be playing).
+#[cfg(target_os = "windows")]
+#[test]
+fn a_verdict_condemns_a_track_only_when_both_sides_name_the_current_stream() {
+    for (current, verdict, expected) in [
+        (Some(2), Some(1), false),
+        (Some(2), Some(2), true),
+        (None, None, false),
+        (Some(2), None, false),
+        (None, Some(2), false),
+    ] {
+        assert_eq!(
+            verdict_names_current_stream(current, verdict),
+            expected,
+            "current {current:?}, verdict {verdict:?}"
         );
     }
 }

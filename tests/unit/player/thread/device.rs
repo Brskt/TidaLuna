@@ -1,5 +1,5 @@
 //! Tests for `src/player/thread/device.rs`, attached to it by `#[path]`. The switches themselves
-//! are driven through the `harness` fixture in `commands.rs`'s tests; this file holds the rule
+//! are driven through the `harness` fixture in `bypass.rs`'s tests; this file holds the rule
 //! they share.
 
 use super::SwitchRearm;
