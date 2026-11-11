@@ -71,7 +71,7 @@ pub(crate) fn enumerate_asio_drivers() -> Vec<AsioDriverInfo> {
     };
 
     let mut drivers = Vec::new();
-    let path = to_wide("SOFTWARE\\ASIO");
+    let path = crate::platform::wide("SOFTWARE\\ASIO");
     let mut root: HKEY = core::ptr::null_mut();
     // SAFETY: open the ASIO hive for read; `root` is closed below.
     let opened =
@@ -125,14 +125,14 @@ fn read_clsid_value(
         HKEY, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
     };
 
-    let sub = to_wide(subkey);
+    let sub = crate::platform::wide(subkey);
     let mut hk: HKEY = core::ptr::null_mut();
     // SAFETY: open the named subkey for read.
     if unsafe { RegOpenKeyExW(root, sub.as_ptr(), 0, KEY_READ, &mut hk) } != ERROR_SUCCESS {
         return None;
     }
 
-    let value = to_wide("CLSID");
+    let value = crate::platform::wide("CLSID");
     let mut buf = [0u16; 128];
     let mut bytes = (buf.len() * 2) as u32; // capacity in bytes
     // SAFETY: read the CLSID string value into the fixed buffer.
@@ -272,12 +272,6 @@ pub(crate) fn driver_error_message(driver: &super::iasio::AsioDriver) -> Option<
     let bytes: Vec<u8> = buf[..len].iter().map(|&b| b as u8).collect();
     let text = String::from_utf8_lossy(&bytes).trim().to_string();
     (!text.is_empty()).then_some(text)
-}
-
-/// Encode a string as a NUL-terminated UTF-16 buffer for the wide registry API.
-#[cfg(target_os = "windows")]
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(core::iter::once(0)).collect()
 }
 
 #[cfg(test)]

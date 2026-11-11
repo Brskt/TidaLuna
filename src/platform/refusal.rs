@@ -16,8 +16,8 @@ use super::process_args::is_helper_process;
 #[cfg(target_os = "windows")]
 fn dialog(text: &str, style: u32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_OK, MessageBoxW};
-    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    let title: Vec<u16> = "TidaLunar".encode_utf16().chain(Some(0)).collect();
+    let text = super::wide(text);
+    let title = super::wide("TidaLunar");
     // SAFETY: both strings are NUL-terminated and outlive the call, and no
     // owner window is named.
     unsafe {

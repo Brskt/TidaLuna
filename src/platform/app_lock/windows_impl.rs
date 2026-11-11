@@ -36,6 +36,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
+use crate::platform::wide;
+
 use super::{
     AppLock, Attempt, CLOSE_WAIT_MS, Focus, HANDOFF_BUDGET_MS, HandOff, LinkChannel,
     NO_LISTENER_GRACE_MS, ObjectOwner, OwnIdentity, Unguarded, Unserved, classify_owner,
@@ -219,10 +221,6 @@ impl SendHandle {
     fn get(&self) -> HANDLE {
         self.0
     }
-}
-
-pub(super) fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// `leaf` inside the namespace `ns`, which `UserNamespace::open` registers

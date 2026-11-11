@@ -13,11 +13,8 @@ use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegSetValueExW,
 };
 
+use crate::platform::wide;
 use crate::ui::deep_link::SCHEME;
-
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
-}
 
 /// A URL carrying a double quote breaks out of `"%1"` and appends its own tokens
 /// to the line CEF reads through `GetCommandLineW`. Past a bare `--` Chromium

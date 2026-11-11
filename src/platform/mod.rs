@@ -30,3 +30,9 @@ pub(crate) mod url_scheme;
 pub(crate) mod volume_sync;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11_class;
+
+/// `s` as the NUL-terminated UTF-16 the wide Win32 calls take.
+#[cfg(target_os = "windows")]
+pub(crate) fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
