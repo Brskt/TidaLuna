@@ -1,7 +1,9 @@
 //! Tests for `src/audio/preload.rs`, attached to it by `#[path]`.
 
 use super::*;
-use crate::audio::bandwidth::spawn_governor;
+use crate::audio::bandwidth::{TrafficClass, spawn_governor};
+use crate::audio::download::download_stream;
+use crate::player::buffer::DownloadFailure;
 use crate::state::{HANG_GUARD, PreloadedTrack, TrackInfo, warm_process_globals};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// libtest runs the crate in one process, several threads wide, and `PRELOAD_STATE`

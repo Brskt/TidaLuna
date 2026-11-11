@@ -1,6 +1,6 @@
 use super::cache_entry::{CacheReadError, read_cache_entry};
 use super::{LoadContext, LoadStep};
-use crate::audio::preload;
+use crate::audio::{download, preload};
 use crate::player::buffer::{DownloadOwner, HeadStatus, RamBuffer};
 use crate::player::{MediaErrorCode, cache, format_bytes, format_ms, short_id};
 use crate::state::{AUDIO_CACHE, HTTP_CLIENT_PLAYBACK, TrackInfo};
@@ -251,7 +251,7 @@ pub(super) async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, t
         // Handed the response already open, not left to race a second one against it: a
         // body nobody reads keeps an HTTP/1.1 connection held and unusable until it drops,
         // and this one would not drop until the whole fallback download had finished.
-        match preload::fetch_and_decrypt(url, key, resp, &ctx.governor).await {
+        match download::fetch_and_decrypt(url, key, resp, &ctx.governor).await {
             Ok(fetched) => {
                 if ctx.is_stale() {
                     crate::vprintln!("[LOAD #{load_gen}] stale after full download, dropping");
@@ -289,7 +289,7 @@ pub(super) async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, t
         ctx.governor.clone(),
     );
 
-    preload::start_download(resp, url.to_string(), key.to_string(), writer);
+    download::start_download(resp, url.to_string(), key.to_string(), writer);
 
     // Pre-buffer 64KB before handing to decoder
     const PRE_BUFFER_TARGET: u64 = 64 * 1024;
