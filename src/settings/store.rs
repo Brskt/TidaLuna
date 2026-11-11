@@ -1,4 +1,4 @@
-use super::catalog::{lost_rows, write};
+use super::catalog::{Read, lost_rows, read, write};
 use super::swap::replace;
 use crate::db::ROUTINE_SYNC;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
@@ -225,18 +225,10 @@ enum Earlier {
 fn marked_off(store: &Connection) -> Vec<&'static str> {
     lost_rows()
         .into_iter()
-        .filter(|(key, row)| {
-            match store
-                .query_row(
-                    "SELECT value FROM settings WHERE key = ?1",
-                    params![key],
-                    |found| found.get::<_, String>(0),
-                )
-                .optional()
-            {
-                Ok(found) => found.as_ref() == Some(row),
-                Err(_) => true,
-            }
+        .filter(|(key, row)| match read::<String>(store, key) {
+            Read::Stored(value) => value == *row,
+            Read::Absent => false,
+            Read::Unreadable(_) => true,
         })
         .map(|(key, _)| key)
         .collect()
