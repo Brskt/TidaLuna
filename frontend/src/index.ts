@@ -180,7 +180,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             }
         } else if (type === "duration") {
             const product = typeof event.product === "string" ? event.product : undefined;
-            // Rust announces this for every load, even one with no length (src/player/thread/commands.rs):
+            // Rust announces this for every load, even one with no length (src/player/thread/load.rs):
             // it is how the page learns which track Rust holds. States carry no track; `PlayState`
             // reads it when `active` arrives, to know whose time the segment it opens is.
             (window as any).__LUNAR_RUST_PRODUCT_ID__ = product;

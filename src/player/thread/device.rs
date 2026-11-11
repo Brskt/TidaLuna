@@ -645,6 +645,43 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.start_playback();
         }
     }
+
+    /// Resolve the configured output device (falling back to the OS default) and
+    /// record its concrete name in `current_output_name`, which the shared
+    /// re-assert guard compares against. Every cpal-open path resolves through here.
+    pub(super) fn resolve_output_device(&mut self) -> Option<cpal::Device> {
+        match super::output::resolve_device(self.current_device_id.as_deref()) {
+            Some(d) => {
+                let name = super::output::output_device_name(&d);
+                self.output_is_default = self
+                    .current_device_id
+                    .as_deref()
+                    .is_none_or(super::output::is_default_selector);
+                // A named (non-default) request that didn't resolve to itself fell
+                // back to the OS default.
+                if !self.output_is_default
+                    && let Some(req) = self.current_device_id.as_deref()
+                    && name.as_deref() != Some(req)
+                {
+                    crate::vprintln!(
+                        "[AUDIO] Device '{}' not found, falling back to default",
+                        req
+                    );
+                }
+                self.current_output_name = name;
+                Some(d)
+            }
+            None => {
+                (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
+                None
+            }
+        }
+    }
+
+    pub(super) fn handle_get_audio_devices(&self, req_id: Option<String>) {
+        let devices = super::output::enumerate_audio_devices();
+        (self.callback)(PlayerEvent::AudioDevices(devices, req_id));
+    }
 }
 
 #[cfg(test)]

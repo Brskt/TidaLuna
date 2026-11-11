@@ -2,8 +2,11 @@ mod commands;
 mod crossfade;
 pub(super) mod decode;
 mod device;
+mod load;
 pub(super) mod output;
 mod playback;
+mod transport;
+mod volume;
 
 use super::buffer::RamBuffer;
 use super::resume::ResumeStore;

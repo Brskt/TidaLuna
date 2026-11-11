@@ -3,7 +3,7 @@
 
 use crate::player::resume::ResumeStore;
 use crate::player::thread::{DecodeCommand, DecodeEvent, PlayerThread};
-use crate::player::{PlayerCommand, PlayerEvent};
+use crate::player::{LoadRequest, PlaybackState, PlayerCommand, PlayerEvent, ResumePolicy};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -59,4 +59,39 @@ pub(super) fn harness(dir: &std::path::Path) -> Harness {
         _cmd_tx: cmd_tx,
         _decode_cmds: decode_cmds,
     }
+}
+
+/// The transport state announced last, ignoring position and format events.
+pub(super) fn last_state(events: &Spy) -> Option<PlaybackState> {
+    events.lock().unwrap().iter().rev().find_map(|ev| match ev {
+        PlayerEvent::StateChange(state, _) => Some(*state),
+        _ => None,
+    })
+}
+
+pub(super) fn load_req_of(
+    buffer: crate::player::buffer::RamBuffer,
+    seq: u32,
+    track: &str,
+) -> LoadRequest {
+    LoadRequest {
+        buffer,
+        load_gen: crate::player::current_gen(),
+        seq,
+        track_id: track.to_string(),
+        product_id: None,
+        resume_policy: ResumePolicy::Restart,
+        load_start: std::time::Instant::now(),
+        cached: Some(crate::player::cache::Generation::NONE),
+        format: "flac".to_string(),
+    }
+}
+
+/// Bytes no decoder reads: the stream is opened and named, which is all these cases need.
+pub(super) fn load_req(seq: u32, track: &str) -> LoadRequest {
+    load_req_of(
+        crate::player::buffer::RamBuffer::from_complete(vec![1, 2, 3]),
+        seq,
+        track,
+    )
 }
