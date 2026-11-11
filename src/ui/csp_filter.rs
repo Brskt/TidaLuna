@@ -60,7 +60,7 @@ wrap_request_context_handler! {
             // the store and module requests above do. Gated here as well, otherwise a
             // SW-proxied load walks straight past the browser-level check.
             if let Some(req) = request.as_ref()
-                && let Some(h) = crate::ui::token_filter::block_disallowed_image(
+                && let Some(h) = crate::ui::exfil_guard::block_disallowed_image(
                     req.resource_type(),
                     &url,
                     "service-worker",

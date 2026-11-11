@@ -431,10 +431,10 @@ wrap_request_handler! {
                     "[EXFIL]  BLOCKED dialog non-https request to {}",
                     crate::util::refused_host(url.as_str())
                 );
-                return Some(crate::ui::token_filter::ExfilBlockHandler::new());
+                return Some(crate::ui::exfil_guard::ExfilBlockHandler::new());
             }
             if let Some(req) = request.as_ref()
-                && let Some(h) = crate::ui::token_filter::block_disallowed_image(
+                && let Some(h) = crate::ui::exfil_guard::block_disallowed_image(
                     req.resource_type(),
                     &url,
                     "dialog",

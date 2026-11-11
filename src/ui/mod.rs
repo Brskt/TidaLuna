@@ -10,6 +10,7 @@ pub(crate) mod deep_link;
 pub(crate) mod destination_dialog;
 pub(crate) mod dialog;
 pub(crate) mod early_runtime;
+mod exfil_guard;
 pub(crate) mod file_dialog;
 pub(crate) mod flush;
 pub(crate) mod folder_picker;

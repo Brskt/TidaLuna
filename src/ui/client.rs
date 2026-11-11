@@ -915,7 +915,7 @@ wrap_request_handler! {
             // `should_rewrite_token` without clearing `is_tidal_origin`, so from inside either
             // arm this gate would never run for them.
             if let Some(req) = _request.as_ref()
-                && let Some(h) = crate::ui::token_filter::block_disallowed_image(
+                && let Some(h) = crate::ui::exfil_guard::block_disallowed_image(
                     req.resource_type(),
                     &url,
                     "renderer",
@@ -944,7 +944,7 @@ wrap_request_handler! {
                         "[EXFIL]  BLOCKED sendBeacon to {}",
                         crate::util::truncate_str(url.as_str(), 80)
                     );
-                    return Some(crate::ui::token_filter::ExfilBlockHandler::new());
+                    return Some(crate::ui::exfil_guard::ExfilBlockHandler::new());
                 }
                 None
             } else {
