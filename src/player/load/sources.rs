@@ -340,3 +340,7 @@ pub(super) async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, t
     );
     ctx.publish_load(buffer, None, track_id.to_string());
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/player/load/sources.rs"]
+mod tests;

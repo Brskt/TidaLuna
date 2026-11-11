@@ -133,9 +133,5 @@ impl Drop for LoadSettleGuard {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/player/prebuffer_tests.rs"]
-mod prebuffer_tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/player/load_failure_text_tests.rs"]
-mod load_failure_text_tests;
+#[path = "../../../tests/unit/player/load.rs"]
+mod tests;

@@ -426,11 +426,3 @@ mod windows_impl;
 
 #[cfg(target_os = "linux")]
 mod linux_impl;
-
-#[cfg(all(test, target_os = "linux"))]
-#[path = "../../../tests/unit/platform/app_lock.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "../../../tests/unit/platform/app_lock_server.rs"]
-mod server_tests;

@@ -1,4 +1,4 @@
-//! Tests for `src/platform/app_lock/linux_impl.rs`, attached to `app_lock/mod.rs` by `#[path]`.
+//! Tests for `src/platform/app_lock/linux_impl.rs`, attached to it by `#[path]`.
 
 use std::ffi::CString;
 use std::fs::File;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::linux_impl::*;
+use super::*;
 
 /// A private runtime directory, as logind makes `/run/user/<uid>`.
 fn runtime_dir() -> tempfile::TempDir {
@@ -41,7 +41,7 @@ fn holder(data: &Path, runtime: &Path) -> (std::fs::File, Channel) {
 
 const CHILD_DATA: &str = "TIDALUNAR_APP_LOCK_TEST_DATA";
 const CHILD_RUNTIME: &str = "TIDALUNAR_APP_LOCK_TEST_RUNTIME";
-const CHILD_TEST: &str = "platform::app_lock::tests::child_holder";
+const CHILD_TEST: &str = "platform::app_lock::linux_impl::tests::child_holder";
 
 #[test]
 fn child_holder() {

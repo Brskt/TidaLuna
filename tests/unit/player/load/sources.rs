@@ -1,7 +1,7 @@
 //! Tests for the pre-buffer wait in `start_stream_load`, attached to it by `#[path]`.
 
-use super::sources::start_stream_load;
-use super::{LoadContext, PlayerCommand, ResumePolicy};
+use super::super::{LoadContext, PlayerCommand, ResumePolicy};
+use super::start_stream_load;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 

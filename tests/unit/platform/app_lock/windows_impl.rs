@@ -1,10 +1,10 @@
-//! Tests for `src/platform/app_lock/windows_impl.rs`, attached to `app_lock/mod.rs` by `#[path]`.
+//! Tests for `src/platform/app_lock/windows_impl.rs`, attached to it by `#[path]`.
 
 /// Real kernel objects, one account. Every name carries a `Test` infix and the pid, never
 /// meeting a running app.
 #[cfg(windows)]
 mod kernel {
-    use super::super::windows_impl::{Names, acquire_with, wide};
+    use super::super::{Names, acquire_with, wide};
 
     /// Runs this test binary again as a second process, running `test` of this module alone
     /// with `var` set to `value`, and fails unless that test ran and passed: a filter that

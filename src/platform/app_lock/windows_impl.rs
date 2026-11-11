@@ -1065,3 +1065,7 @@ fn spawn_focus_listener(event: HANDLE, stop: HANDLE) -> std::io::Result<JoinHand
             unsafe { CloseHandle(served.get()) };
         })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/platform/app_lock/windows_impl.rs"]
+mod tests;

@@ -847,3 +847,7 @@ fn refuse(uid: Option<u32>) {
         None => crate::vprintln!("[LOCK]   refused a signal nobody is named for"),
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/platform/app_lock/linux_impl.rs"]
+mod tests;
