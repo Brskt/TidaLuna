@@ -277,3 +277,7 @@ pub(in crate::player::thread) fn open_output_stream(
     }
     None
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/player/thread/output/stream.rs"]
+mod tests;

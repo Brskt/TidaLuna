@@ -101,5 +101,5 @@ pub(super) fn probe_audio_format(
 mod tests;
 
 #[cfg(test)]
-#[path = "../../../../tests/unit/player/thread/probe_tests.rs"]
-mod probe_tests;
+#[path = "../../../../tests/unit/player/thread/output/fixture.rs"]
+mod fixture;

@@ -212,3 +212,7 @@ fn remap_channels(data: &[f32], src_ch: usize, out_ch: usize, output: &mut Vec<f
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/player/thread/output/resample.rs"]
+mod tests;

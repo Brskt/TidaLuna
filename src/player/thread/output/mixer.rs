@@ -309,3 +309,7 @@ pub(super) fn build_cpal_callback(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/player/thread/output/mixer.rs"]
+mod tests;
