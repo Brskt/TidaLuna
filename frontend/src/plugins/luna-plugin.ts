@@ -575,6 +575,7 @@ export class LunaPlugin {
                 } catch (e) {
                     console.error(`[luna:plugin] Live reload error for ${this.name}:`, e);
                     failed = true;
+                    this.note(pullNote({ outcome: "unavailable", reason: e instanceof Error ? e.message : String(e) }));
                 } finally {
                     this.fetching._ = false;
                 }

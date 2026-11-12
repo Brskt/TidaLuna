@@ -7,15 +7,10 @@ use super::ipc_callback_ok;
 use super::jsrt::PassGuard;
 use super::source::{Manifest, PluginData};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
-use crate::plugins::store::UpdateOutcome;
+use crate::plugins::store::{StoredPlugin, UpdateOutcome};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
-
-/// Bounds the two fetches together: the shared client has no read timeout, and a source stalling
-/// its body would hold the plugin's update turn for good.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The urls with an update in flight. A second update of one url is refused, never queued.
 static UPDATING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
@@ -214,7 +209,7 @@ async fn pull(url: &str) -> Pulled {
         manifest,
         code,
         hash,
-    } = match fetch(url, &stored.manifest).await {
+    } = match fetch(url, &stored).await {
         Ok(fetched) => fetched,
         Err(why) => return unavailable(why),
     };
@@ -284,19 +279,9 @@ fn refused_as(hash: String, reason: String) -> Pulled {
 
 /// The version the source serves. A source that lost its `.json` is an error, not a plugin
 /// without one: `fetch_plugin_data` would make up a manifest and drop the real one.
-async fn fetch(url: &str, stored_manifest: &str) -> Result<PluginData, String> {
-    let client = &*crate::state::HTTP_CLIENT;
-    let fetched =
-        tokio::time::timeout(FETCH_TIMEOUT, super::source::fetch_plugin_data(client, url))
-            .await
-            .map_err(|_| {
-                format!(
-                    "The source did not answer within {} s",
-                    FETCH_TIMEOUT.as_secs()
-                )
-            })?
-            .map_err(|e| format!("{e:#}"))?;
-    if !fetched.manifest.replaces(stored_manifest) {
+async fn fetch(url: &str, stored: &StoredPlugin) -> Result<PluginData, String> {
+    let fetched = super::source::fetch_version(url, Some(stored)).await?;
+    if !fetched.manifest.replaces(&stored.manifest) {
         return Err("The source no longer serves the plugin's manifest".to_string());
     }
     Ok(fetched)

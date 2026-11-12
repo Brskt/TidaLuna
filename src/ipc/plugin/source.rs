@@ -1,5 +1,11 @@
 use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
+use crate::plugins::store::StoredPlugin;
+use std::time::Duration;
+
+/// Bounds a version's fetches together: the shared client has no read timeout, and a source
+/// stalling its body would hold for good whatever waits on it (an update turn, the poll).
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg.arg(0).to_string();
@@ -21,11 +27,7 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, query_id: i64, callback
         state.pending_ipc_callbacks.insert(query_id, callback);
     });
     crate::state::rt_handle().spawn(async move {
-        let client = &*crate::state::HTTP_CLIENT;
-        let base = sanitize_plugin_url(&url);
-        let code_url = format!("{base}.mjs");
-
-        let result = fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await;
+        let result = served_code_hash(&url).await;
 
         // After the fetch, not before: a cancellation mid-flight must find the entry still in
         // the map for `on_query_canceled` to drop, or this task resolves a retired callback.
@@ -34,14 +36,74 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, query_id: i64, callback
         };
 
         match result {
-            Ok(code) => {
-                let hash = fnv_hash_str(&code);
+            Ok(hash) => {
                 let json = format!(r#"{{"hash":"{hash}"}}"#);
                 ipc_callback_ok(&cb, &json);
             }
-            Err(e) => ipc_callback_err(&cb, 500, &format!("{e:#}")),
+            Err(e) => ipc_callback_err(&cb, 500, &e),
         }
     });
+}
+
+/// The fnv of the code the source serves, fetched as `plugin.update` fetches it.
+async fn served_code_hash(url: &str) -> Result<String, String> {
+    let key = url.to_string();
+    let stored = tokio::task::spawn_blocking(move || {
+        crate::state::db().call_plugins(move |pc| crate::plugins::store::stored(pc, &key))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("DB error: {e}"))?;
+    fetch_version(url, stored.as_ref())
+        .await
+        .map(|fetched| fetched.hash)
+}
+
+/// [`fetch_plugin_data`] on the shared client, within [`FETCH_TIMEOUT`].
+pub(super) async fn fetch_version(
+    url: &str,
+    stored: Option<&StoredPlugin>,
+) -> Result<PluginData, String> {
+    let client = &*crate::state::HTTP_CLIENT;
+    tokio::time::timeout(FETCH_TIMEOUT, fetch_plugin_data(client, url, stored))
+        .await
+        .map_err(|_| {
+            format!(
+                "The source did not answer within {} s",
+                FETCH_TIMEOUT.as_secs()
+            )
+        })?
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Whether the stored code is still what the source serves: the fetched manifest carries the
+/// stored one's `hash`, and the stored code hashes to it. A pair stored mid-publish (new
+/// manifest, old code) fails the second test, so its code is downloaded again.
+pub(super) fn serves_stored_code(
+    stored_manifest: &str,
+    stored_code: &str,
+    fetched_manifest: &str,
+) -> bool {
+    match (
+        manifest_hash(stored_manifest),
+        manifest_hash(fetched_manifest),
+    ) {
+        (Some(stored), Some(fetched)) => stored == fetched && content_hash(stored_code) == stored,
+        _ => false,
+    }
+}
+
+fn manifest_hash(manifest: &str) -> Option<String> {
+    let manifest: serde_json::Value = serde_json::from_str(manifest).ok()?;
+    manifest.get("hash")?.as_str().map(str::to_string)
+}
+
+/// The `hash` a Luna plugin build writes into its manifest: esbuild's output hash, xxHash64 of
+/// the `.mjs` bytes, little-endian, in base64 without padding.
+fn content_hash(code: &str) -> String {
+    use base64::Engine as _;
+    let digest = twox_hash::XxHash64::oneshot(0, code.as_bytes());
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest.to_le_bytes())
 }
 
 fn fnv_hash_str(s: &str) -> String {
@@ -149,9 +211,12 @@ pub(super) struct PluginData {
     pub(super) hash: String,
 }
 
+/// The version `url` serves. Given the `stored` version, its code is reused, not downloaded,
+/// while the manifest still names it ([`serves_stored_code`]).
 pub(super) async fn fetch_plugin_data(
     client: &reqwest::Client,
     url: &str,
+    stored: Option<&StoredPlugin>,
 ) -> anyhow::Result<PluginData> {
     let base = sanitize_plugin_url(url);
 
@@ -165,8 +230,15 @@ pub(super) async fn fetch_plugin_data(
             .ok_or_else(|| anyhow::anyhow!("plugin manifest has no name"))?
             .to_string();
 
-        let code_url = format!("{base}.mjs");
-        let code = fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await?;
+        let code = match stored {
+            Some(stored) if serves_stored_code(&stored.manifest, &stored.code, &manifest_str) => {
+                stored.code.clone()
+            }
+            _ => {
+                let code_url = format!("{base}.mjs");
+                fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await?
+            }
+        };
         let hash = fnv_hash_str(&code);
 
         Ok(PluginData {

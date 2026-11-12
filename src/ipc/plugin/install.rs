@@ -57,7 +57,7 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, In
         manifest,
         code,
         hash,
-    } = fetch_plugin_data(client, &url)
+    } = fetch_plugin_data(client, &url, None)
         .await
         .map_err(|e| format!("{e:#}"))?;
     let manifest = manifest.into_string();

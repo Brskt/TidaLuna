@@ -1,6 +1,58 @@
 //! Tests for `src/ipc/plugin/source.rs`, attached to it by `#[path]`.
 
-use super::bump_capped;
+use super::{bump_capped, serves_stored_code};
+
+/// A wrong yes leaves a plugin on old code without any error.
+/// `M2L3YHHyO7k` and `zc/AUeTSimY` are Bun's `xxHash64` of the two codes, little-endian, in
+/// base64 without padding, the form esbuild writes.
+#[test]
+fn stored_code_is_reused_only_while_its_manifest_hash_still_names_it() {
+    let (old, new) = ("export const x = 1;\n", "export const x = 2;\n");
+    let manifest = |hash: &str| format!(r#"{{"name":"p","hash":"{hash}"}}"#);
+    for (stored_manifest, stored_code, fetched_manifest, reused, case) in [
+        (
+            manifest("zc/AUeTSimY"),
+            new,
+            manifest("zc/AUeTSimY"),
+            true,
+            "unchanged",
+        ),
+        (
+            manifest("M2L3YHHyO7k"),
+            old,
+            manifest("zc/AUeTSimY"),
+            false,
+            "hash changed",
+        ),
+        (
+            manifest("zc/AUeTSimY"),
+            old,
+            manifest("zc/AUeTSimY"),
+            false,
+            "stored mid-publish",
+        ),
+        (
+            r#"{"name":"p"}"#.to_string(),
+            new,
+            r#"{"name":"p"}"#.to_string(),
+            false,
+            "no hash",
+        ),
+        (
+            r#"{"hash":7}"#.to_string(),
+            new,
+            r#"{"hash":7}"#.to_string(),
+            false,
+            "not a string",
+        ),
+    ] {
+        assert_eq!(
+            serves_stored_code(&stored_manifest, stored_code, &fetched_manifest),
+            reused,
+            "{case}"
+        );
+    }
+}
 
 /// The plugin-driven byte cap holds exactly at the boundary and cannot be wrapped past:
 /// `usize::MAX + 2` would read as 1, well under the cap, if the sum did not saturate.
