@@ -13,6 +13,12 @@ pub(super) fn handle_plugin_fetch(
         crate::ipc::caller::Caller::Plugin(url) => url.clone(),
         crate::ipc::caller::Caller::Unattributed => String::new(),
     };
+    // The dispatcher refuses plugin.fetch without a capability; this floor repeats that refusal
+    // in the file that hands out the token.
+    let Some(cap) = msg.cap.as_deref() else {
+        ipc_callback_err(&callback, 403, "unattributed call");
+        return;
+    };
     let url = msg.arg(1).to_string();
     let raw_opts = msg.arg(2);
     let opts_json = if raw_opts.is_empty() { "{}" } else { raw_opts }.to_string();
@@ -44,8 +50,7 @@ pub(super) fn handle_plugin_fetch(
         &opts_json,
         query_id,
         callback,
-        None,
-        msg.cap.as_deref(),
+        TokenSource::Capability(cap),
     );
 }
 
@@ -80,37 +85,37 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, query_id: i64, callback: IpcC
         &opts_json,
         query_id,
         callback,
-        Some(token),
-        None,
+        TokenSource::Captured(token),
     );
 }
 
-/// `capability`, when present, is checked against the current session before the token is
-/// handed over. `None` means the caller is the core bundle, which holds no capability and
-/// already validated its own token.
+/// Where `dispatch_authenticated_fetch` takes the token it attaches.
+enum TokenSource<'a> {
+    /// `tidal.fetch`, plugins included (through `TidalApi`): its handler checked only the TIDAL
+    /// API host and a non-empty captured token; no session check.
+    Captured(String),
+    /// `plugin.fetch`: honoured only under the session that minted the capability.
+    Capability(&'a str),
+}
+
 fn dispatch_authenticated_fetch(
     plugin_id: String,
     url: String,
     opts_json: &str,
     query_id: i64,
     callback: IpcCallback,
-    pre_validated_token: Option<String>,
-    capability: Option<&str>,
+    source: TokenSource,
 ) {
     let opts: crate::plugins::fetch::FetchOpts =
         serde_json::from_str(opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
-    let token = match pre_validated_token {
-        Some(token) => Some(token),
+    let token = match source {
+        TokenSource::Captured(token) => Some(token),
         // The comparison and the credential read share one lock deliberately: a session change
         // landing between them would hand out the very token the comparison exists to refuse.
         // Same shape as the guards at the token mint sites, and for the same reason.
-        None => with_state(|state| match capability {
-            Some(cap)
-                if state.plugin_manager.capability_epoch(cap) != Some(state.session_epoch) =>
-            {
-                None
-            }
-            _ => Some(state.captured_token.clone()),
+        TokenSource::Capability(cap) => with_state(|state| {
+            (state.plugin_manager.capability_epoch(cap) == Some(state.session_epoch))
+                .then(|| state.captured_token.clone())
         })
         .flatten(),
     };
