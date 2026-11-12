@@ -5,7 +5,7 @@ use std::process::Command;
 use super::deb::deb_file_name;
 use super::render_template;
 use crate::manifest::Manifest;
-use crate::{project_root, read_workspace_version};
+use crate::{project_root, read_workspace_version, run_status};
 
 /// The tarball's top folder, and its file name before `.tar.gz`.
 fn tarball_bundle_name(version: &str, arch: &str) -> String {
@@ -65,17 +65,15 @@ pub(super) fn package_linux_tarball(arch: &str) -> Result<(), String> {
     fs::write(stage.join("README"), readme).map_err(|e| format!("write README: {e}"))?;
 
     let out_tarball = out_dir.join(format!("{bundle_name}.tar.gz"));
-    let status = Command::new("tar")
-        .arg("-czf")
-        .arg(&out_tarball)
-        .arg("-C")
-        .arg(&stage_root)
-        .arg(&bundle_name)
-        .status()
-        .map_err(|e| format!("tar spawn: {e}"))?;
-    if !status.success() {
-        return Err(format!("tar failed: {status}"));
-    }
+    run_status(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&out_tarball)
+            .arg("-C")
+            .arg(&stage_root)
+            .arg(&bundle_name),
+        "tar",
+    )?;
 
     println!(".tar.gz created: {}", out_tarball.display());
     Ok(())

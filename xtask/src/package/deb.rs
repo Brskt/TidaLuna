@@ -3,7 +3,7 @@ use std::process::Command;
 
 use super::render_template;
 use crate::manifest::{LINUX_SANDBOX_PROTOCOL_REQUIRED, Manifest};
-use crate::{project_root, read_workspace_version, repo};
+use crate::{project_root, read_workspace_version, repo, run_status};
 
 fn releases_url() -> String {
     format!(
@@ -168,17 +168,15 @@ pub(super) fn package_linux_deb(arch: &str) -> Result<(), String> {
     let payload = usr_lib.join("payload.tar.zst");
 
     println!("Compressing payload tarball (this may take a minute)...");
-    let tar_status = Command::new("tar")
-        .args(["-I", "zstd -10 -T0", "-cf"])
-        .arg(&payload)
-        .args(["-C"])
-        .arg(&dist)
-        .arg(".")
-        .status()
-        .map_err(|e| format!("tar spawn: {e}"))?;
-    if !tar_status.success() {
-        return Err(format!("tar failed: {tar_status}"));
-    }
+    run_status(
+        Command::new("tar")
+            .args(["-I", "zstd -10 -T0", "-cf"])
+            .arg(&payload)
+            .args(["-C"])
+            .arg(&dist)
+            .arg("."),
+        "tar",
+    )?;
 
     fs::write(
         usr_lib.join("SANDBOX_PROTOCOL_VERSION"),
@@ -193,15 +191,13 @@ pub(super) fn package_linux_deb(arch: &str) -> Result<(), String> {
     //    to the payload. (Same rationale as `SetCompress off` on Windows.)
     let out_deb = out_dir.join(deb_file_name(&version, arch));
     println!("Building .deb at {}", out_deb.display());
-    let status = Command::new("dpkg-deb")
-        .args(["--build", "--root-owner-group", "-Znone"])
-        .arg(&stage)
-        .arg(&out_deb)
-        .status()
-        .map_err(|e| format!("dpkg-deb spawn: {e}"))?;
-    if !status.success() {
-        return Err(format!("dpkg-deb failed: {status}"));
-    }
+    run_status(
+        Command::new("dpkg-deb")
+            .args(["--build", "--root-owner-group", "-Znone"])
+            .arg(&stage)
+            .arg(&out_deb),
+        "dpkg-deb",
+    )?;
 
     println!(".deb created: {}", out_deb.display());
     Ok(())

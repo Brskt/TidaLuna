@@ -132,6 +132,15 @@ fn run_in(cmd: &Path, args: &[&str], dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Runs `cmd` to completion; `name` prefixes the spawn error and the failed-exit error.
+fn run_status(cmd: &mut Command, name: &str) -> Result<(), String> {
+    let status = cmd.status().map_err(|e| format!("{name} spawn: {e}"))?;
+    if !status.success() {
+        return Err(format!("{name} failed: {status}"));
+    }
+    Ok(())
+}
+
 fn read_workspace_version() -> Result<String, String> {
     let project_root = project_root()?;
     let cargo_toml = fs::read_to_string(project_root.join("Cargo.toml"))

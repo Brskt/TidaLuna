@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::manifest::Manifest;
-use crate::{numeric_version, project_root, read_workspace_version};
+use crate::{numeric_version, project_root, read_workspace_version, run_status};
 
 /// Sum the byte size of every regular file under `dir`, recursively.
 /// Used for the installer's manual `AddSize` estimate: NSIS can't see inside
@@ -152,16 +152,14 @@ pub(super) fn package_windows_nsis(arch: &str) -> Result<(), String> {
     let payload = out_dir.join("payload.7z");
     let _ = fs::remove_file(&payload);
     println!("Compressing payload with 7-Zip (LZMA2, solid, multithreaded)...");
-    let status = Command::new(&sevenzip)
-        .current_dir(&dist)
-        .args(["a", "-t7z", "-mx=9", "-ms=on", "-mmt=on"])
-        .arg(&payload)
-        .arg(".")
-        .status()
-        .map_err(|e| format!("7z spawn: {e}"))?;
-    if !status.success() {
-        return Err(format!("7z failed: {status}"));
-    }
+    run_status(
+        Command::new(&sevenzip)
+            .current_dir(&dist)
+            .args(["a", "-t7z", "-mx=9", "-ms=on", "-mmt=on"])
+            .arg(&payload)
+            .arg("."),
+        "7z",
+    )?;
     if !payload.is_file() {
         return Err("7z reported success but payload.7z is missing".into());
     }
@@ -172,20 +170,18 @@ pub(super) fn package_windows_nsis(arch: &str) -> Result<(), String> {
     println!(
         "Packaging installer: target={expected} version={version} (numeric={version_numeric})"
     );
-    let status = Command::new(&makensis)
-        .arg(format!("-DVERSION={version}"))
-        .arg(format!("-DVERSION_NUMERIC={version_numeric}"))
-        .arg(format!("-DARCH={win_arch}"))
-        .arg(format!("-DPAYLOAD_7Z={}", payload.display()))
-        .arg(format!("-DSEVENZR_EXE={}", sevenzr.display()))
-        .arg(format!("-DPAYLOAD_KB={payload_kb}"))
-        .arg(format!("-DOUT_DIR={}", out_dir.display()))
-        .arg(&nsi)
-        .status()
-        .map_err(|e| format!("makensis spawn: {e}"))?;
-    if !status.success() {
-        return Err(format!("makensis failed: {status}"));
-    }
+    run_status(
+        Command::new(&makensis)
+            .arg(format!("-DVERSION={version}"))
+            .arg(format!("-DVERSION_NUMERIC={version_numeric}"))
+            .arg(format!("-DARCH={win_arch}"))
+            .arg(format!("-DPAYLOAD_7Z={}", payload.display()))
+            .arg(format!("-DSEVENZR_EXE={}", sevenzr.display()))
+            .arg(format!("-DPAYLOAD_KB={payload_kb}"))
+            .arg(format!("-DOUT_DIR={}", out_dir.display()))
+            .arg(&nsi),
+        "makensis",
+    )?;
 
     let exe = out_dir.join(format!("tidalunar_{version}_{win_arch}.exe"));
     if !exe.is_file() {

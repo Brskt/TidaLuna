@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::manifest::Manifest;
-use crate::project_root;
+use crate::{project_root, run_status};
 
 /// Files in `new` that are new or whose sha256 differs from `old`. Files only
 /// in `old` (removed) are not returned; deletions are handled by the updater's
@@ -102,17 +102,15 @@ pub(crate) fn delta(flags: &[String]) -> Result<(), String> {
                 }
                 fs::copy(&from, &to).map_err(|e| format!("copy {rel}: {e}"))?;
             }
-            let status = Command::new("tar")
-                .args(["-czf"])
-                .arg(&out)
-                .args(["-C"])
-                .arg(&stage_root)
-                .arg(&wrap)
-                .status()
-                .map_err(|e| format!("tar spawn: {e}"))?;
-            if !status.success() {
-                return Err(format!("tar failed: {status}"));
-            }
+            run_status(
+                Command::new("tar")
+                    .args(["-czf"])
+                    .arg(&out)
+                    .args(["-C"])
+                    .arg(&stage_root)
+                    .arg(&wrap),
+                "tar",
+            )?;
         }
         "win32" => {
             // Flat zip, matching the full windows bundle.
