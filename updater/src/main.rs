@@ -161,150 +161,14 @@ fn run() -> Result<()> {
     probe_exclusive_access(&args.app_dir)?;
 
     let staging_dir = args.app_dir.join(".update-staging");
-    let manifest_name = format!("manifest-{TARGET}.json");
 
     let manifest = if args.skip_download {
-        // Pre-downloaded by main process - re-verify signature and validate version
-        say!("[updater] Using pre-downloaded staging...");
-        let sig_name = format!("{manifest_name}.sig");
-
-        let manifest_bytes =
-            fs::read(staging_dir.join(&manifest_name)).context("read staged manifest")?;
-        let sig_b64 =
-            fs::read_to_string(staging_dir.join(&sig_name)).context("read staged signature")?;
-
-        verify_manifest_signature(&manifest_bytes, &sig_b64)?;
-
-        let manifest: Manifest =
-            serde_json::from_slice(&manifest_bytes).context("parse staged manifest")?;
-
-        if manifest.version != args.version {
-            bail!(
-                "staged manifest version mismatch: expected {}, got {}",
-                args.version,
-                manifest.version
-            );
-        }
-        if manifest.target != TARGET {
-            bail!(
-                "manifest target mismatch: expected {TARGET}, got {}",
-                manifest.target
-            );
-        }
-
-        #[cfg(target_os = "linux")]
-        enforce_sandbox_protocol_gate(&manifest)?;
-
-        manifest
+        verify_prestaged(&args, &staging_dir)?
     } else {
-        // Full download path (original behavior)
-        say!("[updater] Fetching release v{}...", args.version);
-        let client = reqwest::blocking::Client::builder()
-            .user_agent(format!("TidaLunar-Updater/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .context("failed to create HTTP client")?;
-
-        let release = fetch_release(&client, &args.version)?;
-
-        say!("[updater] Downloading manifest...");
-        let manifest = download_and_verify_manifest(&client, &release)?;
-
-        if manifest.target != TARGET {
-            bail!(
-                "manifest target mismatch: expected {TARGET}, got {}",
-                manifest.target
-            );
-        }
-
-        #[cfg(target_os = "linux")]
-        enforce_sandbox_protocol_gate(&manifest)?;
-
-        // The currently-installed app version comes from its bundled manifest,
-        // NOT env!("CARGO_PKG_VERSION") (which is the updater binary's own
-        // version, unrelated to the app). delta_from is an app version.
-        let installed_version =
-            cleanup::read_manifest(&args.app_dir.join("manifest.json")).map(|m| m.version);
-        let mut use_delta = matches!(
-            (&manifest.delta_from, &installed_version),
-            (Some(d), Some(i)) if d == i
-        );
-        // A delta assumes every file it left out is already correct on disk, a claim about the
-        // two releases and not about this install. Checked after extraction, with the full
-        // archive retried when it fails; bailing would let one damaged file block every future
-        // update through this entry point, as the in-app downloader also reasons.
-        loop {
-            if staging_dir.exists() {
-                fs::remove_dir_all(&staging_dir).context("failed to clean old staging dir")?;
-            }
-            fs::create_dir_all(&staging_dir).context("failed to create staging dir")?;
-
-            say!("[updater] Downloading update package...");
-            let delta_name = delta_archive_name(&args.version);
-            let (archive_name, archive_url) = {
-                let delta = if use_delta {
-                    release.assets.iter().find(|a| a.name == delta_name)
-                } else {
-                    None
-                };
-                match delta {
-                    Some(a) => {
-                        say!(
-                            "[updater] Using delta from v{}",
-                            installed_version.as_deref().unwrap_or("?")
-                        );
-                        (delta_name.clone(), a.browser_download_url.clone())
-                    }
-                    None => {
-                        use_delta = false;
-                        let full = format!("tidalunar_{}_{ARCHIVE_SUFFIX}", args.version);
-                        let a = release
-                            .assets
-                            .iter()
-                            .find(|x| x.name == full)
-                            .context(format!("release missing asset: {full}"))?;
-                        (full, a.browser_download_url.clone())
-                    }
-                }
-            };
-
-            let archive_path = staging_dir.join(&archive_name);
-            download_file(&client, &archive_url, &archive_path)?;
-
-            say!("[updater] Extracting...");
-            extract_archive(&archive_path, &staging_dir)?;
-            fs::remove_file(&archive_path).ok();
-
-            match verify_delta_base(&manifest, &args.app_dir, &staging_dir) {
-                Ok(()) => break,
-                // Only reachable while `use_delta` holds, and the retry clears it; the
-                // fallback fires exactly once.
-                Err(what) if use_delta => {
-                    say!(
-                        "[updater] Local base does not match the delta's assumption ({what}); \
-                         re-downloading the full archive"
-                    );
-                    use_delta = false;
-                }
-                Err(what) => bail!("{what}"),
-            }
-        }
-
-        manifest
+        download_and_stage(&args, &staging_dir)?
     };
 
     // 7. Determine which files need updating
-    //
-    // This gate turns "unchanged" from an inference about versions into a verified claim. Only
-    // the `--skip-download` path needs it, the archive having been staged by the app with no
-    // loop of ours to check it. The own-download path already ran the same call inside the loop
-    // above, against the same manifest and directories with nothing touched in between; a
-    // second call there re-hashes the whole install for an answer that cannot have changed.
-    if args.skip_download
-        && let Err(what) = verify_delta_base(&manifest, &args.app_dir, &staging_dir)
-    {
-        bail!("{what}");
-    }
-
     say!("[updater] Comparing files...");
     let mut files_to_update: Vec<(String, bool)> = Vec::new(); // (path, is_new)
 
@@ -314,8 +178,8 @@ fn run() -> Result<()> {
 
         if !staged_path.exists() {
             // Absent from the archive is the release calling this file unchanged, a claim
-            // `verify_delta_base` has already checked against this disk on either path (inside
-            // the download loop, or at the gate above under `--skip-download`). The existing
+            // `verify_delta_base` has already checked against this disk on either path (in
+            // download_and_stage's loop, or at the end of verify_prestaged). The existing
             // copy stands.
             continue;
         }
@@ -441,6 +305,147 @@ fn run() -> Result<()> {
     relaunch(&args.app_dir)?;
 
     Ok(())
+}
+
+fn verify_prestaged(args: &Args, staging_dir: &Path) -> Result<Manifest> {
+    // Pre-downloaded by main process - re-verify signature and validate version
+    say!("[updater] Using pre-downloaded staging...");
+    let manifest_name = format!("manifest-{TARGET}.json");
+    let sig_name = format!("{manifest_name}.sig");
+
+    let manifest_bytes =
+        fs::read(staging_dir.join(&manifest_name)).context("read staged manifest")?;
+    let sig_b64 =
+        fs::read_to_string(staging_dir.join(&sig_name)).context("read staged signature")?;
+
+    verify_manifest_signature(&manifest_bytes, &sig_b64)?;
+
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).context("parse staged manifest")?;
+
+    if manifest.version != args.version {
+        bail!(
+            "staged manifest version mismatch: expected {}, got {}",
+            args.version,
+            manifest.version
+        );
+    }
+    if manifest.target != TARGET {
+        bail!(
+            "manifest target mismatch: expected {TARGET}, got {}",
+            manifest.target
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    enforce_sandbox_protocol_gate(&manifest)?;
+
+    // This gate turns "unchanged" from an inference about versions into a verified claim. Only
+    // the `--skip-download` path needs it, the archive having been staged by the app with no
+    // loop of ours to check it. download_and_stage already ran the same call inside its loop,
+    // against the same manifest and directories with nothing touched in between; a
+    // second call there re-hashes the whole install for an answer that cannot have changed.
+    if let Err(what) = verify_delta_base(&manifest, &args.app_dir, staging_dir) {
+        bail!("{what}");
+    }
+
+    Ok(manifest)
+}
+
+fn download_and_stage(args: &Args, staging_dir: &Path) -> Result<Manifest> {
+    // Full download path (original behavior)
+    say!("[updater] Fetching release v{}...", args.version);
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("TidaLunar-Updater/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("failed to create HTTP client")?;
+
+    let release = fetch_release(&client, &args.version)?;
+
+    say!("[updater] Downloading manifest...");
+    let manifest = download_and_verify_manifest(&client, &release)?;
+
+    if manifest.target != TARGET {
+        bail!(
+            "manifest target mismatch: expected {TARGET}, got {}",
+            manifest.target
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    enforce_sandbox_protocol_gate(&manifest)?;
+
+    // The currently-installed app version comes from its bundled manifest,
+    // NOT env!("CARGO_PKG_VERSION") (which is the updater binary's own
+    // version, unrelated to the app). delta_from is an app version.
+    let installed_version =
+        cleanup::read_manifest(&args.app_dir.join("manifest.json")).map(|m| m.version);
+    let mut use_delta = matches!(
+        (&manifest.delta_from, &installed_version),
+        (Some(d), Some(i)) if d == i
+    );
+    // A delta assumes every file it left out is already correct on disk, a claim about the
+    // two releases and not about this install. Checked after extraction, with the full
+    // archive retried when it fails; bailing would let one damaged file block every future
+    // update through this entry point, as the in-app downloader also reasons.
+    loop {
+        if staging_dir.exists() {
+            fs::remove_dir_all(staging_dir).context("failed to clean old staging dir")?;
+        }
+        fs::create_dir_all(staging_dir).context("failed to create staging dir")?;
+
+        say!("[updater] Downloading update package...");
+        let delta_name = delta_archive_name(&args.version);
+        let (archive_name, archive_url) = {
+            let delta = if use_delta {
+                release.assets.iter().find(|a| a.name == delta_name)
+            } else {
+                None
+            };
+            match delta {
+                Some(a) => {
+                    say!(
+                        "[updater] Using delta from v{}",
+                        installed_version.as_deref().unwrap_or("?")
+                    );
+                    (delta_name.clone(), a.browser_download_url.clone())
+                }
+                None => {
+                    use_delta = false;
+                    let full = format!("tidalunar_{}_{ARCHIVE_SUFFIX}", args.version);
+                    let a = release
+                        .assets
+                        .iter()
+                        .find(|x| x.name == full)
+                        .context(format!("release missing asset: {full}"))?;
+                    (full, a.browser_download_url.clone())
+                }
+            }
+        };
+
+        let archive_path = staging_dir.join(&archive_name);
+        download_file(&client, &archive_url, &archive_path)?;
+
+        say!("[updater] Extracting...");
+        extract_archive(&archive_path, staging_dir)?;
+        fs::remove_file(&archive_path).ok();
+
+        match verify_delta_base(&manifest, &args.app_dir, staging_dir) {
+            Ok(()) => break,
+            // Only reachable while `use_delta` holds, and the retry clears it; the
+            // fallback fires exactly once.
+            Err(what) if use_delta => {
+                say!(
+                    "[updater] Local base does not match the delta's assumption ({what}); \
+                     re-downloading the full archive"
+                );
+                use_delta = false;
+            }
+            Err(what) => bail!("{what}"),
+        }
+    }
+
+    Ok(manifest)
 }
 
 fn write_journal(path: &Path, journal: &Journal) -> Result<()> {
