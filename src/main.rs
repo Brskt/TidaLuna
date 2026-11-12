@@ -35,7 +35,6 @@ use cef::*;
 use platform::refusal::refuse_install_dir_not_text;
 use platform::refusal::{refuse_to_start, refuse_without_data_dir};
 use player::{Player, PlayerEvent};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use ui::flush::PlayerEventTask;
 
@@ -423,37 +422,7 @@ fn main() {
     #[cfg(target_os = "windows")]
     crate::player::asio::driver::log_asio_drivers();
 
-    let _ = APP_STATE.set(Arc::new(Mutex::new(AppState {
-        player,
-        pending_time_update: None,
-        pending_player_events: Vec::new(),
-        pending_misc_js: Vec::new(),
-        browser: None,
-        flush_scheduled: false,
-        media_controls: None,
-        media_duration: None,
-        plugin_manager: plugins::PluginManager::new(),
-        captured_token: String::new(),
-        token_state: None,
-        pending_ipc_callbacks: HashMap::new(),
-        pending_window_save: None,
-        window_save_scheduled: false,
-        #[cfg(target_os = "windows")]
-        thumbbar: None,
-        close_to_tray: false,
-        force_quit: false,
-        needs_proactive_refresh: false,
-        needs_blob_purge: false,
-        // Gate open by default; cold boot closes it below when a refresh is due.
-        proactive_refresh_done: true,
-        plugin_load_waiters: Vec::new(),
-        plugin_load_in_flight: None,
-        session_epoch: 0,
-        page: Default::default(),
-        plugin_code_admitted: false,
-        last_client_id: String::new(),
-        connect: Some(crate::connect::ConnectManager::new()),
-    })));
+    let _ = APP_STATE.set(Arc::new(Mutex::new(AppState::new(player))));
 
     let root_cache = state::cache_data_dir().join("cef");
     let profile_cache = root_cache.join("Default");

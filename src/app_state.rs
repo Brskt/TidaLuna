@@ -231,6 +231,40 @@ pub(crate) struct EndedSession {
 }
 
 impl AppState {
+    pub(crate) fn new(player: Arc<crate::player::Player>) -> Self {
+        AppState {
+            player,
+            pending_time_update: None,
+            pending_player_events: Vec::new(),
+            pending_misc_js: Vec::new(),
+            browser: None,
+            flush_scheduled: false,
+            media_controls: None,
+            media_duration: None,
+            plugin_manager: crate::plugins::PluginManager::new(),
+            captured_token: String::new(),
+            token_state: None,
+            pending_ipc_callbacks: HashMap::new(),
+            pending_window_save: None,
+            window_save_scheduled: false,
+            #[cfg(target_os = "windows")]
+            thumbbar: None,
+            close_to_tray: false,
+            force_quit: false,
+            needs_proactive_refresh: false,
+            needs_blob_purge: false,
+            // Gate open by default; cold boot closes it when a refresh is due.
+            proactive_refresh_done: true,
+            plugin_load_waiters: Vec::new(),
+            plugin_load_in_flight: None,
+            session_epoch: 0,
+            page: Default::default(),
+            plugin_code_admitted: false,
+            last_client_id: String::new(),
+            connect: Some(crate::connect::ConnectManager::new()),
+        }
+    }
+
     /// The one way `media_duration` is written, and it never empties: a payload that carries
     /// no length is not evidence that the last measured one was wrong.
     pub(crate) fn record_measured_duration(&mut self, measured: MeasuredDuration) {
