@@ -19,7 +19,7 @@ fn a_failed_trust_reset_fails_the_install_and_keeps_the_previous_one() {
     assert!(outcome.is_err());
     let code: String = pc
         .query_row(
-            "SELECT code FROM plugins WHERE url = ?1",
+            "SELECT code FROM plugin_code WHERE url = ?1",
             ["https://x/p"],
             |row| row.get(0),
         )

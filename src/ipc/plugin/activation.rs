@@ -59,6 +59,7 @@ fn enable_admitted(admission: &super::admission::Admission, url: &str) -> Result
                 name,
                 manifest,
                 code,
+                ..
             } = crate::plugins::store::stored(pc, &url)
                 .map_err(|e| format!("DB error: {e}"))?
                 .ok_or_else(|| format!("Plugin not found: {url}"))?;

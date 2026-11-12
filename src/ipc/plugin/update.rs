@@ -170,20 +170,13 @@ fn is_loopback(url: &str) -> bool {
     })
 }
 
-/// Whether a stored manifest has the shape `fetch_plugin_data` makes up for a source with no
-/// `.json`. Only for the stored row, which keeps no provenance: a fetch says it outright.
-fn is_legacy_manifest(manifest: &str) -> bool {
-    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(manifest)
-        .is_ok_and(|keys| keys.len() == 2 && keys.contains_key("name") && keys.contains_key("main"))
-}
-
 impl Manifest {
     /// A made-up manifest replaces only a made-up one: a `.json` missing for a moment must not
     /// drop a real manifest's dependencies and type.
     fn replaces(&self, stored: &str) -> bool {
         match self {
             Manifest::Served(_) => true,
-            Manifest::MadeUp(_) => is_legacy_manifest(stored),
+            Manifest::MadeUp(_) => super::source::is_legacy_manifest(stored),
         }
     }
 }

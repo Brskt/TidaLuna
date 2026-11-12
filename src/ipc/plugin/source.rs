@@ -45,18 +45,44 @@ pub(super) fn handle_plugin_check_hash(msg: &IpcMessage, query_id: i64, callback
     });
 }
 
-/// The fnv of the code the source serves, fetched as `plugin.update` fetches it.
+/// The fnv of the code the source serves, fetched as `plugin.update` fetches it. While the
+/// manifest still names the stored code, that is the fnv stored with it: no code is read.
 async fn served_code_hash(url: &str) -> Result<String, String> {
     let key = url.to_string();
     let stored = tokio::task::spawn_blocking(move || {
-        crate::state::db().call_plugins(move |pc| crate::plugins::store::stored(pc, &key))
+        crate::state::db().call_plugins(move |pc| crate::plugins::store::stored_version(pc, &key))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
     .map_err(|e| format!("DB error: {e}"))?;
-    fetch_version(url, stored.as_ref())
-        .await
-        .map(|fetched| fetched.hash)
+    let client = &*crate::state::HTTP_CLIENT;
+    within_fetch_timeout(async {
+        // A manifest with no `hash` never spares the code: only the code tells a change.
+        if let Some(stored) = &stored
+            && manifest_hash(&stored.manifest).is_none()
+        {
+            let served = !is_legacy_manifest(&stored.manifest);
+            let code = fetch_text_capped(
+                client,
+                &code_url(url, served),
+                MAX_CODE_BYTES,
+                "plugin code",
+            )
+            .await?;
+            return Ok(fnv_hash_str(&code));
+        }
+        let manifest = fetch_plugin_package(client, url).await?;
+        if let (Some(fetched), Some(stored)) = (&manifest, &stored)
+            && let Some(hash) = &stored.hash
+            && serves_stored_code(&stored.content_hash, fetched)
+        {
+            return Ok(hash.clone());
+        }
+        version_from(client, url, manifest, None)
+            .await
+            .map(|fetched| fetched.hash)
+    })
+    .await
 }
 
 /// [`fetch_plugin_data`] on the shared client, within [`FETCH_TIMEOUT`].
@@ -82,34 +108,35 @@ async fn within_fetch_timeout<T>(
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Whether the stored code is still what the source serves: the fetched manifest carries the
-/// stored one's `hash`, and the stored code hashes to it. A pair stored mid-publish (new
-/// manifest, old code) fails the second test, so its code is downloaded again.
-pub(super) fn serves_stored_code(
-    stored_manifest: &str,
-    stored_code: &str,
-    fetched_manifest: &str,
-) -> bool {
-    match (
-        manifest_hash(stored_manifest),
-        manifest_hash(fetched_manifest),
-    ) {
-        (Some(stored), Some(fetched)) => stored == fetched && content_hash(stored_code) == stored,
-        _ => false,
-    }
+/// Whether the stored code is still what the source serves: the fetched manifest's `hash` is the
+/// stored code's [`content_hash`](crate::plugins::store::content_hash). A pair stored
+/// mid-publish (new manifest, old code) fails it, so its code is downloaded again.
+fn serves_stored_code(stored_content_hash: &str, fetched_manifest: &str) -> bool {
+    manifest_hash(fetched_manifest).as_deref() == Some(stored_content_hash)
 }
 
+/// A manifest's `hash`, when it is a string: the name a Luna build gives the code beside it.
 fn manifest_hash(manifest: &str) -> Option<String> {
     let manifest: serde_json::Value = serde_json::from_str(manifest).ok()?;
     manifest.get("hash")?.as_str().map(str::to_string)
 }
 
-/// The `hash` a Luna plugin build writes into its manifest: esbuild's output hash, xxHash64 of
-/// the `.mjs` bytes, little-endian, in base64 without padding.
-fn content_hash(code: &str) -> String {
-    use base64::Engine as _;
-    let digest = twox_hash::XxHash64::oneshot(0, code.as_bytes());
-    base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest.to_le_bytes())
+/// Whether a stored manifest has the shape `fetch_plugin_data` makes up for a source with no
+/// `.json`. Only for the stored row, which keeps no provenance: a fetch says it outright.
+pub(super) fn is_legacy_manifest(manifest: &str) -> bool {
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(manifest)
+        .is_ok_and(|keys| keys.len() == 2 && keys.contains_key("name") && keys.contains_key("main"))
+}
+
+/// Where `url`'s code is fetched: `{base}.mjs`, or `url` itself when the source serves no
+/// manifest and `url` names a file.
+fn code_url(url: &str, served_manifest: bool) -> String {
+    let named = url.ends_with("package.json") || url.ends_with(".mjs");
+    if served_manifest || !named {
+        format!("{}.mjs", sanitize_plugin_url(url))
+    } else {
+        url.to_string()
+    }
 }
 
 fn fnv_hash_str(s: &str) -> String {
@@ -224,11 +251,22 @@ async fn fetch_plugin_data(
     url: &str,
     stored: Option<&StoredPlugin>,
 ) -> anyhow::Result<PluginData> {
-    let base = sanitize_plugin_url(url);
-
     // `?` propagates a hard manifest failure (cap/JSON/transport); only a
     // genuinely-absent manifest (`None`) falls back to the legacy .mjs path.
-    if let Some(manifest_str) = fetch_plugin_package(client, base).await? {
+    let manifest = fetch_plugin_package(client, url).await?;
+    version_from(client, url, manifest, stored).await
+}
+
+/// [`fetch_plugin_data`] once the manifest is fetched.
+async fn version_from(
+    client: &reqwest::Client,
+    url: &str,
+    manifest: Option<String>,
+    stored: Option<&StoredPlugin>,
+) -> anyhow::Result<PluginData> {
+    let base = sanitize_plugin_url(url);
+
+    if let Some(manifest_str) = manifest {
         let manifest: serde_json::Value = serde_json::from_str(&manifest_str)?;
         // No "unknown" stand-in: it made every nameless plugin share one name and its data.
         let name = manifest["name"]
@@ -237,12 +275,12 @@ async fn fetch_plugin_data(
             .to_string();
 
         let code = match stored {
-            Some(stored) if serves_stored_code(&stored.manifest, &stored.code, &manifest_str) => {
+            Some(stored) if serves_stored_code(&stored.content_hash, &manifest_str) => {
                 stored.code.clone()
             }
             _ => {
-                let code_url = format!("{base}.mjs");
-                fetch_text_capped(client, &code_url, MAX_CODE_BYTES, "plugin code").await?
+                fetch_text_capped(client, &code_url(url, true), MAX_CODE_BYTES, "plugin code")
+                    .await?
             }
         };
         let hash = fnv_hash_str(&code);
@@ -254,14 +292,7 @@ async fn fetch_plugin_data(
             hash,
         })
     } else {
-        let fetch_url = if url.ends_with("package.json") {
-            url.to_string()
-        } else if !url.ends_with(".mjs") {
-            format!("{base}.mjs")
-        } else {
-            url.to_string()
-        };
-
+        let fetch_url = code_url(url, false);
         let code = fetch_text_capped(client, &fetch_url, MAX_CODE_BYTES, "plugin code").await?;
 
         let name = base

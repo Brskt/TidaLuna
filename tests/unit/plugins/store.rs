@@ -20,11 +20,71 @@ fn name(raw: &str) -> PluginName {
 /// A row as an older build could have written it, name unchecked.
 pub(super) fn stored_row(conn: &mut Connection, url: &str, raw_name: &str, manifest: &str) {
     conn.execute(
-        "INSERT INTO plugins (url, name, manifest, code, hash, enabled, installed)
-         VALUES (?1, ?2, ?3, 'code', 'h', 1, 1)",
+        "INSERT INTO plugins (url, name, manifest, hash, enabled, installed)
+         VALUES (?1, ?2, ?3, 'h', 1, 1)",
         params![url, raw_name, manifest],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO plugin_code (url, content_hash, code) VALUES (?1, 'ch', 'code')",
+        params![url],
+    )
+    .unwrap();
+}
+
+/// A store from before `plugin_code` keeps every code, each with its hash; a row that had none
+/// gets none. Another open finds nothing left to move.
+#[test]
+fn a_store_from_before_plugin_code_keeps_every_code() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE plugins (
+            url TEXT PRIMARY KEY, name TEXT NOT NULL, manifest TEXT NOT NULL,
+            code TEXT, hash TEXT, enabled INTEGER DEFAULT 0, installed INTEGER DEFAULT 0,
+            ever_dispatched INTEGER DEFAULT 0
+        );
+        INSERT INTO plugins VALUES ('https://a/A', 'A', '{}', 'export const a = 1;', 'ha', 1, 1, 1);
+        INSERT INTO plugins VALUES ('https://b/B', 'B', '{}', 'export const b = 2;', 'hb', 0, 1, 0);
+        INSERT INTO plugins VALUES ('https://c/C', 'C', '{}', NULL, NULL, 0, 1, 0);",
+    )
+    .unwrap();
+
+    init_schema(&mut conn).unwrap();
+    init_schema(&mut conn).unwrap();
+
+    for (url, code) in [
+        ("https://a/A", "export const a = 1;"),
+        ("https://b/B", "export const b = 2;"),
+    ] {
+        let kept = stored(&mut conn, url).unwrap().expect(url);
+        assert_eq!(kept.code, code, "{url}");
+        assert_eq!(kept.content_hash, content_hash(code), "{url}");
+    }
+    assert!(stored(&mut conn, "https://c/C").unwrap().is_none());
+    assert_eq!(list(&mut conn).unwrap().len(), 3, "a plugin row was lost");
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('plugins')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!columns.iter().any(|c| c == "code"), "{columns:?}");
+}
+
+/// A reinstall replaces the plugin's row, which cascades onto its code: the new code must be the
+/// one left, not none.
+#[test]
+fn a_reinstall_keeps_the_new_code() {
+    let mut conn = mem();
+    let url = "https://a/Foo";
+    install(&conn, url, &name("Foo"), "{}", "old", "h1").unwrap();
+    install(&conn, url, &name("Foo"), "{}", "new", "h2").unwrap();
+    let kept = stored(&mut conn, url)
+        .unwrap()
+        .expect("the reinstall lost the plugin's code");
+    assert_eq!(kept.code, "new");
+    assert_eq!(kept.content_hash, content_hash("new"));
 }
 
 /// Windows and macOS give `Foo` and `foo` one data dir: the second would read and write the
@@ -254,6 +314,10 @@ fn a_store_move_carries_enabled_plugins_and_their_storage() {
         "the moved plugin lost its flag"
     );
     assert_eq!(storage_get(&mut conn, moved, "k").as_deref(), Some("foo"));
+    assert!(
+        stored(&mut conn, moved).unwrap().is_some(),
+        "the moved plugin lost its code"
+    );
     assert_eq!(
         storage_rows(&conn, foo),
         0,
@@ -285,15 +349,19 @@ fn seed(conn: &mut Connection, url: &str, name: &str) {
     storage_set(conn, url, "k", "v").unwrap();
 }
 
-/// How many plugin rows and storage rows `conn` holds.
-fn rows(conn: &Connection) -> (i64, i64) {
+/// How many plugin, code and storage rows `conn` holds.
+fn rows(conn: &Connection) -> (i64, i64, i64) {
     let count = |table: &str| {
         conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
             row.get(0)
         })
         .unwrap()
     };
-    (count("plugins"), count("plugin_storage"))
+    (
+        count("plugins"),
+        count("plugin_code"),
+        count("plugin_storage"),
+    )
 }
 
 /// A second transaction would pass `assert_in_order`, which only finds the first of each.
@@ -342,7 +410,7 @@ fn uninstalling_a_plugin_is_one_commit_under_a_full_sync() {
         ],
     );
     assert_one_transaction(&statements);
-    assert_eq!(rows(&conn), (0, 0));
+    assert_eq!(rows(&conn), (0, 0, 0));
 }
 
 #[test]
@@ -364,7 +432,7 @@ fn uninstalling_every_plugin_is_one_commit_under_a_full_sync() {
         ],
     );
     assert_one_transaction(&statements);
-    assert_eq!(rows(&conn), (0, 0));
+    assert_eq!(rows(&conn), (0, 0, 0));
 }
 
 #[test]
@@ -397,16 +465,16 @@ fn a_power_cut_never_leaves_a_plugin_half_removed() {
         let cut = after_a_power_cut(dir.path(), "plugins.db", kept);
         let state = rows(&cut);
         assert!(
-            state == (1, 1) || state == (0, 0),
+            state == (1, 1, 1) || state == (0, 0, 0),
             "a cut at {kept} of {wal_len} bytes left a half-removed plugin: {state:?}"
         );
     }
     assert_eq!(
         rows(&after_a_power_cut(dir.path(), "plugins.db", 0)),
-        (1, 1)
+        (1, 1, 1)
     );
     assert_eq!(
         rows(&after_a_power_cut(dir.path(), "plugins.db", wal_len)),
-        (0, 0)
+        (0, 0, 0)
     );
 }

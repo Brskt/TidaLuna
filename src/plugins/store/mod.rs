@@ -38,16 +38,22 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     // A write whose loss would undo a refusal takes `Stable` itself, as `disable` and `uninstall` do.
     conn.pragma_update(None, "synchronous", ROUTINE_SYNC)?;
+    enforce_foreign_keys(conn)?;
 
+    // The code lives apart: SQLite walks a row's large value to reach any column stored after it.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS plugins (
             url       TEXT PRIMARY KEY,
             name      TEXT NOT NULL,
             manifest  TEXT NOT NULL,
-            code      TEXT,
             hash      TEXT,
             enabled   INTEGER DEFAULT 0,
             installed INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS plugin_code (
+            url          TEXT PRIMARY KEY REFERENCES plugins(url) ON DELETE CASCADE ON UPDATE CASCADE,
+            content_hash TEXT NOT NULL,
+            code         TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS plugin_storage (
             namespace TEXT NOT NULL,
@@ -79,7 +85,54 @@ pub(crate) fn init_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         Err(e) => return Err(e),
     }
 
-    Ok(())
+    move_code_out_of_plugins(conn)
+}
+
+/// `plugin_code` follows its `plugins` row through the cascade. A SQLite linked from the system
+/// may default to keys off, and the pragma does nothing inside a transaction: read back, not assumed.
+fn enforce_foreign_keys(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "foreign_keys", true)?;
+    if conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))? {
+        return Ok(());
+    }
+    Err(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+        Some("foreign keys cannot be enabled on plugins.db".into()),
+    ))
+}
+
+/// Copies each code of a store from before `plugin_code` into it, then drops the column, all in
+/// one transaction. A row is read one at a time: a code can weigh up to the fetch cap.
+fn move_code_out_of_plugins(conn: &mut Connection) -> rusqlite::Result<()> {
+    let has_code: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('plugins') WHERE name = 'code')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_code {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    {
+        let mut read = tx.prepare("SELECT url, code FROM plugins WHERE code IS NOT NULL")?;
+        let mut write =
+            tx.prepare("INSERT INTO plugin_code (url, content_hash, code) VALUES (?1, ?2, ?3)")?;
+        let mut rows = read.query([])?;
+        while let Some(row) = rows.next()? {
+            let (url, code): (String, String) = (row.get(0)?, row.get(1)?);
+            write.execute(params![url, content_hash(&code), code])?;
+        }
+    }
+    tx.execute("ALTER TABLE plugins DROP COLUMN code", [])?;
+    tx.commit()
+}
+
+/// The `hash` a Luna plugin build writes into its manifest: esbuild's output hash, xxHash64 of
+/// the `.mjs` bytes, little-endian, in base64 without padding.
+pub(crate) fn content_hash(code: &str) -> String {
+    use base64::Engine as _;
+    let digest = twox_hash::XxHash64::oneshot(0, code.as_bytes());
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest.to_le_bytes())
 }
 
 /// What the user is told when plugins.db was replaced by an empty store: where the copies of the
@@ -174,12 +227,20 @@ pub(crate) fn install(
             "Plugin '{name}' already installed at a different URL. Uninstall it first."
         ));
     }
-    conn.execute(
-        "INSERT OR REPLACE INTO plugins (url, name, manifest, code, hash, enabled, installed)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, 1)",
-        params![url, name.as_str(), manifest, code, hash],
-    )
-    .map_err(|e| format!("DB error: {e}"))?;
+    let write = || {
+        conn.execute(
+            "INSERT OR REPLACE INTO plugins (url, name, manifest, hash, enabled, installed)
+             VALUES (?1, ?2, ?3, ?4, 0, 1)",
+            params![url, name.as_str(), manifest, hash],
+        )?;
+        // After its row: the replace above cascades onto the previous code. A plain insert
+        // fails rather than run first and have that cascade take it.
+        conn.execute(
+            "INSERT INTO plugin_code (url, content_hash, code) VALUES (?1, ?2, ?3)",
+            params![url, content_hash(code), code],
+        )
+    };
+    write().map_err(|e| format!("DB error: {e}"))?;
     Ok(())
 }
 
@@ -188,19 +249,53 @@ pub(crate) struct StoredPlugin {
     pub name: String,
     pub manifest: String,
     pub code: String,
+    /// [`content_hash`] of `code`, written with it.
+    pub content_hash: String,
 }
 
 /// `Ok(None)` for a url with no installed row; a read that failed is an `Err`, not an uninstall.
 pub(crate) fn stored(conn: &mut Connection, url: &str) -> rusqlite::Result<Option<StoredPlugin>> {
     use rusqlite::OptionalExtension as _;
     conn.query_row(
-        "SELECT name, manifest, code FROM plugins WHERE url = ?1 AND installed = 1",
+        "SELECT p.name, p.manifest, c.code, c.content_hash
+         FROM plugins p JOIN plugin_code c ON c.url = p.url
+         WHERE p.url = ?1 AND p.installed = 1",
         params![url],
         |row| {
             Ok(StoredPlugin {
                 name: row.get(0)?,
                 manifest: row.get(1)?,
                 code: row.get(2)?,
+                content_hash: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// What a live-reload tick checks the source against, read without the code.
+pub(crate) struct StoredVersion {
+    pub manifest: String,
+    pub content_hash: String,
+    pub hash: Option<String>,
+}
+
+/// [`stored`] less the code: `Ok(None)` for a url with no installed row.
+pub(crate) fn stored_version(
+    conn: &mut Connection,
+    url: &str,
+) -> rusqlite::Result<Option<StoredVersion>> {
+    use rusqlite::OptionalExtension as _;
+    conn.query_row(
+        "SELECT p.manifest, c.content_hash, p.hash
+         FROM plugins p JOIN plugin_code c ON c.url = p.url
+         WHERE p.url = ?1 AND p.installed = 1",
+        params![url],
+        |row| {
+            Ok(StoredVersion {
+                manifest: row.get(0)?,
+                content_hash: row.get(1)?,
+                hash: row.get(2)?,
             })
         },
     )
@@ -234,7 +329,9 @@ pub(crate) fn update(
     hash: &str,
 ) -> rusqlite::Result<UpdateOutcome> {
     let row = conn.query_row(
-        "SELECT name, manifest, code, enabled FROM plugins WHERE url = ?1 AND installed = 1",
+        "SELECT p.name, p.manifest, c.code, p.enabled
+         FROM plugins p JOIN plugin_code c ON c.url = p.url
+         WHERE p.url = ?1 AND p.installed = 1",
         params![url],
         |row| {
             Ok((
@@ -261,11 +358,17 @@ pub(crate) fn update(
     if enabled && let Err(missing) = check_dependencies_satisfied(conn, manifest) {
         return Ok(UpdateOutcome::MissingDependencies(missing));
     }
-    conn.execute(
-        "UPDATE plugins SET manifest = ?3, code = ?4, hash = ?5
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE plugins SET manifest = ?3, hash = ?4
          WHERE url = ?1 AND name = ?2 AND installed = 1",
-        params![url, name, manifest, code, hash],
+        params![url, name, manifest, hash],
     )?;
+    tx.execute(
+        "UPDATE plugin_code SET content_hash = ?2, code = ?3 WHERE url = ?1",
+        params![url, content_hash(code), code],
+    )?;
+    tx.commit()?;
     Ok(UpdateOutcome::Updated)
 }
 
@@ -454,7 +557,9 @@ pub(crate) struct EnabledPlugin {
 /// skipped alone, sparing every other plugin.
 pub(crate) fn collect_enabled_code(conn: &mut Connection) -> rusqlite::Result<Vec<EnabledPlugin>> {
     let mut stmt = conn.prepare(
-        "SELECT url, name, code, manifest FROM plugins WHERE installed = 1 AND enabled = 1 AND code IS NOT NULL ORDER BY rowid",
+        "SELECT p.url, p.name, c.code, p.manifest
+         FROM plugins p JOIN plugin_code c ON c.url = p.url
+         WHERE p.installed = 1 AND p.enabled = 1 ORDER BY p.rowid",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(EnabledPlugin {
@@ -470,7 +575,8 @@ pub(crate) fn collect_enabled_code(conn: &mut Connection) -> rusqlite::Result<Ve
 /// The urls `collect_enabled_code` loads, in its order, without reading their code.
 pub(crate) fn enabled_urls(conn: &mut Connection) -> Vec<String> {
     let mut stmt = match conn.prepare(
-        "SELECT url FROM plugins WHERE installed = 1 AND enabled = 1 AND code IS NOT NULL ORDER BY rowid",
+        "SELECT p.url FROM plugins p JOIN plugin_code c ON c.url = p.url
+         WHERE p.installed = 1 AND p.enabled = 1 ORDER BY p.rowid",
     ) {
         Ok(s) => s,
         Err(e) => {
