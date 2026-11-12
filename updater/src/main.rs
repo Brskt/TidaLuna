@@ -169,43 +169,7 @@ fn run() -> Result<()> {
     };
 
     // 7. Determine which files need updating
-    say!("[updater] Comparing files...");
-    let mut files_to_update: Vec<(String, bool)> = Vec::new(); // (path, is_new)
-
-    for (rel_path, entry) in &manifest.files {
-        let local_path = args.app_dir.join(rel_path);
-        let staged_path = staging_dir.join(rel_path);
-
-        if !staged_path.exists() {
-            // Absent from the archive is the release calling this file unchanged, a claim
-            // `verify_delta_base` has already checked against this disk on either path (in
-            // download_and_stage's loop, or at the end of verify_prestaged). The existing
-            // copy stands.
-            continue;
-        }
-
-        // Verify staged file matches manifest
-        let staged_hash = sha256_file(&staged_path)?;
-        if staged_hash != entry.sha256 {
-            bail!(
-                "staged file {rel_path} hash mismatch: expected {}, got {staged_hash}",
-                entry.sha256
-            );
-        }
-
-        // Check if local file differs
-        let local_exists = local_path.exists();
-        let needs_update = if local_exists {
-            let local_hash = sha256_file(&local_path)?;
-            local_hash != entry.sha256
-        } else {
-            true
-        };
-
-        if needs_update {
-            files_to_update.push((rel_path.clone(), !local_exists));
-        }
-    }
+    let files_to_update = plan_updates(&args, &manifest, &staging_dir)?;
 
     if files_to_update.is_empty() {
         say!("[updater] All files already up to date");
@@ -446,6 +410,52 @@ fn download_and_stage(args: &Args, staging_dir: &Path) -> Result<Manifest> {
     }
 
     Ok(manifest)
+}
+
+fn plan_updates(
+    args: &Args,
+    manifest: &Manifest,
+    staging_dir: &Path,
+) -> Result<Vec<(String, bool)>> {
+    say!("[updater] Comparing files...");
+    let mut files_to_update: Vec<(String, bool)> = Vec::new(); // (path, is_new)
+
+    for (rel_path, entry) in &manifest.files {
+        let local_path = args.app_dir.join(rel_path);
+        let staged_path = staging_dir.join(rel_path);
+
+        if !staged_path.exists() {
+            // Absent from the archive is the release calling this file unchanged, a claim
+            // `verify_delta_base` has already checked against this disk on either path (in
+            // download_and_stage's loop, or at the end of verify_prestaged). The existing
+            // copy stands.
+            continue;
+        }
+
+        // Verify staged file matches manifest
+        let staged_hash = sha256_file(&staged_path)?;
+        if staged_hash != entry.sha256 {
+            bail!(
+                "staged file {rel_path} hash mismatch: expected {}, got {staged_hash}",
+                entry.sha256
+            );
+        }
+
+        // Check if local file differs
+        let local_exists = local_path.exists();
+        let needs_update = if local_exists {
+            let local_hash = sha256_file(&local_path)?;
+            local_hash != entry.sha256
+        } else {
+            true
+        };
+
+        if needs_update {
+            files_to_update.push((rel_path.clone(), !local_exists));
+        }
+    }
+
+    Ok(files_to_update)
 }
 
 fn write_journal(path: &Path, journal: &Journal) -> Result<()> {
