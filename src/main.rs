@@ -50,6 +50,55 @@ fn ensure_x11_env() {
     }
 }
 
+/// Refuses the launch on a `chrome-sandbox` that is present but usable as neither sandbox.
+#[cfg(target_os = "linux")]
+fn check_chrome_sandbox(exe_dir: Option<&std::path::Path>) {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
+
+    // Resolution order:
+    //   1. CHROME_DEVEL_SANDBOX env (set by /usr/bin/tidalunar.real launcher
+    //      under packaged install, points at /opt/tidalunar/bin/cef/chrome-sandbox).
+    //   2. exe_dir-relative bin/cef/chrome-sandbox (covers unpackaged dev runs
+    //      and the .tar.gz, which ships the helper without the setuid bit).
+    let sandbox_path: Option<PathBuf> = std::env::var_os("CHROME_DEVEL_SANDBOX")
+        .map(PathBuf::from)
+        .or_else(|| exe_dir.map(|d| d.join("bin").join("cef").join("chrome-sandbox")));
+
+    if let Some(path) = sandbox_path {
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                let mode = meta.mode();
+                let is_setuid_root = meta.uid() == 0 && (mode & 0o4000) != 0;
+                let is_executable = (mode & 0o111) != 0;
+                // Both are valid:
+                //   - setuid root -> legacy SUID sandbox (postinst chmod 4755
+                //     when unprivileged userns is unavailable)
+                //   - normal executable, not setuid -> namespace sandbox
+                //     (Chromium picks userns automatically when chrome-sandbox
+                //     is present but not setuid root)
+                // Fail fast only if the file exists but is unreadable / not
+                // executable: that's an administrative misconfiguration we
+                // want loud rather than a silent fallback to no sandbox.
+                // Fatal: must be loud at LOGS=0, and still traced on a desktop
+                // launch where nothing is attached to stderr.
+                if !is_setuid_root && !is_executable {
+                    refuse_to_start(&format!(
+                        "chrome-sandbox at {} is neither setuid-root nor a normal \
+                        executable. Reinstall the .deb or fix the binary's permissions.",
+                        path.display()
+                    ));
+                }
+            }
+            Err(_) => {
+                // Absence is acceptable: Chromium falls back to the namespace sandbox when
+                // userns is available, or logs a clear message when it is not (Ubuntu 24.04+
+                // apparmor, no .deb profile); the message belongs there.
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn attach_or_alloc_console() {
     use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole};
@@ -204,54 +253,7 @@ fn main() {
 
     #[cfg(target_os = "linux")]
     if is_browser {
-        use std::os::unix::fs::MetadataExt;
-        use std::path::PathBuf;
-
-        // Resolution order:
-        //   1. CHROME_DEVEL_SANDBOX env (set by /usr/bin/tidalunar.real launcher
-        //      under packaged install, points at /opt/tidalunar/bin/cef/chrome-sandbox).
-        //   2. exe_dir-relative bin/cef/chrome-sandbox (covers unpackaged dev runs
-        //      and the .tar.gz, which ships the helper without the setuid bit).
-        let sandbox_path: Option<PathBuf> = std::env::var_os("CHROME_DEVEL_SANDBOX")
-            .map(PathBuf::from)
-            .or_else(|| {
-                exe_dir
-                    .as_ref()
-                    .map(|d| d.join("bin").join("cef").join("chrome-sandbox"))
-            });
-
-        if let Some(path) = sandbox_path {
-            match std::fs::metadata(&path) {
-                Ok(meta) => {
-                    let mode = meta.mode();
-                    let is_setuid_root = meta.uid() == 0 && (mode & 0o4000) != 0;
-                    let is_executable = (mode & 0o111) != 0;
-                    // Both are valid:
-                    //   - setuid root -> legacy SUID sandbox (postinst chmod 4755
-                    //     when unprivileged userns is unavailable)
-                    //   - normal executable, not setuid -> namespace sandbox
-                    //     (Chromium picks userns automatically when chrome-sandbox
-                    //     is present but not setuid root)
-                    // Fail fast only if the file exists but is unreadable / not
-                    // executable: that's an administrative misconfiguration we
-                    // want loud rather than a silent fallback to no sandbox.
-                    // Fatal: must be loud at LOGS=0, and still traced on a desktop
-                    // launch where nothing is attached to stderr.
-                    if !is_setuid_root && !is_executable {
-                        refuse_to_start(&format!(
-                            "chrome-sandbox at {} is neither setuid-root nor a normal \
-                            executable. Reinstall the .deb or fix the binary's permissions.",
-                            path.display()
-                        ));
-                    }
-                }
-                Err(_) => {
-                    // Absence is acceptable: Chromium falls back to the namespace sandbox when
-                    // userns is available, or logs a clear message when it is not (Ubuntu 24.04+
-                    // apparmor, no .deb profile); the message belongs there.
-                }
-            }
-        }
+        check_chrome_sandbox(exe_dir.as_deref());
     }
 
     // `open_command`'s `--` sits in HKCU, where any process of this user can
