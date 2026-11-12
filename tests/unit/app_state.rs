@@ -1,11 +1,15 @@
 //! Tests for `src/app_state.rs`, attached to it by `#[path]`.
 
+use std::sync::Arc;
+
 use super::{
-    MeasuredDuration, PagePhase, PassStood, Ticket, end_page_music, js_ipc_response,
-    js_string_literal, settle_recorded_duration,
+    AppState, MeasuredDuration, PagePhase, PassStood, Ticket, TokenCommit, TokenGrant,
+    end_page_music, js_ipc_response, js_string_literal, settle_recorded_duration,
 };
 use crate::bridge::PlayerBridgeEvent;
+use crate::platform::secure_store::{StoredTokenState, TokenGeneration};
 use crate::player::{LoadOrigin, Player, begin_load, current_load};
+use crate::util::now_unix_secs;
 
 /// A measurement as an ingress hands it over, before the slot decides anything.
 fn measured(id: Option<&str>, secs: f64) -> MeasuredDuration {
@@ -171,5 +175,145 @@ fn the_last_pass_of_a_page_says_whether_its_plugins_were_all_tried() {
         page.pass_stood(ticket),
         PassStood::Incomplete,
         "an earlier complete pass outweighed the later one that could not load everything"
+    );
+}
+
+/// A state whose current token generation is `prior`, in session 1.
+fn state_with_tokens(prior: Option<TokenGeneration>) -> AppState {
+    let player = Player::new(|_| {}, tokio::runtime::Handle::current());
+    let mut state = AppState::new(Arc::new(player));
+    state.session_epoch = 1;
+    state.token_state = prior.map(|current| StoredTokenState {
+        current,
+        previous: None,
+        previous_valid_until: None,
+    });
+    state
+}
+
+fn generation(refresh_token: &str, client_id: &str, version: u64) -> TokenGeneration {
+    TokenGeneration {
+        access_token: "old-at".into(),
+        refresh_token: refresh_token.into(),
+        opaque_at: "old-opaque-at".into(),
+        opaque_rt: "old-opaque-rt".into(),
+        version,
+        access_expires: 0,
+        user_id: None,
+        granted_scopes: Vec::new(),
+        client_id: client_id.into(),
+    }
+}
+
+/// An exchange answer, carrying a new refresh token when `refresh_token` is set.
+fn grant(refresh_token: Option<&str>) -> TokenGrant<'_> {
+    TokenGrant {
+        access_token: "new-at",
+        refresh_token,
+        opaque_at: "new-opaque-at",
+        opaque_rt: refresh_token.map(|_| "new-opaque-rt"),
+        expires_in: None,
+        user_id: None,
+        granted_scopes: &[],
+    }
+}
+
+#[tokio::test]
+async fn a_token_answer_for_an_ended_session_writes_nothing() {
+    let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
+
+    let commit = state.apply_token_generation(0, &grant(Some("new-rt")), |_| "cid".into());
+
+    assert!(matches!(commit, TokenCommit::Refused));
+    let current = &state.token_state.as_ref().unwrap().current;
+    assert_eq!(
+        (current.version, current.refresh_token.as_str()),
+        (4, "old-rt"),
+        "a departed session's answer replaced the live generation"
+    );
+    assert!(
+        state.captured_token.is_empty(),
+        "a departed session's bearer token became the live one"
+    );
+}
+
+#[tokio::test]
+async fn a_new_generation_keeps_the_one_it_replaces_for_thirty_seconds() {
+    let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
+
+    let before = now_unix_secs();
+    let commit = state.apply_token_generation(1, &grant(Some("new-rt")), |_| "cid".into());
+    let after = now_unix_secs();
+
+    assert!(matches!(
+        commit,
+        TokenCommit::Committed { durable: true, .. }
+    ));
+    let tokens = state.token_state.as_ref().unwrap();
+    assert_eq!(
+        (
+            tokens.current.version,
+            tokens.current.refresh_token.as_str()
+        ),
+        (5, "new-rt")
+    );
+    assert_eq!(
+        tokens.previous.as_ref().map(|g| g.version),
+        Some(4),
+        "requests still carrying the replaced token lost it at once"
+    );
+    let until = tokens.previous_valid_until.unwrap();
+    assert!((before + 30..=after + 30).contains(&until), "got {until}");
+    assert_eq!(state.captured_token, "new-at");
+}
+
+#[tokio::test]
+async fn an_answer_without_a_refresh_token_keeps_the_stored_one() {
+    let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
+
+    let commit = state.apply_token_generation(1, &grant(None), |_| "cid".into());
+
+    let TokenCommit::Committed { opaque_rt, durable } = commit else {
+        panic!("a live session's answer was refused");
+    };
+    assert_eq!(opaque_rt, "old-opaque-rt");
+    assert!(durable, "the stored refresh token was dropped");
+    assert_eq!(
+        state.token_state.as_ref().unwrap().current.refresh_token,
+        "old-rt"
+    );
+}
+
+#[tokio::test]
+async fn a_generation_without_any_refresh_token_is_not_durable() {
+    // Saved anyway, it would replace a credential that can refresh with one that cannot.
+    let mut state = state_with_tokens(None);
+
+    let commit = state.apply_token_generation(1, &grant(None), |_| "cid".into());
+
+    assert!(matches!(
+        commit,
+        TokenCommit::Committed { durable: false, .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_client_id_rule_reads_the_generation_being_replaced() {
+    // Read after the write, the rule would see the new generation instead of the one it replaces.
+    let mut state = state_with_tokens(Some(generation("old-rt", "prior-cid", 4)));
+    let mut seen = None;
+
+    state.apply_token_generation(1, &grant(Some("new-rt")), |state| {
+        seen = state
+            .token_state
+            .as_ref()
+            .map(|t| t.current.client_id.clone());
+        "chosen-cid".into()
+    });
+
+    assert_eq!(seen.as_deref(), Some("prior-cid"));
+    assert_eq!(
+        state.token_state.as_ref().unwrap().current.client_id,
+        "chosen-cid"
     );
 }

@@ -230,6 +230,28 @@ pub(crate) struct EndedSession {
     pub(crate) waiters: Vec<(Ticket, IpcCallback)>,
 }
 
+/// What a token exchange or refresh answered, for [`AppState::commit_token_generation`].
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) struct TokenGrant<'a> {
+    pub(crate) access_token: &'a str,
+    pub(crate) refresh_token: Option<&'a str>,
+    pub(crate) opaque_at: &'a str,
+    /// The nonce minted for `refresh_token`, present exactly when it is.
+    pub(crate) opaque_rt: Option<&'a str>,
+    pub(crate) expires_in: Option<u64>,
+    pub(crate) user_id: Option<&'a str>,
+    pub(crate) granted_scopes: &'a [String],
+}
+
+/// How a token commit ended, for each caller to answer and log in its own terms.
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) enum TokenCommit {
+    /// The session the exchange was issued under has ended: nothing was written.
+    Refused,
+    /// The grant is the current generation; `durable` says whether it belongs on disk.
+    Committed { opaque_rt: String, durable: bool },
+}
+
 impl AppState {
     pub(crate) fn new(player: Arc<crate::player::Player>) -> Self {
         AppState {
@@ -263,6 +285,90 @@ impl AppState {
             last_client_id: String::new(),
             connect: Some(crate::connect::ConnectManager::new()),
         }
+    }
+
+    /// Makes `grant` the current token generation and keeps the one it replaces for 30 seconds.
+    /// `client_id` runs before any write, so each caller's rule reads the generation it replaces.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn apply_token_generation(
+        &mut self,
+        session_epoch: u64,
+        grant: &TokenGrant,
+        client_id: impl FnOnce(&AppState) -> String,
+    ) -> TokenCommit {
+        // The session that issued the exchange may have ended while it was on the wire.
+        // Committing then would re-authenticate the live process as the departed account. The
+        // bump and this read are critical sections of the one `AppState` mutex, which orders them.
+        if self.session_epoch != session_epoch {
+            return TokenCommit::Refused;
+        }
+        let now_secs = crate::util::now_unix_secs();
+
+        let (real_rt, ort) = if let Some(rt) = grant.refresh_token {
+            (
+                rt.to_string(),
+                grant.opaque_rt.unwrap_or_default().to_string(),
+            )
+        } else if let Some(ref ts) = self.token_state {
+            (
+                ts.current.refresh_token.clone(),
+                ts.current.opaque_rt.clone(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
+        let client_id = client_id(self);
+        let new_gen = crate::platform::secure_store::TokenGeneration {
+            access_token: grant.access_token.to_string(),
+            refresh_token: real_rt,
+            opaque_at: grant.opaque_at.to_string(),
+            opaque_rt: ort.clone(),
+            version: self
+                .token_state
+                .as_ref()
+                .map(|ts| ts.current.version + 1)
+                .unwrap_or(1),
+            access_expires: now_secs + grant.expires_in.unwrap_or(3600),
+            user_id: grant.user_id.map(str::to_owned),
+            granted_scopes: grant.granted_scopes.to_vec(),
+            client_id,
+        };
+        let durable = new_gen.is_durable();
+
+        let previous = self.token_state.as_ref().map(|ts| ts.current.clone());
+        self.token_state = Some(crate::platform::secure_store::StoredTokenState {
+            current: new_gen,
+            previous,
+            previous_valid_until: Some(now_secs + 30),
+        });
+
+        self.captured_token = grant.access_token.to_string();
+        TokenCommit::Committed {
+            opaque_rt: ort,
+            durable,
+        }
+    }
+
+    /// [`Self::apply_token_generation`], then the new generation queued to disk when durable.
+    #[expect(dead_code)]
+    pub(crate) fn commit_token_generation(
+        &mut self,
+        session_epoch: u64,
+        grant: &TokenGrant,
+        client_id: impl FnOnce(&AppState) -> String,
+    ) -> TokenCommit {
+        let commit = self.apply_token_generation(session_epoch, grant, client_id);
+        if let TokenCommit::Committed { durable, .. } = &commit {
+            let data_dir = crate::state::cache_data_dir();
+            // Only a durable generation belongs on disk. One without a refresh token would
+            // replace a credential that still works, and the next launch would seed the SDK's
+            // own blob from it, handing TIDAL an empty refresh token verbatim.
+            if let (true, Some(ts)) = (*durable, &self.token_state) {
+                crate::platform::secure_store::save_queued(&data_dir, ts);
+            }
+        }
+        commit
     }
 
     /// The one way `media_duration` is written, and it never empties: a payload that carries
