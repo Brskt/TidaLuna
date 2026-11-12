@@ -61,6 +61,49 @@ fn attach_or_alloc_console() {
     }
 }
 
+/// Names the process `com.tidalunar.app` for the shell, and registers `TidaLunar` as that id's
+/// display name.
+#[cfg(target_os = "windows")]
+fn register_app_user_model_id() {
+    unsafe {
+        use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        let app_id: Vec<u16> = "com.tidalunar.app\0".encode_utf16().collect();
+        SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
+
+        use windows_sys::Win32::System::Registry::{
+            HKEY_CURRENT_USER, KEY_WRITE, REG_SZ, RegCreateKeyExW, RegSetValueExW,
+        };
+        let subkey: Vec<u16> = "Software\\Classes\\AppUserModelId\\com.tidalunar.app\0"
+            .encode_utf16()
+            .collect();
+        let mut hkey = core::ptr::null_mut();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            core::ptr::null(),
+            0,
+            KEY_WRITE,
+            core::ptr::null(),
+            &mut hkey,
+            core::ptr::null_mut(),
+        ) == 0
+        {
+            let name: Vec<u16> = "DisplayName\0".encode_utf16().collect();
+            let value: Vec<u16> = "TidaLunar\0".encode_utf16().collect();
+            let _ = RegSetValueExW(
+                hkey,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr().cast(),
+                (value.len() * 2) as u32,
+            );
+            windows_sys::Win32::System::Registry::RegCloseKey(hkey);
+        }
+    }
+}
+
 /// Guards the install folder against plugin writes, except the native plugins' data dirs.
 fn install_protected_root(root: &std::path::Path, recovered: &updater::Recovered) {
     platform::install_guard::install(
@@ -103,43 +146,7 @@ fn main() {
     }
 
     #[cfg(target_os = "windows")]
-    unsafe {
-        use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
-        let app_id: Vec<u16> = "com.tidalunar.app\0".encode_utf16().collect();
-        SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
-
-        use windows_sys::Win32::System::Registry::{
-            HKEY_CURRENT_USER, KEY_WRITE, REG_SZ, RegCreateKeyExW, RegSetValueExW,
-        };
-        let subkey: Vec<u16> = "Software\\Classes\\AppUserModelId\\com.tidalunar.app\0"
-            .encode_utf16()
-            .collect();
-        let mut hkey = core::ptr::null_mut();
-        if RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            subkey.as_ptr(),
-            0,
-            core::ptr::null(),
-            0,
-            KEY_WRITE,
-            core::ptr::null(),
-            &mut hkey,
-            core::ptr::null_mut(),
-        ) == 0
-        {
-            let name: Vec<u16> = "DisplayName\0".encode_utf16().collect();
-            let value: Vec<u16> = "TidaLunar\0".encode_utf16().collect();
-            let _ = RegSetValueExW(
-                hkey,
-                name.as_ptr(),
-                0,
-                REG_SZ,
-                value.as_ptr().cast(),
-                (value.len() * 2) as u32,
-            );
-            windows_sys::Win32::System::Registry::RegCloseKey(hkey);
-        }
-    }
+    register_app_user_model_id();
 
     // Windows and Linux read their bundled CEF payloads relative to the running
     // executable. macOS carries them inside the .app and resolves them
