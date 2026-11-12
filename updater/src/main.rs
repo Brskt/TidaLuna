@@ -494,3 +494,7 @@ fn cleanup(staging_dir: &Path, app_dir: &Path, files: &[JournalFile]) {
     let journal_path = app_dir.join(".update-journal.json");
     fs::remove_file(&journal_path).ok();
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/main/main_tests.rs"]
+mod main_tests;

@@ -97,3 +97,7 @@ pub(crate) fn verify_delta_base(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/manifest/manifest_tests.rs"]
+mod manifest_tests;
