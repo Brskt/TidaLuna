@@ -531,6 +531,10 @@ export class LunaPlugin {
 
         // Neither a disable nor a Reload landed while the poll awaited: it may restart the plugin.
         const stillOurs = () => loop === this.pollLoop && this.enabled && !this.loading._;
+        // A tick that a stop or a Reload overtook keeps quiet; its note would answer for them.
+        const say = (text: string) => {
+            if (stillOurs()) this.note(text);
+        };
 
         const poll = async () => {
             if (loop !== this.pollLoop || !this.liveReload) return;
@@ -555,15 +559,15 @@ export class LunaPlugin {
                             // Noted: the card is the one place these reasons reach the user.
                             case "refused":
                                 this.seenHash = seen;
-                                this.note(pullNote(pulled));
+                                say(pullNote(pulled));
                                 break;
                             case "blocked":
                                 delay = POLL_MAX_MS;
-                                this.note(pullNote(pulled));
+                                say(pullNote(pulled));
                                 break;
                             case "unavailable":
                                 failed = true;
-                                this.note(pullNote(pulled));
+                                say(pullNote(pulled));
                                 break;
                             case "busy":
                                 break;
@@ -575,7 +579,8 @@ export class LunaPlugin {
                 } catch (e) {
                     console.error(`[luna:plugin] Live reload error for ${this.name}:`, e);
                     failed = true;
-                    this.note(pullNote({ outcome: "unavailable", reason: e instanceof Error ? e.message : String(e) }));
+                    // Only `plugin.check_hash` rejects here: no update was tried.
+                    say(`Could not check the source: ${e instanceof Error ? e.message : String(e)}`);
                 } finally {
                     this.fetching._ = false;
                 }
