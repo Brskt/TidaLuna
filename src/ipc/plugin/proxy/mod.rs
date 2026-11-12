@@ -302,11 +302,6 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
 
     if let Some(body) = opts.get("body").and_then(|v| v.as_str()) {
         let body = if crate::ui::nav::is_token_endpoint(&url) {
-            if let Some(cid) = &exchange_client_id {
-                with_state(|state| {
-                    state.last_client_id = cid.clone();
-                });
-            }
             proxy_rewrite_refresh_body(body)
         } else {
             body.to_string()

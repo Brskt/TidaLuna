@@ -52,12 +52,8 @@ pub(super) fn capture_client_id(req: &mut Request, exchange_slot: &Mutex<Option<
     else {
         return;
     };
-    // Bind this exchange's client_id to its own response (per-request slot). The global
-    // stays as the proactive refresh's fallback when the stored client_id is empty.
-    *exchange_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid.clone());
-    crate::app_state::with_state(|state| {
-        state.last_client_id = cid;
-    });
+    // Bind this exchange's client_id to its own response (per-request slot).
+    *exchange_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid);
 }
 
 /// Resolve an opaque `luna_*` access nonce to the real access token for the

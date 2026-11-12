@@ -20,14 +20,9 @@ pub(crate) fn trigger_if_needed() {
     let (refresh_token, client_id, scope, session_epoch) =
         match crate::app_state::with_state(|state| {
             let ts = state.token_state.as_ref()?;
-            let cid = if ts.current.client_id.is_empty() {
-                state.last_client_id.clone()
-            } else {
-                ts.current.client_id.clone()
-            };
             Some((
                 ts.current.refresh_token.clone(),
-                cid,
+                ts.current.client_id.clone(),
                 ts.current.granted_scopes.join(" "),
                 state.session_epoch,
             ))

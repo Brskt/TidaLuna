@@ -122,7 +122,6 @@ pub(crate) struct AppState {
     // Set by the first plugin admitted in this process and never cleared: from then on any
     // script of the page may be a plugin's, and `plugin.migrate_base_url` refuses them all.
     pub(crate) plugin_code_admitted: bool,
-    pub(crate) last_client_id: String,
     pub(crate) connect: Option<crate::connect::ConnectManager>,
 }
 
@@ -299,7 +298,6 @@ impl AppState {
             session_epoch: 0,
             page: Default::default(),
             plugin_code_admitted: false,
-            last_client_id: String::new(),
             connect: Some(crate::connect::ConnectManager::new()),
         }
     }
