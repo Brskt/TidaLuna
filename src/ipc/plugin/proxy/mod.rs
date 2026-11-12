@@ -293,15 +293,15 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
         }
     }
 
+    let is_token_endpoint = crate::ui::nav::is_token_endpoint(&url);
+    let request_body = opts.get("body").and_then(|v| v.as_str());
     // The commit pairs any refresh token minted here with this request's client_id.
-    let exchange_client_id = opts
-        .get("body")
-        .and_then(|v| v.as_str())
-        .filter(|_| crate::ui::nav::is_token_endpoint(&url))
+    let exchange_client_id = request_body
+        .filter(|_| is_token_endpoint)
         .and_then(crate::ui::token_filter::form_client_id);
 
-    if let Some(body) = opts.get("body").and_then(|v| v.as_str()) {
-        let body = if crate::ui::nav::is_token_endpoint(&url) {
+    if let Some(body) = request_body {
+        let body = if is_token_endpoint {
             proxy_rewrite_refresh_body(body)
         } else {
             body.to_string()
@@ -382,7 +382,6 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
                     }
                 }
             }
-            let is_token_endpoint = crate::ui::nav::is_token_endpoint(&url);
             let is_4xx = (400..500).contains(&(status as u32));
             let body = match super::source::read_bytes_capped(
                 resp,
