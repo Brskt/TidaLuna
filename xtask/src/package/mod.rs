@@ -1,3 +1,8 @@
+use std::fs;
+use std::path::Path;
+
+use crate::manifest::Manifest;
+
 mod deb;
 mod nsis;
 mod tarball;
@@ -14,6 +19,43 @@ pub(super) fn render_template(template: &str, pairs: &[(&str, &str)]) -> Result<
         out = out.replace(&token, value);
     }
     Ok(out)
+}
+
+/// Refuses a `dist/` that `bundle` and `build-updater` have not filled, then checks its payload
+/// target with [`payload_target`].
+fn check_dist(dist: &Path, updater: &str, os: &str, arch: &str) -> Result<String, String> {
+    if !dist.is_dir()
+        || fs::read_dir(dist)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_none()
+    {
+        return Err("dist/ is empty or missing - run `cargo xtask bundle` first".into());
+    }
+    if !dist.join("manifest.json").is_file() {
+        return Err("dist/manifest.json missing - run `cargo xtask bundle` first".into());
+    }
+    if !dist.join(updater).is_file() {
+        return Err(format!(
+            "dist/{updater} missing - run `cargo xtask build-updater` first"
+        ));
+    }
+    payload_target(dist, os, arch)
+}
+
+/// The `{os}-{arch}` target, once `dist/manifest.json` is checked to carry it.
+fn payload_target(dist: &Path, os: &str, arch: &str) -> Result<String, String> {
+    let manifest_data =
+        fs::read_to_string(dist.join("manifest.json")).map_err(|e| e.to_string())?;
+    let manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| e.to_string())?;
+    let expected = format!("{os}-{arch}");
+    if manifest.target != expected {
+        return Err(format!(
+            "dist/ payload target {} does not match --arch {} (expected {})",
+            manifest.target, arch, expected
+        ));
+    }
+    Ok(expected)
 }
 
 pub(crate) fn package(flags: &[String]) -> Result<(), String> {

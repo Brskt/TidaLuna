@@ -3,8 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::deb::deb_file_name;
-use super::render_template;
-use crate::manifest::Manifest;
+use super::{payload_target, render_template};
 use crate::{project_root, read_workspace_version, run_status};
 
 /// The tarball's top folder, and its file name before `.tar.gz`.
@@ -18,17 +17,7 @@ pub(super) fn package_linux_tarball(arch: &str) -> Result<(), String> {
     if !dist.is_dir() {
         return Err("dist/ missing - run `cargo xtask bundle` first".into());
     }
-
-    let manifest_data =
-        fs::read_to_string(dist.join("manifest.json")).map_err(|e| e.to_string())?;
-    let manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| e.to_string())?;
-    let expected = format!("linux-{arch}");
-    if manifest.target != expected {
-        return Err(format!(
-            "dist/ payload target {} does not match --arch {} (expected {})",
-            manifest.target, arch, expected
-        ));
-    }
+    payload_target(&dist, "linux", arch)?;
 
     let version = read_workspace_version()?;
     let out_dir = project_root.join("target").join("installer");

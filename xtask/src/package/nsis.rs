@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::manifest::Manifest;
+use super::check_dist;
 use crate::{numeric_version, project_root, read_workspace_version, run_status};
 
 /// Sum the byte size of every regular file under `dir`, recursively.
@@ -25,32 +25,7 @@ fn dir_size_bytes(dir: &Path) -> Result<u64, String> {
 pub(super) fn package_windows_nsis(arch: &str) -> Result<(), String> {
     let project_root = project_root()?;
     let dist = project_root.join("dist");
-    if !dist.is_dir()
-        || fs::read_dir(&dist)
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_none()
-    {
-        return Err("dist/ is empty or missing - run `cargo xtask bundle` first".into());
-    }
-    if !dist.join("manifest.json").is_file() {
-        return Err("dist/manifest.json missing - run `cargo xtask bundle` first".into());
-    }
-    if !dist.join("updater.exe").is_file() {
-        return Err("dist/updater.exe missing - run `cargo xtask build-updater` first".into());
-    }
-
-    // Validate dist payload arch matches --arch.
-    let manifest_data =
-        fs::read_to_string(dist.join("manifest.json")).map_err(|e| e.to_string())?;
-    let manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| e.to_string())?;
-    let expected = format!("windows-{arch}");
-    if manifest.target != expected {
-        return Err(format!(
-            "dist/ payload target {} does not match --arch {} (expected {})",
-            manifest.target, arch, expected
-        ));
-    }
+    let expected = check_dist(&dist, "updater.exe", "windows", arch)?;
 
     // Prefer makensis on PATH, but fall back to the standard NSIS install
     // location on Windows: `choco install nsis` drops makensis.exe under

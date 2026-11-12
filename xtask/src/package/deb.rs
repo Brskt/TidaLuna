@@ -1,8 +1,8 @@
 use std::fs;
 use std::process::Command;
 
-use super::render_template;
-use crate::manifest::{LINUX_SANDBOX_PROTOCOL_REQUIRED, Manifest};
+use super::{check_dist, render_template};
+use crate::manifest::LINUX_SANDBOX_PROTOCOL_REQUIRED;
 use crate::{project_root, read_workspace_version, repo, run_status};
 
 fn releases_url() -> String {
@@ -21,32 +21,7 @@ pub(super) fn deb_file_name(version: &str, arch: &str) -> String {
 pub(super) fn package_linux_deb(arch: &str) -> Result<(), String> {
     let project_root = project_root()?;
     let dist = project_root.join("dist");
-    if !dist.is_dir()
-        || fs::read_dir(&dist)
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_none()
-    {
-        return Err("dist/ is empty or missing - run `cargo xtask bundle` first".into());
-    }
-    if !dist.join("manifest.json").is_file() {
-        return Err("dist/manifest.json missing - run `cargo xtask bundle` first".into());
-    }
-    if !dist.join("updater").is_file() {
-        return Err("dist/updater missing - run `cargo xtask build-updater` first".into());
-    }
-
-    // Validate dist payload arch matches --arch.
-    let manifest_data =
-        fs::read_to_string(dist.join("manifest.json")).map_err(|e| e.to_string())?;
-    let manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| e.to_string())?;
-    let expected = format!("linux-{arch}");
-    if manifest.target != expected {
-        return Err(format!(
-            "dist/ payload target {} does not match --arch {} (expected {})",
-            manifest.target, arch, expected
-        ));
-    }
+    check_dist(&dist, "updater", "linux", arch)?;
 
     if Command::new("dpkg-deb").arg("--version").output().is_err() {
         return Err("dpkg-deb not on PATH - install dpkg-dev (apt install dpkg-dev)".into());
