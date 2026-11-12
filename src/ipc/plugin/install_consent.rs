@@ -29,7 +29,7 @@ impl Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Busy => "another plugin install is waiting for an answer",
+            Self::Busy => "another plugin install is in progress",
             Self::Declined => "install declined",
             Self::Unanswered => "the install dialog closed without an answer",
         })
