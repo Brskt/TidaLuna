@@ -1,4 +1,4 @@
-use super::source::{PluginData, fetch_plugin_data};
+use super::source::{PluginData, fetch_version};
 use super::uninstall::CleanupScope;
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
@@ -51,15 +51,12 @@ async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, In
         ));
     }
     let turn = INSTALL_CONSENTS.begin()?;
-    let client = &*crate::state::HTTP_CLIENT;
     let PluginData {
         name,
         manifest,
         code,
         hash,
-    } = fetch_plugin_data(client, &url, None)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    } = fetch_version(&url, None).await?;
     let manifest = manifest.into_string();
     let name = crate::plugins::name::PluginName::parse(&name).map_err(|r| r.to_string())?;
     check_luna_type(&manifest)?;

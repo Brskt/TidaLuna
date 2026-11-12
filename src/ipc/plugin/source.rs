@@ -11,10 +11,10 @@ pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallbac
     let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
         let client = &*crate::state::HTTP_CLIENT;
-        match fetch_plugin_package(client, &url).await {
+        match within_fetch_timeout(fetch_plugin_package(client, &url)).await {
             Ok(Some(manifest)) => ipc_callback_ok(&callback, &manifest),
             Ok(None) => ipc_callback_err(&callback, 500, "plugin manifest not found"),
-            Err(e) => ipc_callback_err(&callback, 500, &format!("{e:#}")),
+            Err(e) => ipc_callback_err(&callback, 500, &e),
         }
     });
 }
@@ -65,7 +65,13 @@ pub(super) async fn fetch_version(
     stored: Option<&StoredPlugin>,
 ) -> Result<PluginData, String> {
     let client = &*crate::state::HTTP_CLIENT;
-    tokio::time::timeout(FETCH_TIMEOUT, fetch_plugin_data(client, url, stored))
+    within_fetch_timeout(fetch_plugin_data(client, url, stored)).await
+}
+
+async fn within_fetch_timeout<T>(
+    fetch: impl Future<Output = anyhow::Result<T>>,
+) -> Result<T, String> {
+    tokio::time::timeout(FETCH_TIMEOUT, fetch)
         .await
         .map_err(|_| {
             format!(
@@ -173,7 +179,7 @@ async fn fetch_text_capped(
 /// Fetch a plugin's `.json` manifest. `Ok(None)` = genuinely absent (404, a
 /// classic .mjs-only plugin); `Err` = a hard failure (oversized/cap, bad JSON,
 /// transport, other non-2xx) that callers must surface, not fall back on.
-pub(super) async fn fetch_plugin_package(
+async fn fetch_plugin_package(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<Option<String>> {
@@ -213,7 +219,7 @@ pub(super) struct PluginData {
 
 /// The version `url` serves. Given the `stored` version, its code is reused, not downloaded,
 /// while the manifest still names it ([`serves_stored_code`]).
-pub(super) async fn fetch_plugin_data(
+async fn fetch_plugin_data(
     client: &reqwest::Client,
     url: &str,
     stored: Option<&StoredPlugin>,
