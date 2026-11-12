@@ -249,16 +249,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
         self.is_exclusive_mode = false;
         if let Some(old) = self.asio_handle.take() {
-            // Driver-timed teardown: park the switch, the poll re-dispatches it.
-            // The switch supersedes any pending idle release.
-            self.asio_release_at = None;
-            // apply_device_switch retired this reader; a send would queue for nobody.
-            self.asio_seek_tx = None;
-            // Left armed through an unbounded drain, the watchdog ejects the track.
-            self.asio_watchdog_at = None;
-            self.asio_teardown = old.shutdown();
-            self.pending_device_switch = Some((id, mode));
-            return;
+            return self.park_behind_asio_teardown(old, id, mode);
         }
         let Some(handle) = AsioHandle::spawn(self.exclusive_gain.clone(), Some(id.clone())) else {
             // The user asked for this device by name: the refusal is theirs to see.
@@ -359,15 +350,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // driver-timed and holds the KS claim the exclusive open needs:
         // park the switch, the poll re-dispatches it once drained.
         if let Some(old) = self.asio_handle.take() {
-            // The switch supersedes any pending idle release.
-            self.asio_release_at = None;
-            // apply_device_switch retired this reader; a send would queue for nobody.
-            self.asio_seek_tx = None;
-            // Left armed through an unbounded drain, the watchdog ejects the track.
-            self.asio_watchdog_at = None;
-            self.asio_teardown = old.shutdown();
-            self.pending_device_switch = Some((id, mode));
-            return;
+            return self.park_behind_asio_teardown(old, id, mode);
         }
         self.is_asio_mode = false;
         if let Some(old) = self.exclusive_handle.take() {
@@ -458,16 +441,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     #[cfg(target_os = "windows")]
     fn asio_to_shared(&mut self, id: String, mode: OutputMode) {
         if let Some(old) = self.asio_handle.take() {
-            // Driver-timed teardown: park the switch, the poll re-dispatches it.
-            // The switch supersedes any pending idle release.
-            self.asio_release_at = None;
-            // apply_device_switch retired this reader; a send would queue for nobody.
-            self.asio_seek_tx = None;
-            // Left armed through an unbounded drain, the watchdog ejects the track.
-            self.asio_watchdog_at = None;
-            self.asio_teardown = old.shutdown();
-            self.pending_device_switch = Some((id, mode));
-            return;
+            return self.park_behind_asio_teardown(old, id, mode);
         }
         self.is_asio_mode = false;
         self.current_device_id = Some(id);
@@ -498,6 +472,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 self.await_load_after_switch();
             }
         }
+    }
+
+    /// Driver-timed teardown: park the switch, the poll re-dispatches it.
+    #[cfg(target_os = "windows")]
+    fn park_behind_asio_teardown(&mut self, old: AsioHandle, id: String, mode: OutputMode) {
+        // The switch supersedes any pending idle release.
+        self.asio_release_at = None;
+        // apply_device_switch retired this reader; a send would queue for nobody.
+        self.asio_seek_tx = None;
+        // Left armed through an unbounded drain, the watchdog ejects the track.
+        self.asio_watchdog_at = None;
+        self.asio_teardown = old.shutdown();
+        self.pending_device_switch = Some((id, mode));
     }
 
     /// Tear down the cpal stream and rebuild the pipeline on the resolved device at
