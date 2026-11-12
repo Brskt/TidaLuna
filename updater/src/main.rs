@@ -197,69 +197,7 @@ fn run() -> Result<()> {
         );
     }
 
-    // 8. Write transaction journal
-    let journal_path = args.app_dir.join(".update-journal.json");
-    let journal = Journal {
-        version: args.version.clone(),
-        state: JournalState::Pending,
-        files: files_to_update
-            .iter()
-            .map(|(p, is_new)| JournalFile {
-                path: p.clone(),
-                backup: format!("{p}.bak"),
-                is_new: *is_new,
-            })
-            .collect(),
-        deleted_files,
-    };
-    write_journal(&journal_path, &journal)?;
-
-    // 9. Commit phase - rename originals to .bak, move staged to final
-    say!("[updater] Applying update...");
-    for jf in &journal.files {
-        let original = args.app_dir.join(&jf.path);
-        let backup = args.app_dir.join(&jf.backup);
-        let staged = staging_dir.join(&jf.path);
-
-        // Ensure parent dir exists for new files
-        if let Some(parent) = original.parent() {
-            fs::create_dir_all(parent).ok();
-        }
-
-        // Rename original → .bak (if exists)
-        if original.exists() {
-            if backup.exists() {
-                fs::remove_file(&backup).ok();
-            }
-            fs::rename(&original, &backup)
-                .with_context(|| format!("failed to backup {}", jf.path))?;
-        }
-
-        // Move staged → final position
-        if let Err(e) = fs::rename(&staged, &original) {
-            // rename failed - try copy as fallback (cross-device)
-            fs::copy(&staged, &original)
-                .with_context(|| format!("failed to install {} (rename: {e})", jf.path))?;
-            fs::remove_file(&staged).ok();
-        }
-    }
-
-    // Delete obsolete files (from old layout)
-    for del_path in &journal.deleted_files {
-        let to_delete = args.app_dir.join(del_path);
-        if fs::remove_file(&to_delete).is_ok() {
-            say!("[updater] Removed obsolete: {del_path}");
-        }
-    }
-
-    // Mark journal as committed
-    let committed = Journal {
-        version: journal.version,
-        state: JournalState::Committed,
-        files: journal.files,
-        deleted_files: journal.deleted_files,
-    };
-    write_journal(&journal_path, &committed)?;
+    let committed = commit_update(&args, &staging_dir, &files_to_update, deleted_files)?;
 
     // 10. Cleanup and relaunch
     say!("[updater] Cleaning up...");
@@ -456,6 +394,79 @@ fn plan_updates(
     }
 
     Ok(files_to_update)
+}
+
+fn commit_update(
+    args: &Args,
+    staging_dir: &Path,
+    files_to_update: &[(String, bool)],
+    deleted_files: Vec<String>,
+) -> Result<Journal> {
+    // 8. Write transaction journal
+    let journal_path = args.app_dir.join(".update-journal.json");
+    let journal = Journal {
+        version: args.version.clone(),
+        state: JournalState::Pending,
+        files: files_to_update
+            .iter()
+            .map(|(p, is_new)| JournalFile {
+                path: p.clone(),
+                backup: format!("{p}.bak"),
+                is_new: *is_new,
+            })
+            .collect(),
+        deleted_files,
+    };
+    write_journal(&journal_path, &journal)?;
+
+    // 9. Commit phase - rename originals to .bak, move staged to final
+    say!("[updater] Applying update...");
+    for jf in &journal.files {
+        let original = args.app_dir.join(&jf.path);
+        let backup = args.app_dir.join(&jf.backup);
+        let staged = staging_dir.join(&jf.path);
+
+        // Ensure parent dir exists for new files
+        if let Some(parent) = original.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+
+        // Rename original → .bak (if exists)
+        if original.exists() {
+            if backup.exists() {
+                fs::remove_file(&backup).ok();
+            }
+            fs::rename(&original, &backup)
+                .with_context(|| format!("failed to backup {}", jf.path))?;
+        }
+
+        // Move staged → final position
+        if let Err(e) = fs::rename(&staged, &original) {
+            // rename failed - try copy as fallback (cross-device)
+            fs::copy(&staged, &original)
+                .with_context(|| format!("failed to install {} (rename: {e})", jf.path))?;
+            fs::remove_file(&staged).ok();
+        }
+    }
+
+    // Delete obsolete files (from old layout)
+    for del_path in &journal.deleted_files {
+        let to_delete = args.app_dir.join(del_path);
+        if fs::remove_file(&to_delete).is_ok() {
+            say!("[updater] Removed obsolete: {del_path}");
+        }
+    }
+
+    // Mark journal as committed
+    let committed = Journal {
+        version: journal.version,
+        state: JournalState::Committed,
+        files: journal.files,
+        deleted_files: journal.deleted_files,
+    };
+    write_journal(&journal_path, &committed)?;
+
+    Ok(committed)
 }
 
 fn write_journal(path: &Path, journal: &Journal) -> Result<()> {
