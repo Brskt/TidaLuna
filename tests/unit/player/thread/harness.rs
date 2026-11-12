@@ -23,11 +23,14 @@ pub(super) struct Harness {
     /// reporting a hung-up channel.
     _cmd_tx: mpsc::Sender<PlayerCommand>,
     _decode_cmds: mpsc::Receiver<DecodeCommand>,
+    /// Holds the resume file; declared last, it outlives the player that writes there.
+    _dir: tempfile::TempDir,
 }
 
-/// A player holding one loaded, playing shared-path track. `dir` owns the resume file:
-/// no ordering or timing of the calls below can reach the one the running app writes.
-pub(super) fn harness(dir: &std::path::Path) -> Harness {
+/// A player holding one loaded, playing shared-path track. Its own directory holds the resume
+/// file: no ordering or timing of the calls below can reach the one the running app writes.
+pub(super) fn harness() -> Harness {
+    let dir = tempfile::tempdir().unwrap();
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let events: Spy = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -42,7 +45,7 @@ pub(super) fn harness(dir: &std::path::Path) -> Harness {
     )
     .expect("construction opens no device and cannot fail off Windows");
 
-    player.resume_store = ResumeStore::new(dir.join("resume_position.json"));
+    player.resume_store = ResumeStore::new(dir.path().join("resume_position.json"));
 
     let (decode_cmd_tx, decode_cmds) = mpsc::channel();
     let (decode_event_tx, decode_event_rx) = mpsc::channel();
@@ -58,6 +61,7 @@ pub(super) fn harness(dir: &std::path::Path) -> Harness {
         decode_events: decode_event_tx,
         _cmd_tx: cmd_tx,
         _decode_cmds: decode_cmds,
+        _dir: dir,
     }
 }
 

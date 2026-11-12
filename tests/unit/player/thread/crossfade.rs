@@ -61,9 +61,8 @@ fn arm_for_promotion(h: &mut Harness, incoming_secs: f64) -> mpsc::Receiver<Deco
 /// replay guard tests exactly that stamp, replaying the wrong track and aborting the newer load.
 #[test]
 fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
 
     // A generation this test owns: a concurrent test moving the process-wide counter cannot
@@ -103,9 +102,8 @@ fn a_promotion_publishes_the_generation_its_fade_was_armed_under() {
 /// regression this pins.
 #[test]
 fn a_promotion_publishes_the_three_events_the_sdk_waits_on() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
 
     h.player.promote_crossfade(SIX_SECONDS);
@@ -155,9 +153,8 @@ fn a_promotion_publishes_the_three_events_the_sdk_waits_on() {
 /// the order the SDK needs. This test pins the emission order only.
 #[test]
 fn a_promotion_emits_the_incoming_position_before_the_transition_events() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
 
     // Six seconds of the incoming track were drained during the overlap, and the
@@ -199,9 +196,8 @@ fn a_promotion_emits_the_incoming_position_before_the_transition_events() {
 #[tokio::test]
 async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     let staged = crate::state::TrackInfo {
         url: "https://example.invalid/incoming".to_string(),
@@ -226,7 +222,7 @@ async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it
     );
 
     // The same fade, this time carried to its promotion.
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     h.player.promote_crossfade(SIX_SECONDS);
 
@@ -249,9 +245,8 @@ async fn a_cancelled_fade_leaves_the_next_track_staged_and_a_promotion_spends_it
 /// and only then releases.
 #[test]
 fn a_teardown_waits_out_a_swap_in_progress_and_promotes_it() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let incoming_cmds = arm_for_promotion(&mut h, 246.0);
     let link = crate::player::thread::output::CrossfadeLink {
         attach: Arc::new(Mutex::new(None)),
@@ -303,8 +298,7 @@ fn a_teardown_waits_out_a_swap_in_progress_and_promotes_it() {
 async fn a_stale_load_leaves_a_live_fade_armed() {
     // Held for the reason its siblings state: `handle_load` reads the process-wide generation.
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
 
     // A generation already retired. Mints only move the counter forward; this one stays
@@ -338,8 +332,7 @@ async fn a_stale_load_leaves_a_live_fade_armed() {
 /// or a Clear) can stall behind the disk: waiting here parks the control thread as long.
 #[test]
 fn a_busy_cache_never_parks_the_arming_tick() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = harness(dir.path());
+    let h = harness();
     let track = crate::state::TrackInfo {
         url: "https://example.invalid/cached.flac".to_string(),
         key: String::new(),
@@ -394,9 +387,8 @@ fn finished_fade_link() -> crate::player::thread::output::CrossfadeLink {
 /// track Active over permanent silence, with no error and no skip.
 #[test]
 fn a_promoted_fade_settles_the_incoming_track_that_died() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     h.player.cpal_xfade = Some(finished_fade_link());
 
@@ -432,7 +424,7 @@ fn a_promoted_fade_settles_the_incoming_track_that_died() {
 
     // The same forced promotion, reached by a listener changing their mind instead. The
     // staged bytes are good: there is nothing to settle and nothing to report.
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     h.player.cpal_xfade = Some(finished_fade_link());
 
@@ -453,9 +445,8 @@ fn a_promoted_fade_settles_the_incoming_track_that_died() {
 /// `played_samples` only on what the outgoing ring supplied): a fade is left to its own promotion.
 #[test]
 fn a_stalled_counter_does_not_complete_a_track_that_is_still_fading() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     // The outgoing decoder has finished and the counter has stopped moving: exactly
     // the state the drain check completes a track on.
@@ -486,9 +477,8 @@ fn a_stalled_counter_does_not_complete_a_track_that_is_still_fading() {
 /// checked against the state a real fade leaves behind.
 #[test]
 fn a_promotion_keeps_the_clock_the_swap_set_and_clears_the_completion_state() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     // What a real fade leaves behind: the outgoing track finished.
     h.player.pending_complete = true;
@@ -532,9 +522,8 @@ fn a_promotion_keeps_the_clock_the_swap_set_and_clears_the_completion_state() {
 /// refusal decided for the track the promotion just retired.
 #[test]
 fn a_promotion_retires_the_mirrors_that_described_the_outgoing_buffer() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     h.player.buffer_stalled = true;
     h.player.xfade_refused_url = Some("https://example.invalid/refused".to_string());
@@ -560,9 +549,8 @@ fn a_promotion_retires_the_mirrors_that_described_the_outgoing_buffer() {
 /// run in this harness.
 #[test]
 fn a_promotion_reports_both_the_file_rate_and_the_output_rate() {
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming_cmds = arm_for_promotion(&mut h, 246.0);
     h.player.sample_rate = 192_000;
     h.player.pending_crossfade.as_mut().unwrap().media_format =
@@ -690,9 +678,8 @@ fn max_emitted_seq(h: &Harness) -> Option<u32> {
 #[tokio::test]
 async fn a_promotion_yields_the_slot_to_a_load_published_after_its_fade_armed() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = arm_for_promotion(&mut h, 246.0);
     h.player.cpal_xfade = Some(swapped_link());
 
@@ -707,14 +694,13 @@ async fn a_promotion_yields_the_slot_to_a_load_published_after_its_fade_armed() 
 #[tokio::test]
 async fn a_stop_during_the_fade_leaves_the_promotion_publishing() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let gen_a = crate::player::begin_load(crate::player::LoadOrigin::Local);
     publish_source(
         gen_a,
         Some(a_track_at("https://example.invalid/outgoing?sig=a")),
     );
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = arm_for_promotion(&mut h, 246.0);
 
     let _gen_stop = crate::player::begin_load(crate::player::LoadOrigin::Local);
@@ -732,7 +718,6 @@ async fn a_stop_during_the_fade_leaves_the_promotion_publishing() {
 #[tokio::test]
 async fn a_stop_before_arming_leaves_the_promotion_publishing() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let gen_a = crate::player::begin_load(crate::player::LoadOrigin::Local);
     publish_source(
@@ -740,7 +725,7 @@ async fn a_stop_before_arming_leaves_the_promotion_publishing() {
         Some(a_track_at("https://example.invalid/outgoing?sig=a")),
     );
     let gen_stop = crate::player::begin_load(crate::player::LoadOrigin::Local);
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = arm_for_promotion(&mut h, 246.0);
     assert_eq!(
         h.player.pending_crossfade.as_ref().unwrap().next.load_gen,
@@ -760,11 +745,10 @@ async fn a_stop_before_arming_leaves_the_promotion_publishing() {
 #[tokio::test]
 async fn a_second_absence_is_newer_than_the_first() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let gen_d1 = crate::player::begin_load(crate::player::LoadOrigin::Local);
     publish_source(gen_d1, None);
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = arm_for_promotion(&mut h, 246.0);
 
     let gen_d2 = crate::player::begin_load(crate::player::LoadOrigin::Local);
@@ -781,11 +765,10 @@ async fn a_second_absence_is_newer_than_the_first() {
 #[tokio::test]
 async fn a_fade_out_of_a_dash_track_publishes_the_promoted_one() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let gen_d1 = crate::player::begin_load(crate::player::LoadOrigin::Local);
     publish_source(gen_d1, None);
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = arm_for_promotion(&mut h, 246.0);
 
     h.player.promote_crossfade(SIX_SECONDS);
@@ -799,14 +782,13 @@ async fn a_fade_out_of_a_dash_track_publishes_the_promoted_one() {
 #[tokio::test]
 async fn a_restart_of_the_outgoing_track_during_the_fade_keeps_its_publication() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
     let gen_a = crate::player::begin_load(crate::player::LoadOrigin::Local);
     publish_source(
         gen_a,
         Some(a_track_at("https://example.invalid/outgoing?sig=a")),
     );
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = arm_for_promotion(&mut h, 246.0);
 
     let gen_r = crate::player::begin_load(crate::player::LoadOrigin::Local);
@@ -847,9 +829,8 @@ fn a_finished_fade_out_of_a_loaded_track(h: &mut Harness) -> mpsc::Receiver<Deco
 #[tokio::test]
 async fn a_stop_whose_teardown_promotes_still_settles_on_stopped() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = a_finished_fade_out_of_a_loaded_track(&mut h);
 
     // `Player::stop`: a generation and a seq, no publication.
@@ -877,9 +858,8 @@ async fn a_stop_whose_teardown_promotes_still_settles_on_stopped() {
 #[tokio::test]
 async fn a_promotion_before_a_load_publishes_does_not_outrank_its_seq() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = a_finished_fade_out_of_a_loaded_track(&mut h);
 
     let (gen_c, seq_c) = mint_a_load_on_the_ipc_thread();
@@ -900,9 +880,8 @@ async fn a_promotion_before_a_load_publishes_does_not_outrank_its_seq() {
 #[tokio::test]
 async fn a_superseded_promotion_announces_no_transition() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
     let _slot = CurrentTrackSlot::clear();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _incoming = arm_for_promotion(&mut h, 246.0);
     h.player.cpal_xfade = Some(swapped_link());
 

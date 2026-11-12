@@ -150,8 +150,7 @@ fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
             true,
         ),
     ] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = harness(dir.path());
+        let mut h = harness();
         h.player.is_exclusive_mode = true;
         h.player.resume_store.set("track-1", 42.0);
 
@@ -208,8 +207,7 @@ fn a_bypass_decode_failure_frees_the_device_and_keeps_the_resume_point() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_release_deadline_waits_for_an_in_flight_load() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_exclusive_mode = true;
     h.player.is_playing = false;
     h.player.exclusive_release_at =
@@ -242,8 +240,7 @@ fn a_release_deadline_waits_for_an_in_flight_load() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_release_settles_the_seek_it_strands() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_exclusive_mode = true;
     h.player.is_playing = false;
     h.player.idle_state = PlaybackState::Paused;
@@ -282,8 +279,7 @@ fn a_release_settles_the_seek_it_strands() {
 #[cfg(target_os = "windows")]
 #[test]
 fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_exclusive_mode = true;
     h.player.current_exclusive_stream_id = Some(7);
 
@@ -302,8 +298,7 @@ fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
 #[cfg(target_os = "windows")]
 #[test]
 fn an_asio_refusal_keeps_an_adoption_that_may_still_be_live() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_asio_mode = true;
     h.player.current_asio_stream_id = Some(7);
 
@@ -319,8 +314,7 @@ fn an_asio_refusal_keeps_an_adoption_that_may_still_be_live() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_asio_mode = true;
     h.player.has_track = false;
 
@@ -343,8 +337,7 @@ fn a_seek_with_no_live_asio_decoder_is_queued_against_the_current_track() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_asio_mode = true;
     h.player.has_track = false;
     h.player.current_track_id = None;
@@ -378,8 +371,7 @@ fn a_dropped_queued_seek_still_answers_with_the_backend_position() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_queued_seek_survives_a_parked_switch_through_the_reap() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_playing = false;
     // No buffer to reuse: the switch takes its still-streaming arm and spawns no decoder.
     h.player.current_buffer = None;
@@ -468,8 +460,7 @@ fn hold_a_dash_track(h: &mut Harness) -> CurrentTrackSlot {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_dash_track_in_exclusive_moves_to_the_device_picked() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _slot = hold_a_dash_track(&mut h);
     h.player.is_exclusive_mode = true;
     h.player.current_device_id = Some(NO_SUCH_DEVICE_A.to_string());
@@ -506,8 +497,7 @@ fn a_dash_track_in_exclusive_moves_to_the_device_picked() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_shared_dash_track_follows_the_exclusive_toggle() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _slot = hold_a_dash_track(&mut h);
 
     h.player.handle_set_audio_device(
@@ -528,8 +518,7 @@ fn a_shared_dash_track_follows_the_exclusive_toggle() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_shared_dash_track_follows_the_asio_toggle() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _slot = hold_a_dash_track(&mut h);
 
     h.player.handle_set_audio_device(
@@ -552,8 +541,7 @@ fn a_shared_dash_track_follows_the_asio_toggle() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_dash_track_in_asio_parks_its_way_back_to_shared() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _slot = hold_a_dash_track(&mut h);
     let (handle, _driver_events, _driver_cmds) = AsioHandle::for_test();
     h.player.is_asio_mode = true;
@@ -580,8 +568,7 @@ fn a_dash_track_in_asio_parks_its_way_back_to_shared() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_switch_under_an_unlanded_dash_load_leaves_that_load_in_flight() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _slot = CurrentTrackSlot::clear();
     let (streaming, _writer) = crate::player::buffer::RamBuffer::new_for_test(1_000);
     h.player.current_buffer = Some(streaming);
@@ -613,8 +600,7 @@ fn a_switch_under_an_unlanded_dash_load_leaves_that_load_in_flight() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_switch_on_a_streaming_track_replays_its_retained_source() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let _track = ReplayableTrack::set("https://example.invalid/track-1.flac");
     let (streaming, _writer) = crate::player::buffer::RamBuffer::new_for_test(1_000);
     h.player.current_buffer = Some(streaming);
@@ -643,8 +629,7 @@ fn a_switch_on_a_streaming_track_replays_its_retained_source() {
 #[cfg(target_os = "windows")]
 #[test]
 fn an_exclusive_seek_pins_and_announces_only_once_dispatched() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_exclusive_mode = true;
 
     // No decoder to receive it: announcing would pin a target that can never converge.
@@ -678,8 +663,7 @@ async fn a_bypass_load_announces_that_nothing_plays_yet() {
     // Same reason as its siblings: the generation sampled below has to still be current when
     // `handle_load` re-reads it, or the branch under test is never reached at all.
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_exclusive_mode = true;
     // No handle: the branch is taken and spawns nothing. That is the window under test: the
     // device is not open, and nothing downstream can speak for it until it is.
@@ -700,8 +684,7 @@ async fn a_bypass_load_announces_that_nothing_plays_yet() {
 #[cfg(target_os = "windows")]
 #[test]
 fn an_asio_seek_pins_and_announces_only_once_dispatched() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_asio_mode = true;
 
     // No decoder to receive it: announcing would pin a target that can never converge.
@@ -736,8 +719,7 @@ fn an_asio_seek_pins_and_announces_only_once_dispatched() {
 #[cfg(target_os = "windows")]
 #[test]
 fn a_play_during_an_asio_park_reports_the_real_position() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_asio_mode = true;
 
     // The park took the handle and cleared the channel behind it. With `current_buffer` None,
@@ -773,11 +755,8 @@ fn a_play_during_an_asio_park_reports_the_real_position() {
 /// An ASIO player holding one live stream, with the driver's event channel in the test's hand.
 /// The cancel token is the live decoder's: whether a refusal reaches it is the whole question.
 #[cfg(target_os = "windows")]
-fn asio_harness(
-    dir: &std::path::Path,
-    live_stream: u32,
-) -> (Harness, mpsc::Sender<AsioEvent>, Arc<AtomicBool>) {
-    let mut h = harness(dir);
+fn asio_harness(live_stream: u32) -> (Harness, mpsc::Sender<AsioEvent>, Arc<AtomicBool>) {
+    let mut h = harness();
     // The command receiver is dropped: every send through the handle is already best-effort.
     let (handle, asio_events, _) = AsioHandle::for_test();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -801,8 +780,7 @@ fn an_asio_refusal_acts_only_for_the_stream_still_live() {
         (false, 2, true, None),
         (true, 2, true, Some("track-1")),
     ] {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut h, asio_events, cancel) = asio_harness(dir.path(), 2);
+        let (mut h, asio_events, cancel) = asio_harness(2);
         let stream_id = Some(refused_stream);
         let refusal = if rate {
             AsioEvent::RateUnsupported { stream_id }
@@ -852,8 +830,7 @@ async fn an_asio_state_keeps_the_seq_of_its_load_in_whatever_order_the_reports_a
         [(1, PlaybackState::Paused), (2, PlaybackState::Active)],
         [(2, PlaybackState::Active), (1, PlaybackState::Paused)],
     ] {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
+        let (mut h, asio_events, _cancel) = asio_harness(0);
         let _ = h.player.handle_load(load_req(1, "track-1"), false);
         let _ = h.player.handle_load(load_req(2, "track-2"), false);
         h.events.lock().unwrap().clear();
@@ -881,8 +858,7 @@ async fn an_asio_state_keeps_the_seq_of_its_load_in_whatever_order_the_reports_a
 async fn a_retired_exclusive_streams_pause_keeps_the_seq_of_its_load() {
     use crate::player::wasapi::{ExclusiveEvent, ExclusiveHandle};
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let (handle, exclusive_events, _commands) = ExclusiveHandle::for_test();
     h.player.is_exclusive_mode = true;
     h.player.exclusive_handle = Some(handle);
@@ -919,8 +895,7 @@ async fn a_retired_exclusive_streams_pause_keeps_the_seq_of_its_load() {
 #[tokio::test]
 async fn a_stop_leaves_the_stream_it_keeps_answering_under_the_newest_seq() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let (mut h, asio_events, _cancel) = asio_harness(dir.path(), 0);
+    let (mut h, asio_events, _cancel) = asio_harness(0);
     let _ = h.player.handle_load(load_req(1, "track-1"), false);
     h.player.handle_stop(3);
     h.events.lock().unwrap().clear();
@@ -947,8 +922,7 @@ async fn a_stop_leaves_the_stream_it_keeps_answering_under_the_newest_seq() {
 async fn an_asio_stream_is_opened_under_the_seq_of_the_load_that_spawned_it() {
     use crate::player::asio::host::AsioCommand;
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let (handle, _events, commands) = AsioHandle::for_test();
     h.player.is_asio_mode = true;
     h.player.asio_handle = Some(handle);
@@ -973,8 +947,7 @@ async fn an_asio_stream_is_opened_under_the_seq_of_the_load_that_spawned_it() {
 async fn an_exclusive_stream_is_opened_under_the_seq_of_the_load_that_spawned_it() {
     use crate::player::wasapi::{ExclusiveCommand, ExclusiveHandle};
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     let (handle, _events, commands) = ExclusiveHandle::for_test();
     h.player.is_exclusive_mode = true;
     h.player.exclusive_handle = Some(handle);

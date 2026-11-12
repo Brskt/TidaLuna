@@ -42,8 +42,7 @@ async fn an_announced_length_names_the_track_its_load_carried() {
     // and `handle_load` reads it again; a mint from another test landing between the two
     // makes the load read as stale and ignored.
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     let delivered = h.player.handle_load(
         LoadRequest {
@@ -83,8 +82,7 @@ async fn a_failed_load_leaves_no_track_behind() {
     // passed (for a reason that has nothing to do with three bytes failing to probe), and
     // only the flag the deeper path would have cleared gave it away.
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     assert!(h.player.has_track, "the harness starts on a live track");
 
     let delivered = h.player.handle_load(load_req(3, "track-2"), false);
@@ -111,8 +109,7 @@ fn last_media_error(events: &Spy) -> Option<(u32, Option<String>)> {
 #[tokio::test]
 async fn a_probe_failure_names_the_track_its_load_carried() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     let delivered = h.player.handle_load(
         LoadRequest {
@@ -145,8 +142,7 @@ async fn a_fetch_failure_names_the_track_its_load_carried_unless_superseded() {
     for (generations_behind, expected) in
         [(0u32, Some((9, Some("120002099".to_string())))), (1, None)]
     {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = harness(dir.path());
+        let mut h = harness();
         h.player.current_product_id = Some("previous".to_string());
 
         h.player.handle_command(PlayerCommand::LoadFailed {
@@ -170,8 +166,7 @@ async fn a_fetch_failure_names_the_track_its_load_carried_unless_superseded() {
 /// rest of its life, with every length it measured publishable under nothing.
 #[test]
 fn a_re_assert_brings_the_track_its_load_named() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.current_duration = 214.0;
 
     h.player.handle_command(PlayerCommand::ReassertResume {
@@ -196,8 +191,7 @@ fn a_re_assert_brings_the_track_its_load_named() {
 /// way, and blanking the name there is what stopped the swap from ever republishing its length.
 #[test]
 fn a_re_assert_without_an_id_keeps_the_one_already_known() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.current_duration = 214.0;
     h.player.current_product_id = Some("88264189".to_string());
 
@@ -219,8 +213,7 @@ fn a_re_assert_without_an_id_keeps_the_one_already_known() {
 /// the arriving track after the one that just left, and every length it measures along with it.
 #[test]
 fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.current_duration = 214.0;
     // What the thread committed to while the re-assert for `track-1` was still in flight.
     h.player.current_track_id = Some("track-2".to_string());
@@ -249,8 +242,7 @@ fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
 /// would otherwise carry the replaced track's position under the failed load's seq.
 #[test]
 fn a_failed_load_leaves_no_position_from_the_track_it_replaced() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.sample_rate = 1;
     h.player.channels = 1;
     // Where the previous track stood when this load tore its pipeline down.
@@ -288,8 +280,7 @@ fn a_failed_load_leaves_no_position_from_the_track_it_replaced() {
 async fn a_load_lifts_the_orphaning_unless_a_newer_one_superseded_it() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
     for (generations_behind, orphaned) in [(0u32, false), (1, true)] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = harness(dir.path());
+        let mut h = harness();
         h.player.handle_command(PlayerCommand::Stop(1));
         h.player.handle_command(PlayerCommand::Orphan);
 
@@ -318,8 +309,7 @@ fn the_start_position_is_the_queued_seek_else_the_auto_resume_and_taking_retires
         (Some(10.0), Some(45.0), Some(10.0)),
         (None, Some(45.0), Some(45.0)),
     ] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = harness(dir.path());
+        let mut h = harness();
         h.player.user_seek_override = queued.map(|time| ("track-1".to_string(), time));
         h.player.pending_resume_seek = auto_resume;
 

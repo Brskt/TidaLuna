@@ -34,8 +34,7 @@ fn a_play_follows_the_live_track_then_the_load_then_the_retained_source() {
 /// played counter on it would teleport the position by the same amount.
 #[test]
 fn a_refused_seek_persists_what_was_played_not_what_was_decoded() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_playing = false;
     h.player.sample_rate = 1;
     h.player.channels = 1;
@@ -65,8 +64,7 @@ fn a_refused_seek_persists_what_was_played_not_what_was_decoded() {
 /// as the pause lasts. Both bypass backends already answer this way.
 #[test]
 fn a_seek_answered_while_paused_reports_the_landing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_playing = false;
     h.player.sample_rate = 1;
     h.player.channels = 1;
@@ -105,8 +103,7 @@ fn a_seek_answered_while_paused_reports_the_landing() {
 /// it. Asserting the flag before the join keeps a regression a failure rather than a hang.
 #[test]
 fn stopping_the_decoder_retires_its_reader() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     // Held for the test: dropping the writer cancels the buffer, which would free the reader
     // for a different reason than the one under test.
     let (buffer, _writer) = crate::player::buffer::RamBuffer::new_for_test(1024);
@@ -143,8 +140,7 @@ fn stopping_the_decoder_retires_its_reader() {
 /// position playback never reached, and only the next periodic tick took it back.
 #[test]
 fn a_refused_pre_seek_is_not_announced_as_the_start_position() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.is_playing = false;
     // What a load leaves behind once it has dispatched its pre-seek.
     h.player.pending_resume_seek = Some(45.0);
@@ -179,8 +175,7 @@ fn a_refused_pre_seek_is_not_announced_as_the_start_position() {
 /// could settle the pin and persist its own position over the seek still being awaited.
 #[test]
 fn a_superseded_seek_answer_settles_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     // Paused, where the periodic tick cannot quietly correct the stored position.
     h.player.is_playing = false;
 
@@ -227,8 +222,7 @@ fn a_superseded_seek_answer_settles_nothing() {
 
 #[test]
 fn a_seek_settled_after_a_stop_keeps_the_stopped_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     h.player.handle_stop(0);
     h.player.handle_seek(30.0);
@@ -250,8 +244,7 @@ fn a_seek_settled_after_a_stop_keeps_the_stopped_state() {
 
 #[test]
 fn a_seek_queued_behind_a_load_persists_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // No pipeline and no retained track: the seek can only wait for a load, and that load
     // may never land.
@@ -279,8 +272,7 @@ fn a_seek_queued_behind_a_load_persists_nothing() {
 /// what answers. The counter is set apart from the target, keeping the answer from being a constant.
 #[test]
 fn a_seek_queued_behind_a_load_answers_the_played_position() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
     h.player.decode_cmd_tx = None;
     h.player.loading_gen = Some(7);
     h.player.sample_rate = 1;
@@ -313,8 +305,7 @@ fn a_seek_queued_behind_a_load_answers_the_played_position() {
 
 #[test]
 fn a_seek_onto_a_dead_pipeline_puts_the_real_position_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // A fatal decode error nulls the sender while the track keeps draining, and no load
     // is coming to apply a queued position.
@@ -355,8 +346,7 @@ fn a_seek_onto_a_dead_pipeline_puts_the_real_position_back() {
 
 #[test]
 fn a_seek_settled_before_the_first_play_announces_ready() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // A fresh load announced Ready and was never played; the SDK seeks before the first
     // play (boombox applies assetPosition after the load).
@@ -381,8 +371,7 @@ fn a_seek_settled_before_the_first_play_announces_ready() {
 
 #[test]
 fn a_seek_settled_after_a_pause_before_the_first_play_keeps_paused() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // Paused without ever having played, and that pause was announced. The seek that
     // interrupts it must put Paused back; restoring the load's Ready would erase it.
@@ -408,8 +397,7 @@ fn a_seek_settled_after_a_pause_before_the_first_play_keeps_paused() {
 
 #[test]
 fn a_decode_error_while_paused_reaches_a_terminal_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // The shape that defers its terminal state to the drain path: EOF already reported and
     // audio already played. Paused, that path never runs.
@@ -432,8 +420,7 @@ fn a_decode_error_while_paused_reaches_a_terminal_state() {
 
 #[test]
 fn a_seek_in_flight_holds_off_the_drain() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // Decode reported EOF, and the seek's mute has frozen the played count since.
     h.player.pending_complete = true;
@@ -450,8 +437,7 @@ fn a_seek_in_flight_holds_off_the_drain() {
 
 #[test]
 fn retiring_the_decoder_clears_a_pending_seek() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     h.player.handle_seek(30.0);
     assert!(h.player.seeking);
@@ -464,8 +450,7 @@ fn retiring_the_decoder_clears_a_pending_seek() {
 
 #[test]
 fn a_fatal_error_during_a_seek_settles_instead_of_stranding_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // The shape that ordinarily defers its terminal state to the drain path.
     h.player.pending_complete = true;
@@ -483,8 +468,7 @@ fn a_fatal_error_during_a_seek_settles_instead_of_stranding_it() {
 
 #[test]
 fn a_seek_after_a_deferred_decode_error_still_lets_the_track_finish() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // Audio already played: the settle hands the terminal state to the drain rather than
     // firing now. The decode thread has exited regardless.
@@ -514,8 +498,7 @@ fn a_seek_after_a_deferred_decode_error_still_lets_the_track_finish() {
 
 #[test]
 fn a_completed_track_leaves_no_decoder_behind() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // The ring has drained: decode reported EOF and the played count stopped moving.
     h.player.pending_complete = true;
@@ -532,8 +515,7 @@ fn a_completed_track_leaves_no_decoder_behind() {
 
 #[test]
 fn a_seek_reviving_a_parked_decoder_disarms_the_pending_completion() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     // What the decode thread parking at EOF leaves behind: the completion is armed, and
     // the seek that follows brings the stream back to life.
@@ -556,8 +538,7 @@ fn a_seek_reviving_a_parked_decoder_disarms_the_pending_completion() {
 
 #[test]
 fn decode_reaching_eof_while_paused_keeps_the_resume_position() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     h.player.resume_store.set("track-1", 42.0);
     h.player.handle_pause();
@@ -578,8 +559,7 @@ fn decode_reaching_eof_while_paused_keeps_the_resume_position() {
 /// nothing on screen names until that page's own load replaced it.
 #[test]
 fn a_play_after_the_page_that_loaded_the_track_ended_resumes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     h.player.handle_command(PlayerCommand::Stop(1));
     h.player.handle_command(PlayerCommand::Orphan);
@@ -593,8 +573,7 @@ fn a_play_after_the_page_that_loaded_the_track_ended_resumes_nothing() {
 /// The control of the test above: the same stop and play, with the page still there.
 #[test]
 fn a_play_after_a_stop_resumes_the_retained_track() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     h.player.handle_command(PlayerCommand::Stop(1));
     h.player.handle_play();
@@ -607,8 +586,7 @@ fn a_play_after_a_stop_resumes_the_retained_track() {
 /// loads the same track on boot finds it stopped, as a reload leaves everything.
 #[test]
 fn the_page_that_follows_finds_the_retained_track_stopped_not_to_be_resumed() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut h = harness(dir.path());
+    let mut h = harness();
 
     h.player.handle_command(PlayerCommand::Stop(1));
     assert!(
@@ -626,8 +604,7 @@ fn the_page_that_follows_finds_the_retained_track_stopped_not_to_be_resumed() {
 #[test]
 fn a_reassert_lifts_the_orphaning_only_for_the_committed_track() {
     for (track_id, orphaned) in [("track-1", false), ("another", true)] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = harness(dir.path());
+        let mut h = harness();
         h.player.handle_command(PlayerCommand::Stop(1));
         h.player.handle_command(PlayerCommand::Orphan);
 
