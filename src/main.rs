@@ -545,6 +545,12 @@ fn main() {
 
     run_message_loop();
 
+    wind_down();
+}
+
+/// What follows the message loop: queued writes reach the disk, playback and Connect stop, and
+/// CEF shuts down.
+fn wind_down() {
     // Already done where the loop was told to quit; this covers a loop that ended
     // some other way, and costs nothing twice.
     platform::app_lock::close_channel();
