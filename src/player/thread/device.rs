@@ -194,294 +194,310 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             );
             super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
 
-            // Switch TO ASIO (radio: mutually exclusive with shared / WASAPI-exclusive).
             if mode == OutputMode::Asio {
-                // Reaching here is a real shared/exclusive -> ASIO switch (the idempotent
-                // re-assert and the per-track skip both returned above, pre-cancel).
-                let was_playing = self.is_playing;
-                // The owning backend's live position first: mid-switch the old mode flag is
-                // still true, and the cpal counter there reads a frozen shared offset.
-                // resume_store is the cold fallback, 200ms-sampled, unwritten past decoder EOF.
-                let position = self.live_position_secs().or_else(|| {
-                    self.current_track_id
-                        .as_deref()
-                        .and_then(|tid| self.resume_store.get(tid))
-                });
-
-                self.stop_decode();
-                self.cpal_stream = None;
-                self.cpal_stream_error = None;
-
-                // ASIO bypasses the OS mixer: seed the shared digital gain from the
-                // app's own volume state (last_volume), NOT a live GetMasterVolume()
-                // query: a fresh session reports 1.0 regardless of the real level (MS
-                // docs), which would blast full scale. Matches JUCE/foobar/JRiver --
-                // exclusive/ASIO gain comes from app state, never a session read.
-                let gain = f32::from_bits(self.last_volume.load(Relaxed));
-                self.exclusive_gain.store(f32::to_bits(gain), Relaxed);
-                crate::vprintln!("[VOLUME] asio gain seeded: {gain:.3}");
-                self.volume_sync = None;
-                self.volume_rx = None;
-
-                // Radio: tear down a live exclusive handle, then (re)spawn the ASIO one.
-                if let Some(old) = self.exclusive_handle.take() {
-                    old.shutdown();
-                }
-                self.is_exclusive_mode = false;
-                if let Some(old) = self.asio_handle.take() {
-                    // Driver-timed teardown: park the switch, the poll re-dispatches it.
-                    // The switch supersedes any pending idle release.
-                    self.asio_release_at = None;
-                    // The cancel above condemned this reader; a send would queue for nobody.
-                    self.asio_seek_tx = None;
-                    // Left armed through an unbounded drain, the watchdog ejects the track.
-                    self.asio_watchdog_at = None;
-                    self.asio_teardown = old.shutdown();
-                    self.pending_device_switch = Some((id, mode));
-                    return;
-                }
-                let Some(handle) = AsioHandle::spawn(self.exclusive_gain.clone(), Some(id.clone()))
-                else {
-                    // The user asked for this device by name: the refusal is theirs to see.
-                    (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioInitFailed));
-                    // The decoder and the cpal stream are already gone here: returning bare would
-                    // leave `has_track`/`is_playing` naming a track with no backend, and nothing
-                    // polls for that. Fall back like the two ->shared branches below, but not
-                    // through `rearm_shared_after_asio_failure`: it re-derives its position from
-                    // `last_asio_pos`, stale once a session has left ASIO before.
-                    match self.switch_rearm() {
-                        SwitchRearm::Reuse(_) => {
-                            self.seeking = false;
-                            self.seek_target = None;
-                            crate::vprintln!(
-                                "[ASIO] spawn failed; rebuilding shared on the retained buffer"
-                            );
-                            self.rebuild_pipeline_at(position.unwrap_or(0.0));
-                        }
-                        // Still streaming, and a rebuild would race the decoder probe against a
-                        // moving base_offset. The track is re-loaded instead, as the siblings do.
-                        SwitchRearm::Replay(retained) => {
-                            crate::vprintln!("[ASIO] spawn failed; re-arming shared");
-                            self.replay_switched_track(retained, position, was_playing);
-                        }
-                        SwitchRearm::AwaitLoad => self.await_load_after_switch(),
-                    }
-                    return;
-                };
-                self.is_asio_mode = true;
-                // Drop any stale release timer from a prior ASIO session; a fresh
-                // engagement can't fire it and shut down the handle we just spawned.
-                self.asio_release_at = None;
-                self.asio_handle = Some(handle);
-                self.current_device_id = Some(id.clone());
-
-                // Reuse the retained buffer when the track is fully in memory: spawn the
-                // ASIO decoder on it directly, no network re-download and no idle stall.
-                // Only a still-STREAMING buffer races the decoder probe (its base_offset
-                // churns mid-download); a complete one is probe-safe (the same invariant
-                // cache-hit loads rely on every day). No new load: clear the load bookkeeping.
-                match self.switch_rearm() {
-                    SwitchRearm::Reuse(buffer) => {
-                        self.loading_gen = None;
-                        self.pending_play = None;
-                        crate::vprintln!("[AUDIO] Switched to ASIO output (retained buffer)");
-                        // The seek queued while the old device was released is still pending,
-                        // and this spawn is its last reader: nothing downstream looks at it.
-                        let seek_to = self.take_user_seek_override().or(position);
-                        self.spawn_asio_decoder(buffer, seek_to, !was_playing);
-                    }
-                    // Still-streaming buffer: a fresh load re-probes cleanly (handle_load takes
-                    // the ASIO branch since is_asio_mode is set).
-                    SwitchRearm::Replay(retained) => {
-                        crate::vprintln!("[AUDIO] Switched to ASIO output");
-                        self.replay_switched_track(retained, position, was_playing);
-                    }
-                    SwitchRearm::AwaitLoad => {
-                        crate::vprintln!("[AUDIO] Switched to ASIO output");
-                        self.await_load_after_switch();
-                    }
-                }
-                return;
+                return self.switch_to_asio(id, mode);
             }
-
             if mode == OutputMode::Exclusive {
-                // (The per-track format skip returned above, before the cancel block.)
-                // The owning backend's live position first: an ASIO-to-exclusive switch runs
-                // with is_asio_mode still true; the cpal counter would be a frozen shared
-                // offset. resume_store is the cold fallback. Carried on the ReplayRequest
-                // below (or the retained-buffer reuse), applied at the exclusive spawn.
-                let was_playing = self.is_playing;
-                let position = self.live_position_secs().or_else(|| {
-                    self.current_track_id
-                        .as_deref()
-                        .and_then(|tid| self.resume_store.get(tid))
-                });
-
-                self.stop_decode();
-                self.cpal_stream = None;
-                // Drop the shared-stream error flag too: a stale device-loss signal must not
-                // trigger a shared-cpal rebuild while we are in exclusive mode.
-                self.cpal_stream_error = None;
-
-                // Exclusive bypasses the OS mixer: seed the render's digital gain
-                // from the app's own volume state (last_volume), NOT a live
-                // GetMasterVolume() query: a fresh session reports 1.0 regardless of
-                // the real level (MS docs), which would blast full scale. Breaks
-                // bit-perfect <100%, an accepted tradeoff for a live slider.
-                let gain = f32::from_bits(self.last_volume.load(Relaxed));
-                self.exclusive_gain.store(f32::to_bits(gain), Relaxed);
-                crate::vprintln!("[VOLUME] exclusive gain seeded: {gain:.3}");
-
-                self.volume_sync = None;
-                self.volume_rx = None;
-
-                // Radio: tear down a live ASIO handle first. Its teardown is
-                // driver-timed and holds the KS claim the exclusive open needs:
-                // park the switch, the poll re-dispatches it once drained.
-                if let Some(old) = self.asio_handle.take() {
-                    // The switch supersedes any pending idle release.
-                    self.asio_release_at = None;
-                    // The cancel above condemned this reader; a send would queue for nobody.
-                    self.asio_seek_tx = None;
-                    // Left armed through an unbounded drain, the watchdog ejects the track.
-                    self.asio_watchdog_at = None;
-                    self.asio_teardown = old.shutdown();
-                    self.pending_device_switch = Some((id, mode));
-                    return;
-                }
-                self.is_asio_mode = false;
-                if let Some(old) = self.exclusive_handle.take() {
-                    old.shutdown();
-                }
-                let handle = ExclusiveHandle::spawn(id.clone(), self.exclusive_gain.clone());
-                self.is_exclusive_mode = true;
-                // Drop any stale release timer from a prior exclusive session; a fresh
-                // engagement can't fire it and release the device we just acquired.
-                self.exclusive_release_at = None;
-                self.exclusive_handle = Some(handle);
-                self.current_device_id = Some(id.clone());
-
-                // Reuse the retained buffer when the track is fully in memory: spawn the
-                // exclusive decoder on it directly, no network re-download and no idle stall.
-                // The probe race that motivated the fresh load only affects a still-STREAMING
-                // buffer (its base_offset churns mid-download); a complete one is probe-safe.
-                match self.switch_rearm() {
-                    SwitchRearm::Reuse(buffer) => {
-                        self.loading_gen = None;
-                        self.pending_play = None;
-                        self.seeking = false;
-                        self.seek_target = None;
-                        crate::vprintln!(
-                            "[AUDIO] Switched to exclusive WASAPI (retained buffer): {}",
-                            id
-                        );
-                        // Same as the ASIO switch above: this spawn is the last reader of a seek
-                        // queued while the old device was released.
-                        let seek_to = self.take_user_seek_override().or(position);
-                        self.spawn_exclusive_decoder(buffer, seek_to, !was_playing);
-                    }
-                    // Still-streaming buffer: symphonia's probe would race the mid-stream churn
-                    // (silence). Re-arm a fresh load that probes cleanly; handle_load takes
-                    // the exclusive branch since is_exclusive_mode is set.
-                    SwitchRearm::Replay(retained) => {
-                        crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
-                        self.replay_switched_track(retained, position, was_playing);
-                    }
-                    SwitchRearm::AwaitLoad => {
-                        crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
-                        self.await_load_after_switch();
-                    }
-                }
-                return;
-            } else if self.is_exclusive_mode {
-                if let Some(old) = self.exclusive_handle.take() {
-                    old.shutdown();
-                }
-                self.is_exclusive_mode = false;
-                self.current_device_id = Some(id);
-
-                // Prefer the live exclusive position (floor-free); fall back to
-                // resume_store only if no TimeUpdate arrived (it floors sub-1s and
-                // can return a stale prior-session offset). Track from CURRENT_TRACK
-                // since a polled Stopped may have nulled current_track_id.
-                let retained = super::retained_track();
-                let position = self.resume_position(self.last_exclusive_pos, retained.as_ref());
-
-                // Reuse the retained buffer when the track is fully in memory: rebuild the
-                // shared pipeline on it in place (the device-switch path), no network
-                // re-download and no idle stall. A seek killed mid-flight by the exclusive
-                // entry must not survive into the rebuilt pipeline (it would pin the poll
-                // loop at a ghost position): clear it first.
-                let was_playing = self.is_playing;
-                match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
-                    SwitchRearm::Reuse(_) => {
-                        self.seeking = false;
-                        self.seek_target = None;
-                        crate::vprintln!("[AUDIO] Switched back to shared mode (retained buffer)");
-                        self.rebuild_pipeline_at(position.unwrap_or(0.0));
-                    }
-                    // Still-streaming buffer: the exclusive reader parks it mid-range, and a
-                    // fresh shared load probes cleanly instead of blocking the player loop.
-                    SwitchRearm::Replay(retained) => {
-                        crate::vprintln!("[AUDIO] Switched back to shared mode");
-                        self.replay_switched_track(retained, position, was_playing);
-                    }
-                    SwitchRearm::AwaitLoad => {
-                        crate::vprintln!("[AUDIO] Switched back to shared mode");
-                        self.await_load_after_switch();
-                    }
-                }
-                return;
-            } else if self.is_asio_mode {
-                // asio -> shared.
-                if let Some(old) = self.asio_handle.take() {
-                    // Driver-timed teardown: park the switch, the poll re-dispatches it.
-                    // The switch supersedes any pending idle release.
-                    self.asio_release_at = None;
-                    // The cancel above condemned this reader; a send would queue for nobody.
-                    self.asio_seek_tx = None;
-                    // Left armed through an unbounded drain, the watchdog ejects the track.
-                    self.asio_watchdog_at = None;
-                    self.asio_teardown = old.shutdown();
-                    self.pending_device_switch = Some((id, mode));
-                    return;
-                }
-                self.is_asio_mode = false;
-                self.current_device_id = Some(id);
-
-                // Prefer the live ASIO position (floor-free); fall back to resume_store.
-                let retained = super::retained_track();
-                let position = self.resume_position(self.last_asio_pos, retained.as_ref());
-
-                // Reuse the retained buffer when the track is fully in memory: rebuild the
-                // shared pipeline on it in place (the device-switch path), no network
-                // re-download and no idle stall.
-                let was_playing = self.is_playing;
-                match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
-                    SwitchRearm::Reuse(_) => {
-                        self.seeking = false;
-                        self.seek_target = None;
-                        crate::vprintln!(
-                            "[AUDIO] Switched back to shared mode (from ASIO, retained buffer)"
-                        );
-                        self.rebuild_pipeline_at(position.unwrap_or(0.0));
-                    }
-                    SwitchRearm::Replay(retained) => {
-                        crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
-                        self.replay_switched_track(retained, position, was_playing);
-                    }
-                    SwitchRearm::AwaitLoad => {
-                        crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
-                        self.await_load_after_switch();
-                    }
-                }
-                return;
+                return self.switch_to_exclusive(id, mode);
+            }
+            if self.is_exclusive_mode {
+                return self.exclusive_to_shared(id);
+            }
+            if self.is_asio_mode {
+                return self.asio_to_shared(id, mode);
             }
         }
 
         self.current_device_id = Some(id.clone());
         self.rebuild_pipeline_at(self.effective_position());
         crate::vprintln!("[AUDIO] Switched to device: {}", id);
+    }
+
+    /// Switch TO ASIO (radio: mutually exclusive with shared / WASAPI-exclusive).
+    #[cfg(target_os = "windows")]
+    fn switch_to_asio(&mut self, id: String, mode: OutputMode) {
+        // Reaching here is a real shared/exclusive -> ASIO switch (the idempotent
+        // re-assert and the per-track skip both return before the readers are retired).
+        let was_playing = self.is_playing;
+        // The owning backend's live position first: mid-switch the old mode flag is
+        // still true, and the cpal counter there reads a frozen shared offset.
+        // resume_store is the cold fallback, 200ms-sampled, unwritten past decoder EOF.
+        let position = self.live_position_secs().or_else(|| {
+            self.current_track_id
+                .as_deref()
+                .and_then(|tid| self.resume_store.get(tid))
+        });
+
+        self.stop_decode();
+        self.cpal_stream = None;
+        self.cpal_stream_error = None;
+
+        // ASIO bypasses the OS mixer: seed the shared digital gain from the
+        // app's own volume state (last_volume), NOT a live GetMasterVolume()
+        // query: a fresh session reports 1.0 regardless of the real level (MS
+        // docs), which would blast full scale. Matches JUCE/foobar/JRiver --
+        // exclusive/ASIO gain comes from app state, never a session read.
+        let gain = f32::from_bits(self.last_volume.load(Relaxed));
+        self.exclusive_gain.store(f32::to_bits(gain), Relaxed);
+        crate::vprintln!("[VOLUME] asio gain seeded: {gain:.3}");
+        self.volume_sync = None;
+        self.volume_rx = None;
+
+        // Radio: tear down a live exclusive handle, then (re)spawn the ASIO one.
+        if let Some(old) = self.exclusive_handle.take() {
+            old.shutdown();
+        }
+        self.is_exclusive_mode = false;
+        if let Some(old) = self.asio_handle.take() {
+            // Driver-timed teardown: park the switch, the poll re-dispatches it.
+            // The switch supersedes any pending idle release.
+            self.asio_release_at = None;
+            // apply_device_switch retired this reader; a send would queue for nobody.
+            self.asio_seek_tx = None;
+            // Left armed through an unbounded drain, the watchdog ejects the track.
+            self.asio_watchdog_at = None;
+            self.asio_teardown = old.shutdown();
+            self.pending_device_switch = Some((id, mode));
+            return;
+        }
+        let Some(handle) = AsioHandle::spawn(self.exclusive_gain.clone(), Some(id.clone())) else {
+            // The user asked for this device by name: the refusal is theirs to see.
+            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioInitFailed));
+            // The decoder and the cpal stream are already gone here: returning bare would
+            // leave `has_track`/`is_playing` naming a track with no backend, and nothing
+            // polls for that. Fall back like exclusive_to_shared and asio_to_shared, but not
+            // through `rearm_shared_after_asio_failure`: it re-derives its position from
+            // `last_asio_pos`, stale once a session has left ASIO before.
+            match self.switch_rearm() {
+                SwitchRearm::Reuse(_) => {
+                    self.seeking = false;
+                    self.seek_target = None;
+                    crate::vprintln!(
+                        "[ASIO] spawn failed; rebuilding shared on the retained buffer"
+                    );
+                    self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                }
+                // Still streaming, and a rebuild would race the decoder probe against a
+                // moving base_offset. The track is re-loaded instead, as the siblings do.
+                SwitchRearm::Replay(retained) => {
+                    crate::vprintln!("[ASIO] spawn failed; re-arming shared");
+                    self.replay_switched_track(retained, position, was_playing);
+                }
+                SwitchRearm::AwaitLoad => self.await_load_after_switch(),
+            }
+            return;
+        };
+        self.is_asio_mode = true;
+        // Drop any stale release timer from a prior ASIO session; a fresh
+        // engagement can't fire it and shut down the handle we just spawned.
+        self.asio_release_at = None;
+        self.asio_handle = Some(handle);
+        self.current_device_id = Some(id.clone());
+
+        // Reuse the retained buffer when the track is fully in memory: spawn the
+        // ASIO decoder on it directly, no network re-download and no idle stall.
+        // Only a still-STREAMING buffer races the decoder probe (its base_offset
+        // churns mid-download); a complete one is probe-safe (the same invariant
+        // cache-hit loads rely on every day). No new load: clear the load bookkeeping.
+        match self.switch_rearm() {
+            SwitchRearm::Reuse(buffer) => {
+                self.loading_gen = None;
+                self.pending_play = None;
+                crate::vprintln!("[AUDIO] Switched to ASIO output (retained buffer)");
+                // The seek queued while the old device was released is still pending,
+                // and this spawn is its last reader: nothing downstream looks at it.
+                let seek_to = self.take_user_seek_override().or(position);
+                self.spawn_asio_decoder(buffer, seek_to, !was_playing);
+            }
+            // Still-streaming buffer: a fresh load re-probes cleanly (handle_load takes
+            // the ASIO branch since is_asio_mode is set).
+            SwitchRearm::Replay(retained) => {
+                crate::vprintln!("[AUDIO] Switched to ASIO output");
+                self.replay_switched_track(retained, position, was_playing);
+            }
+            SwitchRearm::AwaitLoad => {
+                crate::vprintln!("[AUDIO] Switched to ASIO output");
+                self.await_load_after_switch();
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn switch_to_exclusive(&mut self, id: String, mode: OutputMode) {
+        // (The per-track format skip returns in apply_device_switch, before the readers
+        // are retired.)
+        // The owning backend's live position first: an ASIO-to-exclusive switch runs
+        // with is_asio_mode still true; the cpal counter would be a frozen shared
+        // offset. resume_store is the cold fallback. Carried on the ReplayRequest
+        // below (or the retained-buffer reuse), applied at the exclusive spawn.
+        let was_playing = self.is_playing;
+        let position = self.live_position_secs().or_else(|| {
+            self.current_track_id
+                .as_deref()
+                .and_then(|tid| self.resume_store.get(tid))
+        });
+
+        self.stop_decode();
+        self.cpal_stream = None;
+        // Drop the shared-stream error flag too: a stale device-loss signal must not
+        // trigger a shared-cpal rebuild while we are in exclusive mode.
+        self.cpal_stream_error = None;
+
+        // Exclusive bypasses the OS mixer: seed the render's digital gain
+        // from the app's own volume state (last_volume), NOT a live
+        // GetMasterVolume() query: a fresh session reports 1.0 regardless of
+        // the real level (MS docs), which would blast full scale. Breaks
+        // bit-perfect <100%, an accepted tradeoff for a live slider.
+        let gain = f32::from_bits(self.last_volume.load(Relaxed));
+        self.exclusive_gain.store(f32::to_bits(gain), Relaxed);
+        crate::vprintln!("[VOLUME] exclusive gain seeded: {gain:.3}");
+
+        self.volume_sync = None;
+        self.volume_rx = None;
+
+        // Radio: tear down a live ASIO handle first. Its teardown is
+        // driver-timed and holds the KS claim the exclusive open needs:
+        // park the switch, the poll re-dispatches it once drained.
+        if let Some(old) = self.asio_handle.take() {
+            // The switch supersedes any pending idle release.
+            self.asio_release_at = None;
+            // apply_device_switch retired this reader; a send would queue for nobody.
+            self.asio_seek_tx = None;
+            // Left armed through an unbounded drain, the watchdog ejects the track.
+            self.asio_watchdog_at = None;
+            self.asio_teardown = old.shutdown();
+            self.pending_device_switch = Some((id, mode));
+            return;
+        }
+        self.is_asio_mode = false;
+        if let Some(old) = self.exclusive_handle.take() {
+            old.shutdown();
+        }
+        let handle = ExclusiveHandle::spawn(id.clone(), self.exclusive_gain.clone());
+        self.is_exclusive_mode = true;
+        // Drop any stale release timer from a prior exclusive session; a fresh
+        // engagement can't fire it and release the device we just acquired.
+        self.exclusive_release_at = None;
+        self.exclusive_handle = Some(handle);
+        self.current_device_id = Some(id.clone());
+
+        // Reuse the retained buffer when the track is fully in memory: spawn the
+        // exclusive decoder on it directly, no network re-download and no idle stall.
+        // The probe race that motivated the fresh load only affects a still-STREAMING
+        // buffer (its base_offset churns mid-download); a complete one is probe-safe.
+        match self.switch_rearm() {
+            SwitchRearm::Reuse(buffer) => {
+                self.loading_gen = None;
+                self.pending_play = None;
+                self.seeking = false;
+                self.seek_target = None;
+                crate::vprintln!(
+                    "[AUDIO] Switched to exclusive WASAPI (retained buffer): {}",
+                    id
+                );
+                // Same as in switch_to_asio: this spawn is the last reader of a seek
+                // queued while the old device was released.
+                let seek_to = self.take_user_seek_override().or(position);
+                self.spawn_exclusive_decoder(buffer, seek_to, !was_playing);
+            }
+            // Still-streaming buffer: symphonia's probe would race the mid-stream churn
+            // (silence). Re-arm a fresh load that probes cleanly; handle_load takes
+            // the exclusive branch since is_exclusive_mode is set.
+            SwitchRearm::Replay(retained) => {
+                crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
+                self.replay_switched_track(retained, position, was_playing);
+            }
+            SwitchRearm::AwaitLoad => {
+                crate::vprintln!("[AUDIO] Switched to exclusive WASAPI: {}", id);
+                self.await_load_after_switch();
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn exclusive_to_shared(&mut self, id: String) {
+        if let Some(old) = self.exclusive_handle.take() {
+            old.shutdown();
+        }
+        self.is_exclusive_mode = false;
+        self.current_device_id = Some(id);
+
+        // Prefer the live exclusive position (floor-free); fall back to
+        // resume_store only if no TimeUpdate arrived (it floors sub-1s and
+        // can return a stale prior-session offset). Track from CURRENT_TRACK
+        // since a polled Stopped may have nulled current_track_id.
+        let retained = super::retained_track();
+        let position = self.resume_position(self.last_exclusive_pos, retained.as_ref());
+
+        // Reuse the retained buffer when the track is fully in memory: rebuild the
+        // shared pipeline on it in place (the device-switch path), no network
+        // re-download and no idle stall. A seek killed mid-flight by the exclusive
+        // entry must not survive into the rebuilt pipeline (it would pin the poll
+        // loop at a ghost position): clear it first.
+        let was_playing = self.is_playing;
+        match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
+            SwitchRearm::Reuse(_) => {
+                self.seeking = false;
+                self.seek_target = None;
+                crate::vprintln!("[AUDIO] Switched back to shared mode (retained buffer)");
+                self.rebuild_pipeline_at(position.unwrap_or(0.0));
+            }
+            // Still-streaming buffer: the exclusive reader parks it mid-range, and a
+            // fresh shared load probes cleanly instead of blocking the player loop.
+            SwitchRearm::Replay(retained) => {
+                crate::vprintln!("[AUDIO] Switched back to shared mode");
+                self.replay_switched_track(retained, position, was_playing);
+            }
+            SwitchRearm::AwaitLoad => {
+                crate::vprintln!("[AUDIO] Switched back to shared mode");
+                self.await_load_after_switch();
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn asio_to_shared(&mut self, id: String, mode: OutputMode) {
+        if let Some(old) = self.asio_handle.take() {
+            // Driver-timed teardown: park the switch, the poll re-dispatches it.
+            // The switch supersedes any pending idle release.
+            self.asio_release_at = None;
+            // apply_device_switch retired this reader; a send would queue for nobody.
+            self.asio_seek_tx = None;
+            // Left armed through an unbounded drain, the watchdog ejects the track.
+            self.asio_watchdog_at = None;
+            self.asio_teardown = old.shutdown();
+            self.pending_device_switch = Some((id, mode));
+            return;
+        }
+        self.is_asio_mode = false;
+        self.current_device_id = Some(id);
+
+        // Prefer the live ASIO position (floor-free); fall back to resume_store.
+        let retained = super::retained_track();
+        let position = self.resume_position(self.last_asio_pos, retained.as_ref());
+
+        // Reuse the retained buffer when the track is fully in memory: rebuild the
+        // shared pipeline on it in place (the device-switch path), no network
+        // re-download and no idle stall.
+        let was_playing = self.is_playing;
+        match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
+            SwitchRearm::Reuse(_) => {
+                self.seeking = false;
+                self.seek_target = None;
+                crate::vprintln!(
+                    "[AUDIO] Switched back to shared mode (from ASIO, retained buffer)"
+                );
+                self.rebuild_pipeline_at(position.unwrap_or(0.0));
+            }
+            SwitchRearm::Replay(retained) => {
+                crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
+                self.replay_switched_track(retained, position, was_playing);
+            }
+            SwitchRearm::AwaitLoad => {
+                crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
+                self.await_load_after_switch();
+            }
+        }
     }
 
     /// Tear down the cpal stream and rebuild the pipeline on the resolved device at
