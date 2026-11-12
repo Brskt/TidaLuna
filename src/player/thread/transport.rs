@@ -59,7 +59,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     /// Drops the seek pin: no seek in flight, no target, no start time for the
-    /// "[SEEK] complete" log.
+    /// `[SEEK] complete` log.
     pub(super) fn clear_seek_pin(&mut self) {
         self.seeking = false;
         self.seek_target = None;
