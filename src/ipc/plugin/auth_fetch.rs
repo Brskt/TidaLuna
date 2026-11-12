@@ -3,22 +3,13 @@ use crate::app_state::{IpcCallback, IpcMessage, with_state};
 
 pub(super) fn handle_plugin_fetch(
     msg: &IpcMessage,
-    caller: &crate::ipc::caller::Caller,
+    caller: &crate::ipc::caller::Attributed,
     query_id: i64,
     callback: IpcCallback,
 ) {
     // Taken from the gate's own resolution rather than read off argument 0 or resolved again: the
     // plugin named in a blocked-exfiltration line is the one the gate actually admitted.
-    let plugin_id = match caller {
-        crate::ipc::caller::Caller::Plugin(url) => url.clone(),
-        crate::ipc::caller::Caller::Unattributed => String::new(),
-    };
-    // The dispatcher refuses plugin.fetch without a capability; this floor repeats that refusal
-    // in the file that hands out the token.
-    let Some(cap) = msg.cap.as_deref() else {
-        ipc_callback_err(&callback, 403, "unattributed call");
-        return;
-    };
+    let plugin_id = caller.plugin_id.to_string();
     let url = msg.arg(1).to_string();
     let raw_opts = msg.arg(2);
     let opts_json = if raw_opts.is_empty() { "{}" } else { raw_opts }.to_string();
@@ -50,7 +41,7 @@ pub(super) fn handle_plugin_fetch(
         &opts_json,
         query_id,
         callback,
-        TokenSource::Capability(cap),
+        TokenSource::Capability(caller.capability),
     );
 }
 

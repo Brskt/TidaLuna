@@ -4,8 +4,10 @@ use super::*;
 
 #[test]
 fn require_plugin_refuses_an_unattributed_caller() {
-    let (code, _) = Caller::Unattributed
-        .require_plugin()
-        .expect_err("an unattributed call must be refused");
-    assert_eq!(code, 403);
+    let refused = Caller::Unattributed.require_plugin().err();
+    assert_eq!(
+        refused.map(|(code, _)| code),
+        Some(403),
+        "an unattributed call must be refused"
+    );
 }

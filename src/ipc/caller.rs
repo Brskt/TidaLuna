@@ -9,8 +9,11 @@
 use crate::app_state::IpcMessage;
 
 pub(crate) enum Caller {
-    /// A plugin, identified by its install url.
-    Plugin(String),
+    /// A plugin, identified by its install url, and the capability that resolved to it.
+    Plugin {
+        plugin_id: String,
+        capability: String,
+    },
     /// No capability, or one that no longer resolves. The app bundle lands here too: giving it one
     /// would mean putting it where the shared `@luna/lib` can reach, and plugin code reaches that.
     Unattributed,
@@ -26,19 +29,35 @@ impl Caller {
         })
         .flatten()
         {
-            Some(plugin_id) => Self::Plugin(plugin_id),
+            Some(plugin_id) => Self::Plugin {
+                plugin_id,
+                capability: capability.to_string(),
+            },
             None => Self::Unattributed,
         }
     }
 
     /// Absent and superseded capabilities share one message on purpose: telling them apart would be
     /// an oracle for probing which capabilities once existed.
-    pub(crate) fn require_plugin(&self) -> Result<&str, (i32, &'static str)> {
+    pub(crate) fn require_plugin(&self) -> Result<Attributed<'_>, (i32, &'static str)> {
         match self {
-            Self::Plugin(plugin_id) => Ok(plugin_id),
+            Self::Plugin {
+                plugin_id,
+                capability,
+            } => Ok(Attributed {
+                plugin_id,
+                capability,
+            }),
             Self::Unattributed => Err((403, "unattributed call")),
         }
     }
+}
+
+/// A caller the dispatcher attributed, borrowed from its one resolution: the only form in which
+/// the handlers acting on a plugin's identity receive it.
+pub(crate) struct Attributed<'a> {
+    pub(crate) plugin_id: &'a str,
+    pub(crate) capability: &'a str,
 }
 
 #[cfg(test)]

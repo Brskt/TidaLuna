@@ -88,22 +88,36 @@ fn audio_cache_completion(callback: IpcCallback) -> crate::player::cache::Comple
 }
 
 pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCallback) {
-    // Resolved once, before dispatch: a handler resolving again could read a capability the gate
-    // accepted and eviction has since dropped, turning an allowed call unattributed after the fact.
-    let caller = crate::ipc::caller::Caller::resolve(&msg);
-    if is_plugin_attributed(&msg.channel)
-        && let Err((code, why)) = caller.require_plugin()
-    {
-        // Gated: the caller gets the refusal as its reply; the log is not the only channel, and
-        // an ungated write would let a refused-call loop drive the disk from the renderer.
-        crate::vprintln!("[IPC] Refused {}: {why}", msg.channel);
-        ipc_callback_err(&callback, code, why);
+    if let Some(route) = attributed_route(&msg.channel) {
+        // Resolved once, before dispatch: a handler resolving again could read a capability the
+        // gate accepted and eviction has since dropped, turning an allowed call unattributed after
+        // the fact.
+        let caller = crate::ipc::caller::Caller::resolve(&msg);
+        let attributed = match caller.require_plugin() {
+            Ok(attributed) => attributed,
+            Err((code, why)) => {
+                // Gated: the caller gets the refusal as its reply; the log is not the only
+                // channel, and an ungated write would let a refused-call loop drive the disk
+                // from the renderer.
+                crate::vprintln!("[IPC] Refused {}: {why}", msg.channel);
+                ipc_callback_err(&callback, code, why);
+                return;
+            }
+        };
+        match route {
+            AttributedRoute::Storage => {
+                plugin_db::handle_plugin_storage(msg, attributed.plugin_id, callback);
+            }
+            AttributedRoute::Fetch => {
+                auth_fetch::handle_plugin_fetch(&msg, &attributed, query_id, callback);
+            }
+            AttributedRoute::RegisterNative => {
+                native::handle_register_native(&msg, attributed.plugin_id, callback);
+            }
+        }
         return;
     }
     match msg.channel.as_str() {
-        "plugin.fetch" => {
-            auth_fetch::handle_plugin_fetch(&msg, &caller, query_id, callback);
-        }
         "tidal.fetch" => {
             auth_fetch::handle_tidal_fetch(&msg, query_id, callback);
         }
@@ -127,9 +141,6 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         }
         "proxy.head" => {
             proxy::handle_proxy_head_dispatch(&msg, query_id, callback);
-        }
-        "__Luna.registerNative" => {
-            native::handle_register_native(&msg, &caller, callback);
         }
         "__Luna.clipboardWriteText" => {
             lib_native::handle_clipboard_write_text(&msg, callback);
@@ -283,7 +294,7 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
             });
         }
         _ => {
-            plugin_db::handle_plugin_db(msg, &caller, callback);
+            plugin_db::handle_plugin_db(msg, callback);
         }
     }
 }
@@ -299,10 +310,25 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
 ///
 /// Matched exactly, not by prefix: `plugin.fetch_package` installs a plugin before one exists to
 /// hold a capability.
-fn is_plugin_attributed(channel: &str) -> bool {
-    channel.starts_with("plugin.storage.")
-        || channel == "plugin.fetch"
-        || channel == "__Luna.registerNative"
+fn attributed_route(channel: &str) -> Option<AttributedRoute> {
+    if channel.starts_with("plugin.storage.") {
+        Some(AttributedRoute::Storage)
+    } else if channel == "plugin.fetch" {
+        Some(AttributedRoute::Fetch)
+    } else if channel == "__Luna.registerNative" {
+        Some(AttributedRoute::RegisterNative)
+    } else {
+        None
+    }
+}
+
+/// The handlers [`attributed_route`] sends a channel to, each given the [`Attributed`] caller.
+///
+/// [`Attributed`]: crate::ipc::caller::Attributed
+enum AttributedRoute {
+    Storage,
+    Fetch,
+    RegisterNative,
 }
 
 /// The failure code `player.parse_dash` answers `err` with.

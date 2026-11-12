@@ -12,12 +12,30 @@ fn the_channels_a_plugin_must_be_known_on_are_attributed() {
         "plugin.storage.set",
         "plugin.storage.del",
         "plugin.storage.keys",
-        "plugin.fetch",
-        "__Luna.registerNative",
     ] {
         assert!(
-            is_plugin_attributed(channel),
+            matches!(attributed_route(channel), Some(AttributedRoute::Storage)),
             "{channel} must require attribution"
+        );
+    }
+    assert!(matches!(
+        attributed_route("plugin.fetch"),
+        Some(AttributedRoute::Fetch)
+    ));
+    assert!(matches!(
+        attributed_route("__Luna.registerNative"),
+        Some(AttributedRoute::RegisterNative)
+    ));
+}
+
+/// Served unattributed: `plugin.fetch_package` runs before any plugin holds a capability, and the
+/// app bundle calls the other two with none.
+#[test]
+fn the_channels_served_without_a_capability_are_not_attributed() {
+    for channel in ["plugin.fetch_package", "plugin.list", "tidal.fetch"] {
+        assert!(
+            attributed_route(channel).is_none(),
+            "{channel} must not require attribution"
         );
     }
 }

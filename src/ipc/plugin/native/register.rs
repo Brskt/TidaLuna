@@ -45,7 +45,7 @@ fn ensure_native_runtime() -> Result<&'static NativeRuntime, String> {
 
 pub(in crate::ipc::plugin) fn handle_register_native(
     msg: &IpcMessage,
-    caller: &crate::ipc::caller::Caller,
+    plugin_id: &str,
     callback: IpcCallback,
 ) {
     let name = msg
@@ -76,16 +76,8 @@ pub(in crate::ipc::plugin) fn handle_register_native(
     // The acting plugin is the capability's, never argument 0's. Read off the argument, this only
     // ever confirmed that SOME plugin bore the claimed name. A caller naming another one got that
     // plugin's `data_dir`, inherited its trust grants whenever the code hashed the same, and could
-    // hold its eight module slots until it was uninstalled. The dispatcher refuses this channel
-    // unattributed; the arm below is the floor under that gate rather than its own gate.
-    let plugin_url = match caller {
-        crate::ipc::caller::Caller::Plugin(url) => url.clone(),
-        crate::ipc::caller::Caller::Unattributed => {
-            crate::vprintln!("[NATIVE] Refused registerNative for '{name}': unattributed call");
-            ipc_callback_err(&callback, 403, "unattributed call");
-            return;
-        }
-    };
+    // hold its eight module slots until it was uninstalled.
+    let plugin_url = plugin_id.to_string();
 
     // The load id is captured here rather than re-derived later, because it must answer "still this
     // load" after the awaits below; it is `Some` exactly when the plugin is loaded. The declared
