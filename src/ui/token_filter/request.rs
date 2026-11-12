@@ -35,26 +35,29 @@ fn read_post_body(req: &mut Request) -> Option<Vec<u8>> {
     if body.is_empty() { None } else { Some(body) }
 }
 
+/// The first non-empty `client_id` of a form-encoded token request body.
+pub(crate) fn form_client_id(body: &str) -> Option<String> {
+    url::form_urlencoded::parse(body.as_bytes())
+        .find(|(k, v)| k == "client_id" && !v.is_empty())
+        .map(|(_, v)| v.into_owned())
+}
+
 pub(super) fn capture_client_id(req: &mut Request, exchange_slot: &Mutex<Option<String>>) {
     let Some(body_bytes) = read_post_body(req) else {
         return;
     };
-    let Ok(body_str) = std::str::from_utf8(&body_bytes) else {
+    let Some(cid) = std::str::from_utf8(&body_bytes)
+        .ok()
+        .and_then(form_client_id)
+    else {
         return;
     };
-    for (k, v) in url::form_urlencoded::parse(body_str.as_bytes()) {
-        if k == "client_id" && !v.is_empty() {
-            let cid = v.into_owned();
-            // Bind this exchange's client_id to its own response (per-request
-            // slot). The global stays as a fallback for callers without that
-            // slot: the proactive-refresh and proxy paths.
-            *exchange_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid.clone());
-            crate::app_state::with_state(|state| {
-                state.last_client_id = cid;
-            });
-            return;
-        }
-    }
+    // Bind this exchange's client_id to its own response (per-request slot). The global
+    // stays as the proactive refresh's fallback when the stored client_id is empty.
+    *exchange_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid.clone());
+    crate::app_state::with_state(|state| {
+        state.last_client_id = cid;
+    });
 }
 
 /// Resolve an opaque `luna_*` access nonce to the real access token for the

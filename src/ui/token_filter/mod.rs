@@ -9,7 +9,7 @@ mod request;
 mod response;
 
 use request::{capture_client_id, inject_refresh_token, rewrite_authorization_header};
-pub(crate) use request::{resolve_opaque_access, resolve_opaque_refresh};
+pub(crate) use request::{form_client_id, resolve_opaque_access, resolve_opaque_refresh};
 use response::{ProcessResult, process_token_response};
 
 /// Convert a CefStringUserfree to String without the crate's eprintln on null.

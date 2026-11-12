@@ -202,8 +202,18 @@ impl UpstreamBody {
 
     /// The token-endpoint rewrite is the one caller that must see the real body: it
     /// rewrites the token fields themselves. Its output is re-wrapped, keeping egress gated.
-    fn transform_token_body(self, status: u16, session_epoch: u64) -> Self {
-        Self(proxy_transform_token_body(&self.0, status, session_epoch))
+    fn transform_token_body(
+        self,
+        status: u16,
+        session_epoch: u64,
+        exchange_client_id: Option<&str>,
+    ) -> Self {
+        Self(proxy_transform_token_body(
+            &self.0,
+            status,
+            session_epoch,
+            exchange_client_id,
+        ))
     }
 
     /// The artwork rewrite runs here as well as on the CEF response filter, because a reply
@@ -283,16 +293,19 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
         }
     }
 
+    // The commit pairs any refresh token minted here with this request's client_id.
+    let exchange_client_id = opts
+        .get("body")
+        .and_then(|v| v.as_str())
+        .filter(|_| crate::ui::nav::is_token_endpoint(&url))
+        .and_then(crate::ui::token_filter::form_client_id);
+
     if let Some(body) = opts.get("body").and_then(|v| v.as_str()) {
         let body = if crate::ui::nav::is_token_endpoint(&url) {
-            // Capture client_id from token exchange body (defensive: covers proxy path)
-            for (k, v) in url::form_urlencoded::parse(body.as_bytes()) {
-                if k == "client_id" && !v.is_empty() {
-                    with_state(|state| {
-                        state.last_client_id = v.to_string();
-                    });
-                    break;
-                }
+            if let Some(cid) = &exchange_client_id {
+                with_state(|state| {
+                    state.last_client_id = cid.clone();
+                });
             }
             proxy_rewrite_refresh_body(body)
         } else {
@@ -414,7 +427,7 @@ async fn handle_proxy_fetch(query_id: i64, url: crate::ui::nav::RequestUrl, opts
                 crate::video::codec::note_demand();
             }
             let body = if is_token_endpoint {
-                body.transform_token_body(status, session_epoch)
+                body.transform_token_body(status, session_epoch, exchange_client_id.as_deref())
             } else if strip_artwork {
                 body.strip_video_artwork()
             } else {

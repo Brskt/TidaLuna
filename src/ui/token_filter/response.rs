@@ -7,30 +7,6 @@ pub(super) enum ProcessResult {
     Error,
 }
 
-/// The client_id follows the refresh_token. A response carrying a NEW
-/// refresh_token is bound to the client_id of the exchange that minted it
-/// (`exchange_client_id`, this request's POST). A response with no new
-/// refresh_token reuses the prior one: it keeps that generation's client_id
-/// (`prior_client_id`). This mirrors the SDK, which binds each token to its
-/// context's client_id and never refreshes across contexts - notably the
-/// app-level `client_credentials` token (no refresh_token) must not overwrite
-/// the user client_id.
-fn resolve_generation_client_id(
-    has_new_refresh_token: bool,
-    exchange_client_id: Option<&str>,
-    prior_client_id: Option<&str>,
-) -> String {
-    let exchange = exchange_client_id.filter(|s| !s.is_empty());
-    let prior = prior_client_id.filter(|s| !s.is_empty());
-    if has_new_refresh_token {
-        exchange.or(prior)
-    } else {
-        prior.or(exchange)
-    }
-    .unwrap_or("")
-    .to_string()
-}
-
 pub(super) fn process_token_response(
     body: &[u8],
     exchange_client_id: Option<&str>,
@@ -114,21 +90,12 @@ fn process_token_response_with(
         expires_in,
         user_id: user_id.as_deref(),
         granted_scopes: &granted_scopes,
+        client_id: exchange_client_id,
     };
     // The check belongs inside the closure, atomic with the writes it guards; its answer has
     // to leave it, because the body this function goes on to build is delivered to the SDK.
     let committed = crate::app_state::with_state(|state| {
-        let commit = state.commit_token_generation(session_epoch, &grant, |state| {
-            resolve_generation_client_id(
-                refresh_token.is_some(),
-                exchange_client_id,
-                state
-                    .token_state
-                    .as_ref()
-                    .map(|ts| ts.current.client_id.as_str()),
-            )
-        });
-        match commit {
+        match state.commit_token_generation(session_epoch, &grant) {
             TokenCommit::Refused => {
                 crate::vprintln!(
                     "[AUTH]   Token response answered for a session already left, dropped"

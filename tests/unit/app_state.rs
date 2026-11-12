@@ -215,6 +215,7 @@ fn grant(refresh_token: Option<&str>) -> TokenGrant<'_> {
         expires_in: None,
         user_id: None,
         granted_scopes: &[],
+        client_id: None,
     }
 }
 
@@ -222,7 +223,7 @@ fn grant(refresh_token: Option<&str>) -> TokenGrant<'_> {
 async fn a_token_answer_for_an_ended_session_writes_nothing() {
     let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
 
-    let commit = state.apply_token_generation(0, &grant(Some("new-rt")), |_| "cid".into());
+    let commit = state.apply_token_generation(0, &grant(Some("new-rt")));
 
     assert!(matches!(commit, TokenCommit::Refused));
     let current = &state.token_state.as_ref().unwrap().current;
@@ -242,7 +243,7 @@ async fn a_new_generation_keeps_the_one_it_replaces_for_thirty_seconds() {
     let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
 
     let before = now_unix_secs();
-    let commit = state.apply_token_generation(1, &grant(Some("new-rt")), |_| "cid".into());
+    let commit = state.apply_token_generation(1, &grant(Some("new-rt")));
     let after = now_unix_secs();
 
     assert!(matches!(
@@ -271,7 +272,7 @@ async fn a_new_generation_keeps_the_one_it_replaces_for_thirty_seconds() {
 async fn an_answer_without_a_refresh_token_keeps_the_stored_one() {
     let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
 
-    let commit = state.apply_token_generation(1, &grant(None), |_| "cid".into());
+    let commit = state.apply_token_generation(1, &grant(None));
 
     let TokenCommit::Committed { opaque_rt, durable } = commit else {
         panic!("a live session's answer was refused");
@@ -289,7 +290,7 @@ async fn a_generation_without_any_refresh_token_is_not_durable() {
     // Saved anyway, it would replace a credential that can refresh with one that cannot.
     let mut state = state_with_tokens(None);
 
-    let commit = state.apply_token_generation(1, &grant(None), |_| "cid".into());
+    let commit = state.apply_token_generation(1, &grant(None));
 
     assert!(matches!(
         commit,
@@ -297,23 +298,51 @@ async fn a_generation_without_any_refresh_token_is_not_durable() {
     ));
 }
 
+/// A login after the app-level generation stores the user's client_id with the user's refresh
+/// token; the app-level answer that follows keeps it. A mismatched pair fails the next refresh
+/// with `invalid_client`.
 #[tokio::test]
-async fn the_client_id_rule_reads_the_generation_being_replaced() {
-    // Read after the write, the rule would see the new generation instead of the one it replaces.
-    let mut state = state_with_tokens(Some(generation("old-rt", "prior-cid", 4)));
-    let mut seen = None;
+async fn a_commit_stores_the_client_id_its_refresh_token_was_minted_under() {
+    for (prior, refresh_token, exchange, expected) in [
+        (generation("", "app", 0), Some("user-rt"), "user", "user"),
+        (generation("user-rt", "user", 0), None, "app", "user"),
+    ] {
+        let mut state = state_with_tokens(Some(prior));
+        let answer = TokenGrant {
+            client_id: Some(exchange),
+            ..grant(refresh_token)
+        };
 
-    state.apply_token_generation(1, &grant(Some("new-rt")), |state| {
-        seen = state
-            .token_state
-            .as_ref()
-            .map(|t| t.current.client_id.clone());
-        "chosen-cid".into()
-    });
+        state.apply_token_generation(1, &answer);
 
-    assert_eq!(seen.as_deref(), Some("prior-cid"));
-    assert_eq!(
-        state.token_state.as_ref().unwrap().current.client_id,
-        "chosen-cid"
-    );
+        assert_eq!(
+            state.token_state.as_ref().unwrap().current.client_id,
+            expected,
+            "new refresh: {refresh_token:?}, exchange: {exchange}"
+        );
+    }
+}
+
+/// The exchange's client_id binds only a NEW refresh token; an empty or missing one never blanks
+/// the prior.
+#[test]
+fn a_generation_takes_the_exchange_client_id_only_with_a_new_refresh_token() {
+    for (refresh_token, exchange, prior, expected) in [
+        (Some("rt"), Some("user"), Some("app"), "user"),
+        (None, Some("app"), Some("user"), "user"),
+        (Some("rt"), None, Some("user"), "user"),
+        (Some("rt"), Some(""), Some("user"), "user"),
+        (Some("rt"), Some("user"), None, "user"),
+        (None, Some("app"), None, "app"),
+    ] {
+        let answer = TokenGrant {
+            client_id: exchange,
+            ..grant(refresh_token)
+        };
+        assert_eq!(
+            answer.bound_client_id(prior),
+            expected,
+            "new refresh: {refresh_token:?}, exchange: {exchange:?}, prior: {prior:?}"
+        );
+    }
 }

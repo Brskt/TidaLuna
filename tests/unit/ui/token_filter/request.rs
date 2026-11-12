@@ -28,6 +28,20 @@ fn stored(
     }
 }
 
+/// The first non-empty `client_id` wins, percent-decoded; an empty value is skipped.
+#[test]
+fn a_token_request_names_its_first_non_empty_client_id() {
+    for (body, expected) in [
+        ("grant_type=refresh_token&client_id=a", Some("a")),
+        ("client_id=&client_id=b", Some("b")),
+        ("client_id=a%2Bb", Some("a+b")),
+        ("client_id=", None),
+        ("grant_type=client_credentials", None),
+    ] {
+        assert_eq!(form_client_id(body).as_deref(), expected, "{body}");
+    }
+}
+
 /// An opaque access token never leaves raw: past the window, or with no previous generation, it
 /// resolves to the current real one.
 #[test]

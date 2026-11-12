@@ -49,11 +49,17 @@ pub(super) fn proxy_rewrite_refresh_body(body: &str) -> String {
         .join("&")
 }
 
-pub(super) fn proxy_transform_token_body(body: &str, status: u16, session_epoch: u64) -> String {
+pub(super) fn proxy_transform_token_body(
+    body: &str,
+    status: u16,
+    session_epoch: u64,
+    exchange_client_id: Option<&str>,
+) -> String {
     proxy_transform_token_body_with(
         body,
         status,
         session_epoch,
+        exchange_client_id,
         crate::ui::token_filter::generate_opaque,
     )
 }
@@ -64,11 +70,12 @@ pub(super) fn proxy_transform_token_body(body: &str, status: u16, session_epoch:
 ///
 /// `session_epoch` names the session the fetch was issued under. The reply can land after
 /// a logout, and committing it would hand the departed account's bearer token back to the
-/// live process.
+/// live process. `exchange_client_id` is the client_id the request body carried.
 fn proxy_transform_token_body_with(
     body: &str,
     status: u16,
     session_epoch: u64,
+    exchange_client_id: Option<&str>,
     opaque: impl Fn() -> Option<String>,
 ) -> String {
     let Ok(mut json) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -142,20 +149,13 @@ fn proxy_transform_token_body_with(
         expires_in,
         user_id: user_id.as_deref(),
         granted_scopes: &granted_scopes,
+        client_id: exchange_client_id,
     };
     // `None` is the refusal, not an empty nonce: the check has to sit inside the closure to
     // stay atomic with the writes it guards. The body built after this call goes back to the
     // plugin; the refusal has to travel out with it.
     let stored_opaque_rt = with_state(|state| {
-        let commit = state.commit_token_generation(session_epoch, &grant, |state| {
-            state
-                .token_state
-                .as_ref()
-                .map(|ts| ts.current.client_id.clone())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| state.last_client_id.clone())
-        });
-        match commit {
+        match state.commit_token_generation(session_epoch, &grant) {
             TokenCommit::Refused => {
                 crate::vprintln!("[AUTH]   Exchange answered for a session already left, dropped");
                 None

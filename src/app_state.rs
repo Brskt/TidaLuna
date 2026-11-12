@@ -230,7 +230,7 @@ pub(crate) struct EndedSession {
     pub(crate) waiters: Vec<(Ticket, IpcCallback)>,
 }
 
-/// What a token exchange or refresh answered, for [`AppState::commit_token_generation`].
+/// One token exchange or refresh, for [`AppState::commit_token_generation`].
 pub(crate) struct TokenGrant<'a> {
     pub(crate) access_token: &'a str,
     pub(crate) refresh_token: Option<&'a str>,
@@ -240,6 +240,25 @@ pub(crate) struct TokenGrant<'a> {
     pub(crate) expires_in: Option<u64>,
     pub(crate) user_id: Option<&'a str>,
     pub(crate) granted_scopes: &'a [String],
+    /// The client_id the exchange was sent with, when one was observed.
+    pub(crate) client_id: Option<&'a str>,
+}
+
+impl TokenGrant<'_> {
+    /// A refresh token is bound to the client_id it was minted under (RFC 6749 §6): a NEW one
+    /// takes this exchange's. An answer without one keeps `prior`, the replaced generation's, if
+    /// set: the app-level `client_credentials` answer must not overwrite the user's client_id.
+    pub(crate) fn bound_client_id(&self, prior: Option<&str>) -> String {
+        let exchange = self.client_id.filter(|s| !s.is_empty());
+        let prior = prior.filter(|s| !s.is_empty());
+        if self.refresh_token.is_some() {
+            exchange.or(prior)
+        } else {
+            prior.or(exchange)
+        }
+        .unwrap_or("")
+        .to_string()
+    }
 }
 
 /// How a token commit ended, for each caller to answer and log in its own terms.
@@ -286,12 +305,10 @@ impl AppState {
     }
 
     /// Makes `grant` the current token generation and keeps the one it replaces for 30 seconds.
-    /// `client_id` runs before any write, so each caller's rule reads the generation it replaces.
     pub(crate) fn apply_token_generation(
         &mut self,
         session_epoch: u64,
         grant: &TokenGrant,
-        client_id: impl FnOnce(&AppState) -> String,
     ) -> TokenCommit {
         // The session that issued the exchange may have ended while it was on the wire.
         // Committing then would re-authenticate the live process as the departed account. The
@@ -315,7 +332,11 @@ impl AppState {
             (String::new(), String::new())
         };
 
-        let client_id = client_id(self);
+        let client_id = grant.bound_client_id(
+            self.token_state
+                .as_ref()
+                .map(|ts| ts.current.client_id.as_str()),
+        );
         let new_gen = crate::platform::secure_store::TokenGeneration {
             access_token: grant.access_token.to_string(),
             refresh_token: real_rt,
@@ -352,9 +373,8 @@ impl AppState {
         &mut self,
         session_epoch: u64,
         grant: &TokenGrant,
-        client_id: impl FnOnce(&AppState) -> String,
     ) -> TokenCommit {
-        let commit = self.apply_token_generation(session_epoch, grant, client_id);
+        let commit = self.apply_token_generation(session_epoch, grant);
         if let TokenCommit::Committed { durable, .. } = &commit {
             let data_dir = crate::state::cache_data_dir();
             // Only a durable generation belongs on disk. One without a refresh token would

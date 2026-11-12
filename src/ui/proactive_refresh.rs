@@ -177,19 +177,10 @@ async fn do_refresh(
         expires_in,
         user_id: user_id.as_deref(),
         granted_scopes: &granted_scopes,
+        client_id: Some(&client_id),
     };
     let committed = crate::app_state::with_state(|state| {
-        let commit = state.commit_token_generation(session_epoch, &grant, |state| {
-            // Backfill from the client_id this refresh used; a blob that
-            // arrived without one self-heals instead of staying empty.
-            state
-                .token_state
-                .as_ref()
-                .map(|ts| ts.current.client_id.clone())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| client_id.clone())
-        });
-        match commit {
+        match state.commit_token_generation(session_epoch, &grant) {
             crate::app_state::TokenCommit::Refused => {
                 crate::vprintln!("[AUTH]   Refresh answered for a session already left, dropped");
                 false
