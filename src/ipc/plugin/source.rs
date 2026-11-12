@@ -3,14 +3,15 @@ use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use crate::plugins::store::StoredPlugin;
 use std::time::Duration;
 
-/// Bounds a version's fetches together: the shared client has no read timeout, and a source
-/// stalling its body would hold for good whatever waits on it (an update turn, the poll).
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounds a version's fetches together. The source client's read timeout ends a stall, not a
+/// trickle: a byte sent just inside each timeout would hold the install turn for years at the
+/// code cap.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(super) fn handle_plugin_fetch_package(msg: &IpcMessage, callback: IpcCallback) {
     let url = msg.arg(0).to_string();
     crate::state::rt_handle().spawn(async move {
-        let client = &*crate::state::HTTP_CLIENT;
+        let client = &*crate::state::HTTP_CLIENT_SOURCE;
         match within_fetch_timeout(fetch_plugin_package(client, &url)).await {
             Ok(Some(manifest)) => ipc_callback_ok(&callback, &manifest),
             Ok(None) => ipc_callback_err(&callback, 500, "plugin manifest not found"),
@@ -55,7 +56,7 @@ async fn served_code_hash(url: &str) -> Result<String, String> {
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
     .map_err(|e| format!("DB error: {e}"))?;
-    let client = &*crate::state::HTTP_CLIENT;
+    let client = &*crate::state::HTTP_CLIENT_SOURCE;
     within_fetch_timeout(async {
         // A manifest with no `hash` never spares the code: only the code tells a change.
         if let Some(stored) = &stored
@@ -85,27 +86,67 @@ async fn served_code_hash(url: &str) -> Result<String, String> {
     .await
 }
 
-/// [`fetch_plugin_data`] on the shared client, within [`FETCH_TIMEOUT`].
+/// [`fetch_plugin_data`] on the source client, within [`FETCH_TIMEOUT`].
 pub(super) async fn fetch_version(
     url: &str,
     stored: Option<&StoredPlugin>,
 ) -> Result<PluginData, String> {
-    let client = &*crate::state::HTTP_CLIENT;
+    let client = &*crate::state::HTTP_CLIENT_SOURCE;
     within_fetch_timeout(fetch_plugin_data(client, url, stored)).await
 }
 
+/// `fetch` within [`FETCH_TIMEOUT`], its failure told as a [`SourceFault`].
 async fn within_fetch_timeout<T>(
     fetch: impl Future<Output = anyhow::Result<T>>,
 ) -> Result<T, String> {
     tokio::time::timeout(FETCH_TIMEOUT, fetch)
         .await
-        .map_err(|_| {
-            format!(
-                "The source did not answer within {} s",
+        .map_err(|_| SourceFault::TooSlow.to_string())?
+        .map_err(|e| SourceFault::of(&e).to_string())
+}
+
+/// Why a source fetch failed, in the words the user reads.
+enum SourceFault {
+    /// Connected, and no response headers came.
+    NoAnswer,
+    /// The body stopped coming.
+    StoppedSending,
+    /// Still sending at [`FETCH_TIMEOUT`].
+    TooSlow,
+    /// Anything else, a source never reached included, told by its full error chain.
+    Transport(String),
+}
+
+impl SourceFault {
+    fn of(e: &anyhow::Error) -> Self {
+        let Some(cause) = e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>()) else {
+            return Self::Transport(format!("{e:#}"));
+        };
+        // A connect timeout is a timeout too, but that source never answered.
+        if cause.is_connect() || !cause.is_timeout() {
+            Self::Transport(format!("{e:#}"))
+        } else if cause.is_request() {
+            Self::NoAnswer
+        } else {
+            Self::StoppedSending
+        }
+    }
+}
+
+impl std::fmt::Display for SourceFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // No number: an HTTP/2 keep-alive can end a silent source before `read_timeout`.
+            Self::NoAnswer => f.write_str("The source did not answer"),
+            Self::StoppedSending => f.write_str("The source stopped sending"),
+            Self::TooSlow => write!(
+                f,
+                "The source did not finish sending within {} s",
                 FETCH_TIMEOUT.as_secs()
-            )
-        })?
-        .map_err(|e| format!("{e:#}"))
+            ),
+            Self::Transport(chain) => f.write_str(chain),
+        }
+    }
 }
 
 /// Whether the stored code is still what the source serves: the fetched manifest's `hash` is the
@@ -175,7 +216,14 @@ pub(super) async fn read_bytes_capped(
     let mut total = 0usize;
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| anyhow::anyhow!("{what} transport failed: {e}"))?;
+        let chunk = chunk.map_err(|e| {
+            // A timeout stays typed: `SourceFault::of` tells a stalled body by it.
+            if e.is_timeout() {
+                anyhow::Error::new(e).context(format!("{what} transport failed"))
+            } else {
+                anyhow::anyhow!("{what} transport failed: {e}")
+            }
+        })?;
         total = bump_capped(total, chunk.len(), max)?;
         buf.extend_from_slice(&chunk);
     }

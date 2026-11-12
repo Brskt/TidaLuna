@@ -9,7 +9,8 @@ use track::CurrentSource;
 
 pub use net::{HTTP_CLIENT, HTTP_CLIENT_PLAYBACK, HTTP_CLIENT_PRELOAD};
 pub(crate) use net::{
-    USER_AGENT, build_host_checked_client, build_native_client, chromium_version,
+    HTTP_CLIENT_SOURCE, USER_AGENT, build_host_checked_client, build_native_client,
+    chromium_version,
 };
 pub use paths::cache_data_dir;
 #[cfg(target_os = "linux")]

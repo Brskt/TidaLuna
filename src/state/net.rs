@@ -79,6 +79,18 @@ fn build_media_client() -> reqwest::Client {
         .expect("failed to build media HTTP client")
 }
 
+/// The client for plugin sources. Its `read_timeout` ends a source that stops sending, a bound
+/// `HTTP_CLIENT` cannot take since it also carries `plugin.fetch`. Its own jar keeps a source's
+/// redirect cookies apart from those of `plugin.fetch`.
+fn build_source_client() -> reqwest::Client {
+    base_client_builder()
+        .cookie_store(true)
+        // From send() to the headers too, redirects included; 30 s is what the whole fetch had.
+        .read_timeout(Duration::from_secs(30))
+        .build()
+        .expect("failed to build plugin source HTTP client")
+}
+
 /// Build a native-plugin egress client with a caller-owned cookie jar (for
 /// per-plugin isolation) and a redirect policy (follow vs manual/error).
 pub(crate) fn build_native_client(
@@ -118,6 +130,9 @@ pub(crate) fn build_host_checked_client(
 }
 
 pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
+
+pub(crate) static HTTP_CLIENT_SOURCE: LazyLock<reqwest::Client> =
+    LazyLock::new(build_source_client);
 
 /// Dedicated HTTP client for playback (initial GET + Range restarts).
 /// Separate from HTTP_CLIENT; playback gets its own TCP connection,
