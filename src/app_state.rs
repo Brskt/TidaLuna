@@ -231,7 +231,6 @@ pub(crate) struct EndedSession {
 }
 
 /// What a token exchange or refresh answered, for [`AppState::commit_token_generation`].
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) struct TokenGrant<'a> {
     pub(crate) access_token: &'a str,
     pub(crate) refresh_token: Option<&'a str>,
@@ -244,7 +243,6 @@ pub(crate) struct TokenGrant<'a> {
 }
 
 /// How a token commit ended, for each caller to answer and log in its own terms.
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) enum TokenCommit {
     /// The session the exchange was issued under has ended: nothing was written.
     Refused,
@@ -289,7 +287,6 @@ impl AppState {
 
     /// Makes `grant` the current token generation and keeps the one it replaces for 30 seconds.
     /// `client_id` runs before any write, so each caller's rule reads the generation it replaces.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn apply_token_generation(
         &mut self,
         session_epoch: u64,
@@ -351,7 +348,6 @@ impl AppState {
     }
 
     /// [`Self::apply_token_generation`], then the new generation queued to disk when durable.
-    #[expect(dead_code)]
     pub(crate) fn commit_token_generation(
         &mut self,
         session_epoch: u64,

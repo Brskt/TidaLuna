@@ -1,5 +1,5 @@
 use super::generate_opaque;
-use crate::util::now_unix_secs;
+use crate::app_state::{TokenCommit, TokenGrant};
 
 pub(super) enum ProcessResult {
     Modified(Vec<u8>),
@@ -106,83 +106,44 @@ fn process_token_response_with(
         .map(|s| s.split(' ').map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
+    let grant = TokenGrant {
+        access_token: at,
+        refresh_token: refresh_token.as_deref(),
+        opaque_at: &opaque_at,
+        opaque_rt: opaque_rt_new.as_deref(),
+        expires_in,
+        user_id: user_id.as_deref(),
+        granted_scopes: &granted_scopes,
+    };
     // The check belongs inside the closure, atomic with the writes it guards; its answer has
     // to leave it, because the body this function goes on to build is delivered to the SDK.
     let committed = crate::app_state::with_state(|state| {
-        // The exchange belongs to the session it was issued under. If that session ended
-        // while the response was on the wire, none of the writes below may happen: the bump
-        // and this read are critical sections of the one `AppState` mutex. A commit
-        // running after a logout sees the newer epoch.
-        if state.session_epoch != session_epoch {
-            crate::vprintln!(
-                "[AUTH]   Token response answered for a session already left, dropped"
-            );
-            return false;
-        }
-        let now_secs = now_unix_secs();
-
-        let (real_rt, ort) = if let Some(ref rt) = refresh_token {
-            (rt.clone(), opaque_rt_new.clone().unwrap_or_default())
-        } else if let Some(ref ts) = state.token_state {
-            (
-                ts.current.refresh_token.clone(),
-                ts.current.opaque_rt.clone(),
+        let commit = state.commit_token_generation(session_epoch, &grant, |state| {
+            resolve_generation_client_id(
+                refresh_token.is_some(),
+                exchange_client_id,
+                state
+                    .token_state
+                    .as_ref()
+                    .map(|ts| ts.current.client_id.as_str()),
             )
-        } else {
-            (String::new(), String::new())
-        };
-
-        let prior_client_id = state
-            .token_state
-            .as_ref()
-            .map(|ts| ts.current.client_id.clone());
-        let client_id = resolve_generation_client_id(
-            refresh_token.is_some(),
-            exchange_client_id,
-            prior_client_id.as_deref(),
-        );
-
-        let new_gen = crate::platform::secure_store::TokenGeneration {
-            access_token: at.to_string(),
-            refresh_token: real_rt,
-            opaque_at: opaque_at.clone(),
-            opaque_rt: ort.clone(),
-            version: state
-                .token_state
-                .as_ref()
-                .map(|ts| ts.current.version + 1)
-                .unwrap_or(1),
-            access_expires: now_secs + expires_in.unwrap_or(3600),
-            user_id: user_id.clone(),
-            granted_scopes: granted_scopes.clone(),
-            client_id,
-        };
-
-        let previous = state.token_state.as_ref().map(|ts| ts.current.clone());
-        state.token_state = Some(crate::platform::secure_store::StoredTokenState {
-            current: new_gen,
-            previous,
-            previous_valid_until: Some(now_secs + 30),
         });
-
-        state.captured_token = at.to_string();
-
-        let data_dir = crate::state::cache_data_dir();
-        if let Some(ref ts) = state.token_state {
-            // Only a durable generation belongs on disk. One without a refresh
-            // token would replace a credential that still works with one that
-            // cannot refresh, and the next launch seeds the SDK's own blob from
-            // it, handing TIDAL an empty refresh token verbatim. The access
-            // token above serves this session from memory either way.
-            if ts.current.is_durable() {
-                crate::platform::secure_store::save_queued(&data_dir, ts);
-            } else {
+        match commit {
+            TokenCommit::Refused => {
                 crate::vprintln!(
-                    "[AUTH]   Exchange carried no refresh token - stored credential kept"
+                    "[AUTH]   Token response answered for a session already left, dropped"
                 );
+                false
+            }
+            TokenCommit::Committed { durable, .. } => {
+                if !durable {
+                    crate::vprintln!(
+                        "[AUTH]   Exchange carried no refresh token - stored credential kept"
+                    );
+                }
+                true
             }
         }
-        true
     })
     .unwrap_or(false);
 

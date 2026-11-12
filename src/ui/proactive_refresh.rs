@@ -169,78 +169,42 @@ async fn do_refresh(
     // makes it atomic with the writes it guards), and its answer has to travel back out:
     // everything after this call has side effects of its own, and a bare `return` in a
     // closure leaves them running.
+    let grant = crate::app_state::TokenGrant {
+        access_token: &at,
+        refresh_token: new_rt.as_deref(),
+        opaque_at: &opaque_at,
+        opaque_rt: opaque_rt_new.as_deref(),
+        expires_in,
+        user_id: user_id.as_deref(),
+        granted_scopes: &granted_scopes,
+    };
     let committed = crate::app_state::with_state(|state| {
-        // The session this refresh belongs to may have ended while it was on the network.
-        // Committing anyway re-authenticates the running process as the account the user
-        // left: `captured_token` below is what the proxy injects as `Authorization: Bearer`,
-        // not a draft for a later disk write. The bump and this read are both critical
-        // sections of the one `AppState` mutex; a commit that runs after a logout OBSERVES
-        // the new epoch, by happens-before, not by luck.
-        if state.session_epoch != session_epoch {
-            crate::vprintln!("[AUTH]   Refresh answered for a session already left, dropped");
-            return false;
-        }
-        let now_secs = crate::util::now_unix_secs();
-
-        let (real_rt, ort) = if let Some(ref rt) = new_rt {
-            (rt.clone(), opaque_rt_new.clone().unwrap_or_default())
-        } else if let Some(ref ts) = state.token_state {
-            (
-                ts.current.refresh_token.clone(),
-                ts.current.opaque_rt.clone(),
-            )
-        } else {
-            (String::new(), String::new())
-        };
-
-        let new_gen = crate::platform::secure_store::TokenGeneration {
-            access_token: at.clone(),
-            refresh_token: real_rt,
-            opaque_at: opaque_at.clone(),
-            opaque_rt: ort,
-            version: state
-                .token_state
-                .as_ref()
-                .map(|ts| ts.current.version + 1)
-                .unwrap_or(1),
-            access_expires: now_secs + expires_in.unwrap_or(3600),
-            user_id: user_id.clone(),
-            granted_scopes: granted_scopes.clone(),
+        let commit = state.commit_token_generation(session_epoch, &grant, |state| {
             // Backfill from the client_id this refresh used; a blob that
             // arrived without one self-heals instead of staying empty.
-            client_id: state
+            state
                 .token_state
                 .as_ref()
                 .map(|ts| ts.current.client_id.clone())
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| client_id.clone()),
-        };
-
-        let previous = state.token_state.as_ref().map(|ts| ts.current.clone());
-        state.token_state = Some(crate::platform::secure_store::StoredTokenState {
-            current: new_gen,
-            previous,
-            previous_valid_until: Some(now_secs + 30),
+                .unwrap_or_else(|| client_id.clone())
         });
-
-        state.captured_token = at.clone();
-
-        let data_dir = crate::state::cache_data_dir();
-        if let Some(ref ts) = state.token_state {
-            // Same rule as the two token paths, and this is the site that meets
-            // it most easily. The refresh awaits the network, a session_clear can
-            // empty token_state in the gap, and a refresh that reuses its token
-            // returns no new one. Both arms of the fallback are then gone and the
-            // generation would carry no refresh token at all.
-            if ts.current.is_durable() {
-                crate::platform::secure_store::save_queued(&data_dir, ts);
-            } else {
-                crate::vprintln!(
-                    "[AUTH]   Refresh landed with no refresh token - stored credential kept"
-                );
+        match commit {
+            crate::app_state::TokenCommit::Refused => {
+                crate::vprintln!("[AUTH]   Refresh answered for a session already left, dropped");
+                false
+            }
+            crate::app_state::TokenCommit::Committed { durable, .. } => {
+                // Reached when a session_clear empties token_state during the network wait
+                // and the refresh reuses its token: no refresh token arrives and none is left.
+                if !durable {
+                    crate::vprintln!(
+                        "[AUTH]   Refresh landed with no refresh token - stored credential kept"
+                    );
+                }
+                true
             }
         }
-        true
     })
     .unwrap_or(false);
 
