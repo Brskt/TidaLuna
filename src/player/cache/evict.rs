@@ -111,8 +111,12 @@ impl AudioCache {
 
     /// The names (track hashes) of the files a row or a pass in flight accounts for; `None` when
     /// more than [`OWNED_MAX`] rows are left, which only a Clear that could delete next to nothing
-    /// sees: the section stays bounded and the shards are not swept.
+    /// sees: the section stays bounded and the shards are not swept. `None` too once closed, since
+    /// the rows can no longer be read.
     fn owned_names(&self) -> Result<Option<std::collections::HashSet<String>>, CacheError> {
+        if self.closed {
+            return Ok(None);
+        }
         let mut owned: std::collections::HashSet<String> =
             self.doomed.iter().map(|id| track_hash(id)).collect();
         if let Some(conn) = &self.conn {

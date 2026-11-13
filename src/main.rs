@@ -320,6 +320,9 @@ fn main() {
     }
     let db_actor = db::DbActor::open(&data_dir).unwrap_or_else(|e| refuse_to_start(&e.refusal()));
     let _ = state::DB.set(db_actor);
+    // Locals drop in reverse: this one after the runtime declared below (no task left to
+    // write) and before `app_lock` (no second instance opens the files mid-checkpoint).
+    let _close_stores = CloseStoresOnReturn;
 
     // Load the bootstrap settings snapshot once, off the CEF UI thread, as the
     // single source of truth: used here for the early log level + Windows console
@@ -546,6 +549,15 @@ fn main() {
     run_message_loop();
 
     wind_down();
+}
+
+/// Closes the stores on every return from `main` once the database is open.
+struct CloseStoresOnReturn;
+
+impl Drop for CloseStoresOnReturn {
+    fn drop(&mut self) {
+        state::close_stores();
+    }
 }
 
 /// What follows the message loop: queued writes reach the disk, playback and Connect stop, and

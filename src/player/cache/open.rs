@@ -74,6 +74,7 @@ impl AudioCache {
             wiping: false,
             stranded: 0,
             next_generation,
+            closed: false,
         })
     }
 
@@ -218,6 +219,7 @@ impl AudioCache {
             stranded: 0,
             next_generation: 1,
             checkpointer: None,
+            closed: false,
         }
     }
 }

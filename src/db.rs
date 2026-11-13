@@ -6,6 +6,13 @@ use std::thread::{JoinHandle, ThreadId};
 
 type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static>;
 
+/// What the actor's channel carries.
+enum Msg {
+    Run(BoxedFn),
+    /// Close both connections once everything queued before it has run, then answer.
+    Close(mpsc::SyncSender<()>),
+}
+
 /// Operations the actor's channel holds before a sender waits.
 pub(crate) const QUEUE_CAPACITY: usize = 64;
 
@@ -249,7 +256,7 @@ pub(crate) fn acknowledge_repairs(plugins: &Connection, settings: &Connection) {
 /// `DbActor` is `Clone + Send + Sync`: a channel sender, and the actor thread every clone shares.
 #[derive(Clone)]
 pub(crate) struct DbActor {
-    tx: mpsc::SyncSender<BoxedFn>,
+    tx: mpsc::SyncSender<Msg>,
     // Declared after `tx`, which drops first: the join would otherwise wait on a loop this
     // sender keeps open.
     actor: Arc<ActorThread>,
@@ -284,7 +291,7 @@ impl DbActor {
     /// The actor thread owns `plugins.db` and `settings.db` connections.
     /// Returns once both connections are open and schema is initialized.
     pub fn open(data_dir: &Path) -> Result<Self, OpenError> {
-        let (tx, rx) = mpsc::sync_channel::<BoxedFn>(QUEUE_CAPACITY);
+        let (tx, rx) = mpsc::sync_channel::<Msg>(QUEUE_CAPACITY);
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), OpenError>>(0);
         let data_dir = data_dir.to_owned();
 
@@ -315,7 +322,15 @@ impl DbActor {
                 // A panicking operation is abandoned, not the thread: dead, it would drop every
                 // later write and hang every caller. The unwind rolls back its transaction and
                 // drops its `Stable`, which leaves the connections usable; its other work is lost.
-                while let Ok(f) = rx.recv() {
+                let mut asked_to_close = None;
+                while let Ok(msg) = rx.recv() {
+                    let f = match msg {
+                        Msg::Run(f) => f,
+                        Msg::Close(done) => {
+                            asked_to_close = Some(done);
+                            break;
+                        }
+                    };
                     let run = AssertUnwindSafe(|| f(&mut plugins_conn, &mut settings_conn));
                     if let Err(payload) = std::panic::catch_unwind(run) {
                         crate::verr!(
@@ -323,6 +338,11 @@ impl DbActor {
                             crate::platform::refusal::panic_message(&*payload)
                         );
                     }
+                }
+                close_connection(plugins_conn);
+                close_connection(settings_conn);
+                if let Some(done) = asked_to_close {
+                    let _ = done.send(());
                 }
             })
             .expect("failed to spawn db-actor thread");
@@ -355,9 +375,9 @@ impl DbActor {
         );
         let (resp_tx, resp_rx) = mpsc::sync_channel::<R>(0);
         self.tx
-            .send(Box::new(move |pc, sc| {
+            .send(Msg::Run(Box::new(move |pc, sc| {
                 let _ = resp_tx.send(f(pc, sc));
-            }))
+            })))
             .expect("db-actor thread is dead");
         resp_rx
             .recv()
@@ -375,9 +395,9 @@ impl DbActor {
     where
         F: FnOnce(&mut Connection, &mut Connection) + Send + 'static,
     {
-        if self.tx.send(Box::new(f)).is_err() {
+        if self.tx.send(Msg::Run(Box::new(f))).is_err() {
             // Nothing awaits a post; this log is the only place the loss can surface.
-            crate::verr!("[DB]     Queued operation dropped: the db-actor thread is dead");
+            crate::verr!("[DB]     Queued operation dropped: the db-actor has stopped");
         }
     }
 
@@ -391,18 +411,32 @@ impl DbActor {
     ///
     /// Panics if called from the db-actor thread itself, which would wait on its own reply.
     pub fn flush(&self) {
+        self.rendezvous("flush", |done| {
+            Msg::Run(Box::new(move |_, _| {
+                let _ = done.send(());
+            }))
+        });
+    }
+
+    /// Run what is queued, then close both connections; the last close of a WAL database deletes
+    /// its `-wal` and `-shm`. A second call, like any later operation, finds the actor gone.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from the db-actor thread itself, which would wait on its own reply.
+    pub fn close(&self) {
+        self.rendezvous("close", Msg::Close);
+    }
+
+    /// Queue what `msg` makes of a zero-capacity answer channel and wait for the answer, which
+    /// comes once everything queued before it has run. Returns at once when the actor is gone.
+    fn rendezvous(&self, what: &str, msg: impl FnOnce(mpsc::SyncSender<()>) -> Msg) {
         assert!(
             std::thread::current().id() != self.actor.id,
-            "DbActor::flush() invoked from the db-actor thread - this would deadlock"
+            "DbActor::{what}() invoked from the db-actor thread - this would deadlock"
         );
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
-        if self
-            .tx
-            .send(Box::new(move |_, _| {
-                let _ = done_tx.send(());
-            }))
-            .is_ok()
-        {
+        if self.tx.send(msg(done_tx)).is_ok() {
             let _ = done_rx.recv();
         }
     }
@@ -423,6 +457,15 @@ impl DbActor {
         R: Send + 'static,
     {
         self.call(move |_, sc| f(sc))
+    }
+}
+
+/// A drop would discard the error, and a close refused by an unfinished statement neither
+/// checkpoints nor deletes the log.
+fn close_connection(conn: Connection) {
+    let name = store_of(&conn);
+    if let Err((_, e)) = conn.close() {
+        crate::verr!("[DB]     {name} not closed, its log stays for the next launch: {e}");
     }
 }
 

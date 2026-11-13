@@ -114,6 +114,28 @@ fn a_clear_leaves_the_files_of_an_eviction_in_flight_to_that_eviction() {
     assert_eq!(locked.total_size(), 100);
 }
 
+/// A Clear still queued when exit closes the index cannot read its rows. Sweeping the shards then
+/// would take every file and leave the rows on disk, each naming a file that is gone.
+#[test]
+fn a_clear_after_the_close_sweeps_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = Mutex::new(AudioCache::open_with_capacity(tmp.path(), 10_000).unwrap());
+    filled(&cache, 2);
+    cache.lock().unwrap().close();
+
+    let moves_off = hold_moves_off();
+    AudioCache::wipe(&cache, &moves_off, &|p| fs::remove_file(p)).unwrap();
+    drop(moves_off);
+
+    let locked = cache.lock().unwrap();
+    for id in ["t0", "t1"] {
+        assert!(
+            locked.file_path(id).exists(),
+            "the Clear swept {id}, whose row is still in the index"
+        );
+    }
+}
+
 /// A download moved into place before the Clear took the gate and committed while it runs is
 /// indexed nowhere, and its file goes with the Clear's sweep: a row for it would outlive the file.
 #[test]

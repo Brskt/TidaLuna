@@ -158,8 +158,8 @@ fn row_names(conn: &Connection, limit: i64) -> rusqlite::Result<std::collections
 }
 
 pub struct AudioCache {
-    /// `None`: disabled mode (no openable index location); lookups miss and
-    /// stores are dropped.
+    /// `None`: disabled mode (no openable index location), or closed (see `closed`); lookups miss
+    /// and stores are dropped.
     conn: Option<Connection>,
     audio_dir: PathBuf,
     max_bytes: u64,
@@ -198,14 +198,30 @@ pub struct AudioCache {
     /// The thread that checkpoints the index's log, off the lock; `None` where SQLite's own
     /// automatic checkpoint is still on.
     checkpointer: Option<Checkpointer>,
+    /// Set by [`close`](Self::close). `conn` is then `None` with the rows still on disk, unlike
+    /// disabled mode where there are none: a Clear must not sweep files it cannot see the rows of.
+    closed: bool,
 }
 
-impl Drop for AudioCache {
-    /// The checkpoint thread ends before the connection it was started beside closes.
-    fn drop(&mut self) {
+impl AudioCache {
+    /// End the checkpoint thread, then close the index. The order matters (only the last connection
+    /// to close deletes the `-wal` and `-shm`), and the thread holds the other one.
+    pub(crate) fn close(&mut self) {
         if let Some(mut checkpointer) = self.checkpointer.take() {
             checkpointer.stop(self.conn.as_ref());
         }
+        if let Some(conn) = self.conn.take() {
+            self.closed = true;
+            if let Err((_, e)) = conn.close() {
+                crate::verr!("[CACHE]  Index not closed, its log stays for the next launch: {e}");
+            }
+        }
+    }
+}
+
+impl Drop for AudioCache {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

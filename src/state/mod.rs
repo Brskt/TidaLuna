@@ -3,7 +3,7 @@ mod paths;
 mod track;
 
 use paths::APP_DIR;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, TryLockError};
 #[cfg(test)]
 use track::CurrentSource;
 
@@ -88,6 +88,24 @@ pub static AUDIO_CACHE: LazyLock<Mutex<crate::player::cache::AudioCache>> = Lazy
     crate::player::cache::install_publisher(&mut cache);
     Mutex::new(cache)
 });
+
+/// Close the databases held by statics, which are never dropped. Called once the runtime and CEF
+/// are down, with nothing left to write. A cache never opened stays so; one whose lock is held (an
+/// eviction pass still running) is left for the next launch to recover.
+pub(crate) fn close_stores() {
+    if let Some(cache) = LazyLock::get(&AUDIO_CACHE) {
+        match cache.try_lock() {
+            Ok(mut cache) => cache.close(),
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().close(),
+            Err(TryLockError::WouldBlock) => {
+                crate::vprintln!("[CACHE]  Busy at exit, index left open for the next launch");
+            }
+        }
+    }
+    if let Some(db) = DB.get() {
+        db.close();
+    }
+}
 
 /// The exclusion every test that touches [`CURRENT_TRACK`] has to hold, and the fixture that
 /// holds it for them.

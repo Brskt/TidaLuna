@@ -79,6 +79,39 @@ fn a_panicking_operation_leaves_the_actor_serving() {
     assert_eq!(synchronous, 1, "the full sync outlived its operation");
 }
 
+/// A write queued just before the close must land, and a connection left open keeps each `-wal`
+/// for the next launch to replay, which nothing reports.
+#[test]
+fn closing_runs_what_was_queued_and_leaves_no_log() {
+    let (db, dir) = actor();
+    for name in ["plugins.db", "settings.db"] {
+        assert!(
+            beside(&dir.path().join(name), "-wal").exists(),
+            "{name} has no log to remove, so its absence would prove nothing"
+        );
+    }
+    db.post(|pc, _| {
+        pc.execute_batch("CREATE TABLE t(v INTEGER); INSERT INTO t VALUES (7);")
+            .unwrap()
+    });
+
+    db.close();
+
+    for name in ["plugins.db", "settings.db"] {
+        let path = dir.path().join(name);
+        assert_eq!(
+            companions(&path),
+            [name],
+            "{name} left files behind its close"
+        );
+    }
+    let written: i64 = Connection::open(dir.path().join("plugins.db"))
+        .unwrap()
+        .query_row("SELECT v FROM t", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(written, 7, "the write queued before the close was lost");
+}
+
 // How `DbActor::open` meets a plugins.db it cannot use. settings.db has its own repair, tested
 // beside it.
 
