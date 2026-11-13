@@ -1,12 +1,15 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio, exit};
 
-/// Find the CEF distribution directory inside target/release/build/cef-dll-sys-*/out/
-pub(super) fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
-    let build_dir = target_dir.join("build");
-    let entries = fs::read_dir(&build_dir)
-        .map_err(|e| format!("cannot read {}: {e}", build_dir.display()))?;
+/// Kinds cargo keeps as a prefix on each `linked_paths` entry.
+const LINK_KINDS: [&str; 5] = ["native=", "dependency=", "crate=", "framework=", "all="];
 
+/// Build the binary and return the CEF distribution cef-dll-sys linked it against.
+/// The path is read from cargo's JSON messages: the build-dir layout is internal to
+/// cargo and moved in 1.100, which left a glob over it with nothing to find.
+pub(super) fn build_and_find_cef_dir(release: bool) -> Result<PathBuf, String> {
     // Only match the CEF library for the current target (avoids picking Linux dirs on Windows)
     let cef_marker = if cfg!(target_os = "windows") {
         "libcef.dll"
@@ -16,36 +19,66 @@ pub(super) fn find_cef_dir(target_dir: &Path) -> Result<PathBuf, String> {
         "libcef.so"
     };
 
-    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut cmd = Command::new("cargo");
+    cmd.args(["build", "--message-format=json-render-diagnostics"]);
+    if release {
+        cmd.arg("--release");
+    }
+    // Progress and diagnostics stay on the inherited stderr; stdout carries only JSON.
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to run cargo: {e}"))?;
+    let stdout = child.stdout.take().ok_or("cargo stdout was not captured")?;
 
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with("cef-dll-sys-") {
-            let out_dir = entry.path().join("out");
-            if out_dir.is_dir() {
-                for sub in fs::read_dir(&out_dir).into_iter().flatten().flatten() {
-                    let sub_name = sub.file_name().to_string_lossy().to_string();
-                    if sub_name.starts_with("cef_") && sub.path().is_dir() {
-                        let marker_path = sub.path().join(cef_marker);
-                        if marker_path.exists() || marker_path.is_dir() {
-                            candidates.push(sub.path());
-                        }
-                    }
-                }
+    // Read to the end before waiting, or a full pipe would stall cargo.
+    let mut found: Vec<PathBuf> = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| format!("cannot read cargo output: {e}"))?;
+        for dir in linked_dirs(&line) {
+            if dir.join(cef_marker).exists() && !found.contains(&dir) {
+                found.push(dir);
             }
         }
     }
 
-    candidates.sort_by(|a, b| {
-        let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
-        mtime(b).cmp(&mtime(a))
-    });
-
-    if let Some(best) = candidates.into_iter().next() {
-        return Ok(best);
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait for cargo: {e}"))?;
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
     }
-    Err("CEF directory not found - run `cargo build --release` first".to_string())
+
+    match found.as_slice() {
+        [dir] => Ok(dir.clone()),
+        [] => Err(format!("no library path from the build holds {cef_marker}")),
+        _ => Err(format!(
+            "several library paths hold {cef_marker}: {found:?}"
+        )),
+    }
+}
+
+/// The directories a `build-script-executed` message adds to the library search path.
+fn linked_dirs(line: &str) -> Vec<PathBuf> {
+    let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Vec::new();
+    };
+    if msg["reason"] != "build-script-executed" {
+        return Vec::new();
+    }
+    msg["linked_paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.as_str())
+        .map(|entry| {
+            let path = LINK_KINDS
+                .iter()
+                .find_map(|kind| entry.strip_prefix(kind))
+                .unwrap_or(entry);
+            PathBuf::from(path)
+        })
+        .collect()
 }
 
 /// Link or copy files from CEF dir to bundle (skip .exe, .lib, directories, build files).

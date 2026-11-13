@@ -11,7 +11,7 @@ mod front;
 mod macos;
 
 use bun::{bun_dir, download_bun};
-use cef::{copy_cef_files, copy_dir_flat, find_cef_dir, link_or_copy};
+use cef::{build_and_find_cef_dir, copy_cef_files, copy_dir_flat, link_or_copy};
 use front::{build_front, copy_front};
 use macos::bundle_macos;
 
@@ -32,21 +32,14 @@ pub(crate) fn bundle(flags: &[String]) -> Result<(), String> {
         build_front(project_root)?;
     }
     println!("Building {profile}...");
-    let mut args = vec!["build"];
-    if release {
-        args.push("--release");
-    }
-    run("cargo", &args)?;
+    let cef_dir = build_and_find_cef_dir(release)?;
+    println!("CEF dir: {}", cef_dir.display());
 
     // 2. Locate target dir
     let target_dir = project_root
         .join("target")
         .join(if release { "release" } else { "debug" });
     let bundle_dir = project_root.join("dist");
-
-    // 3. Find CEF directory from build output
-    let cef_dir = find_cef_dir(&target_dir)?;
-    println!("CEF dir: {}", cef_dir.display());
 
     // 4. Ensure bundle directory exists (incremental - no full wipe)
     fs::create_dir_all(&bundle_dir).map_err(|e| format!("failed to create dist/: {e}"))?;
