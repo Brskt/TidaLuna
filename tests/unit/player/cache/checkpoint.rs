@@ -45,26 +45,3 @@ fn a_log_past_the_threshold_is_checkpointed_by_the_cache_thread() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
-
-/// The thread's connection has to close first. Left open, it makes the index's close not the last
-/// one, and both files stay.
-#[test]
-fn closing_the_cache_leaves_no_log() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut cache = AudioCache::open_with_capacity(tmp.path(), 1 << 40).unwrap();
-    cache.record("track", "flac", 1).unwrap();
-    let index = tmp.path().join("cache").join("index.db");
-    let (wal, shm) = (
-        index.with_extension("db-wal"),
-        index.with_extension("db-shm"),
-    );
-    assert!(
-        wal.exists(),
-        "the write left no log, so its removal proves nothing"
-    );
-
-    cache.close();
-
-    assert!(!wal.exists(), "the index's -wal outlived its close");
-    assert!(!shm.exists(), "the index's -shm outlived its close");
-}

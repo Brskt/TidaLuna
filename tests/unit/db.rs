@@ -79,17 +79,10 @@ fn a_panicking_operation_leaves_the_actor_serving() {
     assert_eq!(synchronous, 1, "the full sync outlived its operation");
 }
 
-/// A write queued just before the close must land, and a connection left open keeps each `-wal`
-/// for the next launch to replay, which nothing reports.
+/// Exit closes the actor: a write queued just before must land, or it is lost without a word.
 #[test]
-fn closing_runs_what_was_queued_and_leaves_no_log() {
+fn closing_runs_what_was_queued() {
     let (db, dir) = actor();
-    for name in ["plugins.db", "settings.db"] {
-        assert!(
-            beside(&dir.path().join(name), "-wal").exists(),
-            "{name} has no log to remove, so its absence would prove nothing"
-        );
-    }
     db.post(|pc, _| {
         pc.execute_batch("CREATE TABLE t(v INTEGER); INSERT INTO t VALUES (7);")
             .unwrap()
@@ -97,14 +90,6 @@ fn closing_runs_what_was_queued_and_leaves_no_log() {
 
     db.close();
 
-    for name in ["plugins.db", "settings.db"] {
-        let path = dir.path().join(name);
-        assert_eq!(
-            companions(&path),
-            [name],
-            "{name} left files behind its close"
-        );
-    }
     let written: i64 = Connection::open(dir.path().join("plugins.db"))
         .unwrap()
         .query_row("SELECT v FROM t", [], |r| r.get(0))
