@@ -152,6 +152,8 @@ jobs:
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
+          # A new image can swap MSVC under a cached CMake build.
+          env-vars: ImageVersion
 
       - name: Check TOML formatting
         run: taplo fmt --check
@@ -219,6 +221,8 @@ jobs:
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
+          # A new image can swap MSVC under a cached CMake build.
+          env-vars: ImageVersion
 
       - name: Clippy
         run: cargo xtask clippy
@@ -357,6 +361,8 @@ jobs:
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/lunar-cef' }}
+          # A new image can swap MSVC under a cached CMake build.
+          env-vars: ImageVersion
 
       - name: Cache Bun + frontend deps
         uses: actions/cache@v5
