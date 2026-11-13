@@ -66,6 +66,8 @@ pub(super) fn do_load_plugins_inline(ticket: Ticket) {
                 }
             }
         });
+        // Under the pass lock, which every install, uninstall and store move waits on.
+        crate::plugins::transpiled::sweep_once();
     });
 }
 

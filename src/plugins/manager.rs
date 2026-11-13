@@ -1,4 +1,3 @@
-use super::transpile_helper;
 use super::wrapper;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -183,21 +182,6 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Transpile and wrap plugin code for CEF injection.
-    /// The `load_id` is injected into the wrapper for ack correlation.
-    pub fn transpile_and_wrap(
-        plugin_id: &str,
-        code: &str,
-        load_id: u64,
-        nonce: u64,
-        capability: &str,
-    ) -> Result<String, transpile_helper::Failure> {
-        let js = transpile_helper::transpile(code, &format!("{plugin_id}.mts"))?;
-        Ok(wrapper::wrap_plugin_code(
-            plugin_id, &js, load_id, nonce, capability,
-        ))
     }
 
     /// Mark a plugin as Loading (code dispatched, awaiting ack).

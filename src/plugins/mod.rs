@@ -4,6 +4,7 @@ pub(crate) mod name;
 pub(crate) mod store;
 pub mod transpile;
 pub(crate) mod transpile_helper;
+pub(crate) mod transpiled;
 pub mod wrapper;
 
 pub(crate) use manager::PluginManager;

@@ -162,13 +162,16 @@ pub(super) fn inject_plugin(
         return Err(stale(ticket));
     };
 
-    let js = match crate::plugins::PluginManager::transpile_and_wrap(
-        url,
-        code,
-        load_id,
-        nonce,
-        &capability,
-    ) {
+    // A kept transpile spares the helper, a process per plugin.
+    let cache = &crate::plugins::transpiled::TRANSPILE_CACHE;
+    let source_name = crate::plugins::transpiled::source_name(url);
+    let kept = cache.get(&source_name, code);
+    let fresh = kept.is_none();
+    let made = match kept {
+        Some(js) => Ok(js),
+        None => crate::plugins::transpile_helper::transpile(code, &source_name),
+    };
+    let transpiled = match made {
         Ok(js) => js,
         Err(failure) => {
             // Undone in the page too: `mark_loading` took the record of any instance still running
@@ -187,6 +190,8 @@ pub(super) fn inject_plugin(
             };
         }
     };
+    let js =
+        crate::plugins::wrapper::wrap_plugin_code(url, &transpiled, load_id, nonce, &capability);
 
     crate::vprintln!(
         "[PLUGIN] Prepared '{}' ({} bytes, gen={})",
@@ -208,6 +213,11 @@ pub(super) fn inject_plugin(
             Some(InjectFailure::Undelivered)
         }
     };
+    // After the eval, which the write would otherwise hold up. A write that fails costs the next
+    // load of this source the helper again.
+    if fresh && let Err(e) = cache.put(&source_name, code, &transpiled) {
+        crate::vprintln!("[PLUGIN] Transpile of '{name}' not kept: {e}");
+    }
     if let Some(failure) = unsent {
         with_state(|state| state.plugin_manager.retire_load(url, load_id));
         return Err(failure);

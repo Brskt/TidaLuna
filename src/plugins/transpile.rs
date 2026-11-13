@@ -251,6 +251,21 @@ pub(crate) fn module_export_name(name: &ModuleExportName) -> String {
     name.name().to_string()
 }
 
+/// The transform behind [`transpile_ts`]'s output: this file, and `Cargo.lock` for the oxc it pins.
+/// Both are read at build time, leaving no version to bump by hand; any change to the lock, a
+/// release included, sends every plugin through the helper once more.
+pub(crate) fn transform_key() -> &'static str {
+    static KEY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let inputs = [
+            include_bytes!("transpile.rs").as_slice(),
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")),
+        ]
+        .concat();
+        format!("{:016x}", twox_hash::XxHash64::oneshot(0, &inputs))
+    });
+    &KEY
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/plugins/transpile.rs"]
 mod tests;

@@ -216,10 +216,21 @@ async fn pull(url: &str) -> Pulled {
     if let Err(why) = super::install::check_luna_type(&manifest) {
         return refused_as(hash, why);
     }
-    let filename = format!("{url}.mts");
+    let filename = crate::plugins::transpiled::source_name(url);
     let source = code.clone();
-    match blocking(move || crate::plugins::transpile_helper::transpile(&source, &filename)).await {
-        Ok(Ok(_)) => {}
+    let checked = blocking(
+        move || -> Result<(), crate::plugins::transpile_helper::Failure> {
+            let js = crate::plugins::transpile_helper::transpile(&source, &filename)?;
+            // Kept before the store takes the version; the restart after it then skips the helper.
+            let cache = &crate::plugins::transpiled::TRANSPILE_CACHE;
+            if let Err(e) = cache.put(&filename, &source, &js) {
+                crate::vprintln!("[PLUGIN] Transpile of {filename} not kept: {e}");
+            }
+            Ok(())
+        },
+    );
+    match checked.await {
+        Ok(Ok(())) => {}
         Ok(Err(crate::plugins::transpile_helper::Failure::Source(e))) => {
             return refused_as(hash, format!("The new version does not compile: {e}"));
         }

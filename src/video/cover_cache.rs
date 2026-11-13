@@ -20,7 +20,7 @@ const COVER_FORMAT: u32 = 2;
 
 /// A file that is not a cover and has not been touched for this long is a temporary one a crash
 /// left behind. Younger ones may be another store's, still being written.
-const STALE_AFTER: Duration = Duration::from_secs(600);
+pub(crate) const STALE_AFTER: Duration = Duration::from_secs(600);
 
 pub(crate) struct CoverCache {
     dir: PathBuf,

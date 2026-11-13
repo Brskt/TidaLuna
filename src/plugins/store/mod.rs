@@ -273,6 +273,14 @@ pub(crate) fn stored(conn: &mut Connection, url: &str) -> rusqlite::Result<Optio
     .optional()
 }
 
+/// The url and [`content_hash`] of every stored code, which the transpile cache keeps the files
+/// of. Both precede the code in its row, so no overflow chain is read.
+pub(crate) fn stored_sources(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT url, content_hash FROM plugin_code")?;
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
+}
+
 /// What a live-reload tick checks the source against, read without the code.
 pub(crate) struct StoredVersion {
     pub manifest: String,
