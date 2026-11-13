@@ -1,13 +1,13 @@
 use super::{open_cipher_sink, park_ciphertext};
 use crate::audio::decrypt::FlacDecryptor;
 use crate::player::buffer::{DownloadFailure, RamBufferWriter};
+use crate::state::MediaResponse;
 use crate::util::fmt::format_ms;
-use futures_util::StreamExt;
 
 /// Start a streaming download into a RamBufferWriter.
 /// Handles decryption, governor rate limiting, and Range restarts.
 pub fn start_download(
-    resp: reqwest::Response,
+    resp: MediaResponse,
     url: String,
     key: String,
     writer: RamBufferWriter,
@@ -26,12 +26,7 @@ pub fn start_download(
     })
 }
 
-async fn download_stream(
-    resp: reqwest::Response,
-    url: String,
-    key: String,
-    writer: RamBufferWriter,
-) {
+async fn download_stream(resp: MediaResponse, url: String, key: String, writer: RamBufferWriter) {
     // Captured once: it names which track this task belongs to, and for a staged download
     // it is also the credential every reconnect uses. A playback download re-reads its own
     // through `owner.fetch_url`, since that one can be refreshed under us.
@@ -82,7 +77,6 @@ async fn download_stream(
                 return;
             }
 
-            let range_header = format!("bytes={target}-");
             crate::vprintln2!("[STREAM] Range restart at byte {target}");
             crate::vprintln3!(
                 "[STREAM] Range restart #{} at byte {target} | http_reqs={} elapsed={}",
@@ -102,7 +96,7 @@ async fn download_stream(
             let send_fut = owner
                 .http_client()
                 .get(&fetch_url)
-                .header("Range", &range_header)
+                .starting_at(target)
                 .send();
             let range_resp = tokio::select! {
                 biased;
@@ -117,7 +111,7 @@ async fn download_stream(
                     match result {
                         Ok(r) => r,
                         Err(e) => {
-                            let text = crate::util::network_error_text(e);
+                            let text = e.to_string();
                             crate::vprintln3!(
                                 "[STREAM] DOWNLOAD DIED: range request failed at byte {target} | restarts={range_restarts}: {text}"
                             );
@@ -176,7 +170,7 @@ async fn download_stream(
             None
         };
 
-        let mut stream = stream_resp.bytes_stream();
+        let mut stream = stream_resp.body();
         let mut offset = stream_offset;
         let mut decrypt_buf = Vec::with_capacity(128 * 1024);
         let mut chunk_count: u32 = 0;
@@ -311,7 +305,6 @@ async fn download_stream(
                             }
                             _ = tokio::time::sleep(backoff) => {}
                         }
-                        let range_header = format!("bytes={offset}-");
                         // One read, for the same reason as the restart path above.
                         let owner = writer.owner();
                         let Some(fetch_url) = owner.fetch_url(&task_canonical_id, &url) else {
@@ -321,11 +314,9 @@ async fn download_stream(
                         let send_fut = owner
                             .http_client()
                             .get(&fetch_url)
-                            .header("Range", &range_header)
+                            .starting_at(offset)
                             .send();
-                        // The playback client has no request timeout: race the
-                        // send against restart/cancel: a stalled server must not pin
-                        // this task past a seek/stop/new-track.
+                        // A seek, stop or new track must not wait out a stalled send's bound.
                         let reconnect_resp = tokio::select! {
                             biased;
                             _ = writer.wait_for_restart_or_cancel() => {
@@ -342,7 +333,7 @@ async fn download_stream(
                                 crate::vprintln!(
                                     "[STREAM] Reconnected at byte {offset} (attempt {reconnect_attempts})"
                                 );
-                                break 'reconnect r.bytes_stream();
+                                break 'reconnect r.body();
                             }
                             Ok(r) if r.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
                                 // offset is at/past EOF: all bytes are already
@@ -372,7 +363,7 @@ async fn download_stream(
                                 crate::vprintln!(
                                     "[STREAM] reconnect attempt {reconnect_attempts} to {} failed: {}",
                                     crate::util::redact_url_query(&fetch_url),
-                                    crate::util::network_error_text(send_err)
+                                    send_err
                                 );
                                 continue 'reconnect;
                             }

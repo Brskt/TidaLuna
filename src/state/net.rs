@@ -62,22 +62,151 @@ fn build_http_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
-/// The clients that stream an encrypted media body, which is the only traffic here with an
-/// unbounded await on a body that a silent server can hold open forever.
-///
-/// A whole-request timeout is the wrong shape, one body being a whole track. `read_timeout`'s
-/// clock is created inside `poll_frame` and torn down on every delivered frame, so the stretch
-/// the governor spends not polling costs no budget, and its separate one-shot deadline ends a
-/// server that accepts the connection and then answers nothing. 15s clears the 8s connect budget
-/// with room for a cold CDN edge's TTFB. Deliberately not on `base_client_builder`: the plugin
-/// egress clients layer on that one, and a plugin's destination may answer at any cadence.
-fn build_media_client() -> reqwest::Client {
-    base_client_builder()
+/// How long a media server may stay silent: no headers after a send, or no frame while a read
+/// waits. 15 s clears the 8 s connect budget with room for a cold CDN edge's first byte.
+const MEDIA_SILENCE: Duration = Duration::from_secs(15);
+
+/// No `read_timeout` here: reqwest 0.13.5 counts the time between two reads against it, and the
+/// download loops pause there on purpose for the governor. [`MediaBody::next`] bounds each read.
+fn build_media_client(silence: Duration) -> MediaClient {
+    let inner = base_client_builder()
         .cookie_store(true)
-        .read_timeout(Duration::from_secs(15))
         .build()
-        .expect("failed to build media HTTP client")
+        .expect("failed to build media HTTP client");
+    MediaClient { inner, silence }
 }
+
+/// A client for encrypted media bodies, the one traffic here a silent server could hold open
+/// forever. Every send and body read it hands out ends after `silence` with no data.
+pub struct MediaClient {
+    inner: reqwest::Client,
+    silence: Duration,
+}
+
+impl MediaClient {
+    pub fn get(&self, url: impl reqwest::IntoUrl) -> MediaRequest {
+        MediaRequest {
+            inner: self.inner.get(url),
+            silence: self.silence,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_silence(silence: Duration) -> Self {
+        build_media_client(silence)
+    }
+}
+
+pub struct MediaRequest {
+    inner: reqwest::RequestBuilder,
+    silence: Duration,
+}
+
+impl MediaRequest {
+    /// Asks for the body from `offset` to its end.
+    pub fn starting_at(self, offset: u64) -> Self {
+        Self {
+            inner: self
+                .inner
+                .header(reqwest::header::RANGE, format!("bytes={offset}-")),
+            ..self
+        }
+    }
+
+    /// Ends a server that accepts the connection and never answers, its redirects included.
+    pub async fn send(self) -> Result<MediaResponse, AudioFetchError> {
+        match tokio::time::timeout(self.silence, self.inner.send()).await {
+            Ok(Ok(inner)) => Ok(MediaResponse {
+                inner,
+                silence: self.silence,
+            }),
+            Ok(Err(e)) => Err(AudioFetchError::transport(e)),
+            Err(_) => Err(AudioFetchError::NoAnswer),
+        }
+    }
+}
+
+/// Its body is reached through [`MediaResponse::body`] or [`MediaResponse::bytes`] alone: the
+/// consuming reads of `reqwest::Response` cannot be called through `Deref`.
+pub struct MediaResponse {
+    inner: reqwest::Response,
+    silence: Duration,
+}
+
+impl std::ops::Deref for MediaResponse {
+    type Target = reqwest::Response;
+
+    fn deref(&self) -> &reqwest::Response {
+        &self.inner
+    }
+}
+
+impl MediaResponse {
+    pub fn body(self) -> MediaBody {
+        MediaBody {
+            inner: self.inner,
+            silence: self.silence,
+        }
+    }
+
+    /// Each read is bounded on its own, not the whole: a slow segment still sending finishes.
+    pub async fn bytes(self) -> Result<Vec<u8>, AudioFetchError> {
+        let mut body = self.body();
+        let mut data = Vec::new();
+        while let Some(chunk) = body.next().await {
+            data.extend_from_slice(&chunk?);
+        }
+        Ok(data)
+    }
+}
+
+/// A media body read one frame at a time. A whole-body timeout is the wrong shape, one body being
+/// a whole track.
+pub struct MediaBody {
+    inner: reqwest::Response,
+    silence: Duration,
+}
+
+impl MediaBody {
+    /// The next frame, `None` at the end. The clock runs only while this waits: a pause between
+    /// two reads costs nothing, and a read dropped mid-wait takes its clock with it.
+    pub async fn next(&mut self) -> Option<Result<tokio_util::bytes::Bytes, AudioFetchError>> {
+        match tokio::time::timeout(self.silence, self.inner.chunk()).await {
+            Ok(Ok(chunk)) => chunk.map(Ok),
+            Ok(Err(e)) => Some(Err(AudioFetchError::transport(e))),
+            Err(_) => Some(Err(AudioFetchError::Stalled)),
+        }
+    }
+}
+
+/// Why a media send or read failed.
+#[derive(Debug)]
+pub enum AudioFetchError {
+    /// No response headers within the silence bound of the send.
+    NoAnswer,
+    /// No frame within the silence bound while a read waited.
+    Stalled,
+    /// reqwest's own failure, its URL removed by [`crate::util::network_error_text`].
+    Transport(String),
+}
+
+impl AudioFetchError {
+    fn transport(e: reqwest::Error) -> Self {
+        Self::Transport(crate::util::network_error_text(e))
+    }
+}
+
+impl std::fmt::Display for AudioFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoAnswer => f.write_str("the server sent no answer"),
+            Self::Stalled => f.write_str("the server stopped sending"),
+            Self::Transport(text) => f.write_str(text),
+        }
+    }
+}
+
+impl std::error::Error for AudioFetchError {}
 
 /// The client for plugin sources. Its `read_timeout` ends a source that stops sending, a bound
 /// `HTTP_CLIENT` cannot take since it also carries `plugin.fetch`. Its own jar keeps a source's
@@ -137,9 +266,13 @@ pub(crate) static HTTP_CLIENT_SOURCE: LazyLock<reqwest::Client> =
 /// Dedicated HTTP client for playback (initial GET + Range restarts).
 /// Separate from HTTP_CLIENT; playback gets its own TCP connection,
 /// avoiding HTTP/2 bandwidth contention with preload downloads.
-pub static HTTP_CLIENT_PLAYBACK: LazyLock<reqwest::Client> = LazyLock::new(build_media_client);
+pub static HTTP_CLIENT_PLAYBACK: LazyLock<MediaClient> =
+    LazyLock::new(|| build_media_client(MEDIA_SILENCE));
 
-/// Preload's own client, kept off `HTTP_CLIENT` for the read timeout rather than for contention:
-/// its download loop has the same governor-then-chunk shape as playback's and the same await a
-/// silent server can hold open, while `HTTP_CLIENT` also serves `plugin.fetch`.
-pub static HTTP_CLIENT_PRELOAD: LazyLock<reqwest::Client> = LazyLock::new(build_media_client);
+/// Preload's own pool, so a listener's stream never queues behind staged traffic.
+pub static HTTP_CLIENT_PRELOAD: LazyLock<MediaClient> =
+    LazyLock::new(|| build_media_client(MEDIA_SILENCE));
+
+#[cfg(test)]
+#[path = "../../tests/unit/state/net.rs"]
+mod tests;

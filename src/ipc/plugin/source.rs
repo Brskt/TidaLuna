@@ -215,6 +215,8 @@ pub(super) async fn read_bytes_capped(
     let mut buf: Vec<u8> = Vec::new();
     let mut total = 0usize;
     let mut stream = resp.bytes_stream();
+    // Nothing awaits between two reads here, and nothing may: the source client's
+    // `read_timeout` counts that time too (reqwest 0.13.5), unlike the media one.
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
             // A timeout stays typed: `SourceFault::of` tells a stalled body by it.

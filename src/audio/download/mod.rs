@@ -121,7 +121,7 @@ impl DownloadOwner {
     /// A staged download reconnects on the pool it started on. The two clients exist to
     /// keep preload traffic off the playback pool's contention, and a reconnect that
     /// switched pools would hand it straight back.
-    fn http_client(self) -> &'static reqwest::Client {
+    fn http_client(self) -> &'static crate::state::MediaClient {
         match self {
             Self::Playback => &crate::state::HTTP_CLIENT_PLAYBACK,
             Self::Preload => &HTTP_CLIENT_PRELOAD,

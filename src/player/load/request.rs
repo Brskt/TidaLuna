@@ -319,9 +319,9 @@ impl Player {
             crate::vprintln!("[DASH-LOAD #{load_gen}] fetching init segment...");
             let init_data = match HTTP_CLIENT_PLAYBACK.get(&init_url).send().await {
                 Ok(r) if r.status().is_success() => match r.bytes().await {
-                    Ok(b) => b.to_vec(),
+                    Ok(b) => b,
                     Err(e) => {
-                        let text = crate::util::network_error_text(e);
+                        let text = e.to_string();
                         crate::vprintln!("[ERROR]  DASH init segment read failed: {text}");
                         let _ = cmd_tx.send(PlayerCommand::LoadFailed {
                             error: format!("DASH init segment: {text}"),
@@ -345,7 +345,7 @@ impl Player {
                     return;
                 }
                 Err(e) => {
-                    let text = crate::util::network_error_text(e);
+                    let text = e.to_string();
                     crate::vprintln!("[ERROR]  DASH init segment request failed: {text}");
                     let _ = cmd_tx.send(PlayerCommand::LoadFailed {
                         error: format!("DASH init request: {text}"),
@@ -382,17 +382,12 @@ impl Player {
             let mut segments = stream::iter(segment_urls.into_iter().enumerate())
                 .map(|(i, url)| async move {
                     match HTTP_CLIENT_PLAYBACK.get(&url).send().await {
-                        Ok(r) if r.status().is_success() => r.bytes().await.map_err(|e| {
-                            format!(
-                                "DASH segment {i} read: {}",
-                                crate::util::network_error_text(e)
-                            )
-                        }),
+                        Ok(r) if r.status().is_success() => r
+                            .bytes()
+                            .await
+                            .map_err(|e| format!("DASH segment {i} read: {e}")),
                         Ok(r) => Err(format!("DASH segment {i} HTTP {}", r.status())),
-                        Err(e) => Err(format!(
-                            "DASH segment {i} request: {}",
-                            crate::util::network_error_text(e)
-                        )),
+                        Err(e) => Err(format!("DASH segment {i} request: {e}")),
                     }
                 })
                 .buffered(DASH_MAX_CONCURRENT);

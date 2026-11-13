@@ -2,8 +2,8 @@ use super::open_cipher_sink;
 use crate::audio::bandwidth::GovernorHandle;
 use crate::audio::decrypt::FlacDecryptor;
 use crate::player::buffer::DownloadOwner;
+use crate::state::MediaResponse;
 use crate::util::fmt::format_bytes;
-use futures_util::StreamExt;
 
 /// A complete in-RAM fetch: plaintext for the decoder, plus the ciphertext the disk
 /// cache stores. `None` when staging failed or the fetch was capped - caching is
@@ -22,7 +22,7 @@ pub(in crate::audio) async fn fetch_and_decrypt_inner(
     key: &str,
     max_bytes: Option<usize>,
     owner: DownloadOwner,
-    resp: reqwest::Response,
+    resp: MediaResponse,
     governor: &GovernorHandle,
 ) -> anyhow::Result<Option<FetchedTrack>> {
     let start = std::time::Instant::now();
@@ -32,7 +32,7 @@ pub(in crate::audio) async fn fetch_and_decrypt_inner(
     } else {
         Some(FlacDecryptor::new(key)?)
     };
-    let mut stream = resp.bytes_stream();
+    let mut stream = resp.body();
     let mut offset = 0u64;
     let mut decrypt_buf = Vec::new();
     let mut buffer = Vec::new();
@@ -63,7 +63,6 @@ pub(in crate::audio) async fn fetch_and_decrypt_inner(
                     }
                     let backoff = std::time::Duration::from_millis(250 * reconnect_attempts as u64);
                     tokio::time::sleep(backoff).await;
-                    let range_header = format!("bytes={offset}-");
                     // On the owner's own pool, like the reconnects in `download_stream`. This
                     // path serves the active load as well as a preload now, and the two clients
                     // exist precisely to keep a listener's stream from queueing behind staged
@@ -71,7 +70,7 @@ pub(in crate::audio) async fn fetch_and_decrypt_inner(
                     match owner
                         .http_client()
                         .get(url)
-                        .header("Range", &range_header)
+                        .starting_at(offset)
                         .send()
                         .await
                     {
@@ -79,7 +78,7 @@ pub(in crate::audio) async fn fetch_and_decrypt_inner(
                             crate::vprintln!(
                                 "[PRELOAD] Reconnected at byte {offset} (attempt {reconnect_attempts})"
                             );
-                            break 'reconnect r.bytes_stream();
+                            break 'reconnect r.body();
                         }
                         Ok(r) if r.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
                             break 'download;
@@ -88,12 +87,11 @@ pub(in crate::audio) async fn fetch_and_decrypt_inner(
                         Err(send_err) => {
                             // Two redactions on two values, as `net_fetch.rs` does: the url
                             // names the edge that refused, with its signed query cut, while
-                            // the error's own copy of that url goes entirely. Logging the
-                            // error raw would put the credential back past the first cut.
+                            // the error's own copy of that url is already gone.
                             crate::vprintln!(
                                 "[PRELOAD] reconnect attempt {reconnect_attempts} to {} failed: {}",
                                 crate::util::redact_url_query(url),
-                                crate::util::network_error_text(send_err)
+                                send_err
                             );
                             continue 'reconnect;
                         }
@@ -164,7 +162,7 @@ pub(in crate::audio) async fn fetch_and_decrypt_inner(
 pub async fn fetch_and_decrypt(
     url: &str,
     key: &str,
-    opened: reqwest::Response,
+    opened: MediaResponse,
     governor: &GovernorHandle,
 ) -> anyhow::Result<FetchedTrack> {
     match fetch_and_decrypt_inner(url, key, None, DownloadOwner::Playback, opened, governor).await?

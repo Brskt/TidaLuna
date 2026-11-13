@@ -218,7 +218,7 @@ pub(super) async fn start_stream_load(ctx: &LoadContext, url: &str, key: &str, t
             r
         }
         Err(e) => {
-            let text = crate::util::network_error_text(e);
+            let text = e.to_string();
             crate::vprintln!("[ERROR]  Request failed: {text}");
             ctx.fail_load(
                 format!("request failed: {text}"),

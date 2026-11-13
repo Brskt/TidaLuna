@@ -7,7 +7,7 @@ use std::sync::{LazyLock, Mutex};
 #[cfg(test)]
 use track::CurrentSource;
 
-pub use net::{HTTP_CLIENT, HTTP_CLIENT_PLAYBACK, HTTP_CLIENT_PRELOAD};
+pub use net::{HTTP_CLIENT, HTTP_CLIENT_PLAYBACK, HTTP_CLIENT_PRELOAD, MediaClient, MediaResponse};
 pub(crate) use net::{
     HTTP_CLIENT_SOURCE, USER_AGENT, build_host_checked_client, build_native_client,
     chromium_version,
