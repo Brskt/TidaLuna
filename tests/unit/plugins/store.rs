@@ -389,7 +389,66 @@ fn disabling_a_plugin_is_written_under_a_full_sync() {
             &syncs_routinely,
         ],
     );
-    assert!(collect_enabled_code(&mut conn).unwrap().is_empty());
+    let left = collect_enabled_code(&mut conn).unwrap();
+    assert!(left.plugins.is_empty() && left.unreadable.is_empty());
+}
+
+/// Breaks the overflow chain of a value made of `fill` alone, as damage on disk would: a page in
+/// its middle now points past the end of the file.
+fn damage_overflow_chain(path: &Path, fill: u8) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let raw = usize::from(u16::from_be_bytes([bytes[16], bytes[17]]));
+    let page = if raw == 1 { 65536 } else { raw };
+    let chain: Vec<usize> = (0..bytes.len() / page)
+        .filter(|p| {
+            bytes[p * page + 4..(p + 1) * page]
+                .iter()
+                .all(|&b| b == fill)
+        })
+        .collect();
+    assert!(!chain.is_empty(), "no overflow page holds the value");
+    let target = chain[chain.len() / 2] * page;
+    bytes[target..target + 4].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A plugin whose manifest or code is damaged comes back unreadable, and the plugins after it
+/// still load. One read over every row stopped at the damage and dropped them without a word.
+#[test]
+fn a_damaged_plugin_spares_the_plugins_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut conn = file_conn(dir.path());
+    for (url, name) in [
+        ("https://a/A", "A"),
+        ("https://b/B", "B"),
+        ("https://c/C", "C"),
+        ("https://d/D", "D"),
+    ] {
+        stored_row(&mut conn, url, name, "{}");
+    }
+    // Larger than a page, each lives in an overflow chain that damage can break.
+    conn.execute(
+        "UPDATE plugin_code SET code = ?1 WHERE url = 'https://b/B'",
+        params!["B".repeat(200_000)],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE plugins SET manifest = ?1 WHERE url = 'https://d/D'",
+        params!["M".repeat(200_000)],
+    )
+    .unwrap();
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    drop(conn);
+    let path = dir.path().join("plugins.db");
+    damage_overflow_chain(&path, b'B');
+    damage_overflow_chain(&path, b'M');
+
+    let rows = collect_enabled_code(&mut Connection::open(&path).unwrap()).unwrap();
+    let loaded: Vec<&str> = rows.plugins.iter().map(|p| p.url.as_str()).collect();
+    let unreadable: Vec<&str> = rows.unreadable.iter().map(|p| p.url.as_str()).collect();
+    assert_eq!(loaded, ["https://a/A", "https://c/C"]);
+    assert_eq!(unreadable, ["https://b/B", "https://d/D"]);
 }
 
 #[test]

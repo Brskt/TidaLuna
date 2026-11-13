@@ -6,7 +6,7 @@ use super::admission::Closed;
 use super::jsrt::{PassGuard, PassOutcome, announce_stopped};
 use super::{ipc_callback_err, ipc_callback_ok};
 use crate::app_state::{IpcCallback, IpcMessage, PassStood, emit_ipc_event_with_args, with_state};
-use crate::plugins::store::{EnabledPlugin, StoreMove};
+use crate::plugins::store::{EnabledPlugin, EnabledRows, StoreMove};
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
@@ -73,7 +73,7 @@ fn hold(from: String, to: String) -> rusqlite::Result<Vec<StoreMove>> {
     Ok(moves)
 }
 
-fn is_unloaded(url: &str) -> bool {
+pub(super) fn is_unloaded(url: &str) -> bool {
     with_state(|state| state.plugin_manager.current_load_id(url).is_none()).unwrap_or(false)
 }
 
@@ -141,8 +141,8 @@ fn settle(pass: &PassGuard, to: &str, moves: Vec<StoreMove>, answer: Option<bool
     load(pass, resume);
 }
 
-/// Loads `urls` and the plugins waiting on the move, the other enabled plugins counting as loaded,
-/// which holds once this page's pass tried every plugin; before it, that pass loads them itself.
+/// Loads `urls` and the plugins waiting on the move against the enabled plugins that run, once
+/// this page's pass tried every plugin; before it, that pass loads them itself.
 /// After a pass that could not, they are told so and the next page load takes them.
 fn load(pass: &PassGuard, urls: Vec<String>) {
     if !super::jsrt::has_session() {
@@ -200,13 +200,36 @@ fn load(pass: &PassGuard, urls: Vec<String>) {
         }
     };
     let asking = asked().clone();
-    let (todo, loaded): (Vec<EnabledPlugin>, Vec<EnabledPlugin>) = rows
+    let (todo, others): (Vec<EnabledPlugin>, Vec<EnabledPlugin>) = rows
+        .plugins
         .into_iter()
         .filter(|p| !asking.contains_key(&p.url))
         .partition(|p| urls.contains(&p.url));
-    let loaded = loaded.into_iter().map(|p| p.name).collect();
+    let (unreadable, told): (Vec<_>, Vec<_>) = rows
+        .unreadable
+        .into_iter()
+        .filter(|p| !asking.contains_key(&p.url))
+        .partition(|p| urls.contains(&p.url));
+    // Only a live load counts. A plugin the page kept on without running is no dependency to load
+    // against, whether its row reads or not.
+    let (idle, live): (Vec<_>, Vec<_>) = others
+        .into_iter()
+        .map(|p| (p.url, p.name))
+        .chain(told.into_iter().map(|p| (p.url, p.name)))
+        .partition(|(url, _)| is_unloaded(url));
+    let not_running = idle.into_iter().map(|(_, name)| name).collect();
+    let loaded = live.into_iter().map(|(_, name)| name).collect();
     let held_names = asking.into_values().collect();
-    let outcome = super::jsrt::run_pass(&admission, todo, loaded, &held_names);
+    let outcome = super::jsrt::run_pass(
+        &admission,
+        EnabledRows {
+            plugins: todo,
+            unreadable,
+        },
+        loaded,
+        &held_names,
+        &not_running,
+    );
     // The next answer must not count as loaded what this one could not prepare.
     if let PassOutcome::HelperFailed(_) = outcome {
         with_state(|state| {
@@ -223,11 +246,28 @@ fn load(pass: &PassGuard, urls: Vec<String>) {
 
 /// Splits a pass's rows: the plugins asked about leave it, and their names come back for the
 /// plugins depending on them.
-pub(super) fn hold_back(rows: Vec<EnabledPlugin>) -> (HashSet<String>, Vec<EnabledPlugin>) {
+pub(super) fn hold_back(rows: EnabledRows) -> (HashSet<String>, EnabledRows) {
     let asking = asked();
-    let (held, rest): (Vec<_>, Vec<_>) =
-        rows.into_iter().partition(|p| asking.contains_key(&p.url));
-    (held.into_iter().map(|p| p.name).collect(), rest)
+    let (held, plugins): (Vec<_>, Vec<_>) = rows
+        .plugins
+        .into_iter()
+        .partition(|p| asking.contains_key(&p.url));
+    let (held_unreadable, unreadable): (Vec<_>, Vec<_>) = rows
+        .unreadable
+        .into_iter()
+        .partition(|p| asking.contains_key(&p.url));
+    let held = held
+        .into_iter()
+        .map(|p| p.name)
+        .chain(held_unreadable.into_iter().map(|p| p.name))
+        .collect();
+    (
+        held,
+        EnabledRows {
+            plugins,
+            unreadable,
+        },
+    )
 }
 
 /// The plugins among `unresolved` that depend on a `held` name, directly or through another
@@ -253,6 +293,38 @@ pub(super) fn waiting_on(
         }
         if !grew {
             return waiting;
+        }
+    }
+}
+
+/// The plugins among `unresolved` kept on behind an `idle` one, url to name. Every dependency they
+/// miss is idle or kept on itself; one missing any other fails, and so does a cycle.
+pub(super) fn blocked_behind(
+    unresolved: &[EnabledPlugin],
+    loaded: &HashSet<String>,
+    idle: &HashSet<String>,
+) -> HashMap<String, String> {
+    let deps: Vec<(&EnabledPlugin, Vec<String>)> = unresolved
+        .iter()
+        .map(|p| (p, dependency_names(&p.manifest)))
+        .collect();
+    let mut kept: HashSet<&str> = idle.iter().map(String::as_str).collect();
+    let mut blocked = HashMap::new();
+    loop {
+        let mut grew = false;
+        for (p, deps) in &deps {
+            if !blocked.contains_key(&p.url)
+                && deps
+                    .iter()
+                    .all(|d| loaded.contains(d) || kept.contains(d.as_str()))
+            {
+                blocked.insert(p.url.clone(), p.name.clone());
+                kept.insert(&p.name);
+                grew = true;
+            }
+        }
+        if !grew {
+            return blocked;
         }
     }
 }

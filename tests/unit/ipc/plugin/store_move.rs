@@ -30,3 +30,25 @@ fn a_dependant_of_a_held_plugin_waits_and_another_fails() {
     urls.sort_unstable();
     assert_eq!(urls, ["https://a/chain", "https://a/direct"]);
 }
+
+/// A plugin stays on behind an idle one only when every dependency it misses is idle or kept on
+/// itself, through a chain listed in any order. One also missing a dead dependency fails, and so
+/// does a cycle hanging off an idle name.
+#[test]
+fn only_a_plugin_missing_nothing_but_idle_ones_stays_on() {
+    let unresolved = [
+        row("https://a/chain", "chain", &["direct"]),
+        row("https://a/direct", "direct", &["idle", "lib"]),
+        row("https://b/mixed", "mixed", &["idle", "dead"]),
+        row("https://c/one", "one", &["idle", "two"]),
+        row("https://c/two", "two", &["one"]),
+    ];
+    let blocked = blocked_behind(
+        &unresolved,
+        &HashSet::from(["lib".to_string()]),
+        &HashSet::from(["idle".to_string()]),
+    );
+    let mut urls: Vec<&str> = blocked.keys().map(String::as_str).collect();
+    urls.sort_unstable();
+    assert_eq!(urls, ["https://a/chain", "https://a/direct"]);
+}

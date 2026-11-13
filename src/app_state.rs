@@ -173,7 +173,8 @@ enum PassEnd {
 pub(crate) enum PassStood {
     /// No pass of this ticket ended yet: the pass to come reads the rows itself.
     NotYet,
-    /// Every enabled plugin was tried: the ones not failed are live or parked on a store move.
+    /// Every enabled plugin was tried: the ones not failed are live, parked on a store move, or
+    /// kept on without running and told why.
     Completed,
     /// A pass ended without trying every plugin, or was refused: nothing loads the rest here.
     Incomplete,

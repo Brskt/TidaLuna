@@ -552,27 +552,61 @@ pub(crate) struct EnabledPlugin {
     pub manifest: String,
 }
 
-/// The plugins a load pass injects. `Err` when the table cannot be read, never an empty list: a
-/// pass on nothing would vouch for every plugin it never tried. A row that does not decode is
-/// skipped alone, sparing every other plugin.
-pub(crate) fn collect_enabled_code(conn: &mut Connection) -> rusqlite::Result<Vec<EnabledPlugin>> {
-    let mut stmt = conn.prepare(
-        "SELECT p.url, p.name, c.code, p.manifest
-         FROM plugins p JOIN plugin_code c ON c.url = p.url
-         WHERE p.installed = 1 AND p.enabled = 1 ORDER BY p.rowid",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(EnabledPlugin {
-            url: row.get(0)?,
-            name: row.get(1)?,
-            code: row.get(2)?,
-            manifest: row.get(3)?,
-        })
-    })?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+/// An enabled plugin whose stored manifest or code could not be read, damaged or missing.
+pub(crate) struct UnreadablePlugin {
+    pub url: String,
+    pub name: String,
+    pub why: String,
 }
 
-/// The urls `collect_enabled_code` loads, in its order, without reading their code.
+/// What a load pass finds among the enabled plugins.
+#[derive(Default)]
+pub(crate) struct EnabledRows {
+    pub plugins: Vec<EnabledPlugin>,
+    pub unreadable: Vec<UnreadablePlugin>,
+}
+
+/// The plugins a load pass injects. `Err` when the list cannot be read, never an empty one: a pass
+/// on nothing would vouch for every plugin it never tried. A row that does not decode is skipped;
+/// manifests and code are read one plugin at a time, a damaged one ending any read past it.
+pub(crate) fn collect_enabled_code(conn: &mut Connection) -> rusqlite::Result<EnabledRows> {
+    let mut listed: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT url, name FROM plugins WHERE installed = 1 AND enabled = 1 ORDER BY rowid",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if let (Ok(url), Ok(name)) = (row.get(0), row.get(1)) {
+                listed.push((url, name));
+            }
+        }
+    }
+    let mut read_plugin = conn.prepare(
+        "SELECT p.manifest, c.code FROM plugins p JOIN plugin_code c ON c.url = p.url
+         WHERE p.url = ?1",
+    )?;
+    let mut found = EnabledRows::default();
+    for (url, name) in listed {
+        match read_plugin.query_row([&url], |row| Ok((row.get(0)?, row.get(1)?))) {
+            Ok((manifest, code)) => found.plugins.push(EnabledPlugin {
+                url,
+                name,
+                code,
+                manifest,
+            }),
+            Err(e) => found.unreadable.push(UnreadablePlugin {
+                url,
+                name,
+                why: e.to_string(),
+            }),
+        }
+    }
+    Ok(found)
+}
+
+/// The urls of the enabled plugins with stored code, in `collect_enabled_code`'s order, without
+/// reading it.
 pub(crate) fn enabled_urls(conn: &mut Connection) -> Vec<String> {
     let mut stmt = match conn.prepare(
         "SELECT p.url FROM plugins p JOIN plugin_code c ON c.url = p.url

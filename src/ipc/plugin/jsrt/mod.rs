@@ -53,8 +53,8 @@ pub(super) fn do_load_plugins_inline(ticket: Ticket) {
                 return;
             }
         };
-        let (held, remaining) = super::store_move::hold_back(enabled);
-        let outcome = run_pass(&admission, remaining, HashSet::new(), &held);
+        let (held, rows) = super::store_move::hold_back(enabled);
+        let outcome = run_pass(&admission, rows, HashSet::new(), &held, &HashSet::new());
         // Still under the pass lock: a store move's answer sees either a pass that has not read
         // its rows yet or one that is done and recorded.
         with_state(|state| {
@@ -76,9 +76,12 @@ fn stop_all(ticket: Ticket, reason: &str) {
     match crate::state::db().call_plugins(crate::plugins::store::collect_enabled_code) {
         Ok(rows) => announce_stopped(
             ticket,
-            rows.into_iter()
+            rows.plugins
+                .into_iter()
                 .filter(|p| crate::plugins::store::load_refusal(&p.name, &p.manifest).is_none())
-                .map(|p| (p.url, reason.to_string()))
+                .map(|p| p.url)
+                .chain(rows.unreadable.into_iter().map(|p| p.url))
+                .map(|url| (url, reason.to_string()))
                 .collect(),
         ),
         Err(e) => crate::verr!("[PLUGIN] Cannot tell the page which plugins stay off: {e}"),
@@ -109,27 +112,39 @@ pub(super) fn announce_stopped(ticket: Ticket, plugins: Vec<(String, String)>) {
 }
 
 /// The plugins a pass could not resolve, split by what they are owed.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Unresolved {
     /// Stranded by a plugin's own failure: turned off.
     pub(super) failed: Vec<String>,
     /// Stranded once this machine failed to prepare a plugin: flag kept, the page told.
     pub(super) stopped: Vec<String>,
+    /// Stranded behind a plugin kept on without running: flag kept, the page told.
+    pub(super) blocked: Vec<String>,
 }
 
-/// Splits the plugins left with unresolved dependencies. A machine's failure says nothing about the
-/// plugins waiting on what it could not prepare; one waiting on a store move's answer is in
-/// neither list, since the answer loads it.
+/// Splits the plugins left with unresolved dependencies. Neither a machine's failure nor a
+/// dependency kept on without running says anything about the plugins behind it. One waiting on a
+/// store move's answer is in no list, since the answer loads it.
 pub(super) fn settle_unresolved(
     unresolved: Vec<String>,
     waiting: &HashMap<String, String>,
+    blocked: &HashMap<String, String>,
     helper_failed: bool,
 ) -> Unresolved {
-    let (stopped, failed) = unresolved
-        .into_iter()
-        .filter(|url| !waiting.contains_key(url))
-        .partition(|_| helper_failed);
-    Unresolved { failed, stopped }
+    let mut settled = Unresolved::default();
+    for url in unresolved {
+        if waiting.contains_key(&url) {
+            continue;
+        }
+        if blocked.contains_key(&url) {
+            settled.blocked.push(url);
+        } else if helper_failed {
+            settled.stopped.push(url);
+        } else {
+            settled.failed.push(url);
+        }
+    }
+    settled
 }
 
 /// How a load pass ended.
@@ -176,14 +191,16 @@ pub(super) async fn in_section<R: Send + 'static>(
         .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
-/// Loads `remaining` in dependency order, `loaded_names` counting as loaded already, and answers
-/// how it ended with the urls it gave up on and disabled. `held` names the plugins waiting on a
-/// store move: a plugin depending on one waits with it instead of failing.
+/// Loads `rows` in dependency order, `loaded_names` counting as loaded already, and answers how it
+/// ended with the urls it gave up on and disabled. `held` names the plugins waiting on a store
+/// move: a plugin depending on one waits with it instead of failing. One whose missing dependencies
+/// are all in `not_running`, unreadable, or kept on behind those stays on and is told.
 pub(super) fn run_pass(
     admission: &Admission,
-    mut remaining: Vec<crate::plugins::store::EnabledPlugin>,
+    rows: crate::plugins::store::EnabledRows,
     mut loaded_names: HashSet<String>,
     held: &HashSet<String>,
+    not_running: &HashSet<String>,
 ) -> PassOutcome {
     let ticket = admission.ticket();
     let db = crate::state::db();
@@ -191,6 +208,31 @@ pub(super) fn run_pass(
     let mut helper_failed = false;
     // Left on and not running, with the reason each card shows.
     let mut stopped: Vec<(String, String)> = Vec::new();
+
+    // An unreadable row says nothing about the plugin (kept on, its refusal judged once it reads
+    // again). One may run already, started by an enable or an earlier pass of this page.
+    let mut idle = not_running.clone();
+    let mut unreadable = Vec::new();
+    for p in rows.unreadable {
+        unreadable.push(format!("{:?} ({})", p.url, p.why));
+        if super::store_move::is_unloaded(&p.url) {
+            stopped.push((
+                p.url,
+                "Not loaded: its stored data could not be read".to_string(),
+            ));
+            idle.insert(p.name);
+        } else {
+            loaded_names.insert(p.name);
+        }
+    }
+    if !unreadable.is_empty() {
+        // Not gated: the user's plugin stays off this page. Debug-quoted, the url is the row's own.
+        crate::verr!(
+            "[PLUGIN] Stored manifest or code unreadable: {}",
+            unreadable.join(", ")
+        );
+    }
+    let mut remaining = rows.plugins;
 
     // 3. Multi-pass: load plugins whose deps are satisfied
     let mut dispatched_snapshot: Vec<(String, u64)> = Vec::new(); // (url, load_id) for timeout
@@ -291,11 +333,17 @@ pub(super) fn run_pass(
 
     // 4. Log + reconcile: plugins with unresolved deps. Not once the helper failed: a dependency
     // it could not prepare says nothing about the plugin waiting on it. Nor while a dependency
-    // waits on a store move: the answer loads the plugin.
+    // waits on a store move (the answer loads the plugin), or while every missing one stays idle.
     let waiting = super::store_move::waiting_on(&remaining, held);
+    let blocked = super::store_move::blocked_behind(&remaining, &loaded_names, &idle);
     for p in &remaining {
         if waiting.contains_key(&p.url) {
             crate::vprintln!("[PLUGIN] '{}' waits on a store move's answer", p.name);
+        } else if blocked.contains_key(&p.url) {
+            crate::vprintln!(
+                "[PLUGIN] '{}' depends on a plugin that is not running",
+                p.name
+            );
         } else {
             crate::vprintln!("[PLUGIN] Cannot load '{}': unresolved dependencies", p.name);
         }
@@ -303,6 +351,7 @@ pub(super) fn run_pass(
     let unresolved = settle_unresolved(
         remaining.into_iter().map(|p| p.url).collect(),
         &waiting,
+        &blocked,
         helper_failed,
     );
     failed_urls.extend(unresolved.failed);
@@ -310,6 +359,12 @@ pub(super) fn run_pass(
         (
             url,
             "Not loaded: the load pass could not prepare every plugin".to_string(),
+        )
+    }));
+    stopped.extend(unresolved.blocked.into_iter().map(|url| {
+        (
+            url,
+            "Not loaded: a plugin it depends on is not running".to_string(),
         )
     }));
     super::store_move::wait_for(ticket, waiting);
