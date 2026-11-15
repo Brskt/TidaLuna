@@ -95,7 +95,7 @@ fn a_load_failure_carries_a_product_only_for_a_named_track_this_host_loaded() {
             }),
         ),
     ] {
-        let event = PlayerBridgeEvent::media_error(error, code, product_id, owner);
+        let event = PlayerBridgeEvent::media_error(error, code, product_id, None, owner);
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
             expected,

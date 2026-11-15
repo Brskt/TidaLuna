@@ -311,6 +311,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             code: MediaErrorCode::UnreadableFile,
                             seq: self.current_seq,
                             product_id: None,
+                            cause: None,
                         });
                         // Init-time decode errors emit Error with no trailing Finished,
                         // and nothing else clears committed_track. Drop it here for the SDK's

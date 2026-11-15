@@ -155,6 +155,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 code: MediaErrorCode::UnreadableFile,
                 seq: self.current_seq,
                 product_id: None,
+                cause: None,
             }),
         }
         // The SDK's same-track recovery reload rebuilds instead of resuming a dead decoder.

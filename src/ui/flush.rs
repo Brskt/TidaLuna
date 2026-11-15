@@ -1,6 +1,6 @@
 use crate::app_state::{AppState, exec_js_on_frame, js_ipc_response, with_state};
 use crate::bridge::PlayerBridgeEvent;
-use crate::player::{PlaybackState, PlayerEvent};
+use crate::player::{DeviceErrorKind, PlaybackState, PlayerEvent};
 use cef::*;
 
 pub(crate) struct FlushBatch {
@@ -309,6 +309,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                 error,
                 code,
                 product_id,
+                cause,
                 ..
             } => {
                 state
@@ -317,6 +318,7 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                         &error,
                         code.as_str(),
                         product_id.as_deref(),
+                        cause.map(DeviceErrorKind::as_str),
                         crate::player::current_load().1,
                     ));
             }

@@ -190,11 +190,15 @@ pub enum PlayerEvent {
     /// fetch or the probe, before the track played) and the load carried one. The renderer
     /// refuses a track it loaded itself on that name alone: the SDK does not know such a track.
     /// `None` for a failure of a track already playing, which the renderer leaves to the SDK.
+    ///
+    /// `cause` is the device failure that ended the track, reported just before as `DeviceError`:
+    /// the renderer words its refusal after it. `None` when the track itself failed.
     MediaError {
         error: String,
         code: MediaErrorCode,
         seq: u32,
         product_id: Option<String>,
+        cause: Option<DeviceErrorKind>,
     },
     /// Bytes stopped arriving for thirty seconds and the track cannot go on. Stops the
     /// player and raises TIDAL's own error banner; never advances the queue, and never

@@ -605,6 +605,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             code,
             seq,
             product_id: product_id.clone(),
+            cause: None,
         });
         (self.callback)(PlayerEvent::Duration(0.0, seq, product_id));
     }

@@ -281,10 +281,14 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                 refusePlayback(
                     "TidaLunar could not load this track. Please try again or pick another one.",
                     String(event.v?.productId ?? ""),
+                    event.v?.cause,
                 );
             }
         } else if (mapped) {
             if (!toNative) bridge.trigger(mapped, event.v, event.seq);
+        } else if (type === "mediaerror" && event.v?.cause !== undefined) {
+            // A device failure ended a track the SDK loaded: the device event before it already
+            // reached the SDK, whose banner says why. Raw, this one would add an "unreadable file".
         } else if (PASSTHROUGH_EVENTS.has(type)) {
             // `productId` is this bridge's own: the SDK's native player reads `error` and `errorCode`.
             bridge.trigger(type, type === "mediaerror" ? { error: event.v?.error, errorCode: event.v?.errorCode } : event.v);

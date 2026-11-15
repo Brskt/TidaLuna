@@ -608,6 +608,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 code: MediaErrorCode::UnreadableFile,
                 seq: self.current_seq,
                 product_id: None,
+                cause: None,
             }),
         }
         // Left set, both arm a guard nothing can clear: the channel behind them is dead.

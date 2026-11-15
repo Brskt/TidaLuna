@@ -1,6 +1,6 @@
 import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { proxyFail, proxyRetry } from "./audio-proxy";
-import { showErrorBanner } from "./banner";
+import { refusalMessage, showErrorBanner } from "./banner";
 
 // What a refusal leaves behind, until Rust holds the product again. `standing`: the listener has not
 // asked for it again. `retrying`: they have, and the load that answers has not reached Rust.
@@ -114,9 +114,10 @@ export function playOnRefusal(): PlayOnRefusal {
  *
  * `productId` is the product this page could not load, which the listener's Play asks for again
  * (`playOnRefusal`). A refusal that is not this page's load failing names none: a cast owning the
- * player and a lost network leave Rust with the track a Play must go on resuming.
+ * player and a lost network leave Rust with the track a Play must go on resuming. `cause` is the
+ * device failure that ended the load, when one did (`refusalMessage`).
  */
-export function refusePlayback(message: string, productId = ""): void {
+export function refusePlayback(message: string, productId = "", cause?: string): void {
     refusal = productId === "" ? null : { productId, stage: "standing" };
     releasePlay();
     const failures: unknown[] = [];
@@ -145,7 +146,7 @@ export function refusePlayback(message: string, productId = ""): void {
     // No `errorCode`: TIDAL's error saga then only logs, where a code would raise a banner of its
     // own or, for `S3016`, advance the queue. Its reducer reads the payload, which must exist.
     attempt(() => store().dispatch({ type: "player/ERROR", payload: { errorCode: undefined, errorId: "EUnexpected" } }));
-    attempt(() => showErrorBanner(store(), "PLAYBACK", message));
+    attempt(() => showErrorBanner(store(), "PLAYBACK", refusalMessage(store, message, cause)));
 
     if (storeMissing) console.warn("[refusePlayback] store not published: STOP, IDLE, ERROR and banner dropped");
     if (failures.length === 1) throw failures[0];

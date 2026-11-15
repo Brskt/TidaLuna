@@ -124,6 +124,7 @@ async fn ready_progress_duration_end_and_failures_reach_the_receiver_with_their_
             code: MediaErrorCode::UnreadableFile,
             seq: 7,
             product_id: None,
+            cause: None,
         },
         PlayerEvent::NetworkLost(7),
     ] {
@@ -174,6 +175,7 @@ fn events_of_a_track() -> Vec<PlayerEvent> {
             code: MediaErrorCode::NoSuchFile,
             seq: 1,
             product_id: None,
+            cause: None,
         },
         PlayerEvent::NetworkLost(1),
         PlayerEvent::ReplayRequest {
