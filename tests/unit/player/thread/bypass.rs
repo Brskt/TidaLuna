@@ -18,7 +18,7 @@ use crate::player::thread::harness::{Harness, Spy, harness, last_state, load_req
 #[cfg(target_os = "windows")]
 use crate::player::thread::wav_fixture::wav_s16_mono;
 #[cfg(target_os = "windows")]
-use crate::player::{PlaybackState, PlayerEvent, ResumePolicy};
+use crate::player::{DeviceErrorKind, PlaybackState, PlayerEvent, ResumePolicy};
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 #[cfg(target_os = "windows")]
@@ -283,7 +283,8 @@ fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
     h.player.is_exclusive_mode = true;
     h.player.current_exclusive_stream_id = Some(7);
 
-    h.player.rearm_shared_after_exclusive_failure();
+    h.player
+        .rearm_shared_after_exclusive_failure(DeviceErrorKind::Locked);
 
     assert!(
         h.player.current_exclusive_stream_id.is_none(),
@@ -302,13 +303,69 @@ fn an_asio_refusal_keeps_an_adoption_that_may_still_be_live() {
     h.player.is_asio_mode = true;
     h.player.current_asio_stream_id = Some(7);
 
-    h.player.rearm_shared_after_asio_failure();
+    h.player
+        .rearm_shared_after_asio_failure(DeviceErrorKind::AsioInitFailed);
 
     assert_eq!(
         h.player.current_asio_stream_id,
         Some(7),
         "the ASIO control thread survives its refusals; a newer stream may already be adopted"
     );
+}
+
+/// A backend falling back to shared on a track with no source to re-arm (DASH) must end it, or
+/// the page, the OS controls and a phone stay on "playing". The end names the product and the
+/// device failure, and settles the SDK's load only when its length was never announced (a 0
+/// mid-play overwrites the length the OS controls show). A backend that held no track says nothing.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_fallback_with_nothing_to_re_arm_ends_the_track_it_held() {
+    for (what, asio, kind) in [
+        ("ASIO", true, DeviceErrorKind::AsioInitFailed),
+        ("exclusive", false, DeviceErrorKind::Locked),
+    ] {
+        for (had_track, announced) in [(true, true), (true, false), (false, false)] {
+            let mut h = harness();
+            let _slot = CurrentTrackSlot::clear();
+            h.player.has_track = had_track;
+            h.player.duration_announced = announced;
+            h.player.current_product_id = Some("42".to_string());
+            h.player.current_seq = 9;
+
+            if asio {
+                h.player.rearm_shared_after_asio_failure(kind);
+            } else {
+                h.player.rearm_shared_after_exclusive_failure(kind);
+            }
+
+            let events = h.events.lock().unwrap();
+            if !had_track {
+                assert!(events.is_empty(), "{what}: no track, nothing to end");
+                continue;
+            }
+            let named = |ev: &PlayerEvent| {
+                matches!(ev, PlayerEvent::MediaError { seq: 9, product_id: Some(p), cause: Some(c), .. }
+                    if p == "42" && *c == kind)
+            };
+            let ended = |ev: &PlayerEvent| {
+                matches!(ev, PlayerEvent::StateChange(PlaybackState::Stopped, 9))
+            };
+            let settled = |ev: &PlayerEvent| matches!(ev, PlayerEvent::Duration(d, 9, Some(p)) if *d == 0.0 && p == "42");
+            let in_order = match events.as_slice() {
+                [error, state] if announced => named(error) && ended(state),
+                [error, length, state] if !announced => {
+                    named(error) && settled(length) && ended(state)
+                }
+                _ => false,
+            };
+            assert!(
+                in_order,
+                "{what}, announced {announced}: wanted the error, the length owed, then the end; got {events:?}"
+            );
+            assert_eq!(h.player.idle_state, PlaybackState::Stopped, "{what}");
+            assert!(h.player.current_track_id.is_none(), "{what}");
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]

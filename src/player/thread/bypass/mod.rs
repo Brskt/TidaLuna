@@ -150,6 +150,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 crate::verr!("[BYPASS] Network lost, stopping the player");
                 (self.callback)(PlayerEvent::NetworkLost(self.current_seq));
             }
+            // Before its length reached the page the track failed opening, as a load fails: it
+            // is named for the page to refuse, and the SDK's load is settled.
+            PacketFailure::Source if !self.duration_announced => {
+                self.end_failed_track(error, MediaErrorCode::UnreadableFile, None);
+                return;
+            }
             PacketFailure::Source => (self.callback)(PlayerEvent::MediaError {
                 error,
                 code: MediaErrorCode::UnreadableFile,

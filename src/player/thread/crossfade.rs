@@ -530,6 +530,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.current_seq,
             self.current_product_id.clone(),
         ));
+        self.duration_announced = true;
         (self.callback)(PlayerEvent::StateChange(
             crate::player::PlaybackState::Active,
             self.current_seq,

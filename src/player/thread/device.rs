@@ -527,7 +527,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let sr = self.sample_rate;
         let ch = self.channels;
 
-        let Some(device) = self.resolve_output_device() else {
+        let Ok(device) = self.resolve_output_device() else {
             return;
         };
 
@@ -621,8 +621,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     /// Resolve the configured output device (falling back to the OS default) and
     /// record its concrete name in `current_output_name`, which the shared
-    /// re-assert guard compares against. Every cpal-open path resolves through here.
-    pub(super) fn resolve_output_device(&mut self) -> Option<cpal::Device> {
+    /// re-assert guard compares against. Every cpal-open path resolves through here. The error is
+    /// the failure already reported, for a caller that ends the track on it to name.
+    pub(super) fn resolve_output_device(&mut self) -> Result<cpal::Device, DeviceErrorKind> {
         match super::output::resolve_device(self.current_device_id.as_deref()) {
             Some(d) => {
                 let name = super::output::output_device_name(&d);
@@ -642,11 +643,11 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     );
                 }
                 self.current_output_name = name;
-                Some(d)
+                Ok(d)
             }
             None => {
                 (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::NotFound));
-                None
+                Err(DeviceErrorKind::NotFound)
             }
         }
     }

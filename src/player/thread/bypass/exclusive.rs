@@ -3,7 +3,9 @@ use crate::player::packet_failure::PacketFailure;
 use crate::player::thread::PlayerThread;
 use crate::player::thread::playback::stream_state_seq;
 use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
-use crate::player::{DeviceErrorKind, EXCLUSIVE_STREAM_SEQ, PlaybackState, PlayerEvent, wasapi};
+use crate::player::{
+    DeviceErrorKind, EXCLUSIVE_STREAM_SEQ, MediaErrorCode, PlaybackState, PlayerEvent, wasapi,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -256,6 +258,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                     self.current_seq,
                                     self.current_product_id.clone(),
                                 ));
+                                self.duration_announced = true;
                             }
                         }
                         ExclusiveEvent::InitFailed(e) => {
@@ -266,10 +269,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 cancel.store(true, Relaxed);
                             }
                             self.is_exclusive_mode = false;
-                            (self.callback)(PlayerEvent::DeviceError(
-                                DeviceErrorKind::ExclusiveModeNotAllowed,
-                            ));
-                            self.rearm_shared_after_exclusive_failure();
+                            let kind = DeviceErrorKind::ExclusiveModeNotAllowed;
+                            (self.callback)(PlayerEvent::DeviceError(kind));
+                            self.rearm_shared_after_exclusive_failure(kind);
                         }
                         ExclusiveEvent::DeviceLocked(e) => {
                             crate::vprintln!("[WASAPI] Device locked by another process: {e}");
@@ -277,8 +279,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 cancel.store(true, Relaxed);
                             }
                             self.is_exclusive_mode = false;
-                            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Locked));
-                            self.rearm_shared_after_exclusive_failure();
+                            let kind = DeviceErrorKind::Locked;
+                            (self.callback)(PlayerEvent::DeviceError(kind));
+                            self.rearm_shared_after_exclusive_failure(kind);
                         }
                         ExclusiveEvent::FormatUnsupported { stream_id } => {
                             if let Some(cancel) = self.exclusive_stream_cancel.take() {
@@ -305,10 +308,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 );
                             }
                             self.is_exclusive_mode = false;
-                            (self.callback)(PlayerEvent::DeviceError(
-                                DeviceErrorKind::ExclusiveFormatUnsupported,
-                            ));
-                            self.rearm_shared_after_exclusive_failure();
+                            let kind = DeviceErrorKind::ExclusiveFormatUnsupported;
+                            (self.callback)(PlayerEvent::DeviceError(kind));
+                            self.rearm_shared_after_exclusive_failure(kind);
                         }
                     }
                 }
@@ -334,10 +336,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     self.current_buffer.as_ref(),
                 );
                 self.is_exclusive_mode = false;
-                (self.callback)(PlayerEvent::DeviceError(
-                    DeviceErrorKind::ExclusiveBackendDied,
-                ));
-                self.rearm_shared_after_exclusive_failure();
+                let kind = DeviceErrorKind::ExclusiveBackendDied;
+                (self.callback)(PlayerEvent::DeviceError(kind));
+                self.rearm_shared_after_exclusive_failure(kind);
             }
 
             if !self.is_exclusive_mode {
@@ -375,8 +376,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// Exclusive WASAPI failed (OS denied exclusive, or the device is locked): re-arm a
     /// fresh shared load at the live position; the current track keeps playing instead
     /// of stopping. Mirrors `rearm_shared_after_asio_failure`. No-op without a track.
+    /// `kind` is the failure just reported, which ends a track nothing can re-arm.
     #[cfg(target_os = "windows")]
-    pub(super) fn rearm_shared_after_exclusive_failure(&mut self) {
+    pub(super) fn rearm_shared_after_exclusive_failure(&mut self, kind: DeviceErrorKind) {
+        let had_track = self.has_track;
         let was_playing = self.is_playing;
         self.has_track = false;
         self.is_playing = false;
@@ -406,6 +409,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!(
                 "[WASAPI] exclusive fallback: non-replayable source, playback stopped (cannot re-arm shared)"
             );
+            if had_track {
+                self.end_failed_track(
+                    "exclusive output failed on a track shared output cannot re-arm".into(),
+                    MediaErrorCode::UnreadableFile,
+                    Some(kind),
+                );
+            }
         }
     }
 }

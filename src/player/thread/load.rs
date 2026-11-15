@@ -72,19 +72,57 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         resolve_start_position(queued, self.pending_resume_seek)
     }
 
-    /// Undo the commit this load made at entry. `committed_track` answers `Player::load`'s
-    /// "same track?" on the caller thread, but `decide_play` keys on `has_track`, and after a
-    /// failed load that flag still describes the track this one replaced: a re-assert minted
-    /// before the failure then resumes a pipeline built from a buffer already cancelled here.
+    /// What a track that failed for good leaves: nothing committed, held, playing or pinned, and
+    /// Stopped. Left standing, `has_track` and the position answer for a track that is gone, and
+    /// a re-assert minted before the failure resumes a pipeline built from a cancelled buffer.
+    /// `current_seq` stays: it names the load any event emitted now belongs to.
     fn abandon_failed_load(&mut self) {
         self.set_committed_track(None);
         self.has_track = false;
-        // These two describe the track this load replaced, and every emitter that reads them
-        // keys on the flag just cleared: left standing they answer for a track that is gone,
-        // under the seq of the one that failed. `current_seq` stays. It names this load,
-        // which any event emitted now belongs to.
+        self.is_playing = false;
+        self.clear_seek_pin();
+        #[cfg(target_os = "windows")]
+        {
+            self.exclusive_seek_tx = None;
+            self.asio_seek_tx = None;
+        }
+        self.current_track_id = None;
         self.played_samples.store(0, Relaxed);
         self.current_duration = 0.0;
+        self.idle_state = PlaybackState::Stopped;
+        self.governor.buffer_progress().set_playback_active(false);
+    }
+
+    /// End the committed track for good, naming its product: the page refuses it, and the
+    /// listener's next Play loads it again. `cause` is the device failure reported just before.
+    pub(super) fn end_failed_track(
+        &mut self,
+        error: String,
+        code: MediaErrorCode,
+        cause: Option<DeviceErrorKind>,
+    ) {
+        // A completed fade is adopted here, which renames the product the error must name.
+        self.cancel_crossfade();
+        (self.callback)(PlayerEvent::MediaError {
+            error,
+            code,
+            seq: self.current_seq,
+            product_id: self.current_product_id.clone(),
+            cause,
+        });
+        if !self.duration_announced {
+            // 0, not a stale `current_duration`: the SDK's load() awaits a length either way.
+            (self.callback)(PlayerEvent::Duration(
+                0.0,
+                self.current_seq,
+                self.current_product_id.clone(),
+            ));
+        }
+        self.abandon_failed_load();
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Stopped,
+            self.current_seq,
+        ));
     }
 
     /// Announce a track that is loaded and silent. The bypass backends open their device on
@@ -148,6 +186,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Invalidated until this load's probe emits a fresh one (the ASIO/exclusive
         // branches never do -> stays None, and a re-assert cannot send a stale format).
         self.last_media_format = None;
+        self.duration_announced = false;
         self.buffer_stalled = false;
         self.pending_complete = false;
         self.last_played_snapshot = 0;
@@ -289,20 +328,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             Ok(p) => p,
             Err(e) => {
                 crate::vprintln!("[ERROR]  {e}");
-                (self.callback)(PlayerEvent::MediaError {
-                    error: e,
-                    code: MediaErrorCode::UnreadableFile,
-                    seq: self.current_seq,
-                    product_id: self.current_product_id.clone(),
-                });
-                // Settle the SDK's load() (its `mediaduration` await has no
-                // timeout); 0, not the previous track's stale current_duration.
-                (self.callback)(PlayerEvent::Duration(
-                    0.0,
-                    self.current_seq,
-                    self.current_product_id.clone(),
-                ));
-                self.abandon_failed_load();
+                self.end_failed_track(e, MediaErrorCode::UnreadableFile, None);
                 return false;
             }
         };
@@ -327,9 +353,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
         // Open cpal stream
         let device = match self.resolve_output_device() {
-            Some(d) => d,
-            None => {
-                self.abandon_failed_load();
+            Ok(d) => d,
+            Err(kind) => {
+                self.end_failed_track(
+                    "no audio output device".to_string(),
+                    MediaErrorCode::UnreadableFile,
+                    Some(kind),
+                );
                 return false;
             }
         };
@@ -339,10 +369,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             match open_output_stream(&device, source_sample_rate, source_channels, &self.volume) {
                 Some(o) => o,
                 None => {
-                    (self.callback)(PlayerEvent::DeviceError(
-                        DeviceErrorKind::FormatNotSupported,
-                    ));
-                    self.abandon_failed_load();
+                    let kind = DeviceErrorKind::FormatNotSupported;
+                    (self.callback)(PlayerEvent::DeviceError(kind));
+                    self.end_failed_track(
+                        "the output device refused the stream format".to_string(),
+                        MediaErrorCode::UnreadableFile,
+                        Some(kind),
+                    );
                     return false;
                 }
             };
@@ -400,8 +433,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }) else {
             // Same shape as the cpal-open failure above. The endpoint is open but nothing
             // will feed it; the load is abandoned rather than announced as Ready.
-            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
-            self.abandon_failed_load();
+            let kind = DeviceErrorKind::Unknown;
+            (self.callback)(PlayerEvent::DeviceError(kind));
+            self.end_failed_track(
+                "the decode thread could not start".to_string(),
+                MediaErrorCode::UnreadableFile,
+                Some(kind),
+            );
             return false;
         };
 
@@ -450,6 +488,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.current_seq,
             self.current_product_id.clone(),
         ));
+        self.duration_announced = true;
 
         let bitrate = if self.current_duration > 0.0 {
             (total_len as f64 * 8.0 / self.current_duration / 1000.0) as u32

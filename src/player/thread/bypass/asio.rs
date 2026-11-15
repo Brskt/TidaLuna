@@ -3,7 +3,7 @@ use crate::player::asio::host::{AsioEvent, AsioHandle};
 use crate::player::packet_failure::PacketFailure;
 use crate::player::thread::PlayerThread;
 use crate::player::thread::playback::stream_state_seq;
-use crate::player::{ASIO_STREAM_SEQ, DeviceErrorKind, PlaybackState, PlayerEvent};
+use crate::player::{ASIO_STREAM_SEQ, DeviceErrorKind, MediaErrorCode, PlaybackState, PlayerEvent};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -292,6 +292,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 self.current_seq,
                                 self.current_product_id.clone(),
                             ));
+                            self.duration_announced = true;
                         }
                     }
                     AsioEvent::DriverNotFound => {
@@ -302,10 +303,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             cancel.store(true, Relaxed);
                         }
                         self.is_asio_mode = false;
-                        (self.callback)(PlayerEvent::DeviceError(
-                            DeviceErrorKind::AsioDriverNotFound,
-                        ));
-                        self.rearm_shared_after_asio_failure();
+                        let kind = DeviceErrorKind::AsioDriverNotFound;
+                        (self.callback)(PlayerEvent::DeviceError(kind));
+                        self.rearm_shared_after_asio_failure(kind);
                     }
                     AsioEvent::FormatUnsupported { stream_id } => {
                         // Scoped like `RateUnsupported` below: the channel-count half of this
@@ -320,10 +320,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                                 cancel.store(true, Relaxed);
                             }
                             self.is_asio_mode = false;
-                            (self.callback)(PlayerEvent::DeviceError(
-                                DeviceErrorKind::AsioFormatUnsupported,
-                            ));
-                            self.rearm_shared_after_asio_failure();
+                            let kind = DeviceErrorKind::AsioFormatUnsupported;
+                            (self.callback)(PlayerEvent::DeviceError(kind));
+                            self.rearm_shared_after_asio_failure(kind);
                         } else {
                             crate::vprintln!(
                                 "[ASIO] format refused for superseded stream {stream_id:?} (current {:?}); the live track keeps ASIO",
@@ -349,10 +348,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             );
                             self.asio_skip_track = self.current_track_id.clone();
                             self.is_asio_mode = false;
-                            (self.callback)(PlayerEvent::DeviceError(
-                                DeviceErrorKind::AsioRateUnsupported,
-                            ));
-                            self.rearm_shared_after_asio_failure();
+                            let kind = DeviceErrorKind::AsioRateUnsupported;
+                            (self.callback)(PlayerEvent::DeviceError(kind));
+                            self.rearm_shared_after_asio_failure(kind);
                         } else {
                             crate::vprintln!(
                                 "[ASIO] rate refused for superseded stream {stream_id:?} (current {:?}); the live track keeps ASIO",
@@ -366,8 +364,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             cancel.store(true, Relaxed);
                         }
                         self.is_asio_mode = false;
-                        (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioInitFailed));
-                        self.rearm_shared_after_asio_failure();
+                        let kind = DeviceErrorKind::AsioInitFailed;
+                        (self.callback)(PlayerEvent::DeviceError(kind));
+                        self.rearm_shared_after_asio_failure(kind);
                     }
                 }
             }
@@ -387,8 +386,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // only the thread that just died advances.
             super::super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
             self.is_asio_mode = false;
-            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::AsioBackendDied));
-            self.rearm_shared_after_asio_failure();
+            let kind = DeviceErrorKind::AsioBackendDied;
+            (self.callback)(PlayerEvent::DeviceError(kind));
+            self.rearm_shared_after_asio_failure(kind);
             self.asio_handle = None;
             return;
         }
@@ -416,10 +416,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             self.asio_skip_track = self.current_track_id.clone();
             self.is_asio_mode = false;
             self.asio_watchdog_at = None;
-            (self.callback)(PlayerEvent::DeviceError(
-                DeviceErrorKind::AsioRateUnsupported,
-            ));
-            self.rearm_shared_after_asio_failure();
+            let kind = DeviceErrorKind::AsioRateUnsupported;
+            (self.callback)(PlayerEvent::DeviceError(kind));
+            self.rearm_shared_after_asio_failure(kind);
         }
 
         // Debounced idle release (sustained pause or terminal stop): free the
@@ -498,8 +497,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// ASIO failed: re-arm a fresh shared load at the live position; the current track
     /// recovers immediately (the custom `deviceasio*` events aren't TIDAL-native, and the
     /// frontend won't re-arm). Mirrors the device.rs asio->shared switch. No-op without a track.
+    /// `kind` is the failure just reported, which ends a track nothing can re-arm.
     #[cfg(target_os = "windows")]
-    pub(super) fn rearm_shared_after_asio_failure(&mut self) {
+    pub(super) fn rearm_shared_after_asio_failure(&mut self, kind: DeviceErrorKind) {
+        let had_track = self.has_track;
         let was_playing = self.is_playing;
         self.has_track = false;
         self.is_playing = false;
@@ -526,6 +527,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             crate::vprintln!(
                 "[ASIO] fallback: non-replayable source, playback stopped (cannot re-arm shared)"
             );
+            if had_track {
+                self.end_failed_track(
+                    "ASIO failed on a track shared output cannot re-arm".into(),
+                    MediaErrorCode::UnreadableFile,
+                    Some(kind),
+                );
+            }
         }
     }
 }

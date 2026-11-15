@@ -212,6 +212,10 @@ pub(super) struct PlayerThread<F> {
     // Format of the committed track as last emitted (None for ASIO/exclusive
     // loads, which skip the shared probe); re-sent on ReassertResume.
     last_media_format: Option<MediaFormatSnapshot>,
+    // Whether the page was told the committed load's length. A load that fails before it owes the
+    // SDK a `Duration(0)` (its `mediaduration` await has no timeout); one that fails after it must
+    // not overwrite the length the media controls and the SDK hold.
+    duration_announced: bool,
     current_seq: u32,
     // The seq of the latest accepted load. `current_seq` also moves on a stop, which keeps the
     // stream of the load it stops.
@@ -429,6 +433,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             xfade_waiting_url: None,
             pending_crossfade: None,
             last_media_format: None,
+            duration_announced: false,
             current_seq: 0,
             #[cfg(target_os = "windows")]
             load_seq: 0,

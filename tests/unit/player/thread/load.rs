@@ -3,7 +3,7 @@
 
 use super::settle_load;
 use crate::player::thread::harness::{Spy, harness, load_req};
-use crate::player::{LoadRequest, PlayerCommand, PlayerEvent, ResumePolicy};
+use crate::player::{LoadRequest, PlaybackState, PlayerCommand, PlayerEvent, ResumePolicy};
 use std::sync::atomic::Ordering::Relaxed;
 
 /// A stale settle must not clear a newer in-flight load. A load that failed delivered no
@@ -72,28 +72,6 @@ async fn an_announced_length_names_the_track_its_load_carried() {
     );
 }
 
-/// A load that fails leaves nothing loaded. `committed_track` answers `Player::load`'s "same
-/// track?" on the caller thread, but `decide_play` keys on `has_track`: leaving that true let a
-/// re-assert minted before the failure resume a pipeline built from the buffer this load cancelled.
-#[tokio::test]
-async fn a_failed_load_leaves_no_track_behind() {
-    // Same reason as its siblings, and this one hid the race well: a stale generation returns
-    // false from the guard at the top of `handle_load`; the first assertion below still
-    // passed (for a reason that has nothing to do with three bytes failing to probe), and
-    // only the flag the deeper path would have cleared gave it away.
-    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
-    let mut h = harness();
-    assert!(h.player.has_track, "the harness starts on a live track");
-
-    let delivered = h.player.handle_load(load_req(3, "track-2"), false);
-
-    assert!(!delivered, "three bytes cannot probe as audio");
-    assert!(
-        !h.player.has_track,
-        "a failed load left a track flag that nothing backs"
-    );
-}
-
 /// The id and seq stamped on the last media error, the outer `Option` saying whether one was raised.
 fn last_media_error(events: &Spy) -> Option<(u32, Option<String>)> {
     events.lock().unwrap().iter().rev().find_map(|ev| match ev {
@@ -105,11 +83,15 @@ fn last_media_error(events: &Spy) -> Option<(u32, Option<String>)> {
 }
 
 /// The renderer refuses a track it loaded itself on the name its failure carries. A probe
-/// failure must name the load that failed, not the track the thread held before it.
+/// failure must name the load that failed, not the track the thread held before it. Then the
+/// SDK's load is settled with a length of 0 and the track ends: left at Playing, the OS controls
+/// and a phone go on showing a track that is gone.
 #[tokio::test]
-async fn a_probe_failure_names_the_track_its_load_carried() {
+async fn a_probe_failure_names_its_load_and_ends_the_track() {
     let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
     let mut h = harness();
+    // What the track this load replaces left standing.
+    h.player.is_playing = true;
 
     let delivered = h.player.handle_load(
         LoadRequest {
@@ -131,6 +113,25 @@ async fn a_probe_failure_names_the_track_its_load_carried() {
         last_media_error(&h.events),
         Some((7, Some("120002099".to_string())))
     );
+    let events = h.events.lock().unwrap();
+    let from_error = events
+        .iter()
+        .position(|ev| matches!(ev, PlayerEvent::MediaError { .. }))
+        .expect("the failure is reported");
+    assert!(
+        matches!(
+            &events[from_error + 1..],
+            [
+                PlayerEvent::Duration(d, 7, Some(p)),
+                PlayerEvent::StateChange(PlaybackState::Stopped, 7),
+            ] if *d == 0.0 && p == "120002099"
+        ),
+        "the error, then the length the SDK awaits, then the end: {:?}",
+        &events[from_error..]
+    );
+    assert!(!h.player.has_track && !h.player.is_playing);
+    assert!(h.player.current_track_id.is_none());
+    assert_eq!(h.player.idle_state, PlaybackState::Stopped);
 }
 
 /// A fetch that failed never reached `handle_load`: the thread still holds the previous track,
