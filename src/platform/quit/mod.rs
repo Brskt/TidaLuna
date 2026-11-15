@@ -1,15 +1,22 @@
-//! The exit every Quit takes, and what ends the process when it does not finish.
+//! Quit requests from outside the window: a signal, a console event, `terminate:`, the session
+//! ending.
 //!
-//! Once it begins a deadline stands: past it, the queued writes get a bounded flush and the
-//! process ends with status 0.
+//! Each one asks for the exit the window's own close takes, so that `main` returns and the
+//! stores close. When that exit cannot start, or has not finished by its deadline, the queued
+//! writes get a bounded flush and the process ends the way the request would have ended it.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(target_os = "windows")]
+pub(crate) mod console;
+#[cfg(unix)]
+pub(crate) mod signal;
+
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use cef::*;
 
-/// How far the process has come. Only moves forward.
+/// How far the process has come, as an outside quit request sees it. Only moves forward.
 #[repr(u8)]
 pub(crate) enum Phase {
     /// No message loop takes tasks yet; a posted exit would never run.
@@ -21,6 +28,9 @@ pub(crate) enum Phase {
 }
 
 static PHASE: AtomicU8 = AtomicU8::new(Phase::Boot as u8);
+
+/// Set by the first outside request, in the signal handler itself on Unix, and never cleared.
+static REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// What the normal exit gets before the process ends without it, when the OS sets no deadline:
 /// Chrome's bound on the same path (`EndSession`, its macOS SIGTERM watchdog).
@@ -41,9 +51,19 @@ fn phase() -> Phase {
     }
 }
 
+/// An outside quit request came in. Never cleared.
+pub(crate) fn requested() -> bool {
+    REQUESTED.load(Ordering::Acquire)
+}
+
 /// The exit has begun; the page may no longer hold it back.
 pub(crate) fn winding() -> bool {
     matches!(phase(), Phase::Winding)
+}
+
+/// A request came in or the exit began. Never cleared. An exit cannot be called off.
+pub(crate) fn exiting() -> bool {
+    requested() || winding()
 }
 
 /// Whether the exit had begun when a decision was taken. A decision that must not blame anything
@@ -56,7 +76,7 @@ pub(crate) struct Exit {
 impl Exit {
     pub(crate) fn now() -> Exit {
         Exit {
-            underway: winding(),
+            underway: exiting(),
         }
     }
 
@@ -75,7 +95,8 @@ impl Exit {
     }
 }
 
-/// Begins the exit; it must finish within [`GRACE`], or the process ends.
+/// Begins the exit, whatever asked for it; it must finish within [`GRACE`], or the process
+/// ends. An outside request's deadline and end stand.
 pub(crate) fn begin_winding() {
     begin_winding_with(GRACE);
 }
@@ -87,6 +108,7 @@ fn begin_winding_with(grace: Duration) {
     let mut pending = PENDING.0.lock().unwrap_or_else(|e| e.into_inner());
     if pending.is_none() {
         *pending = Some(Pending {
+            seen: vec![End::Ordinary],
             deadline,
             end: Some(End::Ordinary),
         });
@@ -107,23 +129,78 @@ pub(crate) fn runtime_bound() -> Duration {
     })
 }
 
-/// How the process ends when the normal exit does not finish.
+/// Where a request comes from, and how the process ends when the normal exit does not: as the
+/// request would have ended it. Equal values are one source asking again.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum End {
+    /// The signal raised again with its default action.
+    #[cfg(unix)]
+    Signal(libc::c_int),
+    /// Ctrl+C or Ctrl+Break, both the user at the console. Like the console closing, it ends with
+    /// `STATUS_CONTROL_C_EXIT`, the code Windows' own Ctrl+C handling leaves.
+    #[cfg(target_os = "windows")]
+    ConsoleInterrupt,
+    #[cfg(target_os = "windows")]
+    ConsoleClose,
+    /// What AppKit's own `terminate:` ends in, an exit with status 0.
+    #[cfg(target_os = "macos")]
+    Terminate,
     /// A quit from within the app (window, menu, tray, updater): status 0, as the exit it
     /// replaces would have left.
     Ordinary,
 }
 
 impl End {
+    /// Only Ctrl+C or Ctrl+Break pressed again means "now". The kernel ends a repeated SIGINT
+    /// or SIGTERM itself (one-shot handler); two SIGHUPs are one terminal closing, and AppKit
+    /// sends `terminate:` again for every Quit, which Chromium ignores too.
+    fn repeat_ends_now(self) -> bool {
+        match self {
+            #[cfg(unix)]
+            End::Signal(_) => false,
+            #[cfg(target_os = "windows")]
+            End::ConsoleInterrupt => true,
+            #[cfg(target_os = "windows")]
+            End::ConsoleClose => false,
+            #[cfg(target_os = "macos")]
+            End::Terminate => false,
+            End::Ordinary => false,
+        }
+    }
+
     /// Runs on a thread while others may hold locks (the exit this replaces is stuck); no exit
     /// handler runs here, as in Chromium's own forced exits.
     fn now(self) -> ! {
         match self {
+            #[cfg(unix)]
+            End::Signal(sig) => {
+                // SAFETY: Chromium's `ReraiseSignalAndExit`. The signal may still reach a handler
+                // (SIGHUP keeps ours; `initialize` or our second install may have set one) or be
+                // blocked in this thread: both are undone just before raising.
+                unsafe {
+                    let mut default: libc::sigaction = std::mem::zeroed();
+                    default.sa_sigaction = libc::SIG_DFL;
+                    libc::sigaction(sig, &default, std::ptr::null_mut());
+                    let mut set: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut set);
+                    libc::sigaddset(&mut set, sig);
+                    libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+                    libc::raise(sig);
+                    // Reached only if a handler was set again after the reset above.
+                    libc::_exit(128 + sig)
+                }
+            }
+            #[cfg(target_os = "windows")]
+            End::ConsoleInterrupt | End::ConsoleClose => {
+                terminate(windows_sys::Win32::Foundation::STATUS_CONTROL_C_EXIT as u32)
+            }
             #[cfg(target_os = "windows")]
             End::Ordinary => terminate(0),
-            #[cfg(unix)]
+            #[cfg(target_os = "macos")]
             // SAFETY: ends the process; nothing of ours is left to run.
+            End::Terminate => unsafe { libc::_exit(0) },
+            #[cfg(unix)]
+            // SAFETY: as above.
             End::Ordinary => unsafe { libc::_exit(0) },
         }
     }
@@ -198,16 +275,71 @@ fn spawn_flush(
         })
 }
 
-/// The exit under way.
+/// The exit under way, once a request or the app started it.
 struct Pending {
-    /// When the watchdog ends the process.
+    /// Requests heard so far, which tell a repeat from a new source.
+    seen: Vec<End>,
+    /// When the watchdog ends the process. Only ever moves earlier.
     deadline: Instant,
-    /// How it ends then; `None` once the watchdog took it.
+    /// How it ends then: as the outside request with the earliest deadline would have, or
+    /// [`End::Ordinary`] when none came. `None` once the watchdog took it, or when the exit
+    /// could not start and the request ends the process.
     end: Option<End>,
 }
 
-/// The watchdog waits on the condvar for the deadline.
+/// The condvar wakes the watchdog when a request moves the deadline earlier.
 static PENDING: (Mutex<Option<Pending>>, Condvar) = (Mutex::new(None), Condvar::new());
+
+/// Asks for the normal exit, which must finish within `grace` or by an earlier deadline, else the
+/// process ends as the outside request with the earliest deadline would have. A repeat from one
+/// source changes nothing, except Ctrl+C or Ctrl+Break, which ends it at once.
+pub(crate) fn request(end: End, grace: Duration) {
+    REQUESTED.store(true, Ordering::Release);
+    crate::platform::app_lock::shut_channel();
+    let deadline = Instant::now() + grace;
+    let (lock, deadline_moved) = &PENDING;
+    let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = pending.as_mut() {
+        if p.seen.contains(&end) {
+            drop(pending);
+            if end.repeat_ends_now() {
+                last_words(None, None);
+                end.now();
+            }
+        } else {
+            p.seen.push(end);
+            let earlier = deadline < p.deadline;
+            if earlier {
+                p.deadline = deadline;
+                deadline_moved.notify_all();
+            }
+            // An outside source says how the process ends, over a quit from within the app.
+            if earlier || matches!(p.end, Some(End::Ordinary)) {
+                p.end = Some(end);
+            }
+        }
+        return;
+    }
+    // Held across `post_task` without risk: CEF only queues the task, even from the UI thread
+    // (`terminate:`); the exit it runs takes this lock again only once it is released.
+    let started = match phase() {
+        Phase::Boot => false,
+        Phase::Winding => true,
+        Phase::Running => post_quit_task(),
+    };
+    // Set before the flush, keeping a racing request from ending the process twice.
+    *pending = Some(Pending {
+        seen: vec![end],
+        deadline,
+        end: started.then_some(end),
+    });
+    drop(pending);
+    if !started {
+        last_words(None, None);
+        end.now();
+    }
+    spawn_watchdog();
+}
 
 fn spawn_watchdog() {
     let watchdog = std::thread::Builder::new()
@@ -276,7 +408,7 @@ pub(crate) fn post_force_quit() {
     }
 }
 
-/// Whether CEF took the task.
+/// Holds no lock: [`request`] calls it under [`PENDING`]'s.
 fn post_quit_task() -> bool {
     let mut task = QuitTask::new(0);
     post_task(ThreadId::UI, Some(&mut task)) == 1

@@ -21,7 +21,7 @@ use std::cell::Cell;
 
 use cef::application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol};
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, NSObjectProtocol};
+use objc2::runtime::{AnyObject, Bool, NSObjectProtocol};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, define_class, extern_methods, msg_send};
 use objc2_app_kit::{NSApp, NSApplication, NSEvent};
 
@@ -60,6 +60,17 @@ define_class!(
             // super dispatches to.
             let _: () = unsafe { msg_send![super(self), sendEvent: event] };
             self.ivars().handling_send_event.set(previous);
+        }
+
+        /// Dock Quit and logout end here. AppKit's own `terminate:` calls `exit()` and `main`
+        /// never returns, leaving the stores open; this asks for the window's exit instead, as
+        /// CEF's sample application does, and never calls super.
+        #[unsafe(method(terminate:))]
+        fn request_quit(&self, _sender: Option<&AnyObject>) {
+            crate::platform::quit::request(
+                crate::platform::quit::End::Terminate,
+                crate::platform::quit::GRACE,
+            );
         }
     }
 

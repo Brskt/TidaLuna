@@ -324,6 +324,9 @@ fn main() {
     // bound find the stores closed) and before `app_lock` (no second instance opens the files
     // mid-checkpoint).
     let _close_stores = CloseStoresOnReturn;
+    // From here a quit signal flushes the queued writes before it ends the boot.
+    #[cfg(unix)]
+    platform::quit::signal::install();
 
     // Load the bootstrap settings snapshot once, off the CEF UI thread, as the
     // single source of truth: used here for the early log level + Windows console
@@ -542,6 +545,15 @@ fn main() {
             platform::refusal::InitFailure::Refused(why) => refuse_to_start(&why),
         }
     }
+
+    // A task posted now runs once the loop below starts. `initialize` reset the quit signals
+    // and gave them to Chromium, whose SIGTERM ends the process without this function returning.
+    platform::quit::enter(platform::quit::Phase::Running);
+    #[cfg(unix)]
+    platform::quit::signal::install();
+    // The console twin: Chromium's handler, registered inside `initialize`, ends the process too.
+    #[cfg(target_os = "windows")]
+    platform::quit::console::install();
 
     // Record this build's version as the anti-rollback high-water mark now that
     // the app has booted successfully (AVB-style: bump the floor on good boot).

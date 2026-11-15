@@ -246,7 +246,8 @@ tray-item = { version = "0.10.0", default-features = false, features = [
 
 [target.'cfg(unix)'.dependencies]
 # Already resolved through the graph; named here for the `SCM_CREDENTIALS` call
-# that tells who sent a datagram, which `std` still gates behind nightly.
+# that tells who sent a datagram, which `std` still gates behind nightly, and for
+# the `sigaction` that replaces Chromium's quit-signal handlers.
 libc = "0.2.191"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]

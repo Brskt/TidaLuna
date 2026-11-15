@@ -241,6 +241,12 @@ wrap_request_handler! {
             self.router.on_render_process_terminated(owned.clone());
 
             let reason = render_crash_reason(status);
+            // Once the exit began, a dying renderer is that exit reaching it (a signal sent to the
+            // whole process group), not a crash; Chrome shows no sad tab past shutdown either.
+            if crate::platform::quit::exiting() {
+                crate::vprintln!("[QUIT]   Render process {reason} (code {error_code}) during the exit");
+                return;
+            }
             let err = error_string.map(|s| s.to_string()).unwrap_or_default();
             crate::vprintln!("[CRASH]  Render process {reason} (code {error_code}) {err}");
             let log_path = write_render_crash_log(status, reason, error_code, &err);

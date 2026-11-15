@@ -465,8 +465,9 @@ pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sy
 /// Posting earlier is safe on its own. CEF finds no task runner and answers
 /// false. It also logs a warning no embedder can configure, and CEF's own
 /// internals skip that path for exactly that reason; the two callers an OS
-/// event can reach before CEF is up ask here first. Every other `post_task` in
-/// the tree sits inside a callback that already proves CEF runs.
+/// event can reach before CEF is up ask here first, an outside quit request
+/// asks `quit`'s own phase, and a posted Quit reads the answer. Every other
+/// `post_task` sits inside a callback that already proves CEF runs.
 static CONTEXT_READY: AtomicBool = AtomicBool::new(false);
 
 /// Called once, from `on_context_initialized`.
