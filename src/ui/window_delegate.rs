@@ -78,6 +78,21 @@ unsafe extern "system" fn frameless_subclass_proc(
                 }
                 0
             }
+            // Windows may end the process at any time once this returns, and a Restart Manager
+            // close (`ENDSESSION_CLOSEAPP`) would leave it running; the process ends here after the
+            // last window move, as Chrome ends itself on this message.
+            WM_ENDSESSION if wparam != 0 => {
+                let last = with_state(|state| state.pending_window_save.take())
+                    .flatten()
+                    .map(|ws| {
+                        Box::new(
+                            move |_: &mut rusqlite::Connection, sc: &mut rusqlite::Connection| {
+                                store_window_state(sc, &ws)
+                            },
+                        ) as crate::db::BoxedFn
+                    });
+                crate::platform::quit::end_session(last)
+            }
             _ => DefSubclassProc(hwnd, msg, wparam, lparam),
         }
     }

@@ -216,6 +216,17 @@ fn terminate(code: u32) -> ! {
     std::process::abort()
 }
 
+/// The session is ending: `last` and the queued writes get a bounded flush, then the process
+/// ends with status 0.
+#[cfg(target_os = "windows")]
+pub(crate) fn end_session(last: Option<crate::db::BoxedFn>) -> ! {
+    // A renderer the logoff kills, or a plugin load timing out meanwhile, then reads as the exit.
+    enter(Phase::Winding);
+    crate::platform::app_lock::shut_channel();
+    last_words(None, last);
+    terminate(0)
+}
+
 /// What a forced end still does, off the ending thread: `line`, the unshown link, `last` and
 /// the queued writes. The ending thread waits [`FLUSH_BOUND`] at most, whatever hangs (stderr, a
 /// lock); lines and writes each get a thread, neither costing the other.
