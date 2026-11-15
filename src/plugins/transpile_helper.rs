@@ -42,7 +42,8 @@ const EXIT_TIMEOUT: i32 = 3;
 pub(crate) enum Failure {
     /// The plugin's source was refused, crashed the transpiler, or outran the timeout or the cap.
     Source(String),
-    /// The helper could not run or answered nonsense, which says nothing about the plugin.
+    /// The helper could not run, answered nonsense or was stopped from outside, which says nothing
+    /// about the plugin.
     Helper(String),
 }
 
@@ -190,7 +191,35 @@ pub(crate) fn transpile(source: &str, filename: &str) -> Result<String, Failure>
         .0
         .wait()
         .map_err(|e| Failure::Helper(format!("cannot reap the transpile helper: {e}")))?;
-    decode_answer(status.success(), status.code(), &answer)
+    decode_answer(status.into(), &answer)
+}
+
+/// How the helper ended, read off the platform's status to keep the sorting pure.
+#[derive(Clone, Copy)]
+enum Ended {
+    Exited(i32),
+    #[cfg(unix)]
+    Signaled(i32),
+}
+
+impl From<std::process::ExitStatus> for Ended {
+    fn from(status: std::process::ExitStatus) -> Ended {
+        #[cfg(unix)]
+        {
+            if let Some(sig) = std::os::unix::process::ExitStatusExt::signal(&status) {
+                return Ended::Signaled(sig);
+            }
+        }
+        // Without a signal the status has a code.
+        Ended::Exited(status.code().unwrap_or(-1))
+    }
+}
+
+/// The signals sent to the app's whole group when it ends. SIGABRT (oxc's overflow, Rust's
+/// abort) and SIGKILL (the OOM killer) stay the source's.
+#[cfg(unix)]
+fn sent_from_outside(sig: i32) -> bool {
+    matches!(sig, libc::SIGINT | libc::SIGTERM | libc::SIGHUP)
 }
 
 /// Kills and reaps the helper on every way out, a panic included: a `Child` dropped alive runs on.
@@ -226,17 +255,25 @@ fn encode_answer(kind: u8, body: &str) -> Vec<u8> {
     answer
 }
 
-/// Sorts the helper's exit and answer. A crash or the helper's own timeout is the source's doing;
-/// a helper that could not do its job, or answered nothing readable, is not.
-fn decode_answer(exited_ok: bool, code: Option<i32>, answer: &[u8]) -> Result<String, Failure> {
-    if !exited_ok {
-        return Err(match code {
-            Some(EXIT_BROKEN) => {
-                Failure::Helper("the transpile helper could not do its job".to_string())
-            }
-            Some(EXIT_TIMEOUT) => Failure::timed_out(),
-            _ => Failure::Source("the transpiler crashed on this source".to_string()),
-        });
+/// Sorts the helper's exit and answer. A crash or its own timeout is the source's doing; a
+/// helper that could not do its job, answered nothing readable or was stopped from outside is not.
+fn decode_answer(ended: Ended, answer: &[u8]) -> Result<String, Failure> {
+    let failure = match ended {
+        Ended::Exited(0) => None,
+        Ended::Exited(EXIT_BROKEN) => Some(Failure::Helper(
+            "the transpile helper could not do its job".to_string(),
+        )),
+        Ended::Exited(EXIT_TIMEOUT) => Some(Failure::timed_out()),
+        #[cfg(unix)]
+        Ended::Signaled(sig) if sent_from_outside(sig) => Some(Failure::Helper(format!(
+            "the transpile helper was stopped by signal {sig}"
+        ))),
+        _ => Some(Failure::Source(
+            "the transpiler crashed on this source".to_string(),
+        )),
+    };
+    if let Some(failure) = failure {
+        return Err(failure);
     }
     match answer.split_first() {
         Some((&ANSWER_JS, js)) => String::from_utf8(js.to_vec())
@@ -249,3 +286,7 @@ fn decode_answer(exited_ok: bool, code: Option<i32>, answer: &[u8]) -> Result<St
         )),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "../../tests/unit/plugins/transpile_helper.rs"]
+mod tests;
