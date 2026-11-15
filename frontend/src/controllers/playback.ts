@@ -76,10 +76,10 @@ export const createPlaybackController = () => {
     // A refusal raises what its steps raised, after running them all. In the catch below that
     // would reach the catch of the whole notification and skip its context write: reported here.
     // It refuses the product last announced, which is the one every caller is loading.
-    const refuse = (code: string, error: string, message: string) => {
+    const refuse = (message: string) => {
         refused = true;
         try {
-            refusePlayback(code, error, message, lastTransitionId);
+            refusePlayback(message, lastTransitionId);
         } catch (e) {
             console.error("[luna:playback] refusal failed:", e);
         }
@@ -308,17 +308,11 @@ export const createPlaybackController = () => {
                                     // and it advances the queue; measured on two tracks.
                                     refusedHere = true;
                                     refuse(
-                                        "tidalunar_undecodable_profile",
-                                        "stream codec not supported by this build",
                                         "TidaLunar cannot play music below 320 kbps for the moment. Please change the quality in TIDAL's settings.",
                                     );
                                 } else if (failure?.channel === DASH_PARSE_CHANNEL) {
                                     refusedHere = true;
-                                    refuse(
-                                        "tidalunar_manifest_unreadable",
-                                        "stream manifest rejected by this build",
-                                        "TidaLunar could not load this track. Please try again or pick another one.",
-                                    );
+                                    refuse("TidaLunar could not load this track. Please try again or pick another one.");
                                 }
                             }
 
@@ -329,11 +323,7 @@ export const createPlaybackController = () => {
                                 unloaded = () => {
                                     if (announcement !== announcements) return true;
                                     if (productOfStream(proxyOwnerSrc()) !== productId) return false;
-                                    refuse(
-                                        "tidalunar_manifest_unreadable",
-                                        "stream could not be loaded by this page",
-                                        "TidaLunar could not load this track. Please try again or pick another one.",
-                                    );
+                                    refuse("TidaLunar could not load this track. Please try again or pick another one.");
                                     return true;
                                 };
                                 settle();

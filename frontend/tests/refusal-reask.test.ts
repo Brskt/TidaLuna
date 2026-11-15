@@ -45,7 +45,7 @@ afterEach(() => forgetRefusal(""));
 
 const refused = (productId: string) => {
 	current = productId;
-	refusePlayback("tidalunar_load_failed", "boom", "could not load", productId);
+	refusePlayback("could not load", productId);
 };
 
 test("the refused product loaded again by TIDAL is asked for again, once", () => {

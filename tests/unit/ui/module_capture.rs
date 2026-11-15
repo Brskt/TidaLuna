@@ -247,6 +247,81 @@ fn a_restore_that_reads_no_volume_is_left_alone() {
     }
 }
 
+// TIDAL's stall watchdog and the saga after it, as two builds ship them (index-DnY8hG-p.js of
+// 2026-11-15, index-CaNNwb6Q.js of 2026.10.14): same shape, each build with its own identifiers.
+const WATCHDOG: &str = "function*qgt(){let{timeout1:e}=yield Qn({error:F(Yl),playing:F(K5),\
+timeout1:Wn(1e3),transition:F(Es)});if(e){yield P(us(`STALLED`)),yield F(Kgt);let{timeout2:e}=\
+yield Qn({error:F(Yl),playing:F(K5),timeout2:Wn(1e3)});e&&(yield P(us(`STALLED`)))}}";
+const WATCHDOG_1014: &str = "function*Iat(){let{timeout1:e}=yield Pn({error:F(ul),playing:F(K5),\
+timeout1:Vn(1e3),transition:F(Vo)});if(e){yield j(To(`STALLED`)),yield F(Fat);let{timeout2:e}=\
+yield Pn({error:F(ul),playing:F(K5),timeout2:Vn(1e3)});e&&(yield j(To(`STALLED`)))}}";
+const AFTER_WATCHDOG: &str = "function*q5(e,t={autoplay:!1}){}";
+const STOP_TYPE: &str = "var os=A(`playbackControls/STOP`);";
+
+/// Parses as a module, as the page's chunks do: an unbalancing splice fails here, not in the page.
+fn parses(js: &str) -> bool {
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::from_path(Path::new("chunk.mjs")).unwrap();
+    let parsed = oxc::parser::Parser::new(&allocator, js, source_type).parse();
+    !parsed.fatal_error && parsed.diagnostics.is_empty()
+}
+
+#[test]
+fn a_stop_ends_the_stall_watchdog_in_every_build() {
+    let src = format!("{STOP_TYPE}{WATCHDOG}{AFTER_WATCHDOG}");
+    let out = end_stall_watchdog(&src);
+    assert_eq!(
+        out,
+        format!(
+            "{STOP_TYPE}function*qgt(){{let{{timeout1:e}}=yield Qn({{timeout1:Wn(1e3),\
+             error:F(Yl),playing:F(K5),transition:F(Es),\
+             stop:F(__lunaStop=>__lunaStop.type===\"playbackControls/STOP\")}});\
+             if(e){{yield P(us(`STALLED`));let{{idle:__lunaIdle}}=yield Qn({{idle:F(Kgt),\
+             error:F(Yl),playing:F(K5),stop:F(__lunaStop=>__lunaStop.type===\"playbackControls/STOP\")}});\
+             if(!__lunaIdle)return;let{{timeout2:e}}=yield Qn({{timeout2:Wn(1e3),error:F(Yl),\
+             playing:F(K5),transition:F(Es),\
+             stop:F(__lunaStop=>__lunaStop.type===\"playbackControls/STOP\")}});\
+             e&&(yield P(us(`STALLED`)))}}}}{AFTER_WATCHDOG}"
+        )
+    );
+    assert!(parses(&out));
+    let older = end_stall_watchdog(&format!("{STOP_TYPE}{WATCHDOG_1014}"));
+    assert!(
+        older.contains("let{idle:__lunaIdle}=yield Pn({idle:F(Fat),error:F(ul),playing:F(K5),")
+    );
+    assert_eq!(older.matches("stop:F(").count(), 3);
+    assert!(parses(&older));
+}
+
+#[test]
+fn a_watchdog_of_another_shape_is_left_alone() {
+    for src in [
+        // Another timeout.
+        WATCHDOG.replacen("timeout2:Wn(1e3)", "timeout2:Wn(2e3)", 1),
+        // TIDAL fixed the second race itself.
+        WATCHDOG.replacen("timeout2:Wn(1e3)", "timeout2:Wn(1e3),transition:F(Es)", 1),
+        // Another take between the keys.
+        WATCHDOG.replacen("playing:F(K5),timeout1", "playing:G(K5),timeout1", 1),
+        // The second state is not the first one.
+        WATCHDOG.replacen("e&&(yield P(us(`STALLED`)))", "e&&(yield P(us(`IDLE`)))", 1),
+        // Not a generator.
+        WATCHDOG.replacen("function*qgt", "function qgt", 1),
+    ] {
+        assert_eq!(end_stall_watchdog(&src), src, "must not rewrite: {src}");
+    }
+}
+
+#[test]
+fn a_watchdog_signal_with_no_watchdog_behind_is_reported_inert() {
+    let src = format!("{STOP_TYPE}var o={{timeout1:1}};");
+    assert_eq!(chunk_rewrites(&src), [ChunkRewrite::EndStallWatchdog]);
+    let out = rewrite_chunk(&src).expect("the stop type and the key are the signal");
+    assert_eq!(out.js, src);
+    assert_eq!(out.inert, [ChunkRewrite::EndStallWatchdog]);
+    // Without the stop type a watchdog has no stop to take: no rewrite is called for.
+    assert!(rewrite_chunk(WATCHDOG).is_none());
+}
+
 // What the filter does to each kind of chunk, through the one call it makes.
 
 #[test]

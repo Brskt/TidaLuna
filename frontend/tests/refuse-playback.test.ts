@@ -11,7 +11,6 @@ import { StoreNotPublishedError, isStoreNotPublished } from "../plugins/lib/src/
 type Dispatch = { type: string; payload?: unknown };
 
 let dispatched: Dispatch[] = [];
-let triggered: { name: string; target: unknown }[] = [];
 // What reading the store throws: nothing once it is published.
 let storeFault: Error | null = null;
 let dispatchFault: { type: string; error: Error } | null = null;
@@ -36,10 +35,11 @@ mock.module("../plugins/lib/src/redux/store", storeStub);
 
 const { refusePlayback } = await import("../src/refuse-playback");
 
-const refuse = () => refusePlayback("tidalunar_test", "why", "the banner text");
+const refuse = () => refusePlayback("the banner text");
 const all = [
 	"playbackControls/STOP",
 	"playbackControls/SET_PLAYBACK_STATE",
+	"player/ERROR",
 	"message/MESSAGE_ERROR",
 ];
 
@@ -48,13 +48,9 @@ const realWarn = console.warn;
 
 beforeEach(() => {
 	dispatched = [];
-	triggered = [];
 	warned = [];
 	storeFault = null;
 	dispatchFault = null;
-	(window as any).NativePlayerComponent = {
-		trigger: (name: string, target: unknown) => void triggered.push({ name, target }),
-	};
 	console.warn = (...args: unknown[]) => void warned.push(args);
 });
 
@@ -62,21 +58,22 @@ afterEach(() => {
 	console.warn = realWarn;
 });
 
-test("a refusal stops the track, clears the stall and banners, in that order", () => {
+test("a refusal stops the track, clears the stall, ends TIDAL's watchdog and banners, in that order", () => {
 	refuse();
 
-	expect(triggered).toEqual([{ name: "mediaerror", target: { error: "why", errorCode: "tidalunar_test" } }]);
+	// The error goes through the store, after the IDLE a parked watchdog waits on.
 	expect(dispatched.map((d) => d.type)).toEqual(all);
 	expect(dispatched[1]).toEqual({ type: "playbackControls/SET_PLAYBACK_STATE", payload: "IDLE" });
+	// No code: TIDAL's error saga only logs it. A payload its reducer can read.
+	expect(dispatched[2]).toStrictEqual({ type: "player/ERROR", payload: { errorCode: undefined, errorId: "EUnexpected" } });
 	expect(warned).toEqual([]);
 });
 
-test("a refusal before the store is published does not throw, still raises the error on the element, and says so", () => {
+test("a refusal before the store is published does not throw, and says so", () => {
 	storeFault = new StoreNotPublishedError();
 
 	expect(refuse).not.toThrow();
 
-	expect(triggered).toEqual([{ name: "mediaerror", target: { error: "why", errorCode: "tidalunar_test" } }]);
 	expect(dispatched).toEqual([]);
 	expect(warned.length).toBe(1);
 	expect(String(warned[0]?.[0])).toContain("refusePlayback");
@@ -99,7 +96,6 @@ test("a store that throws for another reason is not taken for an unpublished one
 	expect(refuse).toThrow("several steps failed");
 
 	expect(warned).toEqual([]);
-	expect(triggered.map((t) => t.name)).toEqual(["mediaerror"]);
 });
 
 test("a reducer that throws is raised, after the steps behind it ran", () => {
@@ -107,17 +103,8 @@ test("a reducer that throws is raised, after the steps behind it ran", () => {
 
 	expect(refuse).toThrow("reducer exploded");
 
-	expect(triggered.map((t) => t.name)).toEqual(["mediaerror"]);
 	expect(dispatched.map((d) => d.type)).toEqual(all.slice(1));
 	expect(warned).toEqual([]);
-});
-
-test("a page without the player bridge still gets its store steps", () => {
-	(window as any).NativePlayerComponent = undefined;
-
-	expect(refuse).not.toThrow();
-
-	expect(dispatched.map((d) => d.type)).toEqual(all);
 });
 
 test("the unpublished store is recognised by its type: not by its message, and across bundles", () => {

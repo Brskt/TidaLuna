@@ -109,13 +109,13 @@ test("a load refused for a cast is settled and refused, not left waiting", () =>
 
 	// 0: the SDK's unknown-duration sentinel.
 	expect(triggered).toContainEqual({ name: "mediaduration", target: 0 });
-	// `refusePlayback`'s unit: an error code outside TIDAL's map, and STOP, IDLE, the banner in
-	// that order.
-	expect(triggered).toContainEqual({
-		name: "mediaerror",
-		target: { error: "a TIDAL Connect controller owns the player", errorCode: "tidalunar_cast_owns_player" },
-	});
-	expect(types()).toEqual(["playbackControls/STOP", "playbackControls/SET_PLAYBACK_STATE", "message/MESSAGE_ERROR"]);
+	// `refusePlayback`'s unit: STOP, IDLE, an error TIDAL only logs, the banner, in that order.
+	expect(types()).toEqual([
+		"playbackControls/STOP",
+		"playbackControls/SET_PLAYBACK_STATE",
+		"player/ERROR",
+		"message/MESSAGE_ERROR",
+	]);
 	expect(dispatched[1]).toEqual({ type: "playbackControls/SET_PLAYBACK_STATE", payload: "IDLE" });
 	// Claimed by its own arm, not warned as an unhandled event.
 	expect(warned).toEqual([]);

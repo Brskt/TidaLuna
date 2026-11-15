@@ -80,7 +80,7 @@ const freshRow = () => {
 };
 
 const refuse = (id?: string) => {
-	refusePlayback("tidalunar_load_failed", "boom", "could not load", id);
+	refusePlayback("could not load", id);
 	dispatched = [];
 	sent.length = 0;
 };

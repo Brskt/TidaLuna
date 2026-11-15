@@ -240,11 +240,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             // race, leaving the spinner turning over a player that will never resume.
             // Rust has already waited thirty seconds for the bytes; this is the answer
             // to their never arriving, and it must not advance the queue.
-            refusePlayback(
-                "tidalunar_network_lost",
-                "no bytes for 30s",
-                "TidaLunar cannot play music without an internet connection. Please try again when you're connected.",
-            );
+            refusePlayback("TidaLunar cannot play music without an internet connection. Please try again when you're connected.");
         } else if (type === "mediacastowned") {
             // Rust refused a load: a TIDAL Connect controller owns the player. `load` names the
             // SDK load refused (none for a self-load, which the SDK does not wait on). The SDK
@@ -255,11 +251,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             // and its play is for the refused track, which would resume the cast's instead.
             const refusal: LoadRefusal | undefined = sdkLoad ? bridge.refuseLoad?.(event.v.load) : undefined;
             if (!sdkLoad || refusal?.kind === "pick") {
-                refusePlayback(
-                    "tidalunar_cast_owns_player",
-                    "a TIDAL Connect controller owns the player",
-                    "App is being controlled via another client. Disconnect to control the app again.",
-                );
+                refusePlayback("App is being controlled via another client. Disconnect to control the app again.");
                 if (sdkLoad) bridge.trigger("mediaduration", 0);
             } else if (refusal?.kind === "automatic") {
                 // Nobody asked, nobody is told; the transport stays the cast's.
@@ -287,8 +279,6 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             // and the failure is dropped rather than put under the track they moved to.
             if (loadOwner === "current") {
                 refusePlayback(
-                    "tidalunar_load_failed",
-                    String(event.v?.error ?? ""),
                     "TidaLunar could not load this track. Please try again or pick another one.",
                     String(event.v?.productId ?? ""),
                 );

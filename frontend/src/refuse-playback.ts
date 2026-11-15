@@ -106,23 +106,17 @@ export function playOnRefusal(): PlayOnRefusal {
  * the listener has started since). Anything else that goes wrong is raised after the last step,
  * for the caller's batch to report.
  *
- * The five steps are one unit and the order is load-bearing, found after five
- * attempts that each looked like a fix. TIDAL arms a one second
- * race on every autoplay load: without an error it writes SET_PLAYBACK_STATE("STALLED"),
- * whose reducer forces the desired state back to PLAYING; a STOP posted alone is
- * undone a second later and the spinner never clears.
- *
- * `errorCode` must stay OUTSIDE TIDAL's three-key map (`file_checksum_mismatch`,
- * `no_such_file`, `unreadable_file`). A mapped code raises a second banner beside ours,
- * and `S3016` is the one code that advances the queue, which is the opposite of
- * refusing. An unknown code takes the log-only branch while still raising
- * `player/ERROR`, which is what wins the race.
+ * TIDAL arms a one second watchdog on every autoplay load: unless something ends it, it writes
+ * SET_PLAYBACK_STATE("STALLED"), whose reducer forces the desired state back to PLAYING, and the
+ * spinner never clears. The STOP ends it once `end_stall_watchdog` (module_capture.rs) has rewritten it.
+ * The `player/ERROR` ends it on a build where that rewrite went inert, and only after the IDLE: a
+ * watchdog parked on that IDLE takes no error before it.
  *
  * `productId` is the product this page could not load, which the listener's Play asks for again
  * (`playOnRefusal`). A refusal that is not this page's load failing names none: a cast owning the
  * player and a lost network leave Rust with the track a Play must go on resuming.
  */
-export function refusePlayback(errorCode: string, error: string, message: string, productId = ""): void {
+export function refusePlayback(message: string, productId = ""): void {
     refusal = productId === "" ? null : { productId, stage: "standing" };
     releasePlay();
     const failures: unknown[] = [];
@@ -141,12 +135,6 @@ export function refusePlayback(errorCode: string, error: string, message: string
 
     // The element stops announcing itself ready, or the spinner starts over.
     proxyFail();
-    // `mediaerror` is the sanctioned channel: the SDK listens on this component and
-    // reads `e.target.errorCode`.
-    attempt(() =>
-        (window as { NativePlayerComponent?: { trigger?: (name: string, payload: unknown) => void } })
-            .NativePlayerComponent?.trigger?.("mediaerror", { error, errorCode }),
-    );
     // TIDAL's own pairing for a failure on the current track. STOP is grouped with
     // PAUSE in the reducer, never with SKIP_NEXT. It also stops Rust's track when this page
     // loaded it (the STOP interceptor in index.ts): the SDK's reset() leaves that one playing.
@@ -154,9 +142,12 @@ export function refusePlayback(errorCode: string, error: string, message: string
     // Clears a STALLED already posted, without rewriting the intent the way
     // PLAYING and STALLED both do.
     attempt(() => store().dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: "IDLE" }));
+    // No `errorCode`: TIDAL's error saga then only logs, where a code would raise a banner of its
+    // own or, for `S3016`, advance the queue. Its reducer reads the payload, which must exist.
+    attempt(() => store().dispatch({ type: "player/ERROR", payload: { errorCode: undefined, errorId: "EUnexpected" } }));
     attempt(() => showErrorBanner(store(), "PLAYBACK", message));
 
-    if (storeMissing) console.warn("[refusePlayback] store not published: STOP, IDLE and banner dropped");
+    if (storeMissing) console.warn("[refusePlayback] store not published: STOP, IDLE, ERROR and banner dropped");
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, "[refusePlayback] several steps failed");
 }

@@ -8,7 +8,8 @@
 //!
 //! `tap_saga_put` reaches what no export carries either, the one path a saga's `put` takes
 //! to the store; `route_volume_restore` hands the page-load choice between
-//! TIDAL's saved volume and Rust's level to the early runtime. Both are no-ops on a miss too.
+//! TIDAL's saved volume and Rust's level to the early runtime; `end_stall_watchdog` lets a STOP
+//! end TIDAL's stall watchdog. All three are no-ops on a miss too.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -76,6 +77,7 @@ pub(crate) enum ChunkRewrite {
     /// captured namespaces hold.
     TagCreateRoot,
     RouteVolumeRestore,
+    EndStallWatchdog,
     /// Append a capture of the chunk's exports under this module id.
     Capture(&'static str),
 }
@@ -107,6 +109,9 @@ pub(crate) fn chunk_rewrites(js: &str) -> Vec<ChunkRewrite> {
     }
     if js.contains(RESTORE_ACTION) {
         out.push(ChunkRewrite::RouteVolumeRestore);
+    }
+    if js.contains("timeout1:") && js.contains(STOP_ACTION) {
+        out.push(ChunkRewrite::EndStallWatchdog);
     }
     for (carries, id) in [
         (js.contains(".useState="), "react"),
@@ -435,6 +440,145 @@ pub(crate) fn route_volume_restore(js: &str) -> String {
     js.to_string()
 }
 
+/// The type a refusal and TIDAL's own error path both put, the signal (with `timeout1:`) for
+/// `end_stall_watchdog`: a chunk without it has no stop for the watchdog to take.
+const STOP_ACTION: &str = "playbackControls/STOP";
+const STALL_STATE: &str = "STALLED";
+
+/// Walks a saga's text left to right, each step consuming what it names or failing the match.
+struct Cursor<'a> {
+    js: &'a str,
+    at: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn lit(&mut self, s: &str) -> Option<()> {
+        self.js[self.at..]
+            .starts_with(s)
+            .then(|| self.at += s.len())
+    }
+
+    fn ident(&mut self) -> Option<&'a str> {
+        let end = ident_end(self.js.as_bytes(), self.at);
+        (end > self.at).then(|| {
+            let id = &self.js[self.at..end];
+            self.at = end;
+            id
+        })
+    }
+
+    /// The identifier captured earlier, not the head of a longer one.
+    fn same(&mut self, id: &str) -> Option<()> {
+        self.lit(id)?;
+        let next = self.js.as_bytes().get(self.at);
+        (!next.is_some_and(|b| is_ident_byte(*b))).then_some(())
+    }
+
+    /// The quote the minifier chose, then the same one closing `text`.
+    fn quoted(&mut self, text: &str) -> Option<&'a str> {
+        let quote = self.js.get(self.at..self.at + 1)?;
+        if !matches!(quote, "`" | "\"" | "'") {
+            return None;
+        }
+        self.lit(quote)?;
+        self.lit(text)?;
+        self.lit(quote)?;
+        Some(quote)
+    }
+}
+
+/// End TIDAL's one second stall watchdog on a STOP, and on the error or PLAYING it ignores while
+/// parked on the next IDLE: released later, it paints a spinner nothing clears.
+///
+/// Every TIDAL identifier comes from the matched saga; `js` comes back unchanged on no match.
+pub(crate) fn end_stall_watchdog(js: &str) -> String {
+    let mut from = 0;
+    while let Some(rel) = js[from..].find("function*") {
+        let start = from + rel;
+        from = start + "function*".len();
+        let mut c = Cursor { js, at: from };
+        let Some(rebuilt) = (|| {
+            let name = c.ident()?;
+            c.lit("(){let{timeout1:")?;
+            let first = c.ident()?;
+            c.lit("}=yield ")?;
+            let race = c.ident()?;
+            c.lit("({error:")?;
+            let take = c.ident()?;
+            c.lit("(")?;
+            let error = c.ident()?;
+            c.lit("),playing:")?;
+            c.same(take)?;
+            c.lit("(")?;
+            let playing = c.ident()?;
+            c.lit("),timeout1:")?;
+            let delay = c.ident()?;
+            c.lit("(1e3),transition:")?;
+            c.same(take)?;
+            c.lit("(")?;
+            let transition = c.ident()?;
+            c.lit(")});if(")?;
+            c.same(first)?;
+            c.lit("){yield ")?;
+            let put = c.ident()?;
+            c.lit("(")?;
+            let set_state = c.ident()?;
+            c.lit("(")?;
+            let quote = c.quoted(STALL_STATE)?;
+            c.lit(")),yield ")?;
+            c.same(take)?;
+            c.lit("(")?;
+            let idle = c.ident()?;
+            c.lit(");let{timeout2:")?;
+            let second = c.ident()?;
+            c.lit("}=yield ")?;
+            c.same(race)?;
+            c.lit("({error:")?;
+            c.same(take)?;
+            c.lit("(")?;
+            c.same(error)?;
+            c.lit("),playing:")?;
+            c.same(take)?;
+            c.lit("(")?;
+            c.same(playing)?;
+            c.lit("),timeout2:")?;
+            c.same(delay)?;
+            c.lit("(1e3)});")?;
+            c.same(second)?;
+            c.lit("&&(yield ")?;
+            c.same(put)?;
+            c.lit("(")?;
+            c.same(set_state)?;
+            c.lit("(")?;
+            if c.quoted(STALL_STATE)? != quote {
+                return None;
+            }
+            c.lit(")))}}")?;
+            let stop = format!("stop:{take}(__lunaStop=>__lunaStop.type===\"{STOP_ACTION}\")");
+            let stalled = format!("{put}({set_state}({quote}{STALL_STATE}{quote}))");
+            let ends = format!(
+                "error:{take}({error}),playing:{take}({playing}),transition:{take}({transition}),{stop}"
+            );
+            Some(format!(
+                "function*{name}(){{let{{timeout1:{first}}}=yield {race}({{timeout1:{delay}(1e3),{ends}}});\
+                 if({first}){{yield {stalled};\
+                 let{{idle:__lunaIdle}}=yield {race}({{idle:{take}({idle}),error:{take}({error}),\
+                 playing:{take}({playing}),{stop}}});if(!__lunaIdle)return;\
+                 let{{timeout2:{second}}}=yield {race}({{timeout2:{delay}(1e3),{ends}}});\
+                 {second}&&(yield {stalled})}}}}"
+            ))
+        })() else {
+            continue;
+        };
+        let mut out = String::with_capacity(js.len() + rebuilt.len());
+        out.push_str(&js[..start]);
+        out.push_str(&rebuilt);
+        out.push_str(&js[c.at..]);
+        return out;
+    }
+    js.to_string()
+}
+
 #[derive(Debug)]
 pub(crate) struct RewrittenChunk {
     pub(crate) js: String,
@@ -458,6 +602,7 @@ pub(crate) fn rewrite_chunk(js: &str) -> Option<RewrittenChunk> {
             ChunkRewrite::TapSagaPut => tap_saga_put,
             ChunkRewrite::TagCreateRoot => tag_create_root,
             ChunkRewrite::RouteVolumeRestore => route_volume_restore,
+            ChunkRewrite::EndStallWatchdog => end_stall_watchdog,
             ChunkRewrite::Capture(id) => {
                 ids.push(id);
                 continue;

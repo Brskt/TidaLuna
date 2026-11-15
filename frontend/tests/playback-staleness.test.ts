@@ -138,24 +138,16 @@ const banners = () => dispatched.filter((d) => d.type === "message/MESSAGE_ERROR
 test("a DASH manifest Rust cannot read refuses the track that is still current", async () => {
 	// The SDK plays a DASH track through the element this page proxies; Rust never hears of
 	// it and the SDK's own play resumes what Rust still holds under this track's name.
-	const triggered: [string, any][] = [];
-	(window as any).NativePlayerComponent = { trigger: (name: string, payload: unknown) => triggered.push([name, payload]) };
-	try {
-		const controller = createPlaybackController();
-		controller.setCurrentMediaItem({ productId: "dash", type: "track" });
-		await flush();
+	const controller = createPlaybackController();
+	controller.setCurrentMediaItem({ productId: "dash", type: "track" });
+	await flush();
 
-		rejectPbi?.(manifestFailure());
-		await flush();
+	rejectPbi?.(manifestFailure());
+	await flush();
 
-		expect(stops()).toHaveLength(1);
-		expect(banners()).toHaveLength(1);
-		// The code stays outside TIDAL's table, or the refusal skips the track or doubles the banner.
-		expect(triggered).toEqual([["mediaerror", expect.objectContaining({ errorCode: "tidalunar_manifest_unreadable" })]]);
-		expect((banners()[0].payload as any).message).not.toContain("320 kbps");
-	} finally {
-		delete (window as any).NativePlayerComponent;
-	}
+	expect(stops()).toHaveLength(1);
+	expect(banners()).toHaveLength(1);
+	expect((banners()[0].payload as any).message).not.toContain("320 kbps");
 });
 
 test("a failure that does not name the stream, or no playback info at all, refuses nothing", async () => {

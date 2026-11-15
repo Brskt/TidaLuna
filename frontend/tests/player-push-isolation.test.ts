@@ -63,7 +63,7 @@ test("a refusal that fails is reported and the events behind it still arrive", (
 
 	push([{ t: "medianetworklost" }, { t: "duration", v: 215, seq: 3 }]);
 
-	expect(triggered.map((t) => t.name)).toEqual(["mediaerror", "mediaduration"]);
+	expect(triggered.map((t) => t.name)).toEqual(["mediaduration"]);
 	expect(reported.length).toBe(1);
 	expect(reported[0]?.[1]).toBe("medianetworklost");
 });

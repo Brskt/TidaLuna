@@ -49,16 +49,20 @@ beforeEach(() => {
 
 const failure = { t: "mediaerror", v: { error: "HTTP 403 Forbidden", errorCode: "no_such_file", productId: "120002099" } };
 
-test("a load this page made that failed refuses its track, under a code TIDAL has no entry for", () => {
+test("a load this page made that failed refuses its track, with an error TIDAL only logs", () => {
 	verdict = "current";
 	push([failure]);
 
 	expect(asked).toEqual(["120002099"]);
-	// One `mediaerror`, and it is the refusal's: the raw one would map to NPO01 beside it.
-	expect(triggered).toEqual([
-		{ name: "mediaerror", target: { error: "HTTP 403 Forbidden", errorCode: "tidalunar_load_failed" } },
+	// No raw `mediaerror`: it would map to NPO01, a banner beside ours. The refusal's error goes
+	// through the store.
+	expect(triggered).toEqual([]);
+	expect(types()).toEqual([
+		"playbackControls/STOP",
+		"playbackControls/SET_PLAYBACK_STATE",
+		"player/ERROR",
+		"message/MESSAGE_ERROR",
 	]);
-	expect(types()).toEqual(["playbackControls/STOP", "playbackControls/SET_PLAYBACK_STATE", "message/MESSAGE_ERROR"]);
 });
 
 test("a load this page made that failed after the listener moved on refuses nothing and says nothing", () => {
