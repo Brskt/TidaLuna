@@ -182,6 +182,10 @@ const CEF_DISABLED_FEATURES: &[&str] = &[
     // creates (`disable-extensions`). DELETE once CEF is on a Chromium branched after 2026-08-19
     // (the `AreSameWorld` fix); 153 branched before it.
     "PreventCrossWorldServiceWorkerResourceReuse",
+    // Linux: on logind's or GNOME's session end it calls `_exit(0)` from a D-Bus listener,
+    // bypassing the quit signals and the stores' close. Without it the session end reaches
+    // the app as SIGTERM, which `platform::quit` turns into the normal exit.
+    "LinuxLogindShutdownInhibitor",
 ];
 
 const CEF_ENABLED_FEATURES: &[&str] = &["PartitionAllocMemoryReclaimer"];
