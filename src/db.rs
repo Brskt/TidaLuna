@@ -138,6 +138,27 @@ fn store_of(conn: &Connection) -> String {
         .map_or_else(|| "in-memory".into(), |n| n.to_string_lossy().into_owned())
 }
 
+/// Says when a run that did not close this database left frames in its log, which a closed one
+/// deletes. Called before this session writes anything; the frames counted come from a run that
+/// did not close it, or from another process that still holds it open.
+pub(crate) fn report_unclosed_run(conn: &Connection) {
+    let frames = logged_frames(conn);
+    if frames > 0 {
+        crate::verr!(
+            "[DB]     {}: {frames} frames left in its log (unclosed run or other holder)",
+            store_of(conn)
+        );
+    }
+}
+
+/// Frames in the log at open. An error counts as none: it comes back from the open that
+/// follows, which handles it.
+fn logged_frames(conn: &Connection) -> i64 {
+    // (busy, log frames, checkpointed frames); a database not in WAL mode answers -1.
+    conn.query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| row.get(1))
+        .unwrap_or(0)
+}
+
 /// A file SQLite cannot read as a database (`CORRUPT`, `NOTADB`) is copied aside
 /// and replaced by an empty store: plugin code is fetched again, a reinstall starts disabled, and
 /// trust decisions live in settings.db. The replacement leaves a reset notice in the new store, for the
@@ -145,6 +166,7 @@ fn store_of(conn: &Connection) -> String {
 /// transient fault is no reason to discard what the user installed.
 fn open_plugins(path: &Path) -> Result<Connection, OpenError> {
     let opened = Connection::open(path).and_then(|mut conn| {
+        report_unclosed_run(&conn);
         crate::plugins::store::init_schema(&mut conn)?;
         Ok(conn)
     });
@@ -378,10 +400,10 @@ impl DbActor {
             .send(Msg::Run(Box::new(move |pc, sc| {
                 let _ = resp_tx.send(f(pc, sc));
             })))
-            .expect("db-actor thread is dead");
+            .expect("the db-actor has stopped");
         resp_rx
             .recv()
-            .expect("the db-actor operation panicked and was abandoned")
+            .expect("the db-actor dropped the operation: it panicked, or the actor stopped first")
     }
 
     /// Queue a closure on the actor thread without waiting for its result.

@@ -596,6 +596,7 @@ fn reindex(
 /// every setting as the user chose it.
 pub(crate) fn open(path: &Path) -> rusqlite::Result<(Connection, Opened)> {
     let opened = Connection::open(path).and_then(|mut conn| {
+        crate::db::report_unclosed_run(&conn);
         let vanished = Vanished {
             settings: table_vanished(&conn, &SETTINGS)?,
             trust: table_vanished(&conn, &NATIVE_TRUST)?,
