@@ -12,6 +12,7 @@ pub(crate) mod install_guard;
 pub(crate) mod js_actions;
 pub(crate) mod media_controls;
 pub(crate) mod process_args;
+pub(crate) mod quit;
 pub(crate) mod refusal;
 pub(crate) mod sdk_storage;
 pub(crate) mod secure_store;

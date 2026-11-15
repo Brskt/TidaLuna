@@ -503,6 +503,12 @@ pub(super) fn close_channel() {
     }
 }
 
+pub(super) fn shut_channel() {
+    if let Some(closer) = CLOSER.get() {
+        closer.stop();
+    }
+}
+
 /// What the holder of the lock makes of the legacy name.
 pub(super) enum Legacy {
     /// Bound: an earlier build launched now hands over to this instance.

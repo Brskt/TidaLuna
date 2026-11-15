@@ -1,5 +1,4 @@
 use crate::app_state::{eval_js, open_in_os, toggle_devtools, with_state};
-use crate::ui::app_window::AppWindow;
 use cef::*;
 
 pub(crate) fn about_dialog_js() -> String {
@@ -132,16 +131,7 @@ wrap_menu_model_delegate! {
                         let _ = state.player.stop(crate::player::StopScope::Playing);
                     });
                 }
-                MenuCommand::Exit => {
-                    with_state(|state| {
-                        state.force_quit = true;
-                    });
-                    if let Some(window) = AppWindow::current() {
-                        window.close();
-                    } else {
-                        crate::app_state::quit_loop();
-                    }
-                }
+                MenuCommand::Exit => crate::platform::quit::force_quit(),
             }
         }
     }

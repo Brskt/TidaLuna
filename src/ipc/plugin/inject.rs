@@ -272,6 +272,7 @@ pub(super) async fn watch_ack(url: String, load_id: u64, ticket: Ticket) {
         let still_owed = with_state(|state| {
             timeout_owed(
                 state.ticket() == ticket,
+                crate::platform::quit::Exit::now(),
                 state.plugin_manager.last_marked(&url),
                 load_id,
             )
@@ -295,10 +296,16 @@ pub(super) async fn watch_ack(url: String, load_id: u64, ticket: Ticket) {
     }
 }
 
-/// Whether a timed-out load still owes its disable: its page is the current one and no load of the
-/// url was marked after it. The row still on is checked with the write.
-pub(super) fn timeout_owed(same_page: bool, last_marked: Option<u64>, load_id: u64) -> bool {
-    same_page && last_marked == Some(load_id)
+/// Whether a timed-out load still owes its disable: its page is the current one, the exit has not
+/// begun (the page dies with it, and the silence is not the plugin's), and no load of the url was
+/// marked after it. The row still on is checked with the write.
+pub(super) fn timeout_owed(
+    same_page: bool,
+    exit: crate::platform::quit::Exit,
+    last_marked: Option<u64>,
+    load_id: u64,
+) -> bool {
+    same_page && !exit.is_underway() && last_marked == Some(load_id)
 }
 
 /// Unload whatever load of `url` is current. Under the pass lock: no load can be marked between

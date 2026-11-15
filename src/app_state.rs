@@ -478,10 +478,11 @@ pub(crate) fn context_ready() -> bool {
     CONTEXT_READY.load(Ordering::Acquire)
 }
 
-/// Ends the message loop, turning the single-instance channel away first: a link
-/// accepted after the loop ends has no one left to show it. The page ends before the loop closes
-/// the remaining windows: plugin work still running finds its ticket gone, and writes nothing.
+/// Bounds the exit, then ends the message loop, turning the single-instance channel away first:
+/// a link accepted after the loop ends has no one left to show it. The page ends before the
+/// loop closes the remaining windows; plugin work still running finds no ticket, writes nothing.
 pub(crate) fn quit_loop() {
+    crate::platform::quit::begin_winding();
     with_state(|s| {
         s.end_page_music();
         s.end_page_plugins();

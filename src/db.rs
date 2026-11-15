@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::{JoinHandle, ThreadId};
 
-type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static>;
+pub(crate) type BoxedFn = Box<dyn FnOnce(&mut Connection, &mut Connection) + Send + 'static>;
 
 /// What the actor's channel carries.
 enum Msg {

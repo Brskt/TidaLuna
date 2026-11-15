@@ -695,6 +695,12 @@ pub(super) fn close_channel() {
     }
 }
 
+pub(super) fn shut_channel() {
+    if let Some(closer) = CLOSER.get() {
+        closer.stop();
+    }
+}
+
 /// The deadline a launch that did not get the lock works to, for the pipe and
 /// for the lock alike.
 fn handoff_deadline() -> Instant {

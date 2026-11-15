@@ -147,7 +147,9 @@ pub(crate) fn create_tray() -> bool {
         crate::vprintln!("[TRAY]   Failed to add Show item: {e}");
         return false;
     }
-    if let Err(e) = item.add_menu_item("Quit", post_force_quit) {
+    if let Err(e) = item.add_menu_item("Quit", || {
+        crate::platform::quit::post_force_quit();
+    }) {
         crate::vprintln!("[TRAY]   Failed to add Quit item: {e}");
         return false;
     }
@@ -176,26 +178,9 @@ fn show_window() {
     crate::ui::app_window::AppWindow::raise_current();
 }
 
-fn force_quit() {
-    crate::app_state::with_state(|state| {
-        state.force_quit = true;
-    });
-    if let Some(window) = crate::ui::app_window::AppWindow::current() {
-        window.close();
-    } else {
-        crate::app_state::quit_loop();
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn post_show_window() {
     let mut task = TrayShowWindowTask::new(0);
-    post_task(ThreadId::UI, Some(&mut task));
-}
-
-#[cfg(target_os = "linux")]
-fn post_force_quit() {
-    let mut task = TrayForceQuitTask::new(0);
     post_task(ThreadId::UI, Some(&mut task));
 }
 
@@ -214,7 +199,7 @@ fn poll_events() {
         if event.id == show_id {
             show_window();
         } else if event.id == quit_id {
-            force_quit();
+            crate::platform::quit::force_quit();
             return;
         }
     }
@@ -275,18 +260,6 @@ wrap_task! {
     impl Task {
         fn execute(&self) {
             show_window();
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-wrap_task! {
-    struct TrayForceQuitTask {
-        _p: u8,
-    }
-    impl Task {
-        fn execute(&self) {
-            force_quit();
         }
     }
 }

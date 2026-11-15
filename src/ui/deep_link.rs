@@ -258,12 +258,13 @@ pub(crate) fn deliver(raw: &str) {
     if let Some(target) = target_for(raw) {
         crate::vprintln!("[deep_link] accepted {}", for_log(&target));
         // Last one wins, as a browser does with two clicked links. Saying so
-        // beats dropping the first without a word.
-        if let Some(replaced) = PENDING
+        // beats dropping the first without a word. The lock is let go before the
+        // log line: a forced end takes it, and a stderr that blocks must not hold it.
+        let replaced = PENDING
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .replace(target)
-        {
+            .replace(target);
+        if let Some(replaced) = replaced {
             crate::vprintln!(
                 "[deep_link] {} superseded before it was shown",
                 for_log(&replaced)

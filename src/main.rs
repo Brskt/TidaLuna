@@ -320,8 +320,9 @@ fn main() {
     }
     let db_actor = db::DbActor::open(&data_dir).unwrap_or_else(|e| refuse_to_start(&e.refusal()));
     let _ = state::DB.set(db_actor);
-    // Locals drop in reverse: this one after the runtime declared below (no task left to
-    // write) and before `app_lock` (no second instance opens the files mid-checkpoint).
+    // Locals drop in reverse: this one after the runtime declared below (tasks left past its
+    // bound find the stores closed) and before `app_lock` (no second instance opens the files
+    // mid-checkpoint).
     let _close_stores = CloseStoresOnReturn;
 
     // Load the bootstrap settings snapshot once, off the CEF UI thread, as the
@@ -382,16 +383,18 @@ fn main() {
     #[cfg(target_os = "macos")]
     platform::url_event::install();
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|e| {
-            refuse_to_start(&format!(
-                "TidaLunar cannot start its background threads ({e}). The system may be out \
-                of threads, memory or file handles."
-            ))
-        });
-    let rt_handle = rt.handle().clone();
+    let rt = BoundedRuntime(Some(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| {
+                refuse_to_start(&format!(
+                    "TidaLunar cannot start its background threads ({e}). The system may be out \
+                    of threads, memory or file handles."
+                ))
+            }),
+    ));
+    let rt_handle = rt.handle();
     state::RT_HANDLE
         .set(rt_handle.clone())
         .expect("RT_HANDLE already initialized");
@@ -551,6 +554,29 @@ fn main() {
     wind_down();
 }
 
+/// The runtime, whose drop would wait on every blocking task still running (an update being
+/// verified, a plugin transpile). Dropped before the stores close, it leaves those tasks behind
+/// once the exit's deadline nears; the stores still close in time.
+struct BoundedRuntime(Option<tokio::runtime::Runtime>);
+
+impl BoundedRuntime {
+    fn handle(&self) -> tokio::runtime::Handle {
+        self.0
+            .as_ref()
+            .expect("present until dropped")
+            .handle()
+            .clone()
+    }
+}
+
+impl Drop for BoundedRuntime {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_timeout(platform::quit::runtime_bound());
+        }
+    }
+}
+
 /// Closes the stores on every return from `main` once the database is open.
 struct CloseStoresOnReturn;
 
@@ -565,6 +591,7 @@ impl Drop for CloseStoresOnReturn {
 fn wind_down() {
     // Already done where the loop was told to quit; this covers a loop that ended
     // some other way, and costs nothing twice.
+    platform::quit::begin_winding();
     platform::app_lock::close_channel();
 
     // Settings writes are queued, not awaited; the renderer's acknowledgement outruns the

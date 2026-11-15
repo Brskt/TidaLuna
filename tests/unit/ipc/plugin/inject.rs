@@ -84,26 +84,41 @@ fn only_a_failed_draw_or_transpile_owes_the_boot_pass_a_verdict() {
 /// meanwhile decides whether it still may: a disable written then would land on a plugin that works.
 #[test]
 fn a_timed_out_load_turns_its_plugin_off_only_if_nothing_replaced_it() {
-    for (same_page, last_marked, expected, why) in [
+    use crate::platform::quit::Exit;
+    for (same_page, exit, last_marked, expected, why) in [
         (
             true,
+            Exit::not_yet(),
             Some(4),
             true,
             "nothing changed since the load timed out",
         ),
         (
             true,
+            Exit::not_yet(),
             Some(5),
             false,
             "an enable loaded the plugin again since",
         ),
         (
             false,
+            Exit::not_yet(),
             Some(4),
             false,
             "the page changed: the next page's pass loads it",
         ),
+        (
+            true,
+            Exit::underway(),
+            Some(4),
+            false,
+            "the exit began: the page dies with it and the silence is not the plugin's",
+        ),
     ] {
-        assert_eq!(timeout_owed(same_page, last_marked, 4), expected, "{why}");
+        assert_eq!(
+            timeout_owed(same_page, exit, last_marked, 4),
+            expected,
+            "{why}"
+        );
     }
 }

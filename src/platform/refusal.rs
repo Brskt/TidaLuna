@@ -121,6 +121,9 @@ pub(crate) fn refuse_to_start(why: &str) -> ! {
     // and the channel still ours when the refusal comes after they were taken.
     crate::platform::app_lock::close_channel();
     crate::ui::deep_link::report_unshown();
+    // A flush, not a close: past `initialize` this also runs from the panic guard, with CEF
+    // threads that may still call the stores, and a call after a close panics.
+    crate::platform::quit::flush_bounded();
     if !cfg!(test) && !is_helper_process(std::env::args_os()) {
         #[cfg(target_os = "windows")]
         dialog(

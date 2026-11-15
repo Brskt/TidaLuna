@@ -255,12 +255,27 @@ pub fn vlog_err(args: std::fmt::Arguments<'_>) {
         ErrBudget::WroteAfterMissing(missed) => missed,
     };
     ensure_file_sink();
-    if missed > 0 {
-        print_log(format_args!(
-            "[LOG]    {missed} hard failures went unwritten while the budget was spent"
-        ));
-    }
-    print_log(args);
+    let now = local_now();
+    let mut lines = if missed > 0 {
+        compose_line(
+            now,
+            format_args!(
+                "[LOG]    {missed} hard failures went unwritten while the budget was spent"
+            ),
+        )
+    } else {
+        String::new()
+    };
+    // One write for both: a stderr that blocks after the first would keep the second from the file.
+    lines.push_str(&compose_line(now, args));
+    emit(&lines);
+}
+
+/// The line a forced end leaves, once per process. Outside the budget, a flood of hard failures
+/// just before cannot hide why the process ended.
+pub(crate) fn vlog_forced_end(args: std::fmt::Arguments<'_>) {
+    ensure_file_sink();
+    emit(&compose_line(local_now(), args));
 }
 
 /// One timestamped line, its newline included.
@@ -280,27 +295,36 @@ fn compose_line(now: OffsetDateTime, args: std::fmt::Arguments<'_>) -> String {
     )
 }
 
+fn local_now() -> OffsetDateTime {
+    OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
+}
+
 #[inline]
 fn print_log(args: std::fmt::Arguments<'_>) {
-    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let line = compose_line(now, args);
+    emit(&compose_line(local_now(), args));
+}
+
+fn emit(line: &str) {
     #[cfg(not(test))]
     let mut console = std::io::stderr();
     #[cfg(test)]
     let mut console = CapturedStderr;
-    write_line(&mut console, &FILE_SINK, &line);
+    write_line(&mut console, &FILE_SINK, line);
 }
 
 /// The crate's only writer to stderr, and both writes are best effort. `eprint!` panics when
 /// stderr outlives what it pointed at (a pipe whose reader exited, a full disk): an abort inside
 /// a CEF callback, a dead task elsewhere, and the line never reaching `console.log`.
 fn write_line(console: &mut impl Write, sink: &Mutex<Option<impl Write>>, line: &str) {
-    let _ = console.write_all(line.as_bytes());
-    // Callers gate themselves: vlog* past their level, vlog_err by opening the sink.
-    let mut guard = sink.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(file) = guard.as_mut() {
-        let _ = file.write_all(line.as_bytes());
+    // The file first: a stderr nobody reads blocks the write, and every logging thread behind it.
+    {
+        // Callers gate: vlog* by level, vlog_err and vlog_forced_end by opening the sink.
+        let mut guard = sink.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(file) = guard.as_mut() {
+            let _ = file.write_all(line.as_bytes());
+        }
     }
+    let _ = console.write_all(line.as_bytes());
 }
 
 /// Libtest captures what `eprint!` prints, not what goes to `io::stderr()` directly: the lines a

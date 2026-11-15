@@ -283,14 +283,10 @@ wrap_request_handler! {
                 crate::ui::crash_dialog::CRASH_DIALOG_OPEN
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 if action == crate::ui::crash_dialog::CrashAction::Quit {
-                    // Exiting here skips the drain that follows the message loop, and queued
-                    // settings writes die with the process. This runs on a tokio task, never
-                    // the actor's own thread; waiting on it is safe.
-                    crate::platform::app_lock::close_channel();
-                    crate::state::db().flush();
-                    crate::platform::secure_store::flush();
-                    crate::ui::deep_link::report_unshown();
-                    std::process::exit(0);
+                    // The exit every Quit takes closes the stores; a dead renderer has no
+                    // unload handler to wait for, and the exit's deadline bounds the rest.
+                    crate::platform::quit::post_force_quit();
+                    return;
                 }
                 if action == crate::ui::crash_dialog::CrashAction::OpenFolder
                     && let Some(dir) = log_path.as_ref().and_then(|p| p.parent())
@@ -298,7 +294,7 @@ wrap_request_handler! {
                     open_in_os(dir);
                 }
                 // Reload the main browser on the UI thread (for Reload and
-                // OpenFolder; Quit already exited above).
+                // OpenFolder; Quit returned above).
                 let mut task = crate::ui::crash_dialog::ReloadMainTask::new(0);
                 post_task(ThreadId::UI, Some(&mut task));
             });

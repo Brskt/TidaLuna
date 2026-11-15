@@ -203,6 +203,16 @@ pub(crate) fn close_channel() {
     linux_impl::close_channel();
 }
 
+/// [`close_channel`] without waiting for the listeners, for the moment an exit is decided: the
+/// sender then waits for the lock and starts with its link, instead of handing it to a process
+/// that will not show it. Never blocks.
+pub(crate) fn shut_channel() {
+    #[cfg(windows)]
+    windows_impl::shut_channel();
+    #[cfg(target_os = "linux")]
+    linux_impl::shut_channel();
+}
+
 /// Whose kernel object this is, the link pipe or the legacy lock, by the owner the
 /// kernel stamped on it. A name is a first-come claim any account can make; the
 /// owner is the one fact its creator cannot forge.

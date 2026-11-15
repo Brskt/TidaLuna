@@ -87,6 +87,16 @@ fn load_init_window_state() -> crate::settings::WindowState {
     crate::state::db().call_settings(crate::settings::load_window_state)
 }
 
+/// Writes bounds a move or resize left waiting. Maximized writes the flag alone, and the last
+/// normal bounds stay for the restore.
+fn store_window_state(sc: &mut rusqlite::Connection, ws: &crate::settings::WindowState) {
+    if ws.maximized {
+        crate::settings::save_maximized(sc, true);
+    } else {
+        crate::settings::save_window_state(sc, ws);
+    }
+}
+
 wrap_window_delegate! {
     pub(super) struct TidalWindowDelegate {
         browser_view: RefCell<Option<BrowserView>>,
@@ -306,6 +316,9 @@ wrap_window_delegate! {
                     return 0;
                 }
             }
+            // From here the window closes for real (X, Alt+F4, `window.close`): what follows
+            // waits on the database; the exit is bounded first.
+            crate::platform::quit::begin_winding();
 
             // Quit path: stop audio now instead of waiting for process teardown.
             with_state(|state| {
@@ -314,13 +327,7 @@ wrap_window_delegate! {
 
             let pending_ws = with_state(|state| state.pending_window_save.take()).flatten();
             if let Some(ws) = pending_ws {
-                crate::state::db().call_settings(move |sc| {
-                    if ws.maximized {
-                        crate::settings::save_maximized(sc, true);
-                    } else {
-                        crate::settings::save_window_state(sc, &ws);
-                    }
-                });
+                crate::state::db().call_settings(move |sc| store_window_state(sc, &ws));
             }
             let bv = self.browser_view.borrow();
             let Some(bv) = bv.as_ref() else { return 1; };
@@ -382,13 +389,7 @@ wrap_task! {
             })
             .flatten();
             if let Some(ws) = pending_ws {
-                crate::state::db().call_settings(move |sc| {
-                    if ws.maximized {
-                        crate::settings::save_maximized(sc, true);
-                    } else {
-                        crate::settings::save_window_state(sc, &ws);
-                    }
-                });
+                crate::state::db().call_settings(move |sc| store_window_state(sc, &ws));
             }
         }
     }

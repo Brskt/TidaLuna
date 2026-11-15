@@ -1,8 +1,5 @@
 use std::fs;
 
-// Names the `wrap_task!` expansion refers to unqualified, including the refcount trait.
-use cef::rc::Rc as _;
-use cef::{ImplTask, Task, WrapTask};
 use tokio_util::sync::CancellationToken;
 
 use super::UPDATER_EXE;
@@ -398,8 +395,9 @@ pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
                 match cmd.spawn() {
                     Ok(_) => {
                         crate::vprintln!("[UPDATER] Updater spawned, exiting app...");
-                        let mut task = UpdaterQuitTask::new(0);
-                        cef::post_task(cef::ThreadId::UI, Some(&mut task));
+                        // Closing the window and stopping the loop are UI-thread-only per CEF's
+                        // header; the exit is posted rather than finished inline.
+                        crate::platform::quit::post_force_quit();
                         true
                     }
                     Err(e) => {
@@ -436,27 +434,6 @@ pub(crate) fn handle_updater_apply(msg: &crate::app_state::IpcMessage) {
             );
         }
     });
-}
-
-// The exit half of `updater.apply`, posted back once the updater child is running. Closing
-// the window and stopping the message loop are UI-thread-only per CEF's own header, which is
-// why the spawn above hands this back instead of finishing inline.
-cef::wrap_task! {
-    struct UpdaterQuitTask {
-        _p: u8,
-    }
-    impl Task {
-        fn execute(&self) {
-            crate::app_state::with_state(|state| {
-                state.force_quit = true;
-            });
-            if let Some(window) = crate::ui::app_window::AppWindow::current() {
-                window.close();
-            } else {
-                crate::app_state::quit_loop();
-            }
-        }
-    }
 }
 
 /// Handle `updater.dismiss`: user clicked "Skip this version".

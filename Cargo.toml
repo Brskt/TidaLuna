@@ -239,13 +239,15 @@ security-framework = "3.7.0"
 # notification a launch that stops posts and for the folder portal.
 dbus = "0.9.12"
 flate2 = { workspace = true }
-# Already resolved through the graph; named here for the `SCM_CREDENTIALS` call
-# that tells who sent a datagram, which `std` still gates behind nightly.
-libc = "0.2.191"
 tar = { workspace = true }
 tray-item = { version = "0.10.0", default-features = false, features = [
   "ksni",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+# Already resolved through the graph; named here for the `SCM_CREDENTIALS` call
+# that tells who sent a datagram, which `std` still gates behind nightly.
+libc = "0.2.191"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1.12"
