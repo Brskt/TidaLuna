@@ -153,6 +153,34 @@ wrap_permission_handler! {
     }
 }
 
+wrap_jsdialog_handler! {
+    struct TidalJsdialogHandler {
+        _p: u8,
+    }
+    impl JsdialogHandler {
+        // Once the exit has begun (as a plain X with no tray begins it), a page's `beforeunload`
+        // gets no "Stay": an exit has no way back. Only a plugin arms one, TIDAL's upload guard
+        // being off under desktop features. Popups and an ordinary navigation keep the dialog.
+        fn on_before_unload_dialog(
+            &self,
+            browser: Option<&mut Browser>,
+            _message_text: Option<&CefString>,
+            _is_reload: ::std::os::raw::c_int,
+            callback: Option<&mut JsdialogCallback>,
+        ) -> ::std::os::raw::c_int {
+            let popup = browser.is_some_and(|b| b.is_popup() != 0);
+            if popup || !crate::platform::quit::winding() {
+                return 0;
+            }
+            let Some(callback) = callback else {
+                return 0;
+            };
+            callback.cont(1, None);
+            1
+        }
+    }
+}
+
 wrap_client! {
     pub(super) struct TidalClient {
         life_span: LifeSpanHandler,
@@ -165,6 +193,10 @@ wrap_client! {
         router: Arc<BrowserSideRouter>,
     }
     impl Client {
+        // Stateless: built per call, the generated `new` being at clippy's argument limit.
+        fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
+            Some(TidalJsdialogHandler::new(0))
+        }
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
             Some(self.life_span.clone())
         }
