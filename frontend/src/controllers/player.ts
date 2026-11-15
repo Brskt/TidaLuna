@@ -195,6 +195,14 @@ export const createNativePlayerComponent = () => {
         desiredPlaying = playing;
         sendIpc(playing ? "player.play" : "player.pause");
     };
+    // Rust moved the transport without this page asking (a native Stop, a Connect controller, a
+    // cast handed back): the intent sent last no longer holds and the next one must reach Rust.
+    const forgetStaleIntent = (state: unknown) => {
+        const stale = desiredPlaying === true
+            ? state === "paused" || state === "stopped" || state === "completed"
+            : desiredPlaying === false && state === "active";
+        if (stale) desiredPlaying = null;
+    };
     // A track/list SELECT (ADD_TRACK_LIST) sets this; the load delegate folds it into
     // player.load as the auto_play flag: the SELECTED track plays atomically with its
     // load, never a separate player.play that would resume the still-committed OLD paused
@@ -576,7 +584,10 @@ export const createNativePlayerComponent = () => {
                 if (gen < activeGen) return;
                 if (gen > activeGen) activeGen = gen;
             }
-            if (event === "mediastate") reportedState = target;
+            if (event === "mediastate") {
+                reportedState = target;
+                forgetStaleIntent(target);
+            }
             // Rust takes its staged slot at every `completed` (its own advance, or the promotion of a fade).
             if (event === "mediastate" && target === "completed") stagedProduct = null;
 
