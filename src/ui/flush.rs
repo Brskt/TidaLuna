@@ -61,8 +61,6 @@ struct PostLockEffects {
     mc: Option<crate::platform::media_controls::OsMediaControls>,
     mc_action: MediaControlAction,
     #[cfg(target_os = "windows")]
-    thumbbar: Option<crate::platform::thumbbar::ThumbBar>,
-    #[cfg(target_os = "windows")]
     thumbbar_playing: Option<bool>,
 }
 
@@ -129,20 +127,14 @@ fn run_post_lock_effects(mut effects: PostLockEffects) {
     }
 
     #[cfg(target_os = "windows")]
-    if let Some(playing) = effects.thumbbar_playing
-        && let Some(ref tb) = effects.thumbbar
-    {
-        tb.set_playing(playing);
+    if let Some(playing) = effects.thumbbar_playing {
+        crate::platform::thumbbar::set_playing(playing);
     }
 
-    // Put back media_controls and thumbbar
+    // Put back media_controls
     with_state(|state| {
         if effects.mc.is_some() {
             state.media_controls = effects.mc.take();
-        }
-        #[cfg(target_os = "windows")]
-        if effects.thumbbar.is_some() {
-            state.thumbbar = effects.thumbbar.take();
         }
     });
 
@@ -384,18 +376,11 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             false
         };
 
-        // Take media_controls/thumbbar only if needed
+        // Take media_controls only if needed
         let mc = if matches!(mc_action, MediaControlAction::None) {
             None
         } else {
             state.media_controls.take()
-        };
-
-        #[cfg(target_os = "windows")]
-        let thumbbar = if thumbbar_playing.is_some() {
-            state.thumbbar.take()
-        } else {
-            None
         };
 
         PostLockEffects {
@@ -403,8 +388,6 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
             should_schedule,
             mc,
             mc_action,
-            #[cfg(target_os = "windows")]
-            thumbbar,
             #[cfg(target_os = "windows")]
             thumbbar_playing,
         }

@@ -29,11 +29,7 @@ unsafe extern "system" fn frameless_subclass_proc(
         // Our restore-from-minimize hide/show recreates the taskbar button, wiping
         // its thumb toolbar; re-add the buttons when the taskbar signals recreation.
         if msg == *crate::platform::thumbbar::WM_TASKBAR_BUTTON_CREATED {
-            with_state(|state| {
-                if let Some(ref tb) = state.thumbbar {
-                    tb.add_buttons();
-                }
-            });
+            crate::platform::thumbbar::add_buttons();
             return DefSubclassProc(hwnd, msg, wparam, lparam);
         }
         match msg {
@@ -245,9 +241,7 @@ wrap_window_delegate! {
             {
                 let hwnd = window.window_handle().0 as windows_sys::Win32::Foundation::HWND;
                 if let Some(tb) = crate::platform::thumbbar::ThumbBar::new(hwnd) {
-                    with_state(|state| {
-                        state.thumbbar = Some(tb);
-                    });
+                    crate::platform::thumbbar::install(tb);
                 }
             }
         }

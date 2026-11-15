@@ -16,7 +16,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, HICON, ICONINFO, RegisterWindowMessageW,
 };
 
-use core::cell::Cell;
+use core::cell::{Cell, OnceCell};
+use core::mem::ManuallyDrop;
 use std::sync::LazyLock;
 
 /// `TaskbarButtonCreated` - the taskbar sends this whenever it (re)creates the
@@ -331,6 +332,37 @@ impl ThumbBar {
             }
         }
     }
+}
+
+thread_local! {
+    /// The window's toolbar, kept on the UI thread that made it and alone uses it. Its COM calls
+    /// dispatch sent messages while they wait; no lock may be held across them. Never dropped
+    /// (the release would run after COM is torn down at exit).
+    static INSTALLED: OnceCell<ManuallyDrop<ThumbBar>> = const { OnceCell::new() };
+}
+
+/// Keeps the window's toolbar; the window is built once.
+pub(crate) fn install(bar: ThumbBar) {
+    INSTALLED.with(|cell| {
+        let _ = cell.set(ManuallyDrop::new(bar));
+    });
+}
+
+/// Re-attaches the toolbar, on every `TaskbarButtonCreated`.
+pub(crate) fn add_buttons() {
+    INSTALLED.with(|cell| {
+        if let Some(bar) = cell.get() {
+            bar.add_buttons();
+        }
+    });
+}
+
+pub(crate) fn set_playing(playing: bool) {
+    INSTALLED.with(|cell| {
+        if let Some(bar) = cell.get() {
+            bar.set_playing(playing);
+        }
+    });
 }
 
 impl Drop for ThumbBar {

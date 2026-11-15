@@ -95,8 +95,6 @@ pub(crate) struct AppState {
     pub(crate) pending_ipc_callbacks: HashMap<i64, IpcCallback>,
     pub(crate) pending_window_save: Option<crate::settings::WindowState>,
     pub(crate) window_save_scheduled: bool,
-    #[cfg(target_os = "windows")]
-    pub(crate) thumbbar: Option<crate::platform::thumbbar::ThumbBar>,
     pub(crate) close_to_tray: bool,
     pub(crate) force_quit: bool,
     pub(crate) needs_proactive_refresh: bool,
@@ -286,8 +284,6 @@ impl AppState {
             pending_ipc_callbacks: HashMap::new(),
             pending_window_save: None,
             window_save_scheduled: false,
-            #[cfg(target_os = "windows")]
-            thumbbar: None,
             close_to_tray: false,
             force_quit: false,
             needs_proactive_refresh: false,
@@ -461,20 +457,6 @@ fn end_page_music(
     pending_events.clear();
     *pending_time = None;
 }
-
-// SAFETY: `thumbbar` (Windows only) holds raw `ITaskbarList3` pointers and a
-// `Cell`, and it is the sole field that is not already `Send`. Sound because the
-// taskbar object is created and used solely on the CEF UI thread. Gated to
-// Windows on purpose: elsewhere the auto-impl carries `AppState`, and a field that
-// stops being `Send` fails the build rather than being absorbed here.
-//
-// Nothing else here constrains threading: `browser` is a `RefGuard`, souvlaki's
-// `MediaControls` wraps agile WinRT objects or a channel and a `JoinHandle`, and
-// `BrowserSideCallback` is declared `Send + Sync`. Work that only calls `eval_js` or answers
-// an IPC callback may therefore run off the UI thread, `Frame::execute_java_script` reposting
-// itself onto it.
-#[cfg(target_os = "windows")]
-unsafe impl Send for AppState {}
 
 pub(crate) static APP_STATE: std::sync::OnceLock<Arc<Mutex<AppState>>> = std::sync::OnceLock::new();
 

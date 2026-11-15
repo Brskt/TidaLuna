@@ -147,9 +147,8 @@ enum MediaAction {
 fn handle_media_event(event: MediaControlEvent) {
     // souvlaki invokes this on its own SMTC (Windows) / MPRIS (Linux) thread.
     // `eval_js`/`with_state` clone and dereference the CEF `Browser`/`Frame`
-    // handles, which is only sound on the CEF UI thread - the exact invariant
-    // `unsafe impl Send for AppState` depends on. Resolve the action here, then
-    // marshal it to the UI thread before touching any of those handles.
+    // handles, which is only sound on the CEF UI thread. Resolve the action here,
+    // then marshal it to the UI thread before touching any of those handles.
     let action = match event {
         MediaControlEvent::Play | MediaControlEvent::Pause | MediaControlEvent::Toggle => {
             MediaAction::PlayPause
