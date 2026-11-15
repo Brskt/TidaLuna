@@ -221,6 +221,10 @@ pub(super) struct PlayerThread<F> {
     // stream of the load it stops.
     #[cfg(target_os = "windows")]
     load_seq: u32,
+    // The generation of the load that installed `current_buffer`: a released track is still the
+    // session's only while `CURRENT_TRACK` was last published by that load.
+    #[cfg(target_os = "windows")]
+    buffer_load_gen: Option<u32>,
     // Position tracking
     decoded_samples: Arc<AtomicU64>,
     sample_rate: u32,
@@ -437,6 +441,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             current_seq: 0,
             #[cfg(target_os = "windows")]
             load_seq: 0,
+            #[cfg(target_os = "windows")]
+            buffer_load_gen: None,
             decoded_samples: Arc::new(AtomicU64::new(0)),
             sample_rate: 44100,
             channels: 2,
@@ -717,6 +723,15 @@ fn retire_reader(cancel: &mut Option<Arc<AtomicBool>>, buffer: Option<&RamBuffer
             buf.wake_readers();
         }
     }
+}
+
+/// Whether the load stamped `load_gen` is the last one that published the listener's source.
+#[cfg(target_os = "windows")]
+fn is_published_by(load_gen: u32) -> bool {
+    crate::state::CURRENT_TRACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_published_by(load_gen)
 }
 
 /// A copy of the track `CURRENT_TRACK` retains, its lock released on return.

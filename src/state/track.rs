@@ -106,6 +106,12 @@ impl CurrentSource {
         self.published
     }
 
+    /// Whether the load stamped `load_gen` is the last one that published the source.
+    #[cfg(target_os = "windows")]
+    pub fn is_published_by(&self, load_gen: u32) -> bool {
+        self.published == Publication(load_gen)
+    }
+
     /// A load's publication, `None` for a source no replay can rebuild.
     pub fn publish_load(&mut self, load_gen: u32, track: Option<TrackInfo>) {
         #[cfg(test)]

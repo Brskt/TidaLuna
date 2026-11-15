@@ -549,6 +549,34 @@ fn a_dash_track_in_exclusive_moves_to_the_device_picked() {
     assert!(!replay_requested(&h.events));
 }
 
+/// A device pick after the track ended. Its bytes are still in memory, and restarting on them
+/// played, paused, a track the listener had finished, under a product the page had refused.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_device_pick_after_the_track_ended_brings_nothing_back() {
+    let mut h = harness();
+    let _slot = hold_a_dash_track(&mut h);
+    h.player.is_exclusive_mode = true;
+    h.player.current_device_id = Some(NO_SUCH_DEVICE_A.to_string());
+    // What every way a track ends leaves: no backend, no identity. Its load is still the last one
+    // published (the empty slot's generation): only the lost identity tells it from a release.
+    h.player.has_track = false;
+    h.player.current_track_id = None;
+    h.player.buffer_load_gen = Some(0);
+
+    h.player.handle_set_audio_device(
+        NO_SUCH_DEVICE_B.to_string(),
+        crate::player::OutputMode::Exclusive,
+    );
+
+    assert!(!h.player.has_track);
+    assert!(
+        h.player.current_exclusive_stream_id.is_none(),
+        "a decoder was spawned for a track that had ended"
+    );
+    assert!(!replay_requested(&h.events));
+}
+
 /// The exclusive toggle while a DASH track plays shared. TIDAL shows exclusive from the moment it
 /// sends this. The audio has to follow.
 #[cfg(target_os = "windows")]

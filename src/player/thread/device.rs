@@ -1,6 +1,8 @@
 use super::decode::{DecodeThreadConfig, spawn_decode_thread};
 use super::output::open_output_stream;
 use super::{DecodeCommand, PlayerThread};
+#[cfg(target_os = "windows")]
+use crate::player::MediaErrorCode;
 use crate::player::buffer::RamBuffer;
 use crate::player::{DeviceErrorKind, OutputMode, PlayerEvent};
 use std::sync::Arc;
@@ -26,9 +28,8 @@ pub(super) enum SwitchRearm {
     Reuse(RamBuffer),
     /// Bytes still arriving: a fresh load of the retained source probes cleanly.
     Replay(RetainedTrack),
-    /// Bytes still arriving and nothing retained. No load ever published a replayable source,
-    /// or a DASH load did publish its absence and has yet to land its buffer: that load is the
-    /// one the new mode plays.
+    /// Nothing to bring back here: the track ended, a newer load owns the session, or the bytes
+    /// are still arriving with nothing retained. A load in flight is the one the new mode plays.
     AwaitLoad,
 }
 
@@ -40,6 +41,55 @@ impl SwitchRearm {
             (None, Some(retained)) => Self::Replay(retained),
             (None, None) => Self::AwaitLoad,
         }
+    }
+
+    /// `choose` for what the thread holds: a track that is gone brings nothing back.
+    pub(super) fn for_held(held: Held<'_>, retained: Option<RetainedTrack>) -> Self {
+        match held {
+            Held::Track(buffer) => Self::choose(Some(buffer), retained),
+            Held::Gone => Self::AwaitLoad,
+            Held::Unheld => Self::choose(None, retained),
+        }
+    }
+}
+
+/// What the thread holds for a mode switch to bring back. A buffer outliving its track is not a
+/// track: once ended (no identity), or released and then superseded by a newer load, restarting
+/// it would play what the listener left.
+#[cfg(any(target_os = "windows", test))]
+pub(super) enum Held<'a> {
+    /// Live, or released and still the session's source.
+    Track(&'a RamBuffer),
+    Gone,
+    /// No buffer at all.
+    Unheld,
+}
+
+/// The facts `Held::of` reads, named so that two of them cannot trade places unseen.
+#[cfg(any(target_os = "windows", test))]
+pub(super) struct HeldFacts<'a> {
+    pub(super) buffer: Option<&'a RamBuffer>,
+    pub(super) has_track: bool,
+    pub(super) has_identity: bool,
+    pub(super) load_in_flight: bool,
+    /// `CURRENT_TRACK` was last published by the load that installed `buffer`.
+    pub(super) published_by_buffer: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl<'a> Held<'a> {
+    pub(super) fn of(facts: HeldFacts<'a>) -> Self {
+        let Some(buffer) = facts.buffer else {
+            return Self::Unheld;
+        };
+        // A live backend plays it: whatever loads meanwhile, the listener hears this one.
+        if facts.has_track {
+            return Self::Track(buffer);
+        }
+        if !facts.has_identity || facts.load_in_flight || !facts.published_by_buffer {
+            return Self::Gone;
+        }
+        Self::Track(buffer)
     }
 }
 
@@ -79,13 +129,55 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     fn await_load_after_switch(&mut self) {
         self.vacate_switched_track();
         crate::vprintln!(
-            "[AUDIO] nothing to rebuild the track from; the load in flight plays in the new mode"
+            "[AUDIO] nothing to bring back (ended, superseded, or still loading); a load in flight plays in the new mode"
         );
     }
 
+    /// `retained` is read first by the caller: read after the stamp, it could be a newer
+    /// load's beside a stamp that still matches this buffer.
     #[cfg(target_os = "windows")]
-    fn switch_rearm(&self) -> SwitchRearm {
-        SwitchRearm::choose(self.current_buffer.as_ref(), super::retained_track())
+    fn switch_rearm(&self, retained: Option<RetainedTrack>) -> SwitchRearm {
+        let held = Held::of(HeldFacts {
+            buffer: self.current_buffer.as_ref(),
+            has_track: self.has_track,
+            has_identity: self.current_track_id.is_some(),
+            load_in_flight: self.loading_gen.is_some(),
+            published_by_buffer: self.buffer_load_gen.is_some_and(super::is_published_by),
+        });
+        SwitchRearm::for_held(held, retained)
+    }
+
+    /// `SwitchRearm::Reuse` into shared output, a released track included: its pipeline is gone
+    /// and the rebuild installs it again, paused at its position. A released track whose rebuild is
+    /// refused ends, else the listener's Play would meet nothing to resume.
+    #[cfg(target_os = "windows")]
+    fn reuse_in_shared(&mut self, position: Option<f64>) {
+        let released = !self.has_track;
+        self.seeking = false;
+        self.seek_target = None;
+        let seek_to = self
+            .take_user_seek_override()
+            .or(position)
+            .or_else(|| {
+                self.current_track_id
+                    .as_deref()
+                    .and_then(|tid| self.resume_store.get(tid))
+            })
+            .unwrap_or(0.0);
+        match self.rebuild_held_pipeline(seek_to) {
+            Ok(()) => {}
+            Err(kind) if released => self.end_failed_track(
+                "shared output refused a released track".into(),
+                MediaErrorCode::UnreadableFile,
+                Some(kind),
+            ),
+            Err(kind) => {
+                crate::vprintln!(
+                    "[AUDIO] shared rebuild refused ({}); Play retries",
+                    kind.as_str()
+                )
+            }
+        }
     }
 
     pub(super) fn handle_set_audio_device(&mut self, id: String, mode: OutputMode) {
@@ -259,14 +351,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // polls for that. Fall back like exclusive_to_shared and asio_to_shared, but not
             // through `rearm_shared_after_asio_failure`: it re-derives its position from
             // `last_asio_pos`, stale once a session has left ASIO before.
-            match self.switch_rearm() {
+            match self.switch_rearm(super::retained_track()) {
                 SwitchRearm::Reuse(_) => {
-                    self.seeking = false;
-                    self.seek_target = None;
                     crate::vprintln!(
                         "[ASIO] spawn failed; rebuilding shared on the retained buffer"
                     );
-                    self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                    self.reuse_in_shared(position);
                 }
                 // Still streaming, and a rebuild would race the decoder probe against a
                 // moving base_offset. The track is re-loaded instead, as the siblings do.
@@ -290,7 +380,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Only a still-STREAMING buffer races the decoder probe (its base_offset
         // churns mid-download); a complete one is probe-safe (the same invariant
         // cache-hit loads rely on every day). No new load: clear the load bookkeeping.
-        match self.switch_rearm() {
+        match self.switch_rearm(super::retained_track()) {
             SwitchRearm::Reuse(buffer) => {
                 self.loading_gen = None;
                 self.pending_play = None;
@@ -368,7 +458,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // exclusive decoder on it directly, no network re-download and no idle stall.
         // The probe race that motivated the fresh load only affects a still-STREAMING
         // buffer (its base_offset churns mid-download); a complete one is probe-safe.
-        match self.switch_rearm() {
+        match self.switch_rearm(super::retained_track()) {
             SwitchRearm::Reuse(buffer) => {
                 self.loading_gen = None;
                 self.pending_play = None;
@@ -418,12 +508,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // entry must not survive into the rebuilt pipeline (it would pin the poll
         // loop at a ghost position): clear it first.
         let was_playing = self.is_playing;
-        match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
+        match self.switch_rearm(retained) {
             SwitchRearm::Reuse(_) => {
-                self.seeking = false;
-                self.seek_target = None;
                 crate::vprintln!("[AUDIO] Switched back to shared mode (retained buffer)");
-                self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                self.reuse_in_shared(position);
             }
             // Still-streaming buffer: the exclusive reader parks it mid-range, and a
             // fresh shared load probes cleanly instead of blocking the player loop.
@@ -454,14 +542,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // shared pipeline on it in place (the device-switch path), no network
         // re-download and no idle stall.
         let was_playing = self.is_playing;
-        match SwitchRearm::choose(self.current_buffer.as_ref(), retained) {
+        match self.switch_rearm(retained) {
             SwitchRearm::Reuse(_) => {
-                self.seeking = false;
-                self.seek_target = None;
                 crate::vprintln!(
                     "[AUDIO] Switched back to shared mode (from ASIO, retained buffer)"
                 );
-                self.rebuild_pipeline_at(position.unwrap_or(0.0));
+                self.reuse_in_shared(position);
             }
             SwitchRearm::Replay(retained) => {
                 crate::vprintln!("[AUDIO] Switched back to shared mode (from ASIO)");
@@ -489,20 +575,31 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
 
     /// Tear down the cpal stream and rebuild the pipeline on the resolved device at
     /// `position`, preserving play state. No-op when no track is loaded. Shared by
-    /// manual device switching and device-loss recovery.
+    /// manual device switching and device-loss recovery. A refused rebuild leaves the track
+    /// held: the listener's next Play rebuilds again (`recover_audio_device`).
     fn rebuild_pipeline_at(&mut self, position: f64) {
         if !self.has_track {
             return;
         }
+        if let Err(kind) = self.rebuild_held_pipeline(position) {
+            crate::vprintln!("[AUDIO] rebuild refused ({}); Play retries", kind.as_str());
+        }
+    }
+
+    /// Rebuild the held buffer's pipeline at `position`. The error is the device failure
+    /// already reported.
+    fn rebuild_held_pipeline(&mut self, position: f64) -> Result<(), DeviceErrorKind> {
         let was_playing = self.is_playing;
         // Sampled before stop_decode() clears it, like was_playing: only a rebuild that
         // interrupted a real transport seek may re-announce one.
         let was_seeking = self.seeking;
         self.stop_decode();
         self.cpal_stream = None;
-        if let Some(ref buffer) = self.current_buffer {
-            let buffer = buffer.clone();
-            self.rebuild_pipeline_on_device(buffer, was_playing, was_seeking, position);
+        match self.current_buffer.clone() {
+            Some(buffer) => {
+                self.rebuild_pipeline_on_device(buffer, was_playing, was_seeking, position)
+            }
+            None => Ok(()),
         }
     }
 
@@ -513,13 +610,13 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.rebuild_pipeline_at(self.effective_position());
     }
 
-    pub(super) fn rebuild_pipeline_on_device(
+    fn rebuild_pipeline_on_device(
         &mut self,
         buffer: RamBuffer,
         was_playing: bool,
         was_seeking: bool,
         seek_to: f64,
-    ) {
+    ) -> Result<(), DeviceErrorKind> {
         // Track unchanged on a switch/recovery: the format is known. Re-probing
         // here would block the player thread on a mid-stream buffer, which means
         // silence since the pipeline is already torn down. Reuse the format for the
@@ -527,17 +624,14 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         let sr = self.sample_rate;
         let ch = self.channels;
 
-        let Ok(device) = self.resolve_output_device() else {
-            return;
-        };
+        let device = self.resolve_output_device()?;
 
         let opened = match open_output_stream(&device, sr, ch, &self.volume) {
             Some(o) => o,
             None => {
-                (self.callback)(PlayerEvent::DeviceError(
-                    DeviceErrorKind::FormatNotSupported,
-                ));
-                return;
+                let kind = DeviceErrorKind::FormatNotSupported;
+                (self.callback)(PlayerEvent::DeviceError(kind));
+                return Err(kind);
             }
         };
 
@@ -581,8 +675,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }) else {
             // This function's own convention on failure: report the device and leave, rather
             // than install a pipeline whose decoder does not exist.
-            (self.callback)(PlayerEvent::DeviceError(DeviceErrorKind::Unknown));
-            return;
+            let kind = DeviceErrorKind::Unknown;
+            (self.callback)(PlayerEvent::DeviceError(kind));
+            return Err(kind);
         };
 
         let stream = opened.stream;
@@ -592,6 +687,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.decode_event_rx = Some(decode_event_rx);
         self.decode_handle = Some(decode_handle);
         self.current_buffer = Some(buffer);
+        // A released track is held again; a live one already was.
+        self.has_track = true;
 
         #[cfg(target_os = "windows")]
         self.init_volume_sync();
@@ -617,6 +714,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         if was_playing {
             self.start_playback();
         }
+        Ok(())
     }
 
     /// Resolve the configured output device (falling back to the OS default) and

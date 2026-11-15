@@ -180,6 +180,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         #[cfg(target_os = "windows")]
         {
             self.load_seq = event_seq;
+            self.buffer_load_gen = Some(load_gen);
         }
         self.cached = cached;
         self.current_format = format;
