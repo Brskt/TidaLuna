@@ -464,12 +464,9 @@ pub(super) struct Closer {
 }
 
 impl Closer {
-    /// Stops reading new datagrams and delivers what already arrived. A sender
-    /// after this gets `EPIPE`, the file staying where it is (only `bind`
-    /// removes it), and the pending link is final once this returns.
-    pub(super) fn close(&self) {
-        // Held throughout: a second caller waits for the first to be done.
-        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+    /// Stops reading new datagrams. A sender after this gets `EPIPE`, the file
+    /// staying where it is (only `bind` removes it). Idempotent, and takes no lock.
+    pub(super) fn stop(&self) {
         // Before the shutdown, which the listeners can only tell from an empty
         // datagram by this flag.
         self.closing.store(true, Ordering::Release);
@@ -480,6 +477,14 @@ impl Closer {
                 );
             }
         }
+    }
+
+    /// [`stop`](Closer::stop), then delivers what already arrived: the pending
+    /// link is final once this returns.
+    pub(super) fn close(&self) {
+        self.stop();
+        // Held throughout: a second caller waits for the first to be done.
+        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
         for listener in listeners.drain(..) {
             if !join_within(listener, Duration::from_millis(CLOSE_WAIT_MS)) {
                 crate::verr!("[LOCK]   a channel listener did not stop; a link may be left unread");

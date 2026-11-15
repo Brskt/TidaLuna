@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -493,7 +493,11 @@ fn first_instance(
         }
         Legacy::Unavailable => ptr::null_mut(),
     };
-    let closing = Arc::new(AtomicBool::new(false));
+    let wake = Arc::new(PipeWake {
+        closing: AtomicBool::new(false),
+        focus_alive: AtomicUsize::new(0),
+        pipe: names.pipe.clone(),
+    });
     // Manual-reset and unnamed: every focus listener waits on it beside its own
     // event, and it stays signalled once closing has begun.
     // SAFETY: no name, no attributes; an owned handle or null.
@@ -505,19 +509,19 @@ fn first_instance(
     let mut listeners = Listeners {
         focus: Vec::new(),
         link: None,
-        kept: Vec::new(),
     };
+    let mut kept = Vec::new();
     // SAFETY: focus_name is NUL-terminated UTF-16; auto-reset, owned handle.
     let event = unsafe { CreateEventW(&attributes, FALSE, FALSE, focus_name.as_ptr()) };
     if event.is_null() {
         unserved.push(Unserved::Focus(std::io::Error::last_os_error()));
     } else {
-        match spawn_focus_listener(event, stop) {
+        match spawn_focus_listener(event, stop, &wake) {
             Ok(listener) => listeners.focus.push(listener),
             Err(e) => {
                 // Kept until closing begins: its presence is what tells a launch
                 // this holder is not leaving, whether or not a thread reads it.
-                listeners.kept.push(SendHandle(event));
+                kept.push(SendHandle(event));
                 unserved.push(Unserved::Focus(e));
             }
         }
@@ -529,7 +533,7 @@ fn first_instance(
         if event.is_null() {
             unserved.push(Unserved::LegacyFocus(std::io::Error::last_os_error()));
         } else {
-            match spawn_focus_listener(event, stop) {
+            match spawn_focus_listener(event, stop, &wake) {
                 Ok(listener) => listeners.focus.push(listener),
                 Err(e) => {
                     // SAFETY: no thread took it; it is ours alone, closed once. An
@@ -546,7 +550,7 @@ fn first_instance(
     // caller outruns. A client arriving first got `ERROR_FILE_NOT_FOUND`,
     // and the only retry was gated on the pipe being busy instead.
     let link = match create_instance(&names.pipe) {
-        Some(pipe) => match spawn_link_listener(names.pipe.clone(), pipe, Arc::clone(&closing)) {
+        Some(pipe) => match spawn_link_listener(pipe, Arc::clone(&wake)) {
             Ok(listener) => {
                 listeners.link = Some(listener);
                 LinkChannel::Listening
@@ -566,9 +570,9 @@ fn first_instance(
         None => LinkChannel::Unavailable,
     };
     let closer = Closer {
-        closing,
+        wake,
         stop: SendHandle(stop),
-        pipe: matches!(link, LinkChannel::Listening).then(|| names.pipe.clone()),
+        kept: Mutex::new(kept),
         listeners: Mutex::new(listeners),
     };
     Some(AppLock {
@@ -583,13 +587,45 @@ fn first_instance(
     })
 }
 
-/// What turns the link pipe and the focus events away: the flag the pipe
-/// listener reads, the event the focus listeners wait on beside their own, the
-/// pipe's name to wake its listener with, and the listeners to wait for.
+/// What takes the link pipe's name down once closing has begun, and when: the
+/// focus events go first; the pipe never leaves while its holder's focus event
+/// is still there. A launch tells a leaving holder from a live one without a pipe
+/// by that event.
+struct PipeWake {
+    closing: AtomicBool,
+    /// Focus listeners still serving: the last one out wakes the pipe.
+    focus_alive: AtomicUsize,
+    pipe: Vec<u16>,
+}
+
+impl PipeWake {
+    /// The pipe listener sits in ConnectNamedPipe, which only a client ends. One
+    /// that writes nothing makes the read fail (`ERROR_BROKEN_PIPE`): nothing is
+    /// delivered, and past `closing` no next instance is made.
+    fn wake(&self) {
+        if let Some(client) = open_instance(&self.pipe) {
+            // SAFETY: our own client end, closed once and unwritten.
+            unsafe { CloseHandle(client) };
+        }
+    }
+
+    fn focus_closed(&self) {
+        // SeqCst with `Closer::stop`: this sees `closing`, or stop sees no listener left.
+        if self.focus_alive.fetch_sub(1, Ordering::SeqCst) == 1
+            && self.closing.load(Ordering::SeqCst)
+        {
+            self.wake();
+        }
+    }
+}
+
+/// What turns the link pipe and the focus events away: the wake (and its `closing`
+/// flag) the listeners share, the event the focus listeners wait on beside their own,
+/// the focus events no thread serves, and the listeners to wait for.
 pub(super) struct Closer {
-    closing: Arc<AtomicBool>,
+    wake: Arc<PipeWake>,
     stop: SendHandle,
-    pipe: Option<Vec<u16>>,
+    kept: Mutex<Vec<SendHandle>>,
     listeners: Mutex<Listeners>,
 }
 
@@ -597,44 +633,50 @@ pub(super) struct Closer {
 struct Listeners {
     focus: Vec<JoinHandle<()>>,
     link: Option<JoinHandle<()>>,
-    /// Focus events no thread serves, closed with the others.
-    kept: Vec<SendHandle>,
 }
 
 impl Closer {
-    /// Stops serving new clients and delivers what a connected one already
-    /// wrote. The pipe's name goes with its last instance. A link sent after
-    /// this finds no pipe, and its sender waits on the lock.
-    pub(super) fn close(&self) {
-        // Held throughout: a second caller waits for the first to be done.
-        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+    /// Stops serving new clients without waiting for the listeners: the focus
+    /// events go, then the pipe's name with the last focus listener, or here when
+    /// none runs. A link sent after this finds no pipe, and its sender waits on
+    /// the lock. Idempotent.
+    pub(super) fn stop(&self) {
         // Before the signals, which the listeners act on by reading it.
-        self.closing.store(true, Ordering::Release);
+        self.wake.closing.store(true, Ordering::SeqCst);
+        // Before the stop event, which may let the last focus listener take the pipe down.
+        for event in self
+            .kept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            // SAFETY: no thread waits on it and nothing else closes it; drained, each is closed once.
+            unsafe { CloseHandle(event.get()) };
+        }
         if !self.stop.get().is_null() {
             // SAFETY: the stop event is a live handle, never closed.
             unsafe { SetEvent(self.stop.get()) };
         }
-        // The focus events go first, so the pipe never leaves while its holder's
-        // focus event is still there: a launch tells a leaving holder from a live
-        // one without a pipe by that event. One deadline for the group.
+        if self.wake.focus_alive.load(Ordering::SeqCst) == 0 {
+            self.wake.wake();
+        }
+    }
+
+    /// [`stop`](Closer::stop), then waits for the listeners: what a connected
+    /// client already wrote is delivered once this returns.
+    pub(super) fn close(&self) {
+        self.stop();
+        // Held throughout: a second caller waits for the first to be done.
+        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+        // One deadline for the group.
         let deadline = Instant::now() + Duration::from_millis(CLOSE_WAIT_MS);
         for listener in listeners.focus.drain(..) {
             if !join_within(listener, deadline.saturating_duration_since(Instant::now())) {
                 crate::verr!("[LOCK]   a focus listener did not stop; its event stays open");
             }
         }
-        for event in listeners.kept.drain(..) {
-            // SAFETY: no thread waits on it and nothing else closes it; closed here, once.
-            unsafe { CloseHandle(event.get()) };
-        }
-        // The pipe listener sits in ConnectNamedPipe, which only a client ends.
-        // One that connects and writes nothing is read as an empty message.
-        if let Some(name) = &self.pipe
-            && let Some(client) = open_instance(name)
-        {
-            // SAFETY: our own client end, closed once and unwritten.
-            unsafe { CloseHandle(client) };
-        }
+        // Again: a focus listener past its deadline never woke it.
+        self.wake.wake();
         if let Some(listener) = listeners.link.take()
             && !join_within(listener, Duration::from_millis(CLOSE_WAIT_MS))
         {
@@ -753,11 +795,7 @@ fn ask_focus(focus_name: &[u16]) -> Focus {
 /// a stream, and a queue here would only let a stalled reader hide the next one.
 /// Past `closing` it serves the connection in hand and makes no next instance,
 /// the name going with the last. A failed start leaves the pipe with the caller.
-fn spawn_link_listener(
-    pipe_name: Vec<u16>,
-    first: HANDLE,
-    closing: Arc<AtomicBool>,
-) -> std::io::Result<JoinHandle<()>> {
+fn spawn_link_listener(first: HANDLE, wake: Arc<PipeWake>) -> std::io::Result<JoinHandle<()>> {
     let served = SendHandle(first);
     std::thread::Builder::new()
         .name("app-link-listener".to_owned())
@@ -770,14 +808,24 @@ fn spawn_link_listener(
                 // The next instance before this conversation ends, not after,
                 // since the name is the address clients look for and closing
                 // the only instance would take the address down with it.
-                let next = if closing.load(Ordering::Acquire) {
+                let next = if wake.closing.load(Ordering::SeqCst) {
                     None
                 } else {
-                    create_instance(&pipe_name)
+                    create_instance(&wake.pipe)
                 };
                 serve_instance(pipe);
                 match next {
-                    Some(handle) => pipe = handle,
+                    Some(handle) => {
+                        pipe = handle;
+                        // Closing began during that conversation: an earlier wake found no
+                        // free instance. With no focus listener left to wake `next`, wake it
+                        // here.
+                        if wake.closing.load(Ordering::SeqCst)
+                            && wake.focus_alive.load(Ordering::SeqCst) == 0
+                        {
+                            wake.wake();
+                        }
+                    }
                     None => return,
                 }
             }
@@ -1041,10 +1089,17 @@ fn write_link(pipe: HANDLE, url: &str) -> HandOff {
 /// closed under it is undefined; the thread that waits is the one that closes,
 /// and the name goes with it. A null `stop` is never signalled. A failed start
 /// leaves the event with the caller.
-fn spawn_focus_listener(event: HANDLE, stop: HANDLE) -> std::io::Result<JoinHandle<()>> {
+fn spawn_focus_listener(
+    event: HANDLE,
+    stop: HANDLE,
+    wake: &Arc<PipeWake>,
+) -> std::io::Result<JoinHandle<()>> {
     let served = SendHandle(event);
     let stop = SendHandle(stop);
-    std::thread::Builder::new()
+    let pipe_wake = Arc::clone(wake);
+    // Counted before it runs (the pipe cannot leave ahead of its event).
+    wake.focus_alive.fetch_add(1, Ordering::SeqCst);
+    let spawned = std::thread::Builder::new()
         .name("app-focus-listener".to_owned())
         .spawn(move || {
             let handles = [served.get(), stop.get()];
@@ -1061,7 +1116,12 @@ fn spawn_focus_listener(event: HANDLE, stop: HANDLE) -> std::io::Result<JoinHand
             }
             // SAFETY: our event, waited on nowhere else and closed once.
             unsafe { CloseHandle(served.get()) };
-        })
+            pipe_wake.focus_closed();
+        });
+    if spawned.is_err() {
+        wake.focus_alive.fetch_sub(1, Ordering::SeqCst);
+    }
+    spawned
 }
 
 #[cfg(test)]
