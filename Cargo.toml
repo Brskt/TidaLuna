@@ -50,7 +50,6 @@ version = "0.0.20-alpha"
 edition = "2024"
 description = "A native TIDAL client"
 authors = ["Inrixia"]
-homepage = "https://github.com/Inrixia/TidaLuna"
 repository = "https://github.com/Inrixia/TidaLuna"
 
 
@@ -149,7 +148,6 @@ twox-hash = { version = "2.1.5", default-features = false, features = [
 ] }
 url = "2.5.8"
 bzip2 = { workspace = true }
-zip = { workspace = true }
 openh264 = { workspace = true }
 # Direct only for the API trait codec::load_api calls, which openh264 does not re-export;
 # resolves to the crate openh264 pulls in, whose hashes.txt TARGETS copies.
@@ -204,6 +202,7 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
+zip = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already in the graph through objc2-app-kit; named here for the folder panel's
