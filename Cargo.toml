@@ -33,9 +33,11 @@ extend-ignore-identifiers-re = [
   "Cpy",            # NSIS installer macro
   "DELETEd",        # SQL DELETE, past tense, in a doc comment
   "msg_controllen", # glibc `msghdr` field: the control buffer's length
+  "Pn",             # minified identifier quoted from TIDAL's bundle in a test fixture
 ]
 extend-ignore-re = [
-  'caf\\u\{e9\}', # "café" spelled with a Unicode escape in a test
+  'caf\\u\{e9\}',          # "café" spelled with a Unicode escape in a test
+  't-device-unkown-error', # TIDAL's own i18n key, misspelled at the source
 ]
 
 [workspace.metadata.typos.default.extend-words]
