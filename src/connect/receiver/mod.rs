@@ -569,7 +569,8 @@ wrap_task! {
         fn execute(&self) {
             crate::app_state::with_state(|state| {
                 if let Some(ref mut mc) = state.media_controls {
-                    mc.set_metadata(&self.title, &self.artist, self.duration_secs);
+                    // The Connect controller hands over title, artist and length only
+                    mc.set_metadata(&self.title, &self.artist, "", None, self.duration_secs);
                 }
                 // Recorded together because the controller hands them over together. The
                 // frontend echoes this track back as a `player.metadata` frame after a
@@ -590,6 +591,7 @@ wrap_task! {
                             artist: self.artist.clone(),
                             quality: String::new(),
                             id: self.track_id.clone(),
+                            ..Default::default()
                         });
                     }
                     Err(e) => {

@@ -51,6 +51,23 @@ fn parse_media_item_artist(obj: &Value) -> String {
     String::new()
 }
 
+/// TIDAL's media item carries the album as a title string, other payloads as `{ title }`.
+fn parse_media_item_album(obj: &Value) -> String {
+    obj.get("album")
+        .and_then(|album| {
+            value_trimmed_string(album)
+                .or_else(|| album.get("title").and_then(value_trimmed_string))
+        })
+        .unwrap_or_default()
+}
+
+/// The cover the page shows (`imageUrl`, as the MediaSession artwork uses). Only http(s) urls
+/// are passed on: the OS fetches it itself.
+fn parse_cover_url(obj: &Value) -> Option<String> {
+    first_trimmed_string(obj, &["imageUrl", "coverUrl"])
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+}
+
 /// The track id off a metadata payload. `productId` is read first because that is the order the
 /// frontend resolves identity in (`item.productId ?? item.id`).
 fn parse_track_id(obj: &Value) -> Option<String> {
@@ -64,11 +81,15 @@ pub(crate) fn parse_track_metadata(payload: &Value) -> crate::state::TrackMetada
     let quality = first_trimmed_string(payload, &["audioQuality", "quality"]).unwrap_or_default();
     let artist = parse_media_item_artist(payload);
     let id = parse_track_id(payload);
+    let album = parse_media_item_album(payload);
+    let cover_url = parse_cover_url(payload);
 
     crate::state::TrackMetadata {
         title,
         artist,
         quality,
+        album,
+        cover_url,
         id,
     }
 }
