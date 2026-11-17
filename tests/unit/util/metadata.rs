@@ -51,3 +51,27 @@ fn a_track_is_identified_by_its_trimmed_product_id_else_its_id() {
         );
     }
 }
+
+/// Album and cover are read off TIDAL's media item for the OS media controls (#6).
+#[test]
+fn album_and_cover_are_read_for_the_media_controls() {
+    let meta = parse_track_metadata(&json!({
+        "title": "Automatic",
+        "album": "Lush",
+        "imageUrl": "https://resources.tidal.com/images/a/b/c/640x640.jpg",
+        "id": 1
+    }));
+    assert_eq!(meta.album, "Lush");
+    assert_eq!(
+        meta.cover_url.as_deref(),
+        Some("https://resources.tidal.com/images/a/b/c/640x640.jpg")
+    );
+
+    let nested = parse_track_metadata(&json!({ "album": { "title": "Nested" } }));
+    assert_eq!(nested.album, "Nested");
+
+    // Anything but http(s) is not handed to the OS
+    let local = parse_track_metadata(&json!({ "imageUrl": "file:///C:/x.jpg" }));
+    assert_eq!(local.cover_url, None);
+    assert_eq!(local.album, "");
+}

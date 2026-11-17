@@ -70,6 +70,8 @@ enum MediaControlAction {
     SetMetadata {
         title: String,
         artist: String,
+        album: String,
+        cover_url: Option<String>,
         duration: Option<f64>,
     },
 }
@@ -96,6 +98,8 @@ fn settle_measured_duration(
             MediaControlAction::SetMetadata {
                 title: meta.title.clone(),
                 artist: meta.artist.clone(),
+                album: meta.album.clone(),
+                cover_url: meta.cover_url.clone(),
                 duration: Some(duration),
             }
         }
@@ -117,10 +121,12 @@ fn run_post_lock_effects(mut effects: PostLockEffects) {
         MediaControlAction::SetMetadata {
             ref title,
             ref artist,
+            ref album,
+            ref cover_url,
             duration,
         } => {
             if let Some(ref mut mc) = effects.mc {
-                mc.set_metadata(title, artist, duration);
+                mc.set_metadata(title, artist, album, cover_url.as_deref(), duration);
             }
         }
         MediaControlAction::None => {}
