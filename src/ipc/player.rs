@@ -71,7 +71,7 @@ pub(crate) fn handle_ipc_message(request: &str) {
 struct PlayerIpcEffects {
     batch: Option<FlushBatch>,
     mc: Option<crate::platform::media_controls::OsMediaControls>,
-    mc_metadata: Option<(String, String, Option<f64>)>,
+    mc_metadata: Option<(crate::state::TrackMetadata, Option<f64>)>,
     clip_state: Option<crate::player::PlaybackState>,
 }
 
@@ -204,7 +204,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                 }
                 PlayerIpc::Metadata { payload } => {
                     let meta = crate::util::metadata::parse_track_metadata(&payload);
-                    let (title, artist) = (meta.title.clone(), meta.artist.clone());
+                    let announced = meta.clone();
                     let mc = state.media_controls.take();
                     // The measurement's own tag vouches for the length; the shared
                     // metadata slot cannot, being rewritten by a track's first frame.
@@ -221,7 +221,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                             crate::vprintln!("[PLAYER] CURRENT_METADATA lock poisoned: {e}")
                         }
                     }
-                    let mc_metadata = Some((title, artist, length));
+                    let mc_metadata = Some((announced, length));
                     PlayerIpcEffects {
                         mc,
                         mc_metadata,
@@ -285,9 +285,14 @@ fn handle_player_ipc(msg: &IpcMessage) {
     });
 
     if let Some(mut effects) = effects {
-        if let (Some(mc), Some((title, artist, duration))) = (&mut effects.mc, &effects.mc_metadata)
-        {
-            mc.set_metadata(title, artist, *duration);
+        if let (Some(mc), Some((meta, duration))) = (&mut effects.mc, &effects.mc_metadata) {
+            mc.set_metadata(
+                &meta.title,
+                &meta.artist,
+                &meta.album,
+                meta.cover_url.as_deref(),
+                *duration,
+            );
         }
 
         if let (Some(mc), Some(st)) = (&mut effects.mc, effects.clip_state) {
