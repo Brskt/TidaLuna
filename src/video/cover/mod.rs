@@ -9,6 +9,7 @@ mod fetch;
 mod nal;
 
 pub(crate) use decode::{
-    CoverFrame, DecodeStream, OpenError, ParameterSets, annex_b_access_unit, intern, parameter_sets,
+    CoverFrame, DecodeStream, OpenError, ParameterSets, access_unit, annex_b_access_unit, intern,
+    parameter_sets,
 };
 pub(crate) use fetch::{CoverFetchError, CoverKey, fetch_cover};

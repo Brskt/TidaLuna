@@ -5,12 +5,13 @@ use cef::*;
 
 use crate::ui::token_filter::userfree_to_string;
 
+use super::fragment::{FragmentBody, open_fragment};
 use super::frames::{FrameBody, open_frames};
 use super::store::{read_capped_body, store_answer};
 use super::video::video_answer;
 use super::{
-    Answer, COVER_SCHEME, CoverRoute, CoverShared, FRAME_STREAMS, SkipVerdict, parse_request,
-    requester_refusal,
+    Answer, COVER_SCHEME, CoverRoute, CoverShared, FRAGMENT_DEADLINE, FRAGMENT_STREAMS,
+    FRAME_STREAMS, SkipVerdict, StreamBody, parse_request, requester_refusal,
 };
 
 /// Hand one request its answer and resume CEF on its IO thread, where `cancel()` also runs: the
@@ -66,8 +67,8 @@ wrap_resource_handler! {
                 return 1;
             }
 
-            match route {
-                CoverRoute::Video => {
+            match (route, key) {
+                (CoverRoute::Video, Some(key)) => {
                     let range = userfree_to_string(
                         &request.header_by_name(Some(&CefString::from("Range"))),
                     );
@@ -88,7 +89,7 @@ wrap_resource_handler! {
                         deliver(shared, callback, answer);
                     });
                 }
-                CoverRoute::Frames => {
+                (CoverRoute::Frames, Some(key)) => {
                     let Some(slot) = FRAME_STREAMS.try_acquire() else {
                         deliver(shared, callback, Answer::refusal(429, "too many covers are being transcoded"));
                         return 1;
@@ -96,8 +97,8 @@ wrap_resource_handler! {
                     crate::state::rt_handle().spawn(async move {
                         let answer = match open_frames(&shared, &key).await {
                             Ok(stream) => {
-                                *shared.frames.lock().unwrap_or_else(|e| e.into_inner()) =
-                                    Some(FrameBody::new(stream, key, slot));
+                                *shared.stream.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(StreamBody::Frames(Box::new(FrameBody::new(stream, key, slot))));
                                 shared.streaming.store(true, Ordering::Release);
                                 Answer {
                                     status: 200,
@@ -110,7 +111,7 @@ wrap_resource_handler! {
                         deliver(shared, callback, answer);
                     });
                 }
-                CoverRoute::Store => {
+                (CoverRoute::Store, Some(key)) => {
                     let body = match read_capped_body(request, crate::video::webm::MAX_WEBM_BYTES) {
                         Ok(body) => body,
                         Err((status, why)) => {
@@ -127,6 +128,41 @@ wrap_resource_handler! {
                                 });
                         deliver(shared, callback, answer);
                     });
+                }
+                (CoverRoute::Fragment, _) => {
+                    // The slot first: a request refused for the cap costs no body copy.
+                    let Some(slot) = FRAGMENT_STREAMS.try_acquire() else {
+                        deliver(shared, callback, Answer::refusal(429, "too many video fragments are being decoded"));
+                        return 1;
+                    };
+                    let body = match read_capped_body(request, crate::video::fragment::MAX_FRAGMENT_BYTES) {
+                        Ok(body) => body,
+                        Err((status, why)) => {
+                            deliver(shared, callback, Answer::refusal(status, why));
+                            return 1;
+                        }
+                    };
+                    crate::state::rt_handle().spawn(async move {
+                        let deadline = shared.deadline(FRAGMENT_DEADLINE);
+                        let answer = match open_fragment(body, &shared.cancelled, deadline).await {
+                            Ok(decode) => {
+                                *shared.stream.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(StreamBody::Fragment(Box::new(FragmentBody::new(decode, slot))));
+                                shared.streaming.store(true, Ordering::Release);
+                                Answer {
+                                    status: 200,
+                                    mime: "application/octet-stream",
+                                    ..Answer::default()
+                                }
+                            }
+                            Err(answer) => answer,
+                        };
+                        deliver(shared, callback, answer);
+                    });
+                }
+                // `parse_request` names a cover for every route but `fragment/`.
+                (CoverRoute::Video | CoverRoute::Frames | CoverRoute::Store, None) => {
+                    deliver(shared, callback, Answer::refusal(400, "the cover request carries no src"));
                 }
             }
             1
@@ -202,23 +238,23 @@ wrap_resource_handler! {
             let out = unsafe { std::slice::from_raw_parts_mut(data_out, bytes_to_read as usize) };
 
             if self.shared.streaming.load(Ordering::Acquire) {
-                // Decoded here, on the pool sequence CEF reads on: one frame is little work, and
-                // nothing is parked waiting for one, which would hold `cancel()` back.
-                let mut frames = self.shared.frames.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(body) = frames.as_mut() else {
+                // Decoded here, on the pool sequence CEF reads on: one frame or record is little
+                // work, and nothing is parked waiting for one, which would hold `cancel()` back.
+                let mut stream = self.shared.stream.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(body) = stream.as_mut() else {
                     *br = 0;
                     return 0;
                 };
                 if self.shared.cancelled.load(Ordering::Relaxed) {
-                    *frames = None;
+                    *stream = None;
                     *br = 0;
                     return 0;
                 }
                 return match body.fill(out) {
                     Ok(0) => {
-                        // Frees the decoder, the file and the stream's slot now, not at the
+                        // Frees the decoder, its source and the stream's slot now, not at the
                         // handler's release.
-                        *frames = None;
+                        *stream = None;
                         *br = 0;
                         0
                     }
@@ -227,8 +263,8 @@ wrap_resource_handler! {
                         1
                     }
                     Err(e) => {
-                        crate::verr!("[VIDEO]   Cover frames stopped: {e}");
-                        *frames = None;
+                        crate::verr!("[VIDEO]   {} stopped: {e}", body.name());
+                        *stream = None;
                         // `ERR_FAILED`: the body ends in an error, never in a short success the
                         // page would take for the whole cover.
                         *br = -2;

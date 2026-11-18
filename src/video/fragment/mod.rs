@@ -3,7 +3,11 @@
 //!
 //! Any trusted frame may post here. Every length and count read from the body is bounded.
 
+mod decode;
 mod demux;
+
+pub(crate) use decode::FragmentDecode;
+pub(crate) use demux::{demux, parse_body};
 
 /// One request's body, init and preroll included: a 6 s segment at 1080p and 6 Mbps is 4.5 MB.
 pub(crate) const MAX_FRAGMENT_BYTES: usize = 24 * 1024 * 1024;
