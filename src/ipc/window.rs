@@ -303,6 +303,11 @@ pub(crate) fn handle_window_ipc(msg: &IpcMessage) {
                 crate::db::acknowledge_repairs(plugins, settings);
             });
         }
+        // The video codec is wanted by a caller that cannot wait (a synchronous `isTypeSupported`):
+        // fire-and-forget, the outcome arrives on `settings.video_codec_state`.
+        "settings.video_codec_demand" => {
+            crate::video::codec::note_demand();
+        }
         "settings.open_logs_dir" => {
             let dir = crate::state::cache_data_dir().join("logs");
             let _ = std::fs::create_dir_all(&dir);

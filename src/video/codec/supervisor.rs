@@ -587,6 +587,15 @@ impl Supervisor {
             .unwrap_or_else(|_| answer(&self.state.borrow().phase))
     }
 
+    /// A page's ask: the demand step runs, and the answer is the snapshot it settled on, whatever
+    /// the phase says (the page words the refusal). Only a supervisor that is gone refuses.
+    async fn ask_settled(&self) -> Result<SnapshotView, NoDecoder> {
+        match self.ask().await {
+            Ok(_) | Err(NoDecoder::Unavailable(_)) => Ok(view(&self.state.borrow())),
+            Err(NoDecoder::Stopped) => Err(NoDecoder::Stopped),
+        }
+    }
+
     /// `notify_one` stores a single permit; a burst of requests wakes the task once. Nothing to
     /// wake for unless something failed.
     fn demand(&self) {
@@ -681,6 +690,14 @@ pub(crate) fn is_ready() -> bool {
 pub(crate) async fn decoder() -> Result<PathBuf, NoDecoder> {
     match SUPERVISOR.get() {
         Some(supervisor) => supervisor.ask().await,
+        None => Err(NoDecoder::Stopped),
+    }
+}
+
+/// A clip's ask from the page: answered with the settled snapshot after the demand step.
+pub(crate) async fn settled_state() -> Result<SnapshotView, NoDecoder> {
+    match SUPERVISOR.get() {
+        Some(supervisor) => supervisor.ask_settled().await,
         None => Err(NoDecoder::Stopped),
     }
 }

@@ -205,6 +205,16 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         "settings.video_codec_state" => {
             ipc_callback_ok(&callback, &crate::video::codec::state_json());
         }
+        // A clip asks for the codec: held until the supervisor's step settled (a download under way
+        // included), then answered with its snapshot.
+        "settings.video_codec_ask" => {
+            crate::state::rt_handle().spawn(async move {
+                match crate::video::codec::settled_state().await {
+                    Ok(view) => ipc_callback_json(&callback, &view),
+                    Err(why) => ipc_callback_err(&callback, 503, why.phrase()),
+                }
+            });
+        }
         // Live: the supervisor follows once free (a download under way finishes first) and answers
         // with its snapshot after the step that took this click, holding the query that long. A
         // decode already running is not interrupted mid-frame.

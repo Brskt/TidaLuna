@@ -424,6 +424,40 @@ async fn fifty_cold_asks_share_one_download() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_page_ask_found_a_download_under_way_is_answered_after_it() {
+    let io = FakeIo::new(secs(5), never_fails);
+    let supervisor = supervising(&io);
+
+    let view = supervisor.ask_settled().await.unwrap();
+
+    assert_eq!(view.phase, PhaseView::Ready);
+}
+
+/// Held: answered at once with the reason, no wait and no fetch. Past the floor the same ask retries.
+#[tokio::test(start_paused = true)]
+async fn a_page_ask_on_a_held_failure_answers_at_once_then_retries_past_the_floor() {
+    let io = FakeIo::new(secs(1), not_found);
+    let supervisor = supervising(&io);
+    live(&supervisor, false, 5).await;
+
+    let before = tokio::time::Instant::now();
+    let held = supervisor.ask_settled().await.unwrap();
+    assert_eq!(tokio::time::Instant::now(), before);
+    assert_eq!(
+        held.phase,
+        PhaseView::Failed {
+            reason: FailureClass::Refused.phrase(),
+            recovery: Recovery::OnDemand
+        }
+    );
+    assert_eq!(io.count(|s| &s.fetches), 1);
+
+    live(&supervisor, false, 30).await;
+    supervisor.ask_settled().await.unwrap();
+    assert_eq!(io.count(|s| &s.fetches), 2);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_file_removed_at_boot_is_downloaded_at_once() {
     let io = FakeIo::new(secs(1), never_fails);
     io.0.removed_once

@@ -23,6 +23,7 @@ import { bannerScreen, deliverStoreRepair, observeMutations } from "./store-repa
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
 import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
+import { watchCodecState } from "./video/codec-state";
 import { invokeIpc, invokeIpcAs, sendIpc, sendIpcAs, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
 
@@ -483,6 +484,7 @@ const init = async () => {
             () => require("../plugins/lib/src/redux/store").store.__lunaRawDispatch,
         );
         void startSdkPlayer();
+        watchCodecState();
         add(PRELOAD_ITEM, onPreloadItem);
         add(PRELOAD_ITEM, onPreloadItem, putInterceptors);
         add("playbackControls/SEEK", (time: number) => {
