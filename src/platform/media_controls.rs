@@ -5,13 +5,21 @@ use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, P
 
 use crate::player::PlaybackState;
 
+/// The metadata as last handed to the OS by `set_metadata`.
+struct Announced {
+    title: String,
+    artist: String,
+    album: String,
+    cover_url: Option<String>,
+    duration: Option<Duration>,
+}
+
 pub(crate) struct OsMediaControls {
     controls: MediaControls,
     /// What the OS was last told by `set_metadata`, held so an unchanged announcement can be
     /// skipped. `None` until the first one lands, and only ever written after a successful call:
     /// a failed one leaves the OS holding something else, which the next call must correct.
-    /// title, artist, album, cover url, duration as last handed to the OS
-    announced: Option<(String, String, String, Option<String>, Option<Duration>)>,
+    announced: Option<Announced>,
 }
 
 impl OsMediaControls {
@@ -109,15 +117,13 @@ impl OsMediaControls {
         // here, the one place that knows what the OS holds, because souvlaki's Windows backend is
         // synchronous WinRT/COM on the CEF UI thread. The normalised duration is compared: two
         // lengths the filter above drops are one announcement.
-        let unchanged = self.announced.as_ref().is_some_and(
-            |(had_title, had_artist, had_album, had_cover, had_duration)| {
-                had_title == title
-                    && had_artist == artist
-                    && had_album == album
-                    && had_cover.as_deref() == cover_url
-                    && *had_duration == duration
-            },
-        );
+        let unchanged = self.announced.as_ref().is_some_and(|had| {
+            had.title == title
+                && had.artist == artist
+                && had.album == album
+                && had.cover_url.as_deref() == cover_url
+                && had.duration == duration
+        });
         if unchanged {
             crate::vprintln3!("[MEDIA]  set_metadata: unchanged, skipped");
             return;
@@ -136,13 +142,13 @@ impl OsMediaControls {
         };
         match self.controls.set_metadata(metadata) {
             Ok(()) => {
-                self.announced = Some((
-                    title.to_owned(),
-                    artist.to_owned(),
-                    album.to_owned(),
-                    cover_url.map(str::to_owned),
+                self.announced = Some(Announced {
+                    title: title.to_owned(),
+                    artist: artist.to_owned(),
+                    album: album.to_owned(),
+                    cover_url: cover_url.map(str::to_owned),
                     duration,
-                ));
+                });
                 crate::vprintln!("[MEDIA]  set_metadata OK");
             }
             Err(e) => crate::vprintln!("[MEDIA]  set_metadata FAILED: {e}"),
