@@ -1,7 +1,8 @@
 import { type Tracer } from "@luna/core";
 
-import { memoize, memoizeArgless, Semaphore, sleep, statusOK, type Memoized, type VoidLike } from "@inrixia/helpers";
+import { memoizeArgless, Semaphore, sleep, statusOK, type Memoized, type VoidLike } from "@inrixia/helpers";
 
+import { AnswerCache } from "../../helpers/AnswerCache";
 import { RateGate } from "../../helpers/RateGate";
 import { SingleFlight } from "../../helpers/SingleFlight";
 
@@ -61,7 +62,12 @@ export class TidalApi {
 		}
 	}
 
-	public static fetch = memoize(<T>(url: string): Promise<T | undefined> => this.request<T>(url));
+	private static readonly answers = new AnswerCache<unknown>();
+	// `clear` kept from the memoized form plugins were given.
+	public static readonly fetch = Object.assign(
+		<T>(url: string): Promise<T | undefined> => this.answers.get(url, () => this.request<T>(url)) as Promise<T | undefined>,
+		{ clear: (url?: string) => this.answers.clear(url) },
+	);
 
 	public static async track(trackId: redux.ItemId) {
 		return this.fetch<redux.Track>(`https://desktop.tidal.com/v1/tracks/${trackId}?${this.queryArgs()}`);
