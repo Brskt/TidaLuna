@@ -59,6 +59,18 @@
         }
       );
 
+      # `nix flake check` builds this output only: packages and devShells are
+      # evaluated, never built, unless aliased here.
+      checks = forAllSystems (
+        system:
+        {
+          devShell = self.devShells.${system}.default;
+        }
+        // nixpkgs.lib.optionalAttrs (packagedSystem system) {
+          package = self.packages.${system}.default;
+        }
+      );
+
       # The tree wrapper, not bare nixfmt: `nix fmt` passes no arguments, and
       # nixfmt then fails on an empty stdin.
       formatter = forAllSystems (system: (pkgsFor system).nixfmt-tree);
