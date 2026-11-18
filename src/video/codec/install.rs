@@ -403,6 +403,16 @@ pub(crate) fn load_api(path: &Path) -> anyhow::Result<openh264::OpenH264API> {
     Ok(api)
 }
 
+/// A decoder as every decode starts one, the supervisor's probe included. `Flush::NoFlush` and one
+/// final drain: `DecoderConfig::new()` with `decode`'s `Flush::Auto` flushes after every call, which
+/// on a reordering stream evicts a referenced picture and fails with `dsOutOfMemory` (openh264-rs#50).
+pub(crate) fn start_decoder(
+    api: openh264::OpenH264API,
+) -> Result<openh264::decoder::Decoder, openh264::Error> {
+    use openh264::decoder::{Decoder, DecoderConfig, Flush};
+    Decoder::with_api_config(api, DecoderConfig::new().flush_after_decode(Flush::NoFlush))
+}
+
 /// What the file at the install path is, once looked at.
 #[derive(Debug)]
 pub(super) enum Verified {

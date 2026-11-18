@@ -294,18 +294,12 @@ impl DecodeStream {
     /// Demux `file`, start the decoder, and decode up to the first picture: its size is what the
     /// stream's header states, and a file that never yields one is refused before any header.
     pub(crate) fn open(file: &[u8], api: openh264::OpenH264API) -> Result<Self, OpenError> {
-        use openh264::decoder::{Decoder, DecoderConfig, Flush};
-
         let samples = demux_cover_samples(file).map_err(OpenError::Cover)?;
         let frame_count = samples.len();
         let times = PresentationTimes::new(samples.iter().map(|s| s.pts_micros).collect());
 
-        // `Flush::NoFlush` and one final drain: `DecoderConfig::new()` with `decode`'s `Flush::Auto`
-        // flushes after every call, which on a reordering stream evicts a referenced picture and
-        // fails with `dsOutOfMemory` (openh264-rs#50). The crate's B-frame test and MP4 example agree.
-        let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
-        let decoder =
-            Decoder::with_api_config(api, config).map_err(|e| OpenError::Decoder(e.to_string()))?;
+        let decoder = crate::video::codec::start_decoder(api)
+            .map_err(|e| OpenError::Decoder(e.to_string()))?;
 
         let mut stream = Self {
             samples: samples.into_iter(),

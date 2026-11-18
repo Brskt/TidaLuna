@@ -9,7 +9,9 @@
 mod install;
 mod supervisor;
 
-pub(crate) use install::{load_api, persist_outlasting_holds, sha256_bytes, write_chain};
+pub(crate) use install::{
+    load_api, persist_outlasting_holds, sha256_bytes, start_decoder, write_chain,
+};
 pub(crate) use supervisor::{
     decoder, is_ready, note_demand, recheck, set_enabled, start, state_json,
 };

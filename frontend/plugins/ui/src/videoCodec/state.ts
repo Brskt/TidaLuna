@@ -1,5 +1,5 @@
 /** How a failure gets asked again: the backend's `Recovery`. */
-export type Recovery = "timer" | "on_demand" | "never";
+export type Recovery = "timer" | "on_demand";
 
 /** The backend's `PhaseView`. A reason is a constant phrase: no path or OS text reaches the page. */
 export type CodecPhase =
@@ -28,7 +28,7 @@ export const initialVideoCodecState: VideoCodecState = { snapshot: null, pending
 export type ClickOutcome = { reply: unknown } | "rejected";
 
 const PLAIN_KINDS = new Set(["starting", "off", "unsupported", "downloading", "ready"]);
-const RECOVERIES = new Set<string>(["timer", "on_demand", "never"]);
+const RECOVERIES = new Set<string>(["timer", "on_demand"]);
 
 function parsePhase(raw: unknown): CodecPhase | null {
 	if (typeof raw !== "object" || raw === null) return null;
@@ -110,9 +110,6 @@ export function codecRowNote(state: VideoCodecState): string | null {
 					return `${sentence(phase.reason)}. Retrying automatically.`;
 				case "on_demand":
 					return `${sentence(phase.reason)}. Will try again when needed, or turn the switch off and on to try now.`;
-				case "never":
-					// The switch is the one way back short of a relaunch: it probes again.
-					return `${sentence(phase.reason)}. Turn the switch off and on to try again.`;
 			}
 	}
 }

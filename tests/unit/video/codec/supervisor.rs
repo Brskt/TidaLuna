@@ -100,12 +100,6 @@ fn a_demand_waits_out_the_floor_of_its_class() {
         plan(&disk, true, true, Demand, false, Some(secs(120)), secs(120)),
         Plan::Verify
     );
-    // Unloadable: no demand ever asks again.
-    let unloadable = failed_phase(FailureClass::Unloadable);
-    assert_eq!(
-        plan(&unloadable, true, true, Demand, false, None, FIRST_RETRY),
-        Plan::Hold
-    );
 }
 
 #[test]
@@ -429,21 +423,6 @@ async fn fifty_cold_asks_share_one_download() {
     assert_eq!(io.count(|s| &s.probes), 1);
 }
 
-/// The environment does not change while the process runs: probed once, never fetched again.
-#[tokio::test(start_paused = true)]
-async fn an_unloadable_codec_is_probed_once() {
-    let io = FakeIo::new(secs(1), never_fails);
-    io.0.loads.store(false, std::sync::atomic::Ordering::SeqCst);
-    let supervisor = supervising(&io);
-
-    live(&supervisor, true, 3600).await;
-
-    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Unloadable));
-    assert_eq!(io.count(|s| &s.fetches), 1);
-    assert_eq!(io.count(|s| &s.probes), 1);
-    assert_eq!(io.count(|s| &s.verifies), 1);
-}
-
 #[tokio::test(start_paused = true)]
 async fn a_file_removed_at_boot_is_downloaded_at_once() {
     let io = FakeIo::new(secs(1), never_fails);
@@ -570,22 +549,41 @@ async fn a_switch_off_during_a_download_is_answered_after_it_and_keeps_its_file(
     assert_eq!(io.count(|s| &s.fetches), 1);
 }
 
-/// The one way back from `Unloadable` short of a relaunch: a system library may have changed.
+/// A decode could not load a `Ready` codec: the recheck loads it again rather than trust an
+/// earlier success, and the page learns it no longer loads. A load that met a passing state (no
+/// file descriptor left, a scanner's lock) is ready again at the first demand past the floor.
 #[tokio::test(start_paused = true)]
-async fn the_switch_probes_an_unloadable_codec_again() {
+async fn a_codec_that_no_longer_loads_is_found_at_a_recheck_and_ready_again_past_the_floor() {
+    use std::sync::atomic::Ordering::SeqCst;
     let io = FakeIo::new(secs(1), never_fails);
-    io.0.loads.store(false, std::sync::atomic::Ordering::SeqCst);
     let supervisor = supervising(&io);
     live(&supervisor, false, 5).await;
-    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Unloadable));
-
-    io.0.loads.store(true, std::sync::atomic::Ordering::SeqCst);
-    supervisor.set_enabled(false);
-    supervisor.set_enabled(true);
-    live(&supervisor, false, 5).await;
-
     assert!(supervisor.is_ready());
+
+    io.0.loads.store(false, SeqCst);
+    supervisor.recheck();
+    live(&supervisor, false, 5).await;
+    assert_eq!(phase(&supervisor), failed_phase(FailureClass::Unloadable));
     assert_eq!(io.count(|s| &s.probes), 2);
+    assert_eq!(io.count(|s| &s.loud), 1);
+
+    io.0.loads.store(true, SeqCst);
+    live(&supervisor, false, 10).await;
+    supervisor.demand();
+    live(&supervisor, false, 5).await;
+    assert_eq!(
+        phase(&supervisor),
+        failed_phase(FailureClass::Unloadable),
+        "inside the floor"
+    );
+    assert_eq!(io.count(|s| &s.probes), 2);
+
+    live(&supervisor, false, 15).await;
+    supervisor.demand();
+    live(&supervisor, false, 5).await;
+    assert!(supervisor.is_ready());
+    assert_eq!(io.count(|s| &s.probes), 3);
+    assert_eq!(io.count(|s| &s.fetches), 1);
 }
 
 /// Panics where a test arms it, through the real `off_runtime` where production goes there:
@@ -794,7 +792,7 @@ fn the_view_the_page_reads_has_one_shape_per_phase() {
         (FailureClass::Refused, "on_demand"),
         (FailureClass::Corrupt, "on_demand"),
         (FailureClass::Disk, "on_demand"),
-        (FailureClass::Unloadable, "never"),
+        (FailureClass::Unloadable, "on_demand"),
         (FailureClass::Crashed, "on_demand"),
     ] {
         assert_eq!(
