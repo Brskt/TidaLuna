@@ -10,6 +10,7 @@
 
 import { Signal } from "./signal";
 import { invokeIpc } from "../ipc";
+import { describeError } from "./listener-owner";
 import { leafFirstGroups } from "./reload-order";
 import { store as obyStore } from "oby";
 
@@ -133,6 +134,8 @@ export class LunaPlugin {
     loading = new Signal<boolean>(false);
     fetching = new Signal<boolean>(false);
     loadError = new Signal<string | undefined>(undefined);
+    // A listener of the running plugin threw: shown on its card, the plugin runs on.
+    runtimeError = new Signal<string | undefined>(undefined);
 
     // Private
     private reloadTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -250,6 +253,12 @@ export class LunaPlugin {
         };
     }
 
+    // The card first: a console a plugin made throw sends the error on to the lib's own handler.
+    reportListenerError(registrar: string, err: unknown): void {
+        this.runtimeError._ = `${registrar}: ${describeError(err)}`;
+        console.error(`[${this.name}] Listener error in ${registrar}:`, err);
+    }
+
     private note(text: string | undefined): void {
         for (const fn of this.noteListeners) {
             try {
@@ -336,6 +345,7 @@ export class LunaPlugin {
         this.rowEpoch++;
         this.loading._ = true;
         this.loadError._ = undefined; // Clear any previous error (e.g., timeout from last attempt)
+        this.runtimeError._ = undefined;
         try {
             // Auto-activate disabled dependencies (recursive)
             for (const dep of this.dependencyRequirements) {
@@ -407,6 +417,7 @@ export class LunaPlugin {
             this.enabled = false;
             // Stopped on purpose: a failure reason must not outlive the attempt it explains.
             this.loadError._ = undefined;
+            this.runtimeError._ = undefined;
             this.exports = undefined;
             if ((window as any).__pluginExports) {
                 delete (window as any).__pluginExports[this.url];

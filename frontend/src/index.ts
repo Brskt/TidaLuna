@@ -34,6 +34,8 @@ import * as LunaCore from "../render/src";
 import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
 import * as LibNative from "../plugins/lib.native/src/index.native";
+import { withOwnedListeners } from "./plugins/listener-owner";
+import { LunaPlugin as HostPlugin } from "./plugins/luna-plugin";
 
 // Top level, before any plugin loads (`jsrt.load_plugins` is awaited in `init`, below): a plugin
 // that took the slot first would see every answer the page's `fetch` returns.
@@ -526,22 +528,35 @@ const init = async () => {
     // acting on the caller's identity travel with one. The shared object above cannot: every
     // plugin reaches it, and an identity in there would belong to whoever asked first.
     //
-    // A snapshot rather than a proxy, `LunaLib`'s exports being fixed at build time. Only the
-    // identity-bearing pair is rebound: `on`/`once`/`onOpenUrl` register listeners, which no
-    // caller's identity decides.
+    // A snapshot rather than a proxy, `LunaLib`'s exports being fixed at build time. The pair
+    // `invoke`/`send` carries the capability; the registrars wrap each listener for the plugin
+    // url `pid`, whose card shows what its listeners throw. `pid` picks a card, it grants nothing.
     //
     // Pinned, because it is called with the CALLER's capability: a plugin that replaced this
     // factory would be handed the identity of every plugin importing `@luna/lib` after it, and
     // could act as any of them on `plugin.storage.*`, `plugin.fetch` and
     // `__Luna.registerNative`. Installed before `jsrt.load_plugins`, when no plugin has run yet.
-    defineHostModule("__lunaLibFor", (cap: string) => ({
-        ...LunaLib,
-        ipcRenderer: {
-            ...LunaLib.ipcRenderer,
-            invoke: (channel: string, ...args: any[]) => invokeIpcAs(cap, channel, ...args),
-            send: (channel: string, ...args: any[]) => sendIpcAs(cap, channel, ...args),
-        },
-    }));
+    // One copy per plugin and load: two imports of one plugin share its classes and wrappers.
+    const libCopies = new Map<unknown, { cap: string; lib: unknown }>();
+    defineHostModule("__lunaLibFor", (cap: string, pid: string) => {
+        const kept = libCopies.get(pid);
+        if (kept !== undefined && kept.cap === cap) return kept.lib;
+        const owned = withOwnedListeners(LunaLib, (registrar, err) => {
+            const owner = typeof pid === "string" ? HostPlugin.getByUrl(pid) : undefined;
+            if (owner) owner.reportListenerError(registrar, err);
+            else console.error(`[@luna/lib] Listener error in ${registrar}:`, err);
+        });
+        const lib = {
+            ...owned,
+            ipcRenderer: {
+                ...owned.ipcRenderer,
+                invoke: (channel: string, ...args: any[]) => invokeIpcAs(cap, channel, ...args),
+                send: (channel: string, ...args: any[]) => sendIpcAs(cap, channel, ...args),
+            },
+        };
+        libCopies.set(pid, { cap, lib });
+        return lib;
+    });
     modules["@inrixia/helpers"] = InrixiaHelpers;
     modules["@luna/lib.native"] = {
         ...LibNative,

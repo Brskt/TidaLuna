@@ -169,9 +169,10 @@ fn lower_import(decl: &ImportDeclaration) -> String {
     // cannot reach it, which is why the channels that act on the caller's identity kept arriving
     // with none, and why `registerNative` read its identity off an argument instead. This lowering
     // is the one step that runs once per plugin with that plugin's capability in scope: the
-    // binding is made here rather than anywhere the lib itself could reach.
+    // binding is made here rather than anywhere the lib itself could reach. `__pid` names the card
+    // its listeners' errors go to.
     let modules_ref = if decl.source.value == "@luna/lib" {
-        "luna?.core?.modules?.[\"__lunaLibFor\"]?.(__cap)".to_string()
+        "luna?.core?.modules?.[\"__lunaLibFor\"]?.(__cap, __pid)".to_string()
     } else {
         format!("luna?.core?.modules?.[{module}]")
     };

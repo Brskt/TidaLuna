@@ -150,7 +150,7 @@ fn an_import_source_reaches_the_lookup_as_the_same_one_string() {
 fn the_lib_import_is_bound_to_the_calling_plugins_capability() {
     let js = lower(r#"import { ipcRenderer } from "@luna/lib";ipcRenderer.invoke("x");"#);
     assert!(
-        js.contains(r#"luna?.core?.modules?.["__lunaLibFor"]?.(__cap)"#),
+        js.contains(r#"luna?.core?.modules?.["__lunaLibFor"]?.(__cap, __pid)"#),
         "the lib import must resolve to the per-plugin copy, not the shared object:\n{js}"
     );
     assert!(
