@@ -174,6 +174,7 @@ fn a_re_assert_brings_the_track_its_load_named() {
         want_play: false,
         product_id: Some("120002099".to_string()),
         track_id: "track-1".to_string(),
+        read_gen: crate::player::current_gen(),
     });
 
     assert_eq!(
@@ -200,6 +201,7 @@ fn a_re_assert_without_an_id_keeps_the_one_already_known() {
         want_play: false,
         product_id: None,
         track_id: "track-1".to_string(),
+        read_gen: crate::player::current_gen(),
     });
 
     assert_eq!(
@@ -224,6 +226,7 @@ fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
         want_play: false,
         product_id: Some("the-superseded-one".to_string()),
         track_id: "track-1".to_string(),
+        read_gen: crate::player::current_gen(),
     });
 
     assert_eq!(
@@ -235,6 +238,76 @@ fn a_re_assert_for_a_superseded_track_keeps_the_live_id() {
         last_duration_track(&h.events),
         Some(Some("the-live-one".to_string())),
         "the live track's length went out under the superseded track's name"
+    );
+}
+
+const A_URL: &str = "https://example.invalid/track-a?sig=old";
+const A_ID: &str = "https://example.invalid/track-a";
+
+fn track_a() -> crate::state::TrackInfo {
+    crate::state::TrackInfo {
+        url: A_URL.to_string(),
+        key: String::new(),
+        format: "flac".to_string(),
+        product_id: Some("a-product".to_string()),
+    }
+}
+
+/// The thread holding A as a load committed it: playing, announced, mirrored for the IPC side, and
+/// retained under `commit_gen` the way `load_with_policy` publishes it.
+fn playing_a(
+    h: &mut crate::player::thread::harness::Harness,
+    commit_gen: u32,
+) -> crate::state::current_track_fixture::CurrentTrackSlot {
+    let slot = crate::state::current_track_fixture::CurrentTrackSlot::holding(
+        crate::state::RetainedTrack {
+            track: track_a(),
+            load_gen: commit_gen,
+        },
+    );
+    h.player.current_track_id = Some(A_ID.to_string());
+    h.player.current_duration = 214.0;
+    h.player.current_product_id = Some("a-product".to_string());
+    h.player
+        .set_committed_track(Some((A_ID.to_string(), "flac".to_string())));
+    slot
+}
+
+fn reassert(h: &mut crate::player::thread::harness::Harness, want_play: bool, read_gen: u32) {
+    h.player.handle_command(PlayerCommand::ReassertResume {
+        want_play,
+        product_id: Some("a-product".to_string()),
+        track_id: A_ID.to_string(),
+        read_gen,
+    });
+}
+
+/// A same-track re-assert dequeued after the Release of that track still serves the page: a
+/// replay that expects the generation the page's load read, playing, from where A was last heard.
+#[tokio::test]
+async fn a_same_track_re_assert_dequeued_after_a_release_replays_the_track() {
+    // Mints the process-wide generation: held like every test that does (see `load_state`).
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let mut h = harness();
+    let gen_commit = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    let _slot = playing_a(&mut h, gen_commit);
+    h.player.resume_store.set(A_ID, 42.0);
+
+    // `Player::release` on the IPC thread: the mint, then the command.
+    let gen_release = crate::player::begin_load(crate::player::LoadOrigin::Local);
+    h.player.handle_release(crate::player::next_event_seq());
+    h.events.lock().unwrap().clear();
+    // The page's load of A, read after the release minted.
+    reassert(&mut h, true, gen_release);
+
+    let events = h.events.lock().unwrap();
+    assert!(
+        events.iter().any(|ev| matches!(
+            ev,
+            PlayerEvent::ReplayRequest { expected_gen, position: Some(p), play: true, .. }
+                if *expected_gen == gen_release && *p == 42.0
+        )),
+        "no live replay of A from its last position: {events:?}"
     );
 }
 

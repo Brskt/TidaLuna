@@ -247,9 +247,15 @@ pub(super) enum PlayerCommand {
         /// has already matched against the committed one. Carried because the match happened
         /// on the caller's thread and can be stale by the time this is handled.
         track_id: String,
+        /// The generation current when that load was read, minting none: a replay of the page's
+        /// track expects it; a stop, a release or a newer load minted after it still wins.
+        read_gen: u32,
     },
     Pause,
     Stop(u32),
+    /// Free the track and its output device now, with no `MediaError` or `Completed`: either
+    /// makes TIDAL skip the track. Carries the event seq a stop mints.
+    Release(u32),
     /// The page that loaded the track just stopped is gone (`StopScope::orphans`): until a load
     /// names a track again, the retained one is nobody's to resume.
     Orphan,

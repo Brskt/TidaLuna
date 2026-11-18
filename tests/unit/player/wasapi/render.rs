@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::player::PlaybackState;
+use std::sync::atomic::AtomicBool;
 
 #[test]
 fn push_reclaims_played_prefix() {
@@ -223,6 +224,7 @@ fn stream_seven(start_paused: bool) -> StreamStart {
         start_secs: 0.0,
         start_paused,
         consumed: Arc::new(AtomicU64::new(0)),
+        cancel: Arc::new(AtomicBool::new(false)),
     }
 }
 

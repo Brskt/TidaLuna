@@ -436,13 +436,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             && std::time::Instant::now() >= at
         {
             self.asio_release_at = None;
-            // Cancel the detached decoder first: its wait sites never observe the
-            // control thread dying: it would leak (thread + full-track buffer).
-            super::super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
-            self.asio_seek_tx = None;
-            if let Some(handle) = self.asio_handle.take() {
-                self.asio_teardown = handle.shutdown();
-            }
+            self.free_backend_now();
             self.settle_seek_on_release();
             self.has_track = false;
             self.set_committed_track(None);

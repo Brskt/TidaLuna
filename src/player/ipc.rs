@@ -47,6 +47,11 @@ pub(crate) enum PlayerIpc {
     Play,
     Pause,
     Stop,
+    /// Free the track and its output device now: a clip is about to play through Chromium.
+    Release,
+    /// The play state of a clip running through Chromium, for the OS media controls and the
+    /// taskbar: the Rust player is idle then and reports nothing.
+    ClipState(super::PlaybackState),
     Seek {
         time: f64,
     },
@@ -150,7 +155,11 @@ impl PlayerIpc {
             PlayerIpc::Load { .. } | PlayerIpc::LoadDash { .. } | PlayerIpc::Recover { .. } => {
                 CastGate::Refuse
             }
-            PlayerIpc::Stop | PlayerIpc::Metadata { .. } => CastGate::Drop,
+            // None may touch the cast's music: a release frees the device only for this page's clip.
+            PlayerIpc::Stop
+            | PlayerIpc::Release
+            | PlayerIpc::ClipState(_)
+            | PlayerIpc::Metadata { .. } => CastGate::Drop,
             // Transport and level commands act on whatever is playing, the cast included, as
             // the controller's own would. A staged preload is refused where it would take
             // over, at promotion (`next_is_current`), and the device commands keep the track.
@@ -341,6 +350,13 @@ pub(crate) fn parse_player_ipc(
         "player.play" => Ok(PlayerIpc::Play),
         "player.pause" => Ok(PlayerIpc::Pause),
         "player.stop" => Ok(PlayerIpc::Stop),
+        "player.release" => Ok(PlayerIpc::Release),
+        "player.clip_state" => match args.first().and_then(|v| v.as_str()) {
+            Some("playing") => Ok(PlayerIpc::ClipState(super::PlaybackState::Active)),
+            Some("paused") => Ok(PlayerIpc::ClipState(super::PlaybackState::Paused)),
+            Some("stopped") => Ok(PlayerIpc::ClipState(super::PlaybackState::Stopped)),
+            _ => Err(PlayerIpcParseError::InvalidArgs("player.clip_state")),
+        },
         "player.seek" => args
             .first()
             .and_then(|v| v.as_f64())

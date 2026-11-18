@@ -73,6 +73,45 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.seek_ack_gen = self.seek_ack_gen.wrapping_add(1);
         self.seek_ack_gen
     }
+    /// Ask the control side to load `track` again, at the position it was last heard at, if
+    /// `expected_gen` is still the current load when it gets there (`Player::rearm`).
+    pub(super) fn request_replay(
+        &self,
+        track: crate::state::TrackInfo,
+        expected_gen: u32,
+        play: bool,
+    ) {
+        // Resume at the retained source's last position, not 0 (e.g. a >10s
+        // pause released the device, re-arming here). resume_store holds it
+        // but is cleared on track-end; a post-Completed re-arm gets None
+        // and starts at 0; the mode's own live position is the floor-free
+        // fast-path.
+        let replayed = crate::player::canonical_track_id(&track.url);
+        let position = self.resume_store.get(&replayed);
+        #[cfg(target_os = "windows")]
+        let position = if self.is_asio_mode {
+            self.last_asio_pos.or(position)
+        } else {
+            self.last_exclusive_pos.or(position)
+        };
+        // A seek taken while the device was released outranks both the live
+        // mirror and the store: it names where the user asked to be. Read rather
+        // than taken, since the load this replay triggers is what consumes it.
+        #[cfg(target_os = "windows")]
+        let position = self
+            .user_seek_override
+            .as_ref()
+            .filter(|(id, _)| *id == replayed)
+            .map(|(_, time)| *time)
+            .or(position);
+        (self.callback)(PlayerEvent::ReplayRequest {
+            track,
+            expected_gen,
+            position,
+            play,
+        });
+    }
+
     pub(super) fn handle_play(&mut self) {
         if self.orphaned {
             crate::vprintln!("[PLAY]   ignored: the page that loaded this track is gone");
@@ -108,36 +147,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 // track to flush.rs (avoids a second CURRENT_TRACK lock).
                 crate::vprintln!("[PLAY]   no live pipeline; re-arming retained source");
                 if let Some(retained) = retained {
-                    let track = retained.track;
-                    // Resume at the retained source's last position, not 0 (e.g. a >10s
-                    // pause released the device, re-arming here). resume_store holds it
-                    // but is cleared on track-end; a post-Completed re-arm gets None
-                    // and starts at 0; the mode's own live position is the floor-free
-                    // fast-path.
-                    let replayed = crate::player::canonical_track_id(&track.url);
-                    let position = self.resume_store.get(&replayed);
-                    #[cfg(target_os = "windows")]
-                    let position = if self.is_asio_mode {
-                        self.last_asio_pos.or(position)
-                    } else {
-                        self.last_exclusive_pos.or(position)
-                    };
-                    // A seek taken while the device was released outranks both the live
-                    // mirror and the store: it names where the user asked to be. Read rather
-                    // than taken, since the load this replay triggers is what consumes it.
-                    #[cfg(target_os = "windows")]
-                    let position = self
-                        .user_seek_override
-                        .as_ref()
-                        .filter(|(id, _)| *id == replayed)
-                        .map(|(_, time)| *time)
-                        .or(position);
-                    (self.callback)(PlayerEvent::ReplayRequest {
-                        track,
-                        expected_gen: retained.load_gen,
-                        position,
-                        play: true,
-                    });
+                    self.request_replay(retained.track, retained.load_gen, true);
                 }
                 return;
             }
@@ -428,6 +438,63 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // pipeline is retained internally (handle_pause emits Paused first; the
         // final state observers settle on is Stopped).
         self.idle_state = PlaybackState::Stopped;
+        (self.callback)(PlayerEvent::StateChange(
+            PlaybackState::Stopped,
+            self.current_seq,
+        ));
+    }
+
+    /// Hand the output device back now: the two idle releases once their timer elapses, and
+    /// `handle_release` at once. ASIO and exclusive are mutually exclusive; the shared path,
+    /// which a stop only pauses, drops its stream and decoder.
+    pub(super) fn free_backend_now(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            if self.is_asio_mode {
+                // Cancel the detached decoder first: its wait sites never see the control
+                // thread die, and it would leak with its thread and full-track buffer.
+                super::retire_reader(&mut self.asio_stream_cancel, self.current_buffer.as_ref());
+                self.asio_seek_tx = None;
+                if let Some(handle) = self.asio_handle.take() {
+                    self.asio_teardown = handle.shutdown();
+                }
+                return;
+            }
+            if self.is_exclusive_mode {
+                // The render outlives the release: retired before it is sent, the decoder's
+                // StartStream is refused at dequeue, and with no id its late reports name no one.
+                super::retire_reader(
+                    &mut self.exclusive_stream_cancel,
+                    self.current_buffer.as_ref(),
+                );
+                if let Some(ref handle) = self.exclusive_handle {
+                    handle.send(ExclusiveCommand::ReleaseDevice);
+                }
+                self.current_exclusive_stream_id = None;
+                return;
+            }
+        }
+        self.stop_decode();
+    }
+
+    /// `Player::release` on the control thread. Emits only `Stopped`: a `MediaError` or a
+    /// `Completed` makes TIDAL skip to the next track.
+    pub(super) fn handle_release(&mut self, event_seq: u32) {
+        self.cancel_crossfade();
+        self.current_seq = event_seq;
+        // A late state of a stream opened before the release keeps its older seq, which the
+        // page drops, instead of reading as newer than this Stopped.
+        #[cfg(target_os = "windows")]
+        {
+            self.load_seq = event_seq;
+        }
+        self.free_backend_now();
+        #[cfg(target_os = "windows")]
+        {
+            self.exclusive_release_at = None;
+            self.asio_release_at = None;
+        }
+        self.abandon_failed_load();
         (self.callback)(PlayerEvent::StateChange(
             PlaybackState::Stopped,
             self.current_seq,

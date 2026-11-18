@@ -234,6 +234,8 @@ fn takeovers() -> Vec<PlayerIpc> {
         load_dash(),
         recover(),
         PlayerIpc::Stop,
+        PlayerIpc::Release,
+        PlayerIpc::ClipState(crate::player::PlaybackState::Active),
         PlayerIpc::Metadata {
             payload: json!({ "productId": "2", "title": "Local pick" }),
         },
@@ -271,8 +273,8 @@ fn every_command() -> Vec<PlayerIpc> {
 
 /// A cast refuses the loads the renderer asks for, routes a numbered one to the receiver with its
 /// act (the automatic one too: only the receiver knows whether the cast already plays it), and
-/// drops the stop the SDK sends ahead of every load, and the announcement, unanswered. Everything
-/// else, and every command on a player this host owns, passes.
+/// drops the stop the SDK sends ahead of every load, a page clip's release and state, and the
+/// announcement, unanswered. Everything else, and every command on a player this host owns, passes.
 #[test]
 fn a_cast_holds_back_only_the_commands_that_replace_its_track() {
     let numbered = |act: Option<ListenerAct>| PlayerIpc::Load {
@@ -310,6 +312,8 @@ fn a_cast_holds_back_only_the_commands_that_replace_its_track() {
         (
             vec![
                 PlayerIpc::Stop,
+                PlayerIpc::Release,
+                PlayerIpc::ClipState(crate::player::PlaybackState::Active),
                 PlayerIpc::Metadata {
                     payload: json!({ "productId": "2" }),
                 },

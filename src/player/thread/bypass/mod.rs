@@ -85,7 +85,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// retires a decoder. The target is re-emitted rather than re-read: the seek never
     /// converged, so `played_position_secs` still reports pre-seek.
     #[cfg(target_os = "windows")]
-    fn settle_seek_on_release(&mut self) {
+    pub(super) fn settle_seek_on_release(&mut self) {
         if !self.seeking {
             return;
         }
