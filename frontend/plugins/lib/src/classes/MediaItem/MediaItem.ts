@@ -105,7 +105,7 @@ export class MediaItem extends ContentBase {
 			return new MediaItem(itemId, mediaItem, contentType, cache);
 		});
 		// Fetch real quality for spatial tracks (only for tracks, not videos)
-		if (item && contentType === "track") await item.fetchBestQuality();
+		if (item?.contentType === "track") await item.fetchBestQuality();
 		return item;
 	}
 	public static fromIsrc: (isrc: string) => Promise<MediaItem | undefined> = memoize(async (isrc) => {
@@ -196,14 +196,18 @@ export class MediaItem extends ContentBase {
 	// #endregion
 	public readonly tidalItem: Readonly<redux.Track>;
 	public readonly trace: Tracer;
+	public readonly contentType: redux.ContentType;
 
 	constructor(
 		public readonly id: redux.ItemId,
 		tidalMediaItem: redux.MediaItem,
-		public readonly contentType: redux.ContentType,
+		contentType: redux.ContentType,
 		private readonly cache: MediaItemCache,
 	) {
 		super();
+		// TIDAL's record says what it is; the caller's type is a guess (`fromId` defaults to a track),
+		// and the instance cache, keyed by id alone, would keep the first guess for everyone.
+		this.contentType = tidalMediaItem?.type ?? contentType;
 		// Ick, really need to figure out how to deal with videos
 		this.tidalItem = tidalMediaItem?.item as redux.Track;
 		if (this.tidalItem === undefined) MediaItem.trace.err.withContext("MediaItem constructor", this).throw("Tidal media item is undefined!");
@@ -463,6 +467,8 @@ export class MediaItem extends ContentBase {
 	 */
 	private formatInfo: Memoized<(audioQuality?: redux.AudioQuality) => Promise<PlaybackInfo | undefined>> = memoize(
 		async (audioQuality?: redux.AudioQuality) => {
+			// The endpoint is the tracks one: a video's id there is a 500.
+			if (this.contentType !== "track") return undefined;
 			audioQuality ??= Quality.Max.audioQuality;
 			const playbackInfo = await getPlaybackInfo(this.servedId, audioQuality);
 			if (!playbackInfo) return undefined;
@@ -551,6 +557,9 @@ export class MediaItem extends ContentBase {
 	}
 	public updateFormat: (audioQuality?: redux.AudioQuality, force?: true) => Promise<MediaFormat | undefined> = asyncDebounce(
 		async (audioQuality, force) => {
+			// An audio format only: the Rust bridge fallback below would hand a video the format of
+			// the last track Rust played.
+			if (this.contentType !== "track") return undefined;
 			this.cache.format ??= {};
 			const requestedQuality = audioQuality;
 			audioQuality ??= Quality.Max.audioQuality;
