@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::ui::nav::PageKind;
 use crate::video::cover::CoverKey;
+use crate::video::deadline::Deadline;
 
 use frames::FrameBody;
 
@@ -115,14 +116,37 @@ impl Answer {
 ///
 /// `cancelled` is an atomic outside both locks: `cancel()` runs on the IO thread and must never
 /// wait on a frame being decoded under `frames`, nor the work on `answer`.
-#[derive(Default)]
 struct CoverShared {
     answer: Mutex<Answer>,
     /// The `frames/` body, decoded one frame per `read`. Its own lock, held only by `read`.
     frames: Mutex<Option<FrameBody>>,
     streaming: AtomicBool,
     cancelled: AtomicBool,
+    /// When CEF handed us the request, after the page armed its own deadline; a decode deadline
+    /// counted from here never ends before the page's.
+    opened: Instant,
 }
+
+impl CoverShared {
+    fn new() -> Self {
+        Self {
+            answer: Mutex::default(),
+            frames: Mutex::default(),
+            streaming: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            opened: Instant::now(),
+        }
+    }
+
+    /// When a decode for this request stops: `limit` past its arrival.
+    fn deadline(&self, limit: Duration) -> Deadline {
+        Deadline::after(self.opened, limit)
+    }
+}
+
+/// How long the page gives one cover pass (download, decode, encode, store) before it abandons it.
+/// Published to it, as the fragment's.
+pub(crate) const COVER_PASS_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Why a requester is refused, or `None` to serve it.
 ///
@@ -205,8 +229,8 @@ impl Grant {
 }
 
 /// How long a pass's grant waits for its store: the page encodes after the last frame, and how
-/// long that takes depends on the machine.
-const GRANT_LIFETIME: Duration = Duration::from_secs(120);
+/// long that takes depends on the machine. Opened later than the pass, it outlives the page's wait.
+const GRANT_LIFETIME: Duration = COVER_PASS_DEADLINE;
 
 /// Grants alive at once. Each is a few words; the bound only stops a page that reads passes and
 /// never stores from growing the map.

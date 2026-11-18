@@ -4,6 +4,8 @@
 //! scripts on disk carry no placeholder a value could break out of, and the host names stay owned
 //! by `ui::nav`.
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use crate::app_state::escape_js_line_terminators;
@@ -47,11 +49,18 @@ pub(crate) struct InitGlobals {
     pub window_maximized: bool,
     pub credentials: serde_json::Value,
     pub rewrite_epoch: u64,
+    /// The page abandons a cover pass past it, and Rust's decode stops there too.
+    pub cover_pass_deadline: Duration,
+}
+
+/// Milliseconds, as the page's timers take them.
+fn millis(d: Duration) -> Value {
+    json!(u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 pub(crate) fn init_globals_js(g: &InitGlobals) -> String {
     let mut js = String::new();
-    let globals: [(&str, Value); 13] = [
+    let globals: [(&str, Value); 14] = [
         ("PLATFORM", json!(g.platform)),
         ("CLOSE_TO_TRAY", json!(g.close_to_tray)),
         ("AUTO_CHECK", json!(g.auto_check)),
@@ -68,6 +77,7 @@ pub(crate) fn init_globals_js(g: &InitGlobals) -> String {
             json!({ "isMaximized": g.window_maximized, "isFullscreen": false }),
         ),
         ("CREDENTIALS", g.credentials.clone()),
+        ("COVER_PASS_DEADLINE_MS", millis(g.cover_pass_deadline)),
     ];
     for (name, value) in &globals {
         js.push_str(&format!(

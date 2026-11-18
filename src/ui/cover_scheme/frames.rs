@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::video::codec::FailureClass;
 use crate::video::cover::{CoverFrame, CoverKey, DecodeStream};
 
-use super::{Answer, CoverShared, GRANTS, Grant, Slot};
+use super::{Answer, COVER_PASS_DEADLINE, CoverShared, GRANTS, Grant, Slot};
 
 /// Magic naming the frames wire format: a page handed a foreign body says so instead of encoding
 /// noise.
@@ -170,9 +170,10 @@ pub(super) async fn open_frames(
         .map_err(|e| refusal(FramesError::Download(e)))?
         // nginx's "client closed request".
         .ok_or_else(|| Answer::refusal(499, "the request was abandoned"))?;
+    let deadline = shared.deadline(COVER_PASS_DEADLINE);
     let opened = tokio::task::spawn_blocking(move || {
         let api = crate::video::codec::load_api(&path).map_err(FramesError::Load)?;
-        DecodeStream::open(&file, api).map_err(FramesError::Open)
+        DecodeStream::open(&file, api, deadline).map_err(FramesError::Open)
     })
     .await
     .unwrap_or_else(|e| Err(FramesError::Panicked(e)));

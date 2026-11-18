@@ -110,6 +110,18 @@ test("a missing encoder leaves covers still for the session", async () => {
 	expect(none).toEqual([`${real("none-b")}|1280`]);
 });
 
+// Rust stops its decode at the deadline it publishes: a pass with none would time itself by a guess.
+test("a pass does not start without the deadline the app publishes, and starts once it is there", async () => {
+	const calls = transcoder("stored");
+	const { source } = mount(real("no-deadline"));
+	delete (window as any).__TIDALUNAR_COVER_PASS_DEADLINE_MS__;
+	await missed(source);
+	expect(calls).toEqual([]);
+	(window as any).__TIDALUNAR_COVER_PASS_DEADLINE_MS__ = 120_000;
+	await missed(source);
+	expect(calls).toEqual([`${real("no-deadline")}|1280`]);
+});
+
 /** `ms` later on the fake clock, then a miss on `target` and the queue drained. */
 const missAfter = async (ms: number, target: Element) => {
 	jest.advanceTimersByTime(ms);

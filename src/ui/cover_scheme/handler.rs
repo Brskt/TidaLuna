@@ -322,7 +322,7 @@ wrap_scheme_handler_factory! {
                     .map_or_else(|| "no frame".to_string(), crate::util::refused_host);
                 crate::vprintln!("[VIDEO]   Refused a cover request from {from}: {reason}");
             }
-            Some(CoverHandler::new(Arc::new(CoverShared::default()), refusal))
+            Some(CoverHandler::new(Arc::new(CoverShared::new()), refusal))
         }
     }
 }

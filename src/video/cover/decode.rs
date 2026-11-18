@@ -10,6 +10,7 @@ use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
 use super::nal::{CallWork, admit_nal};
 use crate::video::codec::FailureClass;
+use crate::video::deadline::Deadline;
 
 /// A 4-byte start code. Three is also legal Annex-B, but four is what the crate emits and
 /// what every muxer writes at an access-unit boundary.
@@ -346,6 +347,9 @@ pub(crate) struct DecodeStream {
     drained: bool,
     size: Option<(usize, usize)>,
     frame_count: usize,
+    /// `open` and one `read` may each run many decode calls, and CEF delivers a cancel only after
+    /// a `read` returns.
+    deadline: Deadline,
 }
 
 /// Why a decode could not open: ours, or the cover's.
@@ -378,7 +382,11 @@ impl std::fmt::Display for OpenError {
 impl DecodeStream {
     /// Demux `file`, start the decoder, and decode up to the first picture: its size is what the
     /// stream's header states, and a file that never yields one is refused before any header.
-    pub(crate) fn open(file: &[u8], api: openh264::OpenH264API) -> Result<Self, OpenError> {
+    pub(crate) fn open(
+        file: &[u8],
+        api: openh264::OpenH264API,
+        deadline: Deadline,
+    ) -> Result<Self, OpenError> {
         let samples = demux_cover_samples(file).map_err(OpenError::Cover)?;
         let frame_count = samples.len();
         let times = PresentationTimes::new(samples.iter().map(|s| s.pts_micros).collect());
@@ -395,6 +403,7 @@ impl DecodeStream {
             drained: false,
             size: None,
             frame_count,
+            deadline,
         };
         while stream.ready.is_empty() && stream.decode_more().map_err(OpenError::Cover)? {}
         if stream.ready.is_empty() {
@@ -440,6 +449,9 @@ impl DecodeStream {
     /// Feed the decoder one sample, or drain it once the samples are spent. False when there is
     /// nothing left to feed or drain.
     fn decode_more(&mut self) -> anyhow::Result<bool> {
+        if !self.drained {
+            self.deadline.check()?;
+        }
         if let Some(sample) = self.samples.next() {
             access_unit(
                 &sample.prefix,
