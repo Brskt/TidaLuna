@@ -24,6 +24,7 @@ import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutp
 import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
 import { watchCodecState } from "./video/codec-state";
+import { clipActive, reassertClipState } from "./video/clip-driver";
 import { invokeIpc, invokeIpcAs, sendIpc, sendIpcAs, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
 
@@ -232,6 +233,8 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                     store.dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: reduxState });
                 } catch (_) {}
             }
+            // The idle player's state, the release's Stopped among them, is not the clip's.
+            if (clipActive()) reassertClipState();
         }
         const mapped = SEQ_EVENTS[type];
         const loadOwner: LoadOwner = type === "mediaerror" ? window.nativeInterface.playback.loadOwner(event.v?.productId) : "foreign";
@@ -410,6 +413,8 @@ const init = async () => {
             registry[action].add(cb);
         };
         add("playbackControls/PLAY", () => {
+            // A clip's play, pause, stop and seek are its element's, which TIDAL's Shaka drives.
+            if (clipActive()) return;
             // A track this page refused asks for the load again, and Rust's own track stays as it is.
             // The Play is cancelled: it goes out again once the track is loaded.
             switch (playOnRefusal()) {
@@ -426,6 +431,7 @@ const init = async () => {
             else (window.NativePlayerComponent as any)?.setDesiredPlayback?.(true);
         });
         add("playbackControls/PAUSE", () => {
+            if (clipActive()) return;
             if (!isSelfLoad()) (window.NativePlayerComponent as any)?.setDesiredPlayback?.(false);
         });
         // TIDAL puts this at the start of every load it begins (its pick, its Play on a stopped transport),
@@ -444,6 +450,7 @@ const init = async () => {
         // transport. Both rails: a dispatched STOP (this page's refusals) and the one TIDAL's saga
         // puts after a queue clear. Rust drops the stop while a cast owns the player.
         const stopSelfLoad = () => {
+            if (clipActive()) return;
             if (isSelfLoad()) sendIpc("player.stop");
         };
         add("playbackControls/STOP", stopSelfLoad);
@@ -487,6 +494,7 @@ const init = async () => {
         add(PRELOAD_ITEM, onPreloadItem);
         add(PRELOAD_ITEM, onPreloadItem, putInterceptors);
         add("playbackControls/SEEK", (time: number) => {
+            if (clipActive()) return;
             // The bar names the refused track, and Rust's is the one the refusal left behind.
             if (refusalStands()) return;
             sendIpc("player.seek", time);
