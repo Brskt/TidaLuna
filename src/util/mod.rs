@@ -30,6 +30,45 @@ pub(crate) fn redact_url_query(url: &str) -> Cow<'_, str> {
     }
 }
 
+const SIGNED_PARAMS: [&str; 3] = ["Policy=", "Signature=", "Key-Pair-Id="];
+
+/// `text` with the value of each CloudFront signature parameter replaced: a segment URL a
+/// page logs keeps its path but not its credential. Borrows the input when nothing matches.
+pub(crate) fn redact_signed_params(text: &str) -> Cow<'_, str> {
+    let is_value_end = |c: char| c.is_whitespace() || matches!(c, '&' | '"' | '\'');
+    let mut out: Option<String> = None;
+    let mut done = 0;
+    let mut scan = 0;
+    while scan < text.len() {
+        let hit = text[scan..].char_indices().find_map(|(i, c)| {
+            if !matches!(c, '?' | '&') {
+                return None;
+            }
+            let name_at = scan + i + 1;
+            SIGNED_PARAMS
+                .iter()
+                .find(|name| text[name_at..].starts_with(**name))
+                .map(|name| name_at + name.len())
+        });
+        let Some(value_start) = hit else { break };
+        let value_len = text[value_start..]
+            .find(is_value_end)
+            .unwrap_or(text.len() - value_start);
+        let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
+        out.push_str(&text[done..value_start]);
+        out.push_str("<redacted>");
+        done = value_start + value_len;
+        scan = done;
+    }
+    match out {
+        Some(mut out) => {
+            out.push_str(&text[done..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(text),
+    }
+}
+
 /// `text` with the secrets of every URL cut, as a panic's `Debug` of a `reqwest::Error` or a
 /// `url::Url` prints them. A run ends at whitespace, at `"`, `<` and `>` (which `url` encodes) or
 /// at a backtick or backslash; `Url`'s fields carry no `://` and are cut by name. Takes no lock.
