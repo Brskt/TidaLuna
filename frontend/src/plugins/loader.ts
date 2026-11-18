@@ -42,6 +42,10 @@ CoreLunaPlugin.prototype.reload = async function () {
     if (ours) await ours.reload();
 };
 
+// Reload all for @luna/ui: the upstream class has no such static, the UI reaches these by a cast.
+(CoreLunaPlugin as any).reloadAll = () => LunaPlugin.reloadAll();
+(CoreLunaPlugin as any).reloadAllInFlight = () => LunaPlugin.reloadAllInFlight;
+
 // Upstream imports plugin code into the page, past every check Rust makes; no instance may do that.
 (CoreLunaPlugin.prototype as any).loadExports = async function () {
     throw new Error("Plugins run through the host, never imported into the page");

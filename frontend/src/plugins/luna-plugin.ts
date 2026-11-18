@@ -10,6 +10,7 @@
 
 import { Signal } from "./signal";
 import { invokeIpc } from "../ipc";
+import { leafFirstGroups } from "./reload-order";
 import { store as obyStore } from "oby";
 
 export type LunaAuthor = {
@@ -96,6 +97,18 @@ function pullNote(pulled: Pulled): string {
     }
 }
 
+// Rust refused to stop the plugin, which runs as it was; an update it pulled waits for a launch.
+function stopRefusedNote(pulled: Pulled, why: string): string {
+    return pulled.outcome === "updated" ? `Updated, runs from the next launch: ${why}` : `Not restarted: ${why}`;
+}
+
+export type ReloadAllResult = {
+    reloaded: string[];
+    notReloaded: { name: string; reason: string }[];
+};
+
+const CHANGED_DURING_RELOAD = "Turned off or removed while reloading";
+
 // The live-reload poll's pace, and its ceiling for a failing source or a blocked update.
 const POLL_MS = 1000;
 const POLL_MAX_MS = 30000;
@@ -130,6 +143,9 @@ export class LunaPlugin {
     private rowEpoch = 0;
     // The last source hash the poll had a verdict on; only a different one is pulled again.
     private seenHash: string | undefined;
+    // Held by a Reload all from its pull to its restart: `loading` alone is cleared by each step.
+    private held = false;
+    private static reloadingAll: Promise<ReloadAllResult> | undefined;
     private enabledListeners = new Set<(enabled: boolean) => void>();
     private liveReloadListeners = new Set<(liveReload: boolean) => void>();
     // What a Reload found, or why the live reload did not take a version; a failed start is a
@@ -443,17 +459,115 @@ export class LunaPlugin {
         try {
             await this.stop();
         } catch (e) {
-            const why = e instanceof Error ? e.message : String(e);
             if (pulled === undefined) {
                 console.error(`[luna:plugin] Failed to reload '${this.name}':`, e);
             } else {
-                this.note(pulled.outcome === "updated"
-                    ? `Updated, runs from the next launch: ${why}`
-                    : `Not restarted: ${why}`);
+                this.note(stopRefusedNote(pulled, e instanceof Error ? e.message : String(e)));
             }
             return;
         }
         await this.enable();
+    }
+
+    // The card's Reload for every enabled plugin. One plugin's Reload after another fails: a
+    // dependency's stop is refused while its dependant runs again. So each group tied by
+    // dependencies stops dependants first, then starts dependencies first; a second call joins.
+    static reloadAll(): Promise<ReloadAllResult> {
+        LunaPlugin.reloadingAll ??= LunaPlugin.runReloadAll().finally(() => {
+            LunaPlugin.reloadingAll = undefined;
+        });
+        return LunaPlugin.reloadingAll;
+    }
+
+    static get reloadAllInFlight(): Promise<ReloadAllResult> | undefined {
+        return LunaPlugin.reloadingAll;
+    }
+
+    private static async runReloadAll(): Promise<ReloadAllResult> {
+        const set = Object.values(LunaPlugin.plugins)
+            .filter(p => p.installed && p.enabled && !LunaPlugin.corePlugins.has(p.name));
+        const pulledOf = new Map<LunaPlugin, Pulled>();
+        // A plugin whose epoch moved was acted on by someone else: the run leaves it as it is.
+        const epochOf = new Map<LunaPlugin, number>();
+        const left = new Map<LunaPlugin, string>();
+        for (const p of set) {
+            p.held = true;
+            p.loading._ = true;
+            p.acted = true;
+            epochOf.set(p, p.rowEpoch);
+        }
+        try {
+            for (const p of set) {
+                p.note(undefined);
+                const pulled = await p.pullUpdate();
+                p.note(pullNote(pulled));
+                pulledOf.set(p, pulled);
+                if (pulled.outcome === "busy" || pulled.outcome === "gone") left.set(p, pullNote(pulled));
+            }
+            // After the pulls: a new version can declare a dependency, and Rust reads the stored one.
+            const live = set.filter(p => !left.has(p));
+            const byUrl = new Map(live.map(p => [p.url, p]));
+            const groups = leafFirstGroups(live.map(p => ({
+                url: p.url,
+                name: p.name,
+                dependencies: p.dependencyRequirements.map(d => d.name),
+            })));
+            // One group at a time: a stopped plugin is off on disk until its start.
+            for (const group of groups) {
+                await LunaPlugin.restartGroup(group.map(url => byUrl.get(url)!), pulledOf, epochOf, left);
+            }
+        } finally {
+            for (const p of set) {
+                p.held = false;
+                p.loading._ = false;
+            }
+        }
+        // Read from the final state: a dependant's enable() can start a dependency once more.
+        const result: ReloadAllResult = { reloaded: [], notReloaded: [] };
+        for (const p of set) {
+            const reason = left.get(p) ?? (p.running ? undefined : p.loadError._ ?? "Not running");
+            if (reason === undefined) result.reloaded.push(p.name);
+            else result.notReloaded.push({ name: p.name, reason });
+        }
+        return result;
+    }
+
+    private static async restartGroup(
+        leafFirst: LunaPlugin[],
+        pulledOf: Map<LunaPlugin, Pulled>,
+        epochOf: Map<LunaPlugin, number>,
+        left: Map<LunaPlugin, string>,
+    ): Promise<void> {
+        const stopped: LunaPlugin[] = [];
+        try {
+            for (const p of leafFirst) {
+                if (!p.installed || !p.enabled || p.rowEpoch !== epochOf.get(p)) {
+                    left.set(p, CHANGED_DURING_RELOAD);
+                    continue;
+                }
+                try {
+                    await p.stop();
+                } catch (e) {
+                    const note = stopRefusedNote(pulledOf.get(p)!, e instanceof Error ? e.message : String(e));
+                    p.note(note);
+                    left.set(p, note);
+                    continue;
+                } finally {
+                    p.loading._ = true;
+                }
+                epochOf.set(p, p.rowEpoch);
+                stopped.push(p);
+            }
+        } finally {
+            for (const p of stopped.reverse()) {
+                if (!p.installed || p.rowEpoch !== epochOf.get(p)) {
+                    left.set(p, CHANGED_DURING_RELOAD);
+                    continue;
+                }
+                await p.enable();
+                p.loading._ = true;
+            }
+        }
     }
 
     // Takes in the row of a version Rust has just stored. Settings are left to the restarted
@@ -530,7 +644,7 @@ export class LunaPlugin {
         let failures = 0;
 
         // Neither a disable nor a Reload landed while the poll awaited: it may restart the plugin.
-        const stillOurs = () => loop === this.pollLoop && this.enabled && !this.loading._;
+        const stillOurs = () => loop === this.pollLoop && this.enabled && !this.loading._ && !this.held;
         // A tick that a stop or a Reload overtook keeps quiet; its note would answer for them.
         const say = (text: string) => {
             if (stillOurs()) this.note(text);
