@@ -29,6 +29,7 @@ const waiting = new Map<string, Array<() => void>>();
 
 // What the app's init script publishes before the page runs; a test that needs one absent deletes
 // it, and `afterEach` puts it back.
+(window as any).__TIDALUNAR_FRAGMENT_DEADLINE_MS__ = 20_000;
 (window as any).__TIDALUNAR_COVER_PASS_DEADLINE_MS__ = 120_000;
 
 // Settles once `channel` has been sent: at once if it already was, else at the call that sends it.

@@ -34,9 +34,8 @@ import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
 import * as LibNative from "../plugins/lib.native/src/index.native";
 
-// Top level: it runs before TIDAL's SDK asks for its first playbackinfo and before any plugin
-// loads (`jsrt.load_plugins` is awaited in `init`, below). A plugin that took the slot first would
-// see every answer the page's `fetch` returns.
+// Top level, before any plugin loads (`jsrt.load_plugins` is awaited in `init`, below): a plugin
+// that took the slot first would see every answer the page's `fetch` returns.
 installSdkFetchObserver();
 
 // Synchronous initialization: expose nativeInterface immediately for Tidal

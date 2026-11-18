@@ -9,6 +9,7 @@ declare global {
         __TIDALUNAR_PLATFORM__: string;
         __TIDALUNAR_WINDOW_STATE__?: { isMaximized: boolean; isFullscreen: boolean };
         __TIDALUNAR_PLAYER_PUSH__?: (events: any[]) => void;
+        __TIDALUNAR_FRAGMENT_DEADLINE_MS__?: number;
         __TIDALUNAR_COVER_PASS_DEADLINE_MS__?: number;
         __TIDALUNAR_CREDENTIALS__?: {
             credentialsStorageKey: string;
