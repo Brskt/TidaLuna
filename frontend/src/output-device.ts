@@ -53,6 +53,16 @@ export function deviceReleasedToShaka(): string | null {
 	return typeof held === "string" && held !== "default" ? held : null;
 }
 
+// The Chromium sink of the device chosen in the app, for a clip Chromium plays itself: TIDAL's store
+// pairs each device with a `webDeviceId`. Null when the active device names none.
+export function clipSinkId(state: any): string | null {
+	const player = state?.player;
+	const devices: unknown = player?.availableDevices;
+	if (!Array.isArray(devices)) return null;
+	const sink: unknown = devices.find((d) => d?.id === player.activeDeviceId)?.webDeviceId;
+	return typeof sink === "string" && sink !== "" ? sink : null;
+}
+
 const keyOf = (out: CommittedOutput | null) => (out ? `${out.mode}:${out.id}` : null);
 
 let warnedSessionUncaptured = false;

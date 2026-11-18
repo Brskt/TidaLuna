@@ -6,6 +6,7 @@ import Hls from "hls.js/light";
 import { proxyClip, proxyClipGone, setSelfLoad } from "../audio-proxy";
 import { updatePlaybackState } from "../controllers/mediasession";
 import { sendIpc } from "../ipc";
+import { clipSinkId } from "../output-device";
 import { refusePlayback } from "../refuse-playback";
 import { store } from "../../plugins/lib/src/redux/store";
 import { isStoreNotPublished } from "../../plugins/lib/src/redux/storeNotPublished";
@@ -43,6 +44,7 @@ const clips = new Map<HTMLMediaElement, Clip>();
 /** The clip TIDAL plays: Rust has let go of its track, and the clip speaks for the transport. */
 let owner: Clip | null = null;
 let reported: ClipState | null = null;
+let unfollowSink: () => void = () => {};
 
 export function isHlsManifest(value: unknown): value is string {
 	return typeof value === "string" && value.startsWith(HLS_MANIFEST);
@@ -78,6 +80,81 @@ const listenerHasVideo = () => {
 	}
 };
 
+// The `setSinkId` in flight on an element, whoever asked: Chromium aborts a switch another overtakes.
+const sinkInFlight = new WeakMap<HTMLMediaElement, Promise<void>>();
+
+// The clip plays on the device chosen in the app, followed while it holds the transport. The element
+// says which sink it is on (`sinkId`, set only once a call resolves); `refused` is the last attempt
+// that failed, retried on a device change or the clip's next takeover, forgotten once another is chosen.
+const followSink = (clip: Clip): (() => void) => {
+	const { el } = clip;
+	let refused: string | null = null;
+	let warnedUnsupported = false;
+	let waiting = false;
+	let stopped = false;
+	const applyAfter = (call: Promise<void>) => {
+		if (waiting) return;
+		waiting = true;
+		void call.then(() => {
+			waiting = false;
+			if (!stopped) apply();
+		});
+	};
+	const apply = () => {
+		const busy = sinkInFlight.get(el);
+		if (busy) return applyAfter(busy);
+		let sink: string | null;
+		try {
+			sink = clipSinkId(store.getState());
+		} catch (e) {
+			if (!isStoreNotPublished(e)) console.warn("[video] the store did not say which device plays:", e);
+			return;
+		}
+		if (sink !== refused) refused = null;
+		if (sink === null || sink === refused || sink === el.sinkId) return;
+		if (typeof el.setSinkId !== "function") {
+			if (!warnedUnsupported) console.warn("[video] this element cannot choose its device: the clip keeps its output");
+			warnedUnsupported = true;
+			return;
+		}
+		const call = el
+			.setSinkId(sink)
+			.catch((e: unknown) => {
+				refused = sink;
+				const reason = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+				console.warn("[video] the chosen device was refused, the clip keeps its output until a device change:", reason);
+			})
+			.finally(() => sinkInFlight.delete(el));
+		sinkInFlight.set(el, call);
+		applyAfter(call);
+	};
+	const onDeviceChange = () => {
+		refused = null;
+		apply();
+	};
+	let unsubscribe = () => {};
+	let devices: MediaDevices | undefined;
+	try {
+		unsubscribe = store.subscribe(() => {
+			if (owner === clip) apply();
+		});
+	} catch (e) {
+		if (!isStoreNotPublished(e)) console.warn("[video] the clip does not follow device changes:", e);
+	}
+	try {
+		devices = navigator.mediaDevices;
+		devices?.addEventListener("devicechange", onDeviceChange);
+	} catch (e) {
+		console.warn("[video] the clip does not follow device arrivals:", e);
+	}
+	apply();
+	return () => {
+		stopped = true;
+		unsubscribe();
+		devices?.removeEventListener("devicechange", onDeviceChange);
+	};
+};
+
 // Rust lets go of its track and device at once (exclusive and ASIO hold the device otherwise), and
 // the last audio track's mirror is dropped: no PLAY, SEEK or device change is routed to Rust.
 const takeOver = (clip: Clip) => {
@@ -87,11 +164,14 @@ const takeOver = (clip: Clip) => {
 	sendIpc("player.release");
 	setSelfLoad(false);
 	proxyClip(clip.el);
+	unfollowSink = followSink(clip);
 };
 
 const yieldTransport = (clip: Clip) => {
 	if (owner !== clip) return;
 	owner = null;
+	unfollowSink();
+	unfollowSink = () => {};
 	if (reported === "playing" || reported === "paused") report("stopped");
 	reported = null;
 };
