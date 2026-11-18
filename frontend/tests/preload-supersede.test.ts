@@ -43,6 +43,7 @@ mock.module("../plugins/lib/src/redux/store", () => ({
 // The page's way to the SDK (`src/sdk-player.ts`, tested apart): a stand-in whose unset unloads the native player
 // the way `NativePlayer.unloadPreloadedMediaProduct` does, through the delegate.
 mock.module("../src/sdk-player", () => ({
+	sdkNativeActive: () => null,
 	startSdkPlayer: async () => {},
 	sdkPlayer: () =>
 		sdkAvailable

@@ -3,7 +3,7 @@
 // with every build.
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { SDK_PLAYER_API, findSdkPlayer, sdkPlayer, startSdkPlayer } from "../src/sdk-player";
+import { SDK_PLAYER_API, findSdkPlayer, sdkNativeActive, sdkPlayer, startSdkPlayer } from "../src/sdk-player";
 
 const api = () => ({
 	setNext: () => Promise.resolve(),
@@ -54,4 +54,21 @@ test("the API is looked for again until it is found, then kept", () => {
 
 	host.__lunaHostModules = {};
 	expect(sdkPlayer()).toBe(sdk as any);
+});
+
+test("names a plugin leaves on Object.prototype do not make another export the SDK's session", () => {
+	const session = {
+		activePlayer: { name: "shakaPlayer" },
+		preloadPlayer: undefined,
+		get preloadedMediaProduct() {
+			return undefined;
+		},
+	};
+	const names = ["activePlayer", "preloadPlayer", "preloadedMediaProduct"];
+	for (const name of names) Object.defineProperty(Object.prototype, name, { value: { name: "nativePlayer" }, configurable: true });
+	try {
+		expect(sdkNativeActive({ [SDK_PLAYER_API]: { a: {}, ct: session } })).toBe(false);
+	} finally {
+		for (const name of names) delete (Object.prototype as Record<string, unknown>)[name];
+	}
 });

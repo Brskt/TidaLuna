@@ -8,8 +8,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { SentIpc } from "./setup";
 
 const { followCommittedOutput } = await import("../src/output-device");
-const { setSelfLoad } = await import("../src/audio-proxy");
 const { createNativePlayerComponent } = await import("../src/controllers/player");
+const { SDK_PLAYER_API } = await import("../src/sdk-player");
 
 const sent: SentIpc[] = (globalThis as any).__LUNAR_TEST_IPC__;
 const deviceSets = () => sent.filter((s) => s.channel === "player.devices.set").map((s) => s.args);
@@ -45,16 +45,29 @@ function follow(store: ReturnType<typeof fakeStore>) {
 	unsubscribe = followCommittedOutput(store);
 }
 
+// The SDK's session singleton as the Rust filter captures it: fields and getters only.
+const session = {
+	activePlayer: undefined as { name: string } | undefined,
+	preloadPlayer: undefined,
+	get preloadedMediaProduct() {
+		return undefined;
+	},
+};
+const activePlayer = (name: string) => {
+	session.activePlayer = { name };
+};
+
 beforeEach(() => {
 	sent.length = 0;
 	W.__TIDALUNAR_ASIO__ = false;
-	setSelfLoad(true);
+	W.__lunaHostModules = { [SDK_PLAYER_API]: { ct: session } };
+	activePlayer("shakaPlayer");
 });
 
 afterEach(() => {
 	unsubscribe?.();
 	unsubscribe = undefined;
-	setSelfLoad(false);
+	delete W.__lunaHostModules;
 });
 
 test("a device or exclusive mode TIDAL commits during a self-loaded track reaches Rust", () => {
@@ -95,14 +108,22 @@ test("a commit that names no device Rust knows, or changes nothing, sends Rust n
 });
 
 test("a native track is left to the delegate", () => {
-	setSelfLoad(false);
+	activePlayer("nativePlayer");
 	const store = fakeStore("guid-a");
 	follow(store);
 	store.commit({ activeDeviceId: "guid-b" });
 	expect(deviceSets()).toEqual([]);
-	setSelfLoad(true);
+	activePlayer("shakaPlayer");
 	store.commit();
 	expect(deviceSets()).toEqual([]);
+});
+
+test("an uncaptured SDK session lets the follower speak", () => {
+	delete W.__lunaHostModules;
+	const store = fakeStore("guid-a");
+	follow(store);
+	store.commit({ activeDeviceId: "guid-b" });
+	expect(deviceSets()).toEqual([["Headphones (B)", "shared"]]);
 });
 
 test("the delegate and a committed switch send Rust the same thing", () => {
