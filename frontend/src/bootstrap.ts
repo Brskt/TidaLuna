@@ -15,7 +15,8 @@ installDateTimeFormatMemo();
 // Initialize window.luna object (window.core.ts adds getters to it)
 (window as any).luna = {};
 
-// Force all audio through Rust player - prevents SDK boombox/shakaPlayer for DASH/AAC.
+// No MSE for audio: Rust rewrites Shaka's MediaSource test to say no (`blind_shaka`). Should that
+// rewrite go inert, Shaka still finds no MediaSource here.
 delete (window as any).MediaSource;
 delete (window as any).ManagedMediaSource;
 
