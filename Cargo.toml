@@ -45,6 +45,7 @@ seeked = "seeked"           # HTML media event / audio-domain term
 unparseable = "unparseable" # valid variant used in updater docs
 trak = "trak"               # ISO BMFF box name
 trun = "trun"               # ISO BMFF box name
+ue = "ue"                   # H.264 Exp-Golomb descriptor ue(v)
 
 [package]
 name = "tidalunar"

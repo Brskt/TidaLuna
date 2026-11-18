@@ -1,10 +1,14 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use crate::util::mp4_samples::{SampleBudget, sample_bytes};
 use shiguredo_mp4::TrackKind;
-use shiguredo_mp4::bitstream::h264::{LengthSize, length_prefixed_to_annexb};
+use shiguredo_mp4::bitstream::h264::LengthSize;
 use shiguredo_mp4::boxes::AvccBox;
 use shiguredo_mp4::boxes::SampleEntry;
 use shiguredo_mp4::demux::{Input, Mp4FileDemuxer};
 
+use super::nal::{CallWork, admit_nal};
 use crate::video::codec::FailureClass;
 
 /// A 4-byte start code. Three is also legal Annex-B, but four is what the crate emits and
@@ -12,18 +16,37 @@ use crate::video::codec::FailureClass;
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 /// What the `avcC` box carries that the decoder needs before its first slice.
-struct ParameterSets {
+pub(crate) struct ParameterSets {
     sps: Vec<Vec<u8>>,
     pps: Vec<Vec<u8>>,
     length_size: LengthSize,
 }
 
+/// Every SPS and PPS of one `avcC` together. Real ones are small; the box itself may declare
+/// 18 MB, all of it input.
+const MAX_PARAMETER_SET_BYTES: usize = 16 * 1024;
+
 /// `length_size_minus_one` is two bits, and the value 2 is reserved by ISO/IEC 14496-15.
 /// `LengthSize` has three variants and cannot hold it, so the refusal is structural rather
 /// than a check we could forget: an illegal width never becomes a value.
-fn parameter_sets(avcc: &AvccBox) -> anyhow::Result<ParameterSets> {
+pub(crate) fn parameter_sets(avcc: &AvccBox) -> anyhow::Result<ParameterSets> {
     let length_size = LengthSize::from_length_size_minus_one(avcc.length_size_minus_one.get())
-        .map_err(|e| anyhow::anyhow!("cover avcC declares a reserved length prefix: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("avcC declares a reserved length prefix: {e}"))?;
+    let total = avcc
+        .sps_list
+        .iter()
+        .chain(&avcc.pps_list)
+        .fold(0usize, |total, nal| total.saturating_add(nal.len()));
+    if total > MAX_PARAMETER_SET_BYTES {
+        anyhow::bail!(
+            "avcC carries {total} bytes of SPS and PPS, past the cap of {MAX_PARAMETER_SET_BYTES}"
+        );
+    }
+    // Both lists: each entry reaches the decoder behind a start code, which reads its header
+    // byte rather than the list it came from.
+    for nal in avcc.sps_list.iter().chain(&avcc.pps_list) {
+        admit_nal(nal)?;
+    }
     Ok(ParameterSets {
         sps: avcc.sps_list.clone(),
         pps: avcc.pps_list.clone(),
@@ -31,32 +54,84 @@ fn parameter_sets(avcc: &AvccBox) -> anyhow::Result<ParameterSets> {
     })
 }
 
-/// Rewrite one sample into an Annex-B access unit, prefixing the parameter sets on a
-/// keyframe.
-///
-/// The parameter sets go in front of every keyframe rather than once at the start: a cover
-/// loops, and a decoder restarted mid-loop would otherwise get slices it cannot interpret.
-/// They are deliberately not repeated on non-keyframes, where the decoder already holds them.
-fn annex_b_access_unit(
-    sample: &[u8],
-    params: &ParameterSets,
-    keyframe: bool,
-    out: &mut Vec<u8>,
-) -> anyhow::Result<()> {
-    out.clear();
-    if keyframe {
-        if params.sps.is_empty() || params.pps.is_empty() {
-            anyhow::bail!("cover avcC carries no SPS or no PPS; the stream cannot be started");
+impl ParameterSets {
+    /// What a fresh decoder needs before its first slice: every SPS then every PPS, each behind a
+    /// start code. Built once per sample entry, then shared by every unit of that entry.
+    pub(crate) fn prefix(&self) -> anyhow::Result<Vec<u8>> {
+        if self.sps.is_empty() || self.pps.is_empty() {
+            anyhow::bail!("avcC carries no SPS or no PPS; the stream cannot be started");
         }
-        for nal in params.sps.iter().chain(params.pps.iter()) {
+        let mut out = Vec::new();
+        for nal in self.sps.iter().chain(self.pps.iter()) {
             out.extend_from_slice(&START_CODE);
             out.extend_from_slice(nal);
         }
+        Ok(out)
     }
-    let converted = length_prefixed_to_annexb(sample, params.length_size)
-        .map_err(|e| anyhow::anyhow!("cover sample is not valid length-prefixed H.264: {e}"))?;
-    out.extend_from_slice(&converted);
-    Ok(())
+}
+
+/// One shared copy per distinct value: equal sample entries share their prefix or config; what
+/// the units hold is bounded by the distinct entries, not by the samples.
+pub(crate) fn intern(seen: &mut HashSet<Arc<[u8]>>, bytes: Vec<u8>) -> Arc<[u8]> {
+    if let Some(shared) = seen.get(bytes.as_slice()) {
+        return shared.clone();
+    }
+    let shared: Arc<[u8]> = bytes.into();
+    seen.insert(shared.clone());
+    shared
+}
+
+/// Rewrite one length-prefixed sample into Annex-B over `out`, and say whether it holds an IDR
+/// slice: only an IDR starts a decoder, whatever the container's sync flag claims. Written as it
+/// is read, with no NAL list first. Its slices are charged against one `decode()` call's budget.
+pub(crate) fn annex_b_access_unit(
+    sample: &[u8],
+    params: &ParameterSets,
+    out: &mut Vec<u8>,
+) -> anyhow::Result<bool> {
+    out.clear();
+    let width = params.length_size.bytes();
+    let mut rest = sample;
+    let mut idr = false;
+    let mut work = CallWork::default();
+    while !rest.is_empty() {
+        let (field, tail) = rest
+            .split_at_checked(width)
+            .ok_or_else(|| anyhow::anyhow!("a NAL length field runs past the sample"))?;
+        let len = field
+            .iter()
+            .fold(0usize, |len, byte| len << 8 | usize::from(*byte));
+        if len == 0 {
+            anyhow::bail!("a NAL declares a length of 0");
+        }
+        let (nal, tail) = tail
+            .split_at_checked(len)
+            .ok_or_else(|| anyhow::anyhow!("a NAL of {len} bytes runs past the sample"))?;
+        let header = nal[0];
+        if header & 0x80 != 0 {
+            anyhow::bail!("a NAL sets its forbidden_zero_bit");
+        }
+        admit_nal(nal)?;
+        work.charge(nal)?;
+        idr |= header & 0x1F == IDR_SLICE;
+        out.extend_from_slice(&START_CODE);
+        out.extend_from_slice(nal);
+        rest = tail;
+    }
+    Ok(idr)
+}
+
+/// `nal_unit_type` of a coded slice of an IDR picture (ITU-T H.264 table 7-1).
+const IDR_SLICE: u8 = 5;
+
+/// One decode call's bytes over `out`: the entry's parameter sets in front of an IDR, then the
+/// sample. A fresh decoder has none, and one that holds them drops an identical copy.
+pub(crate) fn access_unit(prefix: &[u8], idr: bool, sample: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    if idr {
+        out.extend_from_slice(prefix);
+    }
+    out.extend_from_slice(sample);
 }
 
 /// One decoded frame, owned. The decoder's own `DecodedYUV` borrows the decoder and cannot
@@ -75,9 +150,12 @@ pub(crate) struct CoverFrame {
     pub(crate) pts_micros: i64,
 }
 
-/// One sample, lifted out of the demuxer's borrow.
+/// One sample, lifted out of the demuxer's borrow: its Annex-B slices, and its entry's parameter
+/// sets shared with every other sample of that entry, put in front at decode time on an IDR.
 struct CoverSample {
     annex_b: Vec<u8>,
+    idr: bool,
+    prefix: Arc<[u8]>,
     pts_micros: i64,
 }
 
@@ -119,11 +197,11 @@ fn demux_cover_samples(file: &[u8]) -> anyhow::Result<Vec<CoverSample>> {
     let track_id = video.track_id;
     let timescale = video.timescale.get() as i64;
 
-    let mut params: Option<ParameterSets> = None;
+    let mut params: Option<(ParameterSets, Arc<[u8]>)> = None;
+    let mut prefixes = HashSet::new();
     let mut samples = Vec::new();
-    let mut scratch = Vec::new();
-    // Charging the declared size is enough: the Annex-B rewrite grows a sample at most fourfold,
-    // and the parameter sets prepended to sync samples are bounded by the count.
+    // Charging the declared size bounds the samples: Annex-B adds 3 bytes per NAL at most. The
+    // parameter sets are held once per distinct entry, each under `MAX_PARAMETER_SET_BYTES`.
     let mut budget = SampleBudget::new("cover", MAX_COVER_SAMPLES, file.len());
 
     loop {
@@ -139,7 +217,9 @@ fn demux_cover_samples(file: &[u8]) -> anyhow::Result<Vec<CoverSample>> {
         }
         match sample.sample_entry {
             Some(SampleEntry::Avc1(avc1)) => {
-                params = Some(parameter_sets(&avc1.avcc_box)?);
+                let sets = parameter_sets(&avc1.avcc_box)?;
+                let prefix = intern(&mut prefixes, sets.prefix()?);
+                params = Some((sets, prefix));
             }
             // A later `stsd` index switched the track to a codec this path does not
             // decode. Leaving `params` as-is would feed non-AVC bytes to the H.264
@@ -152,7 +232,7 @@ fn demux_cover_samples(file: &[u8]) -> anyhow::Result<Vec<CoverSample>> {
             }
             None => {}
         }
-        let Some(params) = params.as_ref() else {
+        let Some((params, prefix)) = params.as_ref() else {
             anyhow::bail!("cover sample arrived before its avcC");
         };
 
@@ -162,7 +242,8 @@ fn demux_cover_samples(file: &[u8]) -> anyhow::Result<Vec<CoverSample>> {
 
         let bytes = sample_bytes(file, sample.data_offset, sample.data_size)
             .ok_or_else(|| anyhow::anyhow!("cover sample lies outside the file"))?;
-        annex_b_access_unit(bytes, params, sample.keyframe, &mut scratch)?;
+        let mut annex_b = Vec::new();
+        let idr = annex_b_access_unit(bytes, params, &mut annex_b)?;
 
         // `timestamp` is the decode timestamp; presentation is it plus the composition
         // offset, which is absent on a stream with no B-frames.
@@ -171,7 +252,9 @@ fn demux_cover_samples(file: &[u8]) -> anyhow::Result<Vec<CoverSample>> {
             anyhow::anyhow!("cover sample presentation time overflows converting to microseconds")
         })? / timescale;
         samples.push(CoverSample {
-            annex_b: scratch.clone(),
+            annex_b,
+            idr,
+            prefix: prefix.clone(),
             pts_micros,
         });
     }
@@ -255,6 +338,8 @@ fn take_frame(
 /// moves to whichever pool thread CEF reads on, and `next_frame` is all of its work.
 pub(crate) struct DecodeStream {
     samples: std::vec::IntoIter<CoverSample>,
+    /// The access unit being decoded, refilled for each sample.
+    scratch: Vec<u8>,
     decoder: openh264::decoder::Decoder,
     times: PresentationTimes,
     ready: std::collections::VecDeque<CoverFrame>,
@@ -303,6 +388,7 @@ impl DecodeStream {
 
         let mut stream = Self {
             samples: samples.into_iter(),
+            scratch: Vec::new(),
             decoder,
             times,
             ready: std::collections::VecDeque::new(),
@@ -355,9 +441,15 @@ impl DecodeStream {
     /// nothing left to feed or drain.
     fn decode_more(&mut self) -> anyhow::Result<bool> {
         if let Some(sample) = self.samples.next() {
+            access_unit(
+                &sample.prefix,
+                sample.idr,
+                &sample.annex_b,
+                &mut self.scratch,
+            );
             let decoded = self
                 .decoder
-                .decode(&sample.annex_b)
+                .decode(&self.scratch)
                 .map_err(|e| anyhow::anyhow!("decoding a cover frame failed: {e}"))?;
             // `None` is ordinary: the decoder holds frames back until it has enough.
             if let Some(yuv) = decoded {
