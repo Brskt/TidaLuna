@@ -666,6 +666,7 @@ impl ProbedListener {
         )
     }
 
+    #[cfg(has_connect_server_key)]
     pub(crate) fn port(&self) -> u16 {
         self.listener.local_addr().unwrap().port()
     }

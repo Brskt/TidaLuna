@@ -7,11 +7,13 @@ fn main() {
     // key is a credential kept out of the repo, and a clone without it is the normal case.
     println!("cargo:rerun-if-changed=src/connect/ws/certs");
     println!("cargo:rustc-check-cfg=cfg(has_connect_server_key)");
-    if Path::new("src/connect/ws/certs/tidal_server_key.pem").exists() {
+    // An empty file is no key: CI writes one when a fork's pull request is denied the secret.
+    let key = Path::new("src/connect/ws/certs/tidal_server_key.pem");
+    if std::fs::metadata(key).is_ok_and(|m| m.len() > 0) {
         println!("cargo:rustc-cfg=has_connect_server_key");
     } else {
         println!(
-            "cargo:warning=tidal_server_key.pem is absent, so the TIDAL Connect receiver is compiled out (the controller is unaffected)"
+            "cargo:warning=tidal_server_key.pem is absent or empty, so the TIDAL Connect receiver is compiled out (the controller is unaffected)"
         );
     }
 
