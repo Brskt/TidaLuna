@@ -13,6 +13,7 @@ fn announced(id: &str) -> TrackMetadata {
         artist: format!("artist {id}"),
         quality: String::new(),
         id: Some(id.to_string()),
+        ..Default::default()
     }
 }
 
@@ -45,6 +46,7 @@ fn a_length_is_published_beside_the_track_it_was_measured_on() {
             title,
             artist,
             duration,
+            ..
         } => {
             assert_eq!(title, "title A");
             assert_eq!(artist, "artist A");

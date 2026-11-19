@@ -28,6 +28,10 @@ pub struct TrackMetadata {
     pub title: String,
     pub artist: String,
     pub quality: String,
+    /// Album title for the OS media controls. Empty when the payload carried none.
+    pub album: String,
+    /// Cover art for the OS media controls, an http(s) url. `None` when the payload had none.
+    pub cover_url: Option<String>,
     /// Tells one track from the next. `None` when the payload carried no id, which no
     /// comparison may read as a match: two unidentified tracks are not the same track.
     pub id: Option<String>,
