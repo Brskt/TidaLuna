@@ -49,7 +49,7 @@ ue = "ue"                   # H.264 Exp-Golomb descriptor ue(v)
 
 [package]
 name = "tidalunar"
-version = "0.0.20-alpha"
+version = "0.0.21-alpha"
 edition = "2024"
 description = "A native TIDAL client"
 authors = ["Inrixia"]
