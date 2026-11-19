@@ -51,17 +51,8 @@ pub(super) fn download_bun(bundle_dir: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let (archive_name, inner_dir) = if cfg!(target_os = "windows") {
-        ("bun-windows-x64.zip", "bun-windows-x64")
-    } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") {
-            ("bun-darwin-aarch64.zip", "bun-darwin-aarch64")
-        } else {
-            ("bun-darwin-x64.zip", "bun-darwin-x64")
-        }
-    } else {
-        ("bun-linux-x64.zip", "bun-linux-x64")
-    };
+    let inner_dir = archive_stem()?;
+    let archive_name = format!("{inner_dir}.zip");
 
     let url = format!(
         "https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/{archive_name}"
@@ -90,6 +81,23 @@ pub(super) fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     install_executable(&cached_bun, &bun_dst)?;
     println!("  Bun v{BUN_VERSION} installed");
     Ok(())
+}
+
+/// Oven's name for this target's archive, which is also the folder inside it. A target Bun is not
+/// built for is an error: any other archive ships a binary the app cannot run.
+fn archive_stem() -> Result<String, String> {
+    let os = match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "darwin",
+        "linux" => "linux",
+        other => return Err(format!("Bun publishes no build for {other}")),
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "aarch64",
+        other => return Err(format!("Bun publishes no build for {other}")),
+    };
+    Ok(format!("bun-{os}-{arch}"))
 }
 
 /// Writes the archive's `entry` to `dst` through a `.part` file: an extraction cut short never
