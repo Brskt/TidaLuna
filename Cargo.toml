@@ -12,13 +12,13 @@ semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-zip = { version = "9.4.2", default-features = false, features = [
+zip = { version = "9.7.0", default-features = false, features = [
   "deflate-flate2-zlib-rs",
 ] }
 flate2 = "1.1.11"
 bzip2 = "0.6.1"
 tar = "0.4.46"
-openh264 = { version = "0.9.9", default-features = false, features = [
+openh264 = { version = "0.9.10", default-features = false, features = [
   "libloading",
 ] }
 # Exact: CalVer, and a minor release may carry a [CHANGE] (breaking) entry; 2026.5.0 adds the
@@ -81,12 +81,12 @@ audioadapter-buffers = "5.2.0"
 base16ct = { workspace = true }
 base64 = { workspace = true }
 cbc = "0.2.1"
-cef = { version = "156.4.0", features = ["build-util"] }
+cef = { version = "156.6.0", features = ["build-util"] }
 # Already in the graph through `cef`, at this exact version; direct only so that build.rs
 # receives `DEP_CEF_DLL_WRAPPER_CEF_DIR`. Cargo passes a `links` crate's metadata to DIRECT
 # dependents alone, and that variable is the only supported way to learn where the macOS
 # framework was unpacked: a path that carries a build-script hash and changes on rebuild.
-cef-dll-sys = "156.4.0"
+cef-dll-sys = "156.6.0"
 # Pinned to the PR #1183 merge (WASAPI/CoreAudio auto-reroute on default-device
 # change + unified Error/ErrorKind). Drop back to a crates.io release once cpal 0.18 ships.
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "c6aa4592ef07968ab6b431e62acab79c72869716", version = "0.18.0" }
@@ -99,7 +99,7 @@ fnv = "1.0.7"
 futures-util = "0.3.34"
 getrandom = { workspace = true }
 oauth2 = { version = "5.0.0", default-features = false }
-oxc = { version = "0.157.0", features = ["semantic", "transformer", "codegen"] }
+oxc = { version = "0.159.0", features = ["semantic", "transformer", "codegen"] }
 pbkdf2 = "0.13.0"
 # Already in the graph through `url`; named here to decode a path segment before
 # it is matched against the deep-link allowlist.
@@ -120,8 +120,8 @@ reqwest = { workspace = true, features = [
   "deflate",
 ] }
 rtrb = "0.4.1"
-rubato = "5.0.1"
-rusqlite = { version = "0.41.1", features = ["backup", "bundled"] }
+rubato = "5.1.0"
+rusqlite = { version = "0.43.0", features = ["backup", "bundled"] }
 
 rusty-leveldb = "4.0.2"
 semver = { workspace = true }
@@ -130,7 +130,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 souvlaki = "0.9.3"
 symphonia = { version = "0.6.1", features = ["flac", "aac", "isomp4"] }
-sysinfo = { version = "0.40.1", default-features = false, features = [
+sysinfo = { version = "0.40.4", default-features = false, features = [
   "system",
 ] }
 tempfile = "3.27.0"
@@ -154,17 +154,17 @@ bzip2 = { workspace = true }
 openh264 = { workspace = true }
 # Direct only for the API trait codec::load_api calls, which openh264 does not re-export;
 # resolves to the crate openh264 pulls in, whose hashes.txt TARGETS copies.
-openh264-sys2 = { version = "0.9.9", default-features = false, features = [
+openh264-sys2 = { version = "0.9.10", default-features = false, features = [
   "libloading",
 ] }
 shiguredo_mp4 = { workspace = true }
 
 # TIDAL Connect
-arc-swap = "1.9.4"
+arc-swap = "1.9.5"
 async-trait = "0.1.92"
 gethostname = "1.1.0"
 md-5 = "0.11.0"
-mdns-sd = "0.21.7"
+mdns-sd = "0.22.0"
 rustls = "0.23.46"
 rustls-pemfile = "2.2.0"
 tokio-rustls = "0.26.6"
