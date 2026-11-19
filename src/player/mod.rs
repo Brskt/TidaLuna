@@ -206,6 +206,20 @@ impl Player {
         Ok(())
     }
 
+    /// Free the track and its output device at once, for a clip the page plays through
+    /// Chromium: a bypass backend would hold the device for its idle window. Mints as a local
+    /// stop does, which bars any pending auto-play load from taking the device back.
+    pub fn release(&self) -> anyhow::Result<()> {
+        begin_load(LoadOrigin::Local);
+        // The track is gone from this moment: a same-track load read before the thread
+        // dequeues the Release must not take the idempotent branch.
+        *self
+            .committed_track
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        self.send_cmd(PlayerCommand::Release(next_event_seq()))
+    }
+
     pub fn seek(&self, time: f64) -> anyhow::Result<()> {
         self.send_cmd(PlayerCommand::Seek(time))
     }

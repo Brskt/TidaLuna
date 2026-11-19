@@ -54,3 +54,14 @@ async fn a_network_error_carries_no_request_url() {
     assert!(!text.contains("127.0.0.1"), "the url survived: {text}");
     assert!(!text.is_empty(), "the failure still has to say something");
 }
+
+/// hls.js logs each segment URL it fetches, and a TIDAL clip URL carries its CloudFront
+/// signature in the query: a credential that must not reach the persistent console log.
+#[test]
+fn signed_segment_urls_lose_their_signature() {
+    let line = "https://vmz-ad-cf.video.tidal.com/a/media_segment_1_0.ts?Policy=abc&Signature=d-e~f&Key-Pair-Id=K1&x=2 failed";
+    assert_eq!(
+        redact_signed_params(line),
+        "https://vmz-ad-cf.video.tidal.com/a/media_segment_1_0.ts?Policy=<redacted>&Signature=<redacted>&Key-Pair-Id=<redacted>&x=2 failed"
+    );
+}

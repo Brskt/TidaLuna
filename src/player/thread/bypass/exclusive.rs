@@ -2,7 +2,7 @@ use super::{seek_ack_is_current, verdict_names_current_stream};
 use crate::player::packet_failure::PacketFailure;
 use crate::player::thread::PlayerThread;
 use crate::player::thread::playback::stream_state_seq;
-use crate::player::wasapi::{ExclusiveCommand, ExclusiveEvent};
+use crate::player::wasapi::ExclusiveEvent;
 use crate::player::{
     DeviceErrorKind, EXCLUSIVE_STREAM_SEQ, MediaErrorCode, PlaybackState, PlayerEvent, wasapi,
 };
@@ -325,7 +325,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             // hook turns one into anything. Judged on `is_finished`, a FACT not a deadline:
             // there is no healthy state it can misread, which is why polling it is safe
             // where a timer would not be.
-            if backend_died && self.current_exclusive_stream_id.is_some() {
+            if backend_died && self.is_exclusive_mode {
                 crate::verr!("[WASAPI] render thread died; re-arming shared");
                 // The decoder outlives it and would park forever: it throttles against
                 // `consumed`, which only the thread that just died advances. Cancelling
@@ -360,9 +360,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 && std::time::Instant::now() >= at
             {
                 self.exclusive_release_at = None;
-                if let Some(ref handle) = self.exclusive_handle {
-                    handle.send(ExclusiveCommand::ReleaseDevice);
-                }
+                self.free_backend_now();
                 self.settle_seek_on_release();
                 self.has_track = false;
                 self.set_committed_track(None);
@@ -388,10 +386,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.seeking = false;
         self.seek_target = None;
         self.exclusive_seek_tx = None;
-        // Left standing, the panic gate fires a second recovery on the tick a typed refusal
-        // already ran: `is_dead()` reports a clean exit exactly as it reports a panic. Safe to
-        // clear on this backend only, every exclusive refusal taking the render thread down.
-        // The ASIO twin keeps its id: no ASIO refusal ends its control thread.
+        // No render thread is left behind a refusal to own this stream. The panic gate keys on
+        // the mode, which each refusal arm clears before the gate runs, not on this id. The
+        // ASIO twin keeps its id: no ASIO refusal ends its control thread.
         self.current_exclusive_stream_id = None;
 
         // Prefer the live exclusive position (floor-free); fall back to resume_store.

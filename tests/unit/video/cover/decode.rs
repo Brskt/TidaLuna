@@ -17,8 +17,11 @@ fn params() -> ParameterSets {
 #[test]
 fn a_keyframe_is_prefixed_with_its_parameter_sets() {
     let sample = [0, 0, 0, 2, 0x65, 0xAA];
+    let mut converted = Vec::new();
+    let idr = annex_b_access_unit(&sample, &params(), &mut converted).unwrap();
+    assert!(idr);
     let mut out = Vec::new();
-    annex_b_access_unit(&sample, &params(), true, &mut out).unwrap();
+    access_unit(&params().prefix().unwrap(), idr, &converted, &mut out);
 
     assert_eq!(
         out,
@@ -31,17 +34,66 @@ fn a_keyframe_is_prefixed_with_its_parameter_sets() {
 
 #[test]
 fn a_non_keyframe_is_written_alone_over_a_cleared_buffer() {
+    let mut converted = vec![0xFF; 8];
+    let idr = annex_b_access_unit(&[0, 0, 0, 2, 0x41, 0x9A], &params(), &mut converted).unwrap();
+    assert!(!idr);
     let mut out = vec![0xFF; 8];
-    annex_b_access_unit(&[0, 0, 0, 1, 0x41], &params(), false, &mut out).unwrap();
-    assert_eq!(out, [0, 0, 0, 1, 0x41]);
+    access_unit(&params().prefix().unwrap(), idr, &converted, &mut out);
+    assert_eq!(out, [0, 0, 0, 1, 0x41, 0x9A]);
 }
 
 /// A malformed sample must error rather than reach the decoder half-converted.
 #[test]
-fn a_sample_whose_length_overruns_is_refused() {
-    let sample = [0, 0, 0, 9, 0x41];
+fn a_malformed_nal_framing_is_refused() {
     let mut out = Vec::new();
-    assert!(annex_b_access_unit(&sample, &params(), false, &mut out).is_err());
+    for (length_size, sample, what) in [
+        (LengthSize::FourBytes, &[0, 0, 0, 0, 0x41][..], "length 0"),
+        (
+            LengthSize::FourBytes,
+            &[0, 0, 0, 2, 0x41, 0x9A, 0, 0][..],
+            "cut length field",
+        ),
+        (
+            LengthSize::FourBytes,
+            &[0, 0, 0, 1, 0xC1][..],
+            "forbidden_zero_bit",
+        ),
+        (
+            LengthSize::OneByte,
+            &[2, 0x41, 0x9A, 3, 0x41][..],
+            "1-byte overrun",
+        ),
+    ] {
+        let p = ParameterSets {
+            length_size,
+            ..params()
+        };
+        assert!(annex_b_access_unit(sample, &p, &mut out).is_err(), "{what}");
+    }
+}
+
+#[test]
+fn every_nal_of_a_sample_is_written_and_any_idr_among_them_counts() {
+    // The IDR first: a NAL after it must not take its keyframe away.
+    let expected = [0, 0, 0, 1, 0x65, 0x88, 0, 0, 0, 1, 0x41, 0x9A];
+    for (length_size, sample) in [
+        (LengthSize::OneByte, &[2, 0x65, 0x88, 2, 0x41, 0x9A][..]),
+        (
+            LengthSize::TwoBytes,
+            &[0, 2, 0x65, 0x88, 0, 2, 0x41, 0x9A][..],
+        ),
+    ] {
+        let p = ParameterSets {
+            length_size,
+            ..params()
+        };
+        let mut out = Vec::new();
+        assert!(annex_b_access_unit(sample, &p, &mut out).unwrap());
+        assert_eq!(out, expected);
+    }
+    let mut out = vec![0xFF; 4];
+    assert!(!annex_b_access_unit(&[], &params(), &mut out).unwrap());
+    assert!(out.is_empty(), "an empty sample leaves nothing behind");
 }
 
 /// An `avcC` with no SPS or no PPS describes a stream that cannot be started. Better to say
@@ -50,12 +102,11 @@ fn a_sample_whose_length_overruns_is_refused() {
 fn an_avcc_without_both_parameter_sets_is_refused() {
     let mut p = params();
     p.sps.clear();
-    let mut out = Vec::new();
-    assert!(annex_b_access_unit(&[0, 0, 0, 1, 0x65], &p, true, &mut out).is_err());
+    assert!(p.prefix().is_err());
 
     let mut p = params();
     p.pps.clear();
-    assert!(annex_b_access_unit(&[0, 0, 0, 1, 0x65], &p, true, &mut out).is_err());
+    assert!(p.prefix().is_err());
 }
 
 use shiguredo_mp4::Uint;
@@ -82,7 +133,7 @@ fn avcc(length_size_minus_one: u8, sps: Vec<Vec<u8>>, pps: Vec<Vec<u8>>) -> Avcc
 /// widths must come through too: four bytes is also what a reader falls back on.
 #[test]
 fn parameter_sets_refuses_the_reserved_width_and_carries_the_legal_ones_through() {
-    let sps = vec![vec![0x67, 0x42, 0x00, 0x1E]];
+    let sps = vec![SPS_16X16.to_vec()];
     let pps = vec![vec![0x68, 0xCE, 0x3C, 0x80]];
     for (minus_one, expected) in [
         (2, None),
@@ -101,6 +152,38 @@ fn parameter_sets_refuses_the_reserved_width_and_carries_the_legal_ones_through(
         assert_eq!(sets.pps, pps);
     }
 }
+
+/// Both ways in front of the decoder pass every NAL through `admit_nal`: a subset SPS in the SPS
+/// list, a start code hidden in the PPS list, and an SVC slice in a sample are each refused.
+#[test]
+fn a_hostile_nal_is_refused_on_both_ways_in() {
+    let sps = vec![SPS_16X16.to_vec()];
+    let pps = vec![vec![0x68, 0xCE, 0x3C, 0x80]];
+    let mut subset = SPS_16X16.to_vec();
+    subset[0] = 0x6F;
+    assert!(parameter_sets(&avcc(3, vec![SPS_16X16.to_vec(), subset], pps)).is_err());
+    let smuggling = vec![vec![0x68, 0xCE, 0, 0, 0, 1, 0x67]];
+    assert!(parameter_sets(&avcc(3, sps, smuggling)).is_err());
+
+    let mut out = Vec::new();
+    let sample = [0, 0, 0, 2, 0x65, 0x88, 0, 0, 0, 4, 0x74, 0x80, 0x80, 0x88];
+    assert!(annex_b_access_unit(&sample, &params(), &mut out).is_err());
+}
+
+/// One sample is one decode call: past 128 full-frame slices it is refused before the decoder sees
+/// any of them.
+#[test]
+fn a_sample_asking_more_than_one_call_may_do_is_refused() {
+    let p = ParameterSets {
+        length_size: LengthSize::OneByte,
+        ..params()
+    };
+    let mut out = Vec::new();
+    assert!(annex_b_access_unit(&[2u8, 0x65, 0x88].repeat(129), &p, &mut out).is_err());
+}
+
+/// Baseline, level 3.0, one macroblock.
+const SPS_16X16: [u8; 6] = [0x67, 0x42, 0x00, 0x1E, 0xDA, 0x79];
 
 /// Not a decode test: decoding needs Cisco's library, which is downloaded at runtime and is
 /// not available here. What is testable without it is that a file which is not an MP4 is

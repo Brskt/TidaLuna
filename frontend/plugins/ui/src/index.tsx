@@ -23,6 +23,7 @@ import { setupDeviceDialogToggles } from "./DeviceDialogToggles";
 
 import { pkg } from "plugins/lib.native/src/index.native";
 import { unloads } from "./index.safe";
+import "./logoutConfirm";
 
 export * from "./classes";
 export * from "./components";

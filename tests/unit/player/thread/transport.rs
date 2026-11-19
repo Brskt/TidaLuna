@@ -598,6 +598,36 @@ fn the_page_that_follows_finds_the_retained_track_stopped_not_to_be_resumed() {
     assert!(!h.player.resume_on_reassert);
 }
 
+/// A clip plays through Chromium: the track must let its device go at once.
+#[test]
+fn release_frees_the_track_and_emits_stopped() {
+    let mut h = harness();
+    // What the load behind the harness's track committed.
+    h.player
+        .set_committed_track(Some(("track-1".to_string(), "flac".to_string())));
+
+    h.player.handle_release(5);
+
+    assert!(!h.player.has_track, "the track is still held");
+    assert_eq!(
+        *h.player
+            .committed_track
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        None,
+        "a same-track load would resume a pipeline that is gone"
+    );
+    // Said once, as Stopped: a `MediaError` or a `Completed` would make TIDAL skip the track.
+    let events = h.events.lock().unwrap();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [PlayerEvent::StateChange(PlaybackState::Stopped, 5)]
+        ),
+        "a release speaks once, as Stopped: {events:?}"
+    );
+}
+
 /// A page that loads the retained track again, by the idempotent branch of `Player::load`, names
 /// it: the re-assert lifts the orphaning and, the page being new, resumes nothing by itself. One
 /// that names another track than the committed one names nothing of this one's.
@@ -612,6 +642,7 @@ fn a_reassert_lifts_the_orphaning_only_for_the_committed_track() {
             want_play: false,
             product_id: None,
             track_id: track_id.to_string(),
+            read_gen: crate::player::current_gen(),
         });
 
         assert_eq!(h.player.orphaned, orphaned, "re-assert of {track_id:?}");

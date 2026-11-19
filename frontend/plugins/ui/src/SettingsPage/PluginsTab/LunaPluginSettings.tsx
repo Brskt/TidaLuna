@@ -104,6 +104,17 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 		};
 	}, [plugin]);
 
+	// What a listener of the running plugin threw. The runtime's own LunaPlugin has `runtimeError`;
+	// @luna/core's type does not.
+	const [runtimeError, setRuntimeError] = React.useState<string | undefined>(undefined);
+	React.useEffect(() => {
+		const signal = (plugin as { runtimeError?: { _: string | undefined; onValue: (cb: (next: string | undefined) => void) => () => void } })
+			.runtimeError;
+		setRuntimeError(signal?._);
+		return signal?.onValue((next) => setRuntimeError(next));
+	}, [plugin]);
+	const shownError = loadError ?? runtimeError;
+
 	// Memoize callbacks
 	const handleReload = React.useCallback(plugin.reload.bind(plugin), [plugin]);
 	const toggleEnabled = React.useCallback((_: unknown, checked: boolean) => (checked ? plugin.enable() : plugin.disable()), [plugin]);
@@ -133,7 +144,7 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 			sx={{
 				borderRadius: 3,
 				backgroundColor: "rgba(0, 0, 0, 0.10)",
-				boxShadow: loadError ? "0 0 10px rgba(255, 0, 0, 0.70)" : "none",
+				boxShadow: shownError ? "0 0 10px rgba(255, 0, 0, 0.70)" : "none",
 				padding: 2,
 				paddingTop: 1,
 				paddingBottom: hasSettings || hideSettings ? 2 : 1,
@@ -143,7 +154,7 @@ export const LunaPluginSettings = React.memo(({ plugin }: { plugin: LunaPlugin }
 				name={name}
 				version={version}
 				link={link}
-				loadError={loadError}
+				loadError={shownError}
 				note={note}
 				author={author}
 				desc={desc}

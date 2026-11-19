@@ -141,6 +141,9 @@ impl Player {
         // pause-retain, and the committed track survives. A genuine track change
         // (different canonical id/format) falls through to a full load.
         let canonical_url_id = canonical_track_id(&url);
+        // Read before the mirror: a mint landing between the two reads (flush's lock-free
+        // advance or rearm) then outranks the replay a re-assert may arm on the thread.
+        let read_gen = current_gen();
         let same_committed = {
             let committed = self
                 .committed_track
@@ -206,6 +209,7 @@ impl Player {
                 want_play,
                 product_id,
                 track_id: canonical_url_id,
+                read_gen,
             });
             return;
         }

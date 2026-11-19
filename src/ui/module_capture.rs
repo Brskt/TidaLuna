@@ -78,6 +78,8 @@ pub(crate) enum ChunkRewrite {
     TagCreateRoot,
     RouteVolumeRestore,
     EndStallWatchdog,
+    /// Make Shaka's MediaSource test answer no, whatever the global `MediaSource` holds.
+    BlindShaka,
     /// Append a capture of the chunk's exports under this module id.
     Capture(&'static str),
 }
@@ -112,6 +114,9 @@ pub(crate) fn chunk_rewrites(js: &str) -> Vec<ChunkRewrite> {
     }
     if js.contains("timeout1:") && js.contains(STOP_ACTION) {
         out.push(ChunkRewrite::EndStallWatchdog);
+    }
+    if js.contains(".ManagedMediaSource||") && js.contains(".isTypeSupported)}") {
+        out.push(ChunkRewrite::BlindShaka);
     }
     for (carries, id) in [
         (js.contains(".useState="), "react"),
@@ -579,6 +584,56 @@ pub(crate) fn end_stall_watchdog(js: &str) -> String {
     js.to_string()
 }
 
+/// Shaka stays in `src=` mode even once the clips install a MediaSource, keeping audio on our
+/// `src` setter. Every gate keeps its head and loses its body, valid wherever a function stands;
+/// `globalThis.__lunaShakaBlind`, set at the chunk's end, says the rewrite ran. Unchanged on no match.
+pub(crate) fn blind_shaka(js: &str) -> String {
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(rel) = js[from..].find("function") {
+        let start = from + rel;
+        from = start + "function".len();
+        // The tail of a longer identifier, a method named `xfunction` for one, is no gate.
+        if start > 0 && is_ident_byte(js.as_bytes()[start - 1]) {
+            continue;
+        }
+        let mut c = Cursor { js, at: from };
+        let Some(body) = (|| {
+            // A gate in expression position may go unnamed.
+            if c.lit(" ").is_some() {
+                c.ident()?;
+            }
+            c.lit("(){")?;
+            let body = c.at;
+            c.lit("var ")?;
+            let t = c.ident()?;
+            c.lit("=")?;
+            let g = c.ident()?;
+            c.lit(".ManagedMediaSource||")?;
+            c.same(g)?;
+            c.lit(".MediaSource;return!!(")?;
+            c.same(t)?;
+            c.lit("&&")?;
+            c.same(t)?;
+            c.lit(".isTypeSupported)}")?;
+            Some(body)
+        })() else {
+            continue;
+        };
+        out.push_str(&js[copied..body]);
+        out.push_str("return!1}");
+        copied = c.at;
+        from = c.at;
+    }
+    if copied == 0 {
+        return js.to_string();
+    }
+    out.push_str(&js[copied..]);
+    out.push_str("\n;globalThis.__lunaShakaBlind=!0;");
+    out
+}
+
 #[derive(Debug)]
 pub(crate) struct RewrittenChunk {
     pub(crate) js: String,
@@ -603,6 +658,7 @@ pub(crate) fn rewrite_chunk(js: &str) -> Option<RewrittenChunk> {
             ChunkRewrite::TagCreateRoot => tag_create_root,
             ChunkRewrite::RouteVolumeRestore => route_volume_restore,
             ChunkRewrite::EndStallWatchdog => end_stall_watchdog,
+            ChunkRewrite::BlindShaka => blind_shaka,
             ChunkRewrite::Capture(id) => {
                 ids.push(id);
                 continue;

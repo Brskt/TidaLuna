@@ -1,10 +1,13 @@
-//! Serves animated covers to the page over a scheme we own, in three routes named by the host:
+//! Serves animated covers and video clips to the page over a scheme we own, in four routes named
+//! by the host:
 //!
 //! * `video/?src=&edge=`: the cover transcoded to VP9 WebM, from the disk cache, with ranges. The
 //!   page points TIDAL's own `<video>` at it. 404 until it is transcoded.
 //! * `frames/?src=&edge=`: the cover's decoded I420 frames, one pass, for the page to transcode.
 //!   Neither `cefQuery` nor `execute_java_script` can carry them, both marshalling through text.
 //! * `store/?src=&edge=` (POST): the transcoded WebM, validated before it reaches the cache.
+//! * `fragment/` (POST): one H.264 + AAC fMP4 append of a video clip, answered with its decoded
+//!   frames and PCM for the page's transcoding MediaSource.
 //!
 //! A registered scheme rather than a synthetic `https://` path: `store_proxy` and `luna_modules`
 //! both bet that their path never collides with a real TIDAL request, and a scheme we own does
@@ -17,9 +20,12 @@ use std::time::{Duration, Instant};
 
 use crate::ui::nav::PageKind;
 use crate::video::cover::CoverKey;
+use crate::video::deadline::Deadline;
 
+use fragment::FragmentBody;
 use frames::FrameBody;
 
+mod fragment;
 mod frames;
 mod handler;
 mod store;
@@ -34,26 +40,28 @@ enum CoverRoute {
     Video,
     Frames,
     Store,
+    Fragment,
 }
 
 impl CoverRoute {
     fn method(self) -> &'static str {
         match self {
             Self::Video | Self::Frames => "GET",
-            Self::Store => "POST",
+            Self::Store | Self::Fragment => "POST",
         }
     }
 }
 
-/// Refused before any work unless both route and cover are ours. The source is a percent-encoded
-/// query parameter, not a path: the `https://` URL's slashes and query survive the round trip.
-/// Other parameters (the page's cache-busting `r`) are ignored.
-fn parse_request(url: &str) -> Result<(CoverRoute, CoverKey), &'static str> {
+/// Refused before any work unless the route is ours and, for a cover route, the cover too
+/// (`fragment/` names none). The source is a percent-encoded query parameter, not a path: the
+/// `https://` URL's slashes and query survive the round trip. Other parameters are ignored.
+fn parse_request(url: &str) -> Result<(CoverRoute, Option<CoverKey>), &'static str> {
     let parsed = url::Url::parse(url).map_err(|_| "the cover request does not parse")?;
     let route = match parsed.host_str() {
         Some("video") => CoverRoute::Video,
         Some("frames") => CoverRoute::Frames,
         Some("store") => CoverRoute::Store,
+        Some("fragment") => return Ok((CoverRoute::Fragment, None)),
         _ => return Err("the cover request names no known route"),
     };
     let (mut src, mut edge) = (None, None);
@@ -66,7 +74,7 @@ fn parse_request(url: &str) -> Result<(CoverRoute, CoverKey), &'static str> {
     }
     let src = src.ok_or("the cover request carries no src")?;
     let edge = edge.ok_or("the cover request carries no edge")?;
-    Ok((route, CoverKey::parse(&src, &edge)?))
+    Ok((route, Some(CoverKey::parse(&src, &edge)?)))
 }
 
 /// One request's answer, as `response_headers` and `read` serve it.
@@ -111,18 +119,69 @@ impl Answer {
     }
 }
 
+/// A body decoded as it is read: `frames/` one frame per `read`, `fragment/` one record. Both
+/// boxed: each holds its decoder's state inline, and the two differ widely in size.
+enum StreamBody {
+    Frames(Box<FrameBody>),
+    Fragment(Box<FragmentBody>),
+}
+
+impl StreamBody {
+    fn fill(&mut self, out: &mut [u8]) -> anyhow::Result<usize> {
+        match self {
+            Self::Frames(body) => body.fill(out),
+            Self::Fragment(body) => body.fill(out),
+        }
+    }
+
+    /// What the log calls it when it stops.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Frames(_) => "Cover frames",
+            Self::Fragment(_) => "Video fragment",
+        }
+    }
+}
+
 /// What a handler shares with the work it started.
 ///
 /// `cancelled` is an atomic outside both locks: `cancel()` runs on the IO thread and must never
-/// wait on a frame being decoded under `frames`, nor the work on `answer`.
-#[derive(Default)]
+/// wait on a frame being decoded under `stream`, nor the work on `answer`.
 struct CoverShared {
     answer: Mutex<Answer>,
-    /// The `frames/` body, decoded one frame per `read`. Its own lock, held only by `read`.
-    frames: Mutex<Option<FrameBody>>,
+    /// The streamed body, decoded one unit per `read`. Its own lock, held only by `read`.
+    stream: Mutex<Option<StreamBody>>,
     streaming: AtomicBool,
     cancelled: AtomicBool,
+    /// When CEF handed us the request, after the page armed its own deadline; a decode deadline
+    /// counted from here never ends before the page's.
+    opened: Instant,
 }
+
+impl CoverShared {
+    fn new() -> Self {
+        Self {
+            answer: Mutex::default(),
+            stream: Mutex::default(),
+            streaming: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            opened: Instant::now(),
+        }
+    }
+
+    /// When a decode for this request stops: `limit` past its arrival.
+    fn deadline(&self, limit: Duration) -> Deadline {
+        Deadline::after(self.opened, limit)
+    }
+}
+
+/// How long the page waits for one fragment's decode and re-encode before it abandons the append.
+/// Published to it: the two clocks cannot drift apart.
+pub(crate) const FRAGMENT_DEADLINE: Duration = Duration::from_secs(20);
+
+/// How long the page gives one cover pass (download, decode, encode, store) before it abandons it.
+/// Published to it, as the fragment's.
+pub(crate) const COVER_PASS_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Why a requester is refused, or `None` to serve it.
 ///
@@ -177,6 +236,10 @@ impl Drop for Slot {
 /// and its cover's samples.
 static FRAME_STREAMS: SlotPool = SlotPool::new(2);
 
+/// Fragment decodes at once: a clip appends its audio and video SourceBuffers in parallel, and
+/// the cap stops any other page script from holding a decoder per request.
+static FRAGMENT_STREAMS: SlotPool = SlotPool::new(4);
+
 /// What a finished `frames/` pass lets the page store: the size and timing its WebM must have.
 #[derive(Clone, Copy, Debug)]
 struct Grant {
@@ -205,8 +268,8 @@ impl Grant {
 }
 
 /// How long a pass's grant waits for its store: the page encodes after the last frame, and how
-/// long that takes depends on the machine.
-const GRANT_LIFETIME: Duration = Duration::from_secs(120);
+/// long that takes depends on the machine. Opened later than the pass, it outlives the page's wait.
+const GRANT_LIFETIME: Duration = COVER_PASS_DEADLINE;
 
 /// Grants alive at once. Each is a few words; the bound only stops a page that reads passes and
 /// never stores from growing the map.

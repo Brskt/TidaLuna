@@ -71,6 +71,7 @@ fn is_invoke_channel(channel: &str) -> bool {
         || channel.starts_with("connect.")
         || channel == "player.parse_dash"
         || channel == "settings.video_codec_state"
+        || channel == "settings.video_codec_ask"
         || channel == "settings.set_video_codec"
         || channel == "settings.audio_cache_state"
         || channel == "settings.set_audio_cache_enabled"

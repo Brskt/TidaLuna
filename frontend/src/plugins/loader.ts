@@ -42,6 +42,10 @@ CoreLunaPlugin.prototype.reload = async function () {
     if (ours) await ours.reload();
 };
 
+// Reload all for @luna/ui: the upstream class has no such static, the UI reaches these by a cast.
+(CoreLunaPlugin as any).reloadAll = () => LunaPlugin.reloadAll();
+(CoreLunaPlugin as any).reloadAllInFlight = () => LunaPlugin.reloadAllInFlight;
+
 // Upstream imports plugin code into the page, past every check Rust makes; no instance may do that.
 (CoreLunaPlugin.prototype as any).loadExports = async function () {
     throw new Error("Plugins run through the host, never imported into the page");
@@ -129,6 +133,7 @@ function registerLifecycleEvents() {
             plugin.store.enabled = false;
             // Its code is unloaded: the Settings it registered must not stay on the card.
             plugin.exports = undefined;
+            plugin.runtimeError._ = undefined;
             plugin.loadError._ = typeof reason === "string" ? reason : "Plugin failed to initialize (timeout)";
             window.dispatchEvent(new Event("luna:plugins-updated"));
         }
@@ -138,6 +143,7 @@ function registerLifecycleEvents() {
         const plugin = LunaPlugin.getByUrl(url);
         if (!plugin) return;
         plugin.exports = undefined;
+        plugin.runtimeError._ = undefined;
         plugin.loadError._ = typeof reason === "string" ? reason : "Plugin stopped";
         window.dispatchEvent(new Event("luna:plugins-updated"));
     });
@@ -159,6 +165,9 @@ function registerLifecycleEvents() {
     onPluginEvent("jsrt.plugin_updated", (url: string) => {
         const plugin = LunaPlugin.getByUrl(url);
         if (!plugin) return;
+        // Ahead of the restart a launch check does in Rust, with no stop() here: the errors of the
+        // version it replaces go with it. Not at the ready ack, which would wipe the new load's own.
+        plugin.runtimeError._ = undefined;
         invokeIpc("plugin.list").then((plugins: any[]) => {
             const info = Array.isArray(plugins) ? plugins.find(p => p.url === url) : undefined;
             if (info) plugin.applyUpdate(info);

@@ -1,12 +1,12 @@
 import { sendIpc } from "./ipc";
-import { isSelfLoad } from "./audio-proxy";
+import { sdkNativeActive } from "./sdk-player";
 import { type CommittedOutput, committedOutput } from "../plugins/lib/src/redux/committedOutput";
 
 // The output device Rust plays on, whichever player TIDAL's SDK made active. TIDAL hands a device
 // choice to its active player only (`set activeDevice` -> `updateOutputDevice()`): the delegate's
-// `selectDevice` on a native track, shaka's `setSinkId` on a silent element for a self-loaded
-// one, which Rust never hears. Both commit the device to the store once applied
-// (`player.activeDeviceId`, mode reset to shared), and a self-loaded track follows that.
+// `selectDevice` on a native track, shaka's `setSinkId` for a self-loaded track or a clip, which
+// Rust never hears. Both commit the device to the store once applied (`player.activeDeviceId`,
+// mode reset to shared); the follower below sends Rust that commit.
 
 export type DeviceMode = "shared" | "exclusive";
 
@@ -53,18 +53,44 @@ export function deviceReleasedToShaka(): string | null {
 	return typeof held === "string" && held !== "default" ? held : null;
 }
 
+// The Chromium sink of the device chosen in the app, for a clip Chromium plays itself: TIDAL's store
+// pairs each device with a `webDeviceId`. Null when the active device names none.
+export function clipSinkId(state: any): string | null {
+	const player = state?.player;
+	const devices: unknown = player?.availableDevices;
+	if (!Array.isArray(devices)) return null;
+	const sink: unknown = devices.find((d) => d?.id === player.activeDeviceId)?.webDeviceId;
+	return typeof sink === "string" && sink !== "" ? sink : null;
+}
+
 const keyOf = (out: CommittedOutput | null) => (out ? `${out.mode}:${out.id}` : null);
 
-// Sends Rust each change of the committed device made while a self-loaded track is Rust's.
+let warnedSessionUncaptured = false;
+
+// The delegate hears a device change only while the SDK's native player is active. With the
+// session uncaptured the follower speaks anyway: a duplicate of the delegate's ends on the right
+// mode, whereas silence would leave Rust on the old device.
+const delegateSilent = (): boolean => {
+	const native = sdkNativeActive();
+	if (native !== null) return !native;
+	if (!warnedSessionUncaptured) {
+		warnedSessionUncaptured = true;
+		console.warn("[luna] SDK session not captured: a device change on a native track may reach Rust twice");
+	}
+	return true;
+};
+
+// Sends Rust each change of the committed device made while the SDK's active player is not its
+// native one: a self-loaded track or a clip, which Shaka plays.
 //
 // Its mode comes from the store too: the committing action resets it to shared. A native track is
 // left to the delegate: it hears the SDK first and the store lags it by one confirmation, so
 // following the store there too would send a stale mode over the one just applied. Changes are
-// tracked on every notification, gated or not, so a self-loaded track only sends what changed
-// during it.
+// tracked on every notification, gated or not; only what changed since the delegate stopped
+// hearing the SDK is sent.
 export function followCommittedOutput(
 	store: { getState(): any; subscribe(cb: () => void): () => void },
-	rustPlaysForShaka: () => boolean = isSelfLoad,
+	delegateIsSilent: () => boolean = delegateSilent,
 ): () => void {
 	let last = keyOf(committedOutput(store.getState()));
 	return store.subscribe(() => {
@@ -72,6 +98,6 @@ export function followCommittedOutput(
 		const key = keyOf(out);
 		if (key === last) return;
 		last = key;
-		if (out && rustPlaysForShaka()) selectDevice(out.id, out.mode);
+		if (out && delegateIsSilent()) selectDevice(out.id, out.mode);
 	});
 }

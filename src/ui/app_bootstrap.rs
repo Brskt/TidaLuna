@@ -390,6 +390,8 @@ wrap_browser_process_handler! {
                 window_maximized,
                 credentials,
                 rewrite_epoch: crate::ui::module_capture::REWRITE_EPOCH,
+                fragment_deadline: crate::ui::cover_scheme::FRAGMENT_DEADLINE,
+                cover_pass_deadline: crate::ui::cover_scheme::COVER_PASS_DEADLINE,
             };
             let init_script = format!(
                 "{}{}\n{}",

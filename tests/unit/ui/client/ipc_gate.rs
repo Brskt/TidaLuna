@@ -1,7 +1,16 @@
 //! Tests for `src/ui/client/ipc_gate.rs`, attached to it by `#[path]`.
 
-use super::{PrivilegedGate, is_privileged_channel, privileged_gate, trusted_via_memo};
+use super::{
+    PrivilegedGate, is_invoke_channel, is_privileged_channel, privileged_gate, trusted_via_memo,
+};
 use crate::ui::nav::PageKind;
+
+/// A channel left out of the list is answered "ok" before its handler runs: a clip asking for the
+/// codec would read a stale snapshot instead of waiting on the supervisor's step.
+#[test]
+fn the_codec_ask_is_an_invoke_channel() {
+    assert!(is_invoke_channel("settings.video_codec_ask"));
+}
 
 /// The memo follows the direct classification for every url, through a hit and a thrash.
 #[test]

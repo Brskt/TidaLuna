@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@inrixia/helpers": "^3.21.2",
+    "hls.js": "1.7.4",
     "idb-keyval": "^6.2.2",
     "oby": "^15.1.2",
     "react": "^19.2.4",

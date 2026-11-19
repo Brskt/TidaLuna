@@ -84,3 +84,14 @@ test("a download after the format ask hands Rust freshly signed urls", async () 
 	expect(requests).toHaveLength(2);
 	expect(downloads).toEqual([expect.objectContaining({ urls: ["https://cdn/init-2.mp4", "https://cdn/seg-2.mp4"] })]);
 });
+
+// The tracks endpoint answers a video's id with a 500: a video's format questions never reach it.
+test("a video's format questions send no track playbackinfo", async () => {
+	const id = String(++nextId);
+	const item = new MediaItem(id, { type: "video", item: { id: Number(id), title: "v" } } as any, "track", {} as any);
+	// Rust's last track format is on the page.
+	(window as any).__LUNAR_MEDIA_FORMAT__ = { sampleRate: 44100 };
+	expect(await item.updateFormat()).toBeUndefined();
+	expect(await item.playbackInfo()).toBeUndefined();
+	expect(requests).toEqual([]);
+});

@@ -72,6 +72,7 @@ struct PlayerIpcEffects {
     batch: Option<FlushBatch>,
     mc: Option<crate::platform::media_controls::OsMediaControls>,
     mc_metadata: Option<(crate::state::TrackMetadata, Option<f64>)>,
+    clip_state: Option<crate::player::PlaybackState>,
 }
 
 /// Whether a measured length may be published under an announced track's name. Two ids match
@@ -244,6 +245,15 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     );
                     PlayerIpcEffects::default()
                 }
+                PlayerIpc::Release => {
+                    report_undelivered("release", state.player.release());
+                    PlayerIpcEffects::default()
+                }
+                PlayerIpc::ClipState(st) => PlayerIpcEffects {
+                    mc: state.media_controls.take(),
+                    clip_state: Some(st),
+                    ..Default::default()
+                },
                 PlayerIpc::Seek { time } => {
                     let seq = crate::player::current_gen();
                     state.pending_time_update = Some((time, seq));
@@ -283,6 +293,17 @@ fn handle_player_ipc(msg: &IpcMessage) {
                 meta.cover_url.as_deref(),
                 *duration,
             );
+        }
+
+        if let (Some(mc), Some(st)) = (&mut effects.mc, effects.clip_state) {
+            mc.set_playback(st);
+        }
+
+        // The taskbar shows the clip too, playing only while `Active`: a clip has no `Seeking`
+        // or `Idle`.
+        #[cfg(target_os = "windows")]
+        if let Some(st) = effects.clip_state {
+            crate::platform::thumbbar::set_playing(st == crate::player::PlaybackState::Active);
         }
 
         if effects.mc.is_some() {
