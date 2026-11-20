@@ -5,6 +5,7 @@ import { sendIpc } from "./ipc";
 import { applyVolume } from "./volume";
 import { hijackSourceSrc, retargetCover } from "./video/cover-hijack";
 import { productOfStream } from "./sdk-playbackinfo";
+import { adoptClip, isHlsManifest, mirrorTaken, releaseClip } from "./video/clip-driver";
 
 // The element Rust's mirror belongs to: the one Shaka plays. Shaka keeps TWO (the active one and
 // the one it preloads the next track into), and only the active one may speak for Rust.
@@ -101,6 +102,13 @@ if (srcDesc) {
 	Object.defineProperty(HTMLMediaElement.prototype, "src", {
 		set(value: string) {
 			console.log("[audio-proxy] src SET:", typeof value === "string" ? value.slice(0, 80) : value, "isTidal:", shouldProxy(value));
+			// A TIDAL clip, which hls.js plays on this element. Any other value ends the clip first:
+			// no audio track may find hls.js still attached.
+			if (isHlsManifest(value)) {
+				adoptClip(this, value);
+				return;
+			}
+			releaseClip(this);
 			if (shouldProxy(value)) {
 				(this as any)._lunarProxy = true;
 				(this as any)._lunarSrc = value;
@@ -110,6 +118,7 @@ if (srcDesc) {
 				const preload = _proxyElement !== null && _proxyElement !== this;
 				if (!preload) {
 					_proxyElement = this;
+					mirrorTaken(this);
 					_handover = false;
 					_proxyPlaying = false;
 					_proxyTime = 0;
@@ -214,6 +223,7 @@ HTMLMediaElement.prototype.play = function () {
 	if ((this as any)._lunarProxy) {
 		if (_proxyElement === null || _proxyElement === this) {
 			_proxyElement = this;
+			mirrorTaken(this);
 			_proxyPlaying = true;
 			this.dispatchEvent(new Event("play"));
 			sendIpc("player.play");
@@ -221,6 +231,7 @@ HTMLMediaElement.prototype.play = function () {
 			// Shaka plays its preloaded element: the track changes over to it. Rust has the old
 			// track until the page loads the next. This is no command for Rust.
 			_proxyElement = this;
+			mirrorTaken(this);
 			_handover = true;
 			_settled = false;
 			_proxyPlaying = true;
@@ -264,6 +275,9 @@ HTMLMediaElement.prototype.load = function () {
 		}
 		return;
 	}
+
+	// Shaka's unload of a clip (`removeAttribute('src')` + `load()`): hls.js lets go of the element.
+	releaseClip(this);
 
 	// A reused element changes cover only through `load()` (the spec ignores a new `src` on an
 	// inserted <source>). TIDAL calls it after the commit, child in place: the edge is now the
@@ -441,4 +455,16 @@ export function proxyReset() {
 	_proxyPlaying = false;
 	_proxyTime = 0;
 	_proxyDuration = 0;
+}
+
+// A clip plays on `el` through Chromium: the mirror is dropped and `el` keeps its slot. A manifest
+// Shaka preloads into its other element meanwhile stays a preload; playing it is a hand-over.
+export function proxyClip(el: HTMLMediaElement) {
+	proxyReset();
+	_proxyElement = el;
+}
+
+// The clip on `el` is gone (unloaded, replaced, refused): the next manifest takes the mirror.
+export function proxyClipGone(el: HTMLMediaElement) {
+	if (_proxyElement === el) _proxyElement = null;
 }

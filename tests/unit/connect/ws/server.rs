@@ -1,6 +1,7 @@
 //! Tests for `src/connect/ws/server.rs`, attached to it by `#[path]`.
 
 use super::*;
+#[cfg(has_connect_server_key)]
 use futures_util::SinkExt;
 
 // The accept must observe a cancelled token instead of blocking forever in
@@ -143,9 +144,11 @@ async fn a_heartbeat_on_a_full_queue_reaches_its_verdict() {
 }
 
 /// The receiver's certificate is its own, not one a test client could check: every one passes.
+#[cfg(has_connect_server_key)]
 #[derive(Debug)]
 struct AcceptAnyCert;
 
+#[cfg(has_connect_server_key)]
 impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
     fn verify_server_cert(
         &self,
@@ -183,11 +186,13 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
     }
 }
 
+#[cfg(has_connect_server_key)]
 type Peer =
     tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
 
 /// The server as `WsServer::start` runs it, on the port the kernel gave its listener. Any failure
-/// (a build without the server key among them) is the test's answer.
+/// is the test's answer.
+#[cfg(has_connect_server_key)]
 async fn start_on_any_port(events_tx: mpsc::Sender<ClientEvent>) -> (WsServer, u16, ListenerProbe) {
     let (listener, probe) = ProbedListener::bind().await;
     let port = listener.port();
@@ -197,6 +202,7 @@ async fn start_on_any_port(events_tx: mpsc::Sender<ClientEvent>) -> (WsServer, u
     }
 }
 
+#[cfg(has_connect_server_key)]
 fn alive_tasks() -> usize {
     tokio::runtime::Handle::current()
         .metrics()
@@ -206,7 +212,7 @@ fn alive_tasks() -> usize {
 /// The server's ESTABLISHED socket to `peer`, named as a descriptor link (`socket:[inode]`).
 /// The table is host-wide and a freed port goes to any other socket; only the connection's own
 /// 4-tuple counts. Read from `/proc/net/tcp` (Linux only; elsewhere the tests check the tasks).
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", has_connect_server_key))]
 fn server_socket(port: u16, peer: std::net::SocketAddr) -> String {
     let std::net::SocketAddr::V4(peer) = peer else {
         panic!("the peer is not on IPv4")
@@ -232,7 +238,7 @@ fn server_socket(port: u16, peer: std::net::SocketAddr) -> String {
 /// Whether this process still has a descriptor on `socket`. Its own table, not the socket's
 /// state: a child that a parallel test forks holds a copy of every descriptor until its exec,
 /// which keeps the socket ESTABLISHED for a moment after the server closed it.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", has_connect_server_key))]
 fn holds(socket: &str) -> bool {
     std::fs::read_dir("/proc/self/fd")
         .unwrap()
@@ -240,6 +246,7 @@ fn holds(socket: &str) -> bool {
         .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|link| link.as_os_str() == socket))
 }
 
+#[cfg(has_connect_server_key)]
 async fn connect_peer(port: u16, rcvbuf: u32) -> Peer {
     let sock = tokio::net::TcpSocket::new_v4().unwrap();
     sock.set_recv_buffer_size(rcvbuf).unwrap();
@@ -265,6 +272,7 @@ async fn connect_peer(port: u16, rcvbuf: u32) -> Peer {
 }
 
 /// How a client whose writer is parked leaves the server.
+#[cfg(has_connect_server_key)]
 #[derive(Clone, Copy, Debug)]
 enum Removal {
     /// The real heartbeat verdict (missed Pongs), no help from the test.
@@ -277,6 +285,7 @@ enum Removal {
 
 /// Asserts that no task or socket of a client whose writer is parked outlives its `removal` or
 /// the shutdown.
+#[cfg(has_connect_server_key)]
 async fn park_then_remove(removal: Removal) {
     let (events_tx, mut events) = mpsc::channel(64);
     let (mut server, port, _) = start_on_any_port(events_tx).await;
@@ -358,16 +367,19 @@ async fn park_then_remove(removal: Removal) {
     drop(peer);
 }
 
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missed_heartbeat_ends_the_parked_writer() {
     park_then_remove(Removal::VerdictReal).await;
 }
 
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_peer_close_ends_the_parked_writer() {
     park_then_remove(Removal::PeerClose).await;
 }
 
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shutdown_ends_the_parked_writer() {
     park_then_remove(Removal::Shutdown).await;
@@ -375,6 +387,7 @@ async fn a_shutdown_ends_the_parked_writer() {
 
 /// A phone's Close is answered before its socket goes: the reply is the reader's to write, the
 /// writer being aborted with the entry the disconnect removes.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_peers_close_is_answered() {
     let (events_tx, events) = mpsc::channel(64);
@@ -392,6 +405,7 @@ async fn a_peers_close_is_answered() {
 }
 
 /// The server dropped without `shutdown` (its owner aborted or panicked).
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_server_releases_its_port() {
     let (events_tx, _events) = mpsc::channel(64);
@@ -412,12 +426,14 @@ async fn a_dropped_server_releases_its_port() {
 
 /// What the peer read of a shutdown: the texts, whether the Close frame came, and how the stream
 /// ended.
+#[cfg(has_connect_server_key)]
 struct Heard {
     texts: Vec<String>,
     closed: bool,
     end: Option<String>,
 }
 
+#[cfg(has_connect_server_key)]
 impl Heard {
     /// The server sends no TLS close_notify (tokio-tungstenite never shuts the TLS stream down):
     /// the peer's rustls reports the FIN as an unexpected EOF. Any other end is a reset.
@@ -428,6 +444,7 @@ impl Heard {
     }
 }
 
+#[cfg(has_connect_server_key)]
 async fn hear_to_the_end(mut read: futures_util::stream::SplitStream<Peer>) -> Heard {
     let mut heard = Heard {
         texts: Vec::new(),
@@ -450,6 +467,7 @@ async fn hear_to_the_end(mut read: futures_util::stream::SplitStream<Peer>) -> H
 
 /// Notices large enough to outlast the peer's window, then the session's end, all queued before
 /// `shutdown`.
+#[cfg(has_connect_server_key)]
 async fn queue_a_session_end(server: &WsServer, socket_id: u32) {
     let pad = "y".repeat(200_000);
     for i in 0..5 {
@@ -460,6 +478,7 @@ async fn queue_a_session_end(server: &WsServer, socket_id: u32) {
     server.send_to(socket_id, &end).await.unwrap();
 }
 
+#[cfg(has_connect_server_key)]
 fn assert_heard_the_session_end(heard: &Heard) {
     assert_eq!(heard.texts.len(), 6, "every queued notice reached the peer");
     assert!(heard.texts[5].contains("notifySessionEnded"));
@@ -473,6 +492,7 @@ fn assert_heard_the_session_end(heard: &Heard) {
 
 /// A server with one TLS peer whose receive window is small, so the flush outlasts it. Returns
 /// once the peer's `Connected` is taken from `events`.
+#[cfg(has_connect_server_key)]
 async fn server_with_a_peer(
     events_tx: mpsc::Sender<ClientEvent>,
     events: &mut mpsc::Receiver<ClientEvent>,
@@ -486,12 +506,14 @@ async fn server_with_a_peer(
 }
 
 /// Takes every event the server sends until it is dropped, the way the routing loop would.
+#[cfg(has_connect_server_key)]
 fn drain(mut events: mpsc::Receiver<ClientEvent>) {
     tokio::spawn(async move { while events.recv().await.is_some() {} });
 }
 
 /// The Pong is read before the shutdown: the command sent behind it reaches the routing loop, and
 /// frames are read in order.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shutdown_after_the_pong_was_read_leaves_the_queue_whole() {
     let (events_tx, mut events) = mpsc::channel(64);
@@ -524,6 +546,7 @@ async fn a_shutdown_after_the_pong_was_read_leaves_the_queue_whole() {
 
 /// A phone's command landing while the server flushes: read, never dispatched, since the routing
 /// loop has left for its epilogue.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_command_sent_during_the_shutdown_is_read_and_dropped() {
     let (events_tx, mut events) = mpsc::channel(64);
@@ -562,6 +585,7 @@ async fn a_command_sent_during_the_shutdown_is_read_and_dropped() {
 
 /// The routing loop, in its epilogue, reads no command: the read task holds one it cannot hand
 /// over when the shutdown starts.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_parked_on_the_routing_loop_leaves_the_shutdown_its_budget() {
     let (events_tx, mut unread) = mpsc::channel(1);
@@ -597,6 +621,7 @@ async fn a_read_parked_on_the_routing_loop_leaves_the_shutdown_its_budget() {
 /// A socket's events, from a peer that sends a command and closes while the map is held, the way
 /// `send_to_each` holds it: its connect comes first, alone, and the rest follows once the map is let
 /// go, in the order the peer sent it, with no entry left behind.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_socket_is_heard_connected_before_anything_its_read_loop_sends() {
     let (events_tx, mut events) = mpsc::channel(64);
@@ -635,6 +660,7 @@ async fn a_socket_is_heard_connected_before_anything_its_read_loop_sends() {
     server.shutdown().await;
 }
 
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_evicted_client_is_heard_disconnected_once() {
     let (events_tx, mut events) = mpsc::channel(64);
@@ -660,6 +686,7 @@ async fn an_evicted_client_is_heard_disconnected_once() {
     server.shutdown().await;
 }
 
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_peer_that_never_answers_the_close_holds_the_shutdown_to_its_deadline() {
     use tokio::io::AsyncReadExt;
@@ -699,6 +726,7 @@ async fn a_peer_that_never_answers_the_close_holds_the_shutdown_to_its_deadline(
 }
 
 /// The next event of a server, failing the test if none comes.
+#[cfg(has_connect_server_key)]
 async fn next_event(events: &mut mpsc::Receiver<ClientEvent>) -> ClientEvent {
     tokio::time::timeout(Duration::from_secs(5), events.recv())
         .await
@@ -708,6 +736,7 @@ async fn next_event(events: &mut mpsc::Receiver<ClientEvent>) -> ClientEvent {
 
 /// A client closed on its own, as TIDAL's receiver closes a phone it told the session is over:
 /// what was queued reaches it before the Close, and the routing loop hears the socket gone, once.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_closed_after_its_drain_is_heard_gone_once() {
     let (events_tx, mut events) = mpsc::channel(64);
@@ -742,6 +771,7 @@ async fn a_client_closed_after_its_drain_is_heard_gone_once() {
 
 /// A shutdown that finds a client mid-close waits for its drain: the notices and the Close reach
 /// the peer whole, not cut by the shutdown's own cancellation.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shutdown_during_a_client_close_leaves_its_drain_whole() {
     let (events_tx, mut events) = mpsc::channel(64);
@@ -762,6 +792,7 @@ async fn a_shutdown_during_a_client_close_leaves_its_drain_whole() {
 }
 
 /// A phone that answers nothing is let go at the deadline: reported gone, its tasks ended.
+#[cfg(has_connect_server_key)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_never_answers_the_close_is_released_at_the_deadline() {
     let (events_tx, mut events) = mpsc::channel(64);

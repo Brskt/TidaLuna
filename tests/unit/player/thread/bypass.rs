@@ -272,10 +272,7 @@ fn a_release_settles_the_seek_it_strands() {
     );
 }
 
-/// Every exclusive refusal takes the render thread down with it, and `is_dead()` reports that
-/// clean exit exactly as it reports a panic. Leaving the adoption record standing let the panic
-/// gate recover a second time on the very tick the refusal already had, sending two replays that
-/// carry the same generation and disagree about whether to resume playing.
+/// No render thread owns the refused stream: late events must name no one.
 #[cfg(target_os = "windows")]
 #[test]
 fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
@@ -288,7 +285,7 @@ fn an_exclusive_refusal_drops_the_adoption_it_recovers_from() {
 
     assert!(
         h.player.current_exclusive_stream_id.is_none(),
-        "the panic gate reads this field: a stale Some makes it fire on a stream nobody owns"
+        "the refused stream is still the one events are judged against"
     );
 }
 
@@ -1025,6 +1022,52 @@ async fn an_asio_stream_is_opened_under_the_seq_of_the_load_that_spawned_it() {
         Ok(AsioCommand::StartStream { opened_under, .. }) => assert_eq!(opened_under, 7),
         _ => panic!("the decoder's first word was not the StartStream of the load"),
     }
+}
+
+/// The exclusive render survives a release, and a stream it was still opening can report after
+/// it: a startup failure skips the track, a completion lands after the Stopped. After a release
+/// neither may be heard, and the decoder must be stopped.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_released_exclusive_stream_says_nothing_after_the_release() {
+    use crate::player::packet_failure::PacketFailure;
+    use crate::player::wasapi::{ExclusiveEvent, ExclusiveHandle};
+    let mut h = harness();
+    // Held open: the release still sends the render its ReleaseDevice.
+    let (handle, exclusive_events, _commands) = ExclusiveHandle::for_test();
+    h.player.is_exclusive_mode = true;
+    h.player.exclusive_handle = Some(handle);
+    let decoder = Arc::new(AtomicBool::new(false));
+    h.player.exclusive_stream_cancel = Some(decoder.clone());
+    h.player.current_exclusive_stream_id = Some(7);
+
+    h.player.handle_release(5);
+
+    assert!(
+        decoder.load(Relaxed),
+        "the released stream's decoder runs on"
+    );
+
+    exclusive_events
+        .send(ExclusiveEvent::StartupFailed {
+            stream_id: 7,
+            error: "probe failed".to_string(),
+            cause: PacketFailure::Source,
+        })
+        .unwrap();
+    exclusive_events.send(ExclusiveEvent::Completed(7)).unwrap();
+    h.player.poll_exclusive_events();
+
+    let events = h.events.lock().unwrap();
+    assert!(
+        !events.iter().any(|ev| matches!(
+            ev,
+            PlayerEvent::MediaError { .. }
+                | PlayerEvent::NetworkLost(_)
+                | PlayerEvent::StateChange(PlaybackState::Completed, _)
+        )),
+        "the released stream spoke after the release: {events:?}"
+    );
 }
 
 #[cfg(target_os = "windows")]

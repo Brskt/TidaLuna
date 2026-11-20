@@ -27,6 +27,11 @@ const waiting = new Map<string, Array<() => void>>();
 
 (globalThis as any).__LUNAR_TEST_IPC__ = sent;
 
+// What the app's init script publishes before the page runs; a test that needs one absent deletes
+// it, and `afterEach` puts it back.
+(window as any).__TIDALUNAR_FRAGMENT_DEADLINE_MS__ = 20_000;
+(window as any).__TIDALUNAR_COVER_PASS_DEADLINE_MS__ = 120_000;
+
 // Settles once `channel` has been sent: at once if it already was, else at the call that sends it.
 (globalThis as any).__LUNAR_TEST_IPC_SENT__ = (channel: string): Promise<void> =>
 	sent.some((s) => s.channel === channel)

@@ -322,6 +322,56 @@ fn a_watchdog_signal_with_no_watchdog_behind_is_reported_inert() {
     assert!(rewrite_chunk(WATCHDOG).is_none());
 }
 
+// Shaka's device constructor and its MediaSource test, verbatim from TIDAL's vendor chunk
+// (vendor-DHZY3U3e.js).
+const SHAKA_HT: &str = "function VT(){this.j=new ye(function(){for(var e=navigator.userAgent.toLowerCase(),\
+t=y([{type:`VR`,Vh:/oculus|quest/},{type:`TV`,Vh:/smart[ _]?tv|android ?tv/},{type:`MOBILE`,\
+Vh:/iphone|ipad|ipod|android/}]),n=t.next();!n.done;n=t.next())if(n=n.value,n.Vh.test(e))\
+return n.type;if(e=navigator.userAgentData,t=e?.platform?.toLowerCase()||``,e){if(e.mobile)\
+return`MOBILE`;if(t.includes(`android`))return`TV`}return`DESKTOP`}),this.l=new ye(function(){\
+var e=navigator.userAgent;return navigator.vendor.includes(`Apple`)&&(e.includes(`Version/`)||\
+e.includes(`OS/`))?`WEBKIT`:e.includes(`Edge/`)?`EDGE`:e.includes(`Chrome/`)?`CHROMIUM`:\
+e.includes(`Firefox/`)?`GECKO`:`UNKNOWN`})}function HT(){var t=e.ManagedMediaSource||\
+e.MediaSource;return!!(t&&t.isTypeSupported)}r=VT.prototype,\
+r.hc=function(){return!!navigator.mediaCapabilities}";
+
+#[test]
+fn shaka_reads_no_media_source_after_the_rewrite() {
+    // The blinding keys on names, not on the minifier's: the same test under other identifiers.
+    let renamed = SHAKA_HT.replacen(
+        "function HT(){var t=e.ManagedMediaSource||e.MediaSource;return!!(t&&t.isTypeSupported)}",
+        "function Qx(){var a=n.ManagedMediaSource||n.MediaSource;return!!(a&&a.isTypeSupported)}",
+        1,
+    );
+    for (src, name) in [(SHAKA_HT, "HT"), (renamed.as_str(), "Qx")] {
+        let out = blind_shaka(src);
+        assert!(
+            out.contains(&format!("function {name}(){{return!1}}r=VT.prototype")),
+            "{name}"
+        );
+        assert!(
+            out.ends_with("\n;globalThis.__lunaShakaBlind=!0;"),
+            "{name}"
+        );
+        assert!(parses(&out), "{name}");
+    }
+}
+
+const GATE_BODY: &str =
+    "(){var t=e.ManagedMediaSource||e.MediaSource;return!!(t&&t.isTypeSupported)}";
+
+/// Every gate is blinded before the flag claims Shaka is, named or not: one left reading
+/// MediaSource would build MSE on audio once the shim installs.
+#[test]
+fn every_gate_of_a_chunk_is_blinded_under_one_flag() {
+    let src = format!("function HT{GATE_BODY}var x=function{GATE_BODY};");
+    let out = blind_shaka(&src);
+    assert_eq!(out.matches("(){return!1}").count(), 2, "{out}");
+    assert!(!out.contains("ManagedMediaSource"), "{out}");
+    assert_eq!(out.matches("__lunaShakaBlind=!0").count(), 1, "{out}");
+    assert!(parses(&out));
+}
+
 // What the filter does to each kind of chunk, through the one call it makes.
 
 #[test]

@@ -19,6 +19,13 @@ enum RenderState {
     Paused,
 }
 
+/// Whether a StartStream may open the device. The render outlives a release, and a decoder the
+/// player retired can still send one. Its cancel is read at dequeue: the moment it was sent or
+/// queued does not matter.
+fn admits(start: &StreamStart) -> bool {
+    !start.cancel.load(Relaxed)
+}
+
 /// Absolute frame index a seek/resume to `secs` corresponds to. Used as the
 /// `frames_played` baseline for position reporting to stay correct after a seek.
 fn position_frames(secs: f64, sample_rate: u32) -> u64 {
@@ -235,7 +242,7 @@ impl RenderContext {
     }
 
     /// Open a new stream, reset all PCM/playback state, start playback.
-    /// Postconditions on Ok: pcm_data cleared, cursors zeroed, stream_id set,
+    /// Postconditions on an admitted Ok: pcm_data cleared, cursors zeroed, stream_id set,
     /// audio resources replaced, state = Playing, Duration + Active events sent.
     /// On Err: an error event was sent and render_thread must exit.
     fn handle_start_stream(
@@ -244,6 +251,13 @@ impl RenderContext {
         event_tx: &mpsc::Sender<ExclusiveEvent>,
         start: StreamStart,
     ) -> Result<(), ()> {
+        if !admits(&start) {
+            crate::vprintln!(
+                "[WASAPI] render: StartStream of retired stream {} refused",
+                start.stream_id
+            );
+            return Ok(());
+        }
         let StreamStart {
             stream_id,
             sample_rate,
@@ -330,6 +344,8 @@ impl RenderContext {
             start_secs,
             start_paused,
             consumed,
+            // Judged before the adoption, by `admits`.
+            cancel: _,
         } = start;
         self.pcm_data.clear();
         self.pcm_sample_rate = sample_rate;

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -50,17 +51,8 @@ pub(super) fn download_bun(bundle_dir: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let (archive_name, inner_dir) = if cfg!(target_os = "windows") {
-        ("bun-windows-x64.zip", "bun-windows-x64")
-    } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") {
-            ("bun-darwin-aarch64.zip", "bun-darwin-aarch64")
-        } else {
-            ("bun-darwin-x64.zip", "bun-darwin-x64")
-        }
-    } else {
-        ("bun-linux-x64.zip", "bun-linux-x64")
-    };
+    let inner_dir = archive_stem()?;
+    let archive_name = format!("{inner_dir}.zip");
 
     let url = format!(
         "https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/{archive_name}"
@@ -82,46 +74,52 @@ pub(super) fn download_bun(bundle_dir: &Path) -> Result<(), String> {
     }
 
     println!("  Extracting {bun_name}...");
-    if cfg!(target_os = "windows") {
-        let ps_cmd = format!(
-            "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-            zip_path.display(),
-            cache_dir.display()
-        );
-        let status = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps_cmd])
-            .status()
-            .map_err(|e| format!("powershell extract failed: {e}"))?;
-        if !status.success() {
-            return Err("Failed to extract Bun zip".to_string());
-        }
-    } else {
-        let status = Command::new("unzip")
-            .args(["-o", "-q"])
-            .arg(&zip_path)
-            .arg("-d")
-            .arg(&cache_dir)
-            .status()
-            .map_err(|e| format!("unzip failed: {e}"))?;
-        if !status.success() {
-            return Err("Failed to extract Bun zip".to_string());
-        }
-    }
-
-    // Move bun binary from inner directory to cache
-    let inner_bun = cache_dir.join(inner_dir).join(bun_name);
-    if inner_bun.exists() {
-        fs::rename(&inner_bun, &cached_bun).map_err(|e| format!("failed to move bun: {e}"))?;
-        let _ = fs::remove_dir_all(cache_dir.join(inner_dir));
-    }
+    let extracted = extract_entry(&zip_path, &format!("{inner_dir}/{bun_name}"), &cached_bun);
     let _ = fs::remove_file(&zip_path);
+    extracted?;
 
-    if cached_bun.exists() {
-        install_executable(&cached_bun, &bun_dst)?;
-        println!("  Bun v{BUN_VERSION} installed");
-    } else {
-        println!("  Warning: Bun binary not found after extraction");
-    }
-
+    install_executable(&cached_bun, &bun_dst)?;
+    println!("  Bun v{BUN_VERSION} installed");
     Ok(())
 }
+
+/// Oven's name for this target's archive, which is also the folder inside it. A target Bun is not
+/// built for is an error: any other archive ships a binary the app cannot run.
+fn archive_stem() -> Result<String, String> {
+    let os = match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "darwin",
+        "linux" => "linux",
+        other => return Err(format!("Bun publishes no build for {other}")),
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "aarch64",
+        other => return Err(format!("Bun publishes no build for {other}")),
+    };
+    Ok(format!("bun-{os}-{arch}"))
+}
+
+/// Writes the archive's `entry` to `dst` through a `.part` file: an extraction cut short never
+/// passes for the cached binary, which is taken on its size alone.
+fn extract_entry(zip_path: &Path, entry: &str, dst: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path)
+        .map_err(|e| format!("failed to open {}: {e}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("failed to read {}: {e}", zip_path.display()))?;
+    let mut source = archive
+        .by_name(entry)
+        .map_err(|e| format!("{entry} is not in {}: {e}", zip_path.display()))?;
+    let mut part = dst.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let mut out =
+        fs::File::create(&part).map_err(|e| format!("failed to create {}: {e}", part.display()))?;
+    io::copy(&mut source, &mut out).map_err(|e| format!("failed to extract {entry}: {e}"))?;
+    drop(out);
+    fs::rename(&part, dst).map_err(|e| format!("failed to move {}: {e}", part.display()))
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/bundle/bun/tests.rs"]
+mod tests;

@@ -69,7 +69,7 @@ export const BT709: VideoColorSpaceInit = {
 };
 
 /** Reads exact byte counts off a stream body, carrying the remainder of each chunk over. */
-class ByteReader {
+export class ByteReader {
 	private chunks: Uint8Array[] = [];
 	private held = 0;
 

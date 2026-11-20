@@ -23,6 +23,8 @@ import { bannerScreen, deliverStoreRepair, observeMutations } from "./store-repa
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
 import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
+import { watchCodecState } from "./video/codec-state";
+import { clipActive, reassertClipState } from "./video/clip-driver";
 import { invokeIpc, invokeIpcAs, sendIpc, sendIpcAs, isLoginCallback, onIpcEvent } from "./ipc";
 import { initPerfOverlay } from "./debug/perf-overlay";
 
@@ -32,10 +34,11 @@ import * as LunaCore from "../render/src";
 import * as LunaLib from "../plugins/lib/src";
 import * as InrixiaHelpers from "@inrixia/helpers";
 import * as LibNative from "../plugins/lib.native/src/index.native";
+import { withOwnedListeners } from "./plugins/listener-owner";
+import { LunaPlugin as HostPlugin } from "./plugins/luna-plugin";
 
-// Top level: it runs before TIDAL's SDK asks for its first playbackinfo and before any plugin
-// loads (`jsrt.load_plugins` is awaited in `init`, below). A plugin that took the slot first would
-// see every answer the page's `fetch` returns.
+// Top level, before any plugin loads (`jsrt.load_plugins` is awaited in `init`, below): a plugin
+// that took the slot first would see every answer the page's `fetch` returns.
 installSdkFetchObserver();
 
 // Synchronous initialization: expose nativeInterface immediately for Tidal
@@ -232,6 +235,8 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
                     store.dispatch({ type: "playbackControls/SET_PLAYBACK_STATE", payload: reduxState });
                 } catch (_) {}
             }
+            // The idle player's state, the release's Stopped among them, is not the clip's.
+            if (clipActive()) reassertClipState();
         }
         const mapped = SEQ_EVENTS[type];
         const loadOwner: LoadOwner = type === "mediaerror" ? window.nativeInterface.playback.loadOwner(event.v?.productId) : "foreign";
@@ -410,6 +415,8 @@ const init = async () => {
             registry[action].add(cb);
         };
         add("playbackControls/PLAY", () => {
+            // A clip's play, pause, stop and seek are its element's, which TIDAL's Shaka drives.
+            if (clipActive()) return;
             // A track this page refused asks for the load again, and Rust's own track stays as it is.
             // The Play is cancelled: it goes out again once the track is loaded.
             switch (playOnRefusal()) {
@@ -426,6 +433,7 @@ const init = async () => {
             else (window.NativePlayerComponent as any)?.setDesiredPlayback?.(true);
         });
         add("playbackControls/PAUSE", () => {
+            if (clipActive()) return;
             if (!isSelfLoad()) (window.NativePlayerComponent as any)?.setDesiredPlayback?.(false);
         });
         // TIDAL puts this at the start of every load it begins (its pick, its Play on a stopped transport),
@@ -444,6 +452,7 @@ const init = async () => {
         // transport. Both rails: a dispatched STOP (this page's refusals) and the one TIDAL's saga
         // puts after a queue clear. Rust drops the stop while a cast owns the player.
         const stopSelfLoad = () => {
+            if (clipActive()) return;
             if (isSelfLoad()) sendIpc("player.stop");
         };
         add("playbackControls/STOP", stopSelfLoad);
@@ -483,9 +492,11 @@ const init = async () => {
             () => require("../plugins/lib/src/redux/store").store.__lunaRawDispatch,
         );
         void startSdkPlayer();
+        watchCodecState();
         add(PRELOAD_ITEM, onPreloadItem);
         add(PRELOAD_ITEM, onPreloadItem, putInterceptors);
         add("playbackControls/SEEK", (time: number) => {
+            if (clipActive()) return;
             // The bar names the refused track, and Rust's is the one the refusal left behind.
             if (refusalStands()) return;
             sendIpc("player.seek", time);
@@ -517,22 +528,35 @@ const init = async () => {
     // acting on the caller's identity travel with one. The shared object above cannot: every
     // plugin reaches it, and an identity in there would belong to whoever asked first.
     //
-    // A snapshot rather than a proxy, `LunaLib`'s exports being fixed at build time. Only the
-    // identity-bearing pair is rebound: `on`/`once`/`onOpenUrl` register listeners, which no
-    // caller's identity decides.
+    // A snapshot rather than a proxy, `LunaLib`'s exports being fixed at build time. The pair
+    // `invoke`/`send` carries the capability; the registrars wrap each listener for the plugin
+    // url `pid`, whose card shows what its listeners throw. `pid` picks a card, it grants nothing.
     //
     // Pinned, because it is called with the CALLER's capability: a plugin that replaced this
     // factory would be handed the identity of every plugin importing `@luna/lib` after it, and
     // could act as any of them on `plugin.storage.*`, `plugin.fetch` and
     // `__Luna.registerNative`. Installed before `jsrt.load_plugins`, when no plugin has run yet.
-    defineHostModule("__lunaLibFor", (cap: string) => ({
-        ...LunaLib,
-        ipcRenderer: {
-            ...LunaLib.ipcRenderer,
-            invoke: (channel: string, ...args: any[]) => invokeIpcAs(cap, channel, ...args),
-            send: (channel: string, ...args: any[]) => sendIpcAs(cap, channel, ...args),
-        },
-    }));
+    // One copy per plugin and load: two imports of one plugin share its classes and wrappers.
+    const libCopies = new Map<unknown, { cap: string; lib: unknown }>();
+    defineHostModule("__lunaLibFor", (cap: string, pid: string) => {
+        const kept = libCopies.get(pid);
+        if (kept !== undefined && kept.cap === cap) return kept.lib;
+        const owned = withOwnedListeners(LunaLib, (registrar, err) => {
+            const owner = typeof pid === "string" ? HostPlugin.getByUrl(pid) : undefined;
+            if (owner) owner.reportListenerError(registrar, err);
+            else console.error(`[@luna/lib] Listener error in ${registrar}:`, err);
+        });
+        const lib = {
+            ...owned,
+            ipcRenderer: {
+                ...owned.ipcRenderer,
+                invoke: (channel: string, ...args: any[]) => invokeIpcAs(cap, channel, ...args),
+                send: (channel: string, ...args: any[]) => sendIpcAs(cap, channel, ...args),
+            },
+        };
+        libCopies.set(pid, { cap, lib });
+        return lib;
+    });
     modules["@inrixia/helpers"] = InrixiaHelpers;
     modules["@luna/lib.native"] = {
         ...LibNative,

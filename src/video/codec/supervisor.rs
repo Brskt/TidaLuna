@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::install::{
     CodecTarget, FetchError, Verified, current_target, fetch_and_install, installed_path, load_api,
-    verify_installed,
+    start_decoder, verify_installed,
 };
 use super::{FailureClass, off_runtime};
 
@@ -79,21 +79,21 @@ fn publish(tx: &tokio::sync::watch::Sender<Snapshot>, phase: Phase, enabled: boo
 }
 
 /// How a failure gets asked again, as the settings row tells it. A named enum rather than a
-/// `retrying` bool: "on the next demand" and "never" want different words.
+/// `retrying` bool: "by itself" and "on the next demand" want different words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Recovery {
     Timer,
     OnDemand,
-    Never,
 }
 
 impl FailureClass {
     fn recovery(self) -> Recovery {
         match self {
             Self::Network => Recovery::Timer,
-            Self::Refused | Self::Corrupt | Self::Disk | Self::Crashed => Recovery::OnDemand,
-            Self::Unloadable => Recovery::Never,
+            Self::Refused | Self::Corrupt | Self::Disk | Self::Unloadable | Self::Crashed => {
+                Recovery::OnDemand
+            }
         }
     }
 }
@@ -177,14 +177,13 @@ impl FailureClass {
     }
 
     /// How long after the last attempt a demand may attempt again, `wait` being the backoff that
-    /// attempt earned. `None`: a fact about this process; only a relaunch or the user's switch
-    /// changes it.
-    fn demand_floor(self, wait: std::time::Duration) -> Option<std::time::Duration> {
+    /// attempt earned.
+    fn demand_floor(self, wait: std::time::Duration) -> std::time::Duration {
         match self {
-            Self::Network => Some(NETWORK_DEMAND_FLOOR),
-            // An attempt may cost a download or a hash: it rides the backoff.
-            Self::Refused | Self::Corrupt | Self::Disk | Self::Crashed => Some(wait),
-            Self::Unloadable => None,
+            Self::Network => NETWORK_DEMAND_FLOOR,
+            // An attempt may cost a download, a hash or a load: it rides the backoff. A load that
+            // failed may have met a passing state (no file descriptor left, a scanner's lock).
+            Self::Refused | Self::Corrupt | Self::Disk | Self::Unloadable | Self::Crashed => wait,
         }
     }
 }
@@ -240,13 +239,7 @@ fn plan(
             // An off and an on the task read as one level still ask for the retry.
             Why::Switch => Plan::Verify,
             Why::Timer if class.timer() && due => Plan::Verify,
-            Why::Demand
-                if class
-                    .demand_floor(wait)
-                    .is_some_and(|floor| since.is_none_or(|d| d >= floor)) =>
-            {
-                Plan::Verify
-            }
+            Why::Demand if since.is_none_or(|d| d >= class.demand_floor(wait)) => Plan::Verify,
             Why::Boot | Why::Timer | Why::Demand | Why::Recheck => Plan::Hold,
         },
     }
@@ -303,10 +296,16 @@ impl Io for OnDisk {
         Ok(path)
     }
 
-    /// Each decode loads its own copy (`Decoder` takes the API by value); the probe's handle
-    /// is dropped here.
+    /// What a decode does first: load the library and start a decoder. Each decode loads its own
+    /// copy (`Decoder` takes the API by value); the probe's is dropped here.
     async fn probe(&self, path: PathBuf) -> Option<anyhow::Result<()>> {
-        off_runtime(move || load_api(&path).map(drop)).await
+        off_runtime(move || {
+            let api = load_api(&path)?;
+            start_decoder(api)
+                .map(drop)
+                .map_err(|e| anyhow::anyhow!("starting the H.264 decoder failed: {e}"))
+        })
+        .await
     }
 
     fn report(&self, gate: Gate, err: anyhow::Error) {
@@ -327,10 +326,6 @@ struct Core<I: Io> {
     /// When the timer asks again; `None` for a class without one.
     next_at: Option<tokio::time::Instant>,
     last_failure: Option<FailureClass>,
-    /// Whether the verified library loads in this process, asked once until a switch click clears
-    /// it. The digest pins the file; what can still refuse it is the environment (a loader
-    /// dependency the system lacks, a glibc too old).
-    loads: Option<bool>,
 }
 
 impl<I: Io> Core<I> {
@@ -342,7 +337,6 @@ impl<I: Io> Core<I> {
             last_attempt: None,
             next_at: None,
             last_failure: None,
-            loads: None,
         }
     }
 
@@ -389,13 +383,11 @@ impl<I: Io> Core<I> {
             }
             Plan::Verify => {
                 if why == Why::Switch {
-                    // The user's click is the manual retry: nothing remembered holds it back,
-                    // not even a library that would not load (a system library may have changed).
+                    // The user's click is the manual retry: nothing remembered holds it back.
                     self.failures = 0;
                     self.wait = FIRST_RETRY;
                     self.last_attempt = None;
                     self.next_at = None;
-                    self.loads = None;
                 }
                 if let Some(next) = self.settle(tx, wanted).await {
                     publish(tx, next, wanted);
@@ -404,8 +396,8 @@ impl<I: Io> Core<I> {
         }
     }
 
-    /// Verify, fetch if needed, probe once. `None` when the runtime shut down underneath: nothing
-    /// was decided or published.
+    /// Verify, fetch if needed, probe. `None` when the runtime shut down underneath: nothing was
+    /// decided or published.
     async fn settle(
         &mut self,
         tx: &tokio::sync::watch::Sender<Snapshot>,
@@ -432,31 +424,12 @@ impl<I: Io> Core<I> {
                 }
             }
         };
-        // A `Ready` the digest alone vouches for is loaded once before it is believed: a library
-        // that hashes right but cannot load would otherwise disarm the artwork filter for covers
-        // no decode can paint.
-        let loads = match self.loads {
-            Some(loads) => loads,
-            None => {
-                let loads = match self.io.probe(path.clone()).await? {
-                    Ok(()) => true,
-                    Err(e) => {
-                        let err = e.context("the codec does not load on this system");
-                        let gate = log_gate(self.last_failure, FailureClass::Unloadable);
-                        self.io.report(gate, err);
-                        false
-                    }
-                };
-                self.loads = Some(loads);
-                loads
-            }
-        };
-        if !loads {
-            self.last_failure = Some(FailureClass::Unloadable);
-            self.next_at = None;
-            return Some(Phase::Unavailable(Unavailable::Failed(
-                FailureClass::Unloadable,
-            )));
+        // A `Ready` the digest alone vouches for is loaded before it is believed, at every verify:
+        // a library that hashes right but cannot load or start a decoder would otherwise disarm
+        // the artwork filter for covers no decode can paint, and a recheck would prove nothing.
+        if let Err(e) = self.io.probe(path.clone()).await? {
+            let err = e.context("the codec does not load on this system");
+            return Some(self.failed(FailureClass::Unloadable, err));
         }
         self.last_failure = None;
         self.failures = 0;
@@ -614,6 +587,15 @@ impl Supervisor {
             .unwrap_or_else(|_| answer(&self.state.borrow().phase))
     }
 
+    /// A page's ask: the demand step runs, and the answer is the snapshot it settled on, whatever
+    /// the phase says (the page words the refusal). Only a supervisor that is gone refuses.
+    async fn ask_settled(&self) -> Result<SnapshotView, NoDecoder> {
+        match self.ask().await {
+            Ok(_) | Err(NoDecoder::Unavailable(_)) => Ok(view(&self.state.borrow())),
+            Err(NoDecoder::Stopped) => Err(NoDecoder::Stopped),
+        }
+    }
+
     /// `notify_one` stores a single permit; a burst of requests wakes the task once. Nothing to
     /// wake for unless something failed.
     fn demand(&self) {
@@ -708,6 +690,14 @@ pub(crate) fn is_ready() -> bool {
 pub(crate) async fn decoder() -> Result<PathBuf, NoDecoder> {
     match SUPERVISOR.get() {
         Some(supervisor) => supervisor.ask().await,
+        None => Err(NoDecoder::Stopped),
+    }
+}
+
+/// A clip's ask from the page: answered with the settled snapshot after the demand step.
+pub(crate) async fn settled_state() -> Result<SnapshotView, NoDecoder> {
+    match SUPERVISOR.get() {
+        Some(supervisor) => supervisor.ask_settled().await,
         None => Err(NoDecoder::Stopped),
     }
 }

@@ -76,7 +76,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     /// Stopped. Left standing, `has_track` and the position answer for a track that is gone, and
     /// a re-assert minted before the failure resumes a pipeline built from a cancelled buffer.
     /// `current_seq` stays: it names the load any event emitted now belongs to.
-    fn abandon_failed_load(&mut self) {
+    pub(super) fn abandon_failed_load(&mut self) {
         self.set_committed_track(None);
         self.has_track = false;
         self.is_playing = false;
@@ -571,7 +571,25 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         want_play: bool,
         product_id: Option<String>,
         track_id: String,
+        read_gen: u32,
     ) {
+        // The caller matched a mirror of this thread's state. Here the state is known: a track
+        // this thread dropped (release, failure, idle release) while the retained slot still
+        // names it is loaded again for that page, as of `read_gen`, which a later mint outranks.
+        let held = self.has_track && self.current_track_id.as_deref() == Some(track_id.as_str());
+        if !held
+            && let Some(retained) = super::retained_track()
+            && crate::player::canonical_track_id(&retained.track.url) == track_id
+        {
+            crate::vprintln!(
+                "[LOAD]   re-assert names {}, which this thread no longer holds; reloading",
+                crate::util::fmt::short_id(&track_id, 60)
+            );
+            self.orphaned = false;
+            let play = want_play || self.resume_on_reassert;
+            self.request_replay(retained.track, read_gen, play);
+            return;
+        }
         // Applied only while `track_id` still names the committed track (see the field
         // docs on `ReassertResume`). Erasing instead of refreshing would cost a
         // quality-swapped track its name, and a generation cannot stand in for the id

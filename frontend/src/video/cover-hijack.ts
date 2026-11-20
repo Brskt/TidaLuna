@@ -10,6 +10,7 @@
 // the cover is transcoded once (`cover-encode.ts`), then every element showing it reloads.
 
 import { transcodeCover, type TranscodeOutcome } from "./cover-encode";
+import { rustDeadlineMs } from "./deadlines";
 
 export const isCoverUrl = (url: string) => {
 	if (typeof url !== "string") return false;
@@ -118,9 +119,6 @@ const MAX_SPENT = 2;
 /** This Chromium cannot encode VP9: covers stay still for the session. A codec switched off is
  * not latched here: the switch is live, and the next miss asks again. */
 let noEncoder = false;
-/** Past this a transcode is abandoned: a wedged encoder or stream must not hold the queue. The
- * grant Rust opens for the upload lives as long. */
-const TRANSCODE_DEADLINE_MS = 120_000;
 /** The ladder between two passes of one cover: from the first rung, doubled up to the last. */
 const FIRST_WAIT_MS = 5_000;
 const MAX_WAIT_MS = 30 * 60_000;
@@ -213,6 +211,13 @@ function enqueue(real: string, edge: number) {
 }
 
 function start(real: string, edge: number, key: string) {
+	// Past it a pass is abandoned: a wedged encoder or stream must not hold the queue. Rust stops
+	// its decode there too, and the grant it opens for the upload lives as long.
+	const passMs = rustDeadlineMs("COVER_PASS_DEADLINE_MS");
+	if (passMs === null) {
+		console.warn("[cover] the app published no pass deadline; covers stay still");
+		return;
+	}
 	const s = standingOf(key);
 	// The pass owns the cover now: a retry still pending would run a second one behind it.
 	clearTimeout(s.timer);
@@ -221,7 +226,7 @@ function start(real: string, edge: number, key: string) {
 	const pass = queue.then(async () => {
 		let outcome: TranscodeOutcome;
 		const deadline = new AbortController();
-		const timer = setTimeout(() => deadline.abort(), TRANSCODE_DEADLINE_MS);
+		const timer = setTimeout(() => deadline.abort(), passMs);
 		try {
 			outcome = await transcode(real, edge, deadline.signal);
 		} catch (e) {

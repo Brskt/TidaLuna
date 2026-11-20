@@ -41,7 +41,7 @@ fn a_source_that_crashes_the_transpiler_ends_only_the_helper() {
         "the marker reached the helper"
     );
 
-    let nested = format!("x={}{};", "[".repeat(100_000), "]".repeat(100_000));
+    let nested = format!("x={}{};", "[".repeat(1_000_000), "]".repeat(1_000_000));
     let (crashed, elapsed) = run_helper(&nested);
     assert!(!crashed.status.success(), "{:?}", crashed.status);
     assert!(crashed.stdout.is_empty(), "a crash left an answer");

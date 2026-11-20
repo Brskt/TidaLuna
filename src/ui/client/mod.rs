@@ -300,6 +300,7 @@ wrap_display_handler! {
                     handle_ipc_message(json);
                     return 0;
                 }
+                let s = crate::util::redact_signed_params(&s);
                 if s.starts_with("[DBG:") || s.starts_with("[withFormat") {
                     crate::vprintln3!("[JS] {s}");
                 } else {

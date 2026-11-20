@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
@@ -24,6 +24,9 @@ pub(super) struct StreamStart {
     pub(super) start_secs: f64,
     pub(super) start_paused: bool,
     pub(super) consumed: Arc<AtomicU64>,
+    /// The decoder's retirement flag, set by the player when it abandons the stream. The render
+    /// reads it at dequeue and refuses a retired decoder's StartStream.
+    pub(super) cancel: Arc<AtomicBool>,
 }
 
 pub(super) enum ExclusiveCommand {
