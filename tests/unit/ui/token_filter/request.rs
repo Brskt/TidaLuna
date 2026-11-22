@@ -29,20 +29,6 @@ fn stored(
     }
 }
 
-/// The first non-empty `client_id` wins, percent-decoded; an empty value is skipped.
-#[test]
-fn a_token_request_names_its_first_non_empty_client_id() {
-    for (body, expected) in [
-        ("grant_type=refresh_token&client_id=a", Some("a")),
-        ("client_id=&client_id=b", Some("b")),
-        ("client_id=a%2Bb", Some("a+b")),
-        ("client_id=", None),
-        ("grant_type=client_credentials", None),
-    ] {
-        assert_eq!(form_client_id(body).as_deref(), expected, "{body}");
-    }
-}
-
 /// An opaque_rt the SDK held past our window must resolve to the current real refresh token,
 /// never leave raw.
 #[test]
@@ -56,7 +42,7 @@ fn an_opaque_refresh_resolves_to_its_generation_within_the_window_else_the_curre
         (&alone, "luna_rt_whatever", 0, "real_rt_new"),
     ] {
         assert_eq!(
-            resolve_opaque_refresh(state, opaque, now),
+            resolve_opaque_refresh(state, opaque, now).refresh_token,
             expected,
             "{opaque} at {now}"
         );

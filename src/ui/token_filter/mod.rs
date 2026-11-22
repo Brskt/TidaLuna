@@ -1,7 +1,8 @@
 use cef::*;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::app_state::{GrantKind, UserCommit};
 use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
 use crate::ui::hosts::{HostShape, TidalDomain};
 use crate::ui::nav::RequestUrl;
@@ -12,8 +13,7 @@ mod response;
 pub(crate) use request::BodyTokenSurface;
 #[cfg(test)]
 pub(crate) use request::resolve_opaque_access;
-use request::{capture_client_id, inject_refresh_token, settle_authorization_header};
-pub(crate) use request::{form_client_id, resolve_opaque_refresh};
+use request::{PreparedToken, prepare_token_request, read_token_body, settle_authorization_header};
 use response::{ProcessResult, process_token_response};
 
 /// Convert a CefStringUserfree to String without the crate's eprintln on null.
@@ -95,6 +95,82 @@ pub(crate) fn carries_nonce_shape(text: &str) -> bool {
     })
 }
 
+/// What a request asked the token endpoint, as Rust sent it, read when the answer arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExchangeOrigin {
+    /// A refresh whose nonce Rust resolved.
+    Substituted,
+    /// Any other grant the page sends: a sign-in's code exchange.
+    Code,
+    /// The app-level `client_credentials` grant.
+    ClientCredentials,
+    /// The SDK's web-session exchange, forwarded only while Rust holds a session.
+    WebSession,
+    /// The answer must never reach the page holding a token: a refresh Rust did not substitute
+    /// (sent empty, or carrying a real token), or a redirect that left the token endpoint or
+    /// changed what was asked.
+    Inert,
+}
+
+/// Where an answer is committed. Its kind is admitted only when the request could produce it: a
+/// forged query cannot turn a refresh's answer into an app token, nor a refresh into a sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answer {
+    Drop,
+    User(UserCommit),
+    Application,
+    /// The current generation's own user, taken in place under its nonces; never a new session.
+    SameUserInPlace,
+}
+
+impl ExchangeOrigin {
+    /// A substituted refresh that rotated its refresh token is still a refresh: same user only.
+    pub(crate) fn answer(self, kind: GrantKind) -> Answer {
+        match (self, kind) {
+            (Self::Substituted, GrantKind::Login | GrantKind::Refresh) => {
+                Answer::User(UserCommit::Refresh)
+            }
+            (Self::Code, GrantKind::Login) => Answer::User(UserCommit::Login),
+            (Self::ClientCredentials, GrantKind::Application) => Answer::Application,
+            (Self::WebSession, GrantKind::Login) => Answer::SameUserInPlace,
+            _ => Answer::Drop,
+        }
+    }
+
+    /// Sticky across hops: a redirect keeps the origin only by asking the same thing again, and
+    /// anything else can only lower it.
+    pub(crate) fn carry(prev: Option<Self>, hop: Option<Self>) -> Option<Self> {
+        match (prev, hop) {
+            (None, hop) => hop,
+            (Some(prev), Some(hop)) if prev == hop => Some(prev),
+            _ => Some(Self::Inert),
+        }
+    }
+
+    fn load(slot: &AtomicU8) -> Option<Self> {
+        match slot.load(Ordering::Acquire) {
+            1 => Some(Self::Substituted),
+            2 => Some(Self::Code),
+            3 => Some(Self::ClientCredentials),
+            4 => Some(Self::Inert),
+            5 => Some(Self::WebSession),
+            _ => None,
+        }
+    }
+
+    fn store(slot: &AtomicU8, origin: Option<Self>) {
+        let raw = match origin {
+            None => 0,
+            Some(Self::Substituted) => 1,
+            Some(Self::Code) => 2,
+            Some(Self::ClientCredentials) => 3,
+            Some(Self::Inert) => 4,
+            Some(Self::WebSession) => 5,
+        };
+        slot.store(raw, Ordering::Release);
+    }
+}
+
 /// Cancels a request whose token could only leave unresolved. One line, the reason only: never
 /// the body, the header or the nonce.
 fn withhold(why: request::TokenRefusal) -> ReturnValue {
@@ -102,17 +178,25 @@ fn withhold(why: request::TokenRefusal) -> ReturnValue {
     ReturnValue::CANCEL
 }
 
+/// The token filter of one hop, its slots fresh: CEF asks for a handler again at every redirect.
+pub(super) fn token_handler() -> ResourceRequestHandler {
+    TokenResourceHandler::new(
+        Arc::new(Mutex::new(None)),
+        Arc::new(AtomicU8::new(0)),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
 wrap_resource_request_handler! {
     pub(super) struct TokenResourceHandler {
-        // Per-request slot: the client_id from this exchange's POST body, set in
-        // on_before_resource_load and read at response time: the persisted
-        // client_id is bound to the same exchange that minted the refresh_token
-        // (the SDK binds each token to its context's client_id). Arc, for the
-        // macro's per-field Clone shares one slot across both callbacks.
+        // The client_id this exchange's POST body was SENT with: set in on_before_resource_load,
+        // read at response time, because the persisted client_id belongs to the exchange that
+        // minted the refresh_token. An Arc: the macro clones each field, both callbacks share it.
         exchange_client_id: Arc<Mutex<Option<String>>>,
-        // Current hop targets the token endpoint; set per on_before_resource_load
-        // entry; a redirect hop re-evaluates it, read at response-filter time.
-        token_exchange: Arc<AtomicBool>,
+        // `ExchangeOrigin` of the request, 0 while no hop reached the token endpoint; each hop
+        // folds into it through `carry`, and the response filter is armed when it is set.
+        exchange_origin: Arc<AtomicU8>,
         // The session this exchange was issued under, read when the request leaves and
         // carried to the response. This path has no Rust await to capture across (CEF
         // drives it), and the request slot IS the capture point.
@@ -138,21 +222,26 @@ wrap_resource_request_handler! {
                 if let Some(surface) = BodyTokenSurface::of(&method, &url) {
                     return withhold(surface.refusal());
                 }
-                let token_endpoint = crate::ui::nav::is_token_endpoint(&url);
-                self.token_exchange.store(token_endpoint, Ordering::Release);
+                let mut hop = None;
+                if crate::ui::nav::is_token_endpoint(&url) {
+                    force_identity_encoding(req);
+                    let body = read_token_body(req);
+                    let prepared = match prepare_token_request(req, &url, &body) {
+                        PreparedToken::Send(prepared) => prepared,
+                        PreparedToken::Withhold(why) => return withhold(why),
+                    };
+                    *self
+                        .exchange_client_id
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = prepared.client_id;
+                    self.exchange_epoch
+                        .store(prepared.session_epoch, Ordering::Release);
+                    hop = Some(prepared.origin);
+                }
+                let origin = ExchangeOrigin::carry(ExchangeOrigin::load(&self.exchange_origin), hop);
+                ExchangeOrigin::store(&self.exchange_origin, origin);
                 if url.is_empty() {
                     return ReturnValue::CONTINUE;
-                }
-
-                if token_endpoint {
-                    force_identity_encoding(req);
-                    capture_client_id(req, &self.exchange_client_id);
-                    self.exchange_epoch.store(
-                        crate::app_state::with_state(|state| state.session_epoch)
-                            .unwrap_or_default(),
-                        Ordering::Release,
-                    );
-                    inject_refresh_token(req, &url);
                 }
 
                 // Asked per request rather than per response: the artwork strip
@@ -194,7 +283,7 @@ wrap_resource_request_handler! {
             request: Option<&mut Request>,
             response: Option<&mut Response>,
         ) -> Option<ResponseFilter> {
-            if self.token_exchange.load(Ordering::Acquire) {
+            if let Some(origin) = ExchangeOrigin::load(&self.exchange_origin) {
                 let exchange_cid = self
                     .exchange_client_id
                     .lock()
@@ -206,6 +295,7 @@ wrap_resource_request_handler! {
                     Arc::new(move |body| {
                         match process_token_response(
                             &body,
+                            origin,
                             exchange_cid.as_deref(),
                             exchange_epoch,
                         ) {

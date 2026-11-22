@@ -1,7 +1,6 @@
 use cef::*;
-use std::sync::Mutex;
 
-use super::{carries_nonce_shape, is_opaque, userfree_to_string};
+use super::{ExchangeOrigin, carries_nonce_shape, is_opaque, userfree_to_string};
 use crate::app_state::AppToken;
 use crate::platform::secure_store::{StoredTokenState, TokenGeneration};
 use crate::ui::hosts::HostShape;
@@ -9,57 +8,67 @@ use crate::ui::nav::RequestUrl;
 use crate::util::now_unix_secs;
 
 const AUTHORIZATION: &str = "Authorization";
+const CONTENT_TYPE: &str = "Content-Type";
 const PATH_SESSION_HYDRATE: &str = "/api/session/hydrate";
 
-fn read_post_body(req: &mut Request) -> Option<Vec<u8>> {
-    let method_cef = req.method();
-    let method = userfree_to_string(&method_cef);
-    if method != "POST" {
-        return None;
+/// A token-endpoint body as CEF exposes it, judged before a byte of it is read.
+pub(crate) enum TokenBody {
+    /// No post data, or post data holding no element.
+    Absent,
+    /// One element of bytes: the form the SDK sends.
+    Bytes(Vec<u8>),
+    /// A blob, a stream, a file or several elements: what would leave cannot be read here.
+    Unreadable,
+}
+
+/// The layout half of [`TokenBody`], apart from the CEF objects so a table can pin it.
+#[derive(Debug, PartialEq, Eq)]
+enum BodyLayout {
+    Absent,
+    OneBytes,
+    Unreadable,
+}
+
+fn body_layout(excluded: bool, kinds: &[Option<PostdataelementType>]) -> BodyLayout {
+    match kinds {
+        _ if excluded => BodyLayout::Unreadable,
+        [] => BodyLayout::Absent,
+        [Some(kind)] if *kind == PostdataelementType::BYTES => BodyLayout::OneBytes,
+        _ => BodyLayout::Unreadable,
     }
-    let post_data = req.post_data()?;
+}
+
+pub(super) fn read_token_body(req: &mut Request) -> TokenBody {
+    let Some(post_data) = req.post_data() else {
+        return TokenBody::Absent;
+    };
     let count = post_data.element_count();
-    if count == 0 {
-        return None;
-    }
     let mut elements: Vec<Option<PostDataElement>> = vec![None; count];
-    post_data.elements(Some(&mut elements));
-    let total: usize = elements.iter().flatten().map(|el| el.bytes_count()).sum();
-    if total == 0 {
-        return None;
+    if count > 0 {
+        post_data.elements(Some(&mut elements));
     }
-    let mut body = Vec::with_capacity(total);
-    for el in elements.into_iter().flatten() {
-        let n = el.bytes_count();
-        if n == 0 {
-            continue;
+    let kinds: Vec<_> = elements
+        .iter()
+        .map(|el| el.as_ref().map(|el| el.get_type()))
+        .collect();
+    match body_layout(post_data.has_excluded_elements() != 0, &kinds) {
+        BodyLayout::Absent => TokenBody::Absent,
+        BodyLayout::Unreadable => TokenBody::Unreadable,
+        BodyLayout::OneBytes => {
+            let Some(el) = elements.into_iter().flatten().next() else {
+                return TokenBody::Unreadable;
+            };
+            let n = el.bytes_count();
+            let mut buf = vec![0u8; n];
+            let read = if n == 0 {
+                0
+            } else {
+                el.bytes(n, buf.as_mut_ptr())
+            };
+            buf.truncate(read);
+            TokenBody::Bytes(buf)
         }
-        let mut buf = vec![0u8; n];
-        el.bytes(n, buf.as_mut_ptr());
-        body.extend_from_slice(&buf);
     }
-    if body.is_empty() { None } else { Some(body) }
-}
-
-/// The first non-empty `client_id` of a form-encoded token request body.
-pub(crate) fn form_client_id(body: &str) -> Option<String> {
-    url::form_urlencoded::parse(body.as_bytes())
-        .find(|(k, v)| k == "client_id" && !v.is_empty())
-        .map(|(_, v)| v.into_owned())
-}
-
-pub(super) fn capture_client_id(req: &mut Request, exchange_slot: &Mutex<Option<String>>) {
-    let Some(body_bytes) = read_post_body(req) else {
-        return;
-    };
-    let Some(cid) = std::str::from_utf8(&body_bytes)
-        .ok()
-        .and_then(form_client_id)
-    else {
-        return;
-    };
-    // Bind this exchange's client_id to its own response (per-request slot).
-    *exchange_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(cid);
 }
 
 /// The generation an opaque nonce names: `previous` while its window is open and the nonce is
@@ -91,98 +100,467 @@ pub(crate) fn resolve_opaque_access<'a>(
     generation_named_by(ts, now, |g| g.opaque_at == opaque)
 }
 
-/// Refresh-token counterpart of [`resolve_opaque_access`]. Keeps the refresh
-/// side self-healing: a `luna_*` the SDK persisted past our two-entry window
-/// still maps to the current real refresh token instead of leaving raw - which
-/// is what let TIDAL reject the SDK's ~1h refresh and log the user out.
-pub(crate) fn resolve_opaque_refresh(
-    ts: &crate::platform::secure_store::StoredTokenState,
+/// Refresh-token counterpart of [`resolve_opaque_access`]: a `luna_*` the SDK persisted past our
+/// two-entry window still maps to the current generation instead of leaving raw. A whole
+/// generation, since its refresh token is only good with its own client.
+pub(crate) fn resolve_opaque_refresh<'a>(
+    ts: &'a StoredTokenState,
     opaque: &str,
     now: u64,
-) -> String {
-    if let Some(prev) = ts.previous.as_ref()
-        && opaque == prev.opaque_rt
-        && ts.previous_valid_until.is_none_or(|until| now <= until)
-    {
-        return prev.refresh_token.clone();
-    }
-    ts.current.refresh_token.clone()
+) -> &'a TokenGeneration {
+    generation_named_by(ts, now, |g| g.opaque_rt == opaque)
 }
 
-pub(super) fn inject_refresh_token(req: &mut Request, url: &RequestUrl) {
-    if !crate::ui::nav::is_token_endpoint(url) {
-        return;
-    }
-    let Some(body_bytes) = read_post_body(req) else {
-        return;
-    };
-    let Ok(body_str) = std::str::from_utf8(&body_bytes) else {
-        return;
-    };
-    let params: Vec<(String, String)> = url::form_urlencoded::parse(body_str.as_bytes())
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+/// A refresh as Rust sends it: the body, and the client that body names.
+pub(crate) struct RefreshRewrite {
+    pub(crate) body: String,
+    pub(crate) client_id: Option<String>,
+}
 
-    let is_refresh = params
-        .iter()
-        .any(|(k, v)| k == "grant_type" && v == "refresh_token");
-    if !is_refresh {
-        return;
-    }
+/// The `Content-Type` TIDAL's SDK sends its token requests with, set by Rust on every body it sends.
+const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded; charset=UTF-8";
 
-    let Some(rt_value) = params
-        .iter()
-        .find(|(k, _)| k == "refresh_token")
-        .map(|(_, v)| v.as_str())
-    else {
-        return;
-    };
+/// The keys each grant may send. Anything else is dropped, `scope` among them on a refresh: the
+/// server answers with the scope the token was granted.
+const REFRESH_KEYS: [&str; 4] = ["client_id", "client_secret", "grant_type", "refresh_token"];
+const CODE_KEYS: [&str; 8] = [
+    "client_id",
+    "client_secret",
+    "client_unique_key",
+    "code",
+    "code_verifier",
+    "grant_type",
+    "redirect_uri",
+    "scope",
+];
+/// Exactly these, each once: an extra key on the grant that mints the app token is refused.
+const CLIENT_CREDENTIALS_KEYS: [&str; 3] = ["client_id", "client_secret", "grant_type"];
 
-    if !is_opaque(rt_value) {
-        return;
-    }
+/// A token request normalised by Rust: a grant it knows, each allowed key's first occurrence (the
+/// one the endpoint reads), in the order the page sent them. The page's bytes never leave: Rust
+/// encodes this.
+pub(crate) struct GrantRequest {
+    grant: RequestedGrant,
+    pairs: Vec<(String, String)>,
+}
 
-    // None only when logged out (no token_state); otherwise every luna_*
-    // resolves to the current real refresh token; the SDK's own refresh
-    // never leaves with a raw opaque (the ~1h logout).
-    let real_rt = crate::app_state::with_state(|state| {
-        state
-            .token_state
-            .as_ref()
-            .map(|ts| resolve_opaque_refresh(ts, rt_value, now_unix_secs()))
-    })
-    .flatten();
-
-    let Some(real_rt) = real_rt else { return };
-
-    let new_body: String = params
-        .iter()
-        .map(|(k, v)| {
-            if k == "refresh_token" {
-                format!(
-                    "{}={}",
-                    url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(),
-                    url::form_urlencoded::byte_serialize(real_rt.as_bytes()).collect::<String>()
-                )
-            } else {
-                format!(
-                    "{}={}",
-                    url::form_urlencoded::byte_serialize(k.as_bytes()).collect::<String>(),
-                    url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()
-                )
+impl GrantRequest {
+    pub(crate) fn parse(body: &str) -> Result<Self, TokenRefusal> {
+        let all: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let mut firsts: Vec<(String, String)> = Vec::new();
+        for (key, value) in &all {
+            if !firsts.iter().any(|(seen, _)| seen == key) {
+                firsts.push((key.clone(), value.clone()));
             }
+        }
+        let grant_type = firsts
+            .iter()
+            .find(|(k, _)| k == "grant_type")
+            .map(|(_, v)| v.as_str());
+        let grant = RequestedGrant::of(grant_type);
+        let allowed: &[&str] = match grant {
+            RequestedGrant::Refresh | RequestedGrant::UpdateClient => &REFRESH_KEYS,
+            RequestedGrant::AuthorizationCode => {
+                let mut uris = all.iter().filter(|(k, _)| k == "redirect_uri");
+                match (uris.next(), uris.next()) {
+                    (Some((_, uri)), None) if is_our_redirect(uri) => {}
+                    _ => return Err(TokenRefusal::BadRedirect),
+                }
+                &CODE_KEYS
+            }
+            RequestedGrant::ClientCredentials => {
+                let exact = all.len() == CLIENT_CREDENTIALS_KEYS.len()
+                    && CLIENT_CREDENTIALS_KEYS
+                        .iter()
+                        .all(|key| all.iter().filter(|(k, _)| k == key).count() == 1);
+                if !exact {
+                    return Err(TokenRefusal::ForeignKeys);
+                }
+                &CLIENT_CREDENTIALS_KEYS
+            }
+            RequestedGrant::Other => return Err(TokenRefusal::UnknownGrant),
+        };
+        firsts.retain(|(key, _)| allowed.contains(&key.as_str()));
+        Ok(Self {
+            grant,
+            pairs: firsts,
         })
-        .collect::<Vec<_>>()
-        .join("&");
-
-    if let Some(mut new_pd) = post_data_create()
-        && let Some(mut el) = post_data_element_create()
-    {
-        let bytes = new_body.as_bytes();
-        el.set_to_bytes(bytes.len(), bytes.as_ptr());
-        new_pd.add_element(Some(&mut el));
-        req.set_post_data(Some(&mut new_pd));
     }
+
+    fn first(&self, key: &str) -> Option<&str> {
+        self.pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The `client_id` the endpoint reads, its first occurrence, when not empty: a refresh token
+    /// minted in reply is bound to it.
+    pub(crate) fn client_id(&self) -> Option<&str> {
+        self.first("client_id").filter(|c| !c.is_empty())
+    }
+
+    pub(crate) fn encode(&self) -> String {
+        let mut out = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in &self.pairs {
+            out.append_pair(key, value);
+        }
+        out.finish()
+    }
+
+    /// The refresh with its token sent empty: TIDAL answers it with a 400 the SDK treats as a
+    /// sign-out.
+    fn emptied(&self) -> String {
+        let mut out = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in &self.pairs {
+            out.append_pair(key, if key == "refresh_token" { "" } else { value });
+        }
+        out.finish()
+    }
+
+    /// Rebuilds a refresh the page sent with a `luna_*` refresh token, from the one generation
+    /// that nonce names; `None` when no generation holding a refresh token completes it.
+    ///
+    /// The token is bound to the client that minted it; that generation's client is sent
+    /// whatever the page asked, and a secret meant for the page's client stays behind.
+    /// `update_client`, the SDK's migration to the page's client, leaves as a plain refresh. Sent
+    /// as such, it carried our placeholder and the SDK retried it forever without logging out.
+    pub(crate) fn substitute_refresh(
+        &self,
+        ts: Option<&StoredTokenState>,
+        now: u64,
+    ) -> Option<RefreshRewrite> {
+        self.grant.sdk_exit()?;
+        let opaque = self.first("refresh_token").filter(|rt| is_opaque(rt))?;
+        let generation = resolve_opaque_refresh(ts?, opaque, now);
+        // An app-level generation holds no refresh token: an empty one would be refused all the
+        // same.
+        if generation.refresh_token.is_empty() {
+            return None;
+        }
+
+        let asked = self.client_id();
+        let update_client = self.grant == RequestedGrant::UpdateClient;
+        let sent = generation
+            .client
+            .for_page_refresh(asked, update_client)
+            .map(str::to_owned);
+        let client_changed = asked != sent.as_deref();
+
+        let mut out = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in &self.pairs {
+            match key.as_str() {
+                "grant_type" => {
+                    out.append_pair(key, "refresh_token");
+                }
+                "refresh_token" => {
+                    out.append_pair(key, &generation.refresh_token);
+                }
+                "client_id" => {
+                    if let Some(client) = &sent {
+                        out.append_pair(key, client);
+                    }
+                }
+                "client_secret" if client_changed => {}
+                _ => {
+                    out.append_pair(key, value);
+                }
+            }
+        }
+        if self.first("client_id").is_none()
+            && let Some(client) = &sent
+        {
+            out.append_pair("client_id", client);
+        }
+        Some(RefreshRewrite {
+            body: out.finish(),
+            client_id: sent,
+        })
+    }
+}
+
+/// The `redirect_uri` of a sign-in: our callback, read exactly as written (the parser drops
+/// surrounding whitespace and tabs, which `as_str` then gives away). A query passes: it holds
+/// TIDAL's own route parameters (`?album=<id>`).
+fn is_our_redirect(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.as_str() == value
+        && url.scheme() == "tidal"
+        && url.host_str() == Some("login")
+        && url.path() == "/auth"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.fragment().is_none()
+}
+
+/// The grant a token request asks for, read on its first `grant_type` as the endpoint reads it.
+/// Asked, never believed: what the answer is allowed to commit is not decided here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestedGrant {
+    Refresh,
+    UpdateClient,
+    AuthorizationCode,
+    ClientCredentials,
+    Other,
+}
+
+/// What the SDK does when its refresh comes back refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SdkExit {
+    /// A refused `refresh_token` signs the page out: an emptied one ends the session cleanly.
+    LogsOut,
+    /// A refused `update_client` is retried forever: sending it at all only feeds the loop.
+    Retries,
+}
+
+impl RequestedGrant {
+    fn of(grant_type: Option<&str>) -> Self {
+        match grant_type {
+            Some("refresh_token") => Self::Refresh,
+            Some("update_client") => Self::UpdateClient,
+            Some("authorization_code") => Self::AuthorizationCode,
+            Some("client_credentials") => Self::ClientCredentials,
+            _ => Self::Other,
+        }
+    }
+
+    /// `None` for a grant that never carries one of our refresh nonces.
+    pub(crate) fn sdk_exit(self) -> Option<SdkExit> {
+        match self {
+            Self::Refresh => Some(SdkExit::LogsOut),
+            Self::UpdateClient => Some(SdkExit::Retries),
+            Self::AuthorizationCode | Self::ClientCredentials | Self::Other => None,
+        }
+    }
+
+    /// What the answer to a request Rust sent without substituting a nonce may do. A refresh
+    /// without our nonce names no generation of ours: its answer never commits.
+    fn unsubstituted_origin(self) -> ExchangeOrigin {
+        match self {
+            Self::Refresh | Self::UpdateClient | Self::Other => ExchangeOrigin::Inert,
+            Self::AuthorizationCode => ExchangeOrigin::Code,
+            Self::ClientCredentials => ExchangeOrigin::ClientCredentials,
+        }
+    }
+}
+
+/// Why a request to a token surface is cancelled instead of sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenRefusal {
+    Unreadable,
+    NotUtf8,
+    ControlByte,
+    NonceMisplaced,
+    UnknownGrant,
+    ForeignKeys,
+    BadRedirect,
+    UpdateClientUnresolved,
+    BodyNotReplaced,
+    SessionHydrate,
+}
+
+impl std::fmt::Display for TokenRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreadable => "its body is not one element of bytes",
+            Self::NotUtf8 => "its body is not UTF-8",
+            Self::ControlByte => "its body holds a control byte",
+            Self::UnknownGrant => "it asks for a grant TIDAL's app never sends",
+            Self::ForeignKeys => "client_credentials carries keys beyond its three",
+            Self::BadRedirect => "its redirect_uri is not our callback, exactly once",
+            Self::NonceMisplaced => "a nonce sits outside the first refresh_token of a refresh",
+            Self::UpdateClientUnresolved => {
+                "update_client names no session holding a refresh token"
+            }
+            Self::BodyNotReplaced => "the rewritten body could not be attached",
+            Self::SessionHydrate => "session/hydrate would carry a nonce to tidal.com",
+        })
+    }
+}
+
+/// What leaves for the token endpoint in place of the page's request.
+pub(crate) enum TokenFate {
+    /// A nonce resolved: the refresh leaves as Rust rebuilt it.
+    Substitute(RefreshRewrite),
+    /// A nonce that resolves to nothing, on a refresh: the token is sent empty, the endpoint
+    /// refuses it and the SDK signs out.
+    Neutralise(String),
+    /// No nonce: the request leaves as Rust re-encoded it, its answer limited by its grant.
+    Reissue {
+        body: String,
+        client_id: Option<String>,
+        origin: ExchangeOrigin,
+    },
+    Withhold(TokenRefusal),
+}
+
+/// The decision on a token-endpoint body. Keys and values are scanned percent-decoded, a body that
+/// is not UTF-8 included: a nonce is found by its shape wherever it sits, and only the first
+/// `refresh_token` of a refresh may carry one, which is then resolved, emptied or held back. What
+/// leaves is always Rust's own encoding of a grant it knows.
+pub(crate) fn decide(body: &[u8], ts: Option<&StoredTokenState>, now: u64) -> TokenFate {
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(body)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let grant_type = pairs
+        .iter()
+        .find(|(k, _)| k == "grant_type")
+        .map(|(_, v)| v.as_str());
+    let exit = RequestedGrant::of(grant_type).sdk_exit();
+    let carrier = exit
+        .and(pairs.iter().position(|(k, _)| k == "refresh_token"))
+        .filter(|&i| is_opaque(&pairs[i].1));
+    let misplaced = pairs.iter().enumerate().any(|(i, (k, v))| {
+        carries_nonce_shape(k) || (Some(i) != carrier && carries_nonce_shape(v))
+    });
+    if misplaced {
+        return TokenFate::Withhold(TokenRefusal::NonceMisplaced);
+    }
+    let Ok(text) = std::str::from_utf8(body) else {
+        return TokenFate::Withhold(TokenRefusal::NotUtf8);
+    };
+    if text.bytes().any(|b| b < 0x20) {
+        return TokenFate::Withhold(TokenRefusal::ControlByte);
+    }
+    let request = match GrantRequest::parse(text) {
+        Ok(request) => request,
+        Err(why) => return TokenFate::Withhold(why),
+    };
+    let Some(exit) = exit.filter(|_| carrier.is_some()) else {
+        return TokenFate::Reissue {
+            body: request.encode(),
+            client_id: request.client_id().map(str::to_owned),
+            origin: request.grant.unsubstituted_origin(),
+        };
+    };
+    if let Some(rewrite) = request.substitute_refresh(ts, now) {
+        return TokenFate::Substitute(rewrite);
+    }
+    match exit {
+        SdkExit::LogsOut => TokenFate::Neutralise(request.emptied()),
+        SdkExit::Retries => TokenFate::Withhold(TokenRefusal::UpdateClientUnresolved),
+    }
+}
+
+fn any_pair_carries_a_nonce(form: &[u8]) -> bool {
+    url::form_urlencoded::parse(form)
+        .any(|(k, v)| carries_nonce_shape(&k) || carries_nonce_shape(&v))
+}
+
+/// The fate of a whole token-endpoint request. The endpoint reads the query before the body (a
+/// nonce there is misplaced whatever the body holds).
+fn fate_of(
+    query: Option<&str>,
+    body: &TokenBody,
+    ts: Option<&StoredTokenState>,
+    now: u64,
+) -> TokenFate {
+    if query.is_some_and(|q| any_pair_carries_a_nonce(q.as_bytes())) {
+        return TokenFate::Withhold(TokenRefusal::NonceMisplaced);
+    }
+    match body {
+        TokenBody::Bytes(bytes) => decide(bytes, ts, now),
+        TokenBody::Absent | TokenBody::Unreadable => TokenFate::Withhold(TokenRefusal::Unreadable),
+    }
+}
+
+/// A token-endpoint request after Rust's pass over its body.
+pub(crate) struct PreparedTokenBody {
+    /// The body to send in place of the page's, when Rust rewrote it.
+    pub(crate) rewritten: Option<String>,
+    /// The client the sent body names: a refresh token minted in reply is bound to it.
+    pub(crate) client_id: Option<String>,
+    /// The session the request leaves under, read in the section that picked its token: a logout
+    /// between two reads would commit one account's reply into the next session.
+    pub(crate) session_epoch: u64,
+    /// What the answer may do once it arrives.
+    pub(crate) origin: ExchangeOrigin,
+}
+
+pub(crate) enum PreparedToken {
+    Send(PreparedTokenBody),
+    Withhold(TokenRefusal),
+}
+
+/// The pass CEF's request filter runs on a token-endpoint request.
+pub(crate) fn prepare_token_body(query: Option<&str>, body: &TokenBody) -> PreparedToken {
+    let now = now_unix_secs();
+    // No AppState yet is no session: a nonce then names nothing to resolve to.
+    let (fate, session_epoch) = crate::app_state::with_state(|state| {
+        (
+            fate_of(query, body, state.token_state.as_ref(), now),
+            state.session_epoch,
+        )
+    })
+    .unwrap_or_else(|| (fate_of(query, body, None, now), 0));
+    let sent = |rewritten: Option<String>, client_id, origin| {
+        PreparedToken::Send(PreparedTokenBody {
+            rewritten,
+            client_id,
+            session_epoch,
+            origin,
+        })
+    };
+    match fate {
+        TokenFate::Substitute(rewrite) => sent(
+            Some(rewrite.body),
+            rewrite.client_id,
+            ExchangeOrigin::Substituted,
+        ),
+        TokenFate::Neutralise(emptied) => sent(Some(emptied), None, ExchangeOrigin::Inert),
+        TokenFate::Reissue {
+            body,
+            client_id,
+            origin,
+        } => sent(Some(body), client_id, origin),
+        TokenFate::Withhold(why) => PreparedToken::Withhold(why),
+    }
+}
+
+/// [`prepare_token_body`] on a request CEF is about to send to the token endpoint, Rust's body
+/// swapped in. A body that cannot be swapped would leave as the page wrote it: held back instead.
+pub(super) fn prepare_token_request(
+    req: &mut Request,
+    url: &RequestUrl,
+    body: &TokenBody,
+) -> PreparedToken {
+    let prepared = prepare_token_body(url.parsed().and_then(|u| u.query()), body);
+    if let PreparedToken::Send(PreparedTokenBody {
+        rewritten: Some(new_body),
+        ..
+    }) = &prepared
+        && !exchange(req, new_body)
+    {
+        return PreparedToken::Withhold(TokenRefusal::BodyNotReplaced);
+    }
+    prepared
+}
+
+/// Puts Rust's body and its `Content-Type` on the request, then reads both back: CEF reports no
+/// failure of either. Only what reads back as written counts as sent. The URL is never touched
+/// here, which would revert the body.
+fn exchange(req: &mut Request, body: &str) -> bool {
+    let (Some(mut post_data), Some(mut el)) = (post_data_create(), post_data_element_create())
+    else {
+        return false;
+    };
+    let bytes = body.as_bytes();
+    el.set_to_bytes(bytes.len(), bytes.as_ptr());
+    if post_data.add_element(Some(&mut el)) == 0 {
+        return false;
+    }
+    req.set_post_data(Some(&mut post_data));
+    if !matches!(read_token_body(req), TokenBody::Bytes(sent) if sent == bytes) {
+        return false;
+    }
+    let name = CefString::from(CONTENT_TYPE);
+    req.set_header_by_name(Some(&name), Some(&CefString::from(FORM_CONTENT_TYPE)), 1);
+    userfree_to_string(&req.header_by_name(Some(&name))) == FORM_CONTENT_TYPE
 }
 
 /// What leaves in the `Authorization` header of a request to a TIDAL API host.
@@ -339,20 +717,6 @@ impl BodyTokenSurface {
         match self {
             Self::SessionHydrate => TokenRefusal::SessionHydrate,
         }
-    }
-}
-
-/// Why a request to a token surface is cancelled instead of sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TokenRefusal {
-    SessionHydrate,
-}
-
-impl std::fmt::Display for TokenRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::SessionHydrate => "session/hydrate would carry a nonce to tidal.com",
-        })
     }
 }
 

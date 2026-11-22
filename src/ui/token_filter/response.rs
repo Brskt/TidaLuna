@@ -1,5 +1,5 @@
-use super::generate_opaque;
-use crate::app_state::{GrantKind, TokenCommit, TokenGrant, UserCommit};
+use super::{Answer, ExchangeOrigin, generate_opaque};
+use crate::app_state::{GrantKind, TokenCommit, TokenGrant};
 
 pub(super) enum ProcessResult {
     Modified(Vec<u8>),
@@ -9,10 +9,26 @@ pub(super) enum ProcessResult {
 
 pub(super) fn process_token_response(
     body: &[u8],
+    origin: ExchangeOrigin,
     exchange_client_id: Option<&str>,
     session_epoch: u64,
 ) -> ProcessResult {
-    process_token_response_with(body, exchange_client_id, session_epoch, generate_opaque)
+    process_token_response_with(
+        body,
+        origin,
+        exchange_client_id,
+        session_epoch,
+        generate_opaque,
+    )
+}
+
+/// Whether an answer would hand the page a token: a non-empty `access_token` or `refresh_token`.
+fn carries_a_token(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    ["access_token", "refresh_token"].iter().any(|key| {
+        obj.get(*key)
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| !v.is_empty())
+    })
 }
 
 /// `exchange_client_id` is the client_id from the POST that produced this
@@ -23,21 +39,32 @@ pub(super) fn process_token_response(
 /// `session_epoch` is the session the POST was issued under. A logout can land between
 /// the request and its reply, and committing then would put the departed account's live
 /// bearer token back into `AppState`.
+///
+/// The body is decoded the way `Response.json()` decodes it, replacement characters and a leading
+/// BOM dropped: a body the page can parse is a body this reads. An `Inert` answer carrying a token
+/// is dropped; its error bodies pass.
 fn process_token_response_with(
     body: &[u8],
+    origin: ExchangeOrigin,
     exchange_client_id: Option<&str>,
     session_epoch: u64,
     opaque: impl Fn() -> Option<String>,
 ) -> ProcessResult {
-    let Ok(json_str) = std::str::from_utf8(body) else {
-        return ProcessResult::Passthrough;
-    };
+    let decoded = String::from_utf8_lossy(body);
+    let json_str = decoded.strip_prefix('\u{FEFF}').unwrap_or(&decoded);
     let Ok(mut json) = serde_json::from_str::<serde_json::Value>(json_str) else {
         return ProcessResult::Passthrough;
     };
     let Some(obj) = json.as_object_mut() else {
         return ProcessResult::Passthrough;
     };
+    if origin == ExchangeOrigin::Inert {
+        return if carries_a_token(obj) {
+            ProcessResult::Error
+        } else {
+            ProcessResult::Passthrough
+        };
+    }
 
     let access_token = obj
         .get("access_token")
@@ -61,11 +88,20 @@ fn process_token_response_with(
         Some(t) if !t.is_empty() => t,
         _ => return ProcessResult::Passthrough,
     };
-
     let kind = GrantKind::of(
         refresh_token.as_deref().is_some_and(|rt| !rt.is_empty()),
         user_id.is_some(),
     );
+    let answer = origin.answer(kind);
+    if answer == Answer::Drop {
+        crate::vprintln!("[AUTH]   {kind:?} answer to a {origin:?} request, dropped");
+        return ProcessResult::Error;
+    }
+    let granted_scopes: Vec<String> = scope
+        .as_deref()
+        .map(|s| s.split(' ').map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+
     // A real token is present: if opaque generation fails, drop the response
     // (Error -> FilterOutcome::Drop) instead of emitting the real token.
     let opaque_at = match opaque() {
@@ -81,11 +117,6 @@ fn process_token_response_with(
         None
     };
 
-    let granted_scopes: Vec<String> = scope
-        .as_deref()
-        .map(|s| s.split(' ').map(|s| s.to_string()).collect())
-        .unwrap_or_default();
-
     let grant = TokenGrant {
         access_token: at,
         refresh_token: refresh_token.as_deref(),
@@ -96,10 +127,9 @@ fn process_token_response_with(
         granted_scopes: &granted_scopes,
         client_id: exchange_client_id,
     };
-    let rule = match kind {
-        GrantKind::Login => UserCommit::Login,
-        GrantKind::Refresh => UserCommit::Refresh,
-        GrantKind::Application => {
+    let rule = match answer {
+        Answer::User(rule) => rule,
+        Answer::Application => {
             // Its own nonce, stable: the user's generation is not touched and nothing is scrubbed.
             let Some(nonce) = crate::app_state::with_state(|state| state.apply_app_token(&grant))
             else {
@@ -111,6 +141,7 @@ fn process_token_response_with(
                 Err(_) => ProcessResult::Error,
             };
         }
+        Answer::Drop | Answer::SameUserInPlace => return ProcessResult::Error,
     };
     // The check belongs inside the closure, atomic with the writes it guards; its answer has
     // to leave it, because the body this function goes on to build is delivered to the SDK.

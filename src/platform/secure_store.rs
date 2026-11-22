@@ -69,6 +69,22 @@ impl ClientBinding {
         id
     }
 
+    /// The client a refresh the page sent leaves with. A proven client is pinned; an unproven one
+    /// lets the page's own through, the server then judging it, except on `update_client`, the
+    /// SDK's move to the page's client, which is only ever sent with the stored one. `None` sends
+    /// no client at all.
+    pub(crate) fn for_page_refresh<'a>(
+        &'a self,
+        asked: Option<&'a str>,
+        update_client: bool,
+    ) -> Option<&'a str> {
+        match self {
+            Self::Proven(id) if !id.is_empty() => Some(id),
+            Self::Unproven(id) if update_client && !id.is_empty() => Some(id),
+            Self::Proven(_) | Self::Unproven(_) => asked,
+        }
+    }
+
     /// A sign-in's new refresh token is bound to the client its exchange was seen sent with;
     /// unseen, the prior client stays, unproven for a token it never served.
     pub(crate) fn after_login(prior: Option<&Self>, sent: Option<&str>) -> Self {
