@@ -126,6 +126,33 @@ wrap_request_handler! {
             open_external_in_os(&url);
             1
         }
+        fn auth_credentials(
+            &self,
+            _browser: Option<&mut Browser>,
+            origin_url: Option<&CefString>,
+            is_proxy: ::std::os::raw::c_int,
+            host: Option<&CefString>,
+            port: ::std::os::raw::c_int,
+            realm: Option<&CefString>,
+            scheme: Option<&CefString>,
+            callback: Option<&mut AuthCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(callback) = callback.map(|c| c.clone()) else {
+                return 0;
+            };
+            let text = |s: Option<&CefString>| s.map(|s| s.to_string()).unwrap_or_default();
+            let challenge = crate::ui::proxy_auth_dialog::Challenge {
+                is_proxy: is_proxy != 0,
+                origin_url: text(origin_url),
+                host: text(host),
+                port,
+                realm: text(realm),
+                scheme: text(scheme),
+            };
+            // Cancelled or kept for later, the request is answered: 1 either way.
+            crate::ui::proxy_auth_dialog::answer_challenge(challenge, callback);
+            1
+        }
         fn on_certificate_error(
             &self,
             _browser: Option<&mut Browser>,

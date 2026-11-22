@@ -105,6 +105,9 @@ const CEF_SWITCHES: &[&str] = &[
     "disable-popup-blocking",
     "disable-prompt-on-repost",
     "disable-save-password-bubble",
+    // Every sign-in challenge goes to `auth_credentials` instead: a page could raise this
+    // prompt for a server of its choosing.
+    "disable-chrome-login-prompt",
     "disable-webrtc",
     "site-per-process",
     "disable-accelerated-video-encode",
