@@ -3,6 +3,7 @@ import "./bootstrap";
 
 import { createApplicationController } from "./controllers/application";
 import { createAudioHack } from "./controllers/audio";
+import { pinLogout } from "./controllers/logout";
 import { createNavigationController } from "./controllers/navigation";
 import { createPlaybackController } from "./controllers/playback";
 import type { LoadOwner } from "./controllers/playback";
@@ -396,6 +397,10 @@ const init = async () => {
         (window as any).__LUNAR_SET_CLOSE_TO_TRAY__ = setCloseToTray;
         setCloseToTray(!!(window as any).__TIDALUNAR_CLOSE_TO_TRAY__);
     }
+
+    // The native menu's Log Out calls this. Read now, before `jsrt.load_plugins`, because a
+    // plugin can overwrite `__lunaRawDispatch` afterwards.
+    pinLogout(window, store.__lunaRawDispatch);
 
     // Repairs Rust made at launch (settings.db, plugins.db), asked for here where the banner can
     // land. Rust keeps them until the banner is on the screen; a page that dies first leaves them

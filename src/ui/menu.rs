@@ -105,7 +105,9 @@ wrap_menu_model_delegate! {
                     eval_js(&about_dialog_js());
                 }
                 MenuCommand::Logout => {
-                    eval_js("window.location.href = '/logout';");
+                    if !eval_js(crate::platform::js_actions::LOGOUT) {
+                        crate::vprintln!("[menu] Log Out: no main frame to sign out from");
+                    }
                 }
                 MenuCommand::ClearCache => {
                     // Handed off rather than run here: this delegate runs on the UI thread, and
