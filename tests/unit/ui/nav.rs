@@ -2,6 +2,100 @@
 
 use super::*;
 
+/// The asker is read on the request's initiator; a navigation's `"null"` or one nothing names
+/// asks as a stranger.
+#[test]
+fn the_asker_is_read_on_the_requests_initiator() {
+    for (initiator, expected) in [
+        (Some("https://login.tidal.com"), Asker::LoginHost),
+        (Some("https://desktop.tidal.com"), Asker::Tidal),
+        (Some("https://desktop.tidal.com."), Asker::Foreign),
+        (Some("http://login.tidal.com"), Asker::Foreign),
+        (Some("https://login.tidal.com.evil.example"), Asker::Foreign),
+        (Some("tidal://login/auth"), Asker::Foreign),
+        (Some("null"), Asker::Foreign),
+        (None, Asker::Foreign),
+    ] {
+        assert_eq!(Asker::of_initiator(initiator), expected, "{initiator:?}");
+    }
+}
+
+/// A sign-in return proves a sign-in only when TIDAL's own sign-in page sent it to our callback in
+/// the main frame, carrying exactly one code that needs no second decoding.
+#[test]
+fn a_sign_in_return_is_recorded_only_from_the_sign_in_page_in_the_main_frame() {
+    let callback = "https://desktop.tidal.com/login/auth?code=abc.DEF_1-2";
+    let login = Some("https://login.tidal.com/success?x=1");
+    let proof = Some(LoginProof::of_code("abc.DEF_1-2"));
+    for (callback, frame, main, expected, why) in [
+        (callback, login, true, proof, "the sign-in page's return"),
+        (
+            "https://desktop.tidal.com/login/auth?album=1&code=abc.DEF_1-2",
+            login,
+            true,
+            proof,
+            "with TIDAL's route parameters",
+        ),
+        (callback, login, false, None, "in a subframe"),
+        (
+            callback,
+            Some("https://desktop.tidal.com/"),
+            true,
+            None,
+            "sent by the desktop page",
+        ),
+        (
+            callback,
+            Some("http://login.tidal.com/"),
+            true,
+            None,
+            "a plaintext sign-in page",
+        ),
+        (
+            callback,
+            Some("https://login.tidal.com./"),
+            true,
+            None,
+            "a malformed sign-in host",
+        ),
+        (callback, None, true, None, "no frame"),
+        (
+            "https://desktop.tidal.com/LOGIN/auth?code=abc",
+            login,
+            true,
+            None,
+            "another path",
+        ),
+        (
+            "https://desktop.tidal.com/login/auth?code=a&code=b",
+            login,
+            true,
+            None,
+            "two codes",
+        ),
+        (
+            "https://desktop.tidal.com/login/auth?code=a%2541",
+            login,
+            true,
+            None,
+            "a code decoding to another escape",
+        ),
+        (
+            "https://desktop.tidal.com/login/auth?code=",
+            login,
+            true,
+            None,
+            "an empty code",
+        ),
+    ] {
+        assert_eq!(
+            LoginProof::observe(callback, frame, main),
+            expected,
+            "{why}"
+        );
+    }
+}
+
 fn u(s: &str) -> RequestUrl {
     RequestUrl::new(s.to_string())
 }

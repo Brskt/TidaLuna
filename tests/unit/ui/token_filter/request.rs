@@ -214,6 +214,7 @@ enum Fate {
     Substitute,
     Neutralise,
     Reissue,
+    SignInPageAsSent,
     Withhold(TokenRefusal),
 }
 
@@ -222,6 +223,7 @@ fn fate(decided: &TokenFate) -> Fate {
         TokenFate::Substitute(_) => Fate::Substitute,
         TokenFate::Neutralise(_) => Fate::Neutralise,
         TokenFate::Reissue { .. } => Fate::Reissue,
+        TokenFate::SignInPageAsSent => Fate::SignInPageAsSent,
         TokenFate::Withhold(why) => Fate::Withhold(*why),
     }
 }
@@ -345,6 +347,7 @@ fn a_token_request_never_sends_a_nonce_whatever_the_body() {
                 TokenFate::Reissue { body: sent, .. } => {
                     assert!(!any_pair_carries_a_nonce(sent.as_bytes()), "{why}");
                 }
+                TokenFate::SignInPageAsSent => panic!("{why}: the app's request left as sent"),
                 TokenFate::Withhold(_) => {}
             }
         }
@@ -382,10 +385,67 @@ fn a_nonce_in_the_query_and_an_unreadable_body_are_held_back() {
         (None, &refresh, Fate::Substitute, "the SDK's refresh"),
     ] {
         assert_eq!(
-            fate(&fate_of(query, body, Some(&live), 0)),
+            fate(&fate_of(query, body, TokenSender::App, Some(&live), 0)),
             expected,
             "{why}"
         );
+    }
+}
+
+/// Nothing of ours runs on the sign-in page and no nonce lives in its storage: its posts leave as
+/// they came, even a body CEF cannot hand over, and their answers never commit. A nonce is
+/// still held back wherever it sits.
+#[test]
+fn only_the_sign_in_page_may_post_a_body_rust_does_not_rewrite() {
+    let live = stored(generation_of("new", "store"), None, None);
+    let sign_in = TokenSender::SignInPage;
+    let password = TokenBody::Bytes(b"grant_type=password&username=u".to_vec());
+    let carrying = TokenBody::Bytes(format!("x=1&code={NONCE}").into_bytes());
+    for (query, body, expected, why) in [
+        (
+            None,
+            &TokenBody::Unreadable,
+            Fate::SignInPageAsSent,
+            "a body CEF cannot hand over",
+        ),
+        (None, &TokenBody::Absent, Fate::SignInPageAsSent, "no body"),
+        (
+            None,
+            &password,
+            Fate::SignInPageAsSent,
+            "a grant the app never sends",
+        ),
+        (
+            None,
+            &carrying,
+            Fate::Withhold(TokenRefusal::NonceMisplaced),
+            "a nonce in the body",
+        ),
+    ] {
+        assert_eq!(
+            fate(&fate_of(query, body, sign_in, Some(&live), 0)),
+            expected,
+            "{why}"
+        );
+    }
+    let prepared = prepare_token_body(None, &TokenBody::Unreadable, sign_in);
+    assert!(
+        matches!(
+            prepared,
+            PreparedToken::Send(PreparedTokenBody {
+                rewritten: None,
+                origin: ExchangeOrigin::Inert,
+                ..
+            })
+        ),
+        "the sign-in page's answer never commits"
+    );
+    for (asker, expected) in [
+        (Asker::LoginHost, TokenSender::SignInPage),
+        (Asker::Tidal, TokenSender::App),
+        (Asker::Foreign, TokenSender::App),
+    ] {
+        assert_eq!(TokenSender::of(asker), expected, "{asker:?}");
     }
 }
 
@@ -417,6 +477,38 @@ fn a_reissued_request_answers_only_as_its_grant_allows() {
             TokenFate::Reissue { origin, .. } => assert_eq!(origin, expected, "{why}"),
             _ => panic!("{why}: not reissued"),
         }
+    }
+}
+
+/// A code exchange leaves only naming the sign-in return held, by the digest of its own code; no
+/// other request asks for one.
+#[test]
+fn a_code_exchange_leaves_only_naming_the_sign_in_return_held() {
+    let code = format!("grant_type=authorization_code&code=the-code&{REDIRECT}");
+    let returned = crate::ui::nav::LoginProof::of_code("the-code");
+    let other = crate::ui::nav::LoginProof::of_code("another-code");
+    let refresh = b"grant_type=refresh_token&refresh_token=real";
+    for (body, held, expected, why) in [
+        (
+            code.as_bytes(),
+            Some(returned),
+            Fate::Reissue,
+            "the return held",
+        ),
+        (
+            code.as_bytes(),
+            Some(other),
+            Fate::Withhold(TokenRefusal::NoLoginProof),
+            "another return",
+        ),
+        (refresh.as_slice(), None, Fate::Reissue, "not a sign-in"),
+    ] {
+        let admitted = admit_sign_in(decide(body, None, 0), |code| code.is_some() && code == held);
+        assert_eq!(fate(&admitted), expected, "{why}");
+    }
+    match decide(code.as_bytes(), None, 0) {
+        TokenFate::Reissue { code, .. } => assert_eq!(code, Some(returned)),
+        _ => panic!("a code exchange is reissued"),
     }
 }
 

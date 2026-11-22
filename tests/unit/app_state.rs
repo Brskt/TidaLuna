@@ -542,3 +542,28 @@ async fn an_app_token_is_renewed_in_place_under_the_pages_nonce() {
         ("luna_app_1", "app-at-2")
     );
 }
+
+/// A sign-in commits only on the return held, which a newer return replaces and a commit spends:
+/// no return, or no code, proves nothing.
+#[tokio::test]
+async fn a_sign_in_return_proves_its_own_code_once() {
+    use crate::ui::nav::LoginProof;
+    let (first, second) = (LoginProof::of_code("a"), LoginProof::of_code("b"));
+    let mut state = state_with_tokens(None);
+    assert!(!state.proves_login(Some(first)), "nothing held");
+    assert!(!state.proves_login(None), "no code, nothing held");
+
+    state.record_login_proof(first);
+    assert!(state.proves_login(Some(first)));
+    assert!(!state.proves_login(None), "no code");
+
+    state.record_login_proof(second);
+    assert!(
+        !state.proves_login(Some(first)),
+        "replaced by a newer return"
+    );
+    assert!(state.proves_login(Some(second)));
+
+    state.spend_login_proof();
+    assert!(!state.proves_login(Some(second)), "spent by its commit");
+}

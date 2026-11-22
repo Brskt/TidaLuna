@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use crate::app_state::{GrantKind, UserCommit};
 use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
 use crate::ui::hosts::{HostShape, TidalDomain};
-use crate::ui::nav::RequestUrl;
+use crate::ui::nav::{Asker, RequestUrl};
 
 mod request;
 mod response;
@@ -13,7 +13,9 @@ mod response;
 pub(crate) use request::BodyTokenSurface;
 #[cfg(test)]
 pub(crate) use request::resolve_opaque_access;
-use request::{PreparedToken, prepare_token_request, read_token_body, settle_authorization_header};
+use request::{
+    PreparedToken, TokenSender, prepare_token_request, read_token_body, settle_authorization_header,
+};
 use response::{ProcessResult, process_token_response};
 
 /// Convert a CefStringUserfree to String without the crate's eprintln on null.
@@ -179,11 +181,13 @@ fn withhold(why: request::TokenRefusal) -> ReturnValue {
 }
 
 /// The token filter of one hop, its slots fresh: CEF asks for a handler again at every redirect.
-pub(super) fn token_handler() -> ResourceRequestHandler {
+pub(super) fn token_handler(asker: Asker) -> ResourceRequestHandler {
     TokenResourceHandler::new(
         Arc::new(Mutex::new(None)),
         Arc::new(AtomicU8::new(0)),
         Arc::new(AtomicU64::new(0)),
+        Arc::new(Mutex::new(None)),
+        asker,
         Arc::new(AtomicBool::new(false)),
     )
 }
@@ -201,6 +205,10 @@ wrap_resource_request_handler! {
         // carried to the response. This path has no Rust await to capture across (CEF
         // drives it), and the request slot IS the capture point.
         exchange_epoch: Arc<AtomicU64>,
+        // The sign-in return a code exchange was admitted on, spent by the commit of its answer.
+        exchange_code: Arc<Mutex<Option<crate::ui::nav::LoginProof>>>,
+        // Who asked, read on the request's initiator by the client's handler.
+        asker: Asker,
         // Current hop targets the gateway that answers with artwork; set on the same
         // entry that refuses compression for it. Carried rather than re-derived. The
         // response half would otherwise reparse a URL for every response the app makes.
@@ -226,7 +234,8 @@ wrap_resource_request_handler! {
                 if crate::ui::nav::is_token_endpoint(&url) {
                     force_identity_encoding(req);
                     let body = read_token_body(req);
-                    let prepared = match prepare_token_request(req, &url, &body) {
+                    let sender = TokenSender::of(self.asker);
+                    let prepared = match prepare_token_request(req, &url, &body, sender) {
                         PreparedToken::Send(prepared) => prepared,
                         PreparedToken::Withhold(why) => return withhold(why),
                     };
@@ -236,6 +245,7 @@ wrap_resource_request_handler! {
                         .unwrap_or_else(|e| e.into_inner()) = prepared.client_id;
                     self.exchange_epoch
                         .store(prepared.session_epoch, Ordering::Release);
+                    *self.exchange_code.lock().unwrap_or_else(|e| e.into_inner()) = prepared.code;
                     hop = Some(prepared.origin);
                 }
                 let origin = ExchangeOrigin::carry(ExchangeOrigin::load(&self.exchange_origin), hop);
@@ -290,6 +300,7 @@ wrap_resource_request_handler! {
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
                 let exchange_epoch = self.exchange_epoch.load(Ordering::Acquire);
+                let exchange_code = *self.exchange_code.lock().unwrap_or_else(|e| e.into_inner());
                 return Some(new_buffering_filter(
                     0,
                     Arc::new(move |body| {
@@ -298,6 +309,7 @@ wrap_resource_request_handler! {
                             origin,
                             exchange_cid.as_deref(),
                             exchange_epoch,
+                            exchange_code,
                         ) {
                             ProcessResult::Modified(v) => FilterOutcome::Emit(v),
                             ProcessResult::Passthrough => FilterOutcome::Emit(body),

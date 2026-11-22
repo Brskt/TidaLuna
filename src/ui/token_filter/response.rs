@@ -1,5 +1,6 @@
 use super::{Answer, ExchangeOrigin, generate_opaque};
-use crate::app_state::{GrantKind, TokenCommit, TokenGrant};
+use crate::app_state::{GrantKind, TokenCommit, TokenGrant, UserCommit};
+use crate::ui::nav::LoginProof;
 
 pub(super) enum ProcessResult {
     Modified(Vec<u8>),
@@ -12,12 +13,14 @@ pub(super) fn process_token_response(
     origin: ExchangeOrigin,
     exchange_client_id: Option<&str>,
     session_epoch: u64,
+    exchange_code: Option<LoginProof>,
 ) -> ProcessResult {
     process_token_response_with(
         body,
         origin,
         exchange_client_id,
         session_epoch,
+        exchange_code,
         generate_opaque,
     )
 }
@@ -43,11 +46,15 @@ fn carries_a_token(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
 /// The body is decoded the way `Response.json()` decodes it, replacement characters and a leading
 /// BOM dropped: a body the page can parse is a body this reads. An `Inert` answer carrying a token
 /// is dropped; its error bodies pass.
+///
+/// A sign-in commits only while the return its request was admitted on (`exchange_code`) is still
+/// the one held, and spends it in the same section.
 fn process_token_response_with(
     body: &[u8],
     origin: ExchangeOrigin,
     exchange_client_id: Option<&str>,
     session_epoch: u64,
+    exchange_code: Option<LoginProof>,
     opaque: impl Fn() -> Option<String>,
 ) -> ProcessResult {
     let decoded = String::from_utf8_lossy(body);
@@ -146,6 +153,11 @@ fn process_token_response_with(
     // The check belongs inside the closure, atomic with the writes it guards; its answer has
     // to leave it, because the body this function goes on to build is delivered to the SDK.
     let committed = crate::app_state::with_state(|state| {
+        let sign_in = rule == UserCommit::Login;
+        if sign_in && !state.proves_login(exchange_code) {
+            crate::verr!("[AUTH] sign-in answer without its sign-in return, dropped");
+            return None;
+        }
         match state.commit_token_generation(session_epoch, &grant, rule) {
             TokenCommit::Refused => {
                 crate::vprintln!(
@@ -158,6 +170,9 @@ fn process_token_response_with(
                 None
             }
             TokenCommit::Committed { durable, ended } => {
+                if sign_in {
+                    state.spend_login_proof();
+                }
                 if !durable {
                     crate::vprintln!(
                         "[AUTH]   Exchange carried no refresh token - stored credential kept"

@@ -14,10 +14,77 @@ pub(crate) const PATH_CONTENT: &str = "/v1";
 /// client follows a redirect to. Known from TIDAL's own server info; not proven complete.
 pub(crate) const SERVICE_HOSTS: [&str; 3] = [HOST_API, HOST_QUEUE, HOST_API_HIFI];
 pub(crate) const REDIRECT_URI: &str = "tidal://login/auth";
+/// Where the desktop page receives our callback.
+const PATH_LOGIN_CALLBACK: &str = "/login/auth";
 /// TIDAL's OAuth token endpoint, under the `/v1/` API prefix. The version-less
 /// `/oauth2/token` path answers 403 to a POST; only `/v1/oauth2/token` is the
 /// real grant endpoint (the SDK's own login/refresh use it too).
 pub(crate) const PATH_OAUTH_TOKEN: &str = "/v1/oauth2/token";
+/// Who asks, read on the request's initiator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asker {
+    /// A page on the sign-in hosts.
+    LoginHost,
+    /// TIDAL's desktop page, its sign-in pages and our callback.
+    Tidal,
+    /// Anything else, or an initiator nothing names.
+    Foreign,
+}
+
+impl Asker {
+    /// The origin of the document that made the request. CEF's frame is no witness: it falls back
+    /// to the main frame (a script of `login.tidal.com` then reads as `DesktopApp`). A
+    /// navigation carries `"null"` and a browser-made request none, both foreign.
+    pub(crate) fn of_initiator(initiator: Option<&str>) -> Self {
+        match initiator.map(PageKind::classify) {
+            Some(PageKind::AuthHost) => Self::LoginHost,
+            Some(PageKind::DesktopApp | PageKind::LoginPage | PageKind::LoginCallback) => {
+                Self::Tidal
+            }
+            Some(PageKind::External | PageKind::TidalCallback) | None => Self::Foreign,
+        }
+    }
+}
+
+/// The return of a sign-in through TIDAL's own page, named by the digest of the code it carried.
+/// Only a code exchange whose code it names may commit a sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LoginProof([u8; 32]);
+
+impl LoginProof {
+    pub(crate) fn of_code(code: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        Self(Sha256::digest(code.as_bytes()).into())
+    }
+
+    /// Our callback, reached in the main frame from a page of `login.tidal.com` itself, carrying
+    /// exactly one code that decodes to no further escape. `callback` is the `tidal://` return as
+    /// the desktop page reloads it; `frame_url` is the page that sent it there.
+    pub(crate) fn observe(
+        callback: &str,
+        frame_url: Option<&str>,
+        is_main_frame: bool,
+    ) -> Option<Self> {
+        let sender = Url::parse(frame_url?).ok()?;
+        let from_login = sender.scheme() == "https"
+            && matches!(HostShape::of(&sender), HostShape::Name(name) if name.is(HOST_LOGIN));
+        let callback = Url::parse(callback).ok()?;
+        if !is_main_frame
+            || !from_login
+            || callback.host_str() != Some(HOST_DESKTOP)
+            || callback.path() != PATH_LOGIN_CALLBACK
+        {
+            return None;
+        }
+        let mut codes = callback.query_pairs().filter(|(key, _)| key == "code");
+        match (codes.next(), codes.next()) {
+            (Some((_, code)), None) if !code.is_empty() && !code.contains('%') => {
+                Some(Self::of_code(&code))
+            }
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageKind {

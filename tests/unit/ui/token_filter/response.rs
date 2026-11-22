@@ -8,14 +8,14 @@ fn token_response_drops_on_entropy_failure_never_passthrough() {
     // (Error), never Passthrough, or the real token reaches the renderer.
     let body = br#"{"access_token":"real-secret","refresh_token":"real-rt"}"#;
     assert!(matches!(
-        process_token_response_with(body, ExchangeOrigin::Code, None, 0, || None),
+        process_token_response_with(body, ExchangeOrigin::Code, None, 0, None, || None),
         ProcessResult::Error
     ));
 }
 
 fn verdict(body: &[u8], origin: ExchangeOrigin) -> &'static str {
     // A failing generator stops a live answer before it commits: no global state is touched.
-    match process_token_response_with(body, origin, None, 0, || None) {
+    match process_token_response_with(body, origin, None, 0, None, || None) {
         ProcessResult::Modified(_) => "modified",
         ProcessResult::Passthrough => "passthrough",
         ProcessResult::Error => "dropped",

@@ -4,7 +4,7 @@ use super::{ExchangeOrigin, carries_nonce_shape, is_opaque, userfree_to_string};
 use crate::app_state::AppToken;
 use crate::platform::secure_store::{StoredTokenState, TokenGeneration};
 use crate::ui::hosts::HostShape;
-use crate::ui::nav::RequestUrl;
+use crate::ui::nav::{Asker, LoginProof, RequestUrl};
 use crate::util::now_unix_secs;
 
 const AUTHORIZATION: &str = "Authorization";
@@ -359,6 +359,7 @@ pub(crate) enum TokenRefusal {
     UnknownGrant,
     ForeignKeys,
     BadRedirect,
+    NoLoginProof,
     UpdateClientUnresolved,
     BodyNotReplaced,
     SessionHydrate,
@@ -373,6 +374,7 @@ impl std::fmt::Display for TokenRefusal {
             Self::UnknownGrant => "it asks for a grant TIDAL's app never sends",
             Self::ForeignKeys => "client_credentials carries keys beyond its three",
             Self::BadRedirect => "its redirect_uri is not our callback, exactly once",
+            Self::NoLoginProof => "its code is not the one the sign-in page returned",
             Self::NonceMisplaced => "a nonce sits outside the first refresh_token of a refresh",
             Self::UpdateClientUnresolved => {
                 "update_client names no session holding a refresh token"
@@ -390,12 +392,16 @@ pub(crate) enum TokenFate {
     /// A nonce that resolves to nothing, on a refresh: the token is sent empty, the endpoint
     /// refuses it and the SDK signs out.
     Neutralise(String),
-    /// No nonce: the request leaves as Rust re-encoded it, its answer limited by its grant.
+    /// No nonce: the request leaves as Rust re-encoded it, its answer limited by its grant. A code
+    /// exchange names the code it carries.
     Reissue {
         body: String,
         client_id: Option<String>,
         origin: ExchangeOrigin,
+        code: Option<LoginProof>,
     },
+    /// The sign-in page's own request leaves as it came, and its answer never commits.
+    SignInPageAsSent,
     Withhold(TokenRefusal),
 }
 
@@ -436,6 +442,9 @@ pub(crate) fn decide(body: &[u8], ts: Option<&StoredTokenState>, now: u64) -> To
             body: request.encode(),
             client_id: request.client_id().map(str::to_owned),
             origin: request.grant.unsubstituted_origin(),
+            code: (request.grant == RequestedGrant::AuthorizationCode)
+                .then(|| request.first("code").map(LoginProof::of_code))
+                .flatten(),
         };
     };
     if let Some(rewrite) = request.substitute_refresh(ts, now) {
@@ -447,25 +456,52 @@ pub(crate) fn decide(body: &[u8], ts: Option<&StoredTokenState>, now: u64) -> To
     }
 }
 
+/// The document a token request comes from, read on its initiator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenSender {
+    /// A page on the sign-in hosts. Nothing of ours runs there and no nonce lives in its storage.
+    /// A body it posts is not ours to read, and its shape is not known here.
+    SignInPage,
+    /// The desktop page, its plugins, or an initiator nothing names.
+    App,
+}
+
+impl TokenSender {
+    pub(crate) fn of(asker: Asker) -> Self {
+        match asker {
+            Asker::LoginHost => Self::SignInPage,
+            Asker::Tidal | Asker::Foreign => Self::App,
+        }
+    }
+}
+
 fn any_pair_carries_a_nonce(form: &[u8]) -> bool {
     url::form_urlencoded::parse(form)
         .any(|(k, v)| carries_nonce_shape(&k) || carries_nonce_shape(&v))
 }
 
 /// The fate of a whole token-endpoint request. The endpoint reads the query before the body (a
-/// nonce there is misplaced whatever the body holds).
+/// nonce there is misplaced whatever the body holds). The sign-in page's requests are not ours
+/// to rewrite: they leave as they came unless they carry a nonce, and never commit.
 fn fate_of(
     query: Option<&str>,
     body: &TokenBody,
+    sender: TokenSender,
     ts: Option<&StoredTokenState>,
     now: u64,
 ) -> TokenFate {
     if query.is_some_and(|q| any_pair_carries_a_nonce(q.as_bytes())) {
         return TokenFate::Withhold(TokenRefusal::NonceMisplaced);
     }
-    match body {
-        TokenBody::Bytes(bytes) => decide(bytes, ts, now),
-        TokenBody::Absent | TokenBody::Unreadable => TokenFate::Withhold(TokenRefusal::Unreadable),
+    match (sender, body) {
+        (TokenSender::SignInPage, TokenBody::Bytes(bytes)) if any_pair_carries_a_nonce(bytes) => {
+            TokenFate::Withhold(TokenRefusal::NonceMisplaced)
+        }
+        (TokenSender::SignInPage, _) => TokenFate::SignInPageAsSent,
+        (TokenSender::App, TokenBody::Bytes(bytes)) => decide(bytes, ts, now),
+        (TokenSender::App, TokenBody::Absent | TokenBody::Unreadable) => {
+            TokenFate::Withhold(TokenRefusal::Unreadable)
+        }
     }
 }
 
@@ -480,6 +516,21 @@ pub(crate) struct PreparedTokenBody {
     pub(crate) session_epoch: u64,
     /// What the answer may do once it arrives.
     pub(crate) origin: ExchangeOrigin,
+    /// The sign-in return a code exchange was admitted on, spent when its answer commits.
+    pub(crate) code: Option<LoginProof>,
+}
+
+/// A code exchange leaves only naming the sign-in return the main frame received: a plugin holds
+/// no code of its own that TIDAL's page sent there.
+fn admit_sign_in(fate: TokenFate, proves: impl FnOnce(Option<LoginProof>) -> bool) -> TokenFate {
+    match fate {
+        TokenFate::Reissue {
+            origin: ExchangeOrigin::Code,
+            code,
+            ..
+        } if !proves(code) => TokenFate::Withhold(TokenRefusal::NoLoginProof),
+        fate => fate,
+    }
 }
 
 pub(crate) enum PreparedToken {
@@ -488,22 +539,31 @@ pub(crate) enum PreparedToken {
 }
 
 /// The pass CEF's request filter runs on a token-endpoint request.
-pub(crate) fn prepare_token_body(query: Option<&str>, body: &TokenBody) -> PreparedToken {
+pub(crate) fn prepare_token_body(
+    query: Option<&str>,
+    body: &TokenBody,
+    sender: TokenSender,
+) -> PreparedToken {
     let now = now_unix_secs();
     // No AppState yet is no session: a nonce then names nothing to resolve to.
     let (fate, session_epoch) = crate::app_state::with_state(|state| {
+        let fate = fate_of(query, body, sender, state.token_state.as_ref(), now);
         (
-            fate_of(query, body, state.token_state.as_ref(), now),
+            admit_sign_in(fate, |code| state.proves_login(code)),
             state.session_epoch,
         )
     })
-    .unwrap_or_else(|| (fate_of(query, body, None, now), 0));
-    let sent = |rewritten: Option<String>, client_id, origin| {
+    .unwrap_or_else(|| {
+        let fate = fate_of(query, body, sender, None, now);
+        (admit_sign_in(fate, |_| false), 0)
+    });
+    let sent = |rewritten: Option<String>, client_id, origin, code| {
         PreparedToken::Send(PreparedTokenBody {
             rewritten,
             client_id,
             session_epoch,
             origin,
+            code,
         })
     };
     match fate {
@@ -511,13 +571,16 @@ pub(crate) fn prepare_token_body(query: Option<&str>, body: &TokenBody) -> Prepa
             Some(rewrite.body),
             rewrite.client_id,
             ExchangeOrigin::Substituted,
+            None,
         ),
-        TokenFate::Neutralise(emptied) => sent(Some(emptied), None, ExchangeOrigin::Inert),
+        TokenFate::Neutralise(emptied) => sent(Some(emptied), None, ExchangeOrigin::Inert, None),
         TokenFate::Reissue {
             body,
             client_id,
             origin,
-        } => sent(Some(body), client_id, origin),
+            code,
+        } => sent(Some(body), client_id, origin, code),
+        TokenFate::SignInPageAsSent => sent(None, None, ExchangeOrigin::Inert, None),
         TokenFate::Withhold(why) => PreparedToken::Withhold(why),
     }
 }
@@ -528,8 +591,9 @@ pub(super) fn prepare_token_request(
     req: &mut Request,
     url: &RequestUrl,
     body: &TokenBody,
+    sender: TokenSender,
 ) -> PreparedToken {
-    let prepared = prepare_token_body(url.parsed().and_then(|u| u.query()), body);
+    let prepared = prepare_token_body(url.parsed().and_then(|u| u.query()), body, sender);
     if let PreparedToken::Send(PreparedTokenBody {
         rewritten: Some(new_body),
         ..

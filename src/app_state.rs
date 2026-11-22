@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::platform::secure_store::ClientBinding;
+use crate::ui::nav::LoginProof;
+
 pub(crate) type IpcCallback = Arc<Mutex<dyn cef::wrapper::message_router::BrowserSideCallback>>;
 
 #[derive(Deserialize, Debug)]
@@ -91,6 +93,8 @@ pub(crate) struct AppState {
     /// The app-level `client_credentials` token, kept apart from the user's generation: in memory
     /// only, never cleared, its nonce stable across renewals.
     pub(crate) app_token: Option<AppToken>,
+    /// The sign-in return a code exchange must name to commit a sign-in.
+    login_proof: Option<LoginProof>,
     /// Keyed by CEF's own per-query id, never by the `id` the caller sent. Three independent
     /// JS counters feed this map (`fetch.__seq` per plugin load, `@luna/lib`'s bundle-wide
     /// one, the early-runtime's page-global one) and all start at 1; a client-chosen key
@@ -347,6 +351,7 @@ impl AppState {
             plugin_manager: crate::plugins::PluginManager::new(),
             token_state: None,
             app_token: None,
+            login_proof: None,
             pending_ipc_callbacks: HashMap::new(),
             pending_window_save: None,
             window_save_scheduled: false,
@@ -478,6 +483,22 @@ impl AppState {
                 grant.opaque_at.to_owned()
             }
         }
+    }
+
+    /// The last sign-in return the main frame received; a newer one replaces it.
+    pub(crate) fn record_login_proof(&mut self, proof: LoginProof) {
+        self.login_proof = Some(proof);
+    }
+
+    /// Whether a code exchange carried the code of the sign-in return held: no code, or no return,
+    /// proves nothing.
+    pub(crate) fn proves_login(&self, code: Option<LoginProof>) -> bool {
+        code.is_some() && self.login_proof == code
+    }
+
+    /// A committed sign-in spends its return: the same code never commits twice.
+    pub(crate) fn spend_login_proof(&mut self) {
+        self.login_proof = None;
     }
 
     /// The one way `media_duration` is written, and it never empties: a payload that carries

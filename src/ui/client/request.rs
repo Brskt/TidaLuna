@@ -81,7 +81,23 @@ wrap_request_handler! {
                     "[AUTH]   Intercepted tidal:// redirect -> {}",
                     crate::util::redact_url_query(&web_url)
                 );
+                let frame_url = frame
+                    .as_ref()
+                    .map(|f| crate::ui::token_filter::userfree_to_string(&f.url()));
+                let main_frame = frame.as_ref().is_some_and(|f| f.is_main() != 0);
+                let proof = nav::LoginProof::observe(&web_url, frame_url.as_deref(), main_frame);
+                crate::vprintln!(
+                    "[AUTH]   Sign-in return {}",
+                    if proof.is_some() {
+                        "recorded"
+                    } else {
+                        "not sent by the sign-in page: no proof"
+                    }
+                );
                 with_state(|state| {
+                    if let Some(proof) = proof {
+                        state.record_login_proof(proof);
+                    }
                     if let Some(ref browser) = state.browser
                         && let Some(main_frame) = browser.main_frame()
                     {
@@ -241,7 +257,11 @@ wrap_request_handler! {
                 || crate::ui::token_filter::BodyTokenSurface::of(&method, &url).is_some()
                 || crate::ui::nav::is_token_endpoint(&url)
             {
-                Some(crate::ui::token_filter::token_handler())
+                Some(crate::ui::token_filter::token_handler(
+                    crate::ui::nav::Asker::of_initiator(
+                        request_initiator.map(|i| i.to_string()).as_deref(),
+                    ),
+                ))
             } else if !crate::ui::nav::is_tidal_origin(&url) {
                 // Exfiltration guard: block sendBeacon to non-Tidal domains.
                 // TIDAL doesn't use sendBeacon - safe to block unconditionally.
