@@ -129,7 +129,7 @@ pub(crate) fn is_document_url(url: &RequestUrl, resource_type: Option<ResourceTy
     let Some(parsed) = url.parsed() else {
         return false;
     };
-    if parsed.host_str() != Some(crate::ui::nav::HOST_DESKTOP) {
+    if parsed.scheme() != "https" || parsed.host_str() != Some(crate::ui::nav::HOST_DESKTOP) {
         return false;
     }
     if resource_type == Some(ResourceType::MAIN_FRAME) {

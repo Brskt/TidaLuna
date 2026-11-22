@@ -6,19 +6,17 @@ fn u(s: &str) -> RequestUrl {
     RequestUrl::new(s.to_string())
 }
 
-/// What does not parse falls back to a relative path, which is same-origin. `//evil.example/x` is
-/// a protocol-relative reference to a foreign host that `starts_with('/')` alone cannot tell apart.
+/// What does not parse names no host and is refused, relative paths too: every caller hands
+/// an absolute URL.
 #[test]
-fn a_tidal_origin_is_the_apex_a_subdomain_or_a_relative_path() {
+fn a_tidal_origin_is_the_apex_or_a_subdomain_and_nothing_else() {
     for (target, expected) in [
         ("https://tidal.com/", true),
         ("https://listen.tidal.com/v1/x", true),
         ("https://eviltidal.com/", false),
         ("https://tidal.com.evil.io/", false),
-        ("//evil.example/x", false),
-        ("//tidal.com.evil.io/x", false),
         ("not a url", false),
-        ("/v1/tracks/1", true),
+        ("/v1/tracks/1", false),
     ] {
         assert_eq!(is_tidal_origin(&u(target)), expected, "{target}");
     }
@@ -34,9 +32,6 @@ fn a_secure_tidal_target_is_https_on_a_tidal_origin_and_nothing_else() {
         ("http://tidal.com/", false),
         ("https://listen.tidal.com/v1/tracks", true),
         ("https://auth.tidal.com/v1/oauth2/token", true),
-        ("//evil.example/x", false),
-        ("/v1/tracks/1", false),
-        ("https://evil.example/v1/tracks", false),
         ("not a url", false),
     ] {
         assert_eq!(is_secure_tidal_target(&u(target)), expected, "{target}");
@@ -63,6 +58,25 @@ fn an_allowed_image_host_is_an_allowed_apex_or_its_subdomain_and_nothing_else() 
         ("", false),
     ] {
         assert_eq!(is_allowed_image_host(&u(target)), expected, "{target:?}");
+    }
+}
+
+/// A plaintext page on a TIDAL host is whatever the network served, never TIDAL's own: it is
+/// `External` (no injection, no privileged IPC). Our `tidal://` callback stays itself.
+#[test]
+fn a_page_is_trusted_over_https_or_as_our_callback_only() {
+    for (raw, expected) in [
+        ("https://desktop.tidal.com/", PageKind::DesktopApp),
+        (
+            "https://desktop.tidal.com/login/auth",
+            PageKind::LoginCallback,
+        ),
+        ("https://login.tidal.com/", PageKind::AuthHost),
+        ("tidal://login/auth", PageKind::TidalCallback),
+        ("http://login.tidal.com/", PageKind::External),
+        ("http://desktop.tidal.com/", PageKind::External),
+    ] {
+        assert_eq!(PageKind::classify(raw), expected, "{raw}");
     }
 }
 

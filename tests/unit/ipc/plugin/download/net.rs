@@ -5,17 +5,29 @@ use super::*;
 /// A substring test accepts all three of these, and each is a host someone else can control.
 #[test]
 fn lookalike_hosts_are_refused() {
-    assert!(!is_tidal_media_host("evil-audio.tidal.com"));
-    assert!(!is_tidal_media_host("audio.tidal.com.evil.com"));
-    assert!(!is_tidal_media_host("evil.com"));
-    assert!(!is_tidal_media_host(""));
+    for url in [
+        "https://evil-audio.tidal.com/track.flac",
+        "https://audio.tidal.com.evil.com/track.flac",
+        "https://evil.com/track.flac",
+    ] {
+        assert!(!allowed_url(url, is_tidal_media_host), "{url}");
+    }
 }
 
 #[test]
 fn artwork_comes_from_its_own_host_only() {
-    assert!(is_tidal_artwork_host("resources.tidal.com"));
-    assert!(!is_tidal_artwork_host("lgf.audio.tidal.com"));
-    assert!(!is_tidal_artwork_host("resources.tidal.com.evil.com"));
+    assert!(allowed_url(
+        "https://resources.tidal.com/cover.jpg",
+        is_tidal_artwork_host
+    ));
+    assert!(!allowed_url(
+        "https://lgf.audio.tidal.com/cover.jpg",
+        is_tidal_artwork_host
+    ));
+    assert!(!allowed_url(
+        "https://resources.tidal.com.evil.com/cover.jpg",
+        is_tidal_artwork_host
+    ));
 }
 
 /// Userinfo is the classic way past a check that reads the string rather than the parsed host (the

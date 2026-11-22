@@ -14,6 +14,8 @@ mod exfil_guard;
 pub(crate) mod file_dialog;
 pub(crate) mod flush;
 pub(crate) mod folder_picker;
+#[cfg_attr(not(test), expect(dead_code))]
+pub(crate) mod hosts;
 pub(crate) mod install_dialog;
 pub(crate) mod luna_modules;
 pub(crate) mod menu;

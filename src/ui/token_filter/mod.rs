@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
+use crate::ui::hosts::{HostShape, TidalDomain};
 use crate::ui::nav::RequestUrl;
 
 mod request;
@@ -32,9 +33,17 @@ pub(crate) fn should_rewrite_token(url: &RequestUrl) -> bool {
     }
     let host = parsed.host_str().unwrap_or("");
     crate::ui::nav::is_tidal_api_host(host)
-        || matches!(host, "login.tidal.com" | "auth.tidal.com")
+        || host == crate::ui::nav::HOST_LOGIN
+        || host == crate::ui::nav::HOST_AUTH
         || (host == "fp.fa.tidal.com" && parsed.path().starts_with("/license"))
-        || (host.starts_with("event-collector.") && host.ends_with(".tidalhi.fi"))
+        || is_event_collector(url)
+}
+
+/// TIDAL's telemetry hosts, `event-collector.<region>.tidalhi.fi`; the region-less
+/// `event-collector.tidalhi.fi` passes too, as it always has.
+fn is_event_collector(url: &RequestUrl) -> bool {
+    matches!(url.shape(), Some(HostShape::Name(name))
+        if name.domain() == Some(TidalDomain::TidalHi) && name.first_label() == "event-collector")
 }
 
 /// Opaque `luna_*` token nonce, or `None` if the system RNG is unavailable.

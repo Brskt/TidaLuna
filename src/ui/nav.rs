@@ -1,5 +1,7 @@
 use url::Url;
 
+use crate::ui::hosts::{HostShape, TidalDomain};
+
 pub(crate) const HOST_DESKTOP: &str = "desktop.tidal.com";
 pub(crate) const HOST_LOGIN: &str = "login.tidal.com";
 pub(crate) const HOST_AUTH: &str = "auth.tidal.com";
@@ -28,6 +30,10 @@ impl PageKind {
 
         if url.scheme() == "tidal" {
             return Self::TidalCallback;
+        }
+        // A plaintext page on a TIDAL host is whatever the network in between served.
+        if url.scheme() != "https" {
+            return Self::External;
         }
 
         let host = url.host_str().unwrap_or("");
@@ -122,29 +128,27 @@ impl RequestUrl {
         self.parsed.as_ref()
     }
 
+    /// `None` when the URL does not parse: that says nothing about a host.
+    pub(crate) fn shape(&self) -> Option<HostShape<'_>> {
+        self.parsed.as_ref().map(HostShape::of)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.raw.is_empty()
     }
 }
 
-/// Broad check: does the URL belong to a Tidal-owned domain?
-/// Used by the exfiltration guard to distinguish Tidal traffic from external.
+/// Broad check: does the URL belong to `tidal.com` or one of its subdomains? Used by the
+/// exfiltration guard to tell TIDAL traffic from external. A URL that does not parse names no
+/// host and is refused: every caller hands an absolute URL.
 pub(crate) fn is_tidal_origin(url: &RequestUrl) -> bool {
+    matches!(url.shape(), Some(HostShape::Name(name)) if name.domain() == Some(TidalDomain::Tidal))
+}
+
 /// May a proxy request (`proxy.head`) go to this URL? Destination and transport both have to hold:
 /// reqwest never travels through Blink, and nothing upgrades a plaintext scheme on the way out. An
 /// unparseable URL carries no transport to judge, and reqwest reads that same string with that same
 /// parser.
-    let Some(parsed) = url.parsed() else {
-        // Unparseable but relative stays same-origin. A leading `//` is not that: it names a
-        // foreign host against the caller's scheme, and `starts_with('/')` alone reads it as a
-        // path. `fetch_proxy.js:57` draws the same line one hop earlier, on the JS side.
-        let raw = url.as_str();
-        return raw.starts_with('/') && !raw.starts_with("//");
-    };
-    let host = parsed.host_str().unwrap_or("");
-    host == "tidal.com" || host.ends_with(".tidal.com")
-}
-
 pub(crate) fn is_token_endpoint(url: &RequestUrl) -> bool {
     let Some(parsed) = url.parsed() else {
         return false;
@@ -180,16 +184,7 @@ const IMAGE_HOSTS: [&str; 5] = [
 /// Destination only: the transport half is `is_secure_image_target`'s, the same split as
 /// `is_tidal_origin` and `is_secure_tidal_target`.
 pub(crate) fn is_allowed_image_host(url: &RequestUrl) -> bool {
-    let Some(parsed) = url.parsed() else {
-        return false;
-    };
-    let host = parsed.host_str().unwrap_or("");
-    IMAGE_HOSTS.iter().any(|domain| {
-        host == *domain
-            || host
-                .strip_suffix(domain)
-                .is_some_and(|rest| rest.ends_with('.'))
-    })
+    matches!(url.shape(), Some(HostShape::Name(name)) if IMAGE_HOSTS.iter().any(|domain| name.within(domain)))
 }
 
 /// Destination and transport both: a plaintext image on an allowed host is whatever the

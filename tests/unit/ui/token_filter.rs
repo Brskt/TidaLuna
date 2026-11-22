@@ -28,3 +28,20 @@ fn rewrite_covers_an_api_host_and_the_auth_host() {
         "https://auth.tidal.com/oauth2/token"
     )));
 }
+
+/// The telemetry hosts carry the token too, the region-less one included. An empty label is no
+/// region: a suffix test let that host take the real token.
+#[test]
+fn the_event_collector_is_a_tidalhi_name_whatever_its_region() {
+    let u = |s: &str| RequestUrl::new(s.to_string());
+    for (url, expected) in [
+        ("https://event-collector.eu.tidalhi.fi/x", true),
+        ("https://event-collector.tidalhi.fi/x", true),
+        ("https://event-collector..tidalhi.fi/x", false),
+        ("https://event-collector.eu.tidalhi.fi.evil.com/x", false),
+        ("https://evil-event-collector.eu.tidalhi.fi/x", false),
+        ("http://event-collector.eu.tidalhi.fi/x", false),
+    ] {
+        assert_eq!(should_rewrite_token(&u(url)), expected, "{url}");
+    }
+}

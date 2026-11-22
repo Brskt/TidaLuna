@@ -25,7 +25,7 @@ use crate::ui::token_filter::userfree_to_string;
 /// File name of a TIDAL `/assets/*.js` chunk, or `None` for any other URL.
 fn asset_name(url: &RequestUrl) -> Option<&str> {
     let parsed = url.parsed()?;
-    if parsed.host_str() != Some(crate::ui::nav::HOST_DESKTOP) {
+    if parsed.scheme() != "https" || parsed.host_str() != Some(crate::ui::nav::HOST_DESKTOP) {
         return None;
     }
     parsed

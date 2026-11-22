@@ -1,4 +1,5 @@
 use crate::audio::flac_tags::Picture;
+use crate::ui::hosts::{HostShape, Name};
 use crate::util::Refused;
 use futures_util::StreamExt;
 use std::time::Duration;
@@ -19,31 +20,33 @@ const COVER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Hosts TIDAL serves audio from. A label-boundary suffix, never a substring: `evil-audio.tidal.com`
 /// is a host anyone can register and it contains the string.
-fn is_tidal_media_host(host: &str) -> bool {
-    host == "audio.tidal.com" || host.ends_with(".audio.tidal.com")
+fn is_tidal_media_host(name: Name<'_>) -> bool {
+    name.within("audio.tidal.com")
 }
 
 /// Cover art comes from its own host and does not belong on the media list.
-fn is_tidal_artwork_host(host: &str) -> bool {
-    host == "resources.tidal.com"
+fn is_tidal_artwork_host(name: Name<'_>) -> bool {
+    name.is("resources.tidal.com")
 }
 
-/// Host comes from the parsed url: `https://lgf.audio.tidal.com@evil.com/` reads as `evil.com` and is
-/// refused; HTTPS only. General outbound http is the trust-gated native `http(s)` module. This must
-/// not become a second, unprompted way to the same thing.
-fn allowed_url(url: &str, allow: fn(&str) -> bool) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    parsed.scheme() == "https" && allow(parsed.host_str().unwrap_or(""))
+/// HTTPS on a host `allow` names. A host with an empty label or a final dot is no [`Name`] and
+/// never passes, and the parsed host is the one judged: `https://lgf.audio.tidal.com@evil.com/` is
+/// `evil.com`.
+fn allowed_parsed(url: &url::Url, allow: fn(Name<'_>) -> bool) -> bool {
+    url.scheme() == "https" && matches!(HostShape::of(url), HostShape::Name(name) if allow(name))
+}
+
+/// General outbound http is the trust-gated native `http(s)` module. This must not become a
+/// second, unprompted way to the same thing.
+fn allowed_url(url: &str, allow: fn(Name<'_>) -> bool) -> bool {
+    url::Url::parse(url).is_ok_and(|parsed| allowed_parsed(&parsed, allow))
 }
 
 /// The same rule at every redirect hop. Checking the submitted url alone would be bypassed by an
 /// open redirect on an allowed host, and the shared client follows redirects with no policy at all.
 /// Media and artwork share one client; either host is acceptable mid-chain.
 fn redirect_allowed(url: &url::Url) -> bool {
-    let host = url.host_str().unwrap_or("");
-    url.scheme() == "https" && (is_tidal_media_host(host) || is_tidal_artwork_host(host))
+    allowed_parsed(url, is_tidal_media_host) || allowed_parsed(url, is_tidal_artwork_host)
 }
 
 /// Downloads use their own client. The redirect policy stays off every other caller of
