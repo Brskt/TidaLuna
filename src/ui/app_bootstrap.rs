@@ -397,9 +397,8 @@ wrap_browser_process_handler! {
                 cover_pass_deadline: crate::ui::cover_scheme::COVER_PASS_DEADLINE,
             };
             let init_script = format!(
-                "{}{}\n{}",
+                "{}{}",
                 crate::frontend::prologue::init_globals_js(&globals),
-                front.early.init_static,
                 front.early.cache_heal
             );
 

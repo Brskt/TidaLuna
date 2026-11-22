@@ -36,12 +36,14 @@ pub(crate) struct EarlyRuntimePayload {
     pub titlebar: String,
 }
 
-/// The renderer config, then the guard scripts in load order. `init_static`
-/// and `cache_heal` stay out: the browser runs them, and the credentials travel with them.
+/// The renderer config, then the scripts in load order. Anything TIDAL reads while its modules
+/// evaluate belongs here, the only place ordered before them: `init_static` comes first for that.
+/// `cache_heal` stays out, the browser runs it with the credentials.
 pub(crate) fn payload_from_frontend(f: &Frontend) -> EarlyRuntimePayload {
     let e = &f.early;
     let body = [
         crate::frontend::prologue::renderer_config_js().as_str(),
+        &e.init_static,
         &e.host_modules,
         &e.saga_put,
         &e.ipc,

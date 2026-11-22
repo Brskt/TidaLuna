@@ -32,11 +32,14 @@ fn frontend() -> Frontend {
     }
 }
 
+/// TIDAL reads `TIDAL_CONFIG` once, while its modules evaluate: `init_static` rides the payload
+/// ahead of them. Sent from the browser, it lost that race after a login.
 #[test]
 fn the_preload_runs_the_scripts_in_this_order() {
     let js = preload_script(&payload_from_frontend(&frontend()), false, true);
     let order = [
         "self.__LUNAR_CONFIG__=",
+        "/*init_static*/",
         "/*host_modules*/",
         "/*saga_put*/",
         "/*ipc*/",
