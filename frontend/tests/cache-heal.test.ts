@@ -70,6 +70,7 @@ const reset = () => {
 	delete (window as any).__lunaHostModules;
 	delete (globalThis as any).__lunaHostReady;
 	delete (self as any).__lunaRewriteEpoch;
+	(self as any).__lunaRewriteEpochKey = "__luna_rewrite_epoch";
 };
 
 beforeEach(reset);

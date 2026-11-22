@@ -2,7 +2,8 @@
 // filters only rewrite what crosses the network. A chunk already sitting in Cache Storage
 // keeps the shape it had when it was precached: a module capture or a createRoot tag
 // added afterwards is invisible to it. Dropping the worker and its caches makes the next
-// launch refetch everything through the filters.
+// launch refetch everything through the filters. A changed epoch is dropped before CEF
+// starts (worker_cache.rs); the epoch heal below is the net for when that could not run.
 //
 // Injected as part of `init_script` (see app_bootstrap.rs): runs on every real
 // navigation, before the bundle.
@@ -82,23 +83,22 @@
     }
 
     // 3) A rewrite changed since the worker filled its cache (`REWRITE_EPOCH`,
-    //    module_capture.rs). The epoch is recorded once the bust finished, and a failed one
-    //    retries. An uncontrolled page came from no cache: it records the epoch only on a
-    //    profile that holds none.
-    var EPOCH_KEY = '__luna_rewrite_epoch';
+    //    module_capture.rs) and worker_cache.rs did not drop it. The epoch is recorded once
+    //    the bust finished, and a failed one retries. An uncontrolled page came from no cache:
+    //    it records the epoch only on a profile that holds none.
     function epochHeal() {
         try {
-            var current = self.__lunaRewriteEpoch;
-            if (!current) return;
-            var stored = localStorage.getItem(EPOCH_KEY);
+            var current = self.__lunaRewriteEpoch, epochKey = self.__lunaRewriteEpochKey;
+            if (!current || !epochKey) return;
+            var stored = localStorage.getItem(epochKey);
             if (stored === current) return;
             if (!navigator.serviceWorker || !navigator.serviceWorker.controller) {
-                if (stored === null) localStorage.setItem(EPOCH_KEY, current);
+                if (stored === null) localStorage.setItem(epochKey, current);
                 return;
             }
             var done = bust('rewrites changed since the cache was filled');
             if (done) done.then(
-                function () { localStorage.setItem(EPOCH_KEY, current); },
+                function () { localStorage.setItem(epochKey, current); },
                 function (e) { console.warn('[luna:heal] the bust did not finish, the next launch retries it: ' + e); }
             );
         } catch (e) {}

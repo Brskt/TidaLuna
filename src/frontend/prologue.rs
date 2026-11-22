@@ -89,7 +89,9 @@ pub(crate) fn init_globals_js(g: &InitGlobals) -> String {
         ));
     }
     // A JSON string, not a number: `cache_heal.js` compares it with the one in localStorage.
-    let epoch = json!(format!("{:016x}", g.rewrite_epoch));
+    let epoch = json!(crate::ui::module_capture::epoch_text(g.rewrite_epoch));
     js.push_str(&format!("self.__lunaRewriteEpoch={};\n", js_value(&epoch)));
+    let key = json!(crate::ui::worker_cache::EPOCH_KEY);
+    js.push_str(&format!("self.__lunaRewriteEpochKey={};\n", js_value(&key)));
     js
 }

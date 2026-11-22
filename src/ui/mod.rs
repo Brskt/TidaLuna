@@ -27,6 +27,7 @@ pub(crate) mod store_proxy;
 pub(crate) mod token_filter;
 pub(crate) mod trust_dialog;
 mod window_delegate;
+pub(crate) mod worker_cache;
 
 pub(crate) use app_bootstrap::TidalApp;
 pub(crate) use client::{

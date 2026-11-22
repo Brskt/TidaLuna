@@ -41,16 +41,18 @@ pub(crate) fn is_tidal_chunk(url: &RequestUrl) -> bool {
     asset_name(url).is_some()
 }
 
-/// Names the set of rewrites this binary applies to the assets TIDAL's service worker precaches.
-///
-/// Workbox refetches a precached chunk only when TIDAL bumps its revision, and until then the
-/// chunk keeps the shape its fetching binary gave it. `cache_heal.js` drops the worker once when
-/// this differs from the epoch the cache was filled under. Hashed from the rewriting sources
-/// below, it moves with every edit to them (a comment-only one costs a single refetch).
+/// Names the rewrites this binary applies to the assets TIDAL's service worker precaches, which
+/// keep the shape their fetching binary gave them. A change drops the worker (`worker_cache`
+/// before CEF, `cache_heal.js` after); any edit to the sources below moves it, comments included.
 pub(crate) const REWRITE_EPOCH: u64 = fnv1a64(&[
     include_str!("module_capture.rs"),
     include_str!("csp_filter.rs"),
 ]);
+
+/// The epoch as both sides store it in localStorage: Rust before CEF starts, `cache_heal.js` after.
+pub(crate) fn epoch_text(epoch: u64) -> String {
+    format!("{epoch:016x}")
+}
 
 /// FNV-1a over the parts in order, as if they were one string.
 const fn fnv1a64(parts: &[&str]) -> u64 {

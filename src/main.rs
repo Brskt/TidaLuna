@@ -454,6 +454,8 @@ fn main() {
         ));
     }
 
+    // Same window and same reason: the worker's files and Local Storage are still ours alone.
+    crate::ui::worker_cache::drop_if_stale(&profile_cache);
     // Token reconciliation, phase 1: secure-store load + raw SDK-blob read.
     // All LevelDB I/O happens here, while our process is still its only
     // possible opener. The crypto - dominated by a 100k-iteration PBKDF2 -

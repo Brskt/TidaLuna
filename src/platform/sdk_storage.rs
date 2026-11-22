@@ -141,7 +141,7 @@ pub(crate) enum ReadRawResult {
 /// I/O half of the read path: fetch the four keys and validate their shape.
 /// No crypto happens here; the blob decrypts later via decrypt_raw_blob.
 pub(crate) fn read_raw_blob(leveldb_path: &Path) -> ReadRawResult {
-    let mut db = match open_leveldb(leveldb_path) {
+    let mut db = match open_leveldb(leveldb_path, OpenMode::Existing) {
         OpenResult::Missing => return ReadRawResult::Missing,
         OpenResult::Ok(db) => *db,
         OpenResult::Error => return ReadRawResult::Unreadable,
@@ -160,6 +160,7 @@ pub(crate) fn read_raw_blob(leveldb_path: &Path) -> ReadRawResult {
         match result {
             ReadKeyResult::Ok(_) => present += 1,
             ReadKeyResult::Missing => {}
+            ReadKeyResult::Unreadable => return ReadRawResult::Unreadable,
             ReadKeyResult::Invalid => {
                 present += 1;
                 has_invalid = true;
@@ -216,14 +217,25 @@ enum OpenResult {
     Error,
 }
 
+enum OpenMode {
+    Existing,
+    /// The worker-cache epoch write can run on a fresh profile.
+    OrCreate,
+}
+
 /// Chromium writes with Snappy (compressor id=1). Default CompressorList includes both
 /// NoneCompressor (0) and SnappyCompressor (1); reads work. compressor=1 for writes.
-fn open_leveldb(path: &Path) -> OpenResult {
-    if !path.exists() {
+fn open_leveldb(path: &Path, mode: OpenMode) -> OpenResult {
+    if matches!(mode, OpenMode::Existing) && !path.exists() {
         return OpenResult::Missing;
     }
+    // On Windows both sides lock with `LockFileEx` and the open itself refuses.
+    #[cfg(unix)]
+    if matches!(probe_lock(path), LockProbe::Held) {
+        return OpenResult::Error;
+    }
     let opts = rusty_leveldb::Options {
-        create_if_missing: false,
+        create_if_missing: matches!(mode, OpenMode::OrCreate),
         compressor: 1, // Snappy, same as Chromium
         ..rusty_leveldb::Options::default()
     };
@@ -233,20 +245,83 @@ fn open_leveldb(path: &Path) -> OpenResult {
     }
 }
 
+#[cfg(unix)]
+enum LockProbe {
+    Free,
+    Held,
+}
+
+/// Chromium locks `LOCK` with `fcntl`, which rusty-leveldb's `flock` does not see on Linux; the
+/// probe asks with Chromium's own call. Anything it cannot answer counts as held. Before CEF
+/// init only: `F_GETLK` misses this process's own locks, and closing the file drops them.
+#[cfg(unix)]
+fn probe_lock(leveldb: &Path) -> LockProbe {
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd;
+
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(leveldb.join("LOCK"))
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return LockProbe::Free,
+        Err(_) => return LockProbe::Held,
+    };
+    // SAFETY: `flock` is a C struct; the fields left alone are the ones read as zero (whole file).
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    // SAFETY: the descriptor belongs to `file`, which outlives the call, and `lock` is ours.
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) };
+    if rc == -1 || lock.l_type != libc::F_UNLCK as libc::c_short {
+        LockProbe::Held
+    } else {
+        LockProbe::Free
+    }
+}
+
 enum ReadKeyResult {
     Missing,
     Ok(Vec<u8>),
     Invalid,
+    /// The tables could not be read; nothing may be concluded from them.
+    Unreadable,
 }
 
+enum Lookup {
+    Found(Vec<u8>),
+    Absent,
+    Failed,
+}
+
+/// Looks the key up through the iterator, because `DB::get` stops at the first tombstone it meets
+/// even when it belongs to another key (rusty-leveldb 4.0.2, `version.rs:95`), missing live keys
+/// on Chromium's multi-table stores. A damaged table panics there instead of erroring.
 fn read_ls_key(db: &mut rusty_leveldb::DB, ls_key: &str) -> ReadKeyResult {
+    use rusty_leveldb::LdbIterator;
+
     let key = leveldb_key(ls_key);
-    let Some(raw) = db.get(&key) else {
-        return ReadKeyResult::Missing;
-    };
-    match decode_ls_value(&raw) {
-        Some(bytes) => ReadKeyResult::Ok(bytes),
-        None => ReadKeyResult::Invalid,
+    let lookup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Ok(mut iter) = db.new_iter() else {
+            return Lookup::Failed;
+        };
+        iter.seek(&key);
+        match iter.current() {
+            Some((found, raw)) if iter.valid() && found.as_ref() == key.as_slice() => {
+                Lookup::Found(raw.to_vec())
+            }
+            _ => Lookup::Absent,
+        }
+    }))
+    .unwrap_or(Lookup::Failed);
+    match lookup {
+        Lookup::Found(raw) => match decode_ls_value(&raw) {
+            Some(bytes) => ReadKeyResult::Ok(bytes),
+            None => ReadKeyResult::Invalid,
+        },
+        Lookup::Absent => ReadKeyResult::Missing,
+        Lookup::Failed => ReadKeyResult::Unreadable,
     }
 }
 
@@ -337,7 +412,7 @@ pub(crate) fn write_entries(leveldb_path: &Path, entries: &SdkEntries) -> Option
 }
 
 pub(crate) fn purge_sdk_credentials(leveldb_path: &Path) {
-    let OpenResult::Ok(db) = open_leveldb(leveldb_path) else {
+    let OpenResult::Ok(db) = open_leveldb(leveldb_path, OpenMode::Existing) else {
         return;
     };
     let mut db = *db;
@@ -347,4 +422,36 @@ pub(crate) fn purge_sdk_credentials(leveldb_path: &Path) {
         batch.delete(&key);
     }
     let _ = db.write(batch, true);
+}
+
+/// One localStorage value of TIDAL's origin, read with the LevelDB opened here.
+pub(crate) enum LsValue {
+    Missing,
+    Value(Vec<u8>),
+    /// Present but not in either of Chromium's value encodings.
+    Corrupt,
+    /// The LevelDB would not open or its tables would not read.
+    Unreadable,
+}
+
+pub(crate) fn read_ls_value(leveldb_path: &Path, ls_key: &str) -> LsValue {
+    let mut db = match open_leveldb(leveldb_path, OpenMode::Existing) {
+        OpenResult::Missing => return LsValue::Missing,
+        OpenResult::Ok(db) => *db,
+        OpenResult::Error => return LsValue::Unreadable,
+    };
+    match read_ls_key(&mut db, ls_key) {
+        ReadKeyResult::Ok(bytes) => LsValue::Value(bytes),
+        ReadKeyResult::Missing => LsValue::Missing,
+        ReadKeyResult::Invalid => LsValue::Corrupt,
+        ReadKeyResult::Unreadable => LsValue::Unreadable,
+    }
+}
+
+/// Writes localStorage values in one batch, creating the LevelDB if absent.
+pub(crate) fn write_ls_values(leveldb_path: &Path, entries: &[(&str, &[u8])]) -> Option<()> {
+    let OpenResult::Ok(mut db) = open_leveldb(leveldb_path, OpenMode::OrCreate) else {
+        return None;
+    };
+    write_ls_keys(&mut db, entries)
 }
