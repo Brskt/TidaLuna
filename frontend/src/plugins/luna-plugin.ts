@@ -98,6 +98,11 @@ function pullNote(pulled: Pulled): string {
     }
 }
 
+// The name a card shows for a url whose package is not known yet.
+function nameFromUrl(url: string): string {
+    return url.split("/").filter(Boolean).pop() || "unknown";
+}
+
 // Rust refused to stop the plugin, which runs as it was; an update it pulled waits for a launch.
 function stopRefusedNote(pulled: Pulled, why: string): string {
     return pulled.outcome === "updated" ? `Updated, runs from the next launch: ${why}` : `Not restarted: ${why}`;
@@ -277,18 +282,25 @@ export class LunaPlugin {
     }
 
     async install(): Promise<void> {
+        // Read before Rust replaces the row: a failed start undoes only a first install;
+        // a reinstall keeps what the user had, its stored data included.
+        const wasInstalled = this.installed;
         this.acted = true;
+        this.rowEpoch++;
         this.loading._ = true;
         try {
-            // 1. Store (installed=1, enabled=0)
+            // 1. Store (installed=1, enabled=0). Rust unloads a reinstalled plugin itself; a refused
+            // or failed install throws here, before anything of this card changed.
             const info = await invokeIpc("plugin.install", this.url);
-            try {
-                const pkg = typeof info.manifest === "string" ? JSON.parse(info.manifest) : info.manifest;
-                if (pkg?.name) this.store.package = pkg;
-            } catch (e) { console.warn("[luna:plugin] Package info parse failed:", e); }
-            if (info.hash) this.store.package.hash = info.hash;
+            this.applyUpdate(info);
             this.store.installed = true;
             this.name = this.store.package.name;
+            if (wasInstalled) {
+                // Rust unloaded the old code and wrote the row off: the card follows.
+                this.stopReloadLoop();
+                this.enabled = false;
+                this.dropLoad();
+            }
             LunaPlugin.plugins[this.url] = this;
 
             // 2. Enable atomically (Rust: check deps + DB enable + inject)
@@ -297,26 +309,9 @@ export class LunaPlugin {
                 this.store.enabled = true;
                 this.enabled = true;
             } catch (enableErr) {
-                console.error(`[luna:plugin] Enable failed, attempting cleanup:`, enableErr);
-                // Best-effort cleanup - guard may block if dependants exist
-                let cleaned = false;
-                try {
-                    await invokeIpc("plugin.uninstall", this.url);
-                    cleaned = true;
-                } catch {
-                    // Normal uninstall blocked - try dedicated cleanup for never-dispatched plugins
-                    try {
-                        await invokeIpc("plugin.cleanup_failed_install", this.url);
-                        cleaned = true;
-                    } catch {}
-                }
-
-                if (cleaned) {
-                    this.store.installed = false;
-                    delete LunaPlugin.plugins[this.url];
-                    syncUpstream(this.url, null);
-                } else {
-                    // Zombie remains visible as installed, off until its row says otherwise
+                console.error(`[luna:plugin] Enable failed after install of '${this.name}':`, enableErr);
+                if (wasInstalled || !(await this.undoInstall())) {
+                    // Installed and visible, off until its row says otherwise
                     this.store.enabled = false;
                     this.enabled = false;
                     this.loadError._ = enableErr instanceof Error ? enableErr.message : String(enableErr);
@@ -331,6 +326,24 @@ export class LunaPlugin {
         } finally {
             this.loading._ = false;
         }
+    }
+
+    // Best-effort undo of a first install. The guard refuses while dependants exist; a
+    // plugin never dispatched has its own cleanup. True when the row is gone.
+    private async undoInstall(): Promise<boolean> {
+        try {
+            await invokeIpc("plugin.uninstall", this.url);
+        } catch {
+            try {
+                await invokeIpc("plugin.cleanup_failed_install", this.url);
+            } catch {
+                return false;
+            }
+        }
+        this.store.installed = false;
+        delete LunaPlugin.plugins[this.url];
+        syncUpstream(this.url, null);
+        return true;
     }
 
     async enable(visited = new Set<string>()): Promise<void> {
@@ -771,51 +784,19 @@ export class LunaPlugin {
         return plugin;
     }
 
+    // The card already shown for this url installs itself: a reinstall keeps the object the UI
+    // holds; a new url gets one registered only once its install went through.
     static async install(url: string): Promise<LunaPlugin> {
         const cleanUrl = url.replace(/(\.(mjs|json|mjs\.map))$/, "");
-
-        const existing = LunaPlugin.plugins[cleanUrl];
-        if (existing) {
-            await existing.disable();
-        }
-
-        const info = await invokeIpc("plugin.install", cleanUrl);
-        const plugin = LunaPlugin.fromPluginInfo(info);
-        plugin.acted = true;
-
-        // Enable atomically (Rust: check deps + persist + inject)
-        try {
-            await invokeIpc("plugin.enable", cleanUrl);
-            plugin.store.enabled = true;
-            plugin.enabled = true;
-        } catch (enableErr) {
-            console.error(`[luna:plugin] Enable failed, attempting cleanup:`, enableErr);
-            let cleaned = false;
-            try {
-                await invokeIpc("plugin.uninstall", cleanUrl);
-                cleaned = true;
-            } catch {
-                try {
-                    await invokeIpc("plugin.cleanup_failed_install", cleanUrl);
-                    cleaned = true;
-                } catch {}
-            }
-            if (cleaned) {
-                plugin.store.installed = false;
-                delete LunaPlugin.plugins[cleanUrl];
-                syncUpstream(cleanUrl, null);
-            } else {
-                plugin.store.enabled = false;
-                plugin.enabled = false;
-                plugin.loadError._ = enableErr instanceof Error ? enableErr.message : String(enableErr);
-                void plugin.followRow();
-                syncUpstream(cleanUrl, plugin);
-            }
-            throw enableErr;
-        }
-
-        plugin.extractSettings();
-        syncUpstream(cleanUrl, plugin);
+        const plugin = LunaPlugin.plugins[cleanUrl] ?? new LunaPlugin({
+            url: cleanUrl,
+            package: { name: nameFromUrl(cleanUrl) },
+            enabled: false,
+            installed: false,
+            liveReload: false,
+            hideSettings: true,
+        });
+        await plugin.install();
         return plugin;
     }
 
@@ -855,8 +836,7 @@ export class LunaPlugin {
                 if (typeof pkg === "string") pkg = JSON.parse(pkg);
             } catch (e) {
                 console.warn("[luna:plugin] Plugin update check error:", e);
-                const lastSegment = url.split("/").filter(Boolean).pop() || "unknown";
-                pkg = { name: lastSegment };
+                pkg = { name: nameFromUrl(url) };
             }
         }
 
