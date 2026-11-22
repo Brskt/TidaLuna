@@ -156,10 +156,12 @@ fn the_last_pass_of_a_page_says_whether_its_plugins_were_all_tried() {
     let ticket = Ticket {
         epoch: 1,
         page: page.next(),
+        signed_out: 0,
     };
     let other = Ticket {
         epoch: 2,
         page: ticket.page,
+        signed_out: 0,
     };
     assert_eq!(page.pass_stood(ticket), PassStood::NotYet);
 
@@ -547,6 +549,55 @@ async fn an_app_token_is_renewed_in_place_under_the_pages_nonce() {
     assert_eq!(
         (app.opaque_at.as_str(), app.access_token.as_str()),
         ("luna_app_1", "app-at-2")
+    );
+}
+
+/// A page that reports no user loses its plugins at once and moves the ticket (work started
+/// before can no longer land); the session and the store stay. Once per document and per sign-out:
+/// signed in again, the next one moves it anew, and a new document starts unreported.
+#[tokio::test]
+async fn a_signed_out_page_moves_the_ticket_once_per_sign_out_and_keeps_the_session() {
+    let mut state = state_with_tokens(Some(user_generation(Some("a"))));
+    let doc = state.page.next();
+    let before = state.ticket();
+    assert!(state.session_for_plugins());
+
+    assert!(
+        state.page_signed_out(doc + 1).is_none(),
+        "a document already gone"
+    );
+    assert_eq!(state.ticket(), before);
+
+    assert!(state.page_signed_out(doc).is_some());
+    let after = state.ticket();
+    assert_ne!(
+        after, before,
+        "work started before the sign-out still stands"
+    );
+    assert!(!state.session_for_plugins());
+    assert!(state.page_signed_out(doc).is_none(), "a second clear");
+    assert_eq!(state.ticket(), after);
+
+    let current = &state.token_state.as_ref().unwrap().current;
+    assert_eq!((state.session_epoch, current.version), (1, 4));
+    assert!(state.has_session(), "the clear ended the session");
+
+    state.page.user_returned();
+    assert!(
+        state.session_for_plugins(),
+        "signed in again in the same document"
+    );
+    let next = state.page_signed_out(doc).map(|_| state.ticket());
+    assert_ne!(
+        next,
+        Some(after),
+        "a second sign-out reused the first one's ticket"
+    );
+
+    state.page.next();
+    assert!(
+        state.session_for_plugins(),
+        "a new document starts unreported"
     );
 }
 

@@ -101,6 +101,10 @@ impl AuthRoute {
         }
     }
 
+    /// The one request whose sending says the user meant to leave the session.
+    pub(crate) fn ends_session(self) -> bool {
+        self == Self::WebSessionLogout
+    }
 }
 
 /// The return of a sign-in through TIDAL's own page, named by the digest of the code it carried.

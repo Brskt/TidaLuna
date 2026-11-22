@@ -148,6 +148,11 @@ fn a_sign_in_route_is_its_exact_path_and_only_the_logout_ends_a_session() {
         let parsed = Url::parse(url).unwrap();
         let route = AuthRoute::of(method, &parsed, asker);
         assert_eq!(route, expected, "{method} {url} {asker:?}");
+        assert_eq!(
+            route.ends_session(),
+            expected == WebSessionLogout,
+            "{method} {url} {asker:?}"
+        );
     }
     assert_eq!(PATH_OAUTH_TOKEN, format!("{AUTH_API_PREFIX}oauth2/token"));
 }

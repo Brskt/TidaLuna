@@ -102,7 +102,7 @@ pub(super) fn handle_plugin_update(msg: &IpcMessage, callback: IpcCallback) {
 /// its check for the page that follows the login.
 pub(super) fn handle_plugin_update_all(callback: IpcCallback) {
     ipc_callback_ok(&callback, "true");
-    if !super::jsrt::has_session() || LAUNCH_CHECK_RAN.swap(true, Ordering::SeqCst) {
+    if !super::jsrt::session_for_plugins() || LAUNCH_CHECK_RAN.swap(true, Ordering::SeqCst) {
         return;
     }
     crate::state::rt_handle().spawn(async {

@@ -182,6 +182,24 @@ impl ExchangeOrigin {
     }
 }
 
+/// The page sent TIDAL's logout: the user means to leave. The session ends and the store is erased
+/// in one section, before the clear the reloaded page sends right after, which only
+/// marks that page. The request itself always goes, whatever its answer: refused, the SDK would
+/// not finish its own logout.
+fn end_session_at_logout() {
+    let ended = crate::app_state::with_state(|state| {
+        let ended = state.end_session();
+        // Queued on the same channel as the saves: an erase that overtook a save still in flight
+        // would hand the credential back to the next launch after the user logged out.
+        crate::platform::secure_store::delete_queued(&crate::state::cache_data_dir());
+        ended
+    });
+    crate::vprintln!("[AUTH]   Logout sent: session ended, stored credential erased");
+    if let Some(ended) = ended {
+        crate::ipc::plugin::settle_ended_session(&ended);
+    }
+}
+
 /// Cancels a request whose token could only leave unresolved. One line, the reason only: never
 /// the body, the header or the nonce.
 fn withhold(why: request::TokenRefusal) -> ReturnValue {
@@ -266,6 +284,9 @@ wrap_resource_request_handler! {
                     let body = read_token_body(req);
                     if let Err(why) = route_body(auth.route, &body) {
                         return withhold(why);
+                    }
+                    if auth.route.ends_session() {
+                        end_session_at_logout();
                     }
                     if auth.route == AuthRoute::TokenGrant {
                         force_identity_encoding(req);

@@ -153,6 +153,9 @@ wrap_load_handler! {
                         let _ = state.player.stop(crate::player::StopScope::OwnMusic);
                         state.pending_player_events.clear();
                         state.pending_time_update = None;
+                        // Signed in again in this same document: its earlier sign-out no longer
+                        // holds, and `post_login_init` below loads the plugins.
+                        state.page.user_returned();
                     });
                     if !crate::ui::client::POST_LOGIN_RELOADED
                         .swap(true, std::sync::atomic::Ordering::SeqCst)

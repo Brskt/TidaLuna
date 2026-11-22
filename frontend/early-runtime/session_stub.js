@@ -76,7 +76,7 @@ if (!window.nativeInterface) {
         userSession: {
             clear: function() {
                 if (window.location.pathname === (_cfg.loginCallbackPath || '/login/auth')) return;
-                sendIpc('jsrt.session_clear');
+                sendIpc('jsrt.session_clear', window.__LUNAR_PAGE__);
             },
             registerDelegate: function(d) { self.__LUNAR_SESSION_DELEGATE__ = d; },
             update: function(s) {
@@ -96,13 +96,4 @@ if (!window.nativeInterface) {
             setFullscreen: noop,
         },
     };
-
-    self.__LUNAR_SESSION_CLEAR_DONE__ = false;
-    self.__LUNAR_IPC_ON__('jsrt.session_cleared', function() {
-        self.__LUNAR_SESSION_CLEAR_DONE__ = true;
-        var d = self.__LUNAR_SESSION_DELEGATE__;
-        if (d && typeof d.onSessionChanged === 'function') {
-            d.onSessionChanged(null);
-        }
-    });
 }

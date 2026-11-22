@@ -2,37 +2,40 @@ use crate::app_state::{eval_js, with_state};
 use crate::ipc::plugin::{ipc_callback_ok, reset_pkce_scrub};
 use cef::*;
 
-use super::JS_PURGE_SDK_BLOB;
-
-// Soft clear: token only. TIDAL calls this during "not logged in" flow -
-// must not destroy cookies/localStorage/sessionStorage.
-
-pub(super) fn handle_session_clear() {
+/// TIDAL's page cleared its session: it shows the sign-in screen. Only the page is marked; the
+/// session, the store and the SDK blob are left to the logout POST, which alone says the user
+/// meant to leave. `doc` is the document that sent it: a clear from a document already gone
+/// touches nothing of the one running.
+pub(super) fn handle_session_clear(doc: Option<u64>) {
     crate::vprintln!("[AUTH]   session_clear received");
 
-    let ended = with_state(|state| {
+    let cleared = with_state(|state| {
+        if doc != Some(state.page.generation()) {
+            return None;
+        }
         // Stop the native player; it runs independent of the renderer: a
         // session clear alone won't halt audio on logout. This account's music only: a cast
         // runs on its controller's credentials and goes on without this login.
         let _ = state.player.stop(crate::player::StopScope::OwnMusic);
         state.pending_player_events.clear();
         state.pending_time_update = None;
-        state.end_session()
+        let held = state.has_session();
+        Some((held, state.page_signed_out(state.page.generation())))
     })
-    .unwrap_or_default();
-    settle_ended_session(&ended);
+    .flatten();
+    let Some((held, ended)) = cleared else {
+        crate::vprintln!("[AUTH]   session_clear from a document no longer running, ignored");
+        return;
+    };
+    if let Some(ended) = ended {
+        settle_ended_session(&ended);
+    }
     // Allow the next login to trigger its one-shot cold-boot reload.
     crate::ui::POST_LOGIN_RELOADED.store(false, std::sync::atomic::Ordering::SeqCst);
-    let data_dir = crate::state::cache_data_dir();
-    // Queued on the same channel as the saves: an erase that overtook a save still in flight
-    // would hand the credential back to the next launch after the user logged out.
-    crate::platform::secure_store::delete_queued(&data_dir);
-    crate::app_state::eval_js(JS_PURGE_SDK_BLOB);
     reset_pkce_scrub();
-    crate::vprintln!("[AUTH]   Cleared captured token + token state + SDK auth blob");
-
-    crate::app_state::emit_ipc_event("jsrt.session_cleared");
-    crate::vprintln!("[AUTH]   Notified frontend: session_cleared");
+    if held {
+        crate::verr!("[AUTH] session_clear held: the page signed out, the session stays");
+    }
 }
 
 // Aggressive cleanup: cookies, storage, token. Used for debug/manual logout only.

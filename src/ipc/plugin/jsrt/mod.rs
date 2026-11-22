@@ -7,12 +7,8 @@ mod session;
 
 use session::{handle_session_clear, handle_session_hard_reset};
 
+pub(super) use gate::{handle_jsrt_load_plugins, session_for_plugins};
 pub(crate) use session::settle_ended_session;
-pub(super) use gate::{handle_jsrt_load_plugins, has_session};
-
-/// Purges the real tokens of the SDK's localStorage blob before plugin code runs. The SDK already
-/// holds them in memory (credentialsProvider), and the blob would be readable by any plugin.
-pub(crate) const JS_PURGE_SDK_BLOB: &str = "try{['Data','Counter','Salt','Key'].forEach(function(s){localStorage.removeItem('AuthDB/tidal'+s)})}catch(e){}";
 
 /// Multi-pass plugin loading with dependency ordering and startup reconciliation.
 /// Used by both the fire-and-forget path and the request-response handler.
@@ -409,7 +405,7 @@ pub(super) fn run_pass(
 pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
     match msg.channel.as_str() {
         "jsrt.session_clear" => {
-            handle_session_clear();
+            handle_session_clear(msg.args.first().and_then(|doc| doc.as_u64()));
         }
         "jsrt.session_hard_reset" => {
             // Destructive: wipes cookies, storage, token. Debug-only guard.

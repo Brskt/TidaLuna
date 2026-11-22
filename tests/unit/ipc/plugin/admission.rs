@@ -6,6 +6,7 @@ const fn at(epoch: u64, page: u64) -> Ticket {
     Ticket {
         epoch,
         page,
+        signed_out: 0,
     }
 }
 

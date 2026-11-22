@@ -66,7 +66,7 @@ pub(super) fn admit(_pass: &PassGuard, ticket: Ticket) -> Result<Admission, Clos
         entry(
             state.ticket(),
             ticket,
-            standing(state.has_session()),
+            standing(state.session_for_plugins()),
         )?;
         // Set before any plugin line can run, and only for the page still current: a stale pass
         // must not close the store-move window on a page whose own bundle has not asked yet.

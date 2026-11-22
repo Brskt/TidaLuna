@@ -146,6 +146,19 @@ fn settle_recorded_duration(
 pub(crate) struct Ticket {
     pub(crate) epoch: u64,
     pub(crate) page: u64,
+    /// How many times a page signed out: work started before the page reported no user is not
+    /// for the page after it, though the document and the session both stayed.
+    pub(crate) signed_out: u64,
+}
+
+/// What the running document said of its user. It lives with the document: a new one starts
+/// unreported.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PageUser {
+    #[default]
+    Unreported,
+    /// TIDAL's page cleared its session: it shows the sign-in screen, whatever Rust still holds.
+    SignedOut,
 }
 
 /// What a main document holds of the plugin loading, gone with it. A reload keeps the session but
@@ -154,6 +167,9 @@ pub(crate) struct Ticket {
 #[derive(Default)]
 pub(crate) struct PagePhase {
     generation: u64,
+    user: PageUser,
+    /// Counts the sign-outs, never reset: a ticket taken before one never equals one after.
+    sign_outs: u64,
     /// How the last load pass of this page ended. The last one wins: a later pass that could not
     /// load everything takes back what an earlier one vouched for.
     pass_end: PassEnd,
@@ -191,7 +207,32 @@ impl PagePhase {
         self.generation = self.generation.wrapping_add(1);
         self.pass_end = PassEnd::Pending;
         self.waiting.clear();
+        self.user = PageUser::Unreported;
         self.generation
+    }
+
+    /// The page reported no user. True only on the first report of a document: a second clear
+    /// changes nothing, and moves no ticket.
+    pub(crate) fn sign_out(&mut self) -> bool {
+        if self.user == PageUser::SignedOut {
+            return false;
+        }
+        self.user = PageUser::SignedOut;
+        self.sign_outs = self.sign_outs.wrapping_add(1);
+        true
+    }
+
+    /// The same document left its sign-in screen for the app: what it reported no longer holds.
+    pub(crate) fn user_returned(&mut self) {
+        self.user = PageUser::Unreported;
+    }
+
+    pub(crate) fn user(&self) -> PageUser {
+        self.user
+    }
+
+    pub(crate) fn sign_outs(&self) -> u64 {
+        self.sign_outs
     }
 
     pub(crate) fn mark_loaded(&mut self, ticket: Ticket) {
@@ -219,9 +260,9 @@ impl PagePhase {
     }
 }
 
-/// What a session that has just ended was still holding, for the caller to settle outside
-/// the lock: an `eval_js` reaches the renderer and a parked callback answers an IPC
-/// request, and neither belongs under the state mutex.
+/// What a session that has just ended, or a page that signed out, was still holding, for the
+/// caller to settle outside the lock: an `eval_js` reaches the renderer and a parked callback
+/// answers an IPC request, and neither belongs under the state mutex.
 #[derive(Default)]
 pub(crate) struct EndedSession {
     /// The plugins the ended session had live in the page.
@@ -686,7 +727,30 @@ impl AppState {
         Ticket {
             epoch: self.session_epoch,
             page: self.page.generation(),
+            signed_out: self.page.sign_outs(),
         }
+    }
+
+    /// Whether plugin code may run: a session the app knows, in a page that did not report its
+    /// user gone. A signed-out page shows the sign-in screen even while Rust keeps the credential.
+    pub(crate) fn session_for_plugins(&self) -> bool {
+        self.has_session() && self.page.user() != PageUser::SignedOut
+    }
+
+    /// The document `doc` reported no user. Its plugins go and its parked requests are answered,
+    /// in the section that moves the ticket: a pass registering between the two would run in a
+    /// signed-out page. `None` when nothing changed: a clear from a document already gone, or a
+    /// second one from this document. The session and the store are left as they are.
+    pub(crate) fn page_signed_out(&mut self, doc: u64) -> Option<EndedSession> {
+        if doc != self.page.generation() || !self.page.sign_out() {
+            return None;
+        }
+        let loaded = self.plugin_manager.retire_all_loaded();
+        self.page.take_waiting();
+        Some(EndedSession {
+            loaded,
+            waiters: std::mem::take(&mut self.plugin_load_waiters),
+        })
     }
 
     /// End the plugin loading of the page that is gone, returning the new page's generation. Its

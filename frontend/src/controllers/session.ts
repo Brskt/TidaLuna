@@ -8,16 +8,10 @@ export const createUserSession = () => {
     let delegate: SessionDelegate | null = (window as any).__LUNAR_SESSION_DELEGATE__ || null;
     let currentSession: any = null;
 
-    // If clear happened before the bundle loaded, consume the flag now.
-    if ((window as any).__LUNAR_SESSION_CLEAR_DONE__) {
-        currentSession = null;
-        (window as any).__LUNAR_SESSION_CLEAR_DONE__ = false;
-    }
-
     return {
         clear: () => {
             if (isLoginCallback()) return;
-            sendIpc("jsrt.session_clear");
+            sendIpc("jsrt.session_clear", (window as any).__LUNAR_PAGE__);
         },
         registerDelegate: (d: SessionDelegate) => {
             delegate = d;

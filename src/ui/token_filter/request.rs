@@ -732,7 +732,8 @@ pub(super) fn settle_authorization_header(req: &mut Request) -> bool {
         let held = HeldTokens {
             user: state.token_state.as_ref(),
             app: state.app_token.as_ref(),
-            user_live: state.token_state.is_some(),
+            user_live: state.token_state.is_some()
+                && state.page.user() != crate::app_state::PageUser::SignedOut,
         };
         BearerFate::decide(&header, &held, now)
     })

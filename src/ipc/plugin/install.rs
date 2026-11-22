@@ -45,7 +45,7 @@ impl From<String> for InstallError {
 async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, InstallError> {
     // Before the dialog: an install is enabled next, which admission refuses the same way, and that
     // refusal would throw away an install the user had just agreed to.
-    let standing = with_state(|state| super::admission::standing(state.has_session()))
+    let standing = with_state(|state| super::admission::standing(state.session_for_plugins()))
         .unwrap_or(Err(super::admission::Closed::NoSession));
     if let Err(closed) = standing {
         return Err(InstallError::Failed(closed.reason().to_string()));

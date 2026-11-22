@@ -19,7 +19,6 @@ mod uninstall;
 mod update;
 
 pub(crate) use admission::page_stamp;
-pub(crate) use jsrt::JS_PURGE_SDK_BLOB;
 pub(crate) use jsrt::handle_jsrt_fire_and_forget;
 pub(crate) use jsrt::settle_ended_session;
 pub(crate) use native::native_data_dirs;
