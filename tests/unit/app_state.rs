@@ -403,6 +403,31 @@ fn a_client_is_proven_only_by_an_answer_to_a_request_sent_with_it() {
             "refresh, {prior:?} sent {sent:?}"
         );
     }
+    for (binding, asked, update_client, expected) in [
+        (&proven, Some("page"), false, Some("store")),
+        (&proven, Some("page"), true, Some("store")),
+        (&unproven, Some("page"), false, Some("page")),
+        (&unproven, Some("page"), true, Some("store")),
+        (&unproven, None, false, None),
+        (
+            &ClientBinding::Proven(String::new()),
+            Some("page"),
+            false,
+            Some("page"),
+        ),
+        (
+            &ClientBinding::Unproven(String::new()),
+            Some("page"),
+            true,
+            Some("page"),
+        ),
+    ] {
+        assert_eq!(
+            binding.for_page_refresh(asked, update_client),
+            expected,
+            "{binding:?} asked {asked:?}, update_client {update_client}"
+        );
+    }
 }
 
 fn user_generation(user: Option<&str>) -> TokenGeneration {

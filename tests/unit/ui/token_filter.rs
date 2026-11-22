@@ -35,6 +35,54 @@ fn the_detector_finds_a_nonce_shape_and_nothing_shorter_or_cased_differently() {
     }
 }
 
+/// A redirect keeps the origin only by asking the token endpoint the same thing again; leaving it
+/// or asking something else makes the answer inert, and nothing raises it back.
+#[test]
+fn an_exchange_origin_only_ever_lowers_across_hops() {
+    use ExchangeOrigin::{Code, Inert, Substituted, WebSession};
+    for (prev, hop, expected) in [
+        (None, None, None),
+        (None, Some(Substituted), Some(Substituted)),
+        (Some(Code), Some(Code), Some(Code)),
+        (Some(WebSession), Some(Code), Some(Inert)),
+        (Some(Substituted), None, Some(Inert)),
+        (Some(Inert), Some(Substituted), Some(Inert)),
+    ] {
+        assert_eq!(
+            ExchangeOrigin::carry(prev, hop),
+            expected,
+            "{prev:?} then {hop:?}"
+        );
+    }
+}
+
+/// An answer commits only as what its request could produce: a forged query cannot turn a
+/// refresh's answer into an app token, a refresh into a sign-in, nor an inert request into anything.
+#[test]
+fn an_answer_commits_only_as_what_its_request_could_produce() {
+    use crate::app_state::{GrantKind::*, UserCommit};
+    use Answer::{Application as App, Drop, SameUserInPlace, User};
+    use ExchangeOrigin::{ClientCredentials, Code, Inert, Substituted, WebSession};
+    for (origin, expected) in [
+        (
+            Substituted,
+            [User(UserCommit::Refresh), User(UserCommit::Refresh), Drop],
+        ),
+        (Code, [User(UserCommit::Login), Drop, Drop]),
+        (ClientCredentials, [Drop, Drop, App]),
+        (WebSession, [SameUserInPlace, Drop, Drop]),
+        (Inert, [Drop, Drop, Drop]),
+    ] {
+        for (kind, expected) in [Login, Refresh, Application].into_iter().zip(expected) {
+            assert_eq!(
+                origin.answer(kind),
+                expected,
+                "{origin:?} answered {kind:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn rewrite_covers_an_api_host_and_the_auth_host() {
     let u = |s: &str| RequestUrl::new(s.to_string());
