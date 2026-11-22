@@ -235,9 +235,31 @@ pub(super) fn inject_plugin(
     Ok(Injected::Started(load_id))
 }
 
-/// Wait on the ready ack of `load_id`, and give the load up once it has gone idle: unload it,
-/// persist the disable, tell the page. One task per load: a load paused on its user's dialogs
-/// holds back no other plugin's. `ticket` is the one the load was injected under.
+/// The reason a timed-out load's card shows. The flag stays the user's: the next load retries it.
+const TIMED_OUT: &str = "Not loaded: it did not finish loading";
+
+/// What a timed-out load still owed tells the page. No variant writes `enabled`: another plugin
+/// can starve an ack, and a flag turned off then would punish the starved one.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TimeoutNotice {
+    /// The user turned the plugin off since: its card already says so.
+    Silent,
+    Stopped,
+}
+
+impl TimeoutNotice {
+    /// An unreadable flag still tells: the load is gone either way, and a card left on would lie.
+    pub(super) fn for_flag(enabled: Option<bool>) -> Self {
+        match enabled {
+            Some(false) => Self::Silent,
+            Some(true) | None => Self::Stopped,
+        }
+    }
+}
+
+/// Wait on the ready ack of `load_id`, and give the load up once it has gone idle: unload it and
+/// tell the page. One task per load: a load paused on its user's dialogs holds back no other
+/// plugin's. `ticket` is the one the load was injected under.
 pub(super) async fn watch_ack(url: String, load_id: u64, ticket: Ticket) {
     use crate::plugins::manager::LoadWatch;
     // The clock started at `mark_loading`, before the transpile and, at boot, before every later
@@ -261,13 +283,13 @@ pub(super) async fn watch_ack(url: String, load_id: u64, ticket: Ticket) {
         }
     }
     crate::vprintln!(
-        "[PLUGIN] Timeout: '{url}' never sent ready ack (gen={load_id}), marking failed"
+        "[PLUGIN] Timeout: '{url}' never sent ready ack (gen={load_id}), unloading it"
     );
     eval_js(&crate::plugins::PluginManager::generate_unload_js(
         &url, load_id,
     ));
-    // The verdict on this load is taken; the flag and the event wait for the pass lock, where a
-    // page change, a newer load or the user's own disable since would make them wrong.
+    // The verdict on this load is taken; the notice waits for the pass lock, where a page change,
+    // a newer load or the user's own disable since would make it wrong.
     let tail = super::jsrt::in_section(move |_| {
         let still_owed = with_state(|state| {
             timeout_owed(
@@ -281,24 +303,22 @@ pub(super) async fn watch_ack(url: String, load_id: u64, ticket: Ticket) {
         if !still_owed {
             return;
         }
-        let url_disable = url.clone();
-        let disabled = crate::state::db().call_plugins(move |pc| {
-            let enabled = crate::plugins::store::is_enabled(pc, &url_disable).unwrap_or(false);
-            enabled && crate::plugins::store::disable_failed(pc, &url_disable).is_ok()
-        });
-        if disabled {
-            crate::app_state::emit_ipc_event_with_args("jsrt.plugin_failed", &[&url]);
+        let url_read = url.clone();
+        let enabled = crate::state::db()
+            .call_plugins(move |pc| crate::plugins::store::is_enabled(pc, &url_read).ok());
+        if TimeoutNotice::for_flag(enabled) == TimeoutNotice::Stopped {
+            crate::app_state::emit_ipc_event_with_args("jsrt.plugin_stopped", &[&url, TIMED_OUT]);
         }
     })
     .await;
     if let Err(e) = tail {
-        crate::verr!("[PLUGIN] A timed-out plugin was left on: {e}");
+        crate::verr!("[PLUGIN] Timed-out plugin's card not updated: {e}");
     }
 }
 
-/// Whether a timed-out load still owes its disable: its page is the current one, the exit has not
+/// Whether a timed-out load still owes its notice: its page is the current one, the exit has not
 /// begun (the page dies with it, and the silence is not the plugin's), and no load of the url was
-/// marked after it. The row still on is checked with the write.
+/// marked after it.
 pub(super) fn timeout_owed(
     same_page: bool,
     exit: crate::platform::quit::Exit,

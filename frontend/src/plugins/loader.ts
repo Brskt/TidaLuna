@@ -125,8 +125,8 @@ function release(to: string, from: string, move: PendingMove) {
 
 // Resync frontend on plugin lifecycle events from Rust
 function registerLifecycleEvents() {
-    // The reason is shown as text, whoever emitted it; without one, the ready ack timed out.
-    onPluginEvent("jsrt.plugin_failed", (url: string, reason?: string) => {
+    // The reason is shown as text, whoever emitted it.
+    onPluginEvent("jsrt.plugin_failed", (url: string, reason: string) => {
         const plugin = LunaPlugin.getByUrl(url);
         if (plugin) {
             plugin.enabled = false;
@@ -134,11 +134,11 @@ function registerLifecycleEvents() {
             // Its code is unloaded: the Settings it registered must not stay on the card.
             plugin.exports = undefined;
             plugin.runtimeError._ = undefined;
-            plugin.loadError._ = typeof reason === "string" ? reason : "Plugin failed to initialize (timeout)";
+            plugin.loadError._ = reason;
             window.dispatchEvent(new Event("luna:plugins-updated"));
         }
     });
-    // Rust unloaded the plugin and could not start it again this session; its flag is untouched.
+    // Rust unloaded the plugin (timed out, or not restarted); its flag is untouched, the next load retries it.
     onPluginEvent("jsrt.plugin_stopped", (url: string, reason?: string) => {
         const plugin = LunaPlugin.getByUrl(url);
         if (!plugin) return;

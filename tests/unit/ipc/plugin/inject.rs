@@ -80,10 +80,10 @@ fn only_a_failed_draw_or_transpile_owes_the_boot_pass_a_verdict() {
     }
 }
 
-/// A load given up on waits for the pass lock before it turns its plugin off. What happened
-/// meanwhile decides whether it still may: a disable written then would land on a plugin that works.
+/// A load given up on waits for the pass lock before it tells the page. What happened meanwhile
+/// decides whether it still may: a stop announced then would land on a plugin that works.
 #[test]
-fn a_timed_out_load_turns_its_plugin_off_only_if_nothing_replaced_it() {
+fn a_timed_out_load_tells_the_page_only_while_its_page_load_and_app_are_the_same() {
     use crate::platform::quit::Exit;
     for (same_page, exit, last_marked, expected, why) in [
         (
@@ -120,5 +120,30 @@ fn a_timed_out_load_turns_its_plugin_off_only_if_nothing_replaced_it() {
             expected,
             "{why}"
         );
+    }
+}
+
+/// A timed-out load is unloaded whatever its flag says; only the user's own disable since keeps
+/// the page quiet: a flag that cannot be read must not leave a card showing a plugin as running.
+#[test]
+fn a_timed_out_load_tells_its_card_unless_the_user_turned_it_off() {
+    for (enabled, expected, why) in [
+        (
+            Some(true),
+            TimeoutNotice::Stopped,
+            "the card still shows it on",
+        ),
+        (
+            Some(false),
+            TimeoutNotice::Silent,
+            "the user's disable already told the card",
+        ),
+        (
+            None,
+            TimeoutNotice::Stopped,
+            "an unreadable flag is no reason to hide a stop",
+        ),
+    ] {
+        assert_eq!(TimeoutNotice::for_flag(enabled), expected, "{why}");
     }
 }

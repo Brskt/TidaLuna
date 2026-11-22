@@ -115,7 +115,7 @@ fn enable_admitted(admission: &super::admission::Admission, url: &str) -> Result
         return Err("Failed to persist dispatch flag".to_string());
     }
 
-    // 4. Timeout: no ready ack after ten idle seconds, mark failed + notify frontend
+    // 4. Timeout: no ready ack within ACK_IDLE, unload it and tell the page (flag kept)
     crate::state::rt_handle().spawn(super::inject::watch_ack(
         url.to_string(),
         load_id,

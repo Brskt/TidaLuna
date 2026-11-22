@@ -292,8 +292,8 @@ async fn fetch(url: &str, stored: &StoredPlugin) -> Result<PluginData, String> {
 }
 
 /// Puts the stored version in place of the plugin's live load, and says what became of it to the
-/// page. `enabled` stays as the user set it unless the new code itself fails to load, which turns
-/// it off as any failed load does.
+/// page. `enabled` stays as the user set it unless the new code fails to prepare, which turns it
+/// off as any failed load does; a load that times out is only stopped.
 async fn restart_live(url: &str) -> Restarted {
     let url = url.to_string();
     super::jsrt::in_section(move |pass| {
