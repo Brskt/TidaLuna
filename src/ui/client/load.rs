@@ -40,11 +40,10 @@ pub(in crate::ui) enum PageState {
 pub(crate) static POST_LOGIN_RELOADED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// One-shot: armed at boot (finish_boot_tokens) when the SDK blob is unusable
-/// (corrupt or no token match). Consumed on the first navigation that injects
-/// the init script; the renderer wipes the stale blob exactly once - never
-/// re-wiping a blob a later login writes to the same origin. Baking the purge
-/// into the reusable init_script instead would replay it on every reload.
+/// One-shot: armed by the boot refresh when the stored refresh token is dead, consumed by the next
+/// desktop page load. The renderer wipes the SDK's credentials exactly once, never a blob a later
+/// login writes to the same origin; baking the purge into the reusable init_script would replay it
+/// on every reload.
 pub(crate) static NEEDS_BOOT_BLOB_PURGE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -78,14 +77,19 @@ wrap_load_handler! {
                 }
                 let url_userfree = frame.url();
                 let url = crate::ui::token_filter::userfree_to_string(&url_userfree);
-                let policy = NavigationPolicy::for_page(PageKind::classify(&url));
+                let kind = PageKind::classify(&url);
+                let policy = NavigationPolicy::for_page(kind);
                 if policy.inject_init_script {
-                    // One-shot boot purge of an unusable SDK blob, before the
-                    // init script and before TIDAL's JS reads localStorage. The
-                    // first boot navigation is desktop.tidal.com (the blob's
-                    // origin): it lands once, on the right page.
-                    if NEEDS_BOOT_BLOB_PURGE.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                        exec_js_on_frame(frame, crate::ipc::plugin::JS_PURGE_SDK_BLOB);
+                    // One-shot purge of the SDK's credentials, before the init script and before
+                    // TIDAL's JS reads localStorage. Only on the desktop page, the blob's origin:
+                    // the callback page would spend it on a document that starts no SDK.
+                    if kind == PageKind::DesktopApp
+                        && NEEDS_BOOT_BLOB_PURGE.swap(false, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        exec_js_on_frame(
+                            frame,
+                            &crate::platform::sdk_storage::credentials_purge_script(),
+                        );
                     }
                     crate::vprintln!(
                         "[LOAD]   on_load_start init_script: {}",

@@ -26,7 +26,7 @@ mod util;
 mod video;
 
 use app_state::{APP_STATE, AppState};
-use boot_tokens::start_boot_token_reconcile;
+use boot_tokens::restore_at_boot;
 use cef::wrapper::message_router::{
     MessageRouterConfig, MessageRouterRendererSide, RendererSideRouter,
 };
@@ -454,19 +454,16 @@ fn main() {
         ));
     }
 
+    // Token reconciliation, whole and synchronous: the SDK's blobs are read, judged against the
+    // secure store and purged while our process is still Local Storage's only possible opener.
+    restore_at_boot(&data_dir, &profile_cache);
     // Same window and same reason: the worker's files and Local Storage are still ours alone.
     crate::ui::worker_cache::drop_if_stale(&profile_cache);
-    // Token reconciliation, phase 1: secure-store load + raw SDK-blob read.
-    // All LevelDB I/O happens here, while our process is still its only
-    // possible opener. The crypto - dominated by a 100k-iteration PBKDF2 -
-    // runs on its own thread while CEF initializes; on_context_initialized
-    // joins it (finish_boot_tokens) before the first browser exists.
-    start_boot_token_reconcile(&data_dir, &profile_cache);
 
     // Seed the gate mirror before any start path (IPC / SDK) can fire.
     crate::connect::ipc::set_receiver_enabled(boot.receiver_always_on);
-    // Spawn the always-on Connect receiver; it doesn't read the boot tokens
-    // still reconciling (a casting device brings its own).
+    // Spawn the always-on Connect receiver; it doesn't read the boot tokens (a casting device
+    // brings its own).
     if boot.receiver_always_on
         && let Some(rt) = crate::state::RT_HANDLE.get()
     {

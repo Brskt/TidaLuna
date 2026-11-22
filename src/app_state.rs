@@ -104,7 +104,8 @@ pub(crate) struct AppState {
     pub(crate) window_save_scheduled: bool,
     pub(crate) close_to_tray: bool,
     pub(crate) force_quit: bool,
-    pub(crate) needs_proactive_refresh: bool,
+    /// What the boot refresh owes the restored session, taken once by `trigger_if_needed`.
+    pub(crate) refresh_duty: RefreshDuty,
     pub(crate) needs_blob_purge: bool,
     // Gate: plugin JS must not load until the cold-boot real OAuth token has been
     // rotated to opaque nonces in TIDAL's SDK. Default true (warm boot / no
@@ -271,6 +272,19 @@ impl GrantKind {
     }
 }
 
+/// What the refresh Rust sends at boot owes the session it restored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RefreshDuty {
+    /// Nothing restored, or the refresh already ran.
+    #[default]
+    Spent,
+    /// The page holds this session's nonces: prove the refresh token alive, and update the
+    /// generation in place so the page's nonces keep naming it.
+    Check,
+    /// The page holds real tokens: the answer becomes a new generation of nonces.
+    CheckAndRotate,
+}
+
 /// How a user generation is committed: a sign-in may replace the account, a refresh never does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UserCommit {
@@ -336,6 +350,32 @@ fn live_access_token(
         .filter(|token| !token.is_empty())
 }
 
+/// The current generation takes an answer's access token without changing its nonces; the ones
+/// the page holds keep naming it. A rotated refresh token goes to `previous` too when both share a
+/// refresh nonce: two generations naming one nonce hold one token. The client is the caller's.
+fn take_in_place(
+    current: &mut crate::platform::secure_store::TokenGeneration,
+    previous: Option<&mut crate::platform::secure_store::TokenGeneration>,
+    grant: &TokenGrant,
+) {
+    current.access_token = grant.access_token.to_owned();
+    current.access_expires = crate::util::now_unix_secs() + grant.expires_in.unwrap_or(3600);
+    current.version += 1;
+    if current.user_id.is_none() {
+        current.user_id = grant.user_id.map(str::to_owned);
+    }
+    if !grant.granted_scopes.is_empty() {
+        current.granted_scopes = grant.granted_scopes.to_vec();
+    }
+    if let Some(rotated) = grant.refresh_token.filter(|rt| !rt.is_empty()) {
+        if let Some(prev) = previous
+            && prev.opaque_rt == current.opaque_rt
+        {
+            prev.refresh_token = rotated.to_owned();
+        }
+        current.refresh_token = rotated.to_owned();
+    }
+}
 
 impl AppState {
     pub(crate) fn new(player: Arc<crate::player::Player>) -> Self {
@@ -357,7 +397,7 @@ impl AppState {
             window_save_scheduled: false,
             close_to_tray: false,
             force_quit: false,
-            needs_proactive_refresh: false,
+            refresh_duty: RefreshDuty::Spent,
             needs_blob_purge: false,
             // Gate open by default; cold boot closes it when a refresh is due.
             proactive_refresh_done: true,
@@ -457,13 +497,67 @@ impl AppState {
         if let TokenCommit::Committed { durable, .. } = &commit {
             let data_dir = crate::state::cache_data_dir();
             // Only a durable generation belongs on disk. One without a refresh token would
-            // replace a credential that still works, and the next launch would seed the SDK's
-            // own blob from it, handing TIDAL an empty refresh token verbatim.
+            // replace a credential that still works, and the next launch would restore a session
+            // whose refresh token is empty.
             if let (true, Some(ts)) = (*durable, &self.token_state) {
                 crate::platform::secure_store::save_queued(&data_dir, ts);
             }
         }
         commit
+    }
+
+    /// [`Self::apply_refresh_in_place`], then the generation queued to disk in the same section.
+    pub(crate) fn refresh_in_place(
+        &mut self,
+        session_epoch: u64,
+        version_sent: u64,
+        refresh_token_sent: &str,
+        grant: &TokenGrant,
+    ) -> bool {
+        let applied =
+            self.apply_refresh_in_place(session_epoch, version_sent, refresh_token_sent, grant);
+        if applied && let Some(ts) = &self.token_state {
+            crate::platform::secure_store::save_queued(&crate::state::cache_data_dir(), ts);
+        }
+        applied
+    }
+
+    /// Rust's boot refresh answered: the current generation takes the new access token in place
+    /// (see `take_in_place`), since a new nonce would leave the page sending the replaced one.
+    ///
+    /// Refused unless the generation is still the one the request was sent for (same session,
+    /// version and refresh token) and the answer is for its user. The answer proves the client it
+    /// was sent with.
+    pub(crate) fn apply_refresh_in_place(
+        &mut self,
+        session_epoch: u64,
+        version_sent: u64,
+        refresh_token_sent: &str,
+        grant: &TokenGrant,
+    ) -> bool {
+        if self.session_epoch != session_epoch {
+            return false;
+        }
+        let Some(crate::platform::secure_store::StoredTokenState {
+            current, previous, ..
+        }) = self.token_state.as_mut()
+        else {
+            return false;
+        };
+        let same_user = match (current.user_id.as_deref(), grant.user_id) {
+            (Some(was), Some(is)) => was == is,
+            _ => true,
+        };
+        if current.version != version_sent
+            || current.refresh_token.is_empty()
+            || current.refresh_token != refresh_token_sent
+            || !same_user
+        {
+            return false;
+        }
+        take_in_place(current, previous.as_mut(), grant);
+        current.client = ClientBinding::after_refresh(Some(&current.client), grant.client_id);
+        true
     }
 
     /// Stores an app-level token and returns the nonce the page gets for it: the existing one when

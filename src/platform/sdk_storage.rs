@@ -2,14 +2,11 @@
 // Revalidate on Chromium/CEF upgrades (LevelDB key/value format) and TIDAL SDK updates
 // (PBKDF2 params, AES-KW, AES-CTR counter_bits, localStorage key names).
 //
-// Fail-closed: read_raw_blob() returns Missing (no DB / no keys), Corrupt (present but
-// malformed), Unreadable, or Raw; decrypt_raw_blob() returns None on any crypto or
-// schema failure. Never panics, never returns partial results.
+// Fail-closed: open_credentials() returns Missing, Unreadable, or every credential blob of the
+// origin; CredentialBlob::decrypt() returns None on any crypto or schema failure. Never panics.
 //
-// I/O and crypto are split on purpose: the LevelDB halves (read_raw_blob,
-// write_entries, purge_sdk_credentials) must only run before CEF init - Chromium
-// locks that directory once it starts - while the pure halves (decrypt_raw_blob,
-// build_seed_entries) carry the 100k-iteration PBKDF2 and may run on any thread.
+// Everything that opens the LevelDB runs before CEF init only: Chromium locks that directory once
+// it starts.
 
 use aes::Aes256;
 use aes::cipher::{KeyInit, KeyIvInit, StreamCipher};
@@ -25,18 +22,70 @@ const AES_KW_WRAPPED_LEN: usize = 40; // 32-byte key + 8-byte integrity check
 const AES_KW_UNWRAPPED_LEN: usize = 32;
 const COUNTER_LEN: usize = 16;
 const SALT_LEN: usize = 16;
-const PASSWORD: &[u8] = b"tidal";
+/// The localStorage prefix every credential blob of TIDAL's SDK sits under, whatever its id.
+const CREDENTIALS_PREFIX: &str = "AuthDB/";
+/// The four values one blob is stored as, `AuthDB/<id><suffix>`, in the order `CredentialBlob`
+/// keeps them.
+const BLOB_SUFFIXES: [&str; 4] = ["Salt", "Counter", "Key", "Data"];
+/// Chromium's two encodings of a localStorage key or value, named by its first byte.
+const UTF16_LE: u8 = 0x00;
+const LATIN1: u8 = 0x01;
+
+/// Removes every SDK credential key of TIDAL's origin, each id and suffix included, before the
+/// document it runs in starts the SDK. The origin is checked first: anywhere else `localStorage`
+/// may throw, and this runs nowhere else.
+pub(crate) fn credentials_purge_script() -> String {
+    let origin = serde_json::Value::from(ORIGIN);
+    let prefix = serde_json::Value::from(CREDENTIALS_PREFIX);
+    format!(
+        "if(location.origin==={origin}){{Object.keys(localStorage).forEach(function(k){{if(k.startsWith({prefix}))localStorage.removeItem(k)}})}}"
+    )
+}
+
+/// The part of a Chrome localStorage LevelDB key that names TIDAL's origin: `_` + origin + `\x00`.
+fn origin_key_prefix() -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + ORIGIN.len() + 1);
+    key.push(b'_');
+    key.extend_from_slice(ORIGIN.as_bytes());
+    key.push(0x00);
+    key
+}
 
 /// Build a Chrome localStorage LevelDB key.
 /// Format: `_` + origin + `\x00` + encoding_prefix + key_name
 fn leveldb_key(ls_key: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(1 + ORIGIN.len() + 1 + 1 + ls_key.len());
-    key.push(b'_');
-    key.extend_from_slice(ORIGIN.as_bytes());
-    key.push(0x00);
-    key.push(0x01); // ISO-8859-1 encoding
+    let mut key = origin_key_prefix();
+    key.push(LATIN1);
     key.extend_from_slice(ls_key.as_bytes());
     key
+}
+
+/// The start of every credential key of the origin, in each encoding Chromium may store a key in.
+fn credential_key_prefixes() -> [Vec<u8>; 2] {
+    let mut utf16 = origin_key_prefix();
+    utf16.push(UTF16_LE);
+    for unit in CREDENTIALS_PREFIX.encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    [leveldb_key(CREDENTIALS_PREFIX), utf16]
+}
+
+/// A localStorage key name as the page's JS sees it. Chromium stores a name as Latin-1 when every
+/// character fits, as UTF-16-LE otherwise.
+fn decode_ls_name(raw: &[u8]) -> Option<String> {
+    match raw.split_first()? {
+        (&LATIN1, name) => Some(name.iter().copied().map(char::from).collect()),
+        (&UTF16_LE, name) if name.len().is_multiple_of(2) => {
+            let units: Vec<u16> = name
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
+                .collect();
+            Some(String::from_utf16_lossy(&units))
+        }
+        _ => None,
+    }
 }
 
 /// Decode a Chrome localStorage value.
@@ -47,8 +96,8 @@ fn decode_ls_value(raw: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     match raw[0] {
-        0x01 => Some(raw[1..].to_vec()),
-        0x00 => {
+        LATIN1 => Some(raw[1..].to_vec()),
+        UTF16_LE => {
             let payload = &raw[1..];
             if !payload.len().is_multiple_of(2) {
                 return None;
@@ -67,9 +116,9 @@ fn decode_ls_value(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Derive the AES-256 wrapping key from the password + salt via PBKDF2-HMAC-SHA256.
-fn derive_wrapping_key(salt: &[u8; SALT_LEN]) -> [u8; PBKDF2_KEY_LEN] {
+fn derive_wrapping_key(password: &[u8], salt: &[u8; SALT_LEN]) -> [u8; PBKDF2_KEY_LEN] {
     let mut key = [0u8; PBKDF2_KEY_LEN];
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(PASSWORD, salt, PBKDF2_ITERATIONS, &mut key);
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password, salt, PBKDF2_ITERATIONS, &mut key);
     key
 }
 
@@ -100,14 +149,6 @@ fn decrypt_aes_ctr(
     Some(plaintext)
 }
 
-fn encrypt_aes_ctr(
-    data_key: &[u8; AES_KW_UNWRAPPED_LEN],
-    counter: &[u8; COUNTER_LEN],
-    plaintext: &[u8],
-) -> Option<Vec<u8>> {
-    decrypt_aes_ctr(data_key, counter, plaintext)
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SdkCredentials {
@@ -119,96 +160,165 @@ pub(crate) struct SdkCredentials {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SdkAccessToken {
     pub token: Option<String>,
+    /// The account the SDK wrote this blob for, as a decimal string.
+    pub user_id: Option<String>,
 }
 
-/// The four AuthDB/tidal* values, read raw from LevelDB before any crypto.
-pub(crate) struct RawSdkBlob {
-    pub salt: [u8; SALT_LEN],
-    pub counter: [u8; COUNTER_LEN],
-    pub wrapped_key: Vec<u8>,
-    pub data: Vec<u8>,
+/// One credential blob of TIDAL's SDK, `AuthDB/<id>{Salt,Counter,Key,Data}`, as Local Storage
+/// holds it. Ids are read off the key names, never assumed.
+pub(crate) struct CredentialBlob {
+    /// The id the SDK stored it under, which is also the password it encrypted it with.
+    pub(crate) id: String,
+    /// Every LevelDB key found under the id, a name no suffix ends included.
+    keys: Vec<Vec<u8>>,
+    /// The values in `BLOB_SUFFIXES` order, `None` when absent or in neither of Chromium's encodings.
+    parts: [Option<Vec<u8>>; 4],
 }
 
-pub(crate) enum ReadRawResult {
+impl CredentialBlob {
+    /// Decrypts it as the SDK does, with its id as the PBKDF2 password. `None` when a part is
+    /// missing or malformed, the key does not unwrap, or the JSON is not the SDK's. Runs the
+    /// 100k-iteration PBKDF2.
+    pub(crate) fn decrypt(&self) -> Option<SdkCredentials> {
+        let [salt, counter, wrapped_key, data] = &self.parts;
+        let salt = <[u8; SALT_LEN]>::try_from(salt.as_deref()?).ok()?;
+        let counter = <[u8; COUNTER_LEN]>::try_from(counter.as_deref()?).ok()?;
+        let wrapping_key = derive_wrapping_key(self.id.as_bytes(), &salt);
+        let data_key = unwrap_data_key(&wrapping_key, wrapped_key.as_deref()?)?;
+        let plaintext = decrypt_aes_ctr(&data_key, &counter, data.as_deref()?)?;
+        serde_json::from_slice(&plaintext).ok()
+    }
+}
+
+/// Sorts the credential entries of the origin into blobs by the id their names carry. A name no
+/// suffix ends, or one that does not decode, is a blob of its own that never decrypts.
+fn group_blobs(entries: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<CredentialBlob> {
+    let name_at = origin_key_prefix().len();
+    let mut blobs = std::collections::BTreeMap::<String, CredentialBlob>::new();
+    for (key, value) in entries {
+        let name = key
+            .get(name_at..)
+            .and_then(decode_ls_name)
+            .unwrap_or_default();
+        let rest = name.strip_prefix(CREDENTIALS_PREFIX).unwrap_or(&name);
+        let (id, part) = match BLOB_SUFFIXES
+            .iter()
+            .position(|suffix| rest.ends_with(suffix))
+        {
+            Some(part) => (&rest[..rest.len() - BLOB_SUFFIXES[part].len()], Some(part)),
+            None => (rest, None),
+        };
+        let blob = blobs
+            .entry(id.to_owned())
+            .or_insert_with(|| CredentialBlob {
+                id: id.to_owned(),
+                keys: Vec::new(),
+                parts: Default::default(),
+            });
+        if let Some(part) = part {
+            blob.parts[part] = decode_ls_value(&value);
+        }
+        blob.keys.push(key);
+    }
+    blobs.into_values().collect()
+}
+
+/// Every entry of the origin under the credential prefix, through the iterator (see
+/// `read_ls_key`). `None` when the tables do not read, a damaged one panicking instead of erroring.
+fn credential_entries(db: &mut rusty_leveldb::DB) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    use rusty_leveldb::LdbIterator;
+
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut entries = Vec::new();
+        for prefix in credential_key_prefixes() {
+            let mut iter = db.new_iter().ok()?;
+            iter.seek(&prefix);
+            while iter.valid() {
+                let Some((key, value)) = iter.current() else {
+                    break;
+                };
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                entries.push((key.to_vec(), value.to_vec()));
+                if !iter.advance() {
+                    break;
+                }
+            }
+        }
+        Some(entries)
+    }))
+    .ok()
+    .flatten()
+}
+
+/// Local Storage with every SDK credential blob of TIDAL's origin.
+pub(crate) struct CredentialStore {
+    db: rusty_leveldb::DB,
+    blobs: Vec<CredentialBlob>,
+}
+
+pub(crate) enum OpenedCredentials {
+    /// No Local Storage: the browser never started on this profile.
     Missing,
-    Raw(Box<RawSdkBlob>),
-    Corrupt,
-    /// Could not open the LevelDB (e.g. locked by another process); contents
-    /// unknown: callers must not purge. It may hold valid credentials.
+    Opened(Box<CredentialStore>),
+    /// It would not open (another process holds it, most often) or its tables would not read:
+    /// nothing may be concluded from it, and nothing is written to it.
     Unreadable,
 }
 
-/// I/O half of the read path: fetch the four keys and validate their shape.
-/// No crypto happens here; the blob decrypts later via decrypt_raw_blob.
-pub(crate) fn read_raw_blob(leveldb_path: &Path) -> ReadRawResult {
+pub(crate) fn open_credentials(leveldb_path: &Path) -> OpenedCredentials {
     let mut db = match open_leveldb(leveldb_path, OpenMode::Existing) {
-        OpenResult::Missing => return ReadRawResult::Missing,
+        OpenResult::Missing => return OpenedCredentials::Missing,
         OpenResult::Ok(db) => *db,
-        OpenResult::Error => return ReadRawResult::Unreadable,
+        OpenResult::Error => return OpenedCredentials::Unreadable,
     };
-
-    let keys = [
-        read_ls_key(&mut db, "AuthDB/tidalSalt"),
-        read_ls_key(&mut db, "AuthDB/tidalCounter"),
-        read_ls_key(&mut db, "AuthDB/tidalKey"),
-        read_ls_key(&mut db, "AuthDB/tidalData"),
-    ];
-
-    let mut present = 0u8;
-    let mut has_invalid = false;
-    for result in &keys {
-        match result {
-            ReadKeyResult::Ok(_) => present += 1,
-            ReadKeyResult::Missing => {}
-            ReadKeyResult::Unreadable => return ReadRawResult::Unreadable,
-            ReadKeyResult::Invalid => {
-                present += 1;
-                has_invalid = true;
-            }
-        }
+    match credential_entries(&mut db) {
+        Some(entries) => OpenedCredentials::Opened(Box::new(CredentialStore {
+            db,
+            blobs: group_blobs(entries),
+        })),
+        None => OpenedCredentials::Unreadable,
     }
-
-    if present == 0 {
-        return ReadRawResult::Missing;
-    }
-    if present < 4 || has_invalid {
-        return ReadRawResult::Corrupt;
-    }
-
-    let [salt_key, counter_key, wrapped_key, data_key] = keys;
-    let (
-        ReadKeyResult::Ok(salt_bytes),
-        ReadKeyResult::Ok(counter_bytes),
-        ReadKeyResult::Ok(wrapped_bytes),
-        ReadKeyResult::Ok(data_bytes),
-    ) = (salt_key, counter_key, wrapped_key, data_key)
-    else {
-        return ReadRawResult::Corrupt;
-    };
-
-    let Ok(salt) = <[u8; SALT_LEN]>::try_from(salt_bytes.as_slice()) else {
-        return ReadRawResult::Corrupt;
-    };
-    let Ok(counter) = <[u8; COUNTER_LEN]>::try_from(counter_bytes.as_slice()) else {
-        return ReadRawResult::Corrupt;
-    };
-
-    ReadRawResult::Raw(Box::new(RawSdkBlob {
-        salt,
-        counter,
-        wrapped_key: wrapped_bytes,
-        data: data_bytes,
-    }))
 }
 
-/// Crypto half of the read path: PBKDF2, AES-KW unwrap, AES-CTR decrypt, JSON
-/// parse. Pure CPU, no I/O. None on any failure (the blob is corrupt).
-pub(crate) fn decrypt_raw_blob(raw: &RawSdkBlob) -> Option<SdkCredentials> {
-    let wrapping_key = derive_wrapping_key(&raw.salt);
-    let data_key = unwrap_data_key(&wrapping_key, &raw.wrapped_key)?;
-    let plaintext = decrypt_aes_ctr(&data_key, &raw.counter, &raw.data)?;
-    let json_str = std::str::from_utf8(&plaintext).ok()?;
-    serde_json::from_str::<SdkCredentials>(json_str).ok()
+/// What a purge of credential blobs did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purge {
+    /// No blob was picked: nothing was written.
+    Nothing,
+    /// That many keys went, in one batch.
+    Deleted(usize),
+    /// The batch did not land.
+    Failed,
+}
+
+impl CredentialStore {
+    pub(crate) fn blobs(&self) -> &[CredentialBlob] {
+        &self.blobs
+    }
+
+    /// Deletes every key of the blobs `doomed` picks, in one batch, then closes the store.
+    pub(crate) fn purge(mut self, doomed: impl Fn(&CredentialBlob) -> bool) -> Purge {
+        let mut batch = rusty_leveldb::WriteBatch::default();
+        let mut deleted = 0;
+        for key in self
+            .blobs
+            .iter()
+            .filter(|blob| doomed(blob))
+            .flat_map(|blob| &blob.keys)
+        {
+            batch.delete(key);
+            deleted += 1;
+        }
+        if deleted == 0 {
+            return Purge::Nothing;
+        }
+        match self.db.write(batch, true) {
+            Ok(()) => Purge::Deleted(deleted),
+            Err(_) => Purge::Failed,
+        }
+    }
 }
 
 enum OpenResult {
@@ -341,87 +451,6 @@ fn write_ls_keys(db: &mut rusty_leveldb::DB, entries: &[(&str, &[u8])]) -> Optio
     }
     db.write(batch, true).ok()?;
     Some(())
-}
-
-/// Encrypted write entries for a fresh credential blob: new salt, data key and
-/// counter, including the full PBKDF2 derivation. Pure CPU, no I/O.
-/// Used when the secure store has tokens but the SDK storage is missing
-/// (TIDAL's SDK may refuse to persist non-JWT opaque tokens: it is seeded
-/// with the real ones).
-///
-/// `expires_ms` is named for its unit because the SDK reads a milliseconds
-/// epoch here and this side keeps seconds: `TokenGeneration::access_expires_ms`
-/// is the conversion, and passing a raw `access_expires` would seed a token the
-/// SDK judges expired on sight.
-pub(crate) fn build_seed_entries(
-    access_token: &str,
-    refresh_token: &str,
-    expires_ms: u64,
-    user_id: Option<&str>,
-    granted_scopes: &[String],
-) -> Option<SdkEntries> {
-    let mut salt = [0u8; SALT_LEN];
-    getrandom::fill(&mut salt).ok()?;
-
-    let mut data_key = [0u8; AES_KW_UNWRAPPED_LEN];
-    getrandom::fill(&mut data_key).ok()?;
-
-    let mut counter = [0u8; COUNTER_LEN];
-    getrandom::fill(&mut counter).ok()?;
-
-    let credentials_json = serde_json::json!({
-        "accessToken": {
-            "token": access_token,
-            "expires": expires_ms,
-            "userId": user_id.unwrap_or(""),
-            "grantedScopes": granted_scopes,
-        },
-        "refreshToken": refresh_token,
-    });
-    let plaintext = serde_json::to_vec(&credentials_json).ok()?;
-
-    let ciphertext = encrypt_aes_ctr(&data_key, &counter, &plaintext)?;
-
-    let wrapping_key = derive_wrapping_key(&salt);
-    let kek = aes_kw::KwAes256::new_from_slice(&wrapping_key).expect("key is 32 bytes");
-    let mut wrapped_key = [0u8; AES_KW_WRAPPED_LEN];
-    kek.wrap_key(&data_key, &mut wrapped_key).ok()?;
-
-    Some(vec![
-        ("AuthDB/tidalSalt", salt.to_vec()),
-        ("AuthDB/tidalCounter", counter.to_vec()),
-        ("AuthDB/tidalKey", wrapped_key.to_vec()),
-        ("AuthDB/tidalData", ciphertext),
-    ])
-}
-
-/// Pre-encrypted LevelDB write entries: (localStorage key, raw value bytes).
-pub(crate) type SdkEntries = Vec<(&'static str, Vec<u8>)>;
-
-/// Write pre-built entries to the blob, creating the LevelDB if absent (the
-/// seed path can run on a fresh profile). Must run before CEF init.
-pub(crate) fn write_entries(leveldb_path: &Path, entries: &SdkEntries) -> Option<()> {
-    let opts = rusty_leveldb::Options {
-        create_if_missing: true,
-        compressor: 1,
-        ..rusty_leveldb::Options::default()
-    };
-    let mut db = rusty_leveldb::DB::open(leveldb_path, opts).ok()?;
-    let entry_refs: Vec<(&str, &[u8])> = entries.iter().map(|(k, v)| (*k, v.as_slice())).collect();
-    write_ls_keys(&mut db, &entry_refs)
-}
-
-pub(crate) fn purge_sdk_credentials(leveldb_path: &Path) {
-    let OpenResult::Ok(db) = open_leveldb(leveldb_path, OpenMode::Existing) else {
-        return;
-    };
-    let mut db = *db;
-    let mut batch = rusty_leveldb::WriteBatch::default();
-    for suffix in ["Salt", "Counter", "Key", "Data"] {
-        let key = leveldb_key(&format!("AuthDB/tidal{suffix}"));
-        batch.delete(&key);
-    }
-    let _ = db.write(batch, true);
 }
 
 /// One localStorage value of TIDAL's origin, read with the LevelDB opened here.

@@ -368,12 +368,6 @@ wrap_browser_process_handler! {
             let crossfade_enabled = crate::state::boot_settings().crossfade_enabled;
             let crossfade_secs = crate::state::boot_settings().crossfade_secs;
 
-            // Join the boot-token reconcile: the restored session must be in
-            // AppState before the page can consume it. An unusable blob arms a
-            // one-shot renderer purge (NEEDS_BOOT_BLOB_PURGE), not an init-script
-            // prefix that would replay on every reload.
-            crate::boot_tokens::finish_boot_tokens();
-
             // `main` refuses to start without the front, before CEF exists.
             let Some(front) = crate::frontend::load::get() else {
                 crate::platform::refusal::refuse_to_start("TidaLunar's front files were not loaded.");

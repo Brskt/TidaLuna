@@ -1,220 +1,222 @@
-use crate::{app_state, platform, vprintln};
-use std::sync::Mutex;
+use crate::platform::sdk_storage::{self, OpenedCredentials, Purge};
+use crate::platform::secure_store::{self, StoreError, StoredTokenState};
+use crate::{app_state, verr, vprintln};
+use std::path::Path;
 
-/// Boot-token reconcile parked on its own thread while CEF initializes; the
-/// join point is on_context_initialized, before the first browser exists.
-static BOOT_TOKEN_TASK: Mutex<Option<std::thread::JoinHandle<BootTokenOutcome>>> = Mutex::new(None);
-
-/// Reconcile decision computed off-thread. It never carries disk writes: once
-/// initialize() runs, Chromium owns the blob's LevelDB (verified: a join-time
-/// write fails on its lock). The only mutation left, purging an unusable blob,
-/// is done by the renderer itself.
-enum BootTokenOutcome {
-    /// Blob unusable or unrecognized; the renderer purges it before TIDAL's
-    /// JS runs (init-script prefix).
-    Abandon,
-    /// Blob coherent with a stored generation; restore the session.
-    /// needs_refresh is true when the blob holds real or previous-generation
-    /// tokens: the proactive refresh then mints a fresh generation and
-    /// TIDAL's SDK re-persists the blob itself, converging it without a
-    /// disk write.
-    Restore {
-        tokens: Box<platform::secure_store::StoredTokenState>,
-        needs_refresh: bool,
-    },
+/// What a stored SDK credential blob is, against the secure store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobNames {
+    /// Both tokens are nonces and the blob was written for the store's user: the page's own
+    /// session, whichever generation its nonces name. A nonce of an older generation resolves to
+    /// the current one on the wire all the same.
+    Mine,
+    /// An application credential: an access nonce, no refresh token, no user.
+    App,
+    /// Real tokens, equal to a generation of the store.
+    RealTokens,
+    /// Undecryptable, a half pair, another or an unknown user, a real token the store does not
+    /// hold: nothing to restore the page on.
+    Foreign,
 }
 
-/// Restore the reconciled session into AppState. Runs before the first
-/// browser exists; nothing can observe a half-populated state.
-fn restore_session(restored: platform::secure_store::StoredTokenState, needs_refresh: bool) {
+impl BlobNames {
+    fn classify(credentials: &sdk_storage::SdkCredentials, store: &StoredTokenState) -> Self {
+        let access = credentials.access_token.as_ref();
+        let at = access.and_then(|a| a.token.as_deref()).unwrap_or("");
+        let rt = credentials.refresh_token.as_deref().unwrap_or("");
+        let blob_user = access
+            .and_then(|a| a.user_id.as_deref())
+            .filter(|user| !user.is_empty());
+        let store_user = store
+            .current
+            .user_id
+            .as_deref()
+            .or(store.previous.as_ref().and_then(|p| p.user_id.as_deref()));
+        let is_nonce = crate::ui::token_filter::is_nonce;
+        if is_nonce(at) && is_nonce(rt) {
+            return if blob_user.is_some() && blob_user == store_user {
+                Self::Mine
+            } else {
+                Self::Foreign
+            };
+        }
+        if is_nonce(at) && rt.is_empty() && blob_user.is_none() {
+            return Self::App;
+        }
+        let held = std::iter::once(&store.current).chain(store.previous.as_ref());
+        if !rt.is_empty()
+            && held
+                .into_iter()
+                .any(|g| g.access_token == at && g.refresh_token == rt)
+        {
+            return Self::RealTokens;
+        }
+        Self::Foreign
+    }
+
+    /// A blob of Local Storage, decrypted with its own id: one that does not decrypt holds nothing
+    /// to restore.
+    fn of_blob(blob: &sdk_storage::CredentialBlob, store: &StoredTokenState) -> Self {
+        blob.decrypt().map_or(Self::Foreign, |credentials| {
+            Self::classify(&credentials, store)
+        })
+    }
+
+    /// Whether the page keeps the blob. Real tokens go even when they are the store's: their
+    /// password is the id beside them, readable by any plugin.
+    fn stays(self) -> bool {
+        matches!(self, Self::Mine | Self::App)
+    }
+
+    /// The boot refresh is owed whatever the page holds: a nonce blob alone never proves its
+    /// refresh token alive.
+    fn duty(self) -> app_state::RefreshDuty {
+        match self {
+            Self::Mine | Self::App => app_state::RefreshDuty::Check,
+            Self::RealTokens => app_state::RefreshDuty::CheckAndRotate,
+            Self::Foreign => app_state::RefreshDuty::Spent,
+        }
+    }
+}
+
+/// What the boot made of the secure store and the SDK's blobs.
+enum BootRestore {
+    /// A blob is the page's session for the store: restored, and the blobs `purge` names go.
+    Restored {
+        tokens: Box<StoredTokenState>,
+        names: BlobNames,
+        purge: Vec<String>,
+    },
+    /// No secure store: nobody is signed in.
+    StoreAbsent,
+    /// The secure store does not decode.
+    StoreCorrupt,
+    /// The keychain or file backend failed; the store itself may read at the next launch.
+    StoreUnavailable,
+    /// The store loaded, and no blob is the page's session for it.
+    BlobUnusable,
+    /// Local Storage would not open or read.
+    ReconcileFailed,
+}
+
+/// What becomes of the SDK's blobs before CEF starts.
+#[derive(Debug, PartialEq, Eq)]
+enum PageBlob<'a> {
+    Keep,
+    /// These ids go; the page's session stays.
+    Purge(&'a [String]),
+    /// Every credential of the origin goes: Rust restored no session the page could use.
+    PurgeAll,
+}
+
+impl BootRestore {
+    /// Runs the 100k-iteration PBKDF2 once per blob.
+    fn decide(
+        loaded: Result<Option<StoredTokenState>, StoreError>,
+        opened: &OpenedCredentials,
+    ) -> Self {
+        let tokens = match loaded {
+            Ok(Some(tokens)) => tokens,
+            Ok(None) => return Self::StoreAbsent,
+            Err(StoreError::Corrupt) => return Self::StoreCorrupt,
+            Err(StoreError::Backend(e)) => {
+                // Unbudgeted on purpose: the page's blob goes with it, and this line is what
+                // explains a sign-in screen nothing else accounts for.
+                verr!("[AUTH] Secure store unavailable at boot: {e}");
+                return Self::StoreUnavailable;
+            }
+        };
+        let store = match opened {
+            OpenedCredentials::Opened(store) => store,
+            OpenedCredentials::Missing => return Self::BlobUnusable,
+            OpenedCredentials::Unreadable => return Self::ReconcileFailed,
+        };
+        let named: Vec<(&str, BlobNames)> = store
+            .blobs()
+            .iter()
+            .map(|blob| (blob.id.as_str(), BlobNames::of_blob(blob, &tokens)))
+            .collect();
+        for (_, names) in &named {
+            vprintln!("[AUTH]   SDK blob: {names:?}");
+        }
+        let found = |wanted: BlobNames| named.iter().any(|(_, names)| *names == wanted);
+        let names = if found(BlobNames::Mine) {
+            BlobNames::Mine
+        } else if found(BlobNames::RealTokens) {
+            BlobNames::RealTokens
+        } else {
+            return Self::BlobUnusable;
+        };
+        let purge = named
+            .iter()
+            .filter(|(_, names)| !names.stays())
+            .map(|(id, _)| (*id).to_owned())
+            .collect();
+        Self::Restored {
+            tokens: Box::new(tokens),
+            names,
+            purge,
+        }
+    }
+
+    fn page_blob(&self) -> PageBlob<'_> {
+        match self {
+            Self::Restored { purge, .. } if purge.is_empty() => PageBlob::Keep,
+            Self::Restored { purge, .. } => PageBlob::Purge(purge),
+            Self::StoreAbsent
+            | Self::StoreCorrupt
+            | Self::StoreUnavailable
+            | Self::BlobUnusable
+            | Self::ReconcileFailed => PageBlob::PurgeAll,
+        }
+    }
+}
+
+/// Decides the boot from the store and Local Storage, then purges what the decision condemns, in
+/// one opening of Local Storage.
+fn reconcile(loaded: Result<Option<StoredTokenState>, StoreError>, leveldb: &Path) -> BootRestore {
+    let opened = sdk_storage::open_credentials(leveldb);
+    let restore = BootRestore::decide(loaded, &opened);
+    if let OpenedCredentials::Opened(store) = opened {
+        let purged = match restore.page_blob() {
+            PageBlob::Keep => Purge::Nothing,
+            PageBlob::Purge(ids) => store.purge(|blob| ids.contains(&blob.id)),
+            PageBlob::PurgeAll => store.purge(|_| true),
+        };
+        match purged {
+            Purge::Nothing => {}
+            Purge::Deleted(keys) => vprintln!("[AUTH]   Purged {keys} SDK credential key(s)"),
+            Purge::Failed => verr!("[AUTH] The SDK's credentials could not be purged at boot"),
+        }
+    }
+    restore
+}
+
+/// Runs before CEF starts: nothing can observe a half-populated AppState.
+fn restore_session(restored: StoredTokenState, names: BlobNames) {
     app_state::with_state(|state| {
         state.token_state = Some(restored);
-        state.needs_proactive_refresh = needs_refresh;
-        state.needs_blob_purge = needs_refresh;
-        // Close the plugin-load gate only when a proactive refresh will run.
-        state.proactive_refresh_done = !needs_refresh;
+        state.refresh_duty = names.duty();
     });
 }
 
-/// Token reconciliation phase 1, before CEF init: load the secure store, read
-/// the raw SDK blob, and run every path that must write the LevelDB (purges,
-/// seeding) - our process is still its only possible opener here. Only the
-/// read-path crypto goes to the boot-tokens thread.
-pub(crate) fn start_boot_token_reconcile(
-    data_dir: &std::path::Path,
-    cef_profile: &std::path::Path,
-) {
-    let leveldb_path = cef_profile.join("Local Storage").join("leveldb");
-
-    let stored = match platform::secure_store::load(data_dir) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   No secure store - purged SDK blob");
+/// The boot's token reconciliation, synchronous and before CEF init: Chromium locks Local Storage
+/// once it starts, and the SDK must find its blobs already settled when it first reads them.
+pub(crate) fn restore_at_boot(data_dir: &Path, cef_profile: &Path) {
+    let leveldb = cef_profile.join("Local Storage").join("leveldb");
+    let why = match reconcile(secure_store::load(data_dir), &leveldb) {
+        BootRestore::Restored { tokens, names, .. } => {
+            vprintln!("[AUTH]   Boot restore: {names:?}");
+            restore_session(*tokens, names);
             return;
         }
-        Err(platform::secure_store::StoreError::Corrupt) => {
-            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   Secure store corrupt - purged SDK blob");
-            return;
-        }
-        Err(platform::secure_store::StoreError::Backend(e)) => {
-            // Transient (I/O/lock/permission), not corrupt: keep the SDK blob; it
-            // re-seeds from the stored token next launch.
-            vprintln!("[AUTH]   Secure store backend error (transient) - left intact: {e}");
-            return;
-        }
+        BootRestore::StoreAbsent => "no secure store",
+        BootRestore::StoreCorrupt => "secure store corrupt",
+        BootRestore::StoreUnavailable => "secure store unavailable",
+        BootRestore::BlobUnusable => "no SDK blob of this store",
+        BootRestore::ReconcileFailed => "Local Storage unreadable",
     };
-
-    use platform::sdk_storage::ReadRawResult;
-    let raw = match platform::sdk_storage::read_raw_blob(&leveldb_path) {
-        ReadRawResult::Missing => {
-            // TIDAL's SDK validates JWT format - opaque tokens fail validation
-            // and trigger session_clear. Seed with REAL tokens instead.
-            // The blob is AES-256 encrypted and plugins can't access localStorage.
-            // Synchronous - PBKDF2 included - because this write must land
-            // before initialize().
-            vprintln!("[AUTH]   No SDK storage - seeding from secure store");
-            let cur = &stored.current;
-            let seeded = platform::sdk_storage::build_seed_entries(
-                &cur.access_token,
-                &cur.refresh_token,
-                cur.access_expires_ms(),
-                cur.user_id.as_deref(),
-                &cur.granted_scopes,
-            )
-            .and_then(|entries| platform::sdk_storage::write_entries(&leveldb_path, &entries))
-            .is_some();
-            if seeded {
-                vprintln!("[AUTH]   SDK blob seeded successfully");
-                restore_session(stored, true);
-            } else {
-                vprintln!("[AUTH]   SDK blob seeding failed");
-            }
-            return;
-        }
-        ReadRawResult::Raw(raw) => raw,
-        ReadRawResult::Corrupt => {
-            platform::sdk_storage::purge_sdk_credentials(&leveldb_path);
-            vprintln!("[AUTH]   SDK storage corrupt - purged");
-            return;
-        }
-        ReadRawResult::Unreadable => {
-            // Likely locked, not corrupt: leave the blob intact, don't purge.
-            vprintln!("[AUTH]   SDK storage unreadable (locked?) - left intact");
-            return;
-        }
-    };
-
-    match std::thread::Builder::new()
-        .name("boot-tokens".into())
-        .spawn(move || reconcile_sdk_blob(raw, stored))
-    {
-        Ok(handle) => {
-            *BOOT_TOKEN_TASK.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
-        }
-        Err(e) => {
-            // Same degradation as a transient backend error: nothing purged,
-            // the next launch reconciles.
-            vprintln!("[AUTH]   Boot token thread spawn failed ({e}) - left intact");
-        }
-    }
-}
-
-/// Token reconciliation phase 2, on the boot-tokens thread: the read-path
-/// crypto (the 100k-iteration PBKDF2, AES) plus the match against the stored
-/// generations. Pure CPU - no I/O of any kind.
-fn reconcile_sdk_blob(
-    raw: Box<platform::sdk_storage::RawSdkBlob>,
-    stored: platform::secure_store::StoredTokenState,
-) -> BootTokenOutcome {
-    let Some(credentials) = platform::sdk_storage::decrypt_raw_blob(&raw) else {
-        vprintln!("[AUTH]   SDK storage corrupt - purging in renderer");
-        return BootTokenOutcome::Abandon;
-    };
-    let sdk_at = credentials
-        .access_token
-        .as_ref()
-        .and_then(|a| a.token.as_deref())
-        .unwrap_or("")
-        .to_string();
-    let sdk_rt = credentials.refresh_token.unwrap_or_default();
-
-    // Match against opaque tokens (normal flow)
-    if sdk_at == stored.current.opaque_at && sdk_rt == stored.current.opaque_rt {
-        vprintln!("[AUTH]   Boot reconciliation: current match (opaque)");
-        return BootTokenOutcome::Restore {
-            tokens: Box::new(stored),
-            needs_refresh: false,
-        };
-    }
-
-    // Match against real tokens (seeded blob - TIDAL re-persisted them)
-    if sdk_at == stored.current.access_token && sdk_rt == stored.current.refresh_token {
-        vprintln!("[AUTH]   Boot reconciliation: current match (real)");
-        return BootTokenOutcome::Restore {
-            tokens: Box::new(stored),
-            needs_refresh: true,
-        };
-    }
-
-    // One opaque generation behind: restore on the previous mapping and let
-    // the proactive refresh mint a fresh generation; TIDAL's SDK re-persists
-    // the blob itself (an in-place disk rewrite would race Chromium here).
-    if let Some(ref prev) = stored.previous
-        && sdk_at == prev.opaque_at
-        && sdk_rt == prev.opaque_rt
-    {
-        vprintln!("[AUTH]   Boot reconciliation: previous match (opaque) - refreshing to converge");
-        return BootTokenOutcome::Restore {
-            tokens: Box::new(stored),
-            needs_refresh: true,
-        };
-    }
-
-    // Match previous generation against real tokens too
-    if let Some(ref prev) = stored.previous
-        && sdk_at == prev.access_token
-        && sdk_rt == prev.refresh_token
-    {
-        vprintln!("[AUTH]   Boot reconciliation: previous match (real)");
-        return BootTokenOutcome::Restore {
-            tokens: Box::new(stored),
-            needs_refresh: true,
-        };
-    }
-
-    vprintln!("[AUTH]   Boot reconciliation: no match - purging in renderer");
-    BootTokenOutcome::Abandon
-}
-
-/// Token reconciliation phase 3: join the boot-tokens thread and apply its
-/// decision. Called from on_context_initialized before the init script is
-/// built: a restored session must be in AppState before the page can consume
-/// it. On an unusable blob it arms a one-shot renderer purge
-/// (`NEEDS_BOOT_BLOB_PURGE`), consumed on the first navigation. TIDAL's JS then
-/// starts from a clean localStorage.
-pub(crate) fn finish_boot_tokens() {
-    let task = BOOT_TOKEN_TASK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take();
-    let Some(handle) = task else { return };
-    let Ok(outcome) = handle.join() else {
-        // A panic in the reconcile thread degrades like a transient backend
-        // error: nothing purged, the next launch reconciles.
-        vprintln!("[AUTH]   Boot token reconcile panicked - left intact");
-        return;
-    };
-    match outcome {
-        BootTokenOutcome::Abandon => {
-            crate::ui::NEEDS_BOOT_BLOB_PURGE.store(true, std::sync::atomic::Ordering::Release);
-        }
-        BootTokenOutcome::Restore {
-            tokens,
-            needs_refresh,
-        } => restore_session(*tokens, needs_refresh),
-    }
+    vprintln!("[AUTH]   Boot restore: no session ({why})");
 }
 
 #[cfg(test)]

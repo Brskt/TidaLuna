@@ -100,6 +100,11 @@ pub(crate) fn carries_nonce_shape(text: &str) -> bool {
     })
 }
 
+/// Whether `value` is exactly one nonce: the prefix and the hex of its bytes, nothing around it.
+pub(crate) fn is_nonce(value: &str) -> bool {
+    value.len() == OPAQUE_PREFIX.len() + OPAQUE_BYTES * 2 && carries_nonce_shape(value)
+}
+
 /// What a request asked the token endpoint, as Rust sent it, read when the answer arrives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExchangeOrigin {

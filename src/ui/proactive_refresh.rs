@@ -1,58 +1,60 @@
-//! Proactive token refresh: replaces real JWTs in JS memory with opaques
-//! seconds after boot instead of waiting for TIDAL's SDK refresh near token expiry.
+//! Rust's refresh at boot: proves the restored session's refresh token alive before anything
+//! leans on it, and moves the store to a new generation when the page's blob held real tokens.
 //!
-//! Called from the web.loaded IPC handler when needs_proactive_refresh is set.
+//! Called from the web.loaded IPC handler while a `RefreshDuty` is owed.
+
+use crate::app_state::RefreshDuty;
 
 pub(crate) fn trigger_if_needed() {
-    let needs = crate::app_state::with_state(|state| {
-        let needs = state.needs_proactive_refresh;
-        state.needs_proactive_refresh = false;
-        needs
-    })
-    .unwrap_or(false);
-
-    if !needs {
+    let duty = crate::app_state::with_state(|state| std::mem::take(&mut state.refresh_duty))
+        .unwrap_or_default();
+    if duty == RefreshDuty::Spent {
         return;
     }
 
     // The epoch is read here, with the credential it refreshes, and carried through the
     // network round trip: it names the session this work answers for.
-    let (refresh_token, client_id, scope, session_epoch) =
-        match crate::app_state::with_state(|state| {
-            let ts = state.token_state.as_ref()?;
-            Some((
-                ts.current.refresh_token.clone(),
-                ts.current.client.id().to_owned(),
-                ts.current.granted_scopes.join(" "),
-                state.session_epoch,
-            ))
+    let Some(sent) = crate::app_state::with_state(|state| {
+        let ts = state.token_state.as_ref()?;
+        Some(SentRefresh {
+            refresh_token: ts.current.refresh_token.clone(),
+            client_id: ts.current.client.id().to_owned(),
+            scope: ts.current.granted_scopes.join(" "),
+            session_epoch: state.session_epoch,
+            version: ts.current.version,
         })
-        .flatten()
-        {
-            Some(captured) => captured,
-            None => return,
-        };
+    })
+    .flatten() else {
+        return;
+    };
 
-    if refresh_token.is_empty() {
+    if sent.refresh_token.is_empty() {
         return;
     }
 
-    crate::vprintln!("[AUTH]   Proactive refresh: starting");
+    crate::vprintln!("[AUTH]   Proactive refresh: starting ({duty:?})");
     crate::state::rt_handle().spawn(async move {
-        do_refresh(refresh_token, client_id, scope, session_epoch).await;
+        do_refresh(sent, duty).await;
         // Open the gate on every exit path; safe even on refresh failure (the
         // token stays live, but the egress filter blocks exfil).
         crate::ipc::plugin::open_plugin_gate();
     });
 }
 
-async fn do_refresh(
+/// The refresh Rust sends, and the generation it was read from.
+struct SentRefresh {
     refresh_token: String,
     client_id: String,
-    req_scope: String,
+    scope: String,
     session_epoch: u64,
-) {
-    if client_id.is_empty() {
+    version: u64,
+}
+
+/// Bounds a token endpoint that accepts the connection and never answers.
+const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn do_refresh(sent: SentRefresh, duty: RefreshDuty) {
+    if sent.client_id.is_empty() {
         // The token endpoint rejects a refresh grant with no client_id (400,
         // sub_status 1002): a request here can only fail. Skip it; the token
         // stays live and the SDK refreshes it near expiry.
@@ -64,13 +66,13 @@ async fn do_refresh(
 
     let mut body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}",
-        url::form_urlencoded::byte_serialize(refresh_token.as_bytes()).collect::<String>(),
-        url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(sent.refresh_token.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(sent.client_id.as_bytes()).collect::<String>(),
     );
-    if !req_scope.is_empty() {
+    if !sent.scope.is_empty() {
         body.push_str("&scope=");
         body.push_str(
-            &url::form_urlencoded::byte_serialize(req_scope.as_bytes()).collect::<String>(),
+            &url::form_urlencoded::byte_serialize(sent.scope.as_bytes()).collect::<String>(),
         );
     }
 
@@ -84,12 +86,16 @@ async fn do_refresh(
         .post(&url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
+        .timeout(REFRESH_TIMEOUT)
         .send()
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            crate::vprintln!("[AUTH]   Proactive refresh failed: {e}");
+            crate::verr!(
+                "[AUTH]   Proactive refresh failed: {}",
+                crate::util::network_error_text(e)
+            );
             return;
         }
     };
@@ -106,64 +112,42 @@ async fn do_refresh(
         return;
     }
 
-    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&resp_body) else {
-        crate::vprintln!("[AUTH]   Proactive refresh: invalid JSON");
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp_body) else {
         return;
     };
-    let Some(obj) = json.as_object_mut() else {
+    let field = |key: &str| json.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    let Some(at) = field("access_token") else {
         return;
     };
-
-    let at = match obj.get("access_token").and_then(|v| v.as_str()) {
-        Some(t) if !t.is_empty() => t.to_string(),
-        _ => {
-            crate::vprintln!("[AUTH]   Proactive refresh: no access_token in response");
-            return;
-        }
-    };
-
-    let new_rt = obj
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let expires_in = obj.get("expires_in").and_then(|v| v.as_u64());
-    let user_id = obj
+    let new_rt = field("refresh_token");
+    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
+    let user_id = json
         .get("user_id")
         .and_then(|v| v.as_u64())
         .map(|v| v.to_string());
-    let scope = obj
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let opaque_at = match crate::ui::token_filter::generate_opaque() {
-        Some(o) => o,
-        None => return,
-    };
-    // Opaque for the refresh token, generated off the AppState lock (only when a
-    // new refresh token is present). Skip this refresh cycle on RNG failure.
-    let opaque_rt_new = if new_rt.is_some() {
-        match crate::ui::token_filter::generate_opaque() {
-            Some(o) => Some(o),
-            None => return,
-        }
-    } else {
-        None
-    };
-    let granted_scopes: Vec<String> = scope
-        .as_deref()
-        .map(|s| s.split(' ').map(|s| s.to_string()).collect())
+    let granted_scopes: Vec<String> = field("scope")
+        .map(|s| s.split(' ').map(str::to_owned).collect())
         .unwrap_or_default();
 
-    // Build session JS before taking the lock (avoid holding it during string ops)
-    let session_user_id = user_id.clone().unwrap_or_default();
-    let session_scopes_json =
-        serde_json::to_string(&granted_scopes).unwrap_or_else(|_| "[]".to_string());
+    // An update in place keeps the nonces the page holds: none is minted for it. A rotation mints
+    // them off the AppState lock, and skips this cycle on RNG failure.
+    let (opaque_at, opaque_rt_new) = match duty {
+        RefreshDuty::CheckAndRotate => {
+            let Some(opaque_at) = crate::ui::token_filter::generate_opaque() else {
+                return;
+            };
+            let opaque_rt = match new_rt {
+                Some(_) => match crate::ui::token_filter::generate_opaque() {
+                    Some(o) => Some(o),
+                    None => return,
+                },
+                None => None,
+            };
+            (opaque_at, opaque_rt)
+        }
+        RefreshDuty::Check | RefreshDuty::Spent => (String::new(), None),
+    };
 
-    // Whether the commit happened. The check has to live INSIDE the closure (that is what
-    // makes it atomic with the writes it guards), and its answer has to travel back out:
-    // everything after this call has side effects of its own, and a bare `return` in a
-    // closure leaves them running.
     let grant = crate::app_state::TokenGrant {
         access_token: &at,
         refresh_token: new_rt.as_deref(),
@@ -172,11 +156,27 @@ async fn do_refresh(
         expires_in,
         user_id: user_id.as_deref(),
         granted_scopes: &granted_scopes,
-        client_id: Some(&client_id),
+        client_id: Some(&sent.client_id),
     };
-    let committed = crate::app_state::with_state(|state| {
-        match state.commit_token_generation(
-            session_epoch,
+    // The check lives INSIDE the closure, atomic with the writes it guards; `committed` carries its
+    // answer out.
+    let committed = crate::app_state::with_state(|state| match duty {
+        RefreshDuty::Check => {
+            let applied = state.refresh_in_place(
+                sent.session_epoch,
+                sent.version,
+                &sent.refresh_token,
+                &grant,
+            );
+            if !applied {
+                crate::vprintln!(
+                    "[AUTH]   Refresh answered for a generation already replaced, dropped"
+                );
+            }
+            applied
+        }
+        RefreshDuty::CheckAndRotate => match state.commit_token_generation(
+            sent.session_epoch,
             &grant,
             crate::app_state::UserCommit::Refresh,
         ) {
@@ -189,8 +189,6 @@ async fn do_refresh(
                 false
             }
             crate::app_state::TokenCommit::Committed { durable, .. } => {
-                // Reached when a session_clear empties token_state during the network wait
-                // and the refresh reuses its token: no refresh token arrives and none is left.
                 if !durable {
                     crate::vprintln!(
                         "[AUTH]   Refresh landed with no refresh token - stored credential kept"
@@ -198,40 +196,17 @@ async fn do_refresh(
                 }
                 true
             }
-        }
+        },
+        RefreshDuty::Spent => false,
     })
     .unwrap_or(false);
 
-    // The opaque, the user and the scopes below are locals from the response, not re-reads:
-    // pushing them would hand the live SDK a token nothing registered, and an unregistered
-    // opaque resolves to whichever session is current, the departed account's work landing
-    // on somebody else's session.
     if !committed {
         return;
     }
+    // Outside the state lock, which `eval_js` takes again. A warm boot that only refreshes has no
+    // other early trigger for the scrub.
+    crate::ipc::plugin::scrub_pkce_verifier();
 
-    // Push opaques to TIDAL's SDK via session delegate
-    let expires_ms = crate::app_state::with_state(|state| {
-        state
-            .token_state
-            .as_ref()
-            .map(|ts| ts.current.access_expires_ms())
-    })
-    .flatten()
-    .unwrap_or(0);
-
-    let js = format!(
-        "if(window.nativeInterface&&window.nativeInterface.userSession){{window.nativeInterface.userSession.update({{token:{at},expires:{expires},userId:{uid},grantedScopes:{scopes},clientId:{cid}}})}}",
-        at = serde_json::to_string(&opaque_at).unwrap_or_default(),
-        expires = expires_ms,
-        uid = serde_json::to_string(&session_user_id).unwrap_or_default(),
-        scopes = session_scopes_json,
-        cid = serde_json::to_string(&client_id).unwrap_or_default(),
-    );
-    crate::app_state::eval_js(&js);
-
-    crate::vprintln!(
-        "[AUTH]   Proactive refresh complete ({} chars) - opaques pushed to SDK",
-        at.len()
-    );
+    crate::vprintln!("[AUTH]   Proactive refresh complete ({} chars)", at.len());
 }
