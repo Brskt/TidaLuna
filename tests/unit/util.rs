@@ -45,7 +45,9 @@ fn a_refused_url_is_reduced_to_a_bounded_host_for_the_log() {
 /// socket to every controller on the network. The URL has to go at the string's origin.
 #[tokio::test]
 async fn a_network_error_carries_no_request_url() {
-    let err = reqwest::get("http://127.0.0.1:1/seg.mp4?token=SECRET&exp=1")
+    let err = crate::state::CORE_CLIENT
+        .get("http://127.0.0.1:1/seg.mp4?token=SECRET&exp=1")
+        .send()
         .await
         .expect_err("port 1 refuses the connection");
 

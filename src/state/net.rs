@@ -39,6 +39,10 @@ pub(crate) static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
 
 /// Shared client tuning (UA, timeouts, pooling, HTTP/2, TLS) minus the cookie
 /// configuration, which the global and per-plugin clients set differently.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one place a client builder starts"
+)]
 fn base_client_builder() -> reqwest::ClientBuilder {
     // Keep streaming requests unconstrained (no global request timeout),
     // but tune connection setup and pooling for lower latency variance.

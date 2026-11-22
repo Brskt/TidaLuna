@@ -22,7 +22,7 @@ use cef::*;
 use client_comm::{ClientCommunicator, DispatchedCommand, classify_command};
 use outbox::{Effect, Outbox};
 use playback::{PlaybackController, PlaybackInternalEvent, PlaybackNotifyEvent};
-use queue::{CastRoute, QueueManager, QueueNotifyEvent, QueueStep};
+use queue::{CastRoute, ConnectHttp, QueueManager, QueueNotifyEvent, QueueStep};
 use session::{ReceiverSession, SessionEnd, SessionInternalEvent, SessionNotifyEvent};
 use speaker_bridge::{BridgeEvent, SpeakerBridge};
 
@@ -45,7 +45,7 @@ impl ConnectReceiver {
         // WS server
         let server = WsServer::start(config.ws_port, client_tx).await?;
 
-        let (mut receiver, bridge_tx) = Self::launch(server, client_rx, reqwest::Client::new())?;
+        let (mut receiver, bridge_tx) = Self::launch(server, client_rx, ConnectHttp::production())?;
 
         // Last, after every fallible step: a refused start leaves no daemon behind.
         receiver.advertiser = Self::advertise(&config);
@@ -82,12 +82,12 @@ impl ConnectReceiver {
         Some(advertiser)
     }
 
-    /// The services and the routing task over a started server. The queue's HTTP client is
-    /// taken as given so a test can point it at a server of its own.
+    /// The services and the routing task over a started server. The queue's HTTP clients are
+    /// taken as given so a test can point them at a server of its own.
     fn launch(
         server: WsServer,
         client_rx: mpsc::Receiver<ClientEvent>,
-        http: reqwest::Client,
+        http: ConnectHttp,
     ) -> anyhow::Result<(Self, mpsc::Sender<BridgeEvent>)> {
         let tasks = Arc::new(TaskGroup::new());
         let cancel = tasks.cancel_token();

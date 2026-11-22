@@ -15,7 +15,8 @@ use base64::Engine as _;
 use crate::connect::consts;
 use crate::connect::types::{MediaInfo, MediaMetadata, QueueItem, ResolvedStream, ServerInfo};
 
-use super::http::{is_trusted_server_url, resolve_auth_header};
+use super::QueueError;
+use super::http::{ConnectHttp, ConnectRoot, RootKind, resolve_auth_header, send_error};
 
 /// Build a `MediaInfo` payload from a cloud-queue item. Cloud-queue items
 /// often carry richer data in `display_info` than in `metadata`; we
@@ -86,7 +87,7 @@ pub(super) fn queue_item_to_media_info(item: &QueueItem) -> MediaInfo {
 /// This matches the pre-extraction behaviour; turning these soft failures
 /// into `Result`s is a separate concern left to a later phase.
 pub(super) async fn resolve_media_url(
-    http: &reqwest::Client,
+    http: &ConnectHttp,
     content_server: Option<&ServerInfo>,
     media: &mut MediaInfo,
 ) {
@@ -109,35 +110,43 @@ pub(super) async fn resolve_media_url(
         .and_then(|v| v.as_str())
         .unwrap_or("HI_RES_LOSSLESS");
 
-    let url = format!(
-        "{}/tracks/{}/playbackinfo?audioquality={}&playbackmode=STREAM&assetpresentation=FULL",
-        cs.server_url, media.media_id, quality
-    );
-
-    if !is_trusted_server_url(&url) {
-        crate::vprintln!(
-            "[connect::queue] Refusing untrusted content server: {}",
-            url
-        );
-        return;
-    }
+    let query = [
+        ("audioquality", quality),
+        ("playbackmode", "STREAM"),
+        ("assetpresentation", "FULL"),
+    ];
+    let target = match ConnectRoot::admit_logged(&cs.server_url, RootKind::Service)
+        .and_then(|root| root.url(&["tracks", &media.media_id, "playbackinfo"], &query))
+    {
+        Ok(target) => target,
+        // Neither the URL nor the id is logged; a refused segment is named by its index.
+        Err(e) => {
+            crate::verr!("[connect::queue] playbackinfo refused: {e}");
+            return;
+        }
+    };
 
     crate::vprintln!(
         "[connect::queue] Resolving media {} via {}",
         media.media_id,
-        url
+        target.url
     );
 
     let resp = match http
-        .get(&url)
+        .get(&target)
         .header("Authorization", &auth_header)
         .timeout(std::time::Duration::from_secs(consts::HTTP_TIMEOUT_SECS))
         .send()
         .await
+        .map_err(send_error)
     {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
             crate::vprintln!("[connect::queue] playbackinfo HTTP {}", r.status());
+            return;
+        }
+        Err(QueueError::RedirectRefused) => {
+            crate::verr!("[connect::queue] playbackinfo refused: redirect left the service hosts");
             return;
         }
         Err(e) => {

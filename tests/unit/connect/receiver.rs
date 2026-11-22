@@ -188,7 +188,7 @@ async fn an_abort_inside_the_epilogue_frees_the_port() {
     filler.try_send(WsMessage::Ping(vec![].into())).unwrap();
     let (_client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
+        ConnectReceiver::launch(server, client_rx, ConnectHttp::production()).unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let report = receiver
@@ -232,7 +232,7 @@ async fn a_switch_off_with_a_session_open_tells_the_phone_before_closing() {
     drop(filler);
     let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
+        ConnectReceiver::launch(server, client_rx, ConnectHttp::production()).unwrap();
     client_tx
         .send(ClientEvent::Message {
             socket_id: 1,
@@ -305,7 +305,7 @@ async fn a_command_taken_before_its_sockets_disconnect_leaves_nothing_of_the_soc
         client_tx.send(event).await.unwrap();
     }
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
+        ConnectReceiver::launch(server, client_rx, ConnectHttp::production()).unwrap();
 
     let (before, _) = drain_wire(&mut wire, Duration::from_millis(500)).await;
     assert_eq!(before, vec!["notifySessionStarted".to_string()]);
@@ -336,12 +336,17 @@ async fn heard_on(
         .collect()
 }
 
-/// A queue fetch's client, sent to a queue server that never answers.
-fn stalled_http(stall: &Stall) -> reqwest::Client {
-    reqwest::Client::builder()
-        .resolve("api.tidal.com", ([127, 0, 0, 1], stall.port).into())
-        .build()
-        .unwrap()
+/// A queue fetch's clients, the service one resolving to a server that never answers.
+fn stalled_http(stall: &Stall) -> ConnectHttp {
+    let service = crate::state::host_checked_builder(
+        crate::state::service_class,
+        "redirect left TIDAL's service hosts",
+        crate::state::HopCap::Error,
+    )
+    .resolve("api.tidal.com", ([127, 0, 0, 1], stall.port).into())
+    .build()
+    .unwrap();
+    ConnectHttp::new(crate::state::AUTH_CLIENT.clone(), service)
 }
 
 /// What a socket outside any session sends besides the session commands. The queue comes last:
@@ -477,7 +482,7 @@ async fn a_suspended_session_takes_its_phones_commands_again_once_resumed() {
     let mut wire_2 = server.add_client_for_test(2, 64).await;
     let (client_tx, client_rx) = mpsc::channel::<ClientEvent>(128);
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
+        ConnectReceiver::launch(server, client_rx, ConnectHttp::production()).unwrap();
     let send = |socket_id: u32, message: serde_json::Value| {
         let client_tx = client_tx.clone();
         async move {
@@ -529,7 +534,7 @@ struct Pair {
 }
 
 /// Sockets 1 and 2, both connected, the test reading what each is written. Neither has a session.
-async fn two_sockets(http: reqwest::Client) -> Pair {
+async fn two_sockets(http: ConnectHttp) -> Pair {
     let (server, _listener, phone, filler) = WsServer::with_client_for_test(1, 64).await;
     drop(filler);
     let other = server.add_client_for_test(2, 64).await;
@@ -566,7 +571,7 @@ impl Pair {
 #[tokio::test]
 async fn a_suspension_is_told_to_the_phone_and_to_no_other_socket() {
     let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
-    let mut pair = two_sockets(reqwest::Client::new()).await;
+    let mut pair = two_sockets(ConnectHttp::production()).await;
     let id = pair.phone_starts_a_session().await;
 
     pair.say(
@@ -639,7 +644,7 @@ async fn an_outsider_cannot_take_over_the_session_a_phone_suspended() {
 #[tokio::test]
 async fn what_the_session_says_of_its_queue_is_heard_by_its_phones_only() {
     let _serialised = crate::connect::bridge::tests::BRIDGE_TESTS.lock().await;
-    let mut pair = two_sockets(reqwest::Client::new()).await;
+    let mut pair = two_sockets(ConnectHttp::production()).await;
     pair.phone_starts_a_session().await;
 
     pair.say(
@@ -724,7 +729,7 @@ async fn a_replaced_sessions_phone_is_told_and_closed_and_the_new_one_hears_noth
         client_tx.send(event).await.unwrap();
     }
     let (mut receiver, _bridge_tx) =
-        ConnectReceiver::launch(server, client_rx, reqwest::Client::new()).unwrap();
+        ConnectReceiver::launch(server, client_rx, ConnectHttp::production()).unwrap();
 
     let phone = first_heard(&mut wire, 4).await;
     let phone_closed = closes_next(&mut wire).await;

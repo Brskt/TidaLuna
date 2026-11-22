@@ -10,6 +10,7 @@
 //! the same module. Visibility is `pub(super)`: `dispatch` in `mod.rs`
 //! can call them, but nothing outside the queue module can.
 
+use super::http::{ConnectRoot, RootKind};
 use super::media::resolve_media_url;
 use super::next_media_seq;
 use super::{
@@ -220,7 +221,15 @@ impl QueueManager {
 
         // POST to queue server.
         if let Some(ref qs) = self.queue_server {
-            let url = format!("{}/repeatmode", qs.server_url);
+            let url = match ConnectRoot::admit_logged(&qs.server_url, RootKind::Service)
+                .and_then(|root| root.url(&["repeatmode"], &[]))
+            {
+                Ok(url) => url,
+                Err(e) => {
+                    crate::verr!("[connect::queue] POST repeatmode refused: {e}");
+                    return;
+                }
+            };
             let body = serde_json::json!({ "repeatMode": mode_str });
             if let Err(e) =
                 http::post_with_auth(&self.http, self.queue_server.as_ref(), &url, &body).await
@@ -256,7 +265,15 @@ impl QueueManager {
         }
 
         if let Some(ref qs) = self.queue_server {
-            let url = format!("{}/shuffle", qs.server_url);
+            let url = match ConnectRoot::admit_logged(&qs.server_url, RootKind::Service)
+                .and_then(|root| root.url(&["shuffle"], &[]))
+            {
+                Ok(url) => url,
+                Err(e) => {
+                    crate::verr!("[connect::queue] POST shuffle refused: {e}");
+                    return;
+                }
+            };
             let body = serde_json::json!({ "shuffle": shuffle });
             if let Err(e) =
                 http::post_with_auth(&self.http, self.queue_server.as_ref(), &url, &body).await

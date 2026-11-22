@@ -6,6 +6,7 @@ mod media;
 mod window;
 
 pub(crate) use error::QueueError;
+pub(crate) use http::ConnectHttp;
 
 use media::{queue_item_to_media_info, resolve_media_url};
 
@@ -107,7 +108,7 @@ pub(crate) struct QueueManager {
     state: QueueState,
     queue_gen: u64,
 
-    http: reqwest::Client,
+    http: ConnectHttp,
 
     content_server: Option<ServerInfo>,
     queue_server: Option<ServerInfo>,
@@ -144,7 +145,7 @@ struct PendingRetry {
 }
 
 impl QueueManager {
-    pub fn new(http: reqwest::Client, outbox: Outbox) -> Self {
+    pub fn new(http: ConnectHttp, outbox: Outbox) -> Self {
         Self {
             state: QueueState::Idle,
             queue_gen: 0,

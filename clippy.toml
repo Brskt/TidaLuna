@@ -1,1 +1,10 @@
 too-many-arguments-threshold = 8
+
+# Every HTTP client is built in `src/state/net.rs`, where each one gets its redirect class.
+# Not covered: `reqwest::Client::default()`.
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "build clients in src/state/net.rs, with a redirect class" },
+    { path = "reqwest::Client::builder", reason = "build clients in src/state/net.rs, with a redirect class" },
+    { path = "reqwest::ClientBuilder::new", reason = "build clients in src/state/net.rs, with a redirect class" },
+    { path = "reqwest::get", reason = "send through a client of src/state/net.rs" },
+]

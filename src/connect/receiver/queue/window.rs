@@ -1,3 +1,4 @@
+use super::http::{ConnectRoot, RootKind, RootedUrl};
 use super::{PendingRetry, QueueError, QueueManager, QueueNotifyEvent, QueueState, http};
 use crate::connect::types::{QueueItem, QueueNotification, RepeatMode};
 
@@ -28,15 +29,28 @@ impl QueueManager {
             .as_ref()
             .map(|qi| qi.queue_id.as_str())
             .unwrap_or("");
-        let mut url = format!(
-            "{}/{}/window?beforesize={}&aftersize={}&onlyactives=true",
-            qs.server_url, queue_id, before_size, after_size
-        );
+        let (before, after) = (before_size.to_string(), after_size.to_string());
+        let mut query = vec![
+            ("beforesize", before.as_str()),
+            ("aftersize", after.as_str()),
+            ("onlyactives", "true"),
+        ];
         if let Some(id) = item_id {
-            url.push_str(&format!("&itemid={}", id));
+            query.push(("itemid", id));
         }
+        let url = match ConnectRoot::admit_logged(&qs.server_url, RootKind::Service)
+            .and_then(|root| root.url(&[queue_id, "window"], &query))
+        {
+            Ok(url) => url,
+            Err(e) => {
+                crate::verr!("[connect::queue] Queue window refused: {e}");
+                self.state = QueueState::Idle;
+                self.notify_queue_server_error(0, &format!("{e}"));
+                return;
+            }
+        };
 
-        crate::vprintln!("[connect::queue] HTTP GET {}", url);
+        crate::vprintln!("[connect::queue] HTTP GET {}", url.url);
         match http::get_with_auth(&self.http, self.queue_server.as_ref(), &url).await {
             Ok(response) => {
                 crate::vprintln!("[connect::queue] Queue window response OK");
@@ -111,7 +125,7 @@ impl QueueManager {
         }
     }
 
-    pub(super) async fn retry_pending(&mut self, url: &str) -> Result<(), QueueError> {
+    pub(super) async fn retry_pending(&mut self, url: &RootedUrl) -> Result<(), QueueError> {
         let response = http::get_with_auth(&self.http, self.queue_server.as_ref(), url).await?;
         self.process_queue_window_response(response).await;
         Ok(())

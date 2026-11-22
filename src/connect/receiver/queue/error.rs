@@ -8,9 +8,13 @@
 pub(crate) enum QueueError {
     /// No server info configured (content_server/queue_server is None).
     NoServer,
-    /// The peer-supplied server URL is not an https TIDAL host; the receiver
-    /// refuses to attach its token to an untrusted destination.
+    /// The peer-supplied server URL is not an https TIDAL host of the kind the request needs; the
+    /// receiver refuses to attach its token to an untrusted destination.
     UntrustedServer,
+    /// A peer-supplied id would not stay one path segment; the index of the refused segment.
+    RefusedSegment(usize),
+    /// A redirect left the hosts of the request's kind.
+    RedirectRefused,
     /// OAuth server info missing, cannot refresh token.
     NoOAuthServer,
     /// HTTP network error (transport failure, timeout, DNS, etc.).
@@ -37,6 +41,8 @@ impl std::fmt::Display for QueueError {
         match self {
             QueueError::NoServer => f.write_str("no server configured"),
             QueueError::UntrustedServer => f.write_str("untrusted server url"),
+            QueueError::RefusedSegment(index) => write!(f, "refused path segment {index}"),
+            QueueError::RedirectRefused => f.write_str("redirect refused"),
             QueueError::NoOAuthServer => f.write_str("no OAuth server info"),
             QueueError::Network(e) => write!(f, "network: {e}"),
             QueueError::HttpStatus(s) => write!(f, "HTTP {s}"),

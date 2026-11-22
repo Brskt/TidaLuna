@@ -13,7 +13,7 @@ fn item(item_id: &str, media_id: &str) -> QueueItem {
 /// A receiver playing `items[idx]`, with the outbox of its effects in the test's hand.
 fn playing(items: Vec<QueueItem>, idx: usize) -> (QueueManager, Outbox) {
     let outbox = Outbox::default();
-    let mut queue = QueueManager::new(reqwest::Client::new(), outbox.clone());
+    let mut queue = QueueManager::new(ConnectHttp::production(), outbox.clone());
     queue.queue_items = items;
     queue.current_index = Some(idx);
     (queue, outbox)
