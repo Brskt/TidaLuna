@@ -1,4 +1,5 @@
 use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
+use crate::plugins::outbound::{OutboundRequest, PluginFetchError};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 
 pub(super) fn handle_plugin_fetch(
@@ -97,8 +98,22 @@ fn dispatch_authenticated_fetch(
     callback: IpcCallback,
     source: TokenSource,
 ) {
-    let opts: crate::plugins::fetch::FetchOpts =
-        serde_json::from_str(opts_json).unwrap_or_else(|_| serde_json::from_str("{}").unwrap());
+    // Before the credential and before the callback is parked: a refused request reads no token.
+    let request = match OutboundRequest::from_object(&url, opts_json) {
+        Ok(request) => request,
+        Err(refusal) => {
+            crate::vprintln!(
+                "[PLUGIN:FETCH] REFUSED '{plugin_id}' to {}: {refusal}",
+                crate::util::refused_host(&url)
+            );
+            ipc_callback_err(
+                &callback,
+                refusal.status() as i32,
+                &format!("plugin.fetch refused: {refusal}"),
+            );
+            return;
+        }
+    };
     let token = match source {
         TokenSource::Captured(token) => Some(token),
         // The comparison and the credential read share one lock deliberately: a session change
@@ -126,14 +141,17 @@ fn dispatch_authenticated_fetch(
         state.pending_ipc_callbacks.insert(query_id, callback);
     });
     crate::state::rt_handle().spawn(async move {
-        let result = crate::plugins::fetch::plugin_fetch(&plugin_id, &url, &opts, &token).await;
+        let result = crate::plugins::fetch::plugin_fetch(&plugin_id, request, &token).await;
         let Some(cb) = take_ipc_callback(query_id) else {
             return;
         };
         match result {
             // Defence-in-depth: scrub any leaked real token before plugin JS sees it.
             Ok(json) => ipc_callback_ok(&cb, &super::scrub::scrub_real_tokens(json)),
-            Err(e) => ipc_callback_err(&cb, 500, &e),
+            Err(e @ PluginFetchError::Refused(_)) => {
+                ipc_callback_err(&cb, 403, &format!("plugin.fetch {e}"))
+            }
+            Err(e) => ipc_callback_err(&cb, 500, &format!("plugin.fetch {e}")),
         }
     });
 }

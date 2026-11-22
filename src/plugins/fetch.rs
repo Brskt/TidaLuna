@@ -1,28 +1,7 @@
-/// Async fetch handler for plugin.fetch IPC channel.
-///
-/// Plugins call `fetch(url, opts)` which the security wrapper routes
-/// through cefQuery -> Rust. This handler:
-///   1. Parses the request (method, headers, body)
-///   2. Injects the OAuth token for Tidal API requests
-///   3. Executes the fetch via reqwest (async)
-///   4. Returns a Response-like JSON
-///
-/// The token is never exposed to the plugin - it's injected server-side.
-use serde::Deserialize;
-
-#[derive(Deserialize)]
-pub(crate) struct FetchOpts {
-    #[serde(default = "default_method")]
-    pub method: String,
-    #[serde(default)]
-    pub headers: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub body: Option<String>,
-}
-
-fn default_method() -> String {
-    "GET".to_string()
-}
+/// Async handler for `plugin.fetch`: sends the request `plugins::outbound` admitted, with the
+/// OAuth token injected server-side for TIDAL API hosts (the plugin never sees it), and returns a
+/// Response-like JSON.
+use crate::plugins::outbound::{OutboundRequest, PluginFetchError};
 
 /// Execute a plugin fetch request.
 ///
@@ -30,51 +9,24 @@ fn default_method() -> String {
 /// Returns a JSON string with `{ok, status, statusText, url, headers, body}`.
 pub(crate) async fn plugin_fetch(
     plugin_id: &str,
-    url: &str,
-    opts: &FetchOpts,
+    request: OutboundRequest,
     token: &str,
-) -> Result<String, String> {
-    let client = &*crate::state::HTTP_CLIENT;
-
-    let mut req = match opts.method.to_uppercase().as_str() {
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "DELETE" => client.delete(url),
-        "PATCH" => client.patch(url),
-        "HEAD" => client.head(url),
-        _ => client.get(url),
-    };
-
-    // Apply headers from the plugin request
-    for (key, value) in &opts.headers {
-        if let Some(val) = value.as_str() {
-            req = req.header(key.as_str(), val);
-        }
-    }
-
-    let is_tidal = is_tidal_api(url);
-    // Inject OAuth token for Tidal API requests (plugin never sees the token)
-    if !token.is_empty() && is_tidal {
-        // Only inject if plugin didn't already provide an Authorization header
-        if !opts
-            .headers
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case("authorization"))
-        {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
-    }
-
-    // Apply body
-    if let Some(ref body) = opts.body {
-        req = req.body(body.clone());
+) -> Result<String, PluginFetchError> {
+    let url = request.url().as_str().to_string();
+    let method = request.method();
+    let is_tidal = is_tidal_api(&url);
+    // The plugin never sees the token, and its own Authorization header wins.
+    let inject = !token.is_empty() && is_tidal && !request.has_header("authorization");
+    let mut req = request.build(&crate::state::HTTP_CLIENT);
+    if inject {
+        req = req.header("Authorization", format!("Bearer {token}"));
     }
 
     crate::vprintln!(
         "[PLUGIN:FETCH] {} {} {} ({})",
         plugin_id,
-        opts.method,
-        crate::util::redact_url_query(url),
+        method.as_str(),
+        crate::util::redact_url_query(&url),
         if is_tidal {
             "token injected"
         } else {
@@ -82,10 +34,7 @@ pub(crate) async fn plugin_fetch(
         }
     );
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("plugin.fetch failed: {e}"))?;
+    let resp = req.send().await.map_err(PluginFetchError::of_send)?;
 
     let status = resp.status().as_u16();
     let status_text = resp.status().canonical_reason().unwrap_or("").to_string();
@@ -106,7 +55,7 @@ pub(crate) async fn plugin_fetch(
     let body_text = resp
         .text()
         .await
-        .map_err(|e| format!("plugin.fetch body read failed: {e}"))?;
+        .map_err(|e| PluginFetchError::Body(crate::util::network_error_text(e)))?;
 
     let result = serde_json::json!({
         "status": status,

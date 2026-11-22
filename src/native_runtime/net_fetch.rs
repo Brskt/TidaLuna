@@ -12,8 +12,8 @@ use serde_json::Value;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
-/// Max response body accepted from a sanctioned plugin fetch (cover art etc.).
-const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
+use crate::plugins::outbound::{MAX_BODY_BYTES, OutboundRequest, PluginFetchError};
+
 /// Per-request timeout.
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Cap on concurrent in-flight egress fetches (each may buffer up to the body cap).
@@ -31,24 +31,8 @@ pub(crate) enum RedirectMode {
 pub(crate) struct ParsedFetch {
     pub req_id: Value,
     pub plugin: String,
-    pub url: String,
-    pub method: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
+    pub request: OutboundRequest,
     pub redirect: RedirectMode,
-}
-
-/// Uppercase the method and refuse verbs a browser `fetch` never issues
-/// (CONNECT/TRACE/TRACK have no place in plugin egress).
-fn normalize_method(raw: &str) -> Result<String, String> {
-    let m = raw.trim().to_ascii_uppercase();
-    if m.is_empty() {
-        return Err("method must not be empty".to_string());
-    }
-    if matches!(m.as_str(), "CONNECT" | "TRACE" | "TRACK") {
-        return Err(format!("method {m} is not allowed"));
-    }
-    Ok(m)
 }
 
 /// Read the `redirect` init (defaults to follow, matching `fetch`).
@@ -60,77 +44,30 @@ fn parse_redirect_mode(req: &Value) -> RedirectMode {
     }
 }
 
-/// Headers arrive as an ordered array of `[name, value]` pairs: duplicate
-/// names (e.g. repeated request headers) survive instead of collapsing.
-fn parse_headers(req: &Value) -> Vec<(String, String)> {
-    req.get("headers")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|pair| {
-                    let p = pair.as_array()?;
-                    Some((
-                        p.first()?.as_str()?.to_string(),
-                        p.get(1)?.as_str()?.to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Parse + validate a `net.fetch` request. On error, returns the request id
-/// (so the caller can still send a `net.fetch.result` error) plus a message.
+/// Admit a `net.fetch` request. On refusal, returns the request id (so the caller can
+/// still send a `net.fetch.result` error) plus a one-line message. `data:`/`blob:` are resolved in
+/// the child; the admission refuses any other scheme but http(s), on what the URL parses to.
+/// The body cap runs here, before the concurrency semaphore in `run_fetch`.
 pub(crate) fn parse_fetch_request(req: &Value) -> Result<ParsedFetch, (Value, String)> {
     let req_id = req.get("reqId").cloned().unwrap_or(Value::Null);
-
-    // data:/blob: are resolved in the child; only http(s) ever reaches Rust.
-    let url = req
-        .get("url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err((req_id, "url must be http(s)".to_string()));
-    }
-
     let plugin = req
         .get("plugin")
         .and_then(|v| v.as_str())
         .unwrap_or("?")
         .to_string();
-    let method = normalize_method(req.get("method").and_then(|v| v.as_str()).unwrap_or("GET"))
-        .map_err(|e| (req_id.clone(), e))?;
-
-    let headers = parse_headers(req);
-
-    let body = match req.get("body").and_then(|v| v.as_str()) {
-        Some(b64) => {
-            // Reject oversized bodies on length (decoded ≈ encoded * 3/4) before the
-            // decode allocates - a plugin must not force a giant host buffer, and this
-            // runs before the concurrency semaphore in run_fetch.
-            if b64.len() / 4 * 3 > MAX_BODY_BYTES {
-                return Err((req_id, "request body exceeds limit".to_string()));
-            }
-            Some(
-                base64::engine::general_purpose::STANDARD
-                    .decode(b64)
-                    .map_err(|_| (req_id.clone(), "invalid base64 body".to_string()))?,
-            )
-        }
-        None => None,
-    };
-
-    let redirect = parse_redirect_mode(req);
-
+    let request = OutboundRequest::from_pairs(req).map_err(|refusal| {
+        crate::vprintln!(
+            "[NATIVE:FETCH] {} REFUSED to {}: {refusal}",
+            plugin,
+            crate::util::refused_host(req.get("url").and_then(|v| v.as_str()).unwrap_or(""))
+        );
+        (req_id.clone(), refusal.to_string())
+    })?;
     Ok(ParsedFetch {
         req_id,
         plugin,
-        url,
-        method,
-        headers,
-        body,
-        redirect,
+        request,
+        redirect: parse_redirect_mode(req),
     })
 }
 
@@ -291,41 +228,28 @@ async fn run_fetch(req: Value, stdin_tx: &mpsc::UnboundedSender<String>) {
         }
     };
 
-    // normalize_method already validated the token; from_bytes can't fail.
-    let method = match reqwest::Method::from_bytes(parsed.method.as_bytes()) {
-        Ok(m) => m,
-        Err(_) => {
-            let _ = stdin_tx.send(build_error_result(&parsed.req_id, "invalid method"));
-            return;
-        }
-    };
-
     let Ok(_permit) = FETCH_SEMAPHORE.acquire().await else {
         return;
     };
 
+    let url = parsed.request.url().as_str().to_string();
+    let method = parsed.request.method().as_str();
     let client = client_for(&parsed.plugin, parsed.redirect);
-    let mut builder = client
-        .request(method, &parsed.url)
+    let builder = parsed
+        .request
+        .build(&client)
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS));
-    for (k, v) in &parsed.headers {
-        builder = builder.header(k, v);
-    }
-    if let Some(body) = parsed.body {
-        builder = builder.body(body);
-    }
 
     let mut resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            // reqwest's error Display appends the full request URL (query + fragment),
-            // which would bypass the redaction above; strip it before logging/forwarding.
-            let e = e.without_url();
+            // The error's text loses the request URL, which would bypass the redaction below.
+            let e = PluginFetchError::of_send(e);
             crate::vprintln!(
                 "[NATIVE:FETCH] {} {} {} ERR {}",
                 parsed.plugin,
-                parsed.method,
-                crate::util::redact_url_query(&parsed.url),
+                method,
+                crate::util::redact_url_query(&url),
                 e
             );
             let _ = stdin_tx.send(build_error_result(&parsed.req_id, &e.to_string()));
@@ -341,7 +265,7 @@ async fn run_fetch(req: Value, stdin_tx: &mpsc::UnboundedSender<String>) {
     }
     let status_text = resp.status().canonical_reason().unwrap_or("").to_string();
     let final_url = resp.url().to_string();
-    let redirected = final_url != parsed.url;
+    let redirected = final_url != url;
 
     let mut headers: Vec<(String, String)> = Vec::new();
     for (name, value) in resp.headers() {
@@ -386,8 +310,8 @@ async fn run_fetch(req: Value, stdin_tx: &mpsc::UnboundedSender<String>) {
     crate::vprintln!(
         "[NATIVE:FETCH] {} {} {} {} ({} bytes)",
         parsed.plugin,
-        parsed.method,
-        crate::util::redact_url_query(&parsed.url),
+        method,
+        crate::util::redact_url_query(&url),
         status,
         body.len()
     );

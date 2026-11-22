@@ -99,9 +99,9 @@ export interface TidalFetchResponse {
 }
 export const tidalFetch = async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }): Promise<TidalFetchResponse> => {
 	const opts: Record<string, unknown> = {};
-	if (init?.method) opts.method = init.method;
+	if (init?.method != null) opts.method = init.method;
 	if (init?.headers && Object.keys(init.headers).length > 0) opts.headers = init.headers;
-	if (init?.body) opts.body = init.body;
+	if (init?.body != null) opts.body = init.body;
 	const optsJson = Object.keys(opts).length > 0 ? JSON.stringify(opts) : "{}";
 	const raw: { ok: boolean; status: number; statusText: string; url: string; headers: Record<string, string>; body: string } = await invokeIpc("tidal.fetch", url, optsJson);
 	return {

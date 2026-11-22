@@ -1,6 +1,7 @@
 use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use crate::plugins::store::StoredPlugin;
+use crate::ui::hosts::{EgressRefusal, PermittedUrl};
 use std::time::Duration;
 
 /// Bounds a version's fetches together. The source client's read timeout ends a stall, not a
@@ -113,12 +114,19 @@ enum SourceFault {
     StoppedSending,
     /// Still sending at [`FETCH_TIMEOUT`].
     TooSlow,
+    /// On a host no plugin request may reach, from the first URL or after a redirect.
+    Refused,
     /// Anything else, a source never reached included, told by its full error chain.
     Transport(String),
 }
 
 impl SourceFault {
     fn of(e: &anyhow::Error) -> Self {
+        if e.chain()
+            .any(|c| c.is::<EgressRefusal>() || c.is::<crate::util::Refused>())
+        {
+            return Self::Refused;
+        }
         let Some(cause) = e.chain().find_map(|c| c.downcast_ref::<reqwest::Error>()) else {
             return Self::Transport(format!("{e:#}"));
         };
@@ -144,6 +152,7 @@ impl std::fmt::Display for SourceFault {
                 "The source did not finish sending within {} s",
                 FETCH_TIMEOUT.as_secs()
             ),
+            Self::Refused => f.write_str("The source is on a host plugins may not reach"),
             Self::Transport(chain) => f.write_str(chain),
         }
     }
@@ -249,8 +258,14 @@ async fn fetch_text_capped(
     max: usize,
     what: &str,
 ) -> anyhow::Result<String> {
-    let resp = client.get(url).send().await?.error_for_status()?;
+    let resp = get_judged(client, url).await?.error_for_status()?;
     read_body_capped(resp, max, what).await
+}
+
+/// GET `url`, its first URL judged as the client judges every redirect hop.
+async fn get_judged(client: &reqwest::Client, url: &str) -> anyhow::Result<reqwest::Response> {
+    let permitted = PermittedUrl::new(url::Url::parse(url)?)?;
+    Ok(client.get(permitted.into_url()).send().await?)
 }
 
 /// Fetch a plugin's `.json` manifest. `Ok(None)` = genuinely absent (404, a
@@ -262,7 +277,7 @@ async fn fetch_plugin_package(
 ) -> anyhow::Result<Option<String>> {
     let base = sanitize_plugin_url(url);
     let json_url = format!("{base}.json");
-    let resp = client.get(&json_url).send().await?;
+    let resp = get_judged(client, &json_url).await?;
     if manifest_absent(resp.status()) {
         return Ok(None);
     }

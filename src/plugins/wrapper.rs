@@ -106,10 +106,12 @@ pub fn wrap_plugin_code(
 var fetch = function(input, init) {
     var url = typeof input === 'string' ? input : (input && input.url) || String(input);
     var opts = init || {};
-    var method = opts.method || 'GET';
+    var method = opts.method == null ? 'GET' : opts.method;
     var headers = {};
     if (opts.headers) {
-        if (typeof opts.headers.entries === 'function') {
+        if (Array.isArray(opts.headers)) {
+            for (var i = 0; i < opts.headers.length; i++) headers[opts.headers[i][0]] = opts.headers[i][1];
+        } else if (typeof opts.headers.entries === 'function') {
             for (var pair of opts.headers.entries()) headers[pair[0]] = pair[1];
         } else if (typeof opts.headers === 'object') {
             headers = opts.headers;
@@ -117,7 +119,7 @@ var fetch = function(input, init) {
     }
     return new Promise(function(resolve, reject) {
         __cq({
-            request: JSON.stringify({ channel: 'plugin.fetch', args: [__pid, url, JSON.stringify({ method: method, headers: headers, body: opts.body || null })], id: String(++fetch.__seq), cap: __cap }),
+            request: JSON.stringify({ channel: 'plugin.fetch', args: [__pid, url, JSON.stringify({ method: method, headers: headers, body: opts.body == null ? null : opts.body })], id: String(++fetch.__seq), cap: __cap }),
             onSuccess: function(raw) {
                 try {
                     var r = JSON.parse(raw);
