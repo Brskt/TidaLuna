@@ -190,6 +190,9 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         "plugin.disable" => {
             activation::handle_plugin_disable(&msg, callback);
         }
+        "plugin.unload" => {
+            activation::handle_plugin_unload(&msg, callback);
+        }
         "jsrt.load_plugins" => {
             jsrt::handle_jsrt_load_plugins(callback);
         }

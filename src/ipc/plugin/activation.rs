@@ -173,3 +173,65 @@ async fn do_plugin_disable(url: String) -> Result<(), String> {
     })
     .await?
 }
+
+/// Unload without touching `enabled`: a restart stops the plugin this way. A start refused
+/// after it leaves the switch as the user set it, and the next load retries it.
+pub(super) fn handle_plugin_unload(msg: &IpcMessage, callback: IpcCallback) {
+    let url = msg.arg(0).to_string();
+    crate::state::rt_handle().spawn(async move {
+        match do_plugin_unload(url).await {
+            Ok(()) => ipc_callback_ok(&callback, "true"),
+            Err(e) => ipc_callback_err(&callback, 500, &e),
+        }
+    });
+}
+
+async fn do_plugin_unload(url: String) -> Result<(), String> {
+    super::jsrt::in_section(move |pass| {
+        let (name, dependants) = {
+            let url = url.clone();
+            crate::state::db().call_plugins(move |pc| {
+                let name = crate::plugins::store::get_name_by_url(pc, &url)
+                    .ok_or_else(|| format!("Plugin not found: {url}"))?;
+                let dependants = crate::plugins::store::find_dependants(pc, &name)?;
+                Ok::<_, String>((name, dependants))
+            })
+        }?;
+        // Read under the pass lock: no enable marks a dependant between this and the unload.
+        let live = with_state(|state| {
+            let manager = &state.plugin_manager;
+            manager
+                .loaded_loads()
+                .into_iter()
+                .filter_map(|(url, _)| manager.name_for_url(&url).map(|n| n.as_str().to_string()))
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .ok_or_else(|| format!("Cannot stop '{name}': the plugin state is unreadable"))?;
+        let running = live_dependants(dependants, &live);
+        if !running.is_empty() {
+            return Err(format!(
+                "Cannot stop '{name}': running dependants: {}",
+                running.join(", ")
+            ));
+        }
+        super::inject::unload_current(pass, &url);
+        Ok(())
+    })
+    .await?
+}
+
+/// The dependants still loaded or loading: unloading their dependency under them would leave their
+/// imports on code that is gone. One switched on but not running holds nothing.
+pub(super) fn live_dependants(
+    dependants: Vec<String>,
+    live: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    dependants
+        .into_iter()
+        .filter(|dependant| live.contains(dependant))
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "../../../tests/unit/ipc/plugin/activation.rs"]
+mod tests;

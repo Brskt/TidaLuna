@@ -1,12 +1,12 @@
 // Tests Reload all in `src/plugins/luna-plugin.ts` against a fake Rust holding its two guards:
-// a disable is refused while an enabled plugin depends on the target, an enable needs every
+// an unload is refused while a running plugin depends on the target, an enable needs every
 // dependency enabled. One plugin's Reload after another trips the first guard.
 
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 
 import { leafFirstGroups } from "../src/plugins/reload-order";
 
-type Row = { name: string; enabled: boolean; deps: string[] };
+type Row = { name: string; enabled: boolean; live: boolean; deps: string[] };
 
 const rows = new Map<string, Row>();
 const calls: string[] = [];
@@ -28,11 +28,17 @@ mock.module("../src/ipc", () => ({
 			}
 			case "plugin.disable": {
 				calls.push(`disable ${row!.name}`);
-				const dependants = [...rows.values()].filter((r) => r.enabled && r.deps.includes(row!.name));
-				if (dependants.length > 0) {
-					throw new Error(`Cannot disable '${row!.name}': active dependants: ${dependants.map((r) => r.name).join(", ")}`);
-				}
 				row!.enabled = false;
+				row!.live = false;
+				return true;
+			}
+			case "plugin.unload": {
+				calls.push(`unload ${row!.name}`);
+				const running = [...rows.values()].filter((r) => r.live && r.deps.includes(row!.name));
+				if (running.length > 0) {
+					throw new Error(`Cannot stop '${row!.name}': running dependants: ${running.map((r) => r.name).join(", ")}`);
+				}
+				row!.live = false;
 				return true;
 			}
 			case "plugin.enable": {
@@ -41,6 +47,7 @@ mock.module("../src/ipc", () => ({
 				if (off.length > 0) throw new Error(`Cannot enable: deps not satisfied: ${off.join(", ")}`);
 				if (failStart.has(url)) throw new Error("The page did not take the plugin in time");
 				row!.enabled = true;
+				row!.live = true;
 				return true;
 			}
 			case "plugin.list":
@@ -54,7 +61,7 @@ const { LunaPlugin } = await import("../src/plugins/luna-plugin");
 
 const add = (name: string, deps: string[] = []) => {
 	const url = `https://x/${name}`;
-	rows.set(url, { name, enabled: true, deps });
+	rows.set(url, { name, enabled: true, live: true, deps });
 	const manifest = { name, luna: { dependencies: deps.map((d) => ({ name: d, storeUrl: "" })) } };
 	return LunaPlugin.fromPluginInfo({ url, name, manifest: JSON.stringify(manifest), enabled: true, installed: true });
 };
@@ -89,19 +96,19 @@ test("a chain restarts: dependants stop first, dependencies start first", async 
 
 	const result = await LunaPlugin.reloadAll();
 
-	expect(calls).toEqual(["disable app", "disable mid", "disable lib", "enable lib", "enable mid", "enable app"]);
+	expect(calls).toEqual(["unload app", "unload mid", "unload lib", "enable lib", "enable mid", "enable app"]);
 	expect(result.notReloaded).toEqual([]);
 	expect(result.reloaded.sort()).toEqual(["app", "lib", "mid"]);
 	expect([...rows.values()].every((r) => r.enabled)).toBe(true);
 });
 
-test("each group restarts before the next stops: a stopped plugin is off on disk until its start", async () => {
+test("each group restarts before the next unloads: an unloaded plugin is not running until its start", async () => {
 	add("one");
 	add("two");
 
 	await LunaPlugin.reloadAll();
 
-	expect(calls).toEqual(["disable one", "enable one", "disable two", "enable two"]);
+	expect(calls).toEqual(["unload one", "enable one", "unload two", "enable two"]);
 });
 
 test("a busy dependant stays out, its dependency keeps running, the others restart", async () => {
@@ -112,10 +119,10 @@ test("a busy dependant stays out, its dependency keeps running, the others resta
 
 	const result = await LunaPlugin.reloadAll();
 
-	expect(calls).toEqual(["disable app", "disable lib", "enable app"]);
+	expect(calls).toEqual(["unload app", "unload lib", "enable app"]);
 	expect(result.reloaded).toEqual(["app"]);
 	expect(result.notReloaded.map((p) => p.name).sort()).toEqual(["busy", "lib"]);
-	expect(result.notReloaded.find((p) => p.name === "lib")!.reason).toStartWith("Not restarted: Cannot disable 'lib'");
+	expect(result.notReloaded.find((p) => p.name === "lib")!.reason).toStartWith("Not restarted: Cannot stop 'lib'");
 	expect([...rows.values()].every((r) => r.enabled)).toBe(true);
 });
 
@@ -131,7 +138,7 @@ test("a plugin turned off during the pulls is not turned back on", async () => {
 
 	const result = await LunaPlugin.reloadAll();
 
-	expect(calls).toEqual(["disable first", "enable first"]);
+	expect(calls).toEqual(["unload first", "enable first"]);
 	expect(rows.get(user.url)!.enabled).toBe(false);
 	expect(result.notReloaded).toEqual([{ name: "user", reason: "Turned off or removed while reloading" }]);
 });
@@ -162,7 +169,7 @@ test("a second call joins the run in flight", async () => {
 	release();
 	await first;
 
-	expect(calls).toEqual(["disable only", "enable only"]);
+	expect(calls).toEqual(["unload only", "enable only"]);
 	expect(LunaPlugin.reloadAllInFlight).toBeUndefined();
 });
 
@@ -177,7 +184,7 @@ test("a new version that declares a dependency is ordered by it", async () => {
 
 	const result = await LunaPlugin.reloadAll();
 
-	expect(calls).toEqual(["disable app", "disable lib", "enable lib", "enable app"]);
+	expect(calls).toEqual(["unload app", "unload lib", "enable lib", "enable app"]);
 	expect(result.notReloaded).toEqual([]);
 	expect(lib.running && app.running).toBe(true);
 });

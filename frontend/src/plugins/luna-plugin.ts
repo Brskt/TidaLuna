@@ -401,12 +401,6 @@ export class LunaPlugin {
 
     async disable(): Promise<void> {
         this.stopReloadLoop();
-        await this.stop();
-    }
-
-    // `disable()` without stopping the live-reload loop: a restart runs it right before
-    // `enable()`, and the loop must outlive that.
-    private async stop(): Promise<void> {
         this.acted = true;
         this.rowEpoch++;
         this.loading._ = true;
@@ -415,18 +409,38 @@ export class LunaPlugin {
             await invokeIpc("plugin.disable", this.url);
             // Only after Rust confirms:
             this.enabled = false;
-            // Stopped on purpose: a failure reason must not outlive the attempt it explains.
-            this.loadError._ = undefined;
-            this.runtimeError._ = undefined;
-            this.exports = undefined;
-            if ((window as any).__pluginExports) {
-                delete (window as any).__pluginExports[this.url];
-            }
-            syncUpstream(this.url, this);
+            this.dropLoad();
         } finally {
             this.loading._ = false;
         }
-        // NO catch - errors propagate to caller (reload, uninstall, UI)
+        // NO catch: errors propagate to caller (uninstall, UI)
+    }
+
+    // A restart's stop: Rust unloads the plugin and leaves its flag as the user set it. A start
+    // refused next keeps the switch on with its reason, and the next load retries it.
+    private async unload(): Promise<void> {
+        this.acted = true;
+        this.rowEpoch++;
+        this.loading._ = true;
+        try {
+            await invokeIpc("plugin.unload", this.url);
+            this.dropLoad();
+        } finally {
+            this.loading._ = false;
+        }
+        // NO catch: errors propagate to the restart
+    }
+
+    // What a stopped load leaves behind. Stopped on purpose: a failure reason must not outlive the
+    // attempt it explains.
+    private dropLoad(): void {
+        this.loadError._ = undefined;
+        this.runtimeError._ = undefined;
+        this.exports = undefined;
+        if ((window as any).__pluginExports) {
+            delete (window as any).__pluginExports[this.url];
+        }
+        syncUpstream(this.url, this);
     }
 
     // Stores the version the plugin's url serves now, then restarts the plugin from what is
@@ -463,12 +477,12 @@ export class LunaPlugin {
         return pulled;
     }
 
-    // Stops the plugin and starts it again from its stored version, as `disable()` then `enable()`
-    // do: a plugin that was not running starts, and a failed start is enable()'s loadError. Rust
-    // refuses the stop while enabled plugins depend on this one, which then runs as it was.
+    // Unloads the plugin and starts it again from its stored version, its flag untouched: a plugin
+    // that was not running starts, and a failed start is enable()'s loadError. Rust refuses the
+    // unload while plugins depending on this one run, and it then runs as it was.
     private async restart(pulled: Pulled | undefined): Promise<void> {
         try {
-            await this.stop();
+            await this.unload();
         } catch (e) {
             if (pulled === undefined) {
                 console.error(`[luna:plugin] Failed to reload '${this.name}':`, e);
@@ -523,7 +537,7 @@ export class LunaPlugin {
                 name: p.name,
                 dependencies: p.dependencyRequirements.map(d => d.name),
             })));
-            // One group at a time: a stopped plugin is off on disk until its start.
+            // One group at a time: an unloaded plugin is not running until its start.
             for (const group of groups) {
                 await LunaPlugin.restartGroup(group.map(url => byUrl.get(url)!), pulledOf, epochOf, left);
             }
@@ -557,7 +571,7 @@ export class LunaPlugin {
                     continue;
                 }
                 try {
-                    await p.stop();
+                    await p.unload();
                 } catch (e) {
                     const note = stopRefusedNote(pulledOf.get(p)!, e instanceof Error ? e.message : String(e));
                     p.note(note);
