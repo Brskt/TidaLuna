@@ -402,6 +402,13 @@ fn a_client_is_proven_only_by_an_answer_to_a_request_sent_with_it() {
             refresh,
             "refresh, {prior:?} sent {sent:?}"
         );
+        if let Some(prior) = prior {
+            assert_eq!(
+                ClientBinding::after_web_session(prior),
+                ClientBinding::Unproven(prior.id().to_owned()),
+                "web session, {prior:?}"
+            );
+        }
     }
     for (binding, asked, update_client, expected) in [
         (&proven, Some("page"), false, Some("store")),
@@ -685,6 +692,56 @@ async fn a_rotated_refresh_token_reaches_every_generation_sharing_its_nonce() {
         .as_ref()
         .unwrap();
     assert_eq!(previous.refresh_token, "user-rt");
+}
+
+/// A web-session answer lands in place on the live generation of its own user: the page gets back
+/// the nonces it holds, a rotated refresh token reaches the `previous` sharing its nonce, and the
+/// client is unproven again. Another user, a missing one, or a session already left writes nothing.
+#[tokio::test]
+async fn a_web_session_is_taken_in_place_only_for_the_live_user() {
+    let mut state = state_in_window();
+    state.token_state.as_mut().unwrap().current.client = ClientBinding::Proven("cid".into());
+
+    assert_eq!(
+        state.adopt_web_session(1, &refreshed(Some("rotated"), Some("a"))),
+        Some(("old-opaque-at".to_owned(), "old-opaque-rt".to_owned()))
+    );
+    let ts = state.token_state.as_ref().unwrap();
+    assert_eq!(
+        (
+            ts.current.access_token.as_str(),
+            ts.current.refresh_token.as_str(),
+            ts.current.version
+        ),
+        ("fresh-at", "rotated", 5)
+    );
+    assert_eq!(ts.current.client, ClientBinding::Unproven("cid".into()));
+
+    for (epoch, current_user, user, why) in [
+        (0, Some("a"), Some("a"), "a session already left"),
+        (1, Some("a"), Some("b"), "another user"),
+        (1, Some("a"), None, "an answer naming no user"),
+        (1, None, Some("a"), "a generation naming no user"),
+        (1, None, None, "neither naming a user"),
+    ] {
+        let mut state = state_in_window();
+        state.token_state.as_mut().unwrap().current.user_id = current_user.map(str::to_owned);
+        assert_eq!(
+            state.adopt_web_session(epoch, &refreshed(Some("rotated"), user)),
+            None,
+            "{why}"
+        );
+        let current = &state.token_state.as_ref().unwrap().current;
+        assert_eq!(
+            (
+                current.access_token.as_str(),
+                current.refresh_token.as_str(),
+                current.version
+            ),
+            ("old-at", "user-rt", 4),
+            "{why}"
+        );
+    }
 }
 
 /// A dead refresh token ends the session it belonged to, and only that one: a login or another

@@ -94,6 +94,12 @@ impl ClientBinding {
         }
     }
 
+    /// A web-session answer binds its refresh token to the client its JSON body named, which Rust
+    /// never reads: the prior id stays, unproven.
+    pub(crate) fn after_web_session(prior: &Self) -> Self {
+        Self::Unproven(prior.id().to_owned())
+    }
+
     /// A refresh TIDAL answered proves the client it was sent with, for the token it refreshed;
     /// sent without one, the prior binding stays as it was.
     pub(crate) fn after_refresh(prior: Option<&Self>, sent: Option<&str>) -> Self {

@@ -57,7 +57,7 @@ wrap_request_context_handler! {
                 Dispatch::Route(auth) => {
                     return Some(crate::ui::token_filter::route_handler(
                         auth,
-
+                        initiator.as_deref(),
                     ));
                 }
             }

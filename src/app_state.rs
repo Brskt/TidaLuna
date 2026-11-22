@@ -552,6 +552,42 @@ impl AppState {
         true
     }
 
+    /// A web-session exchange the page sent while Rust held its session: the current generation
+    /// takes the answer in place, as a boot refresh does, and its nonces are what the page gets
+    /// back. Only for the generation's own user, a missing one included: an answer for anyone else
+    /// would sign the page in as them. `None` writes nothing.
+    pub(crate) fn adopt_web_session(
+        &mut self,
+        session_epoch: u64,
+        grant: &TokenGrant,
+    ) -> Option<(String, String)> {
+        if self.session_epoch != session_epoch {
+            return None;
+        }
+        let crate::platform::secure_store::StoredTokenState {
+            current, previous, ..
+        } = self.token_state.as_mut()?;
+        if current.user_id.is_none() || current.user_id.as_deref() != grant.user_id {
+            return None;
+        }
+        take_in_place(current, previous.as_mut(), grant);
+        current.client = ClientBinding::after_web_session(&current.client);
+        Some((current.opaque_at.clone(), current.opaque_rt.clone()))
+    }
+
+    /// [`Self::adopt_web_session`], then the generation queued to disk in the same section.
+    pub(crate) fn commit_web_session(
+        &mut self,
+        session_epoch: u64,
+        grant: &TokenGrant,
+    ) -> Option<(String, String)> {
+        let adopted = self.adopt_web_session(session_epoch, grant)?;
+        if let Some(ts) = &self.token_state {
+            crate::platform::secure_store::save_queued(&crate::state::cache_data_dir(), ts);
+        }
+        Some(adopted)
+    }
+
     /// The token endpoint refused the refresh token Rust sent as dead: the session ends, provided
     /// it is still the one that token belonged to. A login or another refresh in between keeps it.
     pub(crate) fn end_dead_session(

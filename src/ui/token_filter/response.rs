@@ -109,6 +109,42 @@ fn process_token_response_with(
         .map(|s| s.split(' ').map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
+    if answer == Answer::SameUserInPlace {
+        let in_place = TokenGrant {
+            access_token: at,
+            refresh_token: refresh_token.as_deref(),
+            opaque_at: "",
+            opaque_rt: None,
+            expires_in,
+            user_id: user_id.as_deref(),
+            granted_scopes: &granted_scopes,
+            client_id: exchange_client_id,
+        };
+        let adopted = crate::app_state::with_state(|state| {
+            state.commit_web_session(session_epoch, &in_place)
+        })
+        .flatten();
+        let Some((nonce_at, nonce_rt)) = adopted else {
+            crate::verr!("[AUTH] web-session answer for no live session of its user, dropped");
+            return ProcessResult::Error;
+        };
+        crate::vprintln!("[AUTH]   Web session taken in place");
+        obj.insert(
+            "access_token".to_string(),
+            serde_json::Value::String(nonce_at),
+        );
+        if refresh_token.is_some() {
+            obj.insert(
+                "refresh_token".to_string(),
+                serde_json::Value::String(nonce_rt),
+            );
+        }
+        return match serde_json::to_vec(&json) {
+            Ok(v) => ProcessResult::Modified(v),
+            Err(_) => ProcessResult::Error,
+        };
+    }
+
     // A real token is present: if opaque generation fails, drop the response
     // (Error -> FilterOutcome::Drop) instead of emitting the real token.
     let opaque_at = match opaque() {

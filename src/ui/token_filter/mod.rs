@@ -9,6 +9,7 @@ use crate::ui::nav::RequestUrl;
 
 mod request;
 mod response;
+mod web_session;
 
 use crate::ui::nav::AuthRoute;
 use crate::ui::request_dispatch::AuthRequest;
@@ -200,9 +201,26 @@ pub(super) fn token_handler(auth: Option<AuthRequest>) -> ResourceRequestHandler
     )
 }
 
-/// The token filter of a hop the dispatch let through to a sign-in route.
-pub(super) fn route_handler(auth: AuthRequest) -> ResourceRequestHandler {
-    token_handler(Some(auth))
+/// Without a session Rust holds, the web-session exchange is answered by Rust, empty: the SDK then
+/// shows its sign-in screen, never a token minted from the cookie alone.
+pub(super) fn route_handler(auth: AuthRequest, initiator: Option<&str>) -> ResourceRequestHandler {
+    if auth.route != AuthRoute::WebSessionCredentials {
+        return token_handler(Some(auth));
+    }
+    let has_session = crate::app_state::with_state(|state| state.has_session()).unwrap_or(false);
+    match web_session::F4Plan::of(has_session, initiator) {
+        web_session::F4Plan::Forward => token_handler(Some(auth)),
+        web_session::F4Plan::Synthetic204 { allow_origin } => {
+            crate::verr!("[AUTH] web-session/credentials without a session: answered empty");
+            web_session::NoSessionAnswer::new(allow_origin)
+        }
+        web_session::F4Plan::Cancel => {
+            crate::verr!(
+                "[AUTH] web-session/credentials without a session nor a TIDAL origin: cancelled"
+            );
+            crate::ui::exfil_guard::ExfilBlockHandler::new()
+        }
+    }
 }
 
 wrap_resource_request_handler! {
@@ -265,6 +283,13 @@ wrap_resource_request_handler! {
                         *self.exchange_code.lock().unwrap_or_else(|e| e.into_inner()) =
                             prepared.code;
                         hop = Some(prepared.origin);
+                    }
+                    // The answer is armed whatever the state: without one, no session can take it.
+                    if auth.route == AuthRoute::WebSessionCredentials {
+                        let epoch = crate::app_state::with_state(|state| state.session_epoch);
+                        self.exchange_epoch
+                            .store(epoch.unwrap_or_default(), Ordering::Release);
+                        hop = Some(ExchangeOrigin::WebSession);
                     }
                 }
                 let origin = ExchangeOrigin::carry(ExchangeOrigin::load(&self.exchange_origin), hop);
