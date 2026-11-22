@@ -12,7 +12,7 @@ semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
-zip = { version = "9.7.0", default-features = false, features = [
+zip = { version = "9.8.1", default-features = false, features = [
   "deflate-flate2-zlib-rs",
 ] }
 flate2 = "1.1.11"
@@ -81,12 +81,12 @@ audioadapter-buffers = "5.2.0"
 base16ct = { workspace = true }
 base64 = { workspace = true }
 cbc = "0.2.1"
-cef = { version = "156.6.0", features = ["build-util"] }
+cef = { version = "156.7.0", features = ["build-util"] }
 # Already in the graph through `cef`, at this exact version; direct only so that build.rs
 # receives `DEP_CEF_DLL_WRAPPER_CEF_DIR`. Cargo passes a `links` crate's metadata to DIRECT
 # dependents alone, and that variable is the only supported way to learn where the macOS
 # framework was unpacked: a path that carries a build-script hash and changes on rebuild.
-cef-dll-sys = "156.6.0"
+cef-dll-sys = "156.7.0"
 # Pinned to the PR #1183 merge (WASAPI/CoreAudio auto-reroute on default-device
 # change + unified Error/ErrorKind). Drop back to a crates.io release once cpal 0.18 ships.
 cpal = { git = "https://github.com/RustAudio/cpal", rev = "c6aa4592ef07968ab6b431e62acab79c72869716", version = "0.18.0" }
@@ -149,7 +149,7 @@ tracing = "0.1.44"
 twox-hash = { version = "2.1.5", default-features = false, features = [
   "xxhash64",
 ] }
-url = "2.5.8"
+url = "2.5.9"
 bzip2 = { workspace = true }
 openh264 = { workspace = true }
 # Direct only for the API trait codec::load_api calls, which openh264 does not re-export;
