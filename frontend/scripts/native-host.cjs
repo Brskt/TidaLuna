@@ -1179,8 +1179,9 @@ async function encodeBody(body) {
         var buf = await formDataToBuffer(body, boundary);
         return { b64: buf.toString("base64"), contentType: "multipart/form-data; boundary=" + boundary };
     }
-    // Unknown body type: coerce to string (fetch's last-resort behavior).
-    return { b64: _Buffer.from(String(body), "utf8").toString("base64"), contentType: null };
+    // Refused rather than coerced: String() would send "[object Object]" or a plugin's own
+    // toString() output as the body, and the request would leave with a body nobody chose.
+    throw new _RealTypeError("[sandbox] fetch body must be a string, a typed array, an ArrayBuffer, a Blob, URLSearchParams or FormData");
 }
 
 function makeAbortError() {
