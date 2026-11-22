@@ -17,6 +17,7 @@ pub(crate) use helpers::{post_emit, post_emit_with_data};
 pub(crate) use receiver::{set_receiver_enabled, start_receiver_task};
 
 use crate::app_state::{IpcCallback, IpcMessage};
+use crate::connect::receiver::queue::ModeToggle;
 
 /// Fire-and-forget IPC (no callback).
 pub(crate) fn handle_connect_ipc(msg: &IpcMessage) {
@@ -30,6 +31,8 @@ pub(crate) fn handle_connect_ipc(msg: &IpcMessage) {
         "receiver.start" => receiver::start(),
         "receiver.stop" => receiver::stop(),
         "receiver.set_always_on" => receiver::set_always_on(msg),
+        "receiver.toggle_shuffle" => receiver::toggle_mode(ModeToggle::Shuffle),
+        "receiver.cycle_repeat" => receiver::toggle_mode(ModeToggle::Repeat),
         _ => {
             crate::vprintln!("[connect::ipc] Unknown fire-and-forget: connect.{}", sub);
         }

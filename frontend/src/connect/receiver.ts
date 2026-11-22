@@ -1,5 +1,4 @@
 import { sendIpc } from "../ipc";
-import type { RepeatMode } from "./types";
 
 export function createRemoteDesktopController() {
     return {
@@ -21,12 +20,6 @@ export function createRemoteDesktopController() {
         requestNextMedia() {},
         disconnect() {
             sendIpc("connect.receiver.stop");
-        },
-        setRepeatMode(repeatMode: RepeatMode) {
-            sendIpc("connect.receiver.set_repeat", repeatMode);
-        },
-        setShuffle(shuffle: boolean) {
-            sendIpc("connect.receiver.set_shuffle", shuffle);
         },
     };
 }

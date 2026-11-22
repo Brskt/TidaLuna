@@ -15,6 +15,7 @@ import { createNativePlayerComponent, intentOfTrackList, moveOf, pickOf, PRELOAD
 import { sdkPlayer, startSdkPlayer } from "./sdk-player";
 import type { LoadRefusal, TrackListPayload } from "./controllers/player";
 import { followCastQueue } from "./connect/middleware";
+import { castShowsModes } from "./connect/modes";
 import { updatePlaybackState } from "./controllers/mediasession";
 import { proxySetPlaying, proxySetTime, proxySetDuration, proxyReset, proxyIdle, proxyFail, proxyEnded, isSelfLoad } from "./audio-proxy";
 import { askRefusedAgain, playOnRefusal, refusalDelivered, refusalStands, refusePlayback } from "./refuse-playback";
@@ -436,6 +437,18 @@ const init = async () => {
             // resumes via stop+load(same) without calling nativePlayer.play().
             if (isSelfLoad()) sendIpc("player.play");
             else (window.NativePlayerComponent as any)?.setDesiredPlayback?.(true);
+        });
+        // During a cast the player bar shows the controller's modes: a click there asks the receiver,
+        // which changes them for the phone too, and the bar follows what the cast then reports.
+        add("playQueue/TOGGLE_SHUFFLE", () => {
+            if (!castShowsModes()) return;
+            sendIpc("connect.receiver.toggle_shuffle");
+            return true;
+        });
+        add("playQueue/TOGGLE_REPEAT_MODE", () => {
+            if (!castShowsModes()) return;
+            sendIpc("connect.receiver.cycle_repeat");
+            return true;
         });
         add("playbackControls/PAUSE", () => {
             if (clipActive()) return;

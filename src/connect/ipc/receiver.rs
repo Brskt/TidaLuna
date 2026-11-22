@@ -121,6 +121,14 @@ pub(super) fn stop() {
     });
 }
 
+/// A click on the page's shuffle or repeat button the page holds back during a cast. Lost when
+/// no receiver loop takes it: the page then shows the cast's mode unchanged.
+pub(super) fn toggle_mode(toggle: crate::connect::receiver::queue::ModeToggle) {
+    if !crate::connect::bridge::route_mode_toggle(toggle) {
+        crate::vprintln!("[connect::ipc] {toggle:?} from the page: no receiver to take it");
+    }
+}
+
 pub(super) fn set_always_on(msg: &IpcMessage) {
     let enabled = msg.args.first().and_then(|v| v.as_bool()).unwrap_or(true);
     set_receiver_enabled(enabled);

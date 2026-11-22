@@ -57,6 +57,9 @@ pub(crate) enum BridgeEvent {
     /// decides what it becomes against the controller's queue, and answers it whatever it
     /// decides: the SDK waits on that load with no timeout.
     LocalLoad(crate::player::ipc::CastLoad),
+    /// A `ModeToggle` from this host's buttons while the controller casts. The loop makes it as the
+    /// phone's own request.
+    ModeToggle(crate::connect::receiver::queue::ModeToggle),
 }
 
 /// Bridge between TIDAL Connect receiver and the local Rust player.

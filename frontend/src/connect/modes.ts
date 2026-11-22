@@ -80,6 +80,11 @@ export async function showReceiverModes(
     apply(store, modes);
 }
 
+/** Whether a cast's modes are on the player bar: its shuffle and repeat buttons are the cast's. */
+export function castShowsModes(): boolean {
+    return shown !== undefined;
+}
+
 /** The cast reset the page's queue (`playQueue/RESET`): its modes are shown again. */
 export function reshowReceiverModes(store: Store): void {
     if (shown) apply(store, shown);

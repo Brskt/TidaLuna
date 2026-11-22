@@ -102,7 +102,7 @@ fn stamped_seq(event: &BridgeEvent) -> Option<u32> {
         | BridgeEvent::PlaybackCompleted { from, .. }
         | BridgeEvent::PlaybackError { from, .. }
         | BridgeEvent::DurationMeasured { from, .. } => Some(from.seq),
-        BridgeEvent::LocalLoad(_) => None,
+        BridgeEvent::LocalLoad(_) | BridgeEvent::ModeToggle(_) => None,
     }
 }
 

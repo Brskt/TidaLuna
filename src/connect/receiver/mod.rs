@@ -269,6 +269,10 @@ async fn routing_loop(
                         crate::vprintln!("[connect::bridge] <- DurationMeasured {}ms ({:?})", duration_ms, from);
                         playback_ctrl.on_duration_measured(duration_ms, track_id.as_deref(), from);
                     }
+                    BridgeEvent::ModeToggle(toggle) => {
+                        crate::vprintln!("[connect::bridge] <- ModeToggle {:?}", toggle);
+                        queue_mgr.toggle_mode(toggle).await;
+                    }
                     BridgeEvent::LocalLoad(load) => {
                         // Answered before anything is selected or stepped. The receiver's load of
                         // the new track mints once the turn settles; the answer reaches the

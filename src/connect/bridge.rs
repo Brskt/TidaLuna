@@ -72,6 +72,15 @@ pub(crate) fn route_load(load: crate::player::ipc::CastLoad) -> bool {
         .is_some_and(|tx| tx.try_send(BridgeEvent::LocalLoad(load)).is_ok())
 }
 
+/// Hand a `ModeToggle` to the receiver's routing loop. `false` when no loop can take it: none
+/// runs, it has shut down, or it is too far behind.
+pub(crate) fn route_mode_toggle(toggle: crate::connect::receiver::queue::ModeToggle) -> bool {
+    let guard = BRIDGE_TX.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .is_some_and(|tx| tx.try_send(BridgeEvent::ModeToggle(toggle)).is_ok())
+}
+
 /// Forward a player event to the receiver, if active. Called from
 /// `ui::flush`'s per-event hook on the player event loop, with `owner` the origin of the load
 /// that is current (`player::current_load`).

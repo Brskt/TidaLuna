@@ -6,6 +6,23 @@ use super::QueueError;
 use super::http::{ConnectRoot, RootedUrl};
 use crate::connect::types::{QueueChangeReason, QueueInfo, RepeatMode};
 
+/// A click on this host's shuffle or repeat button while a controller casts. It names no mode:
+/// the receiver takes the next one from the cast's own, which the phone shows too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModeToggle {
+    Shuffle,
+    Repeat,
+}
+
+impl ModeToggle {
+    pub(super) fn change_from(self, info: &QueueInfo) -> QueueChange {
+        match self {
+            Self::Shuffle => QueueChange::Shuffle(!info.shuffled),
+            Self::Repeat => QueueChange::Repeat(info.repeat_mode.next()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum QueueChange {
     Shuffle(bool),

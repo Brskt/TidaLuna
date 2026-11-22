@@ -31,6 +31,15 @@ impl RepeatMode {
         }
     }
 
+    /// The mode after this one on TIDAL's repeat button: off, all, one, then off again.
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Off => Self::All,
+            Self::All => Self::One,
+            Self::One => Self::Off,
+        }
+    }
+
     /// The `repeat_mode` the queue server takes, lowercase as TIDAL's receiver sends it.
     pub(crate) fn queue_server_word(self) -> &'static str {
         match self {

@@ -6,6 +6,7 @@ mod http;
 mod media;
 mod window;
 
+pub(crate) use change::ModeToggle;
 pub(crate) use error::QueueError;
 pub(crate) use http::ConnectHttp;
 
@@ -490,6 +491,22 @@ impl QueueManager {
                 shuffled: qi.shuffled,
             });
         }
+    }
+
+    /// A click on this host's shuffle or repeat button during a cast, made as the phone's own
+    /// request would be, from the cast's current mode. Refused with no queue loaded, as the
+    /// phone's is; no one waits on an answer.
+    pub async fn toggle_mode(&mut self, toggle: ModeToggle) {
+        if !self.queue_loaded() {
+            let _ = self.refuse(&format!("{toggle:?} from this host"));
+            return;
+        }
+        let Some(ref info) = self.queue_info else {
+            crate::vprintln!("[connect::queue] {toggle:?} from this host: no cloud queue");
+            return;
+        };
+        let change = toggle.change_from(info);
+        let _ = self.proc_change(None, None, change).await;
     }
 
     /// Queue the answer to a phone's request among the command's effects. A request with no id,
