@@ -1,0 +1,3 @@
+# LevelDB fixtures are byte-exact: a CRLF checkout turns CURRENT's "\n" into
+# "\r\n", and LevelDB then looks for a manifest named with a trailing "\r".
+tests/unit/platform/sdk_storage/leveldb_*/** -text
