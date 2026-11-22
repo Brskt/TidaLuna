@@ -1,10 +1,11 @@
 //! Tests for `src/platform/desktop_entry.rs`, attached by `#[path]`.
 
 use std::ffi::OsStr;
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use super::{WM_CLASS, exec_value, install_desktop_entry};
+use super::{WM_CLASS, exec_value, install_desktop_entry, install_icons};
 use crate::ui::deep_link::SCHEME;
 
 /// The `.deb` entry, pulled in so a rename of either constant has to break here.
@@ -183,24 +184,45 @@ fn a_launcher_recovers_the_exact_path_and_the_url_slot() {
 
 #[test]
 fn the_written_entry_carries_the_quoted_line_and_no_other_exec() {
-    let home = tempfile::tempdir().expect("a temp dir");
+    let data = tempfile::tempdir().expect("a temp dir");
     let exe = Path::new("/opt/fixture apps/tidalunar");
-    install_desktop_entry(home.path(), exe);
+    install_desktop_entry(data.path(), exe);
 
-    let written = std::fs::read_to_string(
-        home.path()
-            .join(".local/share/applications/tidalunar.desktop"),
-    )
-    .expect("the entry");
+    let written = std::fs::read_to_string(data.path().join("applications/tidalunar.desktop"))
+        .expect("the entry");
     let execs: Vec<&str> = written.lines().filter(|l| l.starts_with("Exec=")).collect();
     assert_eq!(execs, ["Exec=\"/opt/fixture apps/tidalunar\" %u"]);
 }
 
 #[test]
 fn a_path_that_is_not_text_leaves_no_entry() {
-    let home = tempfile::tempdir().expect("a temp dir");
+    let data = tempfile::tempdir().expect("a temp dir");
     let exe = Path::new(OsStr::from_bytes(b"/opt/fixture/\xff/tidalunar"));
-    install_desktop_entry(home.path(), exe);
+    install_desktop_entry(data.path(), exe);
 
-    assert!(!home.path().join(".local/share/applications").exists());
+    assert!(!data.path().join("applications").exists());
+}
+
+#[test]
+fn install_drops_the_legacy_copy_and_keeps_icons_it_never_wrote() {
+    let tmp = tempfile::tempdir().expect("a temp dir");
+    let hicolor = tmp.path().join("hicolor");
+    let ours = |size: &str| {
+        hicolor
+            .join(size)
+            .join("apps")
+            .join(format!("{WM_CLASS}.png"))
+    };
+    for size in ["1024x1024", "512x512"] {
+        let icon = ours(size);
+        fs::create_dir_all(icon.parent().expect("a parent")).expect("the directories");
+        fs::write(&icon, b"planted").expect("the icon");
+    }
+
+    install_icons(&hicolor);
+    assert!(!ours("1024x1024").exists(), "the legacy copy stayed");
+    assert!(
+        ours("512x512").exists(),
+        "a size we never wrote was removed"
+    );
 }

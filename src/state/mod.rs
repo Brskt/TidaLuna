@@ -17,7 +17,7 @@ pub use net::{CORE_CLIENT, HTTP_CLIENT_PLAYBACK, HTTP_CLIENT_PRELOAD, MediaClien
 pub(crate) use net::{HopCap, host_checked_builder, service_class};
 pub use paths::cache_data_dir;
 #[cfg(target_os = "linux")]
-pub(crate) use paths::user_home;
+pub(crate) use paths::user_data_home;
 #[cfg(not(target_os = "macos"))]
 pub(crate) use paths::{InstallDir, install_dir};
 pub(crate) use paths::{data_dir, home_folder};

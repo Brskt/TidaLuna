@@ -1,5 +1,6 @@
-//! Linux: install a freedesktop `.desktop` entry plus an icon under
-//! `~/.local/share/` for the WM to match a taskbar/dock icon for our window.
+//! Linux: install a freedesktop `.desktop` entry plus its icons under the user
+//! data directory (`$XDG_DATA_HOME`, else `~/.local/share`) for the WM to match
+//! a taskbar/dock icon for our window.
 //!
 //! GNOME Shell ignores `_NET_WM_ICON` and only resolves the icon through a
 //! `.desktop` file matched by `WM_CLASS`; KDE and others use both. We always
@@ -10,21 +11,55 @@
 //! packaged install ships the entry and still claims nothing.
 //!
 //! Idempotent: each call rewrites only when the on-disk content differs from
-//! the current binary path or embedded icon.
+//! the current binary path or embedded icons.
 #![cfg(target_os = "linux")]
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
-const ICON_DATA: &[u8] = include_bytes!("../../tidaluna.png");
 pub(crate) const WM_CLASS: &str = "tidalunar";
+
+/// The `.deb`'s icon of one size, read from that size's directory.
+macro_rules! packaged_icon {
+    ($size:literal) => {
+        (
+            $size,
+            include_bytes!(concat!(
+                "../../installer/linux/deb/icons/hicolor/",
+                stringify!($size),
+                "x",
+                stringify!($size),
+                "/apps/tidalunar.png"
+            )),
+        )
+    };
+}
+
+/// The sizes the `.deb` ships, all declared by hicolor's `index.theme`. A theme
+/// scans only the size directories its system index lists; an icon filed under
+/// any other size, such as the source PNG's 1024, never resolves.
+const ICONS: [(u32, &[u8]); 5] = [
+    packaged_icon!(16),
+    packaged_icon!(32),
+    packaged_icon!(64),
+    packaged_icon!(128),
+    packaged_icon!(256),
+];
+
+/// Sizes earlier versions filed our icon under, none of them declared by hicolor.
+const LEGACY_ICON_SIZES: [u32; 1] = [1024];
 
 /// Browser process only: CEF subprocesses re-enter `main()`.
 pub(crate) fn install() {
+    let Some(data) = crate::state::user_data_home() else {
+        return;
+    };
+
     // A managed install (Nix, etc.) ships its own entry; a user-level one would
     // shadow it, bypass the launch wrapper, and go stale after an upgrade.
     if crate::util::is_managed_install() {
-        remove_stale_user_entry();
+        remove_user_install(&data);
         return;
     }
 
@@ -37,57 +72,108 @@ pub(crate) fn install() {
     if Path::new("/usr/bin/tidalunar").exists()
         && Path::new("/usr/share/applications/tidalunar.desktop").exists()
     {
-        remove_stale_user_entry();
+        remove_user_install(&data);
         return;
     }
 
-    let Some(home) = crate::state::user_home() else {
-        return;
-    };
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
 
-    if let Some(size) = parse_png_size(ICON_DATA) {
-        install_icon(home, size);
+    let hicolor = data.join("icons/hicolor");
+    if install_icons(&hicolor) {
+        refresh_icon_theme(&hicolor);
     }
-    install_desktop_entry(home, &exe);
+    install_desktop_entry(&data, &exe);
 }
 
-/// Remove a user-level `.desktop` entry left by a prior unpackaged run.
-fn remove_stale_user_entry() {
-    if let Some(home) = crate::state::user_home() {
-        let stale = home
-            .join(".local/share/applications")
-            .join(format!("{WM_CLASS}.desktop"));
-        let _ = fs::remove_file(&stale);
+/// What a prior unpackaged run left: the entry, and icons that would shadow
+/// the package's own under the same name.
+fn remove_user_install(data: &Path) {
+    let apps = data.join("applications");
+    if fs::remove_file(apps.join(format!("{WM_CLASS}.desktop"))).is_ok() {
+        refresh_desktop_database(&apps);
+    }
+    let hicolor = data.join("icons/hicolor");
+    let sizes = ICONS.iter().map(|&(size, _)| size);
+    if remove_icons(&hicolor, sizes.chain(LEGACY_ICON_SIZES)) {
+        refresh_icon_theme(&hicolor);
     }
 }
 
-fn parse_png_size(data: &[u8]) -> Option<u32> {
-    if data.len() < 24 || &data[..8] != b"\x89PNG\r\n\x1a\n" {
-        return None;
-    }
-    let width = u32::from_be_bytes(data[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(data[20..24].try_into().ok()?);
-    Some(width.max(height))
+fn size_dir(size: u32) -> String {
+    format!("{size}x{size}")
 }
 
-fn install_icon(home: &Path, size: u32) {
-    let dir = home
-        .join(".local/share/icons/hicolor")
-        .join(format!("{size}x{size}"))
-        .join("apps");
+/// True when a file was written or removed, for the theme to be told.
+fn install_icons(hicolor: &Path) -> bool {
+    let mut changed = false;
+    for (size, data) in ICONS {
+        changed |= install_icon(hicolor, size, data);
+    }
+    remove_icons(hicolor, LEGACY_ICON_SIZES) | changed
+}
+
+fn install_icon(hicolor: &Path, size: u32, data: &[u8]) -> bool {
+    let dir = hicolor.join(size_dir(size)).join("apps");
     if fs::create_dir_all(&dir).is_err() {
-        return;
+        return false;
     }
     let path = dir.join(format!("{WM_CLASS}.png"));
     let needs_write = match fs::read(&path) {
-        Ok(existing) => existing != ICON_DATA,
+        Ok(existing) => existing != data,
         Err(_) => true,
     };
-    if needs_write {
-        let _ = fs::write(&path, ICON_DATA);
+    needs_write && fs::write(&path, data).is_ok()
+}
+
+fn remove_icons(hicolor: &Path, sizes: impl IntoIterator<Item = u32>) -> bool {
+    let mut removed = false;
+    for size in sizes {
+        removed |= remove_icon(hicolor, size);
+    }
+    removed
+}
+
+/// Our icon at one size, by its exact path. A symlinked size or `apps` directory
+/// is the user's to keep; `remove_dir` refuses a directory still holding another
+/// app's icon.
+fn remove_icon(hicolor: &Path, size: u32) -> bool {
+    let dir = hicolor.join(size_dir(size));
+    let apps = dir.join("apps");
+    let real_dir = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    if !real_dir(&dir) || !real_dir(&apps) {
+        return false;
+    }
+    if fs::remove_file(apps.join(format!("{WM_CLASS}.png"))).is_err() {
+        return false;
+    }
+    let _ = fs::remove_dir(&apps);
+    let _ = fs::remove_dir(&dir);
+    true
+}
+
+/// GTK and GNOME Shell rescan a theme only when its top directory's mtime moves;
+/// a file under an existing `NxN/apps` leaves it alone. A user cache is rebuilt
+/// first, then stamped with the directory's new time to stay valid.
+fn refresh_icon_theme(hicolor: &Path) {
+    let cache = hicolor.join("icon-theme.cache");
+    let cached = cache.is_file();
+    if cached {
+        let _ = std::process::Command::new("gtk-update-icon-cache")
+            .args(["-f", "-t", "-q"])
+            .arg(hicolor)
+            .output();
+    }
+    // Whole seconds, compared for equality: a stamp inside the directory's
+    // current second would read as no change.
+    let Ok(old) = fs::metadata(hicolor).and_then(|meta| meta.modified()) else {
+        return;
+    };
+    let next = SystemTime::now().max(old + Duration::from_secs(1));
+    let _ = fs::File::open(hicolor).and_then(|dir| dir.set_modified(next));
+    if cached {
+        let _ = fs::File::open(&cache).and_then(|file| file.set_modified(next));
     }
 }
 
@@ -168,12 +254,12 @@ fn exec_value(exe: &Path) -> Option<String> {
     )))
 }
 
-fn install_desktop_entry(home: &Path, exe: &Path) {
+fn install_desktop_entry(data: &Path, exe: &Path) {
     let Some(exec) = exec_value(exe) else {
         crate::verr!("[desktop_entry] Executable path cannot be written to an Exec line");
         return;
     };
-    let dir = home.join(".local/share/applications");
+    let dir = data.join("applications");
     if fs::create_dir_all(&dir).is_err() {
         return;
     }

@@ -149,10 +149,20 @@ pub(crate) fn data_dir() -> Option<&'static Path> {
     Some(&test_root::root().data)
 }
 
-/// Only the Linux desktop entry asks for the home under test.
+/// Where `XDG_DATA_HOME` points when it is absolute, else `<home>/.local/share`.
+/// Only the desktop entry and its icons follow it: moving `data_dir` would strand
+/// the data already there until a migration exists.
+#[cfg(all(not(test), target_os = "linux"))]
+pub(crate) fn user_data_home() -> Option<PathBuf> {
+    resolve_base(std::env::var_os("XDG_DATA_HOME"), || {
+        user_home().map(|home| home.join(".local").join("share"))
+    })
+}
+
+/// Under test the desktop entry lands in the process's own home.
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) fn user_home() -> Option<&'static Path> {
-    Some(&test_root::root().home)
+pub(crate) fn user_data_home() -> Option<PathBuf> {
+    Some(test_root::root().home.join(".local").join("share"))
 }
 
 /// The data directory. Every caller runs after `main` has refused to start
