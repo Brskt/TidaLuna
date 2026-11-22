@@ -155,21 +155,6 @@ fn leaves_an_unrelated_relationship_alone() {
     assert_eq!(artists[0]["type"], "artists");
 }
 
-#[test]
-fn strips_only_json_on_the_openapi_host() {
-    let openapi = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
-    assert!(should_strip(&openapi, "application/vnd.api+json"));
-    assert!(!should_strip(&openapi, "text/html"));
-
-    // The legacy gateway describes covers with flat fields; a different shape
-    // needs its own transform.
-    let legacy = RequestUrl::new("https://api.tidal.com/v1/albums/1".to_owned());
-    assert!(!should_strip(&legacy, "application/json"));
-
-    let plaintext = RequestUrl::new("http://openapi.tidal.com/v2/albums/1".to_owned());
-    assert!(!should_strip(&plaintext, "application/json"));
-}
-
 /// Armed on the gateway only, and only while the codec is off: the switch disarms it on the same
 /// url and cannot arm it on another host.
 #[test]
@@ -185,25 +170,6 @@ fn the_filter_arms_on_the_gateway_while_the_codec_is_off() {
             arms_artwork_filter(&url, codec_ready),
             armed,
             "{host}, codec ready: {codec_ready}"
-        );
-    }
-}
-
-/// The body rule strips JSON on the gateway while the codec is off; the switch lets the body
-/// through, and a body that is not JSON is left alone whatever the switch says.
-#[test]
-fn the_body_rule_strips_json_on_the_gateway_while_the_codec_is_off() {
-    let url = RequestUrl::new("https://openapi.tidal.com/v2/albums/1".to_owned());
-    for (content_type, codec_ready, stripped) in [
-        ("application/vnd.api+json", false, true),
-        ("application/vnd.api+json", true, false),
-        ("image/jpeg", false, false),
-        ("image/jpeg", true, false),
-    ] {
-        assert_eq!(
-            strips_artwork_body(&url, content_type, codec_ready),
-            stripped,
-            "{content_type}, codec ready: {codec_ready}"
         );
     }
 }

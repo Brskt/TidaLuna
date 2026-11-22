@@ -21,8 +21,6 @@ function pageWith(native: (input: any) => Promise<Response>) {
 		window,
 		globalThis: slot,
 		invokeIpc: async () => ({ status: 200, headers: {}, body: "{}" }),
-		captureToken: () => {},
-		_tidalDomain: "tidal.com",
 	});
 	return { window, slot };
 }

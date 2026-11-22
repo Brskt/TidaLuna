@@ -1,9 +1,9 @@
-//! Tests for `src/ipc/plugin/proxy/scrub.rs`, attached to it by `#[path]`.
+//! Tests for `src/ipc/plugin/scrub.rs`, attached to it by `#[path]`.
 
 use super::*;
 
 #[test]
-fn scrub_replaces_real_token_with_opaque() {
+fn a_real_token_in_a_body_is_replaced_by_its_nonce() {
     let pairs = vec![(
         "real-access-token-1234".to_string(),
         "luna_aaaa".to_string(),

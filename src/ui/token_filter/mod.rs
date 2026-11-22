@@ -23,19 +23,6 @@ pub(crate) fn userfree_to_string(userfree: &CefStringUserfreeUtf16) -> String {
 
 const OPAQUE_PREFIX: &str = "luna_";
 
-/// Hosts where a missing Authorization header should be auto-filled with the bearer token.
-/// Subset of should_rewrite_token - excludes telemetry/DRM hosts that don't need OAuth.
-pub(crate) fn needs_auto_injection(url: &RequestUrl) -> bool {
-    let Some(parsed) = url.parsed() else {
-        return false;
-    };
-    if parsed.scheme() != "https" {
-        return false;
-    }
-
-    crate::ui::nav::is_tidal_api_host(parsed.host_str().unwrap_or(""))
-}
-
 pub(crate) fn should_rewrite_token(url: &RequestUrl) -> bool {
     let Some(parsed) = url.parsed() else {
         return false;

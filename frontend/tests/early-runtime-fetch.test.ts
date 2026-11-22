@@ -19,25 +19,14 @@ const pbi = (id: string) => ({ trackId: Number(id), manifestMimeType: "applicati
 const streamOf = (id: string) => `data:application/dash+xml;base64,${pbi(id).manifest}`;
 const url = (id: string) => `https://api.tidal.com/v1/tracks/${id}/playbackinfo?audioquality=HIGH`;
 
-type Page = { window: any; slot: any; proxied: string[]; captured: string[] };
+type Page = { window: any; slot: any };
 
-// The fragment on a page whose native `fetch` answers `native(input)`. `proxy.fetch` answers with `proxyBody`.
-function pageWith(native: (input: any) => Promise<Response>, proxyBody = "{}"): Page {
+// The fragment on a page whose native `fetch` answers `native(input)`.
+function pageWith(native: (input: any) => Promise<Response>): Page {
 	const window: any = { fetch: native };
 	const fakeGlobal: any = {};
-	const proxied: string[] = [];
-	const captured: string[] = [];
-	runFragment(source, {
-		window,
-		globalThis: fakeGlobal,
-		invokeIpc: async (channel: string, target: string) => {
-			proxied.push(`${channel} ${target}`);
-			return { status: 200, headers: {}, body: proxyBody };
-		},
-		captureToken: (token: string) => captured.push(token),
-		_tidalDomain: "tidal.com",
-	});
-	return { window, slot: fakeGlobal, proxied, captured };
+	runFragment(source, { window, globalThis: fakeGlobal });
+	return { window, slot: fakeGlobal };
 }
 
 const answering = (id: string) => async () => new Response(JSON.stringify(pbi(id)), { status: 200 });
@@ -119,20 +108,6 @@ test("the slot's observer names the product of an answer, and the SDK still read
 	expect(productOfStream(streamOf("7003"))).toBe("7003");
 });
 
-test("an answer the proxy fallback produced is observed too", async () => {
-	const { window, slot, proxied } = pageWith(async () => {
-		throw new TypeError("Failed to fetch");
-	}, JSON.stringify(pbi("7004")));
-	expect(installSdkFetchObserver(slot.__lunaFetchTapInstall)).toBe(true);
-
-	const response = await window.fetch(url("7004"));
-	await flush();
-
-	expect(proxied).toEqual([`proxy.fetch ${url("7004")}`]);
-	expect((await response.json()).trackId).toBe(7004);
-	expect(productOfStream(streamOf("7004"))).toBe("7004");
-});
-
 test("a rejected call rejects the page's promise as it did, and the observer is told", async () => {
 	const { window, slot } = pageWith(async () => {
 		throw new TypeError("Failed to fetch");
@@ -142,7 +117,6 @@ test("a rejected call rejects the page's promise as it did, and the observer is 
 		told = answer;
 	});
 
-	// Not a tidal.com url: the proxy fallback keeps out of it and the native error stands.
 	await expect(window.fetch("https://example.com/x")).rejects.toThrow("Failed to fetch");
 	await expect(told).rejects.toThrow("Failed to fetch");
 });
@@ -160,24 +134,6 @@ test("an observer that throws cannot fail the page's fetch, and is reported", as
 
 	expect(response!.status).toBe(200);
 	expect(reported.map((w) => w[0])).toEqual(["[luna:fetch] observer failed:"]);
-});
-
-test("with no observer installed the page's fetch is the pinned one and nothing else", async () => {
-	const { window, captured } = pageWith(answering("7006"));
-
-	const response = await window.fetch("https://api.tidal.com/v1/x", { headers: { Authorization: "Bearer luna_nonce" } });
-
-	expect(response.status).toBe(200);
-	expect(captured).toEqual(["luna_nonce"]);
-});
-
-test("the early runtime's own work on a call runs whether or not an observer is installed", async () => {
-	const { window, slot, captured } = pageWith(answering("7007"));
-	slot.__lunaFetchTapInstall(() => {});
-
-	await window.fetch("https://api.tidal.com/v1/x", { headers: { Authorization: "Bearer luna_other" } });
-
-	expect(captured).toEqual(["luna_other"]);
 });
 
 test("installing from a page without the early runtime says so, and leaves the page unobserved", async () => {

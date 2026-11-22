@@ -11,6 +11,7 @@ mod native;
 mod path_probe;
 mod plugin_db;
 mod proxy;
+mod scrub;
 mod source;
 mod store_move;
 mod trust_prompt;
@@ -23,7 +24,7 @@ pub(crate) use jsrt::handle_jsrt_fire_and_forget;
 pub(crate) use jsrt::open_plugin_gate;
 pub(crate) use native::native_data_dirs;
 // Token-scrub for plugin-facing response bodies; reused by the native egress path.
-pub(crate) use proxy::scrub_real_tokens;
+pub(crate) use scrub::scrub_real_tokens;
 
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -135,9 +136,6 @@ pub(crate) fn handle_plugin_ipc(msg: IpcMessage, query_id: i64, callback: IpcCal
         }
         "plugin.download" => {
             download::handle_download(&msg, callback);
-        }
-        "proxy.fetch" => {
-            proxy::handle_proxy_fetch_dispatch(&msg, query_id, callback);
         }
         "proxy.head" => {
             proxy::handle_proxy_head_dispatch(&msg, query_id, callback);

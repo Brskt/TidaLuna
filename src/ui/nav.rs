@@ -130,6 +130,10 @@ impl RequestUrl {
 /// Broad check: does the URL belong to a Tidal-owned domain?
 /// Used by the exfiltration guard to distinguish Tidal traffic from external.
 pub(crate) fn is_tidal_origin(url: &RequestUrl) -> bool {
+/// May a proxy request (`proxy.head`) go to this URL? Destination and transport both have to hold:
+/// reqwest never travels through Blink, and nothing upgrades a plaintext scheme on the way out. An
+/// unparseable URL carries no transport to judge, and reqwest reads that same string with that same
+/// parser.
     let Some(parsed) = url.parsed() else {
         // Unparseable but relative stays same-origin. A leading `//` is not that: it names a
         // foreign host against the caller's scheme, and `starts_with('/')` alone reads it as a
@@ -152,12 +156,6 @@ pub(crate) fn is_token_endpoint(url: &RequestUrl) -> bool {
     (host == HOST_AUTH || host == HOST_LOGIN) && parsed.path().contains("oauth2/token")
 }
 
-/// May a credential-bearing proxy request go to this URL? Destination and transport both have to
-/// hold: `proxy.fetch` splices the real refresh token into a token-endpoint body and hands it to
-/// reqwest, which never travels through Blink, and nothing upgrades a plaintext scheme on the way
-/// out. An unparseable URL carries no transport to judge, and reqwest reads that same string with
-/// that same parser. Admission rests on the origin rule alone, pinned by
-/// `every_token_endpoint_host_is_also_a_tidal_origin`: a new auth host belongs there.
 pub(crate) fn is_secure_tidal_target(url: &RequestUrl) -> bool {
     if !is_tidal_origin(url) {
         return false;
@@ -206,7 +204,7 @@ pub(crate) fn is_secure_image_target(url: &RequestUrl) -> bool {
 }
 
 /// TIDAL API hosts that receive the injected OAuth bearer. Single source of truth for
-/// `is_tidal_api`, `needs_auto_injection`, `should_rewrite_token`; the lists cannot drift.
+/// `is_tidal_api` and `should_rewrite_token`; the lists cannot drift.
 pub(crate) fn is_tidal_api_host(host: &str) -> bool {
     matches!(
         host,

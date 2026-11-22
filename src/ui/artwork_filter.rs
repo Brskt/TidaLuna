@@ -34,21 +34,11 @@ pub(crate) fn carries_json(mime: &str) -> bool {
     mime.contains("json")
 }
 
-pub(crate) fn should_strip(url: &RequestUrl, mime: &str) -> bool {
-    carries_json(mime) && serves_artworks(url)
-}
-
 /// The request half, with the decoder's readiness folded in. Readiness, not the switch: a switch
 /// left on over a codec that failed to download would hand TIDAL a video nothing can paint.
 /// A parameter, never read here: this module's rules run under tests that hold no process state.
 pub(crate) fn arms_artwork_filter(url: &RequestUrl, video_codec_ready: bool) -> bool {
     !video_codec_ready && serves_artworks(url)
-}
-
-/// The body half, for the path that fetches upstream itself and so has no CEF response to
-/// attach a filter to.
-pub(crate) fn strips_artwork_body(url: &RequestUrl, mime: &str, video_codec_ready: bool) -> bool {
-    !video_codec_ready && should_strip(url, mime)
 }
 
 pub(crate) enum StripResult {

@@ -21,7 +21,7 @@ pub(super) fn handle_plugin_fetch(
         } else {
             Some(opts_json.as_str())
         };
-        if super::proxy::leaks_real_token(&url, payload) {
+        if super::scrub::leaks_real_token(&url, payload) {
             crate::vprintln!(
                 "[PLUGIN:FETCH] BLOCKED token exfiltration from '{}' to {}",
                 plugin_id,
@@ -132,7 +132,7 @@ fn dispatch_authenticated_fetch(
         };
         match result {
             // Defence-in-depth: scrub any leaked real token before plugin JS sees it.
-            Ok(json) => ipc_callback_ok(&cb, &super::proxy::scrub_real_tokens(json)),
+            Ok(json) => ipc_callback_ok(&cb, &super::scrub::scrub_real_tokens(json)),
             Err(e) => ipc_callback_err(&cb, 500, &e),
         }
     });

@@ -24,9 +24,8 @@ fn a_tidal_origin_is_the_apex_a_subdomain_or_a_relative_path() {
     }
 }
 
-/// `proxy.fetch` puts the real refresh token in a token-endpoint body and hands it to reqwest,
-/// which has no https_only: a plaintext target never passes. Fail closed: a url that carries no
-/// transport (`fetch_proxy.js:57` diverts real bare paths first), or a foreign host, is refused.
+/// `proxy.head` hands the url to reqwest, which has no https_only: a plaintext target never
+/// passes. Fail closed: a url that carries no transport, or a foreign host, is refused.
 #[test]
 fn a_secure_tidal_target_is_https_on_a_tidal_origin_and_nothing_else() {
     for (target, expected) in [
