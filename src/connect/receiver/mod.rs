@@ -344,6 +344,7 @@ async fn routing_loop(
     // disconnect is read, and the controller would own the player for the rest of the process.
     // `reset` stops only a cast (`StopScope::Cast`), leaving local music alone.
     playback_ctrl.reset();
+    crate::connect::ipc::post_emit("connect.receiver.modes_released");
 
     client_comm.shutdown().await;
     crate::vprintln!("[connect::receiver] Routing loop ended");
@@ -378,6 +379,8 @@ async fn settle(
                 end,
             ))) => {
                 playback_ctrl.reset();
+                // The page restores its own shuffle and repeat as it takes the player back.
+                crate::connect::ipc::post_emit("connect.receiver.modes_released");
                 match end {
                     // Kept for a `resumeSession`: its phone steps on through the same queue.
                     SessionEnd::Suspended => {}
@@ -388,6 +391,8 @@ async fn settle(
                 SessionInternalEvent::SessionStarted { session_id },
             )) => {
                 crate::vprintln!("[connect::receiver] Session started: {}", session_id);
+                // A resumed session keeps its queue: the page shows its modes again.
+                queue_mgr.announce_modes();
             }
             Effect::Playback(PlaybackNotifyEvent::ToSession(msg)) => {
                 client_comm.send_to_each(&session_mgr.members(), &msg).await;
@@ -465,6 +470,15 @@ async fn apply_queue_effect(
         }
         QueueNotifyEvent::QueueGenBumped { queue_gen } => {
             playback_ctrl.set_queue_gen(queue_gen);
+        }
+        QueueNotifyEvent::ModesChanged {
+            repeat_mode,
+            shuffled,
+        } => {
+            crate::connect::ipc::post_emit_with_data(
+                "connect.receiver.modes_changed",
+                &serde_json::json!({ "repeatMode": repeat_mode, "shuffled": shuffled }),
+            );
         }
         QueueNotifyEvent::ReloadAfterChange {
             socket_id,

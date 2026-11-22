@@ -9,6 +9,7 @@ import { isStoreNotPublished } from "../../plugins/lib/src/redux/storeNotPublish
 import { storePublished } from "../store-published";
 import { isOutputLevelReport, mirrorRustLevel } from "../volume";
 import { handleReceiverMediaChanged } from "./middleware";
+import { releaseReceiverModes, showReceiverModes } from "./modes";
 import type {
     ConnectionLostPayload,
     ConnectStateSnapshot,
@@ -17,6 +18,7 @@ import type {
     PlayerStatusChangedPayload,
     QueueChangedPayload,
     ReceiverMediaChangedPayload,
+    ReceiverModesPayload,
     ServerErrorPayload,
     SessionEndedPayload,
     SessionStartedPayload,
@@ -159,6 +161,14 @@ export async function setupConnectEventListeners(store: Store, published: () => 
         // Enrichment + DOM mutation lives in the middleware: the listener
         // stays a pure relay.
         void handleReceiverMediaChanged(store, data, published);
+    });
+
+    onIpcEvent("connect.receiver.modes_changed", (data: ReceiverModesPayload) => {
+        void showReceiverModes(store, data, published);
+    });
+
+    onIpcEvent("connect.receiver.modes_released", () => {
+        releaseReceiverModes(store);
     });
 
     // Rust applies a controller's volume and mute itself: the receiver plays with or without a

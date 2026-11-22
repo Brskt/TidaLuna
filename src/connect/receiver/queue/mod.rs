@@ -62,6 +62,12 @@ pub(crate) enum QueueNotifyEvent {
     QueueGenBumped {
         queue_gen: u64,
     },
+    /// The controller's shuffle and repeat modes, for this host's page to show while it plays the
+    /// cast: announced with each `queueInfo` the phones hear.
+    ModesChanged {
+        repeat_mode: RepeatMode,
+        shuffled: bool,
+    },
     /// A change the queue server took: the window is reloaded, then the change answered, once
     /// the `notifyQueueItemsChanged` queued ahead of it has gone out (see `reload_after_change`).
     ReloadAfterChange {
@@ -473,6 +479,17 @@ impl QueueManager {
             .and_then(|idx| self.queue_items.get(idx))
             .map(|item| item.item_id.clone())
             .or_else(|| self.current_item_id_hint.clone())
+    }
+
+    /// Announce the queue's shuffle and repeat modes to this host's page, as the phones hear them.
+    /// Nothing without a queue.
+    pub fn announce_modes(&self) {
+        if let Some(ref qi) = self.queue_info {
+            self.outbox.push(QueueNotifyEvent::ModesChanged {
+                repeat_mode: qi.repeat_mode,
+                shuffled: qi.shuffled,
+            });
+        }
     }
 
     /// Queue the answer to a phone's request among the command's effects. A request with no id,

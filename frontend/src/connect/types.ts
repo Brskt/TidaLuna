@@ -122,6 +122,12 @@ export interface ConnectStateSnapshot {
     outputLevel?: OutputLevelReport;
 }
 
+/** `connect.receiver.modes_changed`: the controller's shuffle and repeat, as the phones hear them. */
+export interface ReceiverModesPayload {
+    repeatMode: RepeatMode;
+    shuffled: boolean;
+}
+
 export interface QueueLoadRequestData {
     audioquality?: string;
     autoplay?: boolean;

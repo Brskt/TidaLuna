@@ -7,6 +7,7 @@
 import { tidalFetch } from "../ipc";
 import { isStoreNotPublished } from "../../plugins/lib/src/redux/storeNotPublished";
 import { storePublished } from "../store-published";
+import { reshowReceiverModes } from "./modes";
 import type { ReceiverMediaChangedPayload, ReceiverStream } from "./types";
 
 type Store = {
@@ -122,6 +123,7 @@ function castTrackBecomesQueue(store: Store, mediaItemId: unknown): void {
         type: "playQueue/RESET",
         payload: { currentIndex: 0, elements: [element], originalSource: [element] },
     });
+    reshowReceiverModes(store);
     // TIDAL's sagas run inside that dispatch, and its load prefills the bar first (`prefilled`).
     // It skips an item its saved restart state names, whatever its player holds now. The reload it
     // runs after a purchase has no such shortcut.

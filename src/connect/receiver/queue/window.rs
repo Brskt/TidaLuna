@@ -245,6 +245,7 @@ impl QueueManager {
                 self.outbox.push(QueueNotifyEvent::ToSession(msg));
             }
         }
+        self.announce_modes();
     }
 
     pub(super) async fn reload_queue_window_around_current(&mut self) {

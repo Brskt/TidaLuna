@@ -353,7 +353,12 @@ pub(crate) fn post_emit_with_data(channel: &str, data: &impl serde::Serialize) {
     post_js_to_ui(build_emit_js(channel, Some(&json)));
 }
 
+/// Dropped before CEF's context is up: no page exists yet to hear it, and the Connect tasks that
+/// emit run outside any CEF callback (nothing else proves CEF runs, see `context_ready`).
 pub(crate) fn post_js_to_ui(js: String) {
+    if !crate::app_state::context_ready() {
+        return;
+    }
     let mut task = ConnectEmitTask::new(js);
     post_task(ThreadId::UI, Some(&mut task));
 }

@@ -254,6 +254,7 @@ impl QueueManager {
                 if let Ok(msg) = serde_json::to_value(&notification) {
                     self.outbox.push(QueueNotifyEvent::ToSession(msg));
                 }
+                self.announce_modes();
                 self.outbox.push(QueueNotifyEvent::ReloadAfterChange {
                     socket_id,
                     request_id,
