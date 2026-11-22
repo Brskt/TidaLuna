@@ -166,8 +166,8 @@ async fn commands_on_the_queue_are_refused_with_no_queue_loaded() {
             queue.state = state;
 
             assert_eq!(
-                queue.handle_command(1, command, payload).await,
-                RequestResult::NoQueue,
+                queue.handle_command(1, Some(1), command, payload).await,
+                Some(RequestResult::NoQueue),
                 "{state:?}: {command}"
             );
             assert!(

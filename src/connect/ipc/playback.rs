@@ -56,7 +56,7 @@ pub(super) fn set_repeat(msg: &IpcMessage, callback: IpcCallback) {
         .args
         .first()
         .and_then(|v| v.as_str())
-        .unwrap_or("NONE")
+        .unwrap_or("OFF")
         .to_string();
     send_device_cmd(
         serde_json::json!({"command": "setRepeatMode", "repeatMode": mode}),

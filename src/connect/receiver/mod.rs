@@ -219,7 +219,7 @@ async fn routing_loop(
                                 Some(RequestResult::Done)
                             }
                             DispatchedCommand::Queue { socket_id, command, payload } => {
-                                Some(queue_mgr.handle_command(socket_id, &command, &payload).await)
+                                queue_mgr.handle_command(socket_id, request_id, &command, &payload).await
                             }
                         };
                         // Sent ahead of the effects this command queued, which `settle` writes:
@@ -402,22 +402,27 @@ async fn settle(
                 }
             }
             Effect::Queue(event) => {
-                apply_queue_effect(*event, client_comm, session_mgr, playback_ctrl).await
+                apply_queue_effect(*event, client_comm, session_mgr, playback_ctrl, queue_mgr).await
             }
         }
     }
 }
 
-/// What the queue asks of the routing loop: a word for the session's phones, or work for playback.
+/// What the queue asks of the routing loop: a word for the session's phones, work for playback,
+/// or its own work once the words queued ahead of it are out.
 async fn apply_queue_effect(
     event: QueueNotifyEvent,
     client_comm: &ClientCommunicator,
     session_mgr: &ReceiverSession,
     playback_ctrl: &mut PlaybackController,
+    queue_mgr: &mut QueueManager,
 ) {
     match event {
         QueueNotifyEvent::ToSession(msg) => {
             client_comm.send_to_each(&session_mgr.members(), &msg).await;
+        }
+        QueueNotifyEvent::ToSocket { socket_id, message } => {
+            let _ = client_comm.send_to(socket_id, &message).await;
         }
         QueueNotifyEvent::SetMedia {
             media_info,
@@ -460,6 +465,12 @@ async fn apply_queue_effect(
         }
         QueueNotifyEvent::QueueGenBumped { queue_gen } => {
             playback_ctrl.set_queue_gen(queue_gen);
+        }
+        QueueNotifyEvent::ReloadAfterChange {
+            socket_id,
+            request_id,
+        } => {
+            queue_mgr.reload_after_change(socket_id, request_id).await;
         }
     }
 }

@@ -241,6 +241,10 @@ impl ConnectHttp {
         self.client(target.kind).get(target.url.clone())
     }
 
+    fn put(&self, target: &RootedUrl) -> reqwest::RequestBuilder {
+        self.client(target.kind).put(target.url.clone())
+    }
+
     fn post(&self, target: &RootedUrl) -> reqwest::RequestBuilder {
         self.client(target.kind).post(target.url.clone())
     }
@@ -296,25 +300,56 @@ pub(super) async fn get_with_auth(
         .map_err(|e| QueueError::InvalidResponse(e.to_string()))
 }
 
-/// POST a JSON body to the queue server. The response body is discarded;
-/// only HTTP success is reported.
-pub(super) async fn post_with_auth(
+/// What the queue server made of a PUT, sorted as TIDAL's receiver sorts it
+/// (`QueueWindowLoader::onReceived`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PutReply {
+    /// 200 or 204.
+    Applied,
+    /// 401: the change waits for the controller's next token.
+    TokenExpired { body: String },
+    /// 400, 404 or 500: the change is given up and the queue dropped.
+    Refused { status: u16, body: String },
+    /// Any other status, which TIDAL's receiver leaves unanswered.
+    Unhandled { status: u16 },
+}
+
+impl PutReply {
+    pub(super) fn sort(status: u16, body: String) -> Self {
+        match status {
+            200 | 204 => Self::Applied,
+            401 => Self::TokenExpired { body },
+            400 | 404 | 500 => Self::Refused { status, body },
+            _ => Self::Unhandled { status },
+        }
+    }
+}
+
+/// PUT a JSON body to the queue server, as TIDAL's receiver changes a queue's
+/// shuffle or repeat mode.
+pub(super) async fn put_with_auth(
     http: &ConnectHttp,
     queue_server: Option<&ServerInfo>,
     target: &RootedUrl,
     body: &serde_json::Value,
-) -> Result<(), QueueError> {
+) -> Result<PutReply, QueueError> {
     let server = queue_server.ok_or(QueueError::NoServer)?;
     let auth_header = resolve_auth_header(server);
 
-    http.post(target)
+    let response = http
+        .put(target)
         .header("Authorization", &auth_header)
         .json(body)
         .timeout(std::time::Duration::from_secs(consts::HTTP_TIMEOUT_SECS))
         .send()
         .await
         .map_err(send_error)?;
-    Ok(())
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| QueueError::Network(e.to_string()))?;
+    Ok(PutReply::sort(status, body))
 }
 
 /// Successful OAuth refresh outcome. The server may rotate the refresh

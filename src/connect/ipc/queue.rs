@@ -36,7 +36,7 @@ pub(super) fn load_queue(msg: &IpcMessage, callback: IpcCallback) {
         "currentMediaInfo": data.get("currentMediaInfo"),
         "queueInfo": {
             "queueId": data.get("queueId").and_then(|v| v.as_str()).unwrap_or(""),
-            "repeatMode": data.get("repeatMode").and_then(|v| v.as_str()).unwrap_or("NONE"),
+            "repeatMode": data.get("repeatMode").and_then(|v| v.as_str()).unwrap_or("OFF"),
             "shuffled": data.get("shuffled").and_then(|v| v.as_bool()).unwrap_or(false),
             "maxAfterSize": data.get("maxAfterSize").and_then(|v| v.as_u64()).unwrap_or(10),
             "maxBeforeSize": data.get("maxBeforeSize").and_then(|v| v.as_u64()).unwrap_or(10),

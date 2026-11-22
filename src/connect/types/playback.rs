@@ -96,6 +96,9 @@ pub(crate) enum RequestResult {
     /// Refused, and nothing done: the command acts on the controller's queue and none is
     /// loaded. TIDAL's receiver answers this in its IDLE state.
     NoQueue,
+    /// Given up: the queue server turned the change down, or a newer change replaced it while
+    /// it waited. TIDAL's receiver answers this when it cancels the queue's pending work.
+    Cancelled,
 }
 
 impl RequestResult {
@@ -105,6 +108,7 @@ impl RequestResult {
             result_code: match self {
                 Self::Done => 0,
                 Self::NoQueue => 1002,
+                Self::Cancelled => 1003,
             },
             sub_code: None,
         }

@@ -10,13 +10,35 @@ pub(crate) struct QueueInfo {
     pub max_before_size: u32,
 }
 
+/// Sent as TIDAL's receiver sends it in a `queueInfo`: `OFF`, `ONE`, `ALL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum RepeatMode {
-    #[serde(alias = "OFF")]
-    None,
+    #[serde(alias = "NONE")]
+    Off,
     One,
     All,
+}
+
+impl RepeatMode {
+    /// A controller's word for a mode, read as TIDAL's receiver reads it: `ONE` and `ALL`, and
+    /// anything else off.
+    pub(crate) fn from_controller(word: &str) -> Self {
+        match word {
+            "ONE" => Self::One,
+            "ALL" => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    /// The `repeat_mode` the queue server takes, lowercase as TIDAL's receiver sends it.
+    pub(crate) fn queue_server_word(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::One => "one",
+            Self::All => "all",
+        }
+    }
 }
 
 // Queue notifications (device/receiver -> controller/mobile)

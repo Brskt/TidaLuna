@@ -227,11 +227,7 @@ impl QueueManager {
                 info.queue_id = qi.to_string();
             }
             if let Some(rm) = response.get("repeatMode").and_then(|v| v.as_str()) {
-                info.repeat_mode = match rm {
-                    "ONE" => RepeatMode::One,
-                    "ALL" => RepeatMode::All,
-                    _ => RepeatMode::None,
-                };
+                info.repeat_mode = RepeatMode::from_controller(rm);
             }
             if let Some(sh) = response.get("shuffle").and_then(|v| v.as_bool()) {
                 info.shuffled = sh;

@@ -10,12 +10,12 @@
 //! the same module. Visibility is `pub(super)`: `dispatch` in `mod.rs`
 //! can call them, but nothing outside the queue module can.
 
-use super::http::{ConnectRoot, RootKind};
+use super::http::{ConnectRoot, PutReply, RootKind};
 use super::media::resolve_media_url;
 use super::next_media_seq;
 use super::{
-    MediaInfo, QueueChangeReason, QueueInfo, QueueManager, QueueNotification, QueueNotifyEvent,
-    QueueState, RepeatMode, http,
+    MediaInfo, PendingChange, QueueChange, QueueChangeReason, QueueInfo, QueueManager,
+    QueueNotification, QueueNotifyEvent, QueueState, RepeatMode, RequestResult, http,
 };
 
 impl QueueManager {
@@ -190,7 +190,7 @@ impl QueueManager {
         let notification = QueueNotification::NotifyQueueItemsChanged {
             queue_info: self.queue_info.clone().unwrap_or_else(|| QueueInfo {
                 queue_id: String::new(),
-                repeat_mode: RepeatMode::None,
+                repeat_mode: RepeatMode::Off,
                 shuffled: false,
                 max_after_size: 0,
                 max_before_size: 0,
@@ -202,99 +202,121 @@ impl QueueManager {
         }
     }
 
-    pub(super) async fn proc_set_repeat_mode(&mut self, payload: &serde_json::Value) {
+    /// A controller's shuffle or repeat change, made as TIDAL's receiver makes it: a PUT to the
+    /// queue server, then on success `notifyQueueItemsChanged`, a window reload and the answer.
+    /// `None` when the answer is queued with those effects; `socket_id` is `None` for a click here.
+    pub(super) async fn proc_change(
+        &mut self,
+        socket_id: Option<u32>,
+        request_id: Option<u64>,
+        change: QueueChange,
+    ) -> Option<RequestResult> {
         self.bump_queue_gen();
-
-        let mode_str = payload
-            .get("repeatMode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("NONE");
-        let mode = match mode_str {
-            "ONE" => RepeatMode::One,
-            "ALL" => RepeatMode::All,
-            _ => RepeatMode::None,
+        if let Some(replaced) = self.pending_change.take() {
+            self.answer(
+                replaced.socket_id,
+                replaced.request_id,
+                RequestResult::Cancelled,
+            );
+        }
+        // A media loaded alone has no cloud queue to change.
+        let Some(current) = self.queue_info.clone() else {
+            return Some(RequestResult::NoQueue);
+        };
+        if change.is_in(&current) {
+            crate::vprintln!("[connect::queue] {change:?}: already in place");
+            return Some(RequestResult::Done);
+        }
+        let target = change.applied_to(&current);
+        let Some(server) = self.queue_server.clone() else {
+            crate::verr!("[connect::queue] {change:?}: no queue server");
+            return Some(RequestResult::Cancelled);
         };
 
-        if let Some(ref mut qi) = self.queue_info {
-            qi.repeat_mode = mode;
-        }
-
-        // POST to queue server.
-        if let Some(ref qs) = self.queue_server {
-            let url = match ConnectRoot::admit_logged(&qs.server_url, RootKind::Service)
-                .and_then(|root| root.url(&["repeatmode"], &[]))
-            {
-                Ok(url) => url,
-                Err(e) => {
-                    crate::verr!("[connect::queue] POST repeatmode refused: {e}");
-                    return;
-                }
-            };
-            let body = serde_json::json!({ "repeatMode": mode_str });
-            if let Err(e) =
-                http::post_with_auth(&self.http, self.queue_server.as_ref(), &url, &body).await
-            {
-                crate::vprintln!("[connect::queue] POST repeatmode failed: {e}");
+        let url = match ConnectRoot::admit_logged(&server.server_url, RootKind::Service)
+            .and_then(|root| change.url(&root, &current.queue_id))
+        {
+            Ok(url) => url,
+            Err(e) => {
+                crate::verr!("[connect::queue] {change:?}: refused, {e}");
+                return Some(RequestResult::Cancelled);
             }
-        }
-
-        let notification = QueueNotification::NotifyQueueItemsChanged {
-            queue_info: self.queue_info.clone().unwrap_or_else(|| QueueInfo {
-                queue_id: String::new(),
-                repeat_mode: mode,
-                shuffled: false,
-                max_after_size: 0,
-                max_before_size: 0,
-            }),
-            reason: Some(QueueChangeReason::RepeatModeChanged),
         };
-        if let Ok(msg) = serde_json::to_value(&notification) {
-            self.outbox.push(QueueNotifyEvent::ToSession(msg));
+        let body = change.body(&self.current_item_id().unwrap_or_default());
+        match http::put_with_auth(&self.http, Some(&server), &url, &body).await {
+            Ok(PutReply::Applied) => {
+                crate::vprintln!("[connect::queue] {change:?}: applied");
+                self.queue_info = Some(target.clone());
+                let notification = QueueNotification::NotifyQueueItemsChanged {
+                    queue_info: target,
+                    reason: Some(change.reason()),
+                };
+                if let Ok(msg) = serde_json::to_value(&notification) {
+                    self.outbox.push(QueueNotifyEvent::ToSession(msg));
+                }
+                self.outbox.push(QueueNotifyEvent::ReloadAfterChange {
+                    socket_id,
+                    request_id,
+                });
+                None
+            }
+            Ok(PutReply::TokenExpired { body }) => {
+                crate::vprintln!("[connect::queue] {change:?}: 401, waiting for updateServerInfo");
+                // To the phone that asked; for a click on this host, to the session's phones, which
+                // alone hold a token to send.
+                let message = Self::queue_server_refusal(401, &body);
+                self.outbox.push(match socket_id {
+                    Some(socket_id) => QueueNotifyEvent::ToSocket { socket_id, message },
+                    None => QueueNotifyEvent::ToSession(message),
+                });
+                self.pending_change = Some(PendingChange {
+                    socket_id,
+                    request_id,
+                    target,
+                });
+                None
+            }
+            // Answered before the refusal reaches the session's phones, as TIDAL's receiver
+            // answers it.
+            Ok(PutReply::Refused { status, body }) => {
+                crate::verr!("[connect::queue] {change:?}: refused with HTTP {status}");
+                self.outbox
+                    .push(QueueNotifyEvent::ToSession(Self::queue_server_refusal(
+                        status, &body,
+                    )));
+                self.drop_queue();
+                Some(RequestResult::Cancelled)
+            }
+            // TIDAL's receiver leaves these unanswered until a newer change cancels them: the
+            // phone gets that cancel now instead.
+            Ok(PutReply::Unhandled { status }) => {
+                crate::verr!("[connect::queue] {change:?}: unexpected HTTP {status}");
+                Some(RequestResult::Cancelled)
+            }
+            Err(e) => {
+                crate::verr!("[connect::queue] {change:?}: {e}");
+                Some(RequestResult::Cancelled)
+            }
         }
     }
 
-    pub(super) async fn proc_set_shuffle(&mut self, payload: &serde_json::Value) {
-        self.bump_queue_gen();
+    /// The window reload that follows a change the queue server took, then its answer. Run by the
+    /// routing loop once the change's `notifyQueueItemsChanged` is out: TIDAL's receiver sends
+    /// that notification as soon as the PUT succeeds, ahead of the reload.
+    pub async fn reload_after_change(&mut self, socket_id: Option<u32>, request_id: Option<u64>) {
+        self.reload_queue_window_around_current().await;
+        self.answer_after_reload(socket_id, request_id);
+    }
 
-        let shuffle = payload
-            .get("shuffle")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if let Some(ref mut qi) = self.queue_info {
-            qi.shuffled = shuffle;
-        }
-
-        if let Some(ref qs) = self.queue_server {
-            let url = match ConnectRoot::admit_logged(&qs.server_url, RootKind::Service)
-                .and_then(|root| root.url(&["shuffle"], &[]))
-            {
-                Ok(url) => url,
-                Err(e) => {
-                    crate::verr!("[connect::queue] POST shuffle refused: {e}");
-                    return;
-                }
-            };
-            let body = serde_json::json!({ "shuffle": shuffle });
-            if let Err(e) =
-                http::post_with_auth(&self.http, self.queue_server.as_ref(), &url, &body).await
-            {
-                crate::vprintln!("[connect::queue] POST shuffle failed: {e}");
-            }
-        }
-
-        let notification = QueueNotification::NotifyQueueItemsChanged {
-            queue_info: self.queue_info.clone().unwrap_or_else(|| QueueInfo {
-                queue_id: String::new(),
-                repeat_mode: RepeatMode::None,
-                shuffled: shuffle,
-                max_after_size: 0,
-                max_before_size: 0,
-            }),
-            reason: Some(QueueChangeReason::ShuffleChanged),
+    /// The answer to a change once its window reload ends: done if the window came, cancelled
+    /// if the reload dropped the queue.
+    fn answer_after_reload(&self, socket_id: Option<u32>, request_id: Option<u64>) {
+        let result = if self.queue_loaded() {
+            RequestResult::Done
+        } else {
+            RequestResult::Cancelled
         };
-        if let Ok(msg) = serde_json::to_value(&notification) {
-            self.outbox.push(QueueNotifyEvent::ToSession(msg));
-        }
+        self.answer(socket_id, request_id, result);
     }
 
     pub(super) async fn proc_update_server_info(&mut self, payload: &serde_json::Value) {
@@ -317,6 +339,14 @@ impl QueueManager {
         {
             crate::vprintln!("[connect::queue] Retry after updateServerInfo failed: {e}");
             self.state = QueueState::Idle;
+        }
+
+        // A change refused with a 401 is not sent again: TIDAL's receiver reloads the window
+        // with the change applied, then answers it.
+        if let Some(pending) = self.pending_change.take() {
+            self.queue_info = Some(pending.target);
+            self.reload_queue_window_around_current().await;
+            self.answer_after_reload(pending.socket_id, pending.request_id);
         }
     }
 }

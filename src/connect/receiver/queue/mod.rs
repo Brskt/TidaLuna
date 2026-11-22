@@ -1,4 +1,5 @@
 mod auth;
+mod change;
 mod commands;
 mod error;
 mod http;
@@ -8,6 +9,7 @@ mod window;
 pub(crate) use error::QueueError;
 pub(crate) use http::ConnectHttp;
 
+use change::QueueChange;
 use media::{queue_item_to_media_info, resolve_media_url};
 
 use std::sync::Arc;
@@ -38,6 +40,11 @@ enum QueueState {
 pub(crate) enum QueueNotifyEvent {
     /// For the live session's phones alone.
     ToSession(serde_json::Value),
+    /// For one phone: the answer to a request it made, or a word about it.
+    ToSocket {
+        socket_id: u32,
+        message: serde_json::Value,
+    },
     SetMedia {
         media_info: MediaInfo,
         media_seq_no: u32,
@@ -54,6 +61,12 @@ pub(crate) enum QueueNotifyEvent {
     },
     QueueGenBumped {
         queue_gen: u64,
+    },
+    /// A change the queue server took: the window is reloaded, then the change answered, once
+    /// the `notifyQueueItemsChanged` queued ahead of it has gone out (see `reload_after_change`).
+    ReloadAfterChange {
+        socket_id: Option<u32>,
+        request_id: Option<u64>,
     },
 }
 
@@ -138,10 +151,22 @@ pub(crate) struct QueueManager {
     /// Reset whenever `sync_auth_from_server_info` installs a fresh generation
     /// (login / relogin): a new generation re-arms the notification.
     terminal_notified: bool,
+
+    /// A shuffle or repeat change the queue server turned down with a 401. It waits for the
+    /// controller's next `updateServerInfo`, which reloads the window and answers it, as TIDAL's
+    /// receiver does; a newer change cancels it.
+    pending_change: Option<PendingChange>,
 }
 
 struct PendingRetry {
-    url: String,
+    url: http::RootedUrl,
+}
+
+struct PendingChange {
+    /// The phone that asked, `None` for a click on this host.
+    socket_id: Option<u32>,
+    request_id: Option<u64>,
+    target: QueueInfo,
 }
 
 impl QueueManager {
@@ -161,6 +186,7 @@ impl QueueManager {
             outbox,
             pending_retry: None,
             terminal_notified: false,
+            pending_change: None,
         }
     }
 
@@ -174,7 +200,9 @@ impl QueueManager {
         };
     }
 
-    /// Dispatch a command from a mobile client, and say what came of it.
+    /// Dispatch a command from a mobile client, and say what came of it. `None` when the answer
+    /// is queued with the command's effects instead: a shuffle or repeat change is answered
+    /// after the notifications it sends, as TIDAL's receiver answers it.
     ///
     /// A command acting on the controller's queue is refused while none is loaded, as TIDAL's
     /// receiver refuses it in its IDLE state. None waits for one: TIDAL's keeps a step back only
@@ -184,22 +212,39 @@ impl QueueManager {
     pub async fn handle_command(
         &mut self,
         socket_id: u32,
+        request_id: Option<u64>,
         command: &str,
         payload: &serde_json::Value,
-    ) -> RequestResult {
+    ) -> Option<RequestResult> {
         match command {
             "loadCloudQueue" => self.proc_load_cloud_queue(payload).await,
             "loadMedia" | "loadMediaInfo" => self.proc_load_media(payload).await,
             "refreshQueue" => self.proc_refresh_queue(payload).await,
             "updateServerInfo" => self.proc_update_server_info(payload).await,
-            "next" => return self.step(QueueStep::Next).await,
-            "previous" => return self.step(QueueStep::Previous).await,
+            "next" => return Some(self.step(QueueStep::Next).await),
+            "previous" => return Some(self.step(QueueStep::Previous).await),
             "selectQueueItem" | "setRepeatMode" | "setShuffle" if !self.queue_loaded() => {
-                return self.refuse(command);
+                return Some(self.refuse(command));
             }
             "selectQueueItem" => self.proc_select_queue_item(payload).await,
-            "setRepeatMode" => self.proc_set_repeat_mode(payload).await,
-            "setShuffle" => self.proc_set_shuffle(payload).await,
+            "setRepeatMode" => {
+                let mode = payload
+                    .get("repeatMode")
+                    .and_then(|v| v.as_str())
+                    .map_or(RepeatMode::Off, RepeatMode::from_controller);
+                return self
+                    .proc_change(Some(socket_id), request_id, QueueChange::Repeat(mode))
+                    .await;
+            }
+            "setShuffle" => {
+                let shuffle = payload
+                    .get("shuffle")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                return self
+                    .proc_change(Some(socket_id), request_id, QueueChange::Shuffle(shuffle))
+                    .await;
+            }
             // The speaker's, not the queue's: TIDAL's receiver answers them from another
             // component, whatever state its queue is in.
             "setVolume" => {
@@ -220,7 +265,7 @@ impl QueueManager {
                 );
             }
         }
-        RequestResult::Done
+        Some(RequestResult::Done)
     }
 
     /// A step through the controller's queue, whoever asks: its own `next` or `previous`, or a
@@ -428,6 +473,37 @@ impl QueueManager {
             .and_then(|idx| self.queue_items.get(idx))
             .map(|item| item.item_id.clone())
             .or_else(|| self.current_item_id_hint.clone())
+    }
+
+    /// Queue the answer to a phone's request among the command's effects. A request with no id,
+    /// or from this host, gets no answer.
+    fn answer(&self, socket_id: Option<u32>, request_id: Option<u64>, result: RequestResult) {
+        if let Some(socket_id) = socket_id
+            && let Some(rid) = request_id
+            && let Ok(message) = serde_json::to_value(result.answer(rid))
+        {
+            self.outbox
+                .push(QueueNotifyEvent::ToSocket { socket_id, message });
+        }
+    }
+
+    /// The queue server's refusal of a change, worded as TIDAL's receiver words it: error 1012,
+    /// the HTTP status as `subCode`, the server's body untouched as `description`.
+    fn queue_server_refusal(status: u16, body: &str) -> serde_json::Value {
+        let notification = QueueNotification::NotifyQueueServerError {
+            error_code: 1012,
+            details: Some(serde_json::json!({ "subCode": status, "description": body })),
+        };
+        serde_json::to_value(&notification).unwrap_or_default()
+    }
+
+    /// TIDAL's receiver drops its queue when the server refuses a change: every command on the
+    /// queue is then refused until the controller loads one again.
+    fn drop_queue(&mut self) {
+        self.state = QueueState::Idle;
+        self.queue_info = None;
+        self.queue_items.clear();
+        self.current_index = None;
     }
 
     fn notify_queue_server_error(&self, error_code: u32, message: &str) {

@@ -265,4 +265,33 @@ async fn a_redirect_off_the_service_hosts_is_a_refusal_not_a_network_error() {
     assert_eq!(refused.to_string(), "redirect refused");
 }
 
+/// The queue server's refusal of a change once read as a success: every status lands where
+/// TIDAL's receiver (`QueueWindowLoader::onReceived`) puts it.
+#[test]
+fn a_put_reply_is_sorted_by_status_as_tidal_sorts_it() {
+    const BODY: &str = r#"{"error":"client_error","error_description":"bad_input"}"#;
+    let body = || BODY.to_string();
+    for (status, expected) in [
+        (200, PutReply::Applied),
+        (204, PutReply::Applied),
+        (401, PutReply::TokenExpired { body: body() }),
+        (
+            400,
+            PutReply::Refused {
+                status: 400,
+                body: body(),
+            },
+        ),
+        (
+            500,
+            PutReply::Refused {
+                status: 500,
+                body: body(),
+            },
+        ),
+        (201, PutReply::Unhandled { status: 201 }),
+        (403, PutReply::Unhandled { status: 403 }),
+    ] {
+        assert_eq!(PutReply::sort(status, body()), expected, "{status}");
+    }
 }

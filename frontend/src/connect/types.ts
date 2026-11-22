@@ -10,7 +10,7 @@ import type { OutputLevelReport } from "../volume";
 
 export type PlayerState = "IDLE" | "BUFFERING" | "PAUSED" | "PLAYING";
 
-export type RepeatMode = "NONE" | "ONE" | "ALL";
+export type RepeatMode = "OFF" | "ONE" | "ALL";
 
 export type DeviceType = "tidalConnect";
 
