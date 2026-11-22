@@ -86,23 +86,26 @@ pub(super) fn package_linux_deb(arch: &str) -> Result<(), String> {
     )
     .map_err(|e| format!("copy desktop: {e}"))?;
 
-    // 4. /usr/share/icons/hicolor/{size}/apps/tidalunar.png - pre-rendered assets.
-    for size in [16u32, 32, 64, 128, 256] {
-        let rel = format!("icons/hicolor/{size}x{size}/apps/tidalunar.png");
-        let icon_src = installer_deb.join(&rel);
+    // 4. /usr/share/icons/hicolor/{size}/apps/tidalunar.png (pre-rendered assets).
+    // The size directories are the list, as they are for the Nix package.
+    let icons_src = installer_deb.join("icons").join("hicolor");
+    let icons_dst = stage
+        .join("usr")
+        .join("share")
+        .join("icons")
+        .join("hicolor");
+    let sizes =
+        fs::read_dir(&icons_src).map_err(|e| format!("read {}: {e}", icons_src.display()))?;
+    for size in sizes {
+        let size = size.map_err(|e| e.to_string())?.file_name();
+        let icon_src = icons_src.join(&size).join("apps").join("tidalunar.png");
         if !icon_src.is_file() {
             return Err(format!("missing icon asset: {}", icon_src.display()));
         }
-        let icon_dir = stage
-            .join("usr")
-            .join("share")
-            .join("icons")
-            .join("hicolor")
-            .join(format!("{size}x{size}"))
-            .join("apps");
+        let icon_dir = icons_dst.join(&size).join("apps");
         fs::create_dir_all(&icon_dir).map_err(|e| e.to_string())?;
         fs::copy(&icon_src, icon_dir.join("tidalunar.png"))
-            .map_err(|e| format!("copy icon {size}: {e}"))?;
+            .map_err(|e| format!("copy icon {}: {e}", size.to_string_lossy()))?;
     }
 
     // 5. /etc/apparmor.d/tidalunar
