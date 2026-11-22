@@ -444,8 +444,8 @@ jobs:
           # floating 7-zip.org/a/7zr.exe changes content on every 7-Zip release)
           # and pin its SHA-256. Bump version and hash together, deliberately.
           $dst = Join-Path $env:RUNNER_TEMP '7zr.exe'
-          Invoke-WebRequest -Uri 'https://github.com/ip7z/7zip/releases/download/26.02/7zr.exe' -OutFile $dst
-          $expected = '56B8CC9F4971CEF253644FAFE54063ED7FDCA551D4DEE0F8C6BAA81B855ACD72'
+          Invoke-WebRequest -Uri 'https://github.com/ip7z/7zip/releases/download/26.06/7zr.exe' -OutFile $dst
+          $expected = 'E80DB2DAD715A6C5ADABE292D31ED54E11F4E9B99CA349827B50573B175891BC'
           $actual = (Get-FileHash $dst -Algorithm SHA256).Hash
           if ($actual -ne $expected) { throw "7zr.exe sha256 mismatch: got $actual" }
           "TIDALUNAR_7ZR_EXE=$dst" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
