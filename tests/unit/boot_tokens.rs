@@ -14,7 +14,7 @@ fn generation(tag: &str) -> TokenGeneration {
         access_expires: u64::MAX,
         user_id: Some("42".into()),
         granted_scopes: vec!["r_usr".into()],
-        client_id: "cid".into(),
+        client: platform::secure_store::ClientBinding::Proven("cid".into()),
     }
 }
 

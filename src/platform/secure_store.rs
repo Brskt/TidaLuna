@@ -18,7 +18,76 @@ pub(crate) struct TokenGeneration {
     pub access_expires: u64,
     pub user_id: Option<String>,
     pub granted_scopes: Vec<String>,
-    pub client_id: String,
+    #[serde(flatten)]
+    pub client: ClientBinding,
+}
+
+/// The client a generation's refresh token is sent with, and whether TIDAL has accepted it for
+/// that token. On disk a `client_id` and a `client_proven` flag; a store written before the flag
+/// reads back unproven.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ClientBindingOnDisk", into = "ClientBindingOnDisk")]
+pub(crate) enum ClientBinding {
+    /// Stored but never seen accepted: a store older than the flag, or a sign-in whose client
+    /// nothing observed.
+    Unproven(String),
+    /// TIDAL answered a request sent with it, for this refresh token.
+    Proven(String),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ClientBindingOnDisk {
+    client_id: String,
+    #[serde(default)]
+    client_proven: bool,
+}
+
+impl From<ClientBindingOnDisk> for ClientBinding {
+    fn from(disk: ClientBindingOnDisk) -> Self {
+        if disk.client_proven {
+            Self::Proven(disk.client_id)
+        } else {
+            Self::Unproven(disk.client_id)
+        }
+    }
+}
+
+impl From<ClientBinding> for ClientBindingOnDisk {
+    fn from(binding: ClientBinding) -> Self {
+        let client_proven = matches!(binding, ClientBinding::Proven(_));
+        let (ClientBinding::Unproven(client_id) | ClientBinding::Proven(client_id)) = binding;
+        Self {
+            client_id,
+            client_proven,
+        }
+    }
+}
+
+impl ClientBinding {
+    pub(crate) fn id(&self) -> &str {
+        let (Self::Unproven(id) | Self::Proven(id)) = self;
+        id
+    }
+
+    /// A sign-in's new refresh token is bound to the client its exchange was seen sent with;
+    /// unseen, the prior client stays, unproven for a token it never served.
+    pub(crate) fn after_login(prior: Option<&Self>, sent: Option<&str>) -> Self {
+        match sent.filter(|id| !id.is_empty()) {
+            Some(id) => Self::Proven(id.to_owned()),
+            None => Self::Unproven(prior.map(|p| p.id().to_owned()).unwrap_or_default()),
+        }
+    }
+
+    /// A refresh TIDAL answered proves the client it was sent with, for the token it refreshed;
+    /// sent without one, the prior binding stays as it was.
+    pub(crate) fn after_refresh(prior: Option<&Self>, sent: Option<&str>) -> Self {
+        match sent.filter(|id| !id.is_empty()) {
+            Some(id) => Self::Proven(id.to_owned()),
+            None => prior
+                .cloned()
+                .unwrap_or_else(|| Self::Unproven(String::new())),
+        }
+    }
 }
 
 impl TokenGeneration {

@@ -22,7 +22,7 @@ pub(crate) fn trigger_if_needed() {
             let ts = state.token_state.as_ref()?;
             Some((
                 ts.current.refresh_token.clone(),
-                ts.current.client_id.clone(),
+                ts.current.client.id().to_owned(),
                 ts.current.granted_scopes.join(" "),
                 state.session_epoch,
             ))
@@ -175,9 +175,17 @@ async fn do_refresh(
         client_id: Some(&client_id),
     };
     let committed = crate::app_state::with_state(|state| {
-        match state.commit_token_generation(session_epoch, &grant) {
+        match state.commit_token_generation(
+            session_epoch,
+            &grant,
+            crate::app_state::UserCommit::Refresh,
+        ) {
             crate::app_state::TokenCommit::Refused => {
                 crate::vprintln!("[AUTH]   Refresh answered for a session already left, dropped");
+                false
+            }
+            crate::app_state::TokenCommit::SwappedAccount => {
+                crate::verr!("[AUTH] Proactive refresh answered for another account, dropped");
                 false
             }
             crate::app_state::TokenCommit::Committed { durable, .. } => {

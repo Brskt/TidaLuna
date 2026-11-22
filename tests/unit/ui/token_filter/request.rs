@@ -1,6 +1,7 @@
 //! Tests for `src/ui/token_filter/request.rs`, attached to it by `#[path]`.
 
 use super::*;
+use crate::platform::secure_store::ClientBinding;
 
 fn generation(tag: &str) -> crate::platform::secure_store::TokenGeneration {
     crate::platform::secure_store::TokenGeneration {
@@ -12,7 +13,7 @@ fn generation(tag: &str) -> crate::platform::secure_store::TokenGeneration {
         access_expires: u64::MAX,
         user_id: None,
         granted_scopes: vec![],
-        client_id: "cid".into(),
+        client: ClientBinding::Proven("cid".into()),
     }
 }
 

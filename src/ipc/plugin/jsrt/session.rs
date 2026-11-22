@@ -128,7 +128,7 @@ cef::wrap_completion_callback! {
 /// Both reach the renderer; both run once the lock is back. Nothing here can be raced by a load
 /// pass: the entries these names came from are retired, the epoch that admitted them is gone,
 /// and a pass arriving now is stopped by its own re-check.
-fn settle_ended_session(ended: &crate::app_state::EndedSession) {
+pub(crate) fn settle_ended_session(ended: &crate::app_state::EndedSession) {
     if !ended.loaded.is_empty() {
         crate::vprintln!(
             "[PLUGIN] Unloading {} user plugin(s) (session ended)",

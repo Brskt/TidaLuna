@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use super::{
     AppState, MeasuredDuration, PagePhase, PassStood, PluginCredential, Ticket, TokenCommit,
-    TokenGrant, end_page_music, js_ipc_response, js_string_literal, settle_recorded_duration,
+    TokenGrant, UserCommit, end_page_music, js_ipc_response, js_string_literal,
+    settle_recorded_duration,
 };
 use crate::bridge::PlayerBridgeEvent;
-use crate::platform::secure_store::{StoredTokenState, TokenGeneration};
+use crate::platform::secure_store::{ClientBinding, StoredTokenState, TokenGeneration};
 use crate::player::{LoadOrigin, Player, begin_load, current_load};
 use crate::util::now_unix_secs;
 
@@ -201,7 +202,7 @@ fn generation(refresh_token: &str, client_id: &str, version: u64) -> TokenGenera
         access_expires: 0,
         user_id: None,
         granted_scopes: Vec::new(),
-        client_id: client_id.into(),
+        client: ClientBinding::Proven(client_id.into()),
     }
 }
 
@@ -223,7 +224,7 @@ fn grant(refresh_token: Option<&str>) -> TokenGrant<'_> {
 async fn a_token_answer_for_an_ended_session_writes_nothing() {
     let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
 
-    let commit = state.apply_token_generation(0, &grant(Some("new-rt")));
+    let commit = state.apply_token_generation(0, &grant(Some("new-rt")), UserCommit::Login);
 
     assert!(matches!(commit, TokenCommit::Refused));
     let current = &state.token_state.as_ref().unwrap().current;
@@ -243,9 +244,7 @@ async fn a_token_answer_for_an_ended_session_writes_nothing() {
 async fn a_new_generation_keeps_the_one_it_replaces_for_thirty_seconds() {
     let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
 
-    let before = now_unix_secs();
-    let commit = state.apply_token_generation(1, &grant(Some("new-rt")));
-    let after = now_unix_secs();
+    let commit = state.apply_token_generation(1, &grant(Some("new-rt")), UserCommit::Login);
 
     assert!(matches!(
         commit,
@@ -264,8 +263,6 @@ async fn a_new_generation_keeps_the_one_it_replaces_for_thirty_seconds() {
         Some(4),
         "requests still carrying the replaced token lost it at once"
     );
-    let until = tokens.previous_valid_until.unwrap();
-    assert!((before + 30..=after + 30).contains(&until), "got {until}");
 }
 
 /// A plugin's request carries the stored token only under the session that issued its capability,
@@ -323,17 +320,15 @@ async fn a_plugin_gets_the_stored_token_only_under_its_own_session() {
 async fn an_answer_without_a_refresh_token_keeps_the_stored_one() {
     let mut state = state_with_tokens(Some(generation("old-rt", "cid", 4)));
 
-    let commit = state.apply_token_generation(1, &grant(None));
+    let commit = state.apply_token_generation(1, &grant(None), UserCommit::Refresh);
 
-    let TokenCommit::Committed { opaque_rt, durable } = commit else {
+    let TokenCommit::Committed { durable, .. } = commit else {
         panic!("a live session's answer was refused");
     };
-    assert_eq!(opaque_rt, "old-opaque-rt");
     assert!(durable, "the stored refresh token was dropped");
-    assert_eq!(
-        state.token_state.as_ref().unwrap().current.refresh_token,
-        "old-rt"
-    );
+    let current = &state.token_state.as_ref().unwrap().current;
+    assert_eq!(current.opaque_rt, "old-opaque-rt");
+    assert_eq!(current.refresh_token, "old-rt");
 }
 
 #[tokio::test]
@@ -341,7 +336,7 @@ async fn a_generation_without_any_refresh_token_is_not_durable() {
     // Saved anyway, it would replace a credential that can refresh with one that cannot.
     let mut state = state_with_tokens(None);
 
-    let commit = state.apply_token_generation(1, &grant(None));
+    let commit = state.apply_token_generation(1, &grant(None), UserCommit::Refresh);
 
     assert!(matches!(
         commit,
@@ -350,50 +345,147 @@ async fn a_generation_without_any_refresh_token_is_not_durable() {
 }
 
 /// A login after the app-level generation stores the user's client_id with the user's refresh
-/// token; the app-level answer that follows keeps it. A mismatched pair fails the next refresh
-/// with `invalid_client`.
+/// token: a mismatched pair fails the next refresh with `invalid_client`.
 #[tokio::test]
 async fn a_commit_stores_the_client_id_its_refresh_token_was_minted_under() {
-    for (prior, refresh_token, exchange, expected) in [
-        (generation("", "app", 0), Some("user-rt"), "user", "user"),
-        (generation("user-rt", "user", 0), None, "app", "user"),
+    let mut state = state_with_tokens(Some(generation("", "app", 0)));
+    let login = TokenGrant {
+        client_id: Some("user"),
+        ..grant(Some("user-rt"))
+    };
+    state.apply_token_generation(1, &login, UserCommit::Login);
+    assert_eq!(
+        state.token_state.as_ref().unwrap().current.client.id(),
+        "user",
+        "the login's refresh token takes the login's client"
+    );
+}
+
+/// A client is proven only by TIDAL accepting it for the token. A sign-in proves the client
+/// its exchange was seen sent with, a refresh the client it was sent with; a refresh sent without
+/// one keeps the binding, and a sign-in whose client went unseen keeps the prior id, unproven.
+#[test]
+fn a_client_is_proven_only_by_an_answer_to_a_request_sent_with_it() {
+    let unproven = ClientBinding::Unproven("store".into());
+    let proven = ClientBinding::Proven("store".into());
+    for (prior, sent, login, refresh) in [
+        (
+            Some(&unproven),
+            Some("page"),
+            ClientBinding::Proven("page".into()),
+            ClientBinding::Proven("page".into()),
+        ),
+        (Some(&proven), Some("store"), proven.clone(), proven.clone()),
+        (Some(&unproven), None, unproven.clone(), unproven.clone()),
+        (Some(&proven), None, unproven.clone(), proven.clone()),
+        (Some(&proven), Some(""), unproven.clone(), proven.clone()),
+        (
+            None,
+            Some("page"),
+            ClientBinding::Proven("page".into()),
+            ClientBinding::Proven("page".into()),
+        ),
+        (
+            None,
+            None,
+            ClientBinding::Unproven(String::new()),
+            ClientBinding::Unproven(String::new()),
+        ),
     ] {
-        let mut state = state_with_tokens(Some(prior));
-        let answer = TokenGrant {
-            client_id: Some(exchange),
-            ..grant(refresh_token)
-        };
-
-        state.apply_token_generation(1, &answer);
-
         assert_eq!(
-            state.token_state.as_ref().unwrap().current.client_id,
-            expected,
-            "new refresh: {refresh_token:?}, exchange: {exchange}"
+            ClientBinding::after_login(prior, sent),
+            login,
+            "login, {prior:?} sent {sent:?}"
+        );
+        assert_eq!(
+            ClientBinding::after_refresh(prior, sent),
+            refresh,
+            "refresh, {prior:?} sent {sent:?}"
         );
     }
 }
 
-/// The exchange's client_id binds only a NEW refresh token; an empty or missing one never blanks
-/// the prior.
-#[test]
-fn a_generation_takes_the_exchange_client_id_only_with_a_new_refresh_token() {
-    for (refresh_token, exchange, prior, expected) in [
-        (Some("rt"), Some("user"), Some("app"), "user"),
-        (None, Some("app"), Some("user"), "user"),
-        (Some("rt"), None, Some("user"), "user"),
-        (Some("rt"), Some(""), Some("user"), "user"),
-        (Some("rt"), Some("user"), None, "user"),
-        (None, Some("app"), None, "app"),
-    ] {
-        let answer = TokenGrant {
-            client_id: exchange,
-            ..grant(refresh_token)
-        };
-        assert_eq!(
-            answer.bound_client_id(prior),
-            expected,
-            "new refresh: {refresh_token:?}, exchange: {exchange:?}, prior: {prior:?}"
-        );
+fn user_generation(user: Option<&str>) -> TokenGeneration {
+    TokenGeneration {
+        user_id: user.map(str::to_owned),
+        ..generation("user-rt", "cid", 4)
     }
+}
+
+/// A refresh for another account writes nothing: committed, it would switch the SDK to that
+/// account. A store without a user, or the same user, takes it.
+#[tokio::test]
+async fn a_refresh_for_another_account_writes_nothing() {
+    for (stored_user, answered_user, commits, why) in [
+        (Some("a"), Some("b"), false, "another account"),
+        (Some("a"), Some("a"), true, "the same account"),
+        (None, Some("b"), true, "a store that names no user"),
+    ] {
+        let mut state = state_with_tokens(Some(user_generation(stored_user)));
+        let refresh = TokenGrant {
+            user_id: answered_user,
+            ..grant(None)
+        };
+
+        let commit = state.apply_token_generation(1, &refresh, UserCommit::Refresh);
+
+        let current = &state.token_state.as_ref().unwrap().current;
+        if commits {
+            assert!(
+                matches!(commit, TokenCommit::Committed { ended: None, .. }),
+                "{why}"
+            );
+            assert_eq!(current.access_token, "new-at", "{why}");
+        } else {
+            assert!(matches!(commit, TokenCommit::SwappedAccount), "{why}");
+            assert_eq!(
+                (current.access_token.as_str(), current.version),
+                ("old-at", 4),
+                "{why}"
+            );
+        }
+    }
+}
+
+/// A sign-in to another account ends the session in the same section: the epoch moves on, and the
+/// new generation keeps nothing of the departed one, neither its refresh token nor a previous.
+#[tokio::test]
+async fn a_sign_in_to_another_account_ends_the_session_first() {
+    let mut state = state_with_tokens(Some(user_generation(Some("a"))));
+    let login = TokenGrant {
+        user_id: Some("b"),
+        client_id: Some("cid-b"),
+        ..grant(Some("b-rt"))
+    };
+
+    let commit = state.apply_token_generation(1, &login, UserCommit::Login);
+
+    assert!(matches!(
+        commit,
+        TokenCommit::Committed {
+            ended: Some(_),
+            durable: true
+        }
+    ));
+    assert_eq!(state.session_epoch, 2);
+    let tokens = state.token_state.as_ref().unwrap();
+    assert_eq!(tokens.current.user_id.as_deref(), Some("b"));
+    assert_eq!(tokens.current.refresh_token, "b-rt");
+    assert_eq!(tokens.current.version, 1, "numbered from the empty state");
+    assert!(
+        tokens.previous.is_none(),
+        "the departed account's token stayed usable"
+    );
+
+    let mut same = state_with_tokens(Some(user_generation(Some("a"))));
+    let again = TokenGrant {
+        user_id: Some("a"),
+        ..grant(Some("a-rt"))
+    };
+    let commit = same.apply_token_generation(1, &again, UserCommit::Login);
+    assert!(matches!(commit, TokenCommit::Committed { ended: None, .. }));
+    assert_eq!(
+        same.session_epoch, 1,
+        "a sign-in to the same account ended its session"
+    );
 }

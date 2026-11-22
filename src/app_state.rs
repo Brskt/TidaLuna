@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::platform::secure_store::ClientBinding;
 pub(crate) type IpcCallback = Arc<Mutex<dyn cef::wrapper::message_router::BrowserSideCallback>>;
 
 #[derive(Deserialize, Debug)]
@@ -241,27 +242,28 @@ pub(crate) struct TokenGrant<'a> {
     pub(crate) client_id: Option<&'a str>,
 }
 
-impl TokenGrant<'_> {
-    /// A refresh token is bound to the client_id it was minted under (RFC 6749 §6): a NEW one
-    /// takes this exchange's. An answer without one keeps `prior`, the replaced generation's, if
-    /// set: the app-level `client_credentials` answer must not overwrite the user's client_id.
-    pub(crate) fn bound_client_id(&self, prior: Option<&str>) -> String {
-        let exchange = self.client_id.filter(|s| !s.is_empty());
-        let prior = prior.filter(|s| !s.is_empty());
-        if self.refresh_token.is_some() {
-            exchange.or(prior)
-        } else {
-            prior.or(exchange)
-        }
-        .unwrap_or("")
-        .to_string()
-    }
+
+/// How a user generation is committed: a sign-in may replace the account, a refresh never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UserCommit {
+    Login,
+    Refresh,
 }
 
 /// How a token commit ended, for each caller to answer and log in its own terms.
 pub(crate) enum TokenCommit {
     /// The session the exchange was issued under has ended: nothing was written.
     Refused,
+    /// A refresh answered for another account than the current one: nothing was written.
+    SwappedAccount,
+    /// The grant is the current generation; `durable` says whether it belongs on disk. `ended` is
+    /// the session a sign-in to another account closed, for the caller to settle off the lock.
+    Committed {
+        durable: bool,
+        ended: Option<EndedSession>,
+    },
+}
+
 /// What a plugin's request to TIDAL may carry. Read from the stored token only: no page script
 /// can hand Rust the token a plugin's request is sent with.
 #[derive(Debug, PartialEq, Eq)]
@@ -299,9 +301,6 @@ fn live_access_token(
         .filter(|token| !token.is_empty())
 }
 
-    /// The grant is the current generation; `durable` says whether it belongs on disk.
-    Committed { opaque_rt: String, durable: bool },
-}
 
 impl AppState {
     pub(crate) fn new(player: Arc<crate::player::Player>) -> Self {
@@ -335,10 +334,15 @@ impl AppState {
     }
 
     /// Makes `grant` the current token generation and keeps the one it replaces for 30 seconds.
+    ///
+    /// A refresh for another account than the current one writes nothing: committed, it would
+    /// switch the SDK to that account. A sign-in to another account ends the current session first,
+    /// in this same section. The new generation inherits nothing of the departed one.
     pub(crate) fn apply_token_generation(
         &mut self,
         session_epoch: u64,
         grant: &TokenGrant,
+        rule: UserCommit,
     ) -> TokenCommit {
         // The session that issued the exchange may have ended while it was on the wire.
         // Committing then would re-authenticate the live process as the departed account. The
@@ -346,6 +350,17 @@ impl AppState {
         if self.session_epoch != session_epoch {
             return TokenCommit::Refused;
         }
+        let current_user = self
+            .token_state
+            .as_ref()
+            .and_then(|ts| ts.current.user_id.as_deref());
+        let other_account =
+            matches!((current_user, grant.user_id), (Some(was), Some(is)) if was != is);
+        let ended = match (rule, other_account) {
+            (UserCommit::Refresh, true) => return TokenCommit::SwappedAccount,
+            (UserCommit::Login, true) => Some(self.end_session()),
+            (_, false) => None,
+        };
         let now_secs = crate::util::now_unix_secs();
 
         let (real_rt, ort) = if let Some(rt) = grant.refresh_token {
@@ -362,16 +377,16 @@ impl AppState {
             (String::new(), String::new())
         };
 
-        let client_id = grant.bound_client_id(
-            self.token_state
-                .as_ref()
-                .map(|ts| ts.current.client_id.as_str()),
-        );
+        let prior_client = self.token_state.as_ref().map(|ts| &ts.current.client);
+        let client = match rule {
+            UserCommit::Login => ClientBinding::after_login(prior_client, grant.client_id),
+            UserCommit::Refresh => ClientBinding::after_refresh(prior_client, grant.client_id),
+        };
         let new_gen = crate::platform::secure_store::TokenGeneration {
             access_token: grant.access_token.to_string(),
             refresh_token: real_rt,
             opaque_at: grant.opaque_at.to_string(),
-            opaque_rt: ort.clone(),
+            opaque_rt: ort,
             version: self
                 .token_state
                 .as_ref()
@@ -380,7 +395,7 @@ impl AppState {
             access_expires: now_secs + grant.expires_in.unwrap_or(3600),
             user_id: grant.user_id.map(str::to_owned),
             granted_scopes: grant.granted_scopes.to_vec(),
-            client_id,
+            client,
         };
         let durable = new_gen.is_durable();
 
@@ -391,10 +406,7 @@ impl AppState {
             previous_valid_until: Some(now_secs + 30),
         });
 
-        TokenCommit::Committed {
-            opaque_rt: ort,
-            durable,
-        }
+        TokenCommit::Committed { durable, ended }
     }
 
     /// [`Self::apply_token_generation`], then the new generation queued to disk when durable.
@@ -402,8 +414,9 @@ impl AppState {
         &mut self,
         session_epoch: u64,
         grant: &TokenGrant,
+        rule: UserCommit,
     ) -> TokenCommit {
-        let commit = self.apply_token_generation(session_epoch, grant);
+        let commit = self.apply_token_generation(session_epoch, grant, rule);
         if let TokenCommit::Committed { durable, .. } = &commit {
             let data_dir = crate::state::cache_data_dir();
             // Only a durable generation belongs on disk. One without a refresh token would

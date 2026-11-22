@@ -1,5 +1,5 @@
 use super::generate_opaque;
-use crate::app_state::{TokenCommit, TokenGrant};
+use crate::app_state::{TokenCommit, TokenGrant, UserCommit};
 
 pub(super) enum ProcessResult {
     Modified(Vec<u8>),
@@ -95,32 +95,40 @@ fn process_token_response_with(
     // The check belongs inside the closure, atomic with the writes it guards; its answer has
     // to leave it, because the body this function goes on to build is delivered to the SDK.
     let committed = crate::app_state::with_state(|state| {
-        match state.commit_token_generation(session_epoch, &grant) {
+        match state.commit_token_generation(session_epoch, &grant, UserCommit::Login) {
             TokenCommit::Refused => {
                 crate::vprintln!(
                     "[AUTH]   Token response answered for a session already left, dropped"
                 );
-                false
+                None
             }
-            TokenCommit::Committed { durable, .. } => {
+            TokenCommit::SwappedAccount => {
+                crate::verr!("[AUTH] refresh answered for another account, dropped");
+                None
+            }
+            TokenCommit::Committed { durable, ended } => {
                 if !durable {
                     crate::vprintln!(
                         "[AUTH]   Exchange carried no refresh token - stored credential kept"
                     );
                 }
-                true
+                Some(ended)
             }
         }
     })
-    .unwrap_or(false);
+    .flatten();
 
     // Nothing registered means the opaque below would resolve to whichever session is
     // current rather than to this response's token. Dropping the body fails this one
     // exchange visibly instead of handing the SDK a credential for somebody else's session;
     // an exchange that still belongs to the live session carries a matching epoch and never
     // reaches here.
-    if !committed {
+    let Some(ended) = committed else {
         return ProcessResult::Error;
+    };
+    // A sign-in to another account closed the session before it: its plugins go, off the lock.
+    if let Some(ended) = ended {
+        crate::ipc::plugin::settle_ended_session(&ended);
     }
 
     crate::ipc::plugin::scrub_pkce_verifier();

@@ -18,7 +18,29 @@ fn generation(refresh_token: &str, opaque_rt: &str) -> TokenGeneration {
         access_expires: 0,
         user_id: None,
         granted_scopes: Vec::new(),
-        client_id: "client".to_owned(),
+        client: ClientBinding::Proven("client".to_owned()),
+    }
+}
+
+/// A store written before the proof existed reads back unproven, and a proven binding survives the
+/// round trip: losing the flag would pin a client TIDAL never accepted, or forget one it did.
+#[test]
+fn a_store_without_the_proof_reads_back_unproven_and_the_proof_survives_a_round_trip() {
+    let older = r#"{"access_token":"a","refresh_token":"r","opaque_at":"o","opaque_rt":"p","version":1,"access_expires":0,"user_id":null,"granted_scopes":[],"client_id":"cid"}"#;
+    let read: TokenGeneration = serde_json::from_str(older).expect("an older store reads");
+    assert_eq!(read.client, ClientBinding::Unproven("cid".into()));
+
+    for binding in [
+        ClientBinding::Proven("cid".into()),
+        ClientBinding::Unproven("cid".into()),
+    ] {
+        let written = TokenGeneration {
+            client: binding.clone(),
+            ..generation("rt", "luna_bbbb")
+        };
+        let json = serde_json::to_string(&written).expect("serializes");
+        let back: TokenGeneration = serde_json::from_str(&json).expect("reads back");
+        assert_eq!(back.client, binding, "{json}");
     }
 }
 

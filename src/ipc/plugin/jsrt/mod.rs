@@ -7,6 +7,7 @@ mod session;
 
 use session::{handle_session_clear, handle_session_hard_reset};
 
+pub(crate) use session::settle_ended_session;
 pub(crate) use gate::open_plugin_gate;
 pub(super) use gate::{handle_jsrt_load_plugins, has_session};
 
