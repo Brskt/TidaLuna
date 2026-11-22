@@ -1,6 +1,9 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use crate::plugins::outbound::OutboundRequest;
+use crate::ui::hosts::{EgressRefusal, HostShape, HostVerdict, Name, PermittedUrl};
+
 /// Chromium version CEF wraps, `MAJOR.MINOR.BUILD.PATCH`. This is not the `cef` crate
 /// version: the crate tracks CEF releases, which wrap their own Chromium. One owner keeps
 /// the user agent and the startup log from disagreeing about which browser this is.
@@ -55,11 +58,10 @@ fn base_client_builder() -> reqwest::ClientBuilder {
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
 }
 
-fn build_http_client() -> reqwest::Client {
+fn build_core_client() -> reqwest::Client {
     base_client_builder()
-        .cookie_store(true)
         .build()
-        .expect("failed to build HTTP client")
+        .expect("failed to build core HTTP client")
 }
 
 /// How long a media server may stay silent: no headers after a send, or no frame while a read
@@ -68,8 +70,9 @@ const MEDIA_SILENCE: Duration = Duration::from_secs(15);
 
 /// No `read_timeout` here: reqwest 0.13.5 counts the time between two reads against it, and the
 /// download loops pause there on purpose for the governor. [`MediaBody::next`] bounds each read.
+/// Its redirects stay in the plugin class: a media URL comes from TIDAL's answer or from a plugin.
 fn build_media_client(silence: Duration) -> MediaClient {
-    let inner = base_client_builder()
+    let inner = host_checked_builder(plugin_class, PLUGIN_REDIRECT_REFUSED, HopCap::Error)
         .cookie_store(true)
         .build()
         .expect("failed to build media HTTP client");
@@ -86,6 +89,7 @@ pub struct MediaClient {
 impl MediaClient {
     pub fn get(&self, url: impl reqwest::IntoUrl) -> MediaRequest {
         MediaRequest {
+            client: self.inner.clone(),
             inner: self.inner.get(url),
             silence: self.silence,
         }
@@ -98,6 +102,8 @@ impl MediaClient {
 }
 
 pub struct MediaRequest {
+    /// The builder's own client, which sends the request once its URL has been judged.
+    client: reqwest::Client,
     inner: reqwest::RequestBuilder,
     silence: Duration,
 }
@@ -113,9 +119,14 @@ impl MediaRequest {
         }
     }
 
-    /// Ends a server that accepts the connection and never answers, its redirects included.
+    /// Times out on a server that accepts the connection and never answers, redirects included.
+    /// A media URL, from TIDAL's answer or a plugin, is never sent when it names a sign-in host.
     pub async fn send(self) -> Result<MediaResponse, AudioFetchError> {
-        match tokio::time::timeout(self.silence, self.inner.send()).await {
+        let request = self.inner.build().map_err(AudioFetchError::transport)?;
+        if let Some(refusal) = HostVerdict::of(request.url()).refusal() {
+            return Err(AudioFetchError::Refused(refusal));
+        }
+        match tokio::time::timeout(self.silence, self.client.execute(request)).await {
             Ok(Ok(inner)) => Ok(MediaResponse {
                 inner,
                 silence: self.silence,
@@ -188,6 +199,8 @@ pub enum AudioFetchError {
     Stalled,
     /// reqwest's own failure, its URL removed by [`crate::util::network_error_text`].
     Transport(String),
+    /// Never sent: the URL's host is one no media request may reach.
+    Refused(EgressRefusal),
 }
 
 impl AudioFetchError {
@@ -202,17 +215,18 @@ impl std::fmt::Display for AudioFetchError {
             Self::NoAnswer => f.write_str("the server sent no answer"),
             Self::Stalled => f.write_str("the server stopped sending"),
             Self::Transport(text) => f.write_str(text),
+            Self::Refused(refusal) => refusal.fmt(f),
         }
     }
 }
 
 impl std::error::Error for AudioFetchError {}
 
-/// The client for plugin sources. Its `read_timeout` ends a source that stops sending, a bound
-/// `HTTP_CLIENT` cannot take since it also carries `plugin.fetch`. Its own jar keeps a source's
-/// redirect cookies apart from those of `plugin.fetch`.
+/// The client for plugin sources, in the plugin class. Its `read_timeout` ends a source that stops
+/// sending, a bound [`PluginClient`] cannot take since it also carries `plugin.fetch`. Its own jar
+/// keeps a source's redirect cookies apart from those of `plugin.fetch`.
 fn build_source_client() -> reqwest::Client {
-    base_client_builder()
+    host_checked_builder(plugin_class, PLUGIN_REDIRECT_REFUSED, HopCap::Error)
         .cookie_store(true)
         // From send() to the headers too, redirects included; 30 s is what the whole fetch had.
         .read_timeout(Duration::from_secs(30))
@@ -220,51 +234,182 @@ fn build_source_client() -> reqwest::Client {
         .expect("failed to build plugin source HTTP client")
 }
 
-/// Build a native-plugin egress client with a caller-owned cookie jar (for
-/// per-plugin isolation) and a redirect policy (follow vs manual/error).
-pub(crate) fn build_native_client(
-    jar: Arc<reqwest::cookie::Jar>,
-    redirect: reqwest::redirect::Policy,
-) -> reqwest::Client {
-    base_client_builder()
+/// Whether a native plugin's `net.fetch` follows redirects. `redirect: "manual"` and `"error"`
+/// take [`Hops::Never`], which hands the 3xx back to the plugin.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Hops {
+    /// Within the plugin class, like every client a plugin drives.
+    Follow,
+    Never,
+}
+
+/// A native-plugin egress client with a caller-owned cookie jar, for per-plugin isolation.
+pub(crate) fn build_native_client(jar: Arc<reqwest::cookie::Jar>, hops: Hops) -> reqwest::Client {
+    let builder = match hops {
+        Hops::Follow => host_checked_builder(plugin_class, PLUGIN_REDIRECT_REFUSED, HopCap::Error),
+        Hops::Never => base_client_builder().redirect(reqwest::redirect::Policy::none()),
+    };
+    builder
         .cookie_provider(jar)
-        .redirect(redirect)
         .build()
         .expect("failed to build native HTTP client")
 }
 
-/// URLs one request may visit, the first included (`Attempt::previous` counts it). A redirect
-/// past the cap comes back as the 3xx response, for the caller's status check to reject.
-const MAX_REDIRECT_CHAIN: usize = 10;
+/// Redirects one request may follow after its first URL.
+const MAX_REDIRECT_HOPS: usize = 10;
 
-/// A client that re-checks `allowed` at every redirect hop and refuses with
-/// [`crate::util::Refused`]`(refusal)` the moment a hop leaves it. Checking the submitted URL alone
-/// would be bypassed by an open redirect on an allowed host. No cookie store.
+/// What a host-checked client does with a redirect past [`MAX_REDIRECT_HOPS`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HopCap {
+    /// Hands back the last 3xx, for the caller's status check to reject.
+    Stop,
+    /// Fails the request with [`TooManyRedirects`], which is no refusal: a 403 would misname it.
+    Error,
+}
+
+/// A redirect chain longer than [`MAX_REDIRECT_HOPS`].
+#[derive(Debug)]
+pub(crate) struct TooManyRedirects;
+
+impl std::fmt::Display for TooManyRedirects {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "more than {MAX_REDIRECT_HOPS} redirects")
+    }
+}
+
+impl std::error::Error for TooManyRedirects {}
+
+/// A builder whose client re-checks `allowed` at every redirect hop and refuses with
+/// [`crate::util::Refused`]`(refusal)` the moment a hop leaves it. An open redirect on an allowed
+/// host would otherwise carry the request anywhere. The first URL is the caller's to judge.
+pub(crate) fn host_checked_builder(
+    allowed: fn(&url::Url) -> bool,
+    refusal: &'static str,
+    cap: HopCap,
+) -> reqwest::ClientBuilder {
+    base_client_builder().redirect(reqwest::redirect::Policy::custom(move |attempt| {
+        if !allowed(attempt.url()) {
+            // The host alone: the rest of a redirect URL can carry a signature or a code.
+            crate::verr!(
+                "[NET] redirect refused to host {}",
+                crate::util::refused_host(attempt.url().as_str())
+            );
+            return attempt.error(crate::util::Refused(refusal));
+        }
+        // `previous` holds the first URL and every hop followed so far.
+        if attempt.previous().len() > MAX_REDIRECT_HOPS {
+            return match cap {
+                HopCap::Stop => attempt.stop(),
+                HopCap::Error => attempt.error(TooManyRedirects),
+            };
+        }
+        attempt.follow()
+    }))
+}
+
+/// [`host_checked_builder`] with no cookie store, stopping at the cap.
 pub(crate) fn build_host_checked_client(
     allowed: fn(&url::Url) -> bool,
     refusal: &'static str,
 ) -> reqwest::Client {
-    base_client_builder()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if !allowed(attempt.url()) {
-                return attempt.error(crate::util::Refused(refusal));
-            }
-            if attempt.previous().len() >= MAX_REDIRECT_CHAIN {
-                return attempt.stop();
-            }
-            attempt.follow()
-        }))
+    host_checked_builder(allowed, refusal, HopCap::Stop)
         .build()
         .expect("failed to build redirect-checked HTTP client")
 }
 
-pub static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_http_client);
+const PLUGIN_REDIRECT_REFUSED: &str = "redirect reached a host plugins may not reach";
+
+/// Every host a plugin may reach: anything but a TIDAL sign-in or malformed host.
+pub(crate) fn plugin_class(url: &url::Url) -> bool {
+    HostVerdict::of(url) == HostVerdict::Open
+}
+
+/// TIDAL's token host. One test, shared by the token client and Connect's token root.
+pub(crate) fn is_token_host(name: Name<'_>) -> bool {
+    name.is(crate::ui::nav::HOST_AUTH)
+}
+
+/// TIDAL's service hosts. One test, shared by the service client and Connect's service roots.
+pub(crate) fn is_service_host(name: Name<'_>) -> bool {
+    crate::ui::nav::SERVICE_HOSTS
+        .iter()
+        .any(|host| name.is(host))
+}
+
+fn https_on(url: &url::Url, host: fn(Name<'_>) -> bool) -> bool {
+    url.scheme() == "https" && matches!(HostShape::of(url), HostShape::Name(name) if host(name))
+}
+
+/// HTTPS on TIDAL's token host alone.
+pub(crate) fn token_class(url: &url::Url) -> bool {
+    https_on(url, is_token_host)
+}
+
+/// HTTPS on one of TIDAL's service hosts.
+pub(crate) fn service_class(url: &url::Url) -> bool {
+    https_on(url, is_service_host)
+}
+
+/// The client every plugin request goes through: the plugin class at every hop, one shared jar.
+/// It takes only a [`PermittedUrl`]: a plugin's first URL is judged before anything is sent.
+pub(crate) struct PluginClient(reqwest::Client);
+
+impl PluginClient {
+    fn build() -> Self {
+        Self(
+            host_checked_builder(plugin_class, PLUGIN_REDIRECT_REFUSED, HopCap::Error)
+                .cookie_store(true)
+                .build()
+                .expect("failed to build plugin HTTP client"),
+        )
+    }
+
+    /// An admitted plugin request, every field as the plugin sent it.
+    pub(crate) fn send(&self, request: OutboundRequest) -> reqwest::RequestBuilder {
+        request.build(&self.0)
+    }
+
+    pub(crate) fn request(
+        &self,
+        method: reqwest::Method,
+        url: PermittedUrl,
+    ) -> reqwest::RequestBuilder {
+        self.0.request(method, url.into_url())
+    }
+}
+
+/// Requests Rust makes for itself (the updater). No cookie store: nothing it reaches keeps a session.
+pub static CORE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_core_client);
+
+/// Rust's own refreshes, in the token class. No cookie store.
+pub(crate) static AUTH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    host_checked_builder(
+        token_class,
+        "redirect left TIDAL's token host",
+        HopCap::Error,
+    )
+    .build()
+    .expect("failed to build auth HTTP client")
+});
+
+/// Connect's requests to the queue and content servers, in the service class. No cookie store.
+pub(crate) static SERVICE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    host_checked_builder(
+        service_class,
+        "redirect left TIDAL's service hosts",
+        HopCap::Error,
+    )
+    .build()
+    .expect("failed to build service HTTP client")
+});
+
+pub(crate) static PLUGIN_CLIENT: LazyLock<PluginClient> = LazyLock::new(PluginClient::build);
 
 pub(crate) static HTTP_CLIENT_SOURCE: LazyLock<reqwest::Client> =
     LazyLock::new(build_source_client);
 
 /// Dedicated HTTP client for playback (initial GET + Range restarts).
-/// Separate from HTTP_CLIENT; playback gets its own TCP connection,
+/// Separate from the other clients; playback gets its own TCP connection,
 /// avoiding HTTP/2 bandwidth contention with preload downloads.
 pub static HTTP_CLIENT_PLAYBACK: LazyLock<MediaClient> =
     LazyLock::new(|| build_media_client(MEDIA_SILENCE));

@@ -88,9 +88,9 @@ impl CoverKey {
     }
 }
 
-/// The cover fetch's own client. Not `HTTP_CLIENT`: it follows redirects with no policy, so an
-/// open redirect on the artwork host would carry the fetch anywhere, and it shares a cookie jar.
-/// This one re-checks the host at every hop, as `ipc::plugin::download` does.
+/// The cover fetch's own client. Not `CORE_CLIENT`: it follows redirects with no policy. An
+/// open redirect on the artwork host would carry the fetch anywhere. This one re-checks the host
+/// at every hop, as `ipc::plugin::download` does.
 static COVER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     crate::state::build_host_checked_client(
         cover_redirect_allowed,

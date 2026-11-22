@@ -7,11 +7,7 @@ use crate::connect::types::{
     AuthInfo, OAuthAuthInfo, OAuthFormParameters, OAuthParameters, OAuthServerInfo, ServerInfo,
 };
 use crate::connect::ws::client::PendingReply;
-use crate::ui::nav::{HOST_API, HOST_AUTH, PATH_OAUTH_TOKEN};
-
-const HOST_QUEUE: &str = "connectqueue.tidal.com";
-const PATH_QUEUE: &str = "/v1/queues";
-const PATH_CONTENT: &str = "/v1";
+use crate::ui::nav::{HOST_API, HOST_AUTH, HOST_QUEUE, PATH_CONTENT, PATH_OAUTH_TOKEN, PATH_QUEUE};
 
 fn https(host: &str, path: &str) -> String {
     format!("https://{host}{path}")

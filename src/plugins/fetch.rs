@@ -17,7 +17,7 @@ pub(crate) async fn plugin_fetch(
     let is_tidal = is_tidal_api(&url);
     // The plugin never sees the token, and its own Authorization header wins.
     let inject = !token.is_empty() && is_tidal && !request.has_header("authorization");
-    let mut req = request.build(&crate::state::HTTP_CLIENT);
+    let mut req = crate::state::PLUGIN_CLIENT.send(request);
     if inject {
         req = req.header("Authorization", format!("Bearer {token}"));
     }

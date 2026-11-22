@@ -60,7 +60,7 @@ async fn do_refresh(
         return;
     }
 
-    let client = &*crate::state::HTTP_CLIENT;
+    let client = &*crate::state::AUTH_CLIENT;
 
     let mut body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}",

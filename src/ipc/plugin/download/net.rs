@@ -49,8 +49,7 @@ fn redirect_allowed(url: &url::Url) -> bool {
     allowed_parsed(url, is_tidal_media_host) || allowed_parsed(url, is_tidal_artwork_host)
 }
 
-/// Downloads use their own client. The redirect policy stays off every other caller of
-/// `HTTP_CLIENT`.
+/// Downloads use their own client, its redirect policy narrower than the plugin class.
 static DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     crate::state::build_host_checked_client(
         redirect_allowed,

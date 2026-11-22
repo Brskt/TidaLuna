@@ -149,11 +149,8 @@ fn client_for(plugin: &str, redirect: RedirectMode) -> reqwest::Client {
     let entry = map.entry(plugin.to_string()).or_insert_with(|| {
         let jar = Arc::new(reqwest::cookie::Jar::default());
         PluginClients {
-            follow: crate::state::build_native_client(
-                jar.clone(),
-                reqwest::redirect::Policy::default(),
-            ),
-            manual: crate::state::build_native_client(jar, reqwest::redirect::Policy::none()),
+            follow: crate::state::build_native_client(jar.clone(), crate::state::Hops::Follow),
+            manual: crate::state::build_native_client(jar, crate::state::Hops::Never),
         }
     });
     match redirect {

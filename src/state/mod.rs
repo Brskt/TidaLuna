@@ -7,11 +7,14 @@ use std::sync::{LazyLock, Mutex, TryLockError};
 #[cfg(test)]
 use track::CurrentSource;
 
-pub use net::{HTTP_CLIENT, HTTP_CLIENT_PLAYBACK, HTTP_CLIENT_PRELOAD, MediaClient, MediaResponse};
 pub(crate) use net::{
-    HTTP_CLIENT_SOURCE, USER_AGENT, build_host_checked_client, build_native_client,
-    chromium_version,
+    AUTH_CLIENT, HTTP_CLIENT_SOURCE, Hops, PLUGIN_CLIENT, SERVICE_CLIENT, USER_AGENT,
+    build_host_checked_client, build_native_client, chromium_version, is_service_host,
+    is_token_host,
 };
+pub use net::{CORE_CLIENT, HTTP_CLIENT_PLAYBACK, HTTP_CLIENT_PRELOAD, MediaClient, MediaResponse};
+#[cfg(test)]
+pub(crate) use net::{HopCap, host_checked_builder, service_class};
 pub use paths::cache_data_dir;
 #[cfg(target_os = "linux")]
 pub(crate) use paths::user_home;

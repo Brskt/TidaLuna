@@ -189,8 +189,7 @@ pub(crate) fn write_chain(
 }
 
 /// The codec download's own client. Not `DOWNLOAD_CLIENT`, whose redirect policy refuses
-/// anything outside TIDAL's hosts; not `HTTP_CLIENT`, which follows redirects with no policy and
-/// carries a shared cookie store this third-party host has no business seeing (this one has none).
+/// anything outside TIDAL's hosts; not `CORE_CLIENT`, which follows redirects with no policy.
 static CODEC_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     crate::state::build_host_checked_client(codec_redirect_allowed, "redirect left the codec host")
 });

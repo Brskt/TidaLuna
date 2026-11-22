@@ -13,6 +13,7 @@ use std::time::Duration;
 use cef::*;
 use futures_util::StreamExt;
 
+use crate::ui::hosts::{HostVerdict, PermittedUrl};
 use crate::ui::token_filter::userfree_to_string;
 
 /// Overall budget for a single store fetch (connect + redirect + body).
@@ -20,10 +21,15 @@ const STORE_FETCH_TIMEOUT_SECS: u64 = 15;
 /// Body cap: a `store.json` is a few KB; this only bounds a hostile/oversized source.
 const MAX_STORE_BYTES: usize = 16 * 1024 * 1024;
 
-/// True for any `store.json` fetch (any host). The host is not restricted: the safety gate
-/// is the JSON validation in `fetch_store`, not an allow-list.
+/// True for a `store.json` fetch on any host but a TIDAL sign-in or malformed one, which keeps
+/// Chromium's own path. Otherwise the safety gate is the JSON validation in `fetch_store`, not an
+/// allow-list.
 fn should_proxy(url: &str) -> bool {
-    (url.starts_with("https://") || url.starts_with("http://")) && url.ends_with("/store.json")
+    url.ends_with("/store.json")
+        && url::Url::parse(url).is_ok_and(|parsed| {
+            matches!(parsed.scheme(), "https" | "http")
+                && HostVerdict::of(&parsed) == HostVerdict::Open
+        })
 }
 
 /// The store-proxy request handler for a matching GitHub store sub-resource fetch, else None.
@@ -63,8 +69,13 @@ struct ProxyState {
 /// (an HTML error page, a binary, a `.exe`, or unrelated JSON). Any link is allowed; this
 /// content check is the only gate; only real store data is served, and nothing is executed.
 async fn fetch_store(url: &str) -> Option<Vec<u8>> {
+    let permitted = PermittedUrl::new(url::Url::parse(url).ok()?).ok()?;
     let body = tokio::time::timeout(Duration::from_secs(STORE_FETCH_TIMEOUT_SECS), async {
-        let resp = crate::state::HTTP_CLIENT.get(url).send().await.ok()?;
+        let resp = crate::state::PLUGIN_CLIENT
+            .request(reqwest::Method::GET, permitted)
+            .send()
+            .await
+            .ok()?;
         let mut stream = resp.bytes_stream();
         let mut buf = Vec::new();
         while let Some(chunk) = stream.next().await {

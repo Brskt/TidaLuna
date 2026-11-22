@@ -58,7 +58,7 @@ async fn download_update_inner(
     cancel: &CancellationToken,
 ) -> Result<(), anyhow::Error> {
     let app_dir = exe_dir().context("cannot resolve exe dir")?;
-    let client = &*crate::state::HTTP_CLIENT;
+    let client = &*crate::state::CORE_CLIENT;
 
     crate::vprintln!("[UPDATER] Fetching release {version}...");
     let release = fetch_gh_release(client, &format!("releases/tags/{version}")).await?;

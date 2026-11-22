@@ -6,6 +6,13 @@ pub(crate) const HOST_DESKTOP: &str = "desktop.tidal.com";
 pub(crate) const HOST_LOGIN: &str = "login.tidal.com";
 pub(crate) const HOST_AUTH: &str = "auth.tidal.com";
 pub(crate) const HOST_API: &str = "api.tidal.com";
+pub(crate) const HOST_API_HIFI: &str = "api.tidalhifi.com";
+pub(crate) const HOST_QUEUE: &str = "connectqueue.tidal.com";
+pub(crate) const PATH_QUEUE: &str = "/v1/queues";
+pub(crate) const PATH_CONTENT: &str = "/v1";
+/// The hosts a Connect phone's queue and content servers may name, and the only ones the service
+/// client follows a redirect to. Known from TIDAL's own server info; not proven complete.
+pub(crate) const SERVICE_HOSTS: [&str; 3] = [HOST_API, HOST_QUEUE, HOST_API_HIFI];
 pub(crate) const REDIRECT_URI: &str = "tidal://login/auth";
 /// TIDAL's OAuth token endpoint, under the `/v1/` API prefix. The version-less
 /// `/oauth2/token` path answers 403 to a POST; only `/v1/oauth2/token` is the

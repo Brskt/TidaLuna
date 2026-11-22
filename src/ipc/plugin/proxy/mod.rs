@@ -1,5 +1,6 @@
 use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
 use crate::app_state::{IpcCallback, IpcMessage, with_state};
+use crate::ui::hosts::PermittedUrl;
 
 /// Restrict proxy channels to Tidal domains only.
 /// Returns true (and sends an IPC error) if the URL is rejected.
@@ -36,18 +37,36 @@ pub(super) fn handle_proxy_head_dispatch(msg: &IpcMessage, query_id: i64, callba
     if reject_non_tidal(&url, "proxy.head", &callback) {
         return;
     }
+    // A TIDAL origin can still be a sign-in host, which no plugin request reaches.
+    let permitted = match url.parsed().cloned().map(PermittedUrl::new) {
+        Some(Ok(permitted)) => permitted,
+        refused => {
+            crate::vprintln!(
+                "[PROXY]  REJECTED proxy.head to {}",
+                crate::util::refused_host(url.as_str())
+            );
+            let reason = match refused {
+                Some(Err(refusal)) => refusal.to_string(),
+                _ => "the url does not parse".to_string(),
+            };
+            ipc_callback_err(&callback, 403, &format!("proxy.head refused: {reason}"));
+            return;
+        }
+    };
 
     with_state(|state| {
         state.pending_ipc_callbacks.insert(query_id, callback);
     });
     crate::state::rt_handle().spawn(async move {
-        handle_proxy_head(query_id, url).await;
+        handle_proxy_head(query_id, permitted).await;
     });
 }
 
-async fn handle_proxy_head(query_id: i64, url: crate::ui::nav::RequestUrl) {
-    let client = &*crate::state::HTTP_CLIENT;
-    let result = client.head(url.as_str()).send().await;
+async fn handle_proxy_head(query_id: i64, url: PermittedUrl) {
+    let result = crate::state::PLUGIN_CLIENT
+        .request(reqwest::Method::HEAD, url)
+        .send()
+        .await;
 
     let Some(callback) = take_ipc_callback(query_id) else {
         return;

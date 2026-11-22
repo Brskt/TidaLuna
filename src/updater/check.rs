@@ -15,7 +15,7 @@ pub(crate) async fn check_for_update(channel: UpdateChannel) -> CheckOutcome {
         "[UPDATER] Checking for updates (current: v{current_version}, channel: {channel:?})..."
     );
 
-    let client = &*crate::state::HTTP_CLIENT;
+    let client = &*crate::state::CORE_CLIENT;
 
     // Enumerate releases instead of GitHub's `releases/latest`: the fork
     // inherits upstream releases whose tags outrank ours on raw numbers, and
