@@ -552,6 +552,21 @@ impl AppState {
         true
     }
 
+    /// The token endpoint refused the refresh token Rust sent as dead: the session ends, provided
+    /// it is still the one that token belonged to. A login or another refresh in between keeps it.
+    pub(crate) fn end_dead_session(
+        &mut self,
+        session_epoch: u64,
+        refresh_token_sent: &str,
+    ) -> Option<EndedSession> {
+        let still_that_session = self.session_epoch == session_epoch
+            && self.token_state.as_ref().is_some_and(|ts| {
+                !ts.current.refresh_token.is_empty()
+                    && ts.current.refresh_token == refresh_token_sent
+            });
+        still_that_session.then(|| self.end_session())
+    }
+
     /// Stores an app-level token and returns the nonce the page gets for it: the existing one when
     /// a token is already held, renewed in place. No session guard: it names no user, and the
     /// user's generation and the disk are never touched.

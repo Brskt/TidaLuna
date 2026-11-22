@@ -3,6 +3,8 @@
 //!
 //! Called from the web.loaded IPC handler while a `RefreshDuty` is owed.
 
+use cef::{ImplBrowser, ImplFrame};
+
 use crate::app_state::RefreshDuty;
 
 pub(crate) fn trigger_if_needed() {
@@ -34,6 +36,39 @@ pub(crate) fn trigger_if_needed() {
 
     crate::vprintln!("[AUTH]   Proactive refresh: starting ({duty:?})");
     crate::state::rt_handle().spawn(do_refresh(sent, duty));
+}
+
+/// What the token endpoint said of a refresh token Rust sent. Read on the status and `error`
+/// alone, never on `error_description`. Only a request Rust sent reaches here: the page's own
+/// answers never decide that a session is dead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshVerdict {
+    /// A 200 carrying an access token.
+    Fresh,
+    /// `400 invalid_grant`: the refresh token is dead.
+    Dead,
+    /// `401 invalid_client`: the token lives but not with that client. Nothing is touched: the
+    /// stored client stays unproven and the page's next refresh sends its own.
+    ClientRefused,
+    /// Anything else: network, timeout, 5xx, another 4xx, a body that is not JSON.
+    Inconclusive,
+}
+
+impl RefreshVerdict {
+    pub(crate) fn classify(status: u16, body: &str) -> Self {
+        let json = serde_json::from_str::<serde_json::Value>(body).ok();
+        let field = |key: &str| {
+            json.as_ref()
+                .and_then(|j| j.get(key)?.as_str())
+                .unwrap_or("")
+        };
+        match (status, field("error")) {
+            (200, _) if !field("access_token").is_empty() => Self::Fresh,
+            (400, "invalid_grant") => Self::Dead,
+            (401, "invalid_client") => Self::ClientRefused,
+            _ => Self::Inconclusive,
+        }
+    }
 }
 
 /// The refresh Rust sends, and the generation it was read from.
@@ -98,13 +133,25 @@ async fn do_refresh(sent: SentRefresh, duty: RefreshDuty) {
     let status = resp.status().as_u16();
     let resp_body = resp.text().await.unwrap_or_default();
 
-    if status != 200 {
-        crate::vprintln!(
-            "[AUTH]   Proactive refresh: {} {}",
-            status,
-            crate::util::truncate_str(&resp_body, 200)
-        );
-        return;
+    match RefreshVerdict::classify(status, &resp_body) {
+        RefreshVerdict::Fresh => {}
+        RefreshVerdict::Dead => {
+            end_dead_session(&sent);
+            return;
+        }
+        RefreshVerdict::ClientRefused => {
+            // The line counts how often a store holds a stale client.
+            crate::verr!("[AUTH] Proactive refresh: the stored client was refused for its token");
+            return;
+        }
+        RefreshVerdict::Inconclusive => {
+            crate::vprintln!(
+                "[AUTH]   Proactive refresh: {} {}",
+                status,
+                crate::util::truncate_str(&resp_body, 200)
+            );
+            return;
+        }
     }
 
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp_body) else {
@@ -205,3 +252,42 @@ async fn do_refresh(sent: SentRefresh, duty: RefreshDuty) {
 
     crate::vprintln!("[AUTH]   Proactive refresh complete ({} chars)", at.len());
 }
+
+/// The stored refresh token is dead: the session ends and the store is erased, then the page
+/// reloads onto the sign-in screen with its credential blob purged before the SDK starts. Armed
+/// by the boot refresh alone (at most once per process).
+fn end_dead_session(sent: &SentRefresh) {
+    let ended = crate::app_state::with_state(|state| {
+        let ended = state.end_dead_session(sent.session_epoch, &sent.refresh_token)?;
+        crate::platform::secure_store::delete_queued(&crate::state::cache_data_dir());
+        Some(ended)
+    })
+    .flatten();
+    let Some(ended) = ended else {
+        crate::vprintln!("[AUTH]   Dead refresh token answered for a session already left");
+        return;
+    };
+    crate::verr!("[AUTH] Proactive refresh: the stored refresh token is dead, session ended");
+    crate::ipc::plugin::settle_ended_session(&ended);
+    crate::ui::NEEDS_BOOT_BLOB_PURGE.store(true, std::sync::atomic::Ordering::Release);
+    reload_desktop_page();
+}
+
+/// Reloads the main frame when it is TIDAL's desktop page; any other page takes the purge on the
+/// next desktop page load.
+fn reload_desktop_page() {
+    let Some(Some(browser)) = crate::app_state::with_state(|state| state.browser.clone()) else {
+        return;
+    };
+    let on_desktop = browser.main_frame().is_some_and(|frame| {
+        let url = crate::ui::token_filter::userfree_to_string(&frame.url());
+        crate::ui::nav::PageKind::classify(&url) == crate::ui::nav::PageKind::DesktopApp
+    });
+    if on_desktop {
+        browser.reload();
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/ui/proactive_refresh.rs"]
+mod tests;

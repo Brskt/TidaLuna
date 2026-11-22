@@ -687,6 +687,31 @@ async fn a_rotated_refresh_token_reaches_every_generation_sharing_its_nonce() {
     assert_eq!(previous.refresh_token, "user-rt");
 }
 
+/// A dead refresh token ends the session it belonged to, and only that one: a login or another
+/// refresh in between keeps the session, and an empty token sent names no session at all.
+#[tokio::test]
+async fn a_dead_refresh_token_ends_only_the_session_it_belonged_to() {
+    for (epoch, stored, sent, ends, why) in [
+        (
+            1,
+            "user-rt",
+            "user-rt",
+            true,
+            "the session the token belonged to",
+        ),
+        (0, "user-rt", "user-rt", false, "a session already left"),
+        (1, "user-rt", "other-rt", false, "a token already replaced"),
+        (1, "", "", false, "no refresh token held"),
+    ] {
+        let mut state = state_with_tokens(Some(user_generation(Some("a"))));
+        state.token_state.as_mut().unwrap().current.refresh_token = stored.into();
+        let ended = state.end_dead_session(epoch, sent);
+        assert_eq!(ended.is_some(), ends, "{why}");
+        assert_eq!(state.token_state.is_none(), ends, "{why}");
+        assert_eq!(state.session_epoch, if ends { 2 } else { 1 }, "{why}");
+    }
+}
+
 /// A sign-in commits only on the return held, which a newer return replaces and a commit spends:
 /// no return, or no code, proves nothing.
 #[tokio::test]
