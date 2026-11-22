@@ -88,6 +88,9 @@ pub(crate) struct AppState {
     pub(crate) media_duration: Option<MeasuredDuration>,
     pub(crate) plugin_manager: crate::plugins::PluginManager,
     pub(crate) token_state: Option<crate::platform::secure_store::StoredTokenState>,
+    /// The app-level `client_credentials` token, kept apart from the user's generation: in memory
+    /// only, never cleared, its nonce stable across renewals.
+    pub(crate) app_token: Option<AppToken>,
     /// Keyed by CEF's own per-query id, never by the `id` the caller sent. Three independent
     /// JS counters feed this map (`fetch.__seq` per plugin load, `@luna/lib`'s bundle-wide
     /// one, the early-runtime's page-global one) and all start at 1; a client-chosen key
@@ -242,12 +245,40 @@ pub(crate) struct TokenGrant<'a> {
     pub(crate) client_id: Option<&'a str>,
 }
 
+/// What a token answer is, read on its shape and never on the request: a request body names its
+/// grant, and a plugin writes request bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantKind {
+    /// A new refresh token: a sign-in, or a refresh that rotated it.
+    Login,
+    /// An access token for a user, the refresh token kept.
+    Refresh,
+    /// An access token for no user: the app-level `client_credentials` grant.
+    Application,
+}
+
+impl GrantKind {
+    pub(crate) fn of(refresh_token: bool, user_id: bool) -> Self {
+        match (refresh_token, user_id) {
+            (true, _) => Self::Login,
+            (false, true) => Self::Refresh,
+            (false, false) => Self::Application,
+        }
+    }
+}
 
 /// How a user generation is committed: a sign-in may replace the account, a refresh never does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UserCommit {
     Login,
     Refresh,
+}
+
+/// The app-level token, apart from the user's generation.
+pub(crate) struct AppToken {
+    /// Handed to the page and kept across renewals: the page's copy never goes stale.
+    pub(crate) opaque_at: String,
+    pub(crate) access_token: String,
 }
 
 /// How a token commit ended, for each caller to answer and log in its own terms.
@@ -315,6 +346,7 @@ impl AppState {
             media_duration: None,
             plugin_manager: crate::plugins::PluginManager::new(),
             token_state: None,
+            app_token: None,
             pending_ipc_callbacks: HashMap::new(),
             pending_window_save: None,
             window_save_scheduled: false,
@@ -427,6 +459,25 @@ impl AppState {
             }
         }
         commit
+    }
+
+    /// Stores an app-level token and returns the nonce the page gets for it: the existing one when
+    /// a token is already held, renewed in place. No session guard: it names no user, and the
+    /// user's generation and the disk are never touched.
+    pub(crate) fn apply_app_token(&mut self, grant: &TokenGrant) -> String {
+        match &mut self.app_token {
+            Some(held) => {
+                held.access_token = grant.access_token.to_owned();
+                held.opaque_at.clone()
+            }
+            None => {
+                self.app_token = Some(AppToken {
+                    opaque_at: grant.opaque_at.to_owned(),
+                    access_token: grant.access_token.to_owned(),
+                });
+                grant.opaque_at.to_owned()
+            }
+        }
     }
 
     /// The one way `media_duration` is written, and it never empties: a payload that carries

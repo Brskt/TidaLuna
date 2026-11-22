@@ -489,3 +489,31 @@ async fn a_sign_in_to_another_account_ends_the_session_first() {
         "a sign-in to the same account ended its session"
     );
 }
+
+#[tokio::test]
+async fn an_app_token_is_renewed_in_place_under_the_pages_nonce() {
+    let mut state = state_with_tokens(Some(user_generation(Some("a"))));
+    let first = TokenGrant {
+        access_token: "app-at-1",
+        opaque_at: "luna_app_1",
+        ..grant(None)
+    };
+    let second = TokenGrant {
+        access_token: "app-at-2",
+        opaque_at: "luna_app_2",
+        ..grant(None)
+    };
+
+    assert_eq!(state.apply_app_token(&first), "luna_app_1");
+    assert_eq!(
+        state.apply_app_token(&second),
+        "luna_app_1",
+        "the page's nonce went stale"
+    );
+
+    let app = state.app_token.as_ref().unwrap();
+    assert_eq!(
+        (app.opaque_at.as_str(), app.access_token.as_str()),
+        ("luna_app_1", "app-at-2")
+    );
+}

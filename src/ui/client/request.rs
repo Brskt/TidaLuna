@@ -183,6 +183,10 @@ wrap_request_handler! {
                     .unwrap_or_default(),
             );
 
+            let method = _request
+                .as_ref()
+                .map(|r| crate::ui::token_filter::userfree_to_string(&r.method()))
+                .unwrap_or_default();
             // Strip the CSP meta on the doc navigation (first load, no SW yet);
             // the browser handler wins over the context one; peel it off here.
             // TokenResourceHandler is a no-op on the doc GET: nothing is lost.
@@ -231,7 +235,10 @@ wrap_request_handler! {
                 return Some(h);
             }
 
+            // The hydrate surface gets the handler only to be withheld there: it never arms the
+            // response filter, no hop of it reaching the token endpoint.
             if crate::ui::token_filter::should_rewrite_token(&url)
+                || crate::ui::token_filter::BodyTokenSurface::of(&method, &url).is_some()
                 || crate::ui::nav::is_token_endpoint(&url)
             {
                 Some(crate::ui::token_filter::TokenResourceHandler::new(

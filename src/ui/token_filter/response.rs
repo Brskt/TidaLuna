@@ -1,5 +1,5 @@
 use super::generate_opaque;
-use crate::app_state::{TokenCommit, TokenGrant, UserCommit};
+use crate::app_state::{GrantKind, TokenCommit, TokenGrant, UserCommit};
 
 pub(super) enum ProcessResult {
     Modified(Vec<u8>),
@@ -62,6 +62,10 @@ fn process_token_response_with(
         _ => return ProcessResult::Passthrough,
     };
 
+    let kind = GrantKind::of(
+        refresh_token.as_deref().is_some_and(|rt| !rt.is_empty()),
+        user_id.is_some(),
+    );
     // A real token is present: if opaque generation fails, drop the response
     // (Error -> FilterOutcome::Drop) instead of emitting the real token.
     let opaque_at = match opaque() {
@@ -92,10 +96,26 @@ fn process_token_response_with(
         granted_scopes: &granted_scopes,
         client_id: exchange_client_id,
     };
+    let rule = match kind {
+        GrantKind::Login => UserCommit::Login,
+        GrantKind::Refresh => UserCommit::Refresh,
+        GrantKind::Application => {
+            // Its own nonce, stable: the user's generation is not touched and nothing is scrubbed.
+            let Some(nonce) = crate::app_state::with_state(|state| state.apply_app_token(&grant))
+            else {
+                return ProcessResult::Error;
+            };
+            obj.insert("access_token".to_string(), serde_json::Value::String(nonce));
+            return match serde_json::to_vec(&json) {
+                Ok(v) => ProcessResult::Modified(v),
+                Err(_) => ProcessResult::Error,
+            };
+        }
+    };
     // The check belongs inside the closure, atomic with the writes it guards; its answer has
     // to leave it, because the body this function goes on to build is delivered to the SDK.
     let committed = crate::app_state::with_state(|state| {
-        match state.commit_token_generation(session_epoch, &grant, UserCommit::Login) {
+        match state.commit_token_generation(session_epoch, &grant, rule) {
             TokenCommit::Refused => {
                 crate::vprintln!(
                     "[AUTH]   Token response answered for a session already left, dropped"

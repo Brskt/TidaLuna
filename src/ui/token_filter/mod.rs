@@ -9,8 +9,11 @@ use crate::ui::nav::RequestUrl;
 mod request;
 mod response;
 
-use request::{capture_client_id, inject_refresh_token, rewrite_authorization_header};
-pub(crate) use request::{form_client_id, resolve_opaque_access, resolve_opaque_refresh};
+pub(crate) use request::BodyTokenSurface;
+#[cfg(test)]
+pub(crate) use request::resolve_opaque_access;
+use request::{capture_client_id, inject_refresh_token, settle_authorization_header};
+pub(crate) use request::{form_client_id, resolve_opaque_refresh};
 use response::{ProcessResult, process_token_response};
 
 /// Convert a CefStringUserfree to String without the crate's eprintln on null.
@@ -58,10 +61,14 @@ pub(crate) fn generate_opaque() -> Option<String> {
     })
 }
 
+/// The random bytes of a nonce, written as lowercase hex after the prefix. The generator and the
+/// detector both read it; a nonce the one makes is always one the other finds.
+const OPAQUE_BYTES: usize = 16;
+
 /// `fill` returns true on success; entropy source is injected for testing.
 fn generate_opaque_with(fill: impl FnOnce(&mut [u8]) -> bool) -> Option<String> {
     use std::fmt::Write;
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; OPAQUE_BYTES];
     if !fill(&mut buf) {
         return None;
     }
@@ -75,6 +82,24 @@ fn generate_opaque_with(fill: impl FnOnce(&mut [u8]) -> bool) -> Option<String> 
 
 pub(crate) fn is_opaque(value: &str) -> bool {
     value.starts_with(OPAQUE_PREFIX)
+}
+
+/// Whether `text` holds a nonce's exact shape anywhere: the prefix and the hex of its bytes. A
+/// bare `luna_` inside a real token or a PKCE verifier is not one and is never refused for life.
+pub(crate) fn carries_nonce_shape(text: &str) -> bool {
+    let hex_len = OPAQUE_BYTES * 2;
+    text.match_indices(OPAQUE_PREFIX).any(|(at, _)| {
+        text.as_bytes()
+            .get(at + OPAQUE_PREFIX.len()..at + OPAQUE_PREFIX.len() + hex_len)
+            .is_some_and(|hex| hex.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    })
+}
+
+/// Cancels a request whose token could only leave unresolved. One line, the reason only: never
+/// the body, the header or the nonce.
+fn withhold(why: request::TokenRefusal) -> ReturnValue {
+    crate::verr!("[AUTH] request withheld: {why}");
+    ReturnValue::CANCEL
 }
 
 wrap_resource_request_handler! {
@@ -109,6 +134,10 @@ wrap_resource_request_handler! {
             if let Some(req) = request {
                 let url_cef = req.url();
                 let url = RequestUrl::new(userfree_to_string(&url_cef));
+                let method = userfree_to_string(&req.method());
+                if let Some(surface) = BodyTokenSurface::of(&method, &url) {
+                    return withhold(surface.refusal());
+                }
                 let token_endpoint = crate::ui::nav::is_token_endpoint(&url);
                 self.token_exchange.store(token_endpoint, Ordering::Release);
                 if url.is_empty() {
@@ -150,8 +179,9 @@ wrap_resource_request_handler! {
                     crate::video::codec::note_demand();
                 }
 
-                if should_rewrite_token(&url) {
-                    rewrite_authorization_header(req);
+                if should_rewrite_token(&url) && !settle_authorization_header(req) {
+                    crate::verr!("[AUTH] request withheld: an unresolved bearer could not be removed");
+                    return ReturnValue::CANCEL;
                 }
             }
             ReturnValue::CONTINUE

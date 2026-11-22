@@ -20,6 +20,21 @@ fn opaque_has_prefix_and_hex_bytes() {
     assert_eq!(hex, "ab".repeat(16));
 }
 
+/// A nonce's shape is the prefix and the lowercase hex of its bytes, anywhere in the text: anything
+/// shorter or cased otherwise is not one.
+#[test]
+fn the_detector_finds_a_nonce_shape_and_nothing_shorter_or_cased_differently() {
+    let hex = "0123456789abcdef".repeat(2);
+    for (text, expected) in [
+        (format!("luna_{}", &hex[..31]), false),
+        (format!("luna_{}", hex.to_uppercase()), false),
+        (format!("luna_luna_{hex}"), true),
+        ("luna_rt_new".to_string(), false),
+    ] {
+        assert_eq!(carries_nonce_shape(&text), expected, "{text}");
+    }
+}
+
 #[test]
 fn rewrite_covers_an_api_host_and_the_auth_host() {
     let u = |s: &str| RequestUrl::new(s.to_string());
