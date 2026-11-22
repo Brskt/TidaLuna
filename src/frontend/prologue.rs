@@ -20,7 +20,6 @@ fn js_value(value: &Value) -> String {
 /// `self.__LUNAR_CONFIG__`, read by the early-runtime scripts in the renderer.
 pub(crate) fn renderer_config_js() -> String {
     let config = json!({
-        "desktopHost": nav::HOST_DESKTOP,
         "loginHost": nav::HOST_LOGIN,
         "authHost": nav::HOST_AUTH,
         "apiHost": nav::HOST_API,

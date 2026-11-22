@@ -57,16 +57,16 @@ fn an_untrusted_frame_is_refused_a_privileged_channel_and_nothing_else() {
     }
 }
 
-/// `parse_dash` (frame-gated in cefQuery; the frame-less console bridge must drop it too), the
-/// token, `window.navigate_self`, `window.open_url` and `player.devices.*` (which switch the OS
-/// output, `set` can ask for exclusive mode) are refused; playback and page chrome stay open.
+/// Refused to an untrusted frame: `parse_dash` (the frame-less bridge drops it too), the session
+/// (`jsrt.*`), `window.navigate_self`, `window.open_url` and `player.devices.*` (they switch the OS
+/// output); playback and page chrome stay open.
 #[test]
-fn only_the_channels_that_reach_the_token_the_os_or_the_dash_parser_are_privileged() {
+fn only_the_channels_that_reach_the_session_the_os_or_the_dash_parser_are_privileged() {
     for (channel, privileged) in [
         ("player.parse_dash", true),
         ("player.play", false),
         ("player.load_dash", false),
-        ("jsrt.set_token", true),
+        ("jsrt.session_clear", true),
         ("window.navigate_self", true),
         ("window.minimize", false),
         ("window.open_url", true),

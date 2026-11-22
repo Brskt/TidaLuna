@@ -59,7 +59,7 @@ pub(super) fn handle_session_hard_reset() {
     // would hand the credential back to the next launch after the user logged out.
     crate::platform::secure_store::delete_queued(&data_dir);
     reset_pkce_scrub();
-    crate::vprintln!("[AUTH]   Cleared captured token + token state");
+    crate::vprintln!("[AUTH]   Cleared token state");
 
     if let Some(cm) = cef::cookie_manager_get_global_manager(None) {
         let empty = cef::CefString::from("");

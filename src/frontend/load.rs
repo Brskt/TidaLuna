@@ -38,7 +38,7 @@ early_runtime! {
     saga_put,
     ipc,
     volume_restore,
-    token_capture,
+    xhr_pin,
     fetch_proxy,
     window_open,
     session_stub,

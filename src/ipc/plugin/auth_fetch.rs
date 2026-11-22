@@ -1,6 +1,6 @@
 use super::{ipc_callback_err, ipc_callback_ok, take_ipc_callback};
+use crate::app_state::{IpcCallback, IpcMessage, PluginCredential, with_state};
 use crate::plugins::outbound::{OutboundRequest, PluginFetchError};
-use crate::app_state::{IpcCallback, IpcMessage, with_state};
 
 pub(super) fn handle_plugin_fetch(
     msg: &IpcMessage,
@@ -63,13 +63,12 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, query_id: i64, callback: IpcC
         return;
     }
 
-    // Reject if the OAuth token hasn't been captured yet - avoids sending unauthenticated
-    // requests that would 403 and get memoized as failures on the frontend.
-    let token = with_state(|state| state.captured_token.clone()).unwrap_or_default();
-    if token.is_empty() {
-        ipc_callback_err(&callback, 401, "tidal.fetch: auth token not yet captured");
+    // Reject while no session holds a token: an unauthenticated request would 403 and be
+    // memoized as a failure on the frontend.
+    let Some(token) = with_state(|state| state.access_token().map(str::to_owned)).flatten() else {
+        ipc_callback_err(&callback, 401, "tidal.fetch: no session holds a token");
         return;
-    }
+    };
 
     dispatch_authenticated_fetch(
         "@luna/lib".to_string(),
@@ -77,15 +76,15 @@ pub(super) fn handle_tidal_fetch(msg: &IpcMessage, query_id: i64, callback: IpcC
         &opts_json,
         query_id,
         callback,
-        TokenSource::Captured(token),
+        TokenSource::Session(token),
     );
 }
 
 /// Where `dispatch_authenticated_fetch` takes the token it attaches.
 enum TokenSource<'a> {
     /// `tidal.fetch`, plugins included (through `TidalApi`): its handler checked only the TIDAL
-    /// API host and a non-empty captured token; no session check.
-    Captured(String),
+    /// API host and the session's stored token; no capability check.
+    Session(String),
     /// `plugin.fetch`: honoured only under the session that minted the capability.
     Capability(&'a str),
 }
@@ -114,28 +113,38 @@ fn dispatch_authenticated_fetch(
             return;
         }
     };
-    let token = match source {
-        TokenSource::Captured(token) => Some(token),
+    let credential = match source {
+        TokenSource::Session(token) => PluginCredential::Credential(token),
         // The comparison and the credential read share one lock deliberately: a session change
         // landing between them would hand out the very token the comparison exists to refuse.
         // Same shape as the guards at the token mint sites, and for the same reason.
         TokenSource::Capability(cap) => with_state(|state| {
-            (state.plugin_manager.capability_epoch(cap) == Some(state.session_epoch))
-                .then(|| state.captured_token.clone())
+            PluginCredential::for_plugin(
+                state.plugin_manager.capability_epoch(cap),
+                state.session_epoch,
+                state.token_state.as_ref(),
+            )
         })
-        .flatten(),
+        .unwrap_or(PluginCredential::PastSession),
     };
-    let Some(token) = token else {
-        // A capability minted under a session the user has left. The plugin holding it was
-        // injected as that session ended, and nothing tracks it any more. This is the last
-        // place that can refuse it the credential.
-        crate::vprintln!("[PLUGIN:FETCH] REFUSED '{plugin_id}': capability outlived its session");
-        ipc_callback_err(
-            &callback,
-            403,
-            "plugin.fetch: capability belongs to a past session",
-        );
-        return;
+    let token = match credential {
+        PluginCredential::Credential(token) => token,
+        // Sent without a token, as a plugin's request always was outside a session.
+        PluginCredential::NoCredential => String::new(),
+        PluginCredential::PastSession => {
+            // A capability minted under a session the user has left. The plugin holding it was
+            // injected as that session ended, and nothing tracks it any more. This is the last
+            // place that can refuse it the credential.
+            crate::vprintln!(
+                "[PLUGIN:FETCH] REFUSED '{plugin_id}': capability outlived its session"
+            );
+            ipc_callback_err(
+                &callback,
+                403,
+                "plugin.fetch: capability belongs to a past session",
+            );
+            return;
+        }
     };
     with_state(|state| {
         state.pending_ipc_callbacks.insert(query_id, callback);

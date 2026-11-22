@@ -86,7 +86,6 @@ pub(crate) struct AppState {
     pub(crate) media_controls: Option<crate::platform::media_controls::OsMediaControls>,
     pub(crate) media_duration: Option<MeasuredDuration>,
     pub(crate) plugin_manager: crate::plugins::PluginManager,
-    pub(crate) captured_token: String,
     pub(crate) token_state: Option<crate::platform::secure_store::StoredTokenState>,
     /// Keyed by CEF's own per-query id, never by the `id` the caller sent. Three independent
     /// JS counters feed this map (`fetch.__seq` per plugin load, `@luna/lib`'s bundle-wide
@@ -113,7 +112,7 @@ pub(crate) struct AppState {
     // Bumped on every session change, and on nothing else. Work started under an older epoch
     // describes a session the user has left: a plugin-load pass must answer nobody who asked
     // after the change, and a token minted before it must not be committed at all (in memory
-    // or to disk) because `captured_token` is the live authorization, not a draft.
+    // or to disk) because `token_state` is the live authorization, not a draft.
     pub(crate) session_epoch: u64,
     // The main document now running, and what this page's plugins have done in it.
     pub(crate) page: PagePhase,
@@ -263,6 +262,43 @@ impl TokenGrant<'_> {
 pub(crate) enum TokenCommit {
     /// The session the exchange was issued under has ended: nothing was written.
     Refused,
+/// What a plugin's request to TIDAL may carry. Read from the stored token only: no page script
+/// can hand Rust the token a plugin's request is sent with.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PluginCredential {
+    Credential(String),
+    /// No session holds a token: the request goes without one.
+    NoCredential,
+    /// The capability was issued to a session the user has left, or to none.
+    PastSession,
+}
+
+impl PluginCredential {
+    /// The session check comes first: a stale capability is refused whether or not a token exists.
+    pub(crate) fn for_plugin(
+        capability_epoch: Option<u64>,
+        session_epoch: u64,
+        token_state: Option<&crate::platform::secure_store::StoredTokenState>,
+    ) -> Self {
+        if capability_epoch != Some(session_epoch) {
+            return Self::PastSession;
+        }
+        match live_access_token(token_state) {
+            Some(token) => Self::Credential(token.to_string()),
+            None => Self::NoCredential,
+        }
+    }
+}
+
+/// No expiry rule: TIDAL answers an expired token with a 401 the caller can act on.
+fn live_access_token(
+    token_state: Option<&crate::platform::secure_store::StoredTokenState>,
+) -> Option<&str> {
+    token_state
+        .map(|ts| ts.current.access_token.as_str())
+        .filter(|token| !token.is_empty())
+}
+
     /// The grant is the current generation; `durable` says whether it belongs on disk.
     Committed { opaque_rt: String, durable: bool },
 }
@@ -279,7 +315,6 @@ impl AppState {
             media_controls: None,
             media_duration: None,
             plugin_manager: crate::plugins::PluginManager::new(),
-            captured_token: String::new(),
             token_state: None,
             pending_ipc_callbacks: HashMap::new(),
             pending_window_save: None,
@@ -356,7 +391,6 @@ impl AppState {
             previous_valid_until: Some(now_secs + 30),
         });
 
-        self.captured_token = grant.access_token.to_string();
         TokenCommit::Committed {
             opaque_rt: ort,
             durable,
@@ -407,12 +441,22 @@ impl AppState {
         self.session_epoch = self.session_epoch.wrapping_add(1);
         // Left waiting by this session's pass: the next session's pass loads them itself.
         self.page.take_waiting();
-        self.captured_token.clear();
         self.token_state = None;
         EndedSession {
             loaded,
             waiters: std::mem::take(&mut self.plugin_load_waiters),
         }
+    }
+
+    /// Whether a session the app knows is in progress. Plugin code runs only then
+    /// (`Closed::NoSession` carries the reason).
+    pub(crate) fn has_session(&self) -> bool {
+        self.token_state.is_some()
+    }
+
+    /// The access token of the session in progress, for a request made on its behalf.
+    pub(crate) fn access_token(&self) -> Option<&str> {
+        live_access_token(self.token_state.as_ref())
     }
 
     /// The session and page plugin work started now belongs to.

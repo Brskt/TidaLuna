@@ -30,8 +30,8 @@ use crate::app_state::{IpcCallback, IpcMessage, with_state};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Scrub the PKCE codeVerifier from nativeInterface after successful auth.
-/// Called from both jsrt.set_token (primary path) and proxy/token_exchange.rs oauth2/token
-/// (fallback).
+/// Called after each token commit: the page's login (token_filter/response.rs) and the proactive
+/// refresh.
 /// Best-effort: eval_js may fail if no renderer frame is available.
 static PKCE_SCRUBBED: AtomicBool = AtomicBool::new(false);
 /// Re-arm the scrub latch: the next login cycle triggers a fresh scrub.

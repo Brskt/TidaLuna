@@ -7,7 +7,7 @@ use super::do_load_plugins_inline;
 /// jsrt.load_plugins as request-response: runs multi-pass + reconciliation, then responds.
 /// Refuses to load plugins when no session is active (login page scenario).
 pub(in crate::ipc::plugin) fn has_session() -> bool {
-    with_state(|state| !state.captured_token.is_empty() || state.token_state.is_some())
+    with_state(|state| state.has_session())
         .unwrap_or(false)
 }
 

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// A true verdict attaches `state.captured_token`, the real access token, to the outgoing request.
+/// A true verdict attaches the session's real access token to the outgoing request.
 /// This path is IPC straight into reqwest, never Blink; no mixed-content check upgrades or blocks
 /// plaintext, which would put the live credential on the wire.
 #[test]

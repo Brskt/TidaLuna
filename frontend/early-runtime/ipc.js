@@ -3,7 +3,7 @@
 
 // Capture cefQuery once at early-runtime init - before any plugin or app code runs.
 // sendIpc/invokeIpc use this private reference: patching window.cefQuery later
-// (e.g., by a plugin) cannot intercept jsrt.set_token or other early-runtime IPC.
+// (e.g., by a plugin) cannot intercept early-runtime IPC.
 var _cq = window.cefQuery;
 var _cfg = self.__LUNAR_CONFIG__ || {};
 var _ipcId = 0;

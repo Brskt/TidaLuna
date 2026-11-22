@@ -46,7 +46,7 @@ pub(crate) fn payload_from_frontend(f: &Frontend) -> EarlyRuntimePayload {
         &e.saga_put,
         &e.ipc,
         &e.volume_restore,
-        &e.token_capture,
+        &e.xhr_pin,
         &e.fetch_proxy,
         &e.window_open,
         &e.session_stub,

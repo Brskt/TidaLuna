@@ -7,7 +7,6 @@ use super::{same_track, should_redact_args};
 #[test]
 fn secret_and_privileged_channels_are_redacted() {
     for channel in [
-        "jsrt.set_token",
         "connect.controller.set_auth",
         "player.load",
         "player.load_dash",

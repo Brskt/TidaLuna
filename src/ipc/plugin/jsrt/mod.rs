@@ -408,18 +408,6 @@ pub(super) fn run_pass(
 
 pub(crate) fn handle_jsrt_fire_and_forget(msg: &IpcMessage) {
     match msg.channel.as_str() {
-        "jsrt.set_token" => {
-            let token = msg.arg(0);
-            if crate::ui::token_filter::is_opaque(token) {
-                crate::vprintln!("[AUTH]   Ignoring opaque token from renderer");
-            } else {
-                with_state(|state| {
-                    state.captured_token = token.to_string();
-                });
-                super::scrub_pkce_verifier();
-                crate::vprintln!("[PLUGIN] Token captured ({} chars)", token.len());
-            }
-        }
         "jsrt.session_clear" => {
             handle_session_clear();
         }

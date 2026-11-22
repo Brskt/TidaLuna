@@ -27,12 +27,7 @@ enum BootTokenOutcome {
 /// Restore the reconciled session into AppState. Runs before the first
 /// browser exists; nothing can observe a half-populated state.
 fn restore_session(restored: platform::secure_store::StoredTokenState, needs_refresh: bool) {
-    let now_secs = crate::util::now_unix_secs();
-    let token_valid = restored.current.access_expires > now_secs;
     app_state::with_state(|state| {
-        if token_valid {
-            state.captured_token = restored.current.access_token.clone();
-        }
         state.token_state = Some(restored);
         state.needs_proactive_refresh = needs_refresh;
         state.needs_blob_purge = needs_refresh;

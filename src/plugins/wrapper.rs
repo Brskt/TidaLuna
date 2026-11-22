@@ -31,8 +31,8 @@
 //!      `window.cefQuery` not)
 //!   2. XHR/fetch prototype freeze - `Object.defineProperty` with `writable: false,
 //!      configurable: false` (silent failure on reassignment in sloppy mode)
-//!   3. Token never stored as JS global - only in Rust `AppState`, fed via
-//!      closure-private `sendIpc` in the early runtime IIFE
+//!   3. Token never stored as JS global, nor taken from the page: it lives only in Rust
+//!      `AppState`, from the token responses Rust itself filters
 //!   4. `getCredentials()` / `getAuthHeaders()` removed from `@luna/lib` public API
 
 /// Escape a string for safe embedding in a JS single-quoted string literal.

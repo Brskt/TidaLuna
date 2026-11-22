@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use super::{
-    AppState, MeasuredDuration, PagePhase, PassStood, Ticket, TokenCommit, TokenGrant,
-    end_page_music, js_ipc_response, js_string_literal, settle_recorded_duration,
+    AppState, MeasuredDuration, PagePhase, PassStood, PluginCredential, Ticket, TokenCommit,
+    TokenGrant, end_page_music, js_ipc_response, js_string_literal, settle_recorded_duration,
 };
 use crate::bridge::PlayerBridgeEvent;
 use crate::platform::secure_store::{StoredTokenState, TokenGeneration};
@@ -232,8 +232,9 @@ async fn a_token_answer_for_an_ended_session_writes_nothing() {
         (4, "old-rt"),
         "a departed session's answer replaced the live generation"
     );
-    assert!(
-        state.captured_token.is_empty(),
+    assert_eq!(
+        state.access_token(),
+        Some("old-at"),
         "a departed session's bearer token became the live one"
     );
 }
@@ -265,7 +266,57 @@ async fn a_new_generation_keeps_the_one_it_replaces_for_thirty_seconds() {
     );
     let until = tokens.previous_valid_until.unwrap();
     assert!((before + 30..=after + 30).contains(&until), "got {until}");
-    assert_eq!(state.captured_token, "new-at");
+}
+
+/// A plugin's request carries the stored token only under the session that issued its capability,
+/// and the session check comes first: a stale plugin learns nothing of whether a token exists.
+#[tokio::test]
+async fn a_plugin_gets_the_stored_token_only_under_its_own_session() {
+    let with_token = state_with_tokens(Some(generation("rt", "cid", 1)));
+    let mut empty = generation("rt", "cid", 1);
+    empty.access_token = String::new();
+    let with_empty = state_with_tokens(Some(empty));
+    let without = state_with_tokens(None);
+
+    for (state, capability_epoch, expected, why) in [
+        (
+            &with_token,
+            Some(1),
+            PluginCredential::Credential("old-at".into()),
+            "the session that issued the capability holds a token",
+        ),
+        (
+            &with_token,
+            Some(0),
+            PluginCredential::PastSession,
+            "the capability belongs to a session the user left",
+        ),
+        (
+            &with_token,
+            None,
+            PluginCredential::PastSession,
+            "an unknown capability is no session's",
+        ),
+        (
+            &without,
+            Some(1),
+            PluginCredential::NoCredential,
+            "no session holds a token",
+        ),
+        (
+            &with_empty,
+            Some(1),
+            PluginCredential::NoCredential,
+            "an empty token is no token",
+        ),
+    ] {
+        let credential = PluginCredential::for_plugin(
+            capability_epoch,
+            state.session_epoch,
+            state.token_state.as_ref(),
+        );
+        assert_eq!(credential, expected, "{why}");
+    }
 }
 
 #[tokio::test]
