@@ -285,13 +285,60 @@ pub(crate) fn vlog_forced_end(args: std::fmt::Arguments<'_>) {
 /// WRITE atomic, not each line: emitting the text and the newline separately
 /// interleaved four fifths of the lines under four concurrent writers.
 fn compose_line(now: OffsetDateTime, args: std::fmt::Arguments<'_>) -> String {
-    format!(
-        "[{:02}:{:02}:{:02}:{:03}] {}\n",
+    let mut line = format!(
+        "[{:02}:{:02}:{:02}:{:03}] ",
         now.hour(),
         now.minute(),
         now.second(),
         now.millisecond(),
-        args
+    );
+    // The sink never fails: an `Err` can only come from a broken `Display`, which `format!` also
+    // treats as a bug.
+    std::fmt::Write::write_fmt(&mut LineSink(&mut line), args)
+        .expect("a Display implementation returned an error");
+    line.push('\n');
+    line
+}
+
+/// Where the arguments of a line are written. A physical line of the log starts with a timestamp
+/// only when `compose_line` made it: a plugin's method, URL or channel name cannot forge one.
+struct LineSink<'a>(&'a mut String);
+
+/// Marks the continuation of a value that spans several lines, such as a JS stack.
+const CONTINUATION: &str = "  | ";
+
+impl std::fmt::Write for LineSink<'_> {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        for c in text.chars() {
+            match c {
+                '\n' => {
+                    self.0.push('\n');
+                    self.0.push_str(CONTINUATION);
+                }
+                '\t' => self.0.push('\t'),
+                c if c.is_control() => self.0.extend(c.escape_default()),
+                c if is_invisible_or_bidi(c) => self.0.extend(c.escape_unicode()),
+                c => self.0.push(c),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Format characters a terminal does not show but obeys: bidi overrides reorder the line, line
+/// separators break it, zero-width ones hide text inside it.
+fn is_invisible_or_bidi(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 

@@ -424,3 +424,31 @@ fn a_panic_before_the_rotation_is_written_once_the_log_opens() {
     let late = log.find("thread 'late' panicked");
     assert!(early.is_some() && late.is_some() && early < late, "{log}");
 }
+
+/// A plugin chooses the method, the URL and the channel name the log quotes. Any of them carrying
+/// a line break or a bidi override could forge a line the reader takes for the app's own.
+#[test]
+fn a_logged_line_cannot_carry_a_second_one() {
+    let breakers =
+        "a\nb\r\nc\rd\u{85}e\u{2028}f\u{2029}g\u{b}h\u{c}i\u{1b}[31mj\0k\u{202e}l\u{200b}m";
+    let line = compose_line(
+        OffsetDateTime::UNIX_EPOCH,
+        format_args!("[PLUGIN] {breakers}\ttab é 日本"),
+    );
+
+    let physical: Vec<&str> = line.trim_end_matches('\n').split('\n').collect();
+    assert!(
+        physical[0].starts_with("[00:00:00:000] [PLUGIN] a"),
+        "{line:?}"
+    );
+    for continuation in &physical[1..] {
+        assert!(continuation.starts_with("  | "), "{line:?}");
+    }
+    for raw in [
+        '\r', '\u{85}', '\u{2028}', '\u{2029}', '\u{b}', '\u{c}', '\u{1b}', '\0', '\u{202e}',
+        '\u{200b}',
+    ] {
+        assert!(!line.contains(raw), "{raw:?} reached the log raw: {line:?}");
+    }
+    assert!(line.contains("\ttab é 日本\n"), "{line:?}");
+}
