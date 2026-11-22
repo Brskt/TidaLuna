@@ -484,3 +484,7 @@ pub(crate) fn write_ls_values(leveldb_path: &Path, entries: &[(&str, &[u8])]) ->
     };
     write_ls_keys(&mut db, entries)
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/platform/sdk_storage.rs"]
+mod tests;

@@ -543,6 +543,150 @@ async fn an_app_token_is_renewed_in_place_under_the_pages_nonce() {
     );
 }
 
+fn refreshed(
+    refresh_token: Option<&'static str>,
+    user: Option<&'static str>,
+) -> TokenGrant<'static> {
+    TokenGrant {
+        access_token: "fresh-at",
+        refresh_token,
+        opaque_at: "",
+        opaque_rt: None,
+        expires_in: Some(60),
+        user_id: user,
+        granted_scopes: &[],
+        client_id: Some("cid"),
+    }
+}
+
+/// A state whose current generation shares its refresh nonce with the previous one, as a refresh
+/// in place leaves it.
+fn state_in_window() -> AppState {
+    let mut state = state_with_tokens(Some(TokenGeneration {
+        client: ClientBinding::Unproven("cid".into()),
+        ..user_generation(Some("a"))
+    }));
+    let ts = state.token_state.as_mut().unwrap();
+    ts.previous = Some(TokenGeneration {
+        access_token: "prev-at".into(),
+        opaque_at: "prev-opaque-at".into(),
+        opaque_rt: ts.current.opaque_rt.clone(),
+        ..generation("user-rt", "cid", 3)
+    });
+    ts.previous_valid_until = Some(now_unix_secs() + 30);
+    state
+}
+
+/// The boot refresh updates the generation in place: the nonces the page holds now name the
+/// fresh token, `previous` and its window stay, and the client is proven.
+#[tokio::test]
+async fn a_refresh_in_place_keeps_the_nonces_and_serves_the_fresh_token() {
+    let mut state = state_in_window();
+    let until = state.token_state.as_ref().unwrap().previous_valid_until;
+
+    assert!(state.apply_refresh_in_place(1, 4, "user-rt", &refreshed(None, Some("a"))));
+
+    let ts = state.token_state.as_ref().unwrap();
+    assert_eq!(
+        (
+            ts.current.opaque_at.as_str(),
+            ts.current.opaque_rt.as_str(),
+            ts.current.version
+        ),
+        ("old-opaque-at", "old-opaque-rt", 5)
+    );
+    assert_eq!(ts.current.client, ClientBinding::Proven("cid".into()));
+    assert_eq!(
+        ts.previous.as_ref().map(|p| p.access_token.as_str()),
+        Some("prev-at")
+    );
+    assert_eq!(ts.previous_valid_until, until);
+    let served =
+        crate::ui::token_filter::resolve_opaque_access(ts, "old-opaque-at", now_unix_secs());
+    assert_eq!(
+        served.access_token, "fresh-at",
+        "the page's nonce still served the stale token"
+    );
+}
+
+/// An answer for a generation already replaced, another session, another user, or a generation
+/// holding no refresh token changes nothing.
+#[tokio::test]
+async fn a_refresh_in_place_only_lands_on_the_generation_it_was_sent_for() {
+    for (epoch, version, stored, sent, user, why) in [
+        (
+            0,
+            4,
+            "user-rt",
+            "user-rt",
+            Some("a"),
+            "a session already left",
+        ),
+        (
+            1,
+            3,
+            "user-rt",
+            "user-rt",
+            Some("a"),
+            "a generation already replaced",
+        ),
+        (
+            1,
+            4,
+            "user-rt",
+            "other-rt",
+            Some("a"),
+            "another refresh token",
+        ),
+        (1, 4, "user-rt", "user-rt", Some("b"), "another user"),
+        (1, 4, "", "", Some("a"), "no refresh token held"),
+    ] {
+        let mut state = state_in_window();
+        state.token_state.as_mut().unwrap().current.refresh_token = stored.into();
+        assert!(
+            !state.apply_refresh_in_place(epoch, version, sent, &refreshed(None, user)),
+            "{why}"
+        );
+        let current = &state.token_state.as_ref().unwrap().current;
+        assert_eq!(
+            (current.access_token.as_str(), current.version),
+            ("old-at", 4),
+            "{why}"
+        );
+    }
+}
+
+/// Two generations naming one refresh nonce hold one refresh token: a rotation reaches both.
+#[tokio::test]
+async fn a_rotated_refresh_token_reaches_every_generation_sharing_its_nonce() {
+    let mut state = state_in_window();
+
+    assert!(state.apply_refresh_in_place(1, 4, "user-rt", &refreshed(Some("rotated"), Some("a"))));
+
+    let ts = state.token_state.as_ref().unwrap();
+    assert_eq!(ts.current.refresh_token, "rotated");
+    assert_eq!(ts.previous.as_ref().unwrap().refresh_token, "rotated");
+
+    let mut apart = state_in_window();
+    apart
+        .token_state
+        .as_mut()
+        .unwrap()
+        .previous
+        .as_mut()
+        .unwrap()
+        .opaque_rt = "elsewhere".into();
+    assert!(apart.apply_refresh_in_place(1, 4, "user-rt", &refreshed(Some("rotated"), Some("a"))));
+    let previous = apart
+        .token_state
+        .as_ref()
+        .unwrap()
+        .previous
+        .as_ref()
+        .unwrap();
+    assert_eq!(previous.refresh_token, "user-rt");
+}
+
 /// A sign-in commits only on the return held, which a newer return replaces and a commit spends:
 /// no return, or no code, proves nothing.
 #[tokio::test]
