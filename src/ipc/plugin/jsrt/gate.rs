@@ -1,6 +1,5 @@
 use crate::app_state::{IpcCallback, Ticket, with_state};
 use crate::ipc::plugin::ipc_callback_ok;
-use cef::*;
 
 use super::do_load_plugins_inline;
 
@@ -18,76 +17,15 @@ pub(in crate::ipc::plugin) fn handle_jsrt_load_plugins(callback: IpcCallback) {
         return;
     }
 
-    // Gate: on a cold boot the real OAuth token still lives in TIDAL's SDK until
-    // the proactive refresh rotates it to opaque nonces. Park the reply until the
-    // gate opens (refresh done or 5s safety timeout); plugins can't read it.
     // Parked first, then requested. Parking is what makes a second caller join the pass already
     // running instead of starting its own over the same plugins, and it is the only way its
     // answer can arrive: the pass, not this handler, replies.
-    let gate_closed = with_state(|state| {
+    with_state(|state| {
         let ticket = state.ticket();
-        state.plugin_load_waiters.push((ticket, callback.clone()));
-        !state.proactive_refresh_done
-    })
-    .unwrap_or(false);
-
-    if gate_closed {
-        crate::vprintln!("[PLUGIN] Deferring plugin load until proactive refresh completes");
-        arm_gate_timeout();
-        return;
-    }
+        state.plugin_load_waiters.push((ticket, callback));
+    });
 
     request_plugin_load();
-}
-
-/// Open the gate and drain parked load requests. Posts to the CEF UI thread
-/// because the drain touches CEF handles that are only sound there.
-pub(crate) fn open_plugin_gate() {
-    let mut task = GateDrainTask::new(0);
-    post_task(ThreadId::UI, Some(&mut task));
-}
-
-/// One-shot latch: only the first parked request arms the safety timer.
-static GATE_TIMEOUT_ARMED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Force the gate open after 5s if the refresh never signals; plugin load
-/// can't hang forever. Safe: the egress filter still blocks any leaked token.
-pub(super) fn arm_gate_timeout() {
-    if GATE_TIMEOUT_ARMED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
-    crate::state::rt_handle().spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let still_closed = with_state(|state| !state.proactive_refresh_done).unwrap_or(false);
-        if still_closed {
-            crate::vprintln!("[PLUGIN] Gate timeout: refresh never signalled, loading anyway");
-            open_plugin_gate();
-        }
-    });
-}
-
-wrap_task! {
-    struct GateDrainTask {
-        _p: u8,
-    }
-    impl Task {
-        fn execute(&self) {
-            // Opening the gate no longer runs the pass here. It only releases whoever is parked
-            // into the single-flight queue, which is also what a request arriving after the gate
-            // opened goes through. One path for both; neither can start a second pass.
-            let parked = with_state(|state| {
-                state.proactive_refresh_done = true;
-                state.plugin_load_waiters.len()
-            })
-            .unwrap_or(0);
-            if parked == 0 {
-                return;
-            }
-            crate::vprintln!("[PLUGIN] Gate open: releasing {parked} parked load request(s)");
-            request_plugin_load();
-        }
-    }
 }
 
 /// Start a load pass unless one is already running.

@@ -1,5 +1,5 @@
-//! The one door plugin code goes through into the page: the real token rotated out of TIDAL's SDK,
-//! its stored blob purged, and the page checked to be the one the work was started for.
+//! The one door plugin code goes through into the page: a session the app knows, and the page
+//! checked to be the one the work was started for.
 //! `inject_plugin` takes an `Admission`: no caller of it can skip these.
 
 use super::jsrt::PassGuard;
@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-/// Proof that the gate was open and the blob purged for `ticket`. Never cloned, and nothing
-/// outside this module can make one.
+/// Proof that `ticket` was the current page of a known session. Never cloned, and nothing outside
+/// this module can make one.
 pub(super) struct Admission {
     ticket: Ticket,
 }
@@ -24,76 +24,56 @@ impl Admission {
 /// Why no plugin may run now.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Closed {
-    /// The cold-boot refresh has not rotated the real token yet.
-    Gate,
     /// The session or the page the work was started for is gone.
     Stale,
-    /// The purge could not reach the page; the blob is still there.
-    PurgeUndelivered,
+    /// No session holds a credential the app knows: TIDAL's page may hold a real token that
+    /// nothing here can rotate, purge or recognise on its way out.
+    NoSession,
 }
 
 impl Closed {
     pub(super) fn reason(&self) -> &'static str {
         match self {
-            Closed::Gate => "The app is still signing in; try again in a moment",
             Closed::Stale => "The page reloaded before the plugin could start",
-            Closed::PurgeUndelivered => "The page could not be prepared for plugins",
+            Closed::NoSession => {
+                "TIDAL's session is not known to the app; sign in again to use plugins"
+            }
         }
     }
 }
 
-/// What an admission may do, from one look at the state: refuse, or go, purging first when the
-/// blob is still due.
-fn entry(gate_open: bool, current: Ticket, asked: Ticket, purge_due: bool) -> Result<bool, Closed> {
-    if !gate_open {
-        return Err(Closed::Gate);
+/// What the state alone must allow before any plugin code is sent: a session the app knows.
+/// Shared with `install`, which asks it before the user is asked anything.
+pub(super) fn standing(session_known: bool) -> Result<(), Closed> {
+    if !session_known {
+        return Err(Closed::NoSession);
     }
+    Ok(())
+}
+
+/// Whether an admission may go, from one look at the state. Work for a page or session already
+/// gone is stale before anything else: it is dropped quietly rather than announced.
+fn entry(current: Ticket, asked: Ticket, standing: Result<(), Closed>) -> Result<(), Closed> {
     if current != asked {
         return Err(Closed::Stale);
     }
-    Ok(purge_due)
+    standing
 }
 
-/// Admit plugin code for `ticket`, purging the SDK blob first if it is still due. Under the pass
-/// lock. No second caller finds the purge flag taken and injects before the purge went out.
-/// Blocks: from a blocking task only, never the UI thread nor under the state lock.
+/// Admit plugin code for `ticket`. Under the pass lock.
 pub(super) fn admit(_pass: &PassGuard, ticket: Ticket) -> Result<Admission, Closed> {
-    let purge = with_state(|state| {
-        let purge = entry(
-            state.proactive_refresh_done,
+    with_state(|state| {
+        entry(
             state.ticket(),
             ticket,
-            state.needs_blob_purge,
+            standing(state.has_session()),
         )?;
-        state.needs_blob_purge = false;
-        Ok(purge)
-    })
-    .unwrap_or(Err(Closed::Stale))?;
-    if purge {
-        // Named one by one: a browser closing has no frame and is no page that failed to prepare.
-        let refused = match eval_for(ticket, super::jsrt::JS_PURGE_SDK_BLOB.to_string()) {
-            Delivery::Ran => None,
-            Delivery::Stale | Delivery::NoFrame => Some(Closed::Stale),
-            Delivery::Undelivered => Some(Closed::PurgeUndelivered),
-        };
-        if let Some(refused) = refused {
-            // Still due: the next admission tries again rather than leave the blob for good.
-            with_state(|state| state.needs_blob_purge = true);
-            return Err(refused);
-        }
-        crate::vprintln!("[AUTH]   Purged SDK auth blob from localStorage (pre-plugin)");
-    }
-    // Set before any plugin line can run, and only for the page still current: a stale pass must
-    // not close the store-move window on a page whose own bundle has not asked yet.
-    with_state(|state| {
-        if state.ticket() != ticket {
-            return Err(Closed::Stale);
-        }
+        // Set before any plugin line can run, and only for the page still current: a stale pass
+        // must not close the store-move window on a page whose own bundle has not asked yet.
         state.plugin_code_admitted = true;
-        Ok(())
+        Ok(Admission { ticket })
     })
-    .unwrap_or(Err(Closed::Stale))?;
-    Ok(Admission { ticket })
+    .unwrap_or(Err(Closed::Stale))
 }
 
 /// What became of a piece of JS handed to the page.

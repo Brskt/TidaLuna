@@ -8,7 +8,6 @@ mod session;
 use session::{handle_session_clear, handle_session_hard_reset};
 
 pub(crate) use session::settle_ended_session;
-pub(crate) use gate::open_plugin_gate;
 pub(super) use gate::{handle_jsrt_load_plugins, has_session};
 
 /// Purges the real tokens of the SDK's localStorage blob before plugin code runs. The SDK already
@@ -23,7 +22,7 @@ pub(crate) const JS_PURGE_SDK_BLOB: &str = "try{['Data','Counter','Salt','Key'].
 /// and cannot stop this pass. The pass has to notice and stop itself.
 pub(super) fn do_load_plugins_inline(ticket: Ticket) {
     exclusive(|pass| {
-        // Before any row is read, plugins or not: the admission is also what purges the blob.
+        // Before any row is read, plugins or not.
         let admission = match super::admission::admit(pass, ticket) {
             Ok(admission) => admission,
             Err(Closed::Stale) => {

@@ -17,8 +17,6 @@ pub(super) fn handle_session_clear() {
         let _ = state.player.stop(crate::player::StopScope::OwnMusic);
         state.pending_player_events.clear();
         state.pending_time_update = None;
-        // Re-open the plugin-load gate; the prior cold-boot refresh is moot now.
-        state.proactive_refresh_done = true;
         state.end_session()
     })
     .unwrap_or_default();

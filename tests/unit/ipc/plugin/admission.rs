@@ -2,43 +2,50 @@
 
 use super::*;
 
-const NOW: Ticket = Ticket { epoch: 3, page: 5 };
+const fn at(epoch: u64, page: u64) -> Ticket {
+    Ticket {
+        epoch,
+        page,
+    }
+}
 
-/// No plugin line may run while the real token is still in TIDAL's SDK, nor in a page or session
-/// the work was not started for. The purge goes first whenever it is still due.
+const NOW: Ticket = at(3, 5);
+
+/// No plugin line may run in a page or session the work was not started for, nor without a
+/// session the app knows.
 #[test]
-fn plugin_code_is_admitted_only_past_the_gate_and_for_the_current_page() {
-    for (gate_open, asked, purge_due, expected, why) in [
-        (
-            false,
-            NOW,
-            true,
-            Err(Closed::Gate),
-            "the cold-boot refresh has not rotated the real token yet",
-        ),
+fn plugin_code_is_admitted_only_in_a_known_session_and_for_the_current_page() {
+    for (session_known, asked, expected, why) in [
         (
             true,
-            Ticket { epoch: 3, page: 4 },
-            false,
+            at(3, 4),
             Err(Closed::Stale),
             "a pass of the page before a reload would run in the new one before its pins",
         ),
         (
             true,
-            Ticket { epoch: 2, page: 5 },
-            false,
+            at(2, 5),
             Err(Closed::Stale),
             "a pass of the session before a logout would run in the one after",
         ),
+        (true, NOW, Ok(()), "the current page of a known session"),
         (
-            true,
+            false,
             NOW,
-            true,
-            Ok(true),
-            "the first admission purges the blob before any plugin",
+            Err(Closed::NoSession),
+            "a page whose token the app does not know may hold a real one a plugin could read",
         ),
-        (true, NOW, false, Ok(false), "the blob is already gone"),
+        (
+            false,
+            at(2, 5),
+            Err(Closed::Stale),
+            "work from before a logout is dropped quietly, not announced as a missing session",
+        ),
     ] {
-        assert_eq!(entry(gate_open, NOW, asked, purge_due), expected, "{why}");
+        assert_eq!(
+            entry(NOW, asked, standing(session_known)),
+            expected,
+            "{why}"
+        );
     }
 }

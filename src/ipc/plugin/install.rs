@@ -43,12 +43,12 @@ impl From<String> for InstallError {
 /// fetch precedes the consent dialog and opens nothing `plugin.fetch_package` does not already. The
 /// sole writer of a plugin row: nothing is stored until the user confirms.
 async fn do_plugin_install(url: String) -> Result<crate::plugins::PluginInfo, InstallError> {
-    // Before the dialog: an install is enabled next, which the gate refuses, and that refusal
-    // would throw away an install the user had just agreed to.
-    if !with_state(|state| state.proactive_refresh_done).unwrap_or(false) {
-        return Err(InstallError::Failed(
-            super::admission::Closed::Gate.reason().to_string(),
-        ));
+    // Before the dialog: an install is enabled next, which admission refuses the same way, and that
+    // refusal would throw away an install the user had just agreed to.
+    let standing = with_state(|state| super::admission::standing(state.has_session()))
+        .unwrap_or(Err(super::admission::Closed::NoSession));
+    if let Err(closed) = standing {
+        return Err(InstallError::Failed(closed.reason().to_string()));
     }
     let turn = INSTALL_CONSENTS.begin()?;
     let PluginData {

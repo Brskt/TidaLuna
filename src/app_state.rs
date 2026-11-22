@@ -106,12 +106,7 @@ pub(crate) struct AppState {
     pub(crate) force_quit: bool,
     /// What the boot refresh owes the restored session, taken once by `trigger_if_needed`.
     pub(crate) refresh_duty: RefreshDuty,
-    pub(crate) needs_blob_purge: bool,
-    // Gate: plugin JS must not load until the cold-boot real OAuth token has been
-    // rotated to opaque nonces in TIDAL's SDK. Default true (warm boot / no
-    // session); a cold boot with a pending refresh closes it.
-    pub(crate) proactive_refresh_done: bool,
-    // Plugin-load requests parked behind the gate or behind a running pass, each tagged with the
+    // Plugin-load requests parked behind a running pass, each tagged with the
     // session and page it was made under; answered when a pass of that same ticket settles.
     pub(crate) plugin_load_waiters: Vec<(Ticket, IpcCallback)>,
     // Set to the ticket of the load pass currently running off the UI thread. One at a time: two
@@ -398,9 +393,6 @@ impl AppState {
             close_to_tray: false,
             force_quit: false,
             refresh_duty: RefreshDuty::Spent,
-            needs_blob_purge: false,
-            // Gate open by default; cold boot closes it when a refresh is due.
-            proactive_refresh_done: true,
             plugin_load_waiters: Vec::new(),
             plugin_load_in_flight: None,
             session_epoch: 0,

@@ -33,12 +33,7 @@ pub(crate) fn trigger_if_needed() {
     }
 
     crate::vprintln!("[AUTH]   Proactive refresh: starting ({duty:?})");
-    crate::state::rt_handle().spawn(async move {
-        do_refresh(sent, duty).await;
-        // Open the gate on every exit path; safe even on refresh failure (the
-        // token stays live, but the egress filter blocks exfil).
-        crate::ipc::plugin::open_plugin_gate();
-    });
+    crate::state::rt_handle().spawn(do_refresh(sent, duty));
 }
 
 /// The refresh Rust sends, and the generation it was read from.
