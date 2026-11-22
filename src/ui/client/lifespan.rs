@@ -24,7 +24,7 @@ wrap_life_span_handler! {
             _window_info: Option<&mut WindowInfo>,
             _client: Option<&mut Option<Client>>,
             _settings: Option<&mut BrowserSettings>,
-            extra_info: Option<&mut Option<DictionaryValue>>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
             let url_str = target_url.as_ref().map(|u| u.to_string()).unwrap_or_default();
@@ -32,33 +32,11 @@ wrap_life_span_handler! {
                 "[POPUP]  on_before_popup: {}",
                 crate::util::truncate_str(&crate::util::redact_url_query(&url_str), 120)
             );
-            if target_url.is_some() {
-                let kind = PageKind::classify(&url_str);
-                if kind == PageKind::AuthHost {
-                    crate::vprintln!(
-                        "[AUTH]   Opening auth popup: {}",
-                        crate::util::truncate_str(&crate::util::redact_url_query(&url_str), 120)
-                    );
-                    if let Some(wi) = _window_info {
-                        wi.window_name = CefString::from("TidaLunar - Login");
-                        wi.bounds = cef::Rect { x: 100, y: 100, width: 500, height: 700 };
-                        #[cfg(target_os = "windows")]
-                        {
-                            wi.style = 0x00CF0000; // WS_OVERLAPPEDWINDOW
-                        }
-                        wi.runtime_style = RuntimeStyle::ALLOY;
-                    }
-                    // The popup's renderer runs the early runtime too (AuthHost injects it).
-                    if crate::ui::early_runtime::COVERED_KINDS.contains(&kind)
-                        && let Some(extra) = extra_info
-                    {
-                        *extra = crate::ui::early_runtime::extra_info();
-                    }
-                    return 0;
-                }
-                if kind == PageKind::External {
-                    open_external_in_os(&url_str);
-                }
+            // No popup ever opens. One would outlive the document that opened it and could still
+            // navigate the main frame, and a sign-in popup hands its opener a `login.tidal.com`
+            // initiator. TIDAL's own sign-in runs in the main frame (`window.open(.., '_self')`).
+            if target_url.is_some() && PageKind::classify(&url_str) == PageKind::External {
+                open_external_in_os(&url_str);
             }
             1
         }
@@ -67,7 +45,7 @@ wrap_life_span_handler! {
                 let is_popup = browser.is_popup() != 0;
                 crate::vprintln!("[CEF]    on_after_created: popup={}", is_popup);
                 if !is_popup {
-                    // Only store the main browser, not auth popups
+                    // Only store the main browser, not a popup such as DevTools
                     with_state(|state| {
                         state.browser = Some(browser);
                     });

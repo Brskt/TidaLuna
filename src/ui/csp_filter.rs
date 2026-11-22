@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
 use crate::ui::nav::RequestUrl;
+use crate::ui::request_dispatch::{Dispatch, Inbound, Surface, refuse};
 use crate::ui::token_filter::userfree_to_string;
 
 // TIDAL delivers its CSP as a <meta http-equiv> tag, not a header. Renaming the
@@ -34,6 +35,32 @@ wrap_request_context_handler! {
                     .map(|r| userfree_to_string(&r.url()))
                     .unwrap_or_default(),
             );
+            let method = request
+                .as_ref()
+                .map(|r| userfree_to_string(&r.method()))
+                .unwrap_or_default();
+            let initiator = request_initiator.map(|i| i.to_string());
+            let inbound = Inbound {
+                method: &method,
+                url: &url,
+                is_navigation: is_navigation != 0,
+                main_frame: request
+                    .as_ref()
+                    .is_some_and(|r| r.resource_type() == ResourceType::MAIN_FRAME),
+                initiator: initiator.as_deref(),
+            };
+            // A plugin's worker reaches the sign-in hosts through here alone, and is judged as the
+            // page is: a route gets the same token filter.
+            match Dispatch::of(Surface::App, &inbound) {
+                Dispatch::Pass => {}
+                Dispatch::Refuse(why) => return Some(refuse("service-worker", why, &url)),
+                Dispatch::Route(auth) => {
+                    return Some(crate::ui::token_filter::route_handler(
+                        auth,
+
+                    ));
+                }
+            }
             if is_document_url(&url, None) {
                 return Some(DocumentHandler::new());
             }

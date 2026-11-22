@@ -5,16 +5,19 @@ use std::sync::{Arc, Mutex};
 use crate::app_state::{GrantKind, UserCommit};
 use crate::ui::buffering_filter::{FilterOutcome, force_identity_encoding, new_buffering_filter};
 use crate::ui::hosts::{HostShape, TidalDomain};
-use crate::ui::nav::{Asker, RequestUrl};
+use crate::ui::nav::RequestUrl;
 
 mod request;
 mod response;
 
+use crate::ui::nav::AuthRoute;
+use crate::ui::request_dispatch::AuthRequest;
 pub(crate) use request::BodyTokenSurface;
 #[cfg(test)]
 pub(crate) use request::resolve_opaque_access;
 use request::{
-    PreparedToken, TokenSender, prepare_token_request, read_token_body, settle_authorization_header,
+    PreparedToken, TokenSender, drop_nonce_bearer, prepare_token_request, read_token_body,
+    route_body, settle_authorization_header,
 };
 use response::{ProcessResult, process_token_response};
 
@@ -181,15 +184,20 @@ fn withhold(why: request::TokenRefusal) -> ReturnValue {
 }
 
 /// The token filter of one hop, its slots fresh: CEF asks for a handler again at every redirect.
-pub(super) fn token_handler(asker: Asker) -> ResourceRequestHandler {
+pub(super) fn token_handler(auth: Option<AuthRequest>) -> ResourceRequestHandler {
     TokenResourceHandler::new(
         Arc::new(Mutex::new(None)),
         Arc::new(AtomicU8::new(0)),
         Arc::new(AtomicU64::new(0)),
         Arc::new(Mutex::new(None)),
-        asker,
+        auth,
         Arc::new(AtomicBool::new(false)),
     )
+}
+
+/// The token filter of a hop the dispatch let through to a sign-in route.
+pub(super) fn route_handler(auth: AuthRequest) -> ResourceRequestHandler {
+    token_handler(Some(auth))
 }
 
 wrap_resource_request_handler! {
@@ -207,8 +215,8 @@ wrap_resource_request_handler! {
         exchange_epoch: Arc<AtomicU64>,
         // The sign-in return a code exchange was admitted on, spent by the commit of its answer.
         exchange_code: Arc<Mutex<Option<crate::ui::nav::LoginProof>>>,
-        // Who asked, read on the request's initiator by the client's handler.
-        asker: Asker,
+        // The sign-in route the dispatch let this hop through to, `None` off the sign-in hosts.
+        auth: Option<AuthRequest>,
         // Current hop targets the gateway that answers with artwork; set on the same
         // entry that refuses compression for it. Carried rather than re-derived. The
         // response half would otherwise reparse a URL for every response the app makes.
@@ -231,22 +239,28 @@ wrap_resource_request_handler! {
                     return withhold(surface.refusal());
                 }
                 let mut hop = None;
-                if crate::ui::nav::is_token_endpoint(&url) {
-                    force_identity_encoding(req);
+                if let Some(auth) = self.auth {
                     let body = read_token_body(req);
-                    let sender = TokenSender::of(self.asker);
-                    let prepared = match prepare_token_request(req, &url, &body, sender) {
-                        PreparedToken::Send(prepared) => prepared,
-                        PreparedToken::Withhold(why) => return withhold(why),
-                    };
-                    *self
-                        .exchange_client_id
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = prepared.client_id;
-                    self.exchange_epoch
-                        .store(prepared.session_epoch, Ordering::Release);
-                    *self.exchange_code.lock().unwrap_or_else(|e| e.into_inner()) = prepared.code;
-                    hop = Some(prepared.origin);
+                    if let Err(why) = route_body(auth.route, &body) {
+                        return withhold(why);
+                    }
+                    if auth.route == AuthRoute::TokenGrant {
+                        force_identity_encoding(req);
+                        let sender = TokenSender::of(auth.asker);
+                        let prepared = match prepare_token_request(req, &url, &body, sender) {
+                            PreparedToken::Send(prepared) => prepared,
+                            PreparedToken::Withhold(why) => return withhold(why),
+                        };
+                        *self
+                            .exchange_client_id
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = prepared.client_id;
+                        self.exchange_epoch
+                            .store(prepared.session_epoch, Ordering::Release);
+                        *self.exchange_code.lock().unwrap_or_else(|e| e.into_inner()) =
+                            prepared.code;
+                        hop = Some(prepared.origin);
+                    }
                 }
                 let origin = ExchangeOrigin::carry(ExchangeOrigin::load(&self.exchange_origin), hop);
                 ExchangeOrigin::store(&self.exchange_origin, origin);
@@ -278,7 +292,16 @@ wrap_resource_request_handler! {
                     crate::video::codec::note_demand();
                 }
 
-                if should_rewrite_token(&url) && !settle_authorization_header(req) {
+                // Only the profile route is sent the user's bearer among the sign-in routes.
+                let settled = match self.auth.map(|auth| auth.route) {
+                    Some(
+                        AuthRoute::TokenGrant
+                        | AuthRoute::WebSessionCredentials
+                        | AuthRoute::WebSessionLogout,
+                    ) => drop_nonce_bearer(req),
+                    _ => !should_rewrite_token(&url) || settle_authorization_header(req),
+                };
+                if !settled {
                     crate::verr!("[AUTH] request withheld: an unresolved bearer could not be removed");
                     return ReturnValue::CANCEL;
                 }

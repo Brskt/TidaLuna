@@ -2,6 +2,156 @@
 
 use super::*;
 
+/// Each sign-in route by its exact raw path: no alias, encoding, extra slash, version or query
+/// reaches the same server route, and a foreign asker reaches none. Only the exact logout POST
+/// ends a session.
+#[test]
+fn a_sign_in_route_is_its_exact_path_and_only_the_logout_ends_a_session() {
+    use Asker::{Foreign, LoginHost, Tidal};
+    use AuthRoute::*;
+    for (method, url, asker, expected) in [
+        (
+            "POST",
+            "https://auth.tidal.com/v1/oauth2/token",
+            Tidal,
+            TokenGrant,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/credentials",
+            Tidal,
+            WebSessionCredentials,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/logout",
+            Tidal,
+            WebSessionLogout,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/logout",
+            LoginHost,
+            WebSessionLogout,
+        ),
+        ("GET", "https://login.tidal.com/oauth2/me", Tidal, Profile),
+        (
+            "GET",
+            "https://login.tidal.com/oauth2/me",
+            LoginHost,
+            LoginPage,
+        ),
+        ("GET", "https://example.com/", Foreign, NotAuth),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/logout",
+            Foreign,
+            Refused,
+        ),
+        (
+            "GET",
+            "https://auth.tidal.com/v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "PUT",
+            "https://auth.tidal.com/v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/logout/",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com//v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/%6cogout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/logout?x=1",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/web-session/logout#x",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com:8443/v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "http://auth.tidal.com/v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://u:p@auth.tidal.com/v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com./v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://x.auth.tidal.com/v1/web-session/logout",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://auth.tidal.com/v1/oauth2/me",
+            Tidal,
+            Refused,
+        ),
+        (
+            "GET",
+            "https://login.tidal.com/v1/oauth2/me",
+            Tidal,
+            Refused,
+        ),
+        (
+            "POST",
+            "https://login.tidal.com/oauth2/token",
+            Tidal,
+            Refused,
+        ),
+    ] {
+        let parsed = Url::parse(url).unwrap();
+        let route = AuthRoute::of(method, &parsed, asker);
+        assert_eq!(route, expected, "{method} {url} {asker:?}");
+    }
+    assert_eq!(PATH_OAUTH_TOKEN, format!("{AUTH_API_PREFIX}oauth2/token"));
+}
+
 /// The asker is read on the request's initiator; a navigation's `"null"` or one nothing names
 /// asks as a stranger.
 #[test]
@@ -188,39 +338,4 @@ fn secure_image_target_needs_an_allowed_host_over_https() {
     )));
     assert!(!is_secure_image_target(&u("https://evil.example/p.png")));
     assert!(!is_secure_image_target(&u("not a url")));
-}
-
-/// `is_secure_tidal_target` admits on `is_tidal_origin` alone, which is only sound while every
-/// host `is_token_endpoint` recognises is itself a Tidal origin. That holds today because both
-/// constants end in `.tidal.com`, but `is_tidal_origin`'s suffix literal does not derive from
-/// them, and nothing else keeps the two in step. Add an auth host on one side only and this turns
-/// red, instead of the gate silently 403-ing real token-refresh traffic.
-#[test]
-fn every_token_endpoint_host_is_also_a_tidal_origin() {
-    for host in [HOST_AUTH, HOST_LOGIN] {
-        let url = u(&format!("https://{host}/v1/oauth2/token"));
-        assert!(
-            is_token_endpoint(&url),
-            "{host} is meant to be a token endpoint"
-        );
-        assert!(
-            is_tidal_origin(&url),
-            "{host} is a token endpoint but not a Tidal origin, so is_secure_tidal_target refuses it"
-        );
-    }
-}
-
-#[test]
-fn token_endpoint_requires_auth_host_and_oauth_path() {
-    assert!(is_token_endpoint(&u(
-        "https://auth.tidal.com/v1/oauth2/token"
-    )));
-    assert!(is_token_endpoint(&u(
-        "https://login.tidal.com/oauth2/token"
-    )));
-    assert!(!is_token_endpoint(&u("https://auth.tidal.com/v1/other")));
-    assert!(!is_token_endpoint(&u(
-        "https://api.tidal.com/v1/oauth2/token"
-    )));
-    assert!(!is_token_endpoint(&u("not a url")));
 }

@@ -9,7 +9,6 @@ use std::sync::OnceLock;
 use cef::*;
 
 use crate::frontend::load::Frontend;
-use crate::ui::nav::PageKind;
 
 pub(crate) const KEY_BODY: &str = "lunar.early_runtime.body";
 pub(crate) const KEY_TITLEBAR: &str = "lunar.early_runtime.titlebar";
@@ -21,15 +20,6 @@ pub(crate) const EARLY_RUNTIME_MISSING: &str = "lunar.early_runtime_missing";
 /// between a broken delivery and a page running without its guards.
 pub(crate) const FAIL_CLOSED_JS: &str =
     "try{window.stop();}catch(e){}location.replace('about:blank');";
-
-/// The page kinds whose browsers carry the payload: everything the main view navigates to, and
-/// the AuthHost popup, the only popup the app lets open.
-pub(crate) const COVERED_KINDS: [PageKind; 4] = [
-    PageKind::DesktopApp,
-    PageKind::LoginCallback,
-    PageKind::LoginPage,
-    PageKind::AuthHost,
-];
 
 pub(crate) struct EarlyRuntimePayload {
     pub body: String,
@@ -63,8 +53,8 @@ pub(crate) fn payload_from_frontend(f: &Frontend) -> EarlyRuntimePayload {
     }
 }
 
-/// Popups get no fallback titlebar. Its buttons drive the main window, and the auth popup is
-/// OS-framed anyway. `has_bundle` tells the titlebar whether TIDAL's own shell will load here.
+/// Popups get no fallback titlebar: its buttons drive the main window. `has_bundle` tells the
+/// titlebar whether TIDAL's own shell will load here.
 pub(crate) fn preload_script(p: &EarlyRuntimePayload, is_popup: bool, has_bundle: bool) -> String {
     let titlebar = if is_popup { "" } else { p.titlebar.as_str() };
     format!(
@@ -73,8 +63,8 @@ pub(crate) fn preload_script(p: &EarlyRuntimePayload, is_popup: bool, has_bundle
     )
 }
 
-/// The one builder both senders call (`browser_view_create`, `on_before_popup`); neither can
-/// create a browser without the payload.
+/// The payload the app window's browser is created with, `app_bootstrap` its only caller; a
+/// dialog's browser carries none.
 pub(crate) fn extra_info() -> Option<DictionaryValue> {
     let Some(front) = crate::frontend::load::get() else {
         crate::verr!("[EARLY]  No front loaded: the renderer gets no early runtime");

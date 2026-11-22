@@ -20,6 +20,10 @@ const PATH_LOGIN_CALLBACK: &str = "/login/auth";
 /// `/oauth2/token` path answers 403 to a POST; only `/v1/oauth2/token` is the
 /// real grant endpoint (the SDK's own login/refresh use it too).
 pub(crate) const PATH_OAUTH_TOKEN: &str = "/v1/oauth2/token";
+/// The prefix of every route of TIDAL's auth API, `oauthAuthUrl` in the bundle.
+const AUTH_API_PREFIX: &str = "/v1/";
+const PATH_PROFILE: &str = "/oauth2/me";
+
 /// Who asks, read on the request's initiator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Asker {
@@ -44,6 +48,59 @@ impl Asker {
             Some(PageKind::External | PageKind::TidalCallback) | None => Self::Foreign,
         }
     }
+}
+
+/// What a request to TIDAL's sign-in hosts is, by its exact route. Paths are matched raw: no
+/// alias, percent-encoding or extra slash reaches the same server route under another name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthRoute {
+    /// Not a sign-in host.
+    NotAuth,
+    /// The sign-in page's own traffic.
+    LoginPage,
+    /// `POST https://auth.tidal.com/v1/oauth2/token`.
+    TokenGrant,
+    /// `POST https://auth.tidal.com/v1/web-session/credentials`.
+    WebSessionCredentials,
+    /// `POST https://auth.tidal.com/v1/web-session/logout`.
+    WebSessionLogout,
+    /// `GET https://login.tidal.com/oauth2/me`.
+    Profile,
+    /// Anything else on a sign-in host, a malformed TIDAL host, or a foreign asker.
+    Refused,
+}
+
+impl AuthRoute {
+    pub(crate) fn of(method: &str, url: &Url, asker: Asker) -> Self {
+        match crate::ui::hosts::HostVerdict::of(url) {
+            crate::ui::hosts::HostVerdict::Open => return Self::NotAuth,
+            crate::ui::hosts::HostVerdict::MalformedTidal => return Self::Refused,
+            crate::ui::hosts::HostVerdict::SignIn => {}
+        }
+        if asker == Asker::Foreign {
+            return Self::Refused;
+        }
+        let plain_origin = url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none();
+        let plain =
+            plain_origin && url.fragment().is_none() && url.query().is_none_or(str::is_empty);
+        match url.host_str() {
+            // The sign-in page's own requests carry their query, as in `/api/email?...`.
+            Some(HOST_LOGIN) if asker == Asker::LoginHost && plain_origin => Self::LoginPage,
+            _ if !plain => Self::Refused,
+            Some(HOST_AUTH) => match (method, url.path().strip_prefix(AUTH_API_PREFIX)) {
+                ("POST", Some("oauth2/token")) => Self::TokenGrant,
+                ("POST", Some("web-session/credentials")) => Self::WebSessionCredentials,
+                ("POST", Some("web-session/logout")) => Self::WebSessionLogout,
+                _ => Self::Refused,
+            },
+            Some(HOST_LOGIN) if method == "GET" && url.path() == PATH_PROFILE => Self::Profile,
+            _ => Self::Refused,
+        }
+    }
+
 }
 
 /// The return of a sign-in through TIDAL's own page, named by the digest of the code it carried.
@@ -223,17 +280,6 @@ pub(crate) fn is_tidal_origin(url: &RequestUrl) -> bool {
 /// reqwest never travels through Blink, and nothing upgrades a plaintext scheme on the way out. An
 /// unparseable URL carries no transport to judge, and reqwest reads that same string with that same
 /// parser.
-pub(crate) fn is_token_endpoint(url: &RequestUrl) -> bool {
-    let Some(parsed) = url.parsed() else {
-        return false;
-    };
-    let host = parsed.host_str().unwrap_or("");
-    // Broad substring, decoupled from PATH_OAUTH_TOKEN's exact value: this must
-    // catch whatever the SDK posts (any API-version prefix), while do_refresh
-    // posts to the precise PATH_OAUTH_TOKEN.
-    (host == HOST_AUTH || host == HOST_LOGIN) && parsed.path().contains("oauth2/token")
-}
-
 pub(crate) fn is_secure_tidal_target(url: &RequestUrl) -> bool {
     if !is_tidal_origin(url) {
         return false;

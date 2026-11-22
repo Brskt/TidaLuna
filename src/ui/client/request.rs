@@ -1,5 +1,6 @@
 use crate::app_state::{open_in_os, with_state};
 use crate::ui::nav::{self, NavigationPolicy, PageKind};
+use crate::ui::request_dispatch::{Dispatch, Inbound, Surface, refuse};
 use cef::wrapper::message_router::{BrowserSideRouter, MessageRouterBrowserSideHandlerCallbacks};
 use cef::*;
 use std::sync::Arc;
@@ -105,17 +106,6 @@ wrap_request_handler! {
                         main_frame.load_url(Some(&cef_url));
                     }
                 });
-                // Only close popup browsers, not the main window
-                if let Some(browser) = browser {
-                    if browser.is_popup() != 0 {
-                        crate::vprintln!("[AUTH]   Closing auth popup after tidal:// redirect");
-                        if let Some(host) = browser.host() {
-                            host.try_close_browser();
-                        }
-                    } else {
-                        crate::vprintln!("[AUTH]   Main frame redirect, not closing browser");
-                    }
-                }
                 return 1;
             }
 
@@ -203,6 +193,27 @@ wrap_request_handler! {
                 .as_ref()
                 .map(|r| crate::ui::token_filter::userfree_to_string(&r.method()))
                 .unwrap_or_default();
+            let initiator = request_initiator.map(|i| i.to_string());
+            let inbound = Inbound {
+                method: &method,
+                url: &url,
+                is_navigation: is_navigation != 0,
+                main_frame: _request
+                    .as_ref()
+                    .is_some_and(|r| r.resource_type() == ResourceType::MAIN_FRAME),
+                initiator: initiator.as_deref(),
+            };
+            match Dispatch::of(Surface::App, &inbound) {
+                Dispatch::Pass => {}
+                Dispatch::Refuse(why) => return Some(refuse("renderer", why, &url)),
+                Dispatch::Route(auth) => {
+                    return Some(crate::ui::token_filter::route_handler(
+                        auth,
+
+                    ));
+                }
+            }
+
             // Strip the CSP meta on the doc navigation (first load, no SW yet);
             // the browser handler wins over the context one; peel it off here.
             // TokenResourceHandler is a no-op on the doc GET: nothing is lost.
@@ -255,13 +266,8 @@ wrap_request_handler! {
             // response filter, no hop of it reaching the token endpoint.
             if crate::ui::token_filter::should_rewrite_token(&url)
                 || crate::ui::token_filter::BodyTokenSurface::of(&method, &url).is_some()
-                || crate::ui::nav::is_token_endpoint(&url)
             {
-                Some(crate::ui::token_filter::token_handler(
-                    crate::ui::nav::Asker::of_initiator(
-                        request_initiator.map(|i| i.to_string()).as_deref(),
-                    ),
-                ))
+                Some(crate::ui::token_filter::token_handler(None))
             } else if !crate::ui::nav::is_tidal_origin(&url) {
                 // Exfiltration guard: block sendBeacon to non-Tidal domains.
                 // TIDAL doesn't use sendBeacon - safe to block unconditionally.

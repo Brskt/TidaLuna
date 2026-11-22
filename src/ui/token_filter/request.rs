@@ -4,7 +4,7 @@ use super::{ExchangeOrigin, carries_nonce_shape, is_opaque, userfree_to_string};
 use crate::app_state::AppToken;
 use crate::platform::secure_store::{StoredTokenState, TokenGeneration};
 use crate::ui::hosts::HostShape;
-use crate::ui::nav::{Asker, LoginProof, RequestUrl};
+use crate::ui::nav::{Asker, AuthRoute, LoginProof, RequestUrl};
 use crate::util::now_unix_secs;
 
 const AUTHORIZATION: &str = "Authorization";
@@ -363,6 +363,8 @@ pub(crate) enum TokenRefusal {
     UpdateClientUnresolved,
     BodyNotReplaced,
     SessionHydrate,
+    UnexpectedBody,
+    NoRoute,
 }
 
 impl std::fmt::Display for TokenRefusal {
@@ -381,6 +383,8 @@ impl std::fmt::Display for TokenRefusal {
             }
             Self::BodyNotReplaced => "the rewritten body could not be attached",
             Self::SessionHydrate => "session/hydrate would carry a nonce to tidal.com",
+            Self::UnexpectedBody => "it carries a body its route never sends",
+            Self::NoRoute => "it names no sign-in route",
         })
     }
 }
@@ -472,6 +476,19 @@ impl TokenSender {
             Asker::LoginHost => Self::SignInPage,
             Asker::Tidal | Asker::Foreign => Self::App,
         }
+    }
+}
+
+/// What each sign-in route may carry, judged before any effect of the request: a logout carrying a
+/// body is refused before it ends the session. The grant's body is judged with its sender.
+pub(crate) fn route_body(route: AuthRoute, body: &TokenBody) -> Result<(), TokenRefusal> {
+    match (route, body) {
+        (AuthRoute::WebSessionLogout | AuthRoute::Profile, TokenBody::Absent) => Ok(()),
+        (AuthRoute::WebSessionLogout | AuthRoute::Profile, _) => Err(TokenRefusal::UnexpectedBody),
+        (AuthRoute::WebSessionCredentials, TokenBody::Bytes(_)) => Ok(()),
+        (AuthRoute::WebSessionCredentials, _) => Err(TokenRefusal::Unreadable),
+        (AuthRoute::TokenGrant | AuthRoute::LoginPage, _) => Ok(()),
+        (AuthRoute::NotAuth | AuthRoute::Refused, _) => Err(TokenRefusal::NoRoute),
     }
 }
 
@@ -735,6 +752,17 @@ pub(super) fn settle_authorization_header(req: &mut Request) -> bool {
         }
         BearerFate::Strip => strip_header(req, AUTHORIZATION),
     }
+}
+
+/// A sign-in route other than the profile has no use for a bearer of ours: one carrying a nonce's
+/// shape is removed, never resolved. `false` when it could not be removed.
+pub(super) fn drop_nonce_bearer(req: &mut Request) -> bool {
+    let header = userfree_to_string(&req.header_by_name(Some(&CefString::from(AUTHORIZATION))));
+    if !carries_nonce_shape(&header) {
+        return true;
+    }
+    crate::verr!("[AUTH] a nonce bearer on a sign-in route was removed");
+    strip_header(req, AUTHORIZATION)
 }
 
 /// Rewrites the whole header map without `name`, compared without case, then reads it back: a

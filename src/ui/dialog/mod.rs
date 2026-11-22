@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use tokio::sync::oneshot;
 
+use crate::ui::request_dispatch::{Dispatch, DispatchRefusal, Inbound, Surface, refuse};
 use crate::util::reply::OnceReply;
 
 mod html;
@@ -151,6 +152,28 @@ wrap_request_handler! {
                     .map(|r| crate::ui::token_filter::userfree_to_string(&r.url()))
                     .unwrap_or_default(),
             );
+            let method = request
+                .as_ref()
+                .map(|r| crate::ui::token_filter::userfree_to_string(&r.method()))
+                .unwrap_or_default();
+            let initiator = request_initiator.map(|i| i.to_string());
+            let inbound = Inbound {
+                method: &method,
+                url: &url,
+                is_navigation: is_navigation != 0,
+                main_frame: request
+                    .as_ref()
+                    .is_some_and(|r| r.resource_type() == ResourceType::MAIN_FRAME),
+                initiator: initiator.as_deref(),
+            };
+            match Dispatch::of(Surface::Dialog, &inbound) {
+                Dispatch::Pass => {}
+                Dispatch::Refuse(why) => return Some(refuse("dialog", why, &url)),
+                // A dialog reaches no sign-in route: `Dispatch::of` refuses every sign-in host.
+                Dispatch::Route(_) => {
+                    return Some(refuse("dialog", DispatchRefusal::DialogSurface, &url));
+                }
+            }
             // Navigations are the buttons' schemes, which `on_before_browse` owns.
             if is_navigation == 0 && !dialog_subresource_allowed(&url) {
                 crate::verr!(

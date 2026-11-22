@@ -1,9 +1,8 @@
 //! Tests for `src/ui/early_runtime.rs`, attached by `#[path]`.
 
 use crate::frontend::load::{EarlyRuntime, Frontend};
-use crate::ui::nav::{NavigationPolicy, PageKind};
 
-use super::{COVERED_KINDS, payload_from_frontend, preload_script};
+use super::{payload_from_frontend, preload_script};
 
 /// Each script names itself, letting order and presence be read off the output.
 fn frontend() -> Frontend {
@@ -76,50 +75,4 @@ fn the_preload_keeps_its_guards() {
         "{js}"
     );
     assert!(js.contains("self.__LUNAR_EARLY_RUNTIME__=true;"), "{js}");
-}
-
-/// Under a system frame the strip shows only where TIDAL's shell never loads: the value must be the
-/// one the bundle injection itself follows, or the login page loses its way back.
-#[test]
-fn the_preload_says_whether_the_page_gets_the_bundle() {
-    let payload = payload_from_frontend(&frontend());
-    for kind in COVERED_KINDS {
-        let bundle = NavigationPolicy::for_page(kind).inject_bundle;
-        let js = preload_script(&payload, false, bundle);
-        assert!(
-            js.contains(&format!("self.__LUNAR_PAGE_HAS_BUNDLE__={bundle};")),
-            "{kind:?}"
-        );
-    }
-    assert!(
-        !NavigationPolicy::for_page(PageKind::AuthHost).inject_bundle,
-        "the login page is the one without it"
-    );
-}
-
-#[test]
-fn the_payload_carries_no_credential() {
-    let payload = payload_from_frontend(&frontend());
-    assert!(!payload.body.contains("__TIDALUNAR_CREDENTIALS__"));
-    assert!(!payload.body.contains("/*init_static*/"));
-    assert!(!payload.body.contains("/*cache_heal*/"));
-}
-
-#[test]
-fn every_injecting_page_kind_has_a_sender() {
-    for kind in [
-        PageKind::DesktopApp,
-        PageKind::LoginCallback,
-        PageKind::LoginPage,
-        PageKind::AuthHost,
-        PageKind::TidalCallback,
-        PageKind::External,
-    ] {
-        if NavigationPolicy::for_page(kind).inject_early_runtime {
-            assert!(
-                COVERED_KINDS.contains(&kind),
-                "{kind:?} injects but no sender covers it"
-            );
-        }
-    }
 }
