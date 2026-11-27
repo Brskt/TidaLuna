@@ -751,6 +751,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             PlayerCommand::Seek(time) => self.handle_seek(time),
             PlayerCommand::SetVolume(vol) => self.handle_set_volume(vol),
             PlayerCommand::GetAudioDevices(req_id) => self.handle_get_audio_devices(req_id),
+            PlayerCommand::DevicesChanged => {
+                self.handle_get_audio_devices(None);
+            }
             PlayerCommand::SetAudioDevice { id, mode } => {
                 self.handle_set_audio_device(id, mode);
             }

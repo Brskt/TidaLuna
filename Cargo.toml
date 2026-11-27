@@ -235,6 +235,12 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSString",
   "std",
 ] }
+# Already in the graph through cpal; named here for the listener on the system's
+# output device list.
+objc2-core-audio = { version = "0.3.2", default-features = false, features = [
+  "AudioHardware",
+  "std",
+] }
 security-framework = "3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]

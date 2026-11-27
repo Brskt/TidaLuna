@@ -272,6 +272,8 @@ pub(super) enum PlayerCommand {
     Seek(f64),
     SetVolume(Volume),
     GetAudioDevices(Option<String>),
+    /// The OS added, removed or activated an output: the page gets the fresh list unasked.
+    DevicesChanged,
     SetAudioDevice {
         id: String,
         mode: OutputMode,

@@ -4718,6 +4718,7 @@ dependencies = [
  "oauth2",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-audio",
  "objc2-foundation",
  "openh264",
  "openh264-sys2",

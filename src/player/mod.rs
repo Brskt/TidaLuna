@@ -4,6 +4,7 @@ pub(crate) mod cache;
 pub(crate) mod crossfade;
 pub(crate) mod dash;
 mod declick;
+mod device_watch;
 // The decode loop the two Windows engines share: compiled under test on every host, its
 // fake-sink tests needing no device.
 #[cfg(any(target_os = "windows", test))]
@@ -85,6 +86,8 @@ pub struct Player {
     governor: GovernorHandle,
     /// The "Normalize volume" mode, shared with the thread and every output path.
     normalization: normalization::Normalization,
+    /// Holds a sender to the thread. It drops with the player, and the thread still sees it go.
+    device_watch: std::sync::Mutex<Option<device_watch::DeviceWatch>>,
 }
 
 pub(crate) use crate::util::fmt::{format_bytes, format_ms, short_id};
@@ -194,6 +197,24 @@ impl Player {
             }),
             governor,
             normalization,
+            device_watch: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Hands the page a fresh device list whenever the OS adds, removes or activates an output.
+    /// Started by the app only: a unit test's player registers nothing with the OS.
+    pub(crate) fn start_device_watch(&self) {
+        let tx = self.cmd_tx.clone();
+        let signal: device_watch::Signal = std::sync::Arc::new(move || {
+            let _ = tx.send(PlayerCommand::DevicesChanged);
+        });
+        match device_watch::start(signal) {
+            Ok(watch) => {
+                *self.device_watch.lock().unwrap_or_else(|e| e.into_inner()) = Some(watch);
+            }
+            Err(reason) => {
+                crate::verr!("[AUDIO]  Device list refreshes only when the page asks: {reason}");
+            }
         }
     }
 

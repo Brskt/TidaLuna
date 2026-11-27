@@ -436,6 +436,7 @@ fn main() {
         },
         rt_handle.clone(),
     ));
+    player.start_device_watch();
 
     #[cfg(target_os = "windows")]
     crate::player::asio::driver::log_asio_drivers();

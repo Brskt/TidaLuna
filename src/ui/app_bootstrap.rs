@@ -178,6 +178,9 @@ const CEF_DISABLED_FEATURES: &[&str] = &[
     "OptimizationHints",
     "CalculateNativeWinOcclusion",
     "ImmersiveReadAnything",
+    // Blink fires `devicechange` only to a page granted the microphone, which this app never
+    // grants: TIDAL's web device list then never refreshes and keeps a removed output active.
+    "DeviceChangeRequiresPermission",
     // Not a capability we refuse: a check that misfires. Chromium 152's
     // `kPreventCrossWorldServiceWorkerResourceReuse` compares `world_for_csp` with a bare `!=` in
     // `Resource::CanReuse`, where null and `MainWorld()` are the same world, and every module TIDAL
