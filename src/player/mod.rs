@@ -46,8 +46,8 @@ pub(crate) use load_state::{
 };
 use protocol::PlayerCommand;
 pub(crate) use protocol::{
-    AudioDevice, DeviceErrorKind, MediaErrorCode, MediaFormatSnapshot, OutputMode, PlaybackState,
-    PlayerEvent,
+    AudioDevice, DeviceErrorKind, MediaErrorCode, MediaFormatSnapshot, NATIVE_PLAYER_VERSION,
+    OutputMode, PlaybackState, PlayerEvent,
 };
 pub(crate) use track_identity::{
     canonical_track_id, refresh_retained_credential, refreshed_fetch_url,

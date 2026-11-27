@@ -19,8 +19,10 @@ export const createApplicationController = () => {
         getDesktopReleaseNotes: () => JSON.stringify({}),
         getPlatform: () => window.__TIDALUNAR_PLATFORM__,
         getPlatformTarget: () => "standalone",
-        getProcessUptime: () => 100,
-        getVersion: () => "2.38.6.6",
+        // Seconds, like the official `process.uptime()`: the page's own clock runs on its differences.
+        getProcessUptime: () => performance.now() / 1000,
+        // Our build, never an official one: the page puts it in About and in TIDAL's error telemetry.
+        getVersion: () => window.__TIDALUNAR_HOST_VERSION__ || "TidaLunar",
         getWindowsVersionNumber: () => Promise.resolve("10.0.0"),
         ready: () => {
             if (isLoginCallback()) return;

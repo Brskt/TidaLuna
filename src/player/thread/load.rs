@@ -349,7 +349,7 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // Emit version once (fire-once at first load)
         if !self.version_emitted {
             self.version_emitted = true;
-            (self.callback)(PlayerEvent::Version(env!("CARGO_PKG_VERSION")));
+            (self.callback)(PlayerEvent::Version(crate::player::NATIVE_PLAYER_VERSION));
         }
 
         // Open cpal stream

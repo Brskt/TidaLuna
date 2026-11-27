@@ -8,8 +8,8 @@ use std::sync::{LazyLock, Mutex, TryLockError};
 use track::CurrentSource;
 
 pub(crate) use net::{
-    AUTH_CLIENT, HTTP_CLIENT_SOURCE, Hops, PLUGIN_CLIENT, SERVICE_CLIENT, USER_AGENT,
-    build_host_checked_client, build_native_client, chromium_version, is_service_host,
+    AUTH_CLIENT, HTTP_CLIENT_SOURCE, Hops, PLUGIN_CLIENT, PRODUCT_TOKEN, SERVICE_CLIENT,
+    USER_AGENT, build_host_checked_client, build_native_client, chromium_version, is_service_host,
     is_token_host,
 };
 pub use net::{CORE_CLIENT, HTTP_CLIENT_PLAYBACK, HTTP_CLIENT_PRELOAD, MediaClient, MediaResponse};

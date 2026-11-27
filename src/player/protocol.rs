@@ -152,6 +152,10 @@ impl MediaFormatSnapshot {
     }
 }
 
+/// The native player's version as the page is told it: the app's, the player being built into it.
+/// The renderer config and `PlayerEvent::Version` both carry this one.
+pub(crate) const NATIVE_PLAYER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     TimeUpdate(f64, u32),

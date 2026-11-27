@@ -28,6 +28,7 @@ pub(crate) fn renderer_config_js() -> String {
         "authHosts": [nav::HOST_LOGIN, nav::HOST_AUTH],
         "nativeWindowButtons": cfg!(target_os = "macos"),
         "systemFrame": crate::ui::SYSTEM_FRAME,
+        "nativePlayerVersion": crate::player::NATIVE_PLAYER_VERSION,
     });
     format!("self.__LUNAR_CONFIG__={};", js_value(&config))
 }
@@ -61,8 +62,9 @@ fn millis(d: Duration) -> Value {
 
 pub(crate) fn init_globals_js(g: &InitGlobals) -> String {
     let mut js = String::new();
-    let globals: [(&str, Value); 15] = [
+    let globals: [(&str, Value); 16] = [
         ("PLATFORM", json!(g.platform)),
+        ("HOST_VERSION", json!(crate::state::PRODUCT_TOKEN)),
         ("CLOSE_TO_TRAY", json!(g.close_to_tray)),
         ("AUTO_CHECK", json!(g.auto_check)),
         ("UPDATE_CHANNEL", json!(g.update_channel)),

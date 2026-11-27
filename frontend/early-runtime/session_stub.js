@@ -18,8 +18,8 @@ if (!window.nativeInterface) {
             getDesktopReleaseNotes: function() { return '{}'; },
             getPlatform: function() { return platform; },
             getPlatformTarget: function() { return 'standalone'; },
-            getProcessUptime: function() { return 100; },
-            getVersion: function() { return '2.38.6.6'; },
+            getProcessUptime: function() { return performance.now() / 1000; },
+            getVersion: function() { return window.__TIDALUNAR_HOST_VERSION__ || 'TidaLunar'; },
             getWindowsVersionNumber: function() { return Promise.resolve('10.0.0'); },
             ready: noop,
             reenableAutoUpdater: noop,
@@ -94,6 +94,30 @@ if (!window.nativeInterface) {
             unmaximize: noop,
             close: noop,
             setFullscreen: noop,
+        },
+    };
+}
+
+// TIDAL's index listens for the native player's version while it evaluates, before the bundle
+// defines the real component, which then replaces this listener-only stand-in.
+if (!window.NativePlayerComponent) {
+    window.NativePlayerComponent = {
+        Player: function() {
+            var listeners = {};
+            var nativeVersion = _cfg.nativePlayerVersion;
+            if (typeof nativeVersion === 'string') {
+                queueMicrotask(function() {
+                    (listeners.version || []).forEach(function(cb) { cb({ target: nativeVersion }); });
+                });
+            }
+            return {
+                addEventListener: function(type, cb) {
+                    (listeners[type] = listeners[type] || []).push(cb);
+                },
+                removeEventListener: function(type, cb) {
+                    listeners[type] = (listeners[type] || []).filter(function(l) { return l !== cb; });
+                },
+            };
         },
     };
 }

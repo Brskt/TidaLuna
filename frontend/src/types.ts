@@ -7,6 +7,7 @@ declare global {
         __TIDAL_CALLBACKS__: any;
         __TIDAL_IPC_RESPONSE__: any;
         __TIDALUNAR_PLATFORM__: string;
+        __TIDALUNAR_HOST_VERSION__?: string;
         __TIDALUNAR_WINDOW_STATE__?: { isMaximized: boolean; isFullscreen: boolean };
         __TIDALUNAR_PLAYER_PUSH__?: (events: any[]) => void;
         __TIDALUNAR_FRAGMENT_DEADLINE_MS__?: number;

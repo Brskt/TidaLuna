@@ -17,11 +17,14 @@ pub(crate) fn chromium_version() -> String {
     )
 }
 
+/// How this build names itself to TIDAL: in the User-Agent and as the page's desktop version.
+pub(crate) const PRODUCT_TOKEN: &str = concat!("TidaLunar/", env!("CARGO_PKG_VERSION"));
+
 fn build_user_agent(os_token: &str) -> String {
     format!(
-        "Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) TidaLunar/{ver} Chrome/{chrome} Safari/537.36",
+        "Mozilla/5.0 ({os}) AppleWebKit/537.36 (KHTML, like Gecko) {product} Chrome/{chrome} Safari/537.36",
         os = os_token,
-        ver = env!("CARGO_PKG_VERSION"),
+        product = PRODUCT_TOKEN,
         chrome = chromium_version(),
     )
 }
