@@ -143,6 +143,7 @@ fn handle_player_ipc(msg: &IpcMessage) {
                     restart,
                     want_play,
                     gains,
+                    load_id,
                     ..
                 } => {
                     let track = TrackInfo {
@@ -152,7 +153,8 @@ fn handle_player_ipc(msg: &IpcMessage) {
                         product_id,
                         gains,
                     };
-                    state.player.load(track, restart, want_play);
+                    let opening = crate::player::ResumePolicy::for_page_load(load_id);
+                    state.player.load(track, restart, want_play, opening);
                     PlayerIpcEffects::default()
                 }
                 PlayerIpc::LoadDash {

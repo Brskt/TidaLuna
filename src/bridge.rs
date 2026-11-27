@@ -28,6 +28,17 @@ impl PlayerBridgeEvent {
         }
     }
 
+    /// Where a load opens: the renderer shows it and keeps it from the SDK (`StartPosition`).
+    pub fn start_time(value: f64, seq: u32) -> Self {
+        Self {
+            t: "starttime",
+            seq: Some(seq),
+            v: serde_json::json!(value),
+            cast: false,
+            product: None,
+        }
+    }
+
     /// `product` is the track the length was measured on, `None` when the load carried no id.
     pub fn duration(value: f64, seq: u32, product: Option<String>) -> Self {
         Self {

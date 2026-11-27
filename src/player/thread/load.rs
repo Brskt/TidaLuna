@@ -49,8 +49,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                 }
             }
             // Position 0, whatever the store holds: a fresh play instance of the same
-            // track must not inherit where the previous instance stopped.
-            ResumePolicy::Restart => None,
+            // track must not inherit where the previous instance stopped, and the SDK
+            // seeks its own load after `active`.
+            ResumePolicy::Restart | ResumePolicy::SdkSeeks => None,
             ResumePolicy::Auto => self.resume_store.get(track_id),
             ResumePolicy::Explicit(t) => {
                 if t.is_finite() && t > RESUME_MIN_SECONDS {
@@ -261,11 +262,10 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         }
         self.stop_decode();
 
-        // Eagerly report the load's resolved start position: the bar snaps to it immediately
-        // rather than lingering on the previous track until the backend's first periodic
-        // report. Safe: same-track re-asserts never reach here, and mediacurrenttime is
-        // store-only, which keeps this from feeding back as a seek.
-        (self.callback)(PlayerEvent::TimeUpdate(
+        // The bar snaps to where the load opens instead of lingering on the previous track until
+        // the backend's first report. Not a `TimeUpdate`: the SDK adopts those as its position,
+        // and until its load() resolves it holds the one it was given (a launch restore).
+        (self.callback)(PlayerEvent::StartPosition(
             self.start_position().unwrap_or(0.0),
             self.current_seq,
         ));

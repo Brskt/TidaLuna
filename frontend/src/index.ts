@@ -114,6 +114,8 @@ let _forceTimeDispatch = false;
 // Short aliases used by the Rust bridge -> SDK event names (carry seq).
 const SEQ_EVENTS: Record<string, string> = {
     "time": "mediacurrenttime",
+    // The page's own: the SDK holds its load()'s position until that load resolves (player.ts).
+    "starttime": "mediastarttime",
     "duration": "mediaduration",
     "state": "mediastate",
 };
@@ -173,7 +175,7 @@ window.__TIDALUNAR_PLAYER_PUSH__ = (events: any[]) => {
             for (const r of _mediaFormatResolvers) r(event.v);
             _mediaFormatResolvers = [];
         }
-        if (type === "time") {
+        if (type === "time" || type === "starttime") {
             proxySetTime(event.v);
             const now = performance.now();
             if (_forceTimeDispatch || now - _lastTimeDispatch >= 250) {

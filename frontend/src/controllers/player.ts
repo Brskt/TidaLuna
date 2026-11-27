@@ -270,6 +270,12 @@ export const createNativePlayerComponent = () => {
             // forever, freezing the SDK's position of record.
             seekTarget = null;
             activePlayer.currentTime = target;
+        } else if (event === "mediastarttime") {
+            // Where a load opens, for the bar. Never emitted: the SDK's listener would overwrite the
+            // position its load() holds, which it reads to restore a track at launch.
+            seekTarget = null;
+            if (activePlayer) activePlayer.currentTime = target;
+            return true;
         } else if (event === "mediaduration" && activePlayer) {
             activePlayer.duration = target;
         }

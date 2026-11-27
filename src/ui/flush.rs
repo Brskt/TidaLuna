@@ -168,6 +168,13 @@ pub(crate) fn handle_player_event(event: PlayerEvent) {
                     should_flush = false;
                 }
             }
+            // A position still pending is the replaced track's: it would trail the new one's start.
+            PlayerEvent::StartPosition(time, seq) => {
+                state.pending_time_update = None;
+                state
+                    .pending_player_events
+                    .push(PlayerBridgeEvent::start_time(time, seq));
+            }
             // Everything the Completed arm below does, minus the auto-load: the
             // incoming track is already playing, having been faded in over the
             // outgoing one. Starting it again here would restart it from zero.

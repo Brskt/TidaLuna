@@ -149,7 +149,7 @@ pub(crate) fn forward(event: &PlayerEvent, owner: LoadOrigin) {
         // controller's queue never moves; adopting the step would pull the receiver's index off
         // the track the cast plays.
         PlayerEvent::CrossfadePromoted(..) => None,
-        PlayerEvent::TimeUpdate(seconds, seq) => {
+        PlayerEvent::TimeUpdate(seconds, seq) | PlayerEvent::StartPosition(seconds, seq) => {
             let ms = (*seconds * 1000.0) as u64;
             Some(BridgeEvent::ProgressUpdated {
                 progress_ms: ms,

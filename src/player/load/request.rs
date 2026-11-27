@@ -133,7 +133,9 @@ impl Player {
         event_seq
     }
 
-    pub fn load(&self, track: TrackInfo, restart: bool, want_play: bool) {
+    /// `opening` applies only when the load changes track: a same-track load restarts or
+    /// re-asserts in place.
+    pub fn load(&self, track: TrackInfo, restart: bool, want_play: bool, opening: ResumePolicy) {
         let TrackInfo {
             url,
             format,
@@ -236,7 +238,7 @@ impl Player {
                 product_id,
                 gains,
             },
-            ResumePolicy::Disabled,
+            opening,
             want_play,
             begin_load(LoadOrigin::Local),
         );

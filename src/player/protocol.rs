@@ -159,6 +159,9 @@ pub(crate) const NATIVE_PLAYER_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     TimeUpdate(f64, u32),
+    /// Where a load opens, announced before its backend reports a position. The page's alone:
+    /// the SDK holds the position its load() was given until that load resolves.
+    StartPosition(f64, u32),
     /// Seconds, the load's event generation, and the id of the track the length was
     /// measured on. The id travels with the measurement because the only shared slot that
     /// names a track is rewritten by whichever load announces itself first, which is not

@@ -39,8 +39,8 @@ use std::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use volume::LevelStore;
 
-use load::{CacheReadError, LoadRequest, ResumePolicy, read_cache_entry};
-pub(crate) use load::{SegmentUrls, cdn_cache_status, log_response_headers};
+use load::{CacheReadError, LoadRequest, read_cache_entry};
+pub(crate) use load::{ResumePolicy, SegmentUrls, cdn_cache_status, log_response_headers};
 pub(crate) use load_state::{
     Continuation, LoadOrigin, StopScope, begin_load, continue_load, current_gen, current_load,
     next_event_seq,

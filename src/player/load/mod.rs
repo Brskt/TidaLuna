@@ -38,14 +38,27 @@ impl IntoIterator for SegmentUrls {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum ResumePolicy {
+pub(crate) enum ResumePolicy {
     Disabled,
     /// Start at 0 and discard a seek queued against this track while its device was
     /// released. Distinct from `Disabled`, which a re-arm also sends when it merely
     /// has no position to offer: only this variant expresses the SDK's load contract.
     Restart,
+    /// Start at 0: the SDK owns the position and seeks there itself once the track is active.
+    SdkSeeks,
     Auto,
     Explicit(f64),
+}
+
+impl ResumePolicy {
+    /// A page load that changes track. Only the SDK delegate numbers its loads, and a self-load
+    /// has no one else to restore it: it keeps the startup lookup.
+    pub(crate) fn for_page_load(load_id: Option<u64>) -> Self {
+        match load_id {
+            Some(_) => Self::SdkSeeks,
+            None => Self::Disabled,
+        }
+    }
 }
 
 pub(super) struct LoadRequest {
