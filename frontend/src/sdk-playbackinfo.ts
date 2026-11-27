@@ -7,12 +7,21 @@
 // attempt. The page's `fetch` sees each answer. Only the answers are read, from a clone: the SDK's
 // body is never consumed, and its answer reaches it unchanged, delayed until the read is recorded.
 
+import type { ReplayGains } from "./loudness";
+
 // What the SDK's `parseManifest` builds the stream from: the BTS manifest's first url, or the DASH
 // manifest as a data url (`manifest-parser.ts`, `parseDataUrl` in `playback-info-resolver.ts`).
 const DATA_URL = /data:([^;]+);base64,(.+)/;
 const BTS_MIME = new Set(["application/vnd.tidal.bts", "application/vnd.tidal.emu"]);
 
-type Endpoint = { pattern: RegExp; streamOf: (body: any) => string | undefined };
+type Endpoint = {
+	pattern: RegExp;
+	streamOf: (body: any) => string | undefined;
+	// Where the track's replay gains are read on this endpoint (`playback-info-resolver.ts`).
+	gainsOf: (body: any) => ReplayGains;
+};
+
+const numberOr = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
 
 const dataUrlOf = (uri: unknown): string | undefined => {
 	const match = typeof uri === "string" ? DATA_URL.exec(uri) : null;
@@ -29,14 +38,23 @@ const ENDPOINTS: Endpoint[] = [
 			if (BTS_MIME.has(body.manifestMimeType)) return JSON.parse(atob(body.manifest)).urls?.[0];
 			return `data:${body.manifestMimeType};base64,${body.manifest}`;
 		},
+		gainsOf: (body) => ({ album: numberOr(body?.albumReplayGain), track: numberOr(body?.trackReplayGain) }),
 	},
-	{ pattern: /\/trackManifests\/(\d+)$/, streamOf: (body) => dataUrlOf(body?.data?.attributes?.uri) },
+	{
+		pattern: /\/trackManifests\/(\d+)$/,
+		streamOf: (body) => dataUrlOf(body?.data?.attributes?.uri),
+		gainsOf: (body) => ({
+			album: numberOr(body?.data?.attributes?.albumAudioNormalizationData?.replayGain),
+			track: numberOr(body?.data?.attributes?.trackAudioNormalizationData?.replayGain),
+		}),
+	},
 ];
 
-// Bounded to the newest 32 answers: the element only needs the load under way and the one before
-// it.
+// Both maps keep the newest 32 answers: their readers ask only for a stream or product in play
+// (the load under way, the one before it, the next one preloaded).
 const MAX_STREAMS = 32;
 const productOfUrl = new Map<string, string>();
+const gainsOfProduct = new Map<string, ReplayGains>();
 const listeners = new Set<() => void>();
 
 // The product the SDK asked for the stream it gave `stream` from, `undefined` when this page never saw
@@ -44,16 +62,23 @@ const listeners = new Set<() => void>();
 export const productOfStream = (stream: string | null | undefined): string | undefined =>
 	stream ? productOfUrl.get(stream) : undefined;
 
+// The replay gains read for `productId`, `undefined` when this page never saw its answer.
+export const replayGainsOf = (productId: string | null | undefined): ReplayGains | undefined =>
+	productId ? gainsOfProduct.get(productId) : undefined;
+
 // Told after each answer is recorded: a stream the element already holds may only now be named.
 export const onSdkStream = (cb: () => void): (() => void) => {
 	listeners.add(cb);
 	return () => void listeners.delete(cb);
 };
 
-const record = (productId: string, stream: string) => {
+const record = (productId: string, stream: string, gains: ReplayGains) => {
 	productOfUrl.delete(stream);
 	productOfUrl.set(stream, productId);
 	if (productOfUrl.size > MAX_STREAMS) productOfUrl.delete(productOfUrl.keys().next().value!);
+	gainsOfProduct.delete(productId);
+	gainsOfProduct.set(productId, gains);
+	if (gainsOfProduct.size > MAX_STREAMS) gainsOfProduct.delete(gainsOfProduct.keys().next().value!);
 	console.log("[luna:sdk-pbi] answer for", productId, "stream length", stream.length);
 	for (const cb of [...listeners]) {
 		try {
@@ -71,8 +96,9 @@ const urlOf = (input: unknown): string | undefined => {
 };
 
 const read = async (response: Response, endpoint: Endpoint, productId: string) => {
-	const stream = endpoint.streamOf(await response.json());
-	if (stream) record(productId, stream);
+	const body = await response.json();
+	const stream = endpoint.streamOf(body);
+	if (stream) record(productId, stream, endpoint.gainsOf(body));
 };
 
 // One `fetch` call of the page, as the early runtime's observer slot hands it over: the request and

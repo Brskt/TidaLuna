@@ -3,7 +3,8 @@ import { setSelfLoad, isSelfLoad } from "../audio-proxy";
 import { applyVolume } from "../volume";
 import { deviceReleasedToShaka, selectDevice } from "../output-device";
 import type { AudioDevice } from "../types";
-import { productOfStream } from "../sdk-playbackinfo";
+import { productOfStream, replayGainsOf } from "../sdk-playbackinfo";
+import { factorsOf } from "../loudness";
 
 export type TrackListPayload = { position?: number | string; context?: { id?: unknown; type?: string; isAutoPlay?: boolean } } | undefined;
 
@@ -412,7 +413,9 @@ export const createNativePlayerComponent = () => {
                 // First fresh time report must not be held behind the 250ms throttle
                 // (armed against the OLD track's last dispatch); mirrors SEEK.
                 (window as any).__LUNAR_FORCE_TIME_DISPATCH__?.();
-                sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay, productId ?? "", loadId, act ?? "");
+                // The track's loudness factors ride its load: Rust plays it at them, never at the last one's.
+                const [albumFactor, trackFactor] = factorsOf(replayGainsOf(productId));
+                sendIpc("player.load", url, streamFormat, encryptionKey, restart, wantPlay, productId ?? "", loadId, act ?? "", albumFactor, trackFactor);
             },
             play: () => {
                 sendDbgIpc("SDK->play");
@@ -470,7 +473,9 @@ export const createNativePlayerComponent = () => {
                 stagedProduct = nextId === "" ? null : nextId;
                 parkingNative = true;
                 queueMicrotask(() => { parkingNative = false; });
-                sendIpc("player.preload", url, streamFormat, encryptionKey, nextId);
+                // Rust advances to it on its own: the factors have to be staged with it.
+                const [albumFactor, trackFactor] = factorsOf(replayGainsOf(nextId));
+                sendIpc("player.preload", url, streamFormat, encryptionKey, nextId, albumFactor, trackFactor);
             },
             cancelPreload: () => {
                 // Not gated on isSelfLoad() like stop: the staged next is this player's alone (`preload`

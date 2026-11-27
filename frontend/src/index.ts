@@ -23,6 +23,7 @@ import { installSdkFetchObserver } from "./sdk-playbackinfo";
 import { isStoreNotPublished } from "../plugins/lib/src/redux/storeNotPublished";
 import { bannerScreen, deliverStoreRepair, observeMutations } from "./store-repair";
 import { followCommittedVolume, isOutputLevelReport, mirrorRustLevel, resyncOutputLevel } from "./volume";
+import { followNormalization } from "./loudness";
 import { followCommittedOutput } from "./output-device";
 import { initWindowControls } from "./ui/window-controls";
 import { watchCodecState } from "./video/codec-state";
@@ -531,6 +532,8 @@ const init = async () => {
     followCommittedOutput(store);
     // A volume set here while TIDAL's player holds no stream (nothing played yet, the queue ended).
     followCommittedVolume(store);
+    // TIDAL's "Normalize volume": Rust applies each track's factor under the mode set here.
+    followNormalization(store, (mode) => sendIpc("player.normalization", mode));
 
     // Loader first: its overrides must be in place before anything can reach the core.
     const { loadRegistry, exposeLoaderApi } = require("./plugins/loader");

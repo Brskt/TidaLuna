@@ -1,7 +1,8 @@
 import { sendIpc, sendDbgIpc } from "../ipc";
 import { isSelfLoad, setSelfLoad, onHandoff, onProxyBind, onSdkLoad, onSdkReload, proxyFail, proxyLoading, proxyOwnerSrc } from "../audio-proxy";
 import { forgetRefusal, refusePlayback } from "../refuse-playback";
-import { onSdkStream, productOfStream } from "../sdk-playbackinfo";
+import { onSdkStream, productOfStream, replayGainsOf } from "../sdk-playbackinfo";
+import { factorsOf } from "../loudness";
 import { setupActionHandlers, updateMetadata, updatePlaybackState } from "./mediasession";
 import { storePublished } from "../store-published";
 import type { ReceiverStream } from "../connect/types";
@@ -29,6 +30,11 @@ const btsSelfLoad = (pbi: any) => {
     if (!streamUrl || (manifest.mimeType ?? "").includes("flac")) return undefined;
     return { streamUrl, codec: manifest.codecs?.split(".")?.[0] ?? "aac", encKey: manifest.keyId ?? "" };
 };
+
+// The loudness factors a self-loaded track plays at: the SDK's own answer for it when this page saw
+// one (the gains TIDAL scales by), else the answer this page fetched itself.
+const selfLoadFactors = (productId: string, pbi: any): [number, number] =>
+    factorsOf(replayGainsOf(productId) ?? { album: pbi?.albumReplayGain, track: pbi?.trackReplayGain });
 
 // Whose a failed load is, by the product the failure names. `current`: a track this page loaded
 // itself and the listener still has. `superseded`: one it loaded itself and the listener has left.
@@ -128,10 +134,11 @@ export const createPlaybackController = () => {
         try {
             const { getPlaybackInfo } = require("../../plugins/lib/src/helpers/getPlaybackInfo");
             const { store } = require("../../plugins/lib/src/redux/store");
-            const fresh = btsSelfLoad(await getPlaybackInfo(productId, store.getState().settings?.quality?.streaming));
+            const answer = await getPlaybackInfo(productId, store.getState().settings?.quality?.streaming);
+            const fresh = btsSelfLoad(answer);
             // Left behind during the request: the listener moved on, or the SDK loaded something itself.
             if (!fresh || loadedId !== productId || lastTransitionId !== productId || !isSelfLoad()) return;
-            sendIpc("player.load", fresh.streamUrl, fresh.codec, fresh.encKey, false, false, productId);
+            sendIpc("player.load", fresh.streamUrl, fresh.codec, fresh.encKey, false, false, productId, null, null, ...selfLoadFactors(productId, answer));
         } catch (e) {
             console.error("[luna:playback] credential refresh failed:", e);
         }
@@ -262,7 +269,7 @@ export const createPlaybackController = () => {
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
-                                        sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec, productId);
+                                        sendIpc("player.load_dash", manifest.initUrl, JSON.stringify(manifest.segmentUrls), codec, productId, ...selfLoadFactors(productId, pbi));
                                         handed = true;
                                     }
                                 }
@@ -276,10 +283,10 @@ export const createPlaybackController = () => {
                                         // Self-load bypasses the SDK load delegate; drop any pending
                                         // select-play intent, keeping it out of a later FLAC load.
                                         (window.NativePlayerComponent as any)?.clearPlayOnLoad?.();
-                                        // restart/wantPlay repeat the defaults this call has
-                                        // always been parsed with; they are spelled out only
-                                        // so productId lands on the index player.load reads.
-                                        sendIpc("player.load", streamUrl, codec, encKey, false, false, productId);
+                                        // restart/wantPlay and the absent load number and act repeat
+                                        // the defaults this call has always been parsed with; they are
+                                        // spelled out only to put the id and factors where they are read.
+                                        sendIpc("player.load", streamUrl, codec, encKey, false, false, productId, null, null, ...selfLoadFactors(productId, pbi));
                                         handed = true;
                                     }
                                 }

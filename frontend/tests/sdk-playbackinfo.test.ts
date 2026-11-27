@@ -5,7 +5,7 @@
 
 import { expect, spyOn, test } from "bun:test";
 
-import { observeSdkFetch, onSdkStream, productOfStream } from "../src/sdk-playbackinfo";
+import { observeSdkFetch, onSdkStream, productOfStream, replayGainsOf } from "../src/sdk-playbackinfo";
 
 const flush = async () => {
 	for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
@@ -52,6 +52,36 @@ test("a trackManifests answer names the data url the SDK rebuilds from its uri, 
 	await flush();
 
 	expect(productOfStream(`data:application/dash+xml;base64,${dashB64}`)).toBe("103");
+});
+
+test("each answer keeps its product's replay gains, where they are read on either endpoint", async () => {
+	const { target } = targetOf({
+		[LEGACY("107")]: () =>
+			json({
+				trackId: 107,
+				manifestMimeType: "application/vnd.tidal.bts",
+				manifest: btsB64(["https://audio.tidal.com/mediatracks/g.flac"]),
+				albumReplayGain: -9.5,
+				trackReplayGain: -7.25,
+			}),
+		[MANIFEST("108")]: () =>
+			json({
+				data: {
+					id: "108",
+					attributes: {
+						uri: `data:application/dash+xml;base64,${dashB64}`,
+						albumAudioNormalizationData: { replayGain: -6, peakAmplitude: 0.9 },
+						trackAudioNormalizationData: { replayGain: -5, peakAmplitude: 0.8 },
+					},
+				},
+			}),
+	});
+	await target.fetch(LEGACY("107"));
+	await target.fetch(MANIFEST("108"));
+	await flush();
+
+	expect(replayGainsOf("107")).toEqual({ album: -9.5, track: -7.25 });
+	expect(replayGainsOf("108")).toEqual({ album: -6, track: -5 });
 });
 
 test("an answer that is not ok names nothing", async () => {
