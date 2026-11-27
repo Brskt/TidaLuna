@@ -34,6 +34,11 @@ impl CipherSink {
         self.flush().await
     }
 
+    /// Ciphertext bytes taken so far, flushed or pending.
+    fn staged_len(&self) -> u64 {
+        self.len + self.pending.len() as u64
+    }
+
     async fn flush(mut self) -> Option<Self> {
         if self.pending.is_empty() {
             return Some(self);
@@ -80,14 +85,9 @@ fn open_cipher_sink(track_id: &str) -> Option<CipherSink> {
     })
 }
 
-/// Hand a complete-from-zero download's ciphertext to the cache writer. Every EOF
-/// path goes through here because one that forgets silently stops caching instead
-/// of failing, which is how the 416-on-reconnect exit was missed. A Range-started
-/// stream is not cacheable (the gate is `base_offset == 0`), and it drops the sink.
-async fn park_ciphertext(writer: &RamBufferWriter, sink: Option<CipherSink>, stream_offset: u64) {
-    if stream_offset != 0 {
-        return;
-    }
+/// Hand the ciphertext of a stream that ended the head to the cache writer. Every EOF
+/// path goes through here: one that forgets silently stops caching instead of failing.
+async fn park_ciphertext(writer: &RamBufferWriter, sink: Option<CipherSink>) {
     if let Some(sink) = sink
         && let Some((file, len)) = sink.finish().await
     {

@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 const INITIAL_BUFFER_CAP: usize = 2 * 1024 * 1024; // 2 MB
 
-/// When the read cursor is slightly ahead of buf_end, wait for the sequential
+/// When the read cursor is slightly ahead of the frontier, wait for the sequential
 /// download to catch up instead of triggering a new Range restart. At the
 /// governed download rate this lookahead arrives in well under a restart's
 /// TTFB; keep it small enough that waiting never loses to restarting.
@@ -146,9 +146,25 @@ pub enum HeadStatus {
     Ended(Option<DownloadFailure>),
 }
 
-struct Inner {
+/// The bytes a Range restart fetched, away from the head.
+struct Window {
+    base: u64,
     data: Vec<u8>,
-    base_offset: u64,
+}
+
+impl Window {
+    fn end(&self) -> u64 {
+        self.base + self.data.len() as u64
+    }
+}
+
+struct Inner {
+    /// The contiguous run from byte 0, which a restart past its end never discards: a seek that
+    /// probes past the frontier comes back into it, and only it can make the file whole.
+    data: Vec<u8>,
+    /// Where the stream is filling when a restart took it past the head, `None` while it extends
+    /// the head itself.
+    window: Option<Window>,
     total_len: u64,
     finished: bool,
     cancelled: bool,
@@ -172,8 +188,30 @@ impl Inner {
     fn is_whole(&self) -> bool {
         self.finished
             && self.error.is_none()
-            && self.base_offset == 0
+            && self.window.is_none()
             && self.data.len() as u64 >= self.total_len
+    }
+
+    fn head_end(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    /// The extent the stream fills, as `[start, end)`.
+    fn growing(&self) -> (u64, u64) {
+        match &self.window {
+            Some(window) => (window.base, window.end()),
+            None => (0, self.head_end()),
+        }
+    }
+
+    /// The bytes held from `cursor` on, from whichever extent holds it.
+    fn bytes_at(&self, cursor: u64) -> Option<&[u8]> {
+        if cursor < self.head_end() {
+            return Some(&self.data[cursor as usize..]);
+        }
+        let window = self.window.as_ref()?;
+        (cursor >= window.base && cursor < window.end())
+            .then(|| &window.data[(cursor - window.base) as usize..])
     }
 }
 
@@ -181,7 +219,7 @@ impl Inner {
 struct SharedState {
     inner: Mutex<Inner>,
     cvar: Condvar,
-    /// Bytes written (absolute file offset = base_offset + data.len()).
+    /// Absolute file offset the stream has filled to: the end of the window, or of the head.
     written: AtomicU64,
     cancelled_atomic: AtomicBool,
     /// Last cursor position after a successful read (for governor buffer tracking).
@@ -204,8 +242,8 @@ struct SharedState {
 ///
 /// Two access patterns:
 /// 1. **Streaming**: Download task writes chunks via `RamBufferWriter`.
-///    Reader blocks if data is not yet available. Forward seek past buffer
-///    triggers a Range restart (reset buffer, new base_offset).
+///    Reader blocks if data is not yet available. A seek away from the bytes
+///    held triggers a Range restart into a window; the head from byte 0 stays.
 /// 2. **Complete**: All data loaded upfront (cache hit or preload).
 ///    All seeks are instant.
 #[derive(Clone)]
@@ -239,7 +277,7 @@ impl RamBuffer {
         let shared = Arc::new(SharedState {
             inner: Mutex::new(Inner {
                 data: Vec::with_capacity((total_len.min(INITIAL_BUFFER_CAP as u64)) as usize),
-                base_offset: 0,
+                window: None,
                 total_len,
                 finished: false,
                 cancelled: false,
@@ -283,7 +321,7 @@ impl RamBuffer {
         let shared = Arc::new(SharedState {
             inner: Mutex::new(Inner {
                 data,
-                base_offset: 0,
+                window: None,
                 total_len,
                 finished: true,
                 cancelled: false,
@@ -428,7 +466,7 @@ impl RamBuffer {
     }
 
     /// Take the ciphertext staging file the download parked at EOF. Gated on the same
-    /// completeness as `is_complete()`: a partial, short or Range-restarted download never
+    /// completeness as `is_complete()`: a partial, short or holed download never
     /// yields one; the caller cannot index as whole what arrived in part.
     pub fn take_ciphertext(&self) -> Option<(tempfile::NamedTempFile, u64)> {
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -449,11 +487,11 @@ impl RamBuffer {
     /// read as two `Relaxed` atomics they race: a writer that appends its last chunk and then
     /// finishes, between the two loads, is seen as ended while short, and a head already in
     /// hand gets refused. Bytes are decided before the end, the caller asking whether it can
-    /// probe rather than whether the download is alive. A `base_offset` past zero refuses
-    /// whatever `written` says: after a Range restart the head is no longer in `data`.
+    /// probe rather than whether the download is alive. Only the head counts, whatever
+    /// `written` says: a window's bytes after a Range restart are not the start of the file.
     pub fn head_status(&self, target: u64) -> HeadStatus {
         let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.base_offset == 0 && inner.data.len() as u64 >= target {
+        if inner.head_end() >= target {
             return HeadStatus::Landed;
         }
         if inner.finished || inner.cancelled {
@@ -520,73 +558,80 @@ impl Read for RamBuffer {
                 return Err(io::Error::new(cause.kind(), err.clone()));
             }
 
-            let buf_start = inner.base_offset;
-            let buf_end = inner.base_offset + inner.data.len() as u64;
-
-            if self.cursor >= buf_start && self.cursor < buf_end {
-                let start = (self.cursor - buf_start) as usize;
-                let end = std::cmp::min(start + buf.len(), inner.data.len());
-                let n = end - start;
-                buf[..n].copy_from_slice(&inner.data[start..end]);
+            if let Some(held) = inner.bytes_at(self.cursor) {
+                let n = held.len().min(buf.len());
+                buf[..n].copy_from_slice(&held[..n]);
                 self.cursor += n as u64;
                 self.shared.read_cursor.store(self.cursor, Relaxed);
                 self.shared.stalled.store(false, Relaxed);
                 return Ok(n);
             }
 
+            let (grow_start, grow_end) = inner.growing();
+
             // EOF: download finished and cursor is at or past end
-            if inner.finished && self.cursor >= buf_end {
+            if inner.finished && self.cursor >= grow_end {
                 return Ok(0);
             }
 
-            // Partial download finished but cursor is before base_offset.
-            // This happens when the stream completed after a Range restart
-            // (buffer covers [base..EOF]) and a seek goes before base.
-            // Clear finished to allow restart.
-            if inner.finished && self.cursor < buf_start {
+            // A window reached EOF and the cursor sits in the hole between the head and that
+            // window. Clear finished to allow restart.
+            if inner.finished && self.cursor < grow_start {
                 crate::vprintln!(
-                    "[BUFFER] Reopen: cursor={} < base={} (partial EOF). Requesting restart.",
+                    "[BUFFER] Reopen: cursor={} < window={} (partial EOF). Requesting restart.",
                     self.cursor,
-                    buf_start
+                    grow_start
                 );
                 inner.finished = false;
             }
 
             // Data not available - determine action:
-            //   cursor < buf_start  -> data was discarded, need Range restart
-            //   cursor > buf_end + SEEK_LOOKAHEAD -> too far ahead, Range restart
-            //   cursor <= buf_end + SEEK_LOOKAHEAD -> wait for download to catch up
+            //   cursor in the hole before the window -> Range restart
+            //   cursor > grow_end + SEEK_LOOKAHEAD -> too far ahead, Range restart
+            //   cursor <= grow_end + SEEK_LOOKAHEAD -> wait for download to catch up
             if !inner.finished {
                 let needs_restart =
-                    self.cursor < buf_start || self.cursor > buf_end + SEEK_LOOKAHEAD;
+                    self.cursor < grow_start || self.cursor > grow_end + SEEK_LOOKAHEAD;
 
                 if needs_restart {
-                    let is_forward = self.cursor > buf_end;
-                    let restart_pos = self.cursor;
+                    let is_forward = self.cursor > grow_end;
+                    let head_end = inner.head_end();
+                    // Just past the head with a window elsewhere: a window here would leave a
+                    // hole nothing refills. The head resumes and the file can still be cached.
+                    let restart_pos = if inner.window.is_some()
+                        && self.cursor > head_end
+                        && self.cursor - head_end <= SEEK_LOOKAHEAD
+                    {
+                        head_end
+                    } else {
+                        self.cursor
+                    };
 
                     // Fires on every read-miss -> reveals the Range-restart storm cadence.
                     crate::vprintln3!(
-                        "[BUFFER] read-miss {} | cursor={} base={} buf_end={} data={}KB target={:?} new={}",
+                        "[BUFFER] read-miss {} | cursor={} head={} grow={}..{} target={:?} new={}",
                         if is_forward { "forward" } else { "backward" },
                         self.cursor,
-                        buf_start,
-                        buf_end,
-                        inner.data.len() / 1024,
+                        head_end,
+                        grow_start,
+                        grow_end,
                         inner.restart_target,
                         inner.restart_target != Some(restart_pos),
                     );
 
                     if inner.restart_target != Some(restart_pos) {
                         crate::vprintln!(
-                            "[BUFFER] Restart: {} | cursor={} base={} buf_end={} gap={}KB",
+                            "[BUFFER] Restart: {} | cursor={} head={} grow={}..{} at={} gap={}KB",
                             if is_forward { "forward" } else { "backward" },
                             self.cursor,
-                            buf_start,
-                            buf_end,
-                            if self.cursor > buf_end {
-                                (self.cursor - buf_end) / 1024
+                            head_end,
+                            grow_start,
+                            grow_end,
+                            restart_pos,
+                            if self.cursor > grow_end {
+                                (self.cursor - grow_end) / 1024
                             } else {
-                                (buf_start - self.cursor) / 1024
+                                (grow_start - self.cursor) / 1024
                             }
                         );
                         inner.restart_target = Some(restart_pos);
@@ -615,10 +660,10 @@ impl Read for RamBuffer {
             if wait_res.timed_out() {
                 // Waited the full timeout with no progress: genuine starvation.
                 starved_cycles += 1;
+                let (grow_start, grow_end) = inner.growing();
                 crate::vprintln3!(
-                    "[BUFFER] STARVED: 5s timeout at cursor={cursor_at_park} | base={} buf_end={} finished={} target={:?}",
-                    inner.base_offset,
-                    inner.base_offset + inner.data.len() as u64,
+                    "[BUFFER] STARVED: 5s timeout at cursor={cursor_at_park} | head={} grow={grow_start}..{grow_end} finished={} target={:?}",
+                    inner.head_end(),
                     inner.finished,
                     inner.restart_target,
                 );
@@ -675,11 +720,10 @@ impl Seek for RamBuffer {
         self.shared.read_cursor.store(new_pos, Relaxed);
         {
             let inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let (grow_start, grow_end) = inner.growing();
             crate::vprintln3!(
-                "[BUFFER] Seek: cursor {old_cursor} -> {new_pos} | base={} buf_end={} total={}",
-                inner.base_offset,
-                inner.base_offset + inner.data.len() as u64,
-                total_len
+                "[BUFFER] Seek: cursor {old_cursor} -> {new_pos} | head={} grow={grow_start}..{grow_end} total={total_len}",
+                inner.head_end(),
             );
         }
         Ok(new_pos)
@@ -703,13 +747,22 @@ impl RamBufferWriter {
     /// Write decrypted data to the buffer. Returns true if data was accepted,
     /// false if discarded due to a pending restart.
     pub fn write_counted(&self, data: &[u8]) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = &mut *guard;
         // Discard writes if a restart is pending (stale data from old range)
         if inner.restart_target.is_some() {
             return false;
         }
-        inner.data.extend_from_slice(data);
-        let abs_written = inner.base_offset + inner.data.len() as u64;
+        let abs_written = match inner.window.as_mut() {
+            Some(window) => {
+                window.data.extend_from_slice(data);
+                window.end()
+            }
+            None => {
+                inner.data.extend_from_slice(data);
+                inner.data.len() as u64
+            }
+        };
         self.shared.written.store(abs_written, Relaxed);
         self.shared.cvar.notify_all();
         self.shared.async_notify.notify_one();
@@ -770,21 +823,35 @@ impl RamBufferWriter {
         inner.restart_target.take()
     }
 
-    /// Reset the buffer for a new Range request starting at `new_offset`.
-    pub fn reset_for_range(&self, new_offset: u64) {
-        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+    /// Point the buffer at a new Range request starting at `new_offset`. True when that stream
+    /// continues the head (from its end, or from 0 over a server that ignored the Range), false
+    /// when it fills a window past it, which drops the previous window and keeps the head.
+    pub fn reset_for_range(&self, new_offset: u64) -> bool {
+        let mut guard = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = &mut *guard;
+        let continues_head = new_offset <= inner.head_end();
         crate::vprintln3!(
-            "[BUFFER] reset_for_range: base {} -> {} | discarding {}KB",
-            inner.base_offset,
-            new_offset,
+            "[BUFFER] reset_for_range: {} -> {new_offset} | head={}KB continues_head={continues_head}",
+            inner.growing().1,
             inner.data.len() / 1024,
         );
-        inner.data.clear();
-        inner.base_offset = new_offset;
+        if continues_head {
+            inner.data.truncate(new_offset as usize);
+            inner.window = None;
+        } else {
+            let mut window = inner.window.take().unwrap_or(Window {
+                base: new_offset,
+                data: Vec::new(),
+            });
+            window.base = new_offset;
+            window.data.clear();
+            inner.window = Some(window);
+        }
         inner.finished = false;
         inner.error = None;
         self.shared.written.store(new_offset, Relaxed);
         self.shared.cvar.notify_all();
+        continues_head
     }
 
     /// Wait for a restart request or cancellation (async).

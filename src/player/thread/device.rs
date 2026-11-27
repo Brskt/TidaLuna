@@ -358,8 +358,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                     );
                     self.reuse_in_shared(position);
                 }
-                // Still streaming, and a rebuild would race the decoder probe against a
-                // moving base_offset. The track is re-loaded instead, as the siblings do.
+                // Still streaming: a window swap or a from-0 restart can pull bytes from under
+                // the decoder probe. The track is re-loaded instead, as the siblings do.
                 SwitchRearm::Replay(retained) => {
                     crate::vprintln!("[ASIO] spawn failed; re-arming shared");
                     self.replay_switched_track(retained, position, was_playing);
@@ -375,11 +375,9 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.asio_handle = Some(handle);
         self.current_device_id = Some(id.clone());
 
-        // Reuse the retained buffer when the track is fully in memory: spawn the
-        // ASIO decoder on it directly, no network re-download and no idle stall.
-        // Only a still-STREAMING buffer races the decoder probe (its base_offset
-        // churns mid-download); a complete one is probe-safe (the same invariant
-        // cache-hit loads rely on every day). No new load: clear the load bookkeeping.
+        // A buffer fully in memory feeds the ASIO decoder directly: no re-download, no idle stall.
+        // Only a still-STREAMING one races the decoder probe (a window swap or a from-0 restart
+        // pulls bytes from under it). No new load: clear the load bookkeeping.
         match self.switch_rearm(super::retained_track()) {
             SwitchRearm::Reuse(buffer) => {
                 self.loading_gen = None;
@@ -454,10 +452,8 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         self.exclusive_handle = Some(handle);
         self.current_device_id = Some(id.clone());
 
-        // Reuse the retained buffer when the track is fully in memory: spawn the
-        // exclusive decoder on it directly, no network re-download and no idle stall.
-        // The probe race that motivated the fresh load only affects a still-STREAMING
-        // buffer (its base_offset churns mid-download); a complete one is probe-safe.
+        // A buffer fully in memory feeds the exclusive decoder directly: no re-download, no idle
+        // stall. Only a still-STREAMING one races the probe that motivated the fresh load.
         match self.switch_rearm(super::retained_track()) {
             SwitchRearm::Reuse(buffer) => {
                 self.loading_gen = None;

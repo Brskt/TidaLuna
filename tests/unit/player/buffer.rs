@@ -326,6 +326,102 @@ fn a_clone_is_not_a_different_stream() {
     );
 }
 
+/// A seek near the start probes past the frontier, then comes back into the head. The restart that
+/// probe armed must keep the head, or the track never reaches the disk cache; a stream back from
+/// the head's end then completes it.
+#[test]
+fn a_restart_ahead_keeps_the_head_and_a_return_to_its_end_makes_the_file_whole() {
+    let (buffer, writer) = RamBuffer::new_for_test(100);
+    writer.write_counted(&[1u8; 40]);
+    assert!(
+        !writer.reset_for_range(70),
+        "a stream opened past the head does not continue it"
+    );
+    writer.write_counted(&[3u8; 30]);
+
+    let mut reader = buffer.clone();
+    let mut head = [0u8; 40];
+    reader
+        .read_exact(&mut head)
+        .expect("the head is still in memory after a restart ahead of it");
+    assert_eq!(head, [1u8; 40]);
+
+    assert!(
+        writer.reset_for_range(40),
+        "a stream from the head's end continues it"
+    );
+    writer.write_counted(&[2u8; 60]);
+    writer.set_ciphertext(
+        tempfile::NamedTempFile::new().expect("a temp file for the staged ciphertext"),
+        100,
+    );
+    writer.finish();
+
+    assert!(buffer.is_complete(), "every byte from 0 arrived in order");
+    assert!(
+        buffer.take_ciphertext().is_some(),
+        "a track the listener seeked once near its start never reached the disk cache"
+    );
+}
+
+/// The truncation invariant the two extents could break: a hole, then a window that runs to the
+/// end, holds `total_len` bytes' worth of reads and is still not the file.
+#[test]
+fn a_hole_before_a_window_that_reaches_the_end_is_not_a_whole_file() {
+    let (buffer, writer) = RamBuffer::new_for_test(100);
+    writer.write_counted(&[1u8; 40]);
+    writer.reset_for_range(70);
+    writer.write_counted(&[3u8; 30]);
+    writer.set_ciphertext(
+        tempfile::NamedTempFile::new().expect("a temp file for the staged ciphertext"),
+        70,
+    );
+    writer.finish();
+
+    assert!(
+        !buffer.is_complete(),
+        "bytes 40..70 never arrived, whatever reached the end"
+    );
+    assert!(
+        buffer.take_ciphertext().is_none(),
+        "a file with a hole handed over is a corrupt track indexed as whole"
+    );
+}
+
+/// A read at or a few KB past the head's end, while a restart has the stream elsewhere, brings the
+/// stream back to the head's end: a window there leaves a hole nothing refills, and the track
+/// never reaches the disk cache.
+#[test]
+fn a_read_at_or_just_past_the_heads_end_restarts_there_while_a_window_is_elsewhere() {
+    for cursor in [1024, 1024 + 8 * 1024] {
+        let (buffer, writer) = RamBuffer::new_for_test(1024 * 1024);
+        writer.write_counted(&[1u8; 1024]);
+        writer.reset_for_range(512 * 1024);
+        writer.write_counted(&[3u8; 1024]);
+
+        let mut reader = buffer.clone();
+        reader
+            .seek(std::io::SeekFrom::Start(cursor))
+            .expect("seeking a RamBuffer moves its cursor and nothing else");
+        let reading = std::thread::spawn(move || {
+            let mut sink = [0u8; 64];
+            reader.read(&mut sink)
+        });
+        // The request is posted before the wait begins.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert_eq!(
+            writer.take_restart_target(),
+            Some(1024),
+            "a read at {cursor} left the head a hole it can never fill"
+        );
+
+        buffer.cancel();
+        let outcome = reading.join().expect("the reading thread must not panic");
+        assert!(outcome.is_err(), "a cancelled buffer serves no read");
+    }
+}
+
 /// A body that ends under its announced length is NOT a complete file, and everything that
 /// keeps these bytes has to be told so.
 ///

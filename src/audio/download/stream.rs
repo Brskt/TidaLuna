@@ -54,6 +54,11 @@ async fn download_stream(resp: MediaResponse, url: String, key: String, writer: 
     // reset on the next successful chunk. Bounds a truly-dead network.
     let mut reconnect_attempts: u32 = 0;
     const MAX_RECONNECTS: u32 = 8;
+    // The ciphertext staging copy follows the head, not the stream: frozen while a restart
+    // fills a window, resumed when the stream comes back to the head's end.
+    let mut cipher_sink = open_cipher_sink(&task_canonical_id);
+    // Whether the stream being read extends the head, the only one the sink may take.
+    let mut streaming_head = true;
 
     'outer: loop {
         let (stream_resp, stream_offset) = if let Some(r) = current_resp.take() {
@@ -137,7 +142,18 @@ async fn download_stream(resp: MediaResponse, url: String, key: String, writer: 
 
             let status = range_resp.status();
             if status == reqwest::StatusCode::PARTIAL_CONTENT {
-                writer.reset_for_range(target);
+                streaming_head = writer.reset_for_range(target);
+                if streaming_head {
+                    // Resumed only where it matches the head byte for byte; a copy that drifted
+                    // from it would be stored as the track.
+                    cipher_sink = if target == 0 {
+                        open_cipher_sink(&task_canonical_id)
+                    } else {
+                        cipher_sink
+                            .take()
+                            .filter(|sink| sink.staged_len() == target)
+                    };
+                }
                 range_restarts += 1;
                 http_requests += 1;
                 (range_resp, target)
@@ -147,7 +163,8 @@ async fn download_stream(resp: MediaResponse, url: String, key: String, writer: 
             } else if status.is_success() {
                 // Server ignored Range, restart from beginning
                 crate::vprintln2!("[STREAM] Server ignored Range header, restarting from byte 0");
-                writer.reset_for_range(0);
+                streaming_head = writer.reset_for_range(0);
+                cipher_sink = open_cipher_sink(&task_canonical_id);
                 (range_resp, 0u64)
             } else {
                 crate::vprintln3!(
@@ -159,15 +176,6 @@ async fn download_stream(resp: MediaResponse, url: String, key: String, writer: 
                 );
                 return;
             }
-        };
-
-        // Staging follows the buffer's cacheability: only a stream from byte 0 can be
-        // cached; a Range-based one stages nothing. Re-opening here also covers a
-        // server that ignored Range and put us back at 0.
-        let mut cipher_sink = if stream_offset == 0 {
-            open_cipher_sink(&crate::player::canonical_track_id(&url))
-        } else {
-            None
         };
 
         let mut stream = stream_resp.body();
@@ -227,12 +235,14 @@ async fn download_stream(resp: MediaResponse, url: String, key: String, writer: 
                             reconnect_attempts = 0; // progress made; reset the reconnect budget
                             let written = writer.write_counted(&decrypt_buf);
                             // `chunk` is still ciphertext: decryption ran on the copy
-                            // in `decrypt_buf`. A discarded write means a restart is
-                            // imminent: the file must not diverge from the buffer.
-                            cipher_sink = match cipher_sink.take() {
-                                Some(sink) if written => sink.append(&chunk).await,
-                                _ => None,
-                            };
+                            // in `decrypt_buf`. A discarded write is skipped by both;
+                            // the file and the head stay the same bytes.
+                            if streaming_head
+                                && written
+                                && let Some(sink) = cipher_sink.take()
+                            {
+                                cipher_sink = sink.append(&chunk).await;
+                            }
                             chunk_count += 1;
                             bytes_since_restart += chunk.len() as u64;
 
@@ -339,7 +349,9 @@ async fn download_stream(resp: MediaResponse, url: String, key: String, writer: 
                                 // offset is at/past EOF: all bytes are already
                                 // buffered: this download is complete and
                                 // cacheable just like a clean EOF.
-                                park_ciphertext(&writer, cipher_sink.take(), stream_offset).await;
+                                if streaming_head {
+                                    park_ciphertext(&writer, cipher_sink.take()).await;
+                                }
                                 writer.finish();
                                 return;
                             }
@@ -382,17 +394,16 @@ async fn download_stream(resp: MediaResponse, url: String, key: String, writer: 
             continue 'outer;
         }
 
-        // If we downloaded from byte 0, the entire file is in the buffer.
-        if stream_offset == 0 {
-            park_ciphertext(&writer, cipher_sink.take(), stream_offset).await;
+        // The head reached EOF: the entire file is in the buffer.
+        if streaming_head {
+            park_ciphertext(&writer, cipher_sink.take()).await;
             writer.finish();
             break;
         }
 
-        // Partial download (Range restart) reached EOF. The buffer covers
-        // [base_offset..EOF]. Mark finished: the decode thread sees EOF and
-        // emits "completed". If a backward seek needs data before
-        // base_offset, buffer.rs clears `finished` and requests a restart.
+        // A window reached EOF. Mark finished: the decode thread sees EOF and
+        // emits "completed". If a read lands in the hole before the window,
+        // buffer.rs clears `finished` and requests a restart.
         writer.finish();
         crate::vprintln2!(
             "[STREAM] Partial EOF (base={}). Waiting for restart or cancel.",
