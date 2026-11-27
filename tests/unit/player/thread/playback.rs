@@ -1,7 +1,29 @@
 //! Tests for `src/player/thread/playback.rs`, attached to it by `#[path]`.
 
 use super::decode_failure_needs_settle;
-use super::stream_state_seq;
+use super::{relays_backend_state, stream_state_seq};
+use crate::player::PlaybackState::{Active, Paused, Stopped};
+
+/// A stop's late pause ack, or an `active` that raced it, lands after `stopped` and leaves the page
+/// on it. A play since the stop makes both the page's again, a pause since it its pause; a retired
+/// stream's states keep relaying, its pause being the page's only NOT_PLAYING for it.
+#[test]
+fn a_stopped_streams_late_pause_or_start_stays_off_the_page() {
+    for (state, opened_under, idle, playing, expected) in [
+        (Paused, 5, Stopped, false, false),
+        (Paused, 5, Stopped, true, true),
+        (Active, 5, Stopped, false, false),
+        (Active, 5, Stopped, true, true),
+        (Paused, 5, Paused, false, true),
+        (Paused, 4, Stopped, false, true),
+    ] {
+        assert_eq!(
+            relays_backend_state(state, opened_under, 5, idle, playing),
+            expected,
+            "relays_backend_state({state:?}, opened under {opened_under}, idle {idle:?}, playing {playing})"
+        );
+    }
+}
 
 /// A stop since the load moved the seq on and kept the stream: what it reports now belongs to
 /// the stop's seq. A stream an earlier load opened keeps that load's seq, or its late pause

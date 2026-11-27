@@ -321,6 +321,12 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     }
 
     pub(super) fn handle_pause(&mut self) {
+        self.pause_transport(true);
+    }
+
+    /// Everything a pause does. `announce` says it to the page as a pause; a stop, which does
+    /// the same, says `stopped` instead and nothing more, as the official engine does.
+    fn pause_transport(&mut self, announce: bool) {
         // A pause cancels any play deferred while the track was still loading;
         // otherwise handle_load would auto-play it against this pause intent.
         self.pending_play = None;
@@ -395,15 +401,19 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
             let _ = tx.send(DecodeCommand::Pause);
         }
 
-        let pos_secs = self.effective_position();
-        (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
+        if announce {
+            let pos_secs = self.effective_position();
+            (self.callback)(PlayerEvent::TimeUpdate(pos_secs, self.current_seq));
+        }
 
         self.is_playing = false;
         self.governor.buffer_progress().set_playback_active(false);
-        (self.callback)(PlayerEvent::StateChange(
-            PlaybackState::Paused,
-            self.current_seq,
-        ));
+        if announce {
+            (self.callback)(PlayerEvent::StateChange(
+                PlaybackState::Paused,
+                self.current_seq,
+            ));
+        }
         self.resume_store.flush_if_due(true);
     }
 
@@ -422,21 +432,20 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
         // of rebuilding. A genuine track change tears the previous track down through `load()`,
         // and position is preserved.
         self.current_seq = event_seq;
-        // Capture is_playing before handle_pause clears it, then record it as the
+        // Capture is_playing before the pause clears it, then record it as the
         // re-assert resume intent (a stop is a re-assert candidate).
         let was_playing = self.is_playing;
-        self.handle_pause();
+        self.pause_transport(false);
         self.resume_on_reassert = was_playing;
-        // handle_pause above arms the release only when something was playing; a
+        // The pause above arms the release only when something was playing; a
         // terminal stop (the SDK's reset(); nothing has to follow) must release
         // even from an already-paused session: re-arm without a was_playing gate.
         #[cfg(target_os = "windows")]
         if self.is_asio_mode && self.asio_handle.is_some() {
             self.asio_release_at = Some(std::time::Instant::now() + super::ASIO_IDLE_RELEASE);
         }
-        // Surface the SDK/UI/Connect/SMTC-visible "stopped" state even though the
-        // pipeline is retained internally (handle_pause emits Paused first; the
-        // final state observers settle on is Stopped).
+        // The only state a stop announces, though the pipeline is retained internally: a
+        // `paused` before it would land after the reset and rewrite its IDLE.
         self.idle_state = PlaybackState::Stopped;
         (self.callback)(PlayerEvent::StateChange(
             PlaybackState::Stopped,

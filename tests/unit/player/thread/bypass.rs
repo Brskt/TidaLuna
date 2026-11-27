@@ -970,6 +970,58 @@ async fn a_retired_exclusive_streams_pause_keeps_the_seq_of_its_load() {
     );
 }
 
+/// A stop says `stopped` alone. The backend's ack of the pause the stop sends it lands after that,
+/// and would leave the page and the SDK on `paused` for a track just reset.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_stopped_asio_streams_pause_ack_stays_off_the_page() {
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let (mut h, asio_events, _cancel) = asio_harness(0);
+    let _ = h.player.handle_load(load_req(1, "track-1"), false);
+    h.player.handle_stop(3);
+    h.events.lock().unwrap().clear();
+
+    asio_events
+        .send(AsioEvent::StateChange {
+            opened_under: 1,
+            state: PlaybackState::Paused,
+        })
+        .unwrap();
+    h.player.poll_asio_events();
+
+    assert!(
+        state_stamps(&h.events).is_empty(),
+        "the stop's own pause ack reached the page after its `stopped`"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_stopped_exclusive_streams_pause_ack_stays_off_the_page() {
+    use crate::player::wasapi::{ExclusiveEvent, ExclusiveHandle};
+    let _serialised = crate::audio::preload::tests::PRELOAD_TESTS.lock().await;
+    let mut h = harness();
+    let (handle, exclusive_events, _commands) = ExclusiveHandle::for_test();
+    h.player.is_exclusive_mode = true;
+    h.player.exclusive_handle = Some(handle);
+    let _ = h.player.handle_load(load_req(1, "track-1"), false);
+    h.player.handle_stop(3);
+    h.events.lock().unwrap().clear();
+
+    exclusive_events
+        .send(ExclusiveEvent::StateChange {
+            opened_under: 1,
+            state: PlaybackState::Paused,
+        })
+        .unwrap();
+    h.player.poll_exclusive_events();
+
+    assert!(
+        state_stamps(&h.events).is_empty(),
+        "the stop's own pause ack reached the page after its `stopped`"
+    );
+}
+
 /// A stop keeps the pipeline for a same-track re-assert; the resume that follows it is
 /// answered by the very stream the stop left in place. The SDK drops anything below the newest
 /// seq it has heard, the stop's included: stamped with the load's, that `active` would never
@@ -981,6 +1033,8 @@ async fn a_stop_leaves_the_stream_it_keeps_answering_under_the_newest_seq() {
     let (mut h, asio_events, _cancel) = asio_harness(0);
     let _ = h.player.handle_load(load_req(1, "track-1"), false);
     h.player.handle_stop(3);
+    // The resume the backend's `active` answers.
+    h.player.handle_play();
     h.events.lock().unwrap().clear();
 
     asio_events

@@ -1,7 +1,7 @@
 use super::{seek_ack_is_current, verdict_names_current_stream};
 use crate::player::packet_failure::PacketFailure;
 use crate::player::thread::PlayerThread;
-use crate::player::thread::playback::stream_state_seq;
+use crate::player::thread::playback::{relays_backend_state, stream_state_seq};
 use crate::player::wasapi::ExclusiveEvent;
 use crate::player::{
     DeviceErrorKind, EXCLUSIVE_STREAM_SEQ, MediaErrorCode, PlaybackState, PlayerEvent, wasapi,
@@ -205,10 +205,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             // Relayed whichever stream it describes: the retired stream's
                             // pause is the page's only NOT_PLAYING in this mode. Only the seq
                             // names the stream; the load that replaced it never hears it.
-                            (self.callback)(PlayerEvent::StateChange(
+                            if relays_backend_state(
                                 state,
-                                stream_state_seq(opened_under, self.load_seq, self.current_seq),
-                            ));
+                                opened_under,
+                                self.load_seq,
+                                self.idle_state,
+                                self.is_playing,
+                            ) {
+                                (self.callback)(PlayerEvent::StateChange(
+                                    state,
+                                    stream_state_seq(opened_under, self.load_seq, self.current_seq),
+                                ));
+                            }
                         }
                         ExclusiveEvent::Completed(sid) => {
                             // Ignore a completion from a superseded stream (a newer track

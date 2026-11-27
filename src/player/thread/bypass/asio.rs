@@ -2,7 +2,7 @@ use super::{seek_ack_is_current, verdict_names_current_stream};
 use crate::player::asio::host::{AsioEvent, AsioHandle};
 use crate::player::packet_failure::PacketFailure;
 use crate::player::thread::PlayerThread;
-use crate::player::thread::playback::stream_state_seq;
+use crate::player::thread::playback::{relays_backend_state, stream_state_seq};
 use crate::player::{ASIO_STREAM_SEQ, DeviceErrorKind, MediaErrorCode, PlaybackState, PlayerEvent};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, mpsc};
@@ -252,10 +252,18 @@ impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
                             self.asio_watchdog_at = None;
                         }
                         // Relayed whichever stream it describes, as the exclusive twin does.
-                        (self.callback)(PlayerEvent::StateChange(
+                        if relays_backend_state(
                             state,
-                            stream_state_seq(opened_under, self.load_seq, self.current_seq),
-                        ));
+                            opened_under,
+                            self.load_seq,
+                            self.idle_state,
+                            self.is_playing,
+                        ) {
+                            (self.callback)(PlayerEvent::StateChange(
+                                state,
+                                stream_state_seq(opened_under, self.load_seq, self.current_seq),
+                            ));
+                        }
                     }
                     AsioEvent::Completed(sid) => {
                         // Ignore a completion from a superseded stream (a newer track

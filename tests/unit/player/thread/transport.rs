@@ -10,6 +10,27 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 
+/// A stop says `stopped` alone, as the official engine's does: a `paused` after the SDK's reset
+/// rewrites its IDLE, and the next Play is refused with "No active player" instead of reloading.
+#[test]
+fn a_stop_announces_stopped_alone_whether_playing_or_paused() {
+    for playing in [true, false] {
+        let mut h = harness();
+        h.player.is_playing = playing;
+
+        h.player.handle_stop(5);
+
+        let events = h.events.lock().unwrap();
+        assert!(
+            matches!(
+                &events[..],
+                [PlayerEvent::StateChange(PlaybackState::Stopped, 5)]
+            ),
+            "a stop (playing: {playing}) said more than `stopped`: {events:?}"
+        );
+    }
+}
+
 /// Two requesters can send in the opposite order to their mints: a stop dequeued after a newer
 /// load must leave that load's owner on what follows, its own `stopped` alone speaking for the
 /// music it ended.

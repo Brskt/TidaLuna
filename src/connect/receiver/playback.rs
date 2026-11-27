@@ -260,8 +260,10 @@ impl PlaybackController {
         }
         match player_state {
             PlayerState::Playing => self.play_state = PbPlayState::Playing,
-            PlayerState::Paused => self.play_state = PbPlayState::Paused,
-            PlayerState::Buffering | PlayerState::Idle => {}
+            // `Idle` is the player's stop, which says nothing more: the retained track resumes
+            // from where it stopped, as from a pause.
+            PlayerState::Paused | PlayerState::Idle => self.play_state = PbPlayState::Paused,
+            PlayerState::Buffering => {}
         }
         self.notify_player_status();
     }

@@ -27,6 +27,26 @@ pub(super) fn stream_state_seq(opened_under: u32, load_seq: u32, current_seq: u3
     }
 }
 
+/// Whether a bypass backend's own state still reaches the page. After a stop (`idle_state`
+/// Stopped) the current stream's pause ack, or a start that raced the stop, would land after
+/// `stopped`; only a play since makes either the page's. A retired stream's states relay.
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn relays_backend_state(
+    state: PlaybackState,
+    opened_under: u32,
+    load_seq: u32,
+    idle_state: PlaybackState,
+    is_playing: bool,
+) -> bool {
+    if opened_under < load_seq || idle_state != PlaybackState::Stopped {
+        return true;
+    }
+    match state {
+        PlaybackState::Paused | PlaybackState::Active => is_playing,
+        _ => true,
+    }
+}
+
 impl<F: Fn(PlayerEvent) + Send + 'static> PlayerThread<F> {
     pub(super) fn samples_to_secs(&self, samples: u64) -> f64 {
         let channels = self.channels.max(1) as u64;
